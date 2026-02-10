@@ -2,7 +2,7 @@
 
 use crate::cli::output::OutputFormatter;
 use crate::embeddings::OnnxProvider;
-use crate::storage::MemoryStore;
+use crate::storage::{paths, MemoryStore};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -82,7 +82,7 @@ pub fn run_init(
 
 /// Update the global registry with this project.
 fn update_global_registry(dir: &Path, project_id: &str) -> Result<()> {
-    let registry_path = registry_path();
+    let registry_path = paths::registry_path()?;
 
     // Create registry directory if needed
     if let Some(parent) = registry_path.parent() {
@@ -115,12 +115,6 @@ fn update_global_registry(dir: &Path, project_id: &str) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Get the registry file path.
-fn registry_path() -> PathBuf {
-    let home = dirs::home_dir().expect("Could not determine home directory");
-    home.join(".config/engramdb/registry.json")
 }
 
 #[cfg(test)]

@@ -91,8 +91,8 @@ impl MemoryStore {
         let project_id = project_id::compute_project_id(dir);
 
         // Create personal directories
-        fs::create_dir_all(paths::personal_memories_dir(&project_id))?;
-        fs::create_dir_all(paths::lancedb_dir(&project_id))?;
+        fs::create_dir_all(paths::personal_memories_dir(&project_id)?)?;
+        fs::create_dir_all(paths::lancedb_dir(&project_id)?)?;
 
         // Update registry
         Self::update_registry(dir, &project_id)?;
@@ -125,7 +125,7 @@ impl MemoryStore {
 
     /// Create a new memory
     pub fn create(&self, memory: &Memory) -> Result<String> {
-        let memories_dir = self.get_memories_dir(&memory.visibility);
+        let memories_dir = self.get_memories_dir(&memory.visibility)?;
         fs::create_dir_all(&memories_dir)?;
 
         // Write memory file
@@ -134,7 +134,7 @@ impl MemoryStore {
         fs::write(&file_path, content)?;
 
         // Update index
-        let index_path = self.get_index_path(&memory.visibility);
+        let index_path = self.get_index_path(&memory.visibility)?;
         let mut idx = index::load_index(&index_path)?;
         let entry = index::IndexEntry::from(memory);
         index::add_entry(&mut idx, entry);
@@ -159,7 +159,7 @@ impl MemoryStore {
         }
 
         // Try personal memories
-        self.get_from_dir(id, &paths::personal_memories_dir(&self.project_id))
+        self.get_from_dir(id, &paths::personal_memories_dir(&self.project_id)?)
     }
 
     fn get_from_dir(&self, id: &str, dir: &Path) -> Result<Memory> {
@@ -206,19 +206,19 @@ impl MemoryStore {
         // Check if visibility changed
         if memory.visibility != old_visibility {
             // Delete from old location
-            self.delete_from_dir(id, &self.get_memories_dir(&old_visibility))?;
+            self.delete_from_dir(id, &self.get_memories_dir(&old_visibility)?)?;
 
             // Write to new location
             self.create(&memory)?;
         } else {
             // Write updated memory
-            let memories_dir = self.get_memories_dir(&memory.visibility);
+            let memories_dir = self.get_memories_dir(&memory.visibility)?;
             let file_path = memories_dir.join(format!("{}.md", memory.id));
             let content = memory_file::write_memory_file(&memory)?;
             fs::write(&file_path, content)?;
 
             // Update index
-            let index_path = self.get_index_path(&memory.visibility);
+            let index_path = self.get_index_path(&memory.visibility)?;
             let mut idx = index::load_index(&index_path)?;
             let entry = index::IndexEntry::from(&memory);
             index::update_entry(&mut idx, entry);
@@ -243,7 +243,7 @@ impl MemoryStore {
         }
 
         // Try to delete from personal
-        self.delete_from_dir(id, &paths::personal_memories_dir(&self.project_id))?;
+        self.delete_from_dir(id, &paths::personal_memories_dir(&self.project_id)?)?;
         self.update_manifest_stats()?;
         Ok(())
     }
@@ -280,7 +280,7 @@ impl MemoryStore {
                     Visibility::Personal
                 };
 
-                let index_path = self.get_index_path(&visibility);
+                let index_path = self.get_index_path(&visibility)?;
                 let mut idx = index::load_index(&index_path)?;
                 index::remove_entry(&mut idx, memory_id);
                 index::save_index(&index_path, &idx)?;
@@ -306,7 +306,7 @@ impl MemoryStore {
         }
 
         // Load personal index
-        let personal_index_path = paths::personal_dir(&self.project_id).join("index.json");
+        let personal_index_path = paths::personal_dir(&self.project_id)?.join("index.json");
         if let Ok(idx) = index::load_index(&personal_index_path) {
             all_entries.extend(idx.memories);
         }
@@ -328,11 +328,11 @@ impl MemoryStore {
         }
 
         // Reindex personal memories
-        let personal_dir = paths::personal_memories_dir(&self.project_id);
+        let personal_dir = paths::personal_memories_dir(&self.project_id)?;
         if personal_dir.exists() {
             let idx = index::rebuild_index_from_files(&personal_dir)?;
             count += idx.memories.len();
-            let index_path = paths::personal_dir(&self.project_id).join("index.json");
+            let index_path = paths::personal_dir(&self.project_id)?.join("index.json");
             index::save_index(&index_path, &idx)?;
         }
 
@@ -344,17 +344,17 @@ impl MemoryStore {
 
     // Helper methods
 
-    fn get_memories_dir(&self, visibility: &Visibility) -> PathBuf {
+    fn get_memories_dir(&self, visibility: &Visibility) -> Result<PathBuf> {
         match visibility {
-            Visibility::Shared => paths::memories_dir(&self.project_dir),
+            Visibility::Shared => Ok(paths::memories_dir(&self.project_dir)),
             Visibility::Personal => paths::personal_memories_dir(&self.project_id),
         }
     }
 
-    fn get_index_path(&self, visibility: &Visibility) -> PathBuf {
+    fn get_index_path(&self, visibility: &Visibility) -> Result<PathBuf> {
         match visibility {
-            Visibility::Shared => paths::project_dir(&self.project_dir).join("index.json"),
-            Visibility::Personal => paths::personal_dir(&self.project_id).join("index.json"),
+            Visibility::Shared => Ok(paths::project_dir(&self.project_dir).join("index.json")),
+            Visibility::Personal => Ok(paths::personal_dir(&self.project_id)?.join("index.json")),
         }
     }
 
@@ -379,7 +379,7 @@ impl MemoryStore {
     }
 
     fn update_registry(dir: &Path, project_id: &str) -> Result<()> {
-        let registry_path = paths::registry_path();
+        let registry_path = paths::registry_path()?;
 
         // Create registry directory if needed
         if let Some(parent) = registry_path.parent() {
@@ -456,8 +456,10 @@ mod tests {
         assert!(project_dir.join(".engramdb/index.json").exists());
 
         // Check personal directories
-        assert!(paths::personal_memories_dir(&store.project_id).exists());
-        assert!(paths::lancedb_dir(&store.project_id).exists());
+        assert!(paths::personal_memories_dir(&store.project_id)
+            .unwrap()
+            .exists());
+        assert!(paths::lancedb_dir(&store.project_id).unwrap().exists());
     }
 
     #[test]

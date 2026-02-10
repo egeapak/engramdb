@@ -35,7 +35,7 @@ pub fn run_get(
         let file_path = match memory.visibility {
             Visibility::Shared => paths::memories_dir(dir).join(format!("{}.md", memory.id)),
             Visibility::Personal => {
-                paths::personal_memories_dir(&store.project_id).join(format!("{}.md", memory.id))
+                paths::personal_memories_dir(&store.project_id)?.join(format!("{}.md", memory.id))
             }
         };
         println!("{}", file_path.display());
@@ -47,7 +47,7 @@ pub fn run_get(
         let file_path = match memory.visibility {
             Visibility::Shared => paths::memories_dir(dir).join(format!("{}.md", memory.id)),
             Visibility::Personal => {
-                paths::personal_memories_dir(&store.project_id).join(format!("{}.md", memory.id))
+                paths::personal_memories_dir(&store.project_id)?.join(format!("{}.md", memory.id))
             }
         };
         let content = fs::read_to_string(&file_path)?;

@@ -39,11 +39,11 @@ pub fn run_search(dir: &Path, params: SearchParams, formatter: &OutputFormatter)
     let mut engine = RetrievalEngine::new(store, config);
 
     // Try to add embeddings (optional - proceed without if they fail)
-    if let (Some(provider), Ok(lancedb_path)) = (
+    if let (Some(provider), Some(lancedb_path)) = (
         OnnxProvider::try_new(),
-        std::fs::canonicalize(crate::storage::paths::lancedb_dir(
-            &engine.store().project_id,
-        )),
+        crate::storage::paths::lancedb_dir(&engine.store().project_id)
+            .ok()
+            .and_then(|p| std::fs::canonicalize(p).ok()),
     ) {
         if let Ok(vector_store) = LanceDbStore::new(lancedb_path, "memories".to_string(), 384) {
             engine = engine.with_embeddings(Box::new(provider), Box::new(vector_store));

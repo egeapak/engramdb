@@ -7,9 +7,10 @@ use fastembed::{InitOptions, TextEmbedding};
 /// ONNX-based embedding provider using all-MiniLM-L6-v2 model.
 ///
 /// This provider uses the fastembed crate to generate embeddings locally
-/// using ONNX Runtime. The model is downloaded and cached in an
-/// XDG-compatible location (`$XDG_CACHE_HOME/engramdb/models` or
-/// `~/.cache/engramdb/models`) so it is shared across all projects.
+/// using ONNX Runtime. The model is downloaded and cached in a
+/// platform-specific location so it is shared across all projects:
+/// - macOS: `~/Library/Caches/engramdb/models`
+/// - Linux: `$XDG_CACHE_HOME/engramdb/models` (default `~/.cache/engramdb/models`)
 pub struct OnnxProvider {
     model: TextEmbedding,
     dimensions: usize,
@@ -18,14 +19,16 @@ pub struct OnnxProvider {
 impl OnnxProvider {
     /// Create a new ONNX provider with the all-MiniLM-L6-v2 model.
     ///
-    /// The model is cached at `$XDG_CACHE_HOME/engramdb/models` (or
-    /// `~/.cache/engramdb/models`) so it only downloads once per machine.
+    /// The model is cached in the platform cache directory
+    /// (`~/Library/Caches/engramdb/models` on macOS,
+    /// `$XDG_CACHE_HOME/engramdb/models` on Linux) so it only downloads
+    /// once per machine.
     ///
     /// # Returns
     /// A new provider instance, or an error if model initialization fails.
     pub fn new() -> Result<Self> {
         let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .context("Could not determine cache directory")?
             .join("engramdb")
             .join("models");
 

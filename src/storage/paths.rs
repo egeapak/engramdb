@@ -2,14 +2,18 @@
 //!
 //! This module provides functions to resolve all EngramDB storage paths:
 //! - Project-local paths (.engramdb/, .engramdb/memories/)
-//! - Global paths (~/.config/engramdb/)
-//! - Personal project paths (~/.config/engramdb/projects/{id}/personal/)
+//! - Global config dir (platform-specific via `dirs::config_dir()`):
+//!   - macOS: `~/Library/Application Support/engramdb/`
+//!   - Linux: `$XDG_CONFIG_HOME/engramdb/` (default `~/.config/engramdb/`)
+//! - Personal project paths (`<global_config_dir>/projects/{id}/personal/`)
 //! - LanceDB vector storage paths
 //! - Registry path
 //!
-//! All functions return PathBuf and handle both shared (project-level) and
-//! personal (user-level) storage locations.
+//! Functions that depend on `dirs::config_dir()` return `Result<PathBuf>` so
+//! callers can handle the (rare) case where the platform config directory
+//! cannot be determined.
 
+use super::error::{Result, StorageError};
 use std::path::{Path, PathBuf};
 
 /// Returns the project-specific EngramDB directory (.engramdb/)
@@ -22,37 +26,40 @@ pub fn memories_dir(dir: &Path) -> PathBuf {
     project_dir(dir).join("memories")
 }
 
-/// Returns the global configuration directory (~/.config/engramdb/)
-pub fn global_config_dir() -> PathBuf {
+/// Returns the global configuration directory (platform-specific).
+///
+/// - macOS: `~/Library/Application Support/engramdb/`
+/// - Linux: `$XDG_CONFIG_HOME/engramdb/` (default `~/.config/engramdb/`)
+pub fn global_config_dir() -> Result<PathBuf> {
     dirs::config_dir()
-        .expect("Could not determine config directory")
-        .join("engramdb")
+        .ok_or_else(|| StorageError::Validation("Could not determine config directory".to_string()))
+        .map(|p| p.join("engramdb"))
 }
 
 /// Returns the personal project directory for a given project ID
-pub fn personal_dir(project_id: &str) -> PathBuf {
-    global_config_dir()
+pub fn personal_dir(project_id: &str) -> Result<PathBuf> {
+    Ok(global_config_dir()?
         .join("projects")
         .join(project_id)
-        .join("personal")
+        .join("personal"))
 }
 
 /// Returns the personal memories directory for a given project ID
-pub fn personal_memories_dir(project_id: &str) -> PathBuf {
-    personal_dir(project_id).join("memories")
+pub fn personal_memories_dir(project_id: &str) -> Result<PathBuf> {
+    Ok(personal_dir(project_id)?.join("memories"))
 }
 
 /// Returns the LanceDB directory for a given project ID
-pub fn lancedb_dir(project_id: &str) -> PathBuf {
-    global_config_dir()
+pub fn lancedb_dir(project_id: &str) -> Result<PathBuf> {
+    Ok(global_config_dir()?
         .join("projects")
         .join(project_id)
-        .join("lancedb")
+        .join("lancedb"))
 }
 
-/// Returns the global registry path (~/.config/engramdb/registry.json)
-pub fn registry_path() -> PathBuf {
-    global_config_dir().join("registry.json")
+/// Returns the global registry path (`<global_config_dir>/registry.json`)
+pub fn registry_path() -> Result<PathBuf> {
+    Ok(global_config_dir()?.join("registry.json"))
 }
 
 /// Returns the memory file path for a given memory ID
@@ -70,8 +77,10 @@ pub fn memory_path(dir: &Path, id: &str) -> Option<PathBuf> {
     // For simplicity, we'll use the compute_project_id from project_id module
     use crate::storage::project_id::compute_project_id;
     let project_id = compute_project_id(dir);
-    let personal_dir = personal_memories_dir(&project_id);
-    find_memory_in_dir(&personal_dir, id)
+    if let Ok(personal_dir) = personal_memories_dir(&project_id) {
+        return find_memory_in_dir(&personal_dir, id);
+    }
+    None
 }
 
 /// Helper function to find a memory file by ID prefix in a directory
@@ -116,7 +125,7 @@ mod tests {
 
     #[test]
     fn test_personal_dir() {
-        let result = personal_dir("abc123");
+        let result = personal_dir("abc123").unwrap();
         assert!(result
             .to_string_lossy()
             .ends_with("projects/abc123/personal"));
@@ -124,13 +133,13 @@ mod tests {
 
     #[test]
     fn test_personal_memories_dir() {
-        let result = personal_memories_dir("abc123");
+        let result = personal_memories_dir("abc123").unwrap();
         assert!(result.to_string_lossy().ends_with("personal/memories"));
     }
 
     #[test]
     fn test_lancedb_dir() {
-        let result = lancedb_dir("abc123");
+        let result = lancedb_dir("abc123").unwrap();
         assert!(result
             .to_string_lossy()
             .ends_with("projects/abc123/lancedb"));

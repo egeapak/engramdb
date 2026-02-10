@@ -387,8 +387,9 @@ impl EngramDbServer {
 
         if let Some(provider) = OnnxProvider::try_new() {
             let store_for_id = self.open_store()?;
-            if let Ok(lance_path) =
-                std::fs::canonicalize(crate::storage::paths::lancedb_dir(&store_for_id.project_id))
+            if let Some(lance_path) = crate::storage::paths::lancedb_dir(&store_for_id.project_id)
+                .ok()
+                .and_then(|p| std::fs::canonicalize(p).ok())
             {
                 if let Ok(vector_store) = LanceDbStore::new(lance_path, "memories".to_string(), 384)
                 {
