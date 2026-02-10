@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod embeddings;
+pub mod ops;
 pub mod retrieval;
 pub mod scope;
 pub mod scoring;

@@ -1,9 +1,10 @@
 //! List all memories with optional filtering.
 
 use crate::cli::output::OutputFormatter;
+use crate::ops::{parse_memory_type, parse_status};
 use crate::storage::MemoryStore;
-use crate::types::{MemoryType, Status};
-use anyhow::{bail, Result};
+use crate::types::MemoryType;
+use anyhow::Result;
 use std::path::Path;
 
 /// List all memories, optionally filtered by type, tags, or status.
@@ -46,30 +47,4 @@ pub fn run_list(
 
     formatter.print_memory_list(&entries);
     Ok(())
-}
-
-fn parse_memory_type(s: &str) -> Result<MemoryType> {
-    match s.to_lowercase().as_str() {
-        "decision" => Ok(MemoryType::Decision),
-        "convention" => Ok(MemoryType::Convention),
-        "hazard" => Ok(MemoryType::Hazard),
-        "context" => Ok(MemoryType::Context),
-        "intent" => Ok(MemoryType::Intent),
-        "relationship" => Ok(MemoryType::Relationship),
-        "debug" => Ok(MemoryType::Debug),
-        "preference" => Ok(MemoryType::Preference),
-        _ => bail!("Invalid memory type: {}. Valid types: decision, convention, hazard, context, intent, relationship, debug, preference", s),
-    }
-}
-
-fn parse_status(s: &str) -> Result<Status> {
-    match s.to_lowercase().as_str() {
-        "active" => Ok(Status::Active),
-        "needsreview" | "needs-review" | "needs_review" => Ok(Status::NeedsReview),
-        "challenged" => Ok(Status::Challenged),
-        _ => bail!(
-            "Invalid status: {}. Valid values: active, needsreview, challenged",
-            s
-        ),
-    }
 }

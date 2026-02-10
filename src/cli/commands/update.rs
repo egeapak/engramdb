@@ -1,9 +1,10 @@
 //! Update an existing memory.
 
 use crate::cli::output::OutputFormatter;
+use crate::ops::{parse_memory_type, parse_status, parse_visibility};
+use crate::ops::{update_memory, UpdateParams as OpsUpdateParams};
 use crate::storage::MemoryStore;
-use crate::types::{MemoryType, MemoryUpdate, Status, Visibility};
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::path::Path;
 
 /// Parameters for the update command.
@@ -34,77 +35,49 @@ pub struct UpdateParams {
 pub fn run_update(dir: &Path, params: UpdateParams, formatter: &OutputFormatter) -> Result<()> {
     let store = MemoryStore::open(dir)?;
 
-    // Build update
-    let mut update = MemoryUpdate::new();
+    let type_ = params.type_.map(|s| parse_memory_type(&s)).transpose()?;
+    let visibility = params
+        .visibility
+        .map(|s| parse_visibility(&s))
+        .transpose()?;
+    let status = params.status.map(|s| parse_status(&s)).transpose()?;
 
-    if let Some(type_str) = params.type_ {
-        update.type_ = Some(parse_memory_type(&type_str)?);
-    }
+    let physical = if params.physical.is_empty() {
+        None
+    } else {
+        Some(params.physical)
+    };
 
-    update.content = params.content;
-    update.summary = params.summary;
-    update.details = params.details;
+    let logical = if params.logical.is_empty() {
+        None
+    } else {
+        Some(params.logical)
+    };
 
-    if !params.physical.is_empty() {
-        update.physical = Some(params.physical);
-    }
+    let tags = if params.tags.is_empty() {
+        None
+    } else {
+        Some(params.tags)
+    };
 
-    if !params.logical.is_empty() {
-        update.logical = Some(params.logical);
-    }
-
-    if !params.tags.is_empty() {
-        update.tags = Some(params.tags);
-    }
-
-    update.criticality = params.criticality;
-    update.confidence = params.confidence;
-
-    if let Some(vis_str) = params.visibility {
-        update.visibility = Some(parse_visibility(&vis_str)?);
-    }
-
-    if let Some(status_str) = params.status {
-        update.status = Some(parse_status(&status_str)?);
-    }
-
-    // Apply update
-    store.update(&params.id, update)?;
+    update_memory(
+        &store,
+        &params.id,
+        OpsUpdateParams {
+            type_,
+            content: params.content,
+            summary: params.summary,
+            physical,
+            logical,
+            tags,
+            criticality: params.criticality,
+            confidence: params.confidence,
+            details: params.details,
+            visibility,
+            status,
+        },
+    )?;
 
     formatter.print_success(&format!("Updated memory {}", params.id));
     Ok(())
-}
-
-fn parse_memory_type(s: &str) -> Result<MemoryType> {
-    match s.to_lowercase().as_str() {
-        "decision" => Ok(MemoryType::Decision),
-        "convention" => Ok(MemoryType::Convention),
-        "hazard" => Ok(MemoryType::Hazard),
-        "context" => Ok(MemoryType::Context),
-        "intent" => Ok(MemoryType::Intent),
-        "relationship" => Ok(MemoryType::Relationship),
-        "debug" => Ok(MemoryType::Debug),
-        "preference" => Ok(MemoryType::Preference),
-        _ => bail!("Invalid memory type: {}. Valid types: decision, convention, hazard, context, intent, relationship, debug, preference", s),
-    }
-}
-
-fn parse_visibility(s: &str) -> Result<Visibility> {
-    match s.to_lowercase().as_str() {
-        "shared" => Ok(Visibility::Shared),
-        "personal" => Ok(Visibility::Personal),
-        _ => bail!("Invalid visibility: {}. Valid values: shared, personal", s),
-    }
-}
-
-fn parse_status(s: &str) -> Result<Status> {
-    match s.to_lowercase().as_str() {
-        "active" => Ok(Status::Active),
-        "needsreview" | "needs-review" | "needs_review" => Ok(Status::NeedsReview),
-        "challenged" => Ok(Status::Challenged),
-        _ => bail!(
-            "Invalid status: {}. Valid values: active, needsreview, challenged",
-            s
-        ),
-    }
 }

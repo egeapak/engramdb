@@ -1,6 +1,7 @@
 //! Delete a memory from the store.
 
 use crate::cli::output::OutputFormatter;
+use crate::ops::{delete_memory, get_memory};
 use crate::storage::MemoryStore;
 use anyhow::Result;
 use std::io::{self, Write};
@@ -19,7 +20,7 @@ pub fn run_delete(dir: &Path, id: &str, force: bool, formatter: &OutputFormatter
     let store = MemoryStore::open(dir)?;
 
     // Get the memory to confirm what we're deleting
-    let memory = store.get(id)?;
+    let memory = get_memory(&store, id)?;
 
     // Confirm deletion unless --force
     if !force {
@@ -35,9 +36,8 @@ pub fn run_delete(dir: &Path, id: &str, force: bool, formatter: &OutputFormatter
         }
     }
 
-    // Delete the memory
-    store.delete(id)?;
+    delete_memory(&store, &memory.id)?;
 
-    formatter.print_success(&format!("Deleted memory {}", id));
+    formatter.print_success(&format!("Deleted memory {}", memory.id));
     Ok(())
 }
