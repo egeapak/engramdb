@@ -30,3 +30,38 @@ pub enum StorageError {
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn test_error_display_not_found() {
+        let error = StorageError::NotFound("x".to_string());
+        assert_eq!(error.to_string(), "Memory not found: x");
+    }
+
+    #[test]
+    fn test_error_display_not_initialized() {
+        let error = StorageError::NotInitialized;
+        assert_eq!(error.to_string(), "Project not initialized");
+    }
+
+    #[test]
+    fn test_error_from_io() {
+        let io_error = io::Error::new(io::ErrorKind::NotFound, "file not found");
+        let storage_error: StorageError = io_error.into();
+        assert!(matches!(storage_error, StorageError::Io(_)));
+    }
+
+    #[test]
+    fn test_error_from_json() {
+        let bad_json = "{ invalid json }";
+        let result: Result<serde_json::Value> = serde_json::from_str(bad_json)
+            .map_err(|e| e.into());
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), StorageError::Json(_)));
+    }
+}

@@ -121,4 +121,61 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_embed_empty_string() {
+        if let Some(provider) = OnnxProvider::try_new() {
+            let result = provider.embed("");
+            assert!(result.is_ok(), "Empty string embedding should succeed");
+
+            let embedding = result.unwrap();
+            assert_eq!(embedding.len(), 384);
+            // Should return a valid 384-dim vector (no panic/error)
+        }
+    }
+
+    #[test]
+    fn test_embed_batch_empty_slice() {
+        if let Some(provider) = OnnxProvider::try_new() {
+            let empty: Vec<&str> = vec![];
+            let result = provider.embed_batch(&empty);
+            assert!(result.is_ok(), "Empty batch should succeed");
+
+            let embeddings = result.unwrap();
+            assert!(embeddings.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_embed_consistency() {
+        if let Some(provider) = OnnxProvider::try_new() {
+            let text = "hello";
+            let embedding1 = provider.embed(text).unwrap();
+            let embedding2 = provider.embed(text).unwrap();
+
+            // Same text should produce identical embeddings
+            assert_eq!(embedding1.len(), embedding2.len());
+            for (a, b) in embedding1.iter().zip(embedding2.iter()) {
+                assert!((a - b).abs() < 1e-6, "Embeddings should be identical");
+            }
+        }
+    }
+
+    #[test]
+    fn test_embed_batch_single_matches_embed() {
+        if let Some(provider) = OnnxProvider::try_new() {
+            let text = "test text";
+            let single_embedding = provider.embed(text).unwrap();
+            let batch_embeddings = provider.embed_batch(&[text]).unwrap();
+
+            assert_eq!(batch_embeddings.len(), 1);
+            let batch_embedding = &batch_embeddings[0];
+
+            // embed_batch(&["text"]) should equal vec![embed("text")]
+            assert_eq!(single_embedding.len(), batch_embedding.len());
+            for (a, b) in single_embedding.iter().zip(batch_embedding.iter()) {
+                assert!((a - b).abs() < 1e-6, "Single and batch embeddings should match");
+            }
+        }
+    }
 }

@@ -312,4 +312,90 @@ accessed_at: "2026-01-15T10:00:00Z"
         assert_eq!(memory.id, "test-empty");
         assert_eq!(memory.content, "");
     }
+
+    #[test]
+    fn test_parse_invalid_yaml_frontmatter() {
+        let input = r#"---
+id: test-invalid
+this is not valid yaml: {{{
+malformed: [unclosed
+---
+
+## Content
+
+Some content here.
+"#;
+
+        let result = parse_memory_file(input);
+        assert!(result.is_err());
+        match result {
+            Err(StorageError::Yaml(_)) => {
+                // Correct error type
+            }
+            _ => panic!("Expected Yaml error for invalid frontmatter"),
+        }
+    }
+
+    #[test]
+    fn test_parse_content_with_triple_dashes() {
+        let input = r#"---
+id: test-dashes
+type: context
+summary: Content with dashes
+content: ""
+physical:
+  - "/"
+logical: []
+tags: []
+criticality: 0.5
+provenance:
+  source: human
+confidence: 0.8
+supersedes: []
+status: Active
+visibility: Shared
+challenges: []
+created_at: "2026-01-15T10:00:00Z"
+updated_at: "2026-01-15T10:00:00Z"
+accessed_at: "2026-01-15T10:00:00Z"
+---
+
+## Content
+
+This content has triple dashes:
+
+---
+
+And it should still parse correctly.
+
+## Details
+
+Even in details section:
+---
+No problem!
+"#;
+
+        let memory = parse_memory_file(input).unwrap();
+        assert_eq!(memory.id, "test-dashes");
+        assert!(memory.content.contains("---"));
+        assert!(memory.content.contains("And it should still parse correctly"));
+        assert!(memory.details.is_some());
+        let details = memory.details.unwrap();
+        assert!(details.contains("---"));
+        assert!(details.contains("No problem!"));
+    }
+
+    #[test]
+    fn test_parse_empty_input() {
+        let input = "";
+
+        let result = parse_memory_file(input);
+        assert!(result.is_err());
+        match result {
+            Err(StorageError::InvalidFormat(msg)) => {
+                assert!(msg.contains("Missing frontmatter") || msg.contains("Missing body"));
+            }
+            _ => panic!("Expected InvalidFormat error for empty input"),
+        }
+    }
 }

@@ -289,4 +289,97 @@ mod tests {
         assert!(score < 0.9);
         assert!(score > 0.0);
     }
+
+    #[test]
+    fn test_composite_score_needs_review_no_penalty() {
+        let mut memory = create_test_memory();
+        memory.status = Status::NeedsReview;
+
+        let context = ScoringContext::scope_only(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+        );
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let score = composite_score(&memory, &context, &config, now);
+        let score_active = composite_score(
+            &create_test_memory(),
+            &context,
+            &config,
+            now,
+        );
+
+        // Status::NeedsReview should NOT get the 0.8x penalty (only Challenged does)
+        assert!((score - score_active).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_composite_score_zero_criticality() {
+        let mut memory = create_test_memory();
+        memory.criticality = 0.0;
+
+        let context = ScoringContext::scope_only(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+        );
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let score = composite_score(&memory, &context, &config, now);
+
+        // With criticality=0.0, relevance component is 0.0, so score should be much lower
+        // Scope: 0.4 * 1.0 = 0.4
+        // Trust: 0.1 * 1.0 = 0.1
+        // Total: ~0.5
+        assert!((score - 0.5).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_composite_score_zero_scope_proximity() {
+        let memory = create_test_memory();
+
+        // No scope match -> scope component is 0.0
+        let context = ScoringContext::scope_only(
+            Some("completely/different/path.rs".to_string()),
+            vec!["completely.different.scope".to_string()],
+        );
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let score = composite_score(&memory, &context, &config, now);
+
+        // Scope component = 0.0, but other components still contribute
+        // Relevance: 0.5 * 0.8 = 0.4
+        // Trust: 0.1 * 1.0 = 0.1
+        // Total: ~0.5
+        assert!((score - 0.5).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_composite_score_boundary_max_values() {
+        let mut memory = create_test_memory();
+        memory.criticality = 1.0;
+        memory.confidence = 1.0;
+
+        let context = ScoringContext::with_semantic(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+            "oauth authentication".to_string(),
+            1.0,
+        );
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let score = composite_score(&memory, &context, &config, now);
+
+        // All components at 1.0 -> final score should be at max
+        // Semantic: 0.5 * 1.0 = 0.5
+        // Relevance: 0.3 * 1.0 = 0.3
+        // Scope: 0.15 * 1.0 = 0.15
+        // Trust: 0.05 * 1.0 = 0.05
+        // Total: 1.0
+        assert!((score - 1.0).abs() < 0.1);
+        assert!(score <= 1.1); // Reasonable cap
+    }
 }

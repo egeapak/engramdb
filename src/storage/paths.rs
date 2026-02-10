@@ -44,3 +44,40 @@ pub fn lancedb_dir(project_id: &str) -> PathBuf {
 pub fn registry_path() -> PathBuf {
     global_config_dir().join("registry.json")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_project_dir() {
+        let path = Path::new("/tmp/my_project");
+        let result = project_dir(path);
+        assert_eq!(result, PathBuf::from("/tmp/my_project/.engramdb"));
+    }
+
+    #[test]
+    fn test_memories_dir() {
+        let path = Path::new("/tmp/my_project");
+        let result = memories_dir(path);
+        assert_eq!(result, PathBuf::from("/tmp/my_project/.engramdb/memories"));
+    }
+
+    #[test]
+    fn test_personal_dir() {
+        let result = personal_dir("abc123");
+        assert!(result.to_string_lossy().ends_with("projects/abc123/personal"));
+    }
+
+    #[test]
+    fn test_personal_memories_dir() {
+        let result = personal_memories_dir("abc123");
+        assert!(result.to_string_lossy().ends_with("personal/memories"));
+    }
+
+    #[test]
+    fn test_lancedb_dir() {
+        let result = lancedb_dir("abc123");
+        assert!(result.to_string_lossy().ends_with("projects/abc123/lancedb"));
+    }
+}

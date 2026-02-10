@@ -56,3 +56,68 @@ pub fn update_stats(manifest: &mut Manifest, memory_count: usize, logical_scopes
     manifest.stats.memory_count = memory_count;
     manifest.stats.logical_scopes = logical_scopes;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_manifest_default() {
+        let manifest = Manifest::default();
+        assert_eq!(manifest.schema_version, "0.1.0");
+        assert_eq!(manifest.stats.memory_count, 0);
+        assert!(manifest.stats.logical_scopes.is_empty());
+    }
+
+    #[test]
+    fn test_save_load_roundtrip() {
+        let dir = tempdir().unwrap();
+        let manifest_path = dir.path().join("manifest.toml");
+
+        let mut original = Manifest::default();
+        original.project = "test_project".to_string();
+        original.description = "Test description".to_string();
+        original.stats.memory_count = 42;
+        original.stats.logical_scopes = vec!["scope1".to_string(), "scope2".to_string()];
+
+        save_manifest(&manifest_path, &original).unwrap();
+        let loaded = load_manifest(&manifest_path).unwrap();
+
+        assert_eq!(loaded.schema_version, original.schema_version);
+        assert_eq!(loaded.project, original.project);
+        assert_eq!(loaded.description, original.description);
+        assert_eq!(loaded.stats.memory_count, original.stats.memory_count);
+        assert_eq!(loaded.stats.logical_scopes, original.stats.logical_scopes);
+    }
+
+    #[test]
+    fn test_load_manifest_file_not_found() {
+        let result = load_manifest(Path::new("/nonexistent/path/manifest.toml"));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), super::super::error::StorageError::Io(_)));
+    }
+
+    #[test]
+    fn test_load_manifest_invalid_toml() {
+        let dir = tempdir().unwrap();
+        let manifest_path = dir.path().join("manifest.toml");
+
+        fs::write(&manifest_path, "invalid { toml content").unwrap();
+
+        let result = load_manifest(&manifest_path);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), super::super::error::StorageError::Toml(_)));
+    }
+
+    #[test]
+    fn test_update_stats() {
+        let mut manifest = Manifest::default();
+        let scopes = vec!["scope_a".to_string(), "scope_b".to_string()];
+
+        update_stats(&mut manifest, 100, scopes.clone());
+
+        assert_eq!(manifest.stats.memory_count, 100);
+        assert_eq!(manifest.stats.logical_scopes, scopes);
+    }
+}

@@ -182,4 +182,89 @@ mod tests {
         // Age >= TTL, should return floor
         assert_eq!(factor, 0.2);
     }
+
+    #[test]
+    fn test_decay_factor_future_timestamp() {
+        let now = Utc::now();
+        let created_at = now + Duration::days(1); // Future timestamp
+        let decay = Some(Decay::linear(Duration::days(10)));
+
+        let factor = decay_factor(created_at, now, &decay);
+        // now < created_at -> factor should be clamped to 1.0 (no negative decay)
+        assert_eq!(factor, 1.0);
+    }
+
+    #[test]
+    fn test_decay_factor_linear_missing_ttl() {
+        let now = Utc::now();
+        let created_at = now - Duration::days(5);
+        let decay = Some(Decay {
+            strategy: DecayStrategy::Linear,
+            half_life: None,
+            ttl: None, // No TTL
+            floor: 0.1,
+        });
+
+        let factor = decay_factor(created_at, now, &decay);
+        // Linear strategy with ttl=None -> returns 1.0
+        assert_eq!(factor, 1.0);
+    }
+
+    #[test]
+    fn test_decay_factor_exponential_missing_half_life() {
+        let now = Utc::now();
+        let created_at = now - Duration::days(5);
+        let decay = Some(Decay {
+            strategy: DecayStrategy::Exponential,
+            half_life: None, // No half_life
+            ttl: Some(Duration::days(10)),
+            floor: 0.1,
+        });
+
+        let factor = decay_factor(created_at, now, &decay);
+        // Exponential with half_life=None -> returns 1.0
+        assert_eq!(factor, 1.0);
+    }
+
+    #[test]
+    fn test_decay_factor_step_missing_ttl() {
+        let now = Utc::now();
+        let created_at = now - Duration::days(5);
+        let decay = Some(Decay {
+            strategy: DecayStrategy::Step,
+            half_life: None,
+            ttl: None, // No TTL
+            floor: 0.2,
+        });
+
+        let factor = decay_factor(created_at, now, &decay);
+        // Step with ttl=None -> returns 1.0
+        assert_eq!(factor, 1.0);
+    }
+
+    #[test]
+    fn test_decay_factor_age_zero() {
+        let now = Utc::now();
+        let created_at = now; // Just created (now == created_at)
+
+        // Test with Linear
+        let decay_linear = Some(Decay::linear(Duration::days(10)));
+        let factor = decay_factor(created_at, now, &decay_linear);
+        assert_eq!(factor, 1.0);
+
+        // Test with Exponential
+        let decay_exp = Some(Decay::exponential(Duration::days(7)));
+        let factor = decay_factor(created_at, now, &decay_exp);
+        assert_eq!(factor, 1.0);
+
+        // Test with Step
+        let decay_step = Some(Decay {
+            strategy: DecayStrategy::Step,
+            half_life: None,
+            ttl: Some(Duration::days(10)),
+            floor: 0.2,
+        });
+        let factor = decay_factor(created_at, now, &decay_step);
+        assert_eq!(factor, 1.0);
+    }
 }

@@ -342,4 +342,144 @@ mod tests {
         assert!(!results.is_empty());
         assert_eq!(results[0].id, "test-id");
     }
+
+    #[test]
+    fn test_delete_removes_vector() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().to_path_buf();
+
+        let store = LanceDbStore::new(db_path, "memories".to_string(), 384).unwrap();
+
+        let vector = vec![0.1f32; 384];
+        let metadata = VectorMetadata {
+            type_: "decision".to_string(),
+            criticality: 0.8,
+            physical: vec!["src/lib.rs".to_string()],
+            logical: vec!["core".to_string()],
+            tags: vec!["test".to_string()],
+        };
+
+        // Upsert
+        store.upsert("test-id", vector.clone(), metadata).unwrap();
+
+        // Delete
+        let delete_result = store.delete("test-id");
+        assert!(delete_result.is_ok());
+
+        // Search should not find the deleted ID
+        let results = store.search(vector, 10).unwrap();
+        assert!(results.is_empty() || !results.iter().any(|m| m.id == "test-id"));
+    }
+
+    #[test]
+    fn test_search_empty_store() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().to_path_buf();
+
+        let store = LanceDbStore::new(db_path, "memories".to_string(), 384).unwrap();
+
+        let query = vec![0.1f32; 384];
+        let results = store.search(query, 10);
+
+        // Should succeed with empty results, not error
+        assert!(results.is_ok());
+        assert!(results.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_upsert_wrong_dimensions() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().to_path_buf();
+
+        let store = LanceDbStore::new(db_path, "memories".to_string(), 384).unwrap();
+
+        let wrong_vector = vec![0.1f32; 128]; // Wrong dimensions
+        let metadata = VectorMetadata {
+            type_: "decision".to_string(),
+            criticality: 0.8,
+            physical: vec!["src/lib.rs".to_string()],
+            logical: vec!["core".to_string()],
+            tags: vec!["test".to_string()],
+        };
+
+        let result = store.upsert("test-id", wrong_vector, metadata);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_search_wrong_dimensions() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().to_path_buf();
+
+        let store = LanceDbStore::new(db_path, "memories".to_string(), 384).unwrap();
+
+        let wrong_query = vec![0.1f32; 128]; // Wrong dimensions
+        let result = store.search(wrong_query, 10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_upsert_replaces_existing() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().to_path_buf();
+
+        let store = LanceDbStore::new(db_path, "memories".to_string(), 384).unwrap();
+
+        let vector = vec![0.1f32; 384];
+        let metadata1 = VectorMetadata {
+            type_: "decision".to_string(),
+            criticality: 0.8,
+            physical: vec!["src/lib.rs".to_string()],
+            logical: vec!["core".to_string()],
+            tags: vec!["first".to_string()],
+        };
+
+        // First upsert
+        store.upsert("test-id", vector.clone(), metadata1).unwrap();
+
+        let metadata2 = VectorMetadata {
+            type_: "pattern".to_string(),
+            criticality: 0.9,
+            physical: vec!["src/main.rs".to_string()],
+            logical: vec!["app".to_string()],
+            tags: vec!["second".to_string()],
+        };
+
+        // Second upsert with same ID
+        store.upsert("test-id", vector.clone(), metadata2).unwrap();
+
+        // Search should return only one result (second metadata wins)
+        let results = store.search(vector, 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "test-id");
+    }
+
+    #[test]
+    fn test_search_limit_exceeds_count() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().to_path_buf();
+
+        let store = LanceDbStore::new(db_path, "memories".to_string(), 384).unwrap();
+
+        let vector1 = vec![0.1f32; 384];
+        let vector2 = vec![0.2f32; 384];
+        let metadata = VectorMetadata {
+            type_: "decision".to_string(),
+            criticality: 0.8,
+            physical: vec!["src/lib.rs".to_string()],
+            logical: vec!["core".to_string()],
+            tags: vec!["test".to_string()],
+        };
+
+        // Add only 2 vectors
+        store.upsert("id1", vector1.clone(), metadata.clone()).unwrap();
+        store.upsert("id2", vector2, metadata).unwrap();
+
+        // Search with limit=100
+        let results = store.search(vector1, 100);
+        assert!(results.is_ok());
+        let results = results.unwrap();
+        // Should return only 2 results, not error
+        assert_eq!(results.len(), 2);
+    }
 }

@@ -382,6 +382,306 @@ mod tests {
         assert_eq!(query.detail_level, DetailLevel::Content);
     }
 
-    // Integration tests would go here, testing against a real MemoryStore
-    // with test data. These would require more complex setup.
+    // Integration tests with real MemoryStore
+
+    #[test]
+    fn test_engine_new() {
+        use tempfile::TempDir;
+        use crate::types::EngramConfig;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let config = EngramConfig::default();
+
+        let engine = RetrievalEngine::new(store, config);
+        assert!(!engine.embeddings_available());
+    }
+
+    #[test]
+    fn test_retrieve_empty_store() {
+        use tempfile::TempDir;
+        use crate::types::EngramConfig;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let config = EngramConfig::default();
+
+        let engine = RetrievalEngine::new(store, config);
+        let query = RetrievalQuery::default();
+        let result = engine.retrieve(&query).unwrap();
+
+        assert_eq!(result.memories.len(), 0);
+        assert_eq!(result.total, 0);
+    }
+
+    #[test]
+    fn test_retrieve_returns_scored_memories() {
+        use tempfile::TempDir;
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+
+        // Use a config with lower threshold to ensure memories are returned
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        // Create two memories with different physical scopes
+        let mut memory1 = Memory::new(
+            MemoryType::Decision,
+            "Memory at src/auth",
+            "This is about authentication",
+            Provenance::human(),
+        );
+        memory1.physical = vec!["src/auth/**".to_string()];
+        memory1.visibility = Visibility::Shared;
+        memory1.criticality = 0.9;
+
+        let mut memory2 = Memory::new(
+            MemoryType::Context,
+            "Memory at root",
+            "This is general context",
+            Provenance::human(),
+        );
+        memory2.physical = vec!["/".to_string()];
+        memory2.visibility = Visibility::Shared;
+        memory2.criticality = 0.9;
+
+        store.create(&memory1).unwrap();
+        store.create(&memory2).unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+
+        // Retrieve with path matching memory1 more closely
+        let query = RetrievalQuery {
+            path: Some("src/auth/handlers.rs".to_string()),
+            ..Default::default()
+        };
+
+        let result = engine.retrieve(&query).unwrap();
+
+        // Both should be returned, but the one with matching scope should score higher
+        assert_eq!(result.memories.len(), 2);
+        assert_eq!(result.total, 2);
+
+        // The first (highest scoring) should be the auth memory
+        assert_eq!(result.memories[0].memory.physical, vec!["src/auth/**".to_string()]);
+        assert!(result.memories[0].score > result.memories[1].score);
+    }
+
+    #[test]
+    fn test_retrieve_filters_by_type() {
+        use tempfile::TempDir;
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        // Create memories of different types
+        let mut decision = Memory::new(
+            MemoryType::Decision,
+            "A decision",
+            "Decision content",
+            Provenance::human(),
+        );
+        decision.visibility = Visibility::Shared;
+        decision.criticality = 0.8;
+
+        let mut context = Memory::new(
+            MemoryType::Context,
+            "Some context",
+            "Context content",
+            Provenance::human(),
+        );
+        context.visibility = Visibility::Shared;
+        context.criticality = 0.8;
+
+        store.create(&decision).unwrap();
+        store.create(&context).unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+
+        // Filter by Decision type only
+        let query = RetrievalQuery {
+            types: Some(vec![MemoryType::Decision]),
+            ..Default::default()
+        };
+
+        let result = engine.retrieve(&query).unwrap();
+
+        assert_eq!(result.memories.len(), 1);
+        assert_eq!(result.memories[0].memory.type_, MemoryType::Decision);
+    }
+
+    #[test]
+    fn test_retrieve_respects_max_results() {
+        use tempfile::TempDir;
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        // Create 5 memories
+        for i in 0..5 {
+            let mut memory = Memory::new(
+                MemoryType::Context,
+                format!("Memory {}", i),
+                format!("Content {}", i),
+                Provenance::human(),
+            );
+            memory.visibility = Visibility::Shared;
+            memory.criticality = 0.8;
+            store.create(&memory).unwrap();
+        }
+
+        let engine = RetrievalEngine::new(store, config);
+
+        // Retrieve with max_results=2
+        let query = RetrievalQuery {
+            max_results: Some(2),
+            ..Default::default()
+        };
+
+        let result = engine.retrieve(&query).unwrap();
+
+        assert_eq!(result.memories.len(), 2);
+        assert_eq!(result.total, 5);
+    }
+
+    #[test]
+    fn test_retrieve_excludes_expired() {
+        use tempfile::TempDir;
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use chrono::{Utc, Duration};
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        // Create an expired memory
+        let mut expired = Memory::new(
+            MemoryType::Debug,
+            "Expired memory",
+            "This has expired",
+            Provenance::human(),
+        );
+        expired.expires_at = Some(Utc::now() - Duration::days(1));
+        expired.visibility = Visibility::Shared;
+        expired.criticality = 0.8;
+
+        // Create an active memory
+        let mut active = Memory::new(
+            MemoryType::Decision,
+            "Active memory",
+            "This is active",
+            Provenance::human(),
+        );
+        active.visibility = Visibility::Shared;
+        active.criticality = 0.8;
+
+        store.create(&expired).unwrap();
+        store.create(&active).unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+
+        // Retrieve with include_expired=false
+        let query = RetrievalQuery {
+            include_expired: Some(false),
+            ..Default::default()
+        };
+
+        let result = engine.retrieve(&query).unwrap();
+
+        assert_eq!(result.memories.len(), 1);
+        assert_eq!(result.memories[0].memory.summary, "Active memory");
+    }
+
+    #[test]
+    fn test_retrieve_detail_level_summary() {
+        use tempfile::TempDir;
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        // Create a memory with content and details
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Test memory",
+            "This is the content",
+            Provenance::human(),
+        );
+        memory.details = Some("These are the details".to_string());
+        memory.visibility = Visibility::Shared;
+        memory.criticality = 0.8;
+
+        store.create(&memory).unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+
+        // Retrieve with detail_level=Summary
+        let query = RetrievalQuery {
+            detail_level: DetailLevel::Summary,
+            ..Default::default()
+        };
+
+        let result = engine.retrieve(&query).unwrap();
+
+        assert_eq!(result.memories.len(), 1);
+        assert_eq!(result.memories[0].memory.summary, "Test memory");
+        assert_eq!(result.memories[0].memory.content, "");
+        assert_eq!(result.memories[0].memory.details, None);
+    }
+
+    #[test]
+    fn test_search_keyword_integration() {
+        use tempfile::TempDir;
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let config = EngramConfig::default();
+
+        // Create memories with specific keywords
+        let mut memory1 = Memory::new(
+            MemoryType::Decision,
+            "Authentication system",
+            "This memory discusses authentication and login flows",
+            Provenance::human(),
+        );
+        memory1.visibility = Visibility::Shared;
+
+        let mut memory2 = Memory::new(
+            MemoryType::Context,
+            "Database schema",
+            "This memory is about database tables and relations",
+            Provenance::human(),
+        );
+        memory2.visibility = Visibility::Shared;
+
+        store.create(&memory1).unwrap();
+        store.create(&memory2).unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+
+        // Search for "authentication"
+        let filters = SearchFilters::default();
+        let results = engine.search("authentication", &filters).unwrap();
+
+        // Should find memory1 with higher score
+        assert!(!results.is_empty());
+        assert_eq!(results[0].memory.summary, "Authentication system");
+        assert!(results[0].score > 0.0);
+    }
 }
