@@ -61,9 +61,18 @@ impl MemoryStore {
         fs::create_dir_all(&engramdb_dir)?;
         fs::create_dir_all(paths::memories_dir(dir))?;
 
-        // Create manifest.toml
+        // Create manifest.toml with project name derived from directory
         let manifest_path = engramdb_dir.join("manifest.toml");
-        let manifest = manifest::Manifest::default();
+        let project_name = dir
+            .canonicalize()
+            .unwrap_or_else(|_| dir.to_path_buf())
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unnamed-project".to_string());
+        let manifest = manifest::Manifest {
+            project: project_name,
+            ..Default::default()
+        };
         manifest::save_manifest(&manifest_path, &manifest)?;
 
         // Create empty config.toml
