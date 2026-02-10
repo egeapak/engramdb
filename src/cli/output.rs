@@ -290,11 +290,18 @@ impl OutputFormatter {
         for (status, count) in &stats.by_status {
             println!("  {:?}: {}", status, count);
         }
-        if !stats.logical_scopes.is_empty() {
-            println!("\nLogical Scopes:");
-            for scope in &stats.logical_scopes {
-                println!("  {}", scope);
+        if !stats.by_scope.is_empty() {
+            println!("\nBy Scope:");
+            for (scope, count) in &stats.by_scope {
+                println!("  {}: {}", scope, count);
             }
+        }
+        println!("\nExpired: {}", stats.expired);
+        if let Some(oldest) = stats.oldest {
+            println!("Oldest: {}", oldest.format("%Y-%m-%d"));
+        }
+        if let Some(newest) = stats.newest {
+            println!("Newest: {}", newest.format("%Y-%m-%d"));
         }
         println!("\nAverage Criticality: {:.2}", stats.avg_criticality);
     }
@@ -316,8 +323,14 @@ pub struct Stats {
     pub by_type: Vec<(MemoryType, usize)>,
     /// Count of memories by status
     pub by_status: Vec<(Status, usize)>,
-    /// All unique logical scopes in use
-    pub logical_scopes: Vec<String>,
+    /// Count of memories per logical scope
+    pub by_scope: Vec<(String, usize)>,
+    /// Count of expired memories
+    pub expired: usize,
+    /// Oldest created_at timestamp
+    pub oldest: Option<chrono::DateTime<chrono::Utc>>,
+    /// Newest created_at timestamp
+    pub newest: Option<chrono::DateTime<chrono::Utc>>,
     /// Average criticality across all memories
     pub avg_criticality: f64,
 }

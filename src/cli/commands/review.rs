@@ -1,7 +1,7 @@
 //! Interactive review of memories needing attention.
 
 use crate::cli::output::OutputFormatter;
-use crate::ops::{delete_memory, review_memories, update_memory, UpdateParams};
+use crate::ops::{self, review_memories};
 use crate::storage::MemoryStore;
 use crate::types::Status;
 use anyhow::Result;
@@ -78,28 +78,13 @@ pub fn run_review(
 
         match answer {
             Ok("Keep (reset to Active)") => {
-                update_memory(
+                ops::resolve_memory(
                     &store,
-                    &memory.id,
-                    UpdateParams {
-                        status: Some(Status::Active),
-                        type_: None,
-                        content: None,
-                        summary: None,
-                        physical: None,
-                        logical: None,
-                        tags: None,
-                        tags_add: None,
-                        tags_remove: None,
-                        criticality: None,
-                        confidence: None,
-                        details: None,
-                        visibility: None,
-                        supersedes: None,
-                        decay_strategy: None,
-                        decay_half_life: None,
-                        decay_ttl: None,
-                        decay_floor: None,
+                    ops::ResolveParams {
+                        id: memory.id.clone(),
+                        action: ops::ResolveAction::Keep,
+                        updated_content: None,
+                        updated_summary: None,
                     },
                 )?;
                 formatter.print_success(&format!(
@@ -112,36 +97,21 @@ pub fn run_review(
                 let new_summary = inquire::Text::new("New summary (enter to keep):").prompt()?;
                 let new_content = inquire::Text::new("New content (enter to keep):").prompt()?;
 
-                update_memory(
+                ops::resolve_memory(
                     &store,
-                    &memory.id,
-                    UpdateParams {
-                        status: Some(Status::Active),
-                        summary: if new_summary.is_empty() {
-                            None
-                        } else {
-                            Some(new_summary)
-                        },
-                        content: if new_content.is_empty() {
+                    ops::ResolveParams {
+                        id: memory.id.clone(),
+                        action: ops::ResolveAction::Update,
+                        updated_content: if new_content.is_empty() {
                             None
                         } else {
                             Some(new_content)
                         },
-                        type_: None,
-                        physical: None,
-                        logical: None,
-                        tags: None,
-                        tags_add: None,
-                        tags_remove: None,
-                        criticality: None,
-                        confidence: None,
-                        details: None,
-                        visibility: None,
-                        supersedes: None,
-                        decay_strategy: None,
-                        decay_half_life: None,
-                        decay_ttl: None,
-                        decay_floor: None,
+                        updated_summary: if new_summary.is_empty() {
+                            None
+                        } else {
+                            Some(new_summary)
+                        },
                     },
                 )?;
                 formatter.print_success(&format!(
@@ -150,7 +120,15 @@ pub fn run_review(
                 ));
             }
             Ok("Delete") => {
-                delete_memory(&store, &memory.id)?;
+                ops::resolve_memory(
+                    &store,
+                    ops::ResolveParams {
+                        id: memory.id.clone(),
+                        action: ops::ResolveAction::Delete,
+                        updated_content: None,
+                        updated_summary: None,
+                    },
+                )?;
                 formatter.print_success(&format!(
                     "Deleted memory {}.",
                     &memory.id[..8.min(memory.id.len())]

@@ -640,10 +640,8 @@ impl EngramDbServer {
         .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
         serde_json::to_string(&serde_json::json!({
-            "id": result.memory.id,
             "challenged": result.challenged,
-            "status": format!("{:?}", result.memory.status).to_lowercase(),
-            "total_challenges": result.memory.challenges.len()
+            "memory": memory_to_output(&result.memory, true)
         }))
         .map_err(|e| e.to_string())
     }
@@ -674,65 +672,10 @@ impl EngramDbServer {
     fn memory_resolve(&self, #[tool(aggr)] input: ResolveInput) -> Result<String, String> {
         let store = self.open_store()?;
 
-        match input.action.as_str() {
-            "keep" => {
-                ops::update_memory(
-                    &store,
-                    &input.id,
-                    ops::UpdateParams {
-                        status: Some(Status::Active),
-                        type_: None,
-                        content: None,
-                        summary: None,
-                        details: None,
-                        physical: None,
-                        logical: None,
-                        tags: None,
-                        tags_add: None,
-                        tags_remove: None,
-                        criticality: None,
-                        confidence: None,
-                        visibility: None,
-                        supersedes: None,
-                        decay_strategy: None,
-                        decay_half_life: None,
-                        decay_ttl: None,
-                        decay_floor: None,
-                    },
-                )
-                .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
-            }
-            "update" => {
-                ops::update_memory(
-                    &store,
-                    &input.id,
-                    ops::UpdateParams {
-                        status: Some(Status::Active),
-                        content: input.updated_content,
-                        summary: input.updated_summary,
-                        type_: None,
-                        details: None,
-                        physical: None,
-                        logical: None,
-                        tags: None,
-                        tags_add: None,
-                        tags_remove: None,
-                        criticality: None,
-                        confidence: None,
-                        visibility: None,
-                        supersedes: None,
-                        decay_strategy: None,
-                        decay_half_life: None,
-                        decay_ttl: None,
-                        decay_floor: None,
-                    },
-                )
-                .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
-            }
-            "delete" => {
-                ops::delete_memory(&store, &input.id)
-                    .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
-            }
+        let action = match input.action.as_str() {
+            "keep" => ops::ResolveAction::Keep,
+            "update" => ops::ResolveAction::Update,
+            "delete" => ops::ResolveAction::Delete,
             other => {
                 return Err(error_response(
                     ErrorCode::ValidationError,
@@ -742,12 +685,23 @@ impl EngramDbServer {
                     ),
                 ));
             }
-        }
+        };
+
+        let result = ops::resolve_memory(
+            &store,
+            ops::ResolveParams {
+                id: input.id.clone(),
+                action,
+                updated_content: input.updated_content,
+                updated_summary: input.updated_summary,
+            },
+        )
+        .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
         serde_json::to_string(&serde_json::json!({
             "id": input.id,
-            "action": input.action,
-            "resolved": true
+            "action": result.action,
+            "resolved": result.resolved
         }))
         .map_err(|e| e.to_string())
     }
@@ -821,11 +775,20 @@ impl EngramDbServer {
             })
             .collect();
 
+        let by_scope: serde_json::Map<String, serde_json::Value> = stats
+            .by_scope
+            .iter()
+            .map(|(s, c)| (s.clone(), serde_json::Value::Number((*c).into())))
+            .collect();
+
         serde_json::to_string(&serde_json::json!({
             "total": stats.total,
             "by_type": by_type,
             "by_status": by_status,
-            "logical_scopes": stats.logical_scopes,
+            "by_scope": by_scope,
+            "expired": stats.expired,
+            "oldest": stats.oldest,
+            "newest": stats.newest,
             "avg_criticality": stats.avg_criticality
         }))
         .map_err(|e| e.to_string())
@@ -902,7 +865,7 @@ impl ServerHandler for EngramDbServer {
                 .enable_prompts()
                 .build(),
             server_info: Implementation {
-                name: "EngramDB".to_string(),
+                name: "engramdb".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
             instructions: Some(

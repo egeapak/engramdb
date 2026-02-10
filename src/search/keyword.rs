@@ -129,6 +129,7 @@ mod tests {
             status: Status::Active,
             visibility: Visibility::Shared,
             challenges: vec![],
+            verified_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             accessed_at: Utc::now(),

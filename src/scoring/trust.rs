@@ -105,7 +105,7 @@ mod tests {
         );
         assert_eq!(
             trust_weight_from_config(ProvenanceSource::Agent, &weights),
-            0.9
+            0.85
         );
         assert_eq!(
             trust_weight_from_config(ProvenanceSource::Imported, &weights),

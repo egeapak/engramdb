@@ -34,10 +34,10 @@ pub struct ScoringWeights {
 impl Default for ScoringWeights {
     fn default() -> Self {
         Self {
-            semantic: Some(0.5),
-            relevance: 0.3,
-            scope: 0.15,
-            trust: 0.05,
+            semantic: Some(0.3),
+            relevance: 0.4,
+            scope: 0.2,
+            trust: 0.1,
         }
     }
 }
@@ -61,15 +61,15 @@ impl Default for ScoringConfig {
             with_query: ScoringWeights::default(),
             scope_only: ScoringWeights {
                 semantic: None,
-                relevance: 0.5,
+                relevance: 0.4,
                 scope: 0.4,
-                trust: 0.1,
+                trust: 0.2,
             },
             degraded: ScoringWeights {
                 semantic: None,
                 relevance: 0.6,
-                scope: 0.3,
-                trust: 0.1,
+                scope: 0.25,
+                trust: 0.15,
             },
         }
     }
@@ -95,9 +95,9 @@ impl Default for ScopeProximityConfig {
     fn default() -> Self {
         Self {
             exact_file: 1.0,
-            same_directory: 0.7,
-            same_module: 0.4,
-            project_root: 0.1,
+            same_directory: 0.85,
+            same_module: 0.6,
+            project_root: 0.4,
         }
     }
 }
@@ -118,9 +118,9 @@ pub struct LogicalBonusConfig {
 impl Default for LogicalBonusConfig {
     fn default() -> Self {
         Self {
-            exact: 1.0,
-            parent: 0.5,
-            sibling: 0.3,
+            exact: 0.3,
+            parent: 0.2,
+            sibling: 0.15,
         }
     }
 }
@@ -145,7 +145,7 @@ impl Default for TrustWeights {
     fn default() -> Self {
         Self {
             human: 1.0,
-            agent: 0.9,
+            agent: 0.85,
             inferred: 0.6,
             imported: 0.7,
         }
@@ -169,8 +169,8 @@ impl Default for ThresholdsConfig {
     fn default() -> Self {
         Self {
             needs_review: 0.3,
-            gc: 0.1,
-            compress: 0.2,
+            gc: 0.05,
+            compress: 0.4,
         }
     }
 }
@@ -194,8 +194,8 @@ pub struct RetrievalConfig {
 impl Default for RetrievalConfig {
     fn default() -> Self {
         Self {
-            relevance_threshold: 0.5,
-            max_results: 20,
+            relevance_threshold: 0.3,
+            max_results: 10,
             include_expired: false,
             scoring: ScoringConfig::default(),
         }
@@ -256,49 +256,49 @@ mod tests {
         let config = EngramConfig::default();
 
         // Retrieval config
-        assert_eq!(config.retrieval.max_results, 20);
-        assert_eq!(config.retrieval.relevance_threshold, 0.5);
+        assert_eq!(config.retrieval.max_results, 10);
+        assert_eq!(config.retrieval.relevance_threshold, 0.3);
         assert!(!config.retrieval.include_expired);
 
         // Trust weights
         assert_eq!(config.trust_weights.human, 1.0);
-        assert_eq!(config.trust_weights.agent, 0.9);
+        assert_eq!(config.trust_weights.agent, 0.85);
         assert_eq!(config.trust_weights.inferred, 0.6);
         assert_eq!(config.trust_weights.imported, 0.7);
 
         // Scope proximity
         assert_eq!(config.scope_proximity.exact_file, 1.0);
-        assert_eq!(config.scope_proximity.same_directory, 0.7);
-        assert_eq!(config.scope_proximity.same_module, 0.4);
-        assert_eq!(config.scope_proximity.project_root, 0.1);
+        assert_eq!(config.scope_proximity.same_directory, 0.85);
+        assert_eq!(config.scope_proximity.same_module, 0.6);
+        assert_eq!(config.scope_proximity.project_root, 0.4);
 
         // Logical bonus
-        assert_eq!(config.logical_bonus.exact, 1.0);
-        assert_eq!(config.logical_bonus.parent, 0.5);
-        assert_eq!(config.logical_bonus.sibling, 0.3);
+        assert_eq!(config.logical_bonus.exact, 0.3);
+        assert_eq!(config.logical_bonus.parent, 0.2);
+        assert_eq!(config.logical_bonus.sibling, 0.15);
 
         // Thresholds
         assert_eq!(config.thresholds.needs_review, 0.3);
-        assert_eq!(config.thresholds.gc, 0.1);
-        assert_eq!(config.thresholds.compress, 0.2);
+        assert_eq!(config.thresholds.gc, 0.05);
+        assert_eq!(config.thresholds.compress, 0.4);
 
         // Scoring weights - with_query
-        assert_eq!(config.retrieval.scoring.with_query.semantic, Some(0.5));
-        assert_eq!(config.retrieval.scoring.with_query.relevance, 0.3);
-        assert_eq!(config.retrieval.scoring.with_query.scope, 0.15);
-        assert_eq!(config.retrieval.scoring.with_query.trust, 0.05);
+        assert_eq!(config.retrieval.scoring.with_query.semantic, Some(0.3));
+        assert_eq!(config.retrieval.scoring.with_query.relevance, 0.4);
+        assert_eq!(config.retrieval.scoring.with_query.scope, 0.2);
+        assert_eq!(config.retrieval.scoring.with_query.trust, 0.1);
 
         // Scoring weights - scope_only
         assert_eq!(config.retrieval.scoring.scope_only.semantic, None);
-        assert_eq!(config.retrieval.scoring.scope_only.relevance, 0.5);
+        assert_eq!(config.retrieval.scoring.scope_only.relevance, 0.4);
         assert_eq!(config.retrieval.scoring.scope_only.scope, 0.4);
-        assert_eq!(config.retrieval.scoring.scope_only.trust, 0.1);
+        assert_eq!(config.retrieval.scoring.scope_only.trust, 0.2);
 
         // Scoring weights - degraded
         assert_eq!(config.retrieval.scoring.degraded.semantic, None);
         assert_eq!(config.retrieval.scoring.degraded.relevance, 0.6);
-        assert_eq!(config.retrieval.scoring.degraded.scope, 0.3);
-        assert_eq!(config.retrieval.scoring.degraded.trust, 0.1);
+        assert_eq!(config.retrieval.scoring.degraded.scope, 0.25);
+        assert_eq!(config.retrieval.scoring.degraded.trust, 0.15);
     }
 
     #[test]
@@ -343,20 +343,20 @@ relevance_threshold = 0.7
 include_expired = true
 
 [retrieval.scoring.with_query]
-semantic = 0.5
-relevance = 0.3
-scope = 0.15
-trust = 0.05
+semantic = 0.3
+relevance = 0.4
+scope = 0.2
+trust = 0.1
 
 [retrieval.scoring.scope_only]
-relevance = 0.5
+relevance = 0.4
 scope = 0.4
-trust = 0.1
+trust = 0.2
 
 [retrieval.scoring.degraded]
 relevance = 0.6
-scope = 0.3
-trust = 0.1
+scope = 0.25
+trust = 0.15
 "#;
 
         let config: EngramConfig = toml::from_str(partial_toml).unwrap();
@@ -369,7 +369,7 @@ trust = 0.1
         // Verify other sections use defaults (thanks to #[serde(default)])
         assert_eq!(config.trust_weights.human, 1.0);
         assert_eq!(config.scope_proximity.exact_file, 1.0);
-        assert_eq!(config.logical_bonus.exact, 1.0);
+        assert_eq!(config.logical_bonus.exact, 0.3);
         assert_eq!(config.thresholds.needs_review, 0.3);
     }
 }

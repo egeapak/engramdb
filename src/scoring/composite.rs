@@ -196,6 +196,7 @@ mod tests {
             status: Status::Active,
             visibility: Visibility::Shared,
             challenges: vec![],
+            verified_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             accessed_at: Utc::now(),
@@ -356,9 +357,9 @@ mod tests {
 
         // With criticality=0.0, relevance component is 0.0, so score should be much lower
         // Scope: 0.4 * 1.0 = 0.4
-        // Trust: 0.1 * 1.0 = 0.1
-        // Total: ~0.5
-        assert!((breakdown.final_score - 0.5).abs() < 0.1);
+        // Trust: 0.2 * 1.0 = 0.2
+        // Total: ~0.6
+        assert!((breakdown.final_score - 0.6).abs() < 0.1);
         assert!((breakdown.relevance - 0.0).abs() < 0.01);
     }
 

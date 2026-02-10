@@ -157,6 +157,7 @@ mod tests {
             status: Status::Active,
             visibility: Visibility::Shared,
             challenges: vec![],
+            verified_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             accessed_at: chrono::Utc::now(),

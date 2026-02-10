@@ -37,7 +37,7 @@ pub struct Cli {
     pub json: bool,
 
     /// Suppress non-essential output
-    #[arg(long, global = true)]
+    #[arg(long, short = 'q', global = true)]
     pub quiet: bool,
 
     /// Verbose output
@@ -167,7 +167,7 @@ pub enum Command {
         min_criticality: Option<f64>,
 
         /// Maximum number of results
-        #[arg(long, default_value = "10")]
+        #[arg(long, short = 'n', default_value = "10")]
         max_results: usize,
 
         /// Detail level: summary, content, full

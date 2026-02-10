@@ -39,7 +39,10 @@ pub fn run_stats(dir: &Path, formatter: &OutputFormatter) -> Result<()> {
         total: store_stats.total,
         by_type: store_stats.by_type,
         by_status: store_stats.by_status,
-        logical_scopes: store_stats.logical_scopes,
+        by_scope: store_stats.by_scope,
+        expired: store_stats.expired,
+        oldest: store_stats.oldest,
+        newest: store_stats.newest,
         avg_criticality: store_stats.avg_criticality,
     };
 

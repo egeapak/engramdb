@@ -133,6 +133,10 @@ pub struct Memory {
     #[serde(default)]
     pub challenges: Vec<Challenge>,
 
+    /// Timestamp of last verification/resolution
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<DateTime<Utc>>,
+
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
 
@@ -175,6 +179,7 @@ impl Memory {
             status: Status::Active,
             visibility: Visibility::Shared,
             challenges: vec![],
+            verified_at: None,
             created_at: now,
             updated_at: now,
             accessed_at: now,
@@ -261,6 +266,9 @@ pub struct MemoryUpdate {
     pub visibility: Option<Visibility>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<DateTime<Utc>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
 }
 
@@ -313,6 +321,9 @@ impl MemoryUpdate {
         }
         if let Some(visibility) = self.visibility {
             memory.visibility = visibility;
+        }
+        if let Some(verified_at) = self.verified_at {
+            memory.verified_at = Some(verified_at);
         }
         if let Some(expires_at) = self.expires_at {
             memory.expires_at = Some(expires_at);
@@ -492,6 +503,7 @@ mod tests {
             supersedes: Some(vec!["old-id".to_string()]),
             status: Some(Status::NeedsReview),
             visibility: Some(Visibility::Personal),
+            verified_at: Some(Utc::now()),
             expires_at: Some(Utc::now() + Duration::days(30)),
         };
 

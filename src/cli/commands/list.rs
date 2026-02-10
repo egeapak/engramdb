@@ -64,7 +64,7 @@ pub fn run_list(
 
     // Apply sorting
     match sort_field {
-        "criticality" => {
+        "criticality" | "relevance" => {
             entries.sort_by(|a, b| b.criticality.partial_cmp(&a.criticality).unwrap());
         }
         "created" => {
@@ -78,7 +78,7 @@ pub fn run_list(
         }
         _ => {
             return Err(anyhow!(
-                "Invalid sort field: {}. Valid options are: criticality, created, updated, type",
+                "Invalid sort field: {}. Valid options are: criticality, relevance, created, updated, type",
                 sort_field
             ));
         }
@@ -129,6 +129,7 @@ mod tests {
             status: Status::Active,
             visibility: Visibility::Shared,
             challenges: vec![],
+            verified_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             accessed_at: chrono::Utc::now(),
