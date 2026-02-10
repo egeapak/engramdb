@@ -1,4 +1,14 @@
-//! Path resolution utilities for EngramDB storage locations
+//! Path resolution utilities for EngramDB storage locations.
+//!
+//! This module provides functions to resolve all EngramDB storage paths:
+//! - Project-local paths (.engramdb/, .engramdb/memories/)
+//! - Global paths (~/.config/engramdb/)
+//! - Personal project paths (~/.config/engramdb/projects/{id}/personal/)
+//! - LanceDB vector storage paths
+//! - Registry path
+//!
+//! All functions return PathBuf and handle both shared (project-level) and
+//! personal (user-level) storage locations.
 
 use std::path::{Path, PathBuf};
 

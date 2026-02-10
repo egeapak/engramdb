@@ -1,3 +1,9 @@
+//! Command handler implementations.
+//!
+//! Each submodule implements a specific CLI command handler. Handlers receive
+//! parsed arguments, interact with the storage layer, and format output using
+//! the provided OutputFormatter.
+
 pub mod add;
 pub mod delete;
 pub mod get;

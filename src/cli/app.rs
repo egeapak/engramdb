@@ -1,13 +1,23 @@
+//! Clap CLI application definitions.
+//!
+//! This module defines the command-line interface structure using Clap's derive macros.
+//! It includes the main CLI struct, all subcommands, and output format options.
+
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+/// Output format for CLI commands.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum OutputFormat {
+    /// Human-friendly colored output with formatting
     Pretty,
+    /// JSON output for programmatic parsing
     Json,
+    /// Plain text output without colors
     Plain,
 }
 
+/// EngramDB command-line interface.
 #[derive(Parser)]
 #[command(
     name = "engramdb",
@@ -43,6 +53,7 @@ pub struct Cli {
     pub dir: Option<PathBuf>,
 }
 
+/// Available CLI commands.
 #[derive(Subcommand)]
 pub enum Command {
     /// Initialize a new EngramDB store

@@ -1,7 +1,48 @@
+//! Physical scope proximity based on file paths and glob patterns
+//!
+//! This module calculates proximity scores between memory scopes (file paths/globs)
+//! and the current file path, using pattern matching to determine relevance.
+//!
+//! # Scoring
+//!
+//! - **1.0**: Exact file match
+//! - **0.85**: Same directory (files in the same folder)
+//! - **0.6**: Parent module or matching glob with `**`
+//! - **0.4**: Project root "/" (matches everything)
+//! - **0.0**: No match
+//!
+//! # Glob Support
+//!
+//! Supports standard glob patterns:
+//! - `*` matches any characters except `/`
+//! - `**` matches any characters including `/` (recursive)
+//! - `?` matches exactly one character
+//!
+//! # Key Functions
+//!
+//! - [`matches`]: Check if a path matches any pattern
+//! - [`proximity`]: Calculate proximity score between scopes and current path
+
 use globset::{Glob, GlobSetBuilder};
 
 /// Checks if a file path matches any of the given patterns.
-/// Patterns can be exact paths, globs, or "/" for project root (matches everything).
+///
+/// # Arguments
+/// * `patterns` - Physical scope patterns (exact paths, globs, or "/")
+/// * `path` - File path to check
+///
+/// # Returns
+/// True if path matches any pattern, false otherwise
+///
+/// # Examples
+///
+/// ```ignore
+/// use engramdb::scope::physical::matches;
+///
+/// assert!(matches(&["/".to_string()], "any/path/file.rs"));
+/// assert!(matches(&["src/**/*.rs".to_string()], "src/api/handlers.rs"));
+/// assert!(!matches(&["src/main.rs".to_string()], "src/lib.rs"));
+/// ```
 pub fn matches(patterns: &[String], path: &str) -> bool {
     // "/" matches everything
     if patterns.iter().any(|p| p == "/") {
@@ -24,14 +65,22 @@ pub fn matches(patterns: &[String], path: &str) -> bool {
 }
 
 /// Calculates proximity score between memory scopes and current file path.
+///
 /// Returns the highest matching score from all memory scopes.
 ///
-/// Scoring:
-/// - Exact file match: 1.0
-/// - Same directory: 0.85
-/// - Same module/parent: 0.6
-/// - Project root "/": 0.4
-/// - No match: 0.0
+/// # Arguments
+/// * `memory_scopes` - Physical scope patterns from the memory
+/// * `current_path` - Current file path
+///
+/// # Returns
+/// Proximity score from 0.0 to 1.0
+///
+/// # Scoring
+/// - **1.0**: Exact file match
+/// - **0.85**: Same directory
+/// - **0.6**: Same module/parent
+/// - **0.4**: Project root "/"
+/// - **0.0**: No match
 pub fn proximity(memory_scopes: &[String], current_path: &str) -> f64 {
     let mut max_score = 0.0;
 

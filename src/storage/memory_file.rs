@@ -1,4 +1,22 @@
-//! Frontmatter markdown parser and writer for memory files
+//! Frontmatter markdown parser and writer for memory files.
+//!
+//! This module handles serialization and deserialization of memory files
+//! in frontmatter markdown format:
+//! ```text
+//! ---
+//! <YAML frontmatter with all memory fields>
+//! ---
+//!
+//! ## Content
+//! <main content text>
+//!
+//! ## Details
+//! <optional extended details>
+//! ```
+//!
+//! The frontmatter contains all Memory struct fields as YAML, while the body
+//! sections provide human-readable content and details. This format is both
+//! machine-readable and human-editable, enabling manual memory curation.
 
 use super::error::{Result, StorageError};
 use crate::types::Memory;

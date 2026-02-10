@@ -1,3 +1,27 @@
+//! Scope proximity scoring for EngramDB
+//!
+//! This module calculates how relevant a memory is to the current context based on
+//! physical (file paths) and logical (dot-notation tags) scope matching.
+//!
+//! # Components
+//!
+//! - [`physical`]: Physical scope matching using file paths and glob patterns
+//! - [`logical`]: Logical scope hierarchy matching using dot-notation
+//! - [`scope_proximity`]: Combines both physical and logical scores
+//!
+//! # Scoring System
+//!
+//! Physical scores range from 0.0 to 1.0 based on file path similarity.
+//! Logical scores provide a bonus of 0.0 to 0.3 based on hierarchical tag matching.
+//! The combined score is capped at 1.0 to maintain consistent score ranges.
+//!
+//! # Design Decisions
+//!
+//! - Physical scope takes precedence (higher weight) over logical scope
+//! - The "/" pattern matches all paths with a base score of 0.4
+//! - Missing current path results in 0.0 physical score (logical bonus still applies)
+//! - Multiple memory scopes return the highest matching score
+
 pub mod logical;
 pub mod physical;
 

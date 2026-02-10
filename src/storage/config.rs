@@ -1,4 +1,11 @@
-//! Configuration loading with defaults
+//! Configuration loading with defaults.
+//!
+//! This module provides the `load_config()` function to load EngramDB
+//! configuration from config.toml in the project directory. If the file
+//! doesn't exist, returns default configuration values.
+//!
+//! Configuration is defined in [`crate::types::EngramConfig`] and includes
+//! scoring weights, retrieval thresholds, scope bonuses, and trust weights.
 
 use super::error::Result;
 use crate::types::EngramConfig;

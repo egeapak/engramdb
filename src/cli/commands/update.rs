@@ -1,9 +1,12 @@
+//! Update an existing memory.
+
 use crate::cli::output::OutputFormatter;
 use crate::storage::MemoryStore;
 use crate::types::{MemoryType, MemoryUpdate, Status, Visibility};
 use anyhow::{bail, Result};
 use std::path::Path;
 
+/// Parameters for the update command.
 pub struct UpdateParams {
     pub id: String,
     pub type_: Option<String>,
@@ -19,6 +22,15 @@ pub struct UpdateParams {
     pub status: Option<String>,
 }
 
+/// Update an existing memory.
+///
+/// Only the fields provided in params will be updated; others remain unchanged.
+/// Automatically updates the `updated_at` timestamp.
+///
+/// # Arguments
+/// * `dir` - The directory containing the EngramDB store
+/// * `params` - Update parameters (only non-None fields are updated)
+/// * `formatter` - Output formatter for success/error messages
 pub fn run_update(dir: &Path, params: UpdateParams, formatter: &OutputFormatter) -> Result<()> {
     let store = MemoryStore::open(dir)?;
 

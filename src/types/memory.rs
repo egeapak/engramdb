@@ -1,3 +1,17 @@
+//! Memory struct and related enums (MemoryType, Status, Visibility).
+//!
+//! This module defines the core [`Memory`] struct, which represents a single piece
+//! of knowledge stored in EngramDB. Each memory has:
+//! - Content (summary, content, optional details)
+//! - Scope (physical paths, logical domains)
+//! - Metadata (criticality, confidence, timestamps)
+//! - Provenance tracking (who/what created it)
+//! - Decay configuration (how relevance decreases over time)
+//! - Challenges (validity disputes)
+//!
+//! The [`MemoryUpdate`] struct provides partial updates to existing memories.
+//! Memories can be Active, NeedsReview, or Challenged, and can be Shared or Personal.
+
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

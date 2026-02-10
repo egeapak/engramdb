@@ -1,4 +1,14 @@
-//! Storage error types
+//! Storage error types.
+//!
+//! This module defines [`StorageError`], the error type for all storage
+//! operations. It wraps IO, YAML, JSON, and TOML parsing errors, and
+//! provides custom error variants for:
+//! - NotFound - memory ID not found
+//! - InvalidFormat - malformed memory file
+//! - Validation - ambiguous ID, invalid data, etc.
+//! - NotInitialized - EngramDB not initialized in directory
+//!
+//! The Result type alias simplifies error handling throughout the storage layer.
 
 use std::io;
 

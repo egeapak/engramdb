@@ -1,4 +1,16 @@
-//! Project identity computation based on git remote or working directory
+//! Project identity computation based on git remote or working directory.
+//!
+//! This module computes a stable, unique project identifier using:
+//! 1. Git remote URL (if available) - preferred for consistency across clones
+//! 2. Absolute directory path - fallback for non-git projects
+//!
+//! The algorithm:
+//! - Normalize git remote URL (strip protocol, lowercase, remove .git)
+//! - SHA-256 hash the normalized URL or path
+//! - Take first 16 hex characters as project ID
+//!
+//! This ensures the same project has the same ID across different machines
+//! (when using git) or stable IDs for local projects.
 
 use sha2::{Digest, Sha256};
 use std::fs;

@@ -1,4 +1,19 @@
-//! Main storage orchestrator - MemoryStore
+//! Main storage orchestrator - MemoryStore.
+//!
+//! This module provides the [`MemoryStore`] struct, which orchestrates all
+//! file system operations for memories:
+//! - Initialize new EngramDB stores with `init()`
+//! - Open existing stores with `open()`
+//! - Create, read, update, delete memories (CRUD operations)
+//! - List all memories via index
+//! - Rebuild index from files with `reindex()`
+//!
+//! MemoryStore handles both shared (project-level) and personal (user-level)
+//! memories, maintaining separate indexes for each. It also manages the global
+//! registry of projects and updates manifest statistics automatically.
+//!
+//! ID matching supports prefix matching for convenience (e.g., "abcd" matches
+//! "abcd1234-5678-..."), with ambiguity detection.
 
 use super::error::{Result, StorageError};
 use super::{index, manifest, memory_file, paths, project_id};
@@ -8,20 +23,32 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Entry in the global registry tracking a single project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryEntry {
+    /// Unique project identifier (hash of git remote or path)
     pub project_id: String,
+    /// Absolute path to the project directory
     pub project_path: String,
+    /// Last time this project was opened
     pub last_opened: chrono::DateTime<chrono::Utc>,
 }
 
+/// Global registry of all EngramDB projects on this machine.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Registry {
+    /// List of all registered projects
     pub projects: Vec<RegistryEntry>,
 }
 
+/// Main storage interface for EngramDB operations.
+///
+/// Manages memory files, indexes, manifest, and coordinates between
+/// shared (project-level) and personal (user-level) storage locations.
 pub struct MemoryStore {
+    /// Root directory of the project (contains .engramdb/)
     pub project_dir: PathBuf,
+    /// Unique identifier for this project
     pub project_id: String,
 }
 

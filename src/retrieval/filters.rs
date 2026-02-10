@@ -1,10 +1,14 @@
-//! Filtering logic for memory retrieval
+//! Filtering logic for memory retrieval.
+//!
+//! This module provides efficient filtering of memory index entries before loading
+//! full memory data. Filters are applied at the index level to minimize disk I/O
+//! and improve retrieval performance.
 
 use crate::scope::physical;
 use crate::storage::IndexEntry;
 use crate::types::MemoryType;
 
-/// Search filters for restricting retrieval results
+/// Search filters for restricting retrieval results.
 #[derive(Debug, Clone, Default)]
 pub struct SearchFilters {
     /// Filter by memory type

@@ -51,7 +51,14 @@ pub fn keyword_search(query: &str, memories: &[Memory]) -> Vec<(usize, f64)> {
     results
 }
 
-/// Calculate keyword match score for a single memory
+/// Calculate keyword match score for a single memory.
+///
+/// Weights:
+/// - Summary match: 3x
+/// - Tag match: 2x
+/// - Content match: 1x
+///
+/// Score is normalized to [0.0, 1.0] based on maximum possible weighted matches.
 fn calculate_keyword_score(query_tokens: &[String], memory: &Memory) -> f64 {
     // Tokenize memory fields
     let summary_tokens = tokenize(&memory.summary);
@@ -87,7 +94,9 @@ fn calculate_keyword_score(query_tokens: &[String], memory: &Memory) -> f64 {
     }
 }
 
-/// Tokenize a string into lowercase words
+/// Tokenize a string into lowercase words.
+///
+/// Splits on non-alphanumeric characters and filters out empty strings.
 fn tokenize(text: &str) -> Vec<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())

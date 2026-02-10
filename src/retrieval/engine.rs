@@ -1,4 +1,8 @@
-//! Retrieval engine for EngramDB
+//! Core retrieval engine implementation.
+//!
+//! The retrieval engine orchestrates the process of finding relevant memories based on
+//! contextual queries. It combines multiple retrieval strategies including scope matching,
+//! semantic search (when embeddings are available), and keyword search.
 
 use super::filters::{apply_index_filters, SearchFilters};
 use crate::embeddings::EmbeddingProvider;
@@ -9,7 +13,7 @@ use crate::vector::{VectorMetadata, VectorStore};
 use chrono::Utc;
 use std::collections::HashMap;
 
-/// Detail level for retrieved memories
+/// Detail level for retrieved memories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DetailLevel {
     /// Just summaries from index (minimal data)
@@ -21,7 +25,7 @@ pub enum DetailLevel {
     Full,
 }
 
-/// Query parameters for retrieval
+/// Query parameters for retrieval.
 #[derive(Debug, Clone, Default)]
 pub struct RetrievalQuery {
     /// Physical scope - current file path
@@ -52,14 +56,16 @@ pub struct RetrievalQuery {
     pub detail_level: DetailLevel,
 }
 
-/// A memory with its computed relevance score
+/// A memory with its computed relevance score.
 #[derive(Debug, Clone)]
 pub struct ScoredMemory {
+    /// The memory data
     pub memory: Memory,
+    /// Relevance score (0.0 to 1.0+, higher is more relevant)
     pub score: f64,
 }
 
-/// Result of a retrieval operation
+/// Result of a retrieval operation.
 #[derive(Debug, Clone)]
 pub struct RetrievalResult {
     /// Retrieved memories with scores, sorted by score descending
@@ -69,7 +75,11 @@ pub struct RetrievalResult {
     pub total: usize,
 }
 
-/// Main retrieval engine for EngramDB
+/// Main retrieval engine for EngramDB.
+///
+/// Coordinates memory retrieval by combining storage access, optional semantic search,
+/// and relevance scoring. The engine can operate with or without embeddings, gracefully
+/// degrading to keyword-only search when semantic search is unavailable.
 pub struct RetrievalEngine {
     store: MemoryStore,
     config: EngramConfig,
@@ -78,7 +88,10 @@ pub struct RetrievalEngine {
 }
 
 impl RetrievalEngine {
-    /// Create a new retrieval engine
+    /// Create a new retrieval engine.
+    ///
+    /// Embeddings are not enabled by default. Use [`with_embeddings`](Self::with_embeddings)
+    /// to add semantic search capabilities.
     pub fn new(store: MemoryStore, config: EngramConfig) -> Self {
         Self {
             store,
@@ -88,7 +101,9 @@ impl RetrievalEngine {
         }
     }
 
-    /// Add embedding support to the retrieval engine
+    /// Add embedding support to the retrieval engine.
+    ///
+    /// Enables semantic search capabilities. Returns self for method chaining.
     pub fn with_embeddings(
         mut self,
         provider: Box<dyn EmbeddingProvider>,
@@ -99,12 +114,20 @@ impl RetrievalEngine {
         self
     }
 
-    /// Check if embeddings are available
+    /// Check if embeddings are available.
+    ///
+    /// Returns true if both an embedding provider and vector store are configured.
     pub fn embeddings_available(&self) -> bool {
         self.embedding_provider.is_some() && self.vector_store.is_some()
     }
 
-    /// Embed and upsert a memory into the vector store
+    /// Embed and upsert a memory into the vector store.
+    ///
+    /// Generates an embedding for the memory's content and stores it in the vector database
+    /// for future semantic search. Does nothing if embeddings are not available.
+    ///
+    /// # Arguments
+    /// * `memory` - The memory to embed
     pub fn embed_memory(&self, memory: &Memory) -> anyhow::Result<()> {
         if let (Some(provider), Some(vs)) = (&self.embedding_provider, &self.vector_store) {
             let text = format!("{} {}", memory.summary, memory.content);
@@ -121,7 +144,13 @@ impl RetrievalEngine {
         Ok(())
     }
 
-    /// Remove a memory from the vector store
+    /// Remove a memory from the vector store.
+    ///
+    /// Deletes the embedding associated with this memory ID. Does nothing if
+    /// embeddings are not available.
+    ///
+    /// # Arguments
+    /// * `id` - The memory ID to remove
     pub fn remove_from_vector_store(&self, id: &str) -> anyhow::Result<()> {
         if let Some(vs) = &self.vector_store {
             vs.delete(id)?;
@@ -129,12 +158,12 @@ impl RetrievalEngine {
         Ok(())
     }
 
-    /// Get a reference to the store
+    /// Get a reference to the memory store.
     pub fn store(&self) -> &MemoryStore {
         &self.store
     }
 
-    /// Get a mutable reference to the store
+    /// Get a mutable reference to the memory store.
     pub fn store_mut(&mut self) -> &mut MemoryStore {
         &mut self.store
     }

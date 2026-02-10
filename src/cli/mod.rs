@@ -1,3 +1,22 @@
+//! Command-line interface for EngramDB.
+//!
+//! This module provides the CLI application for interacting with EngramDB stores.
+//! It handles argument parsing, command dispatch, and output formatting.
+//!
+//! # Key Components
+//!
+//! - [`app`]: Clap-based CLI definitions and command structures.
+//! - [`commands`]: Individual command handler implementations.
+//! - [`output`]: Output formatting for different display modes (JSON, pretty, plain).
+//!
+//! # Architecture
+//!
+//! The CLI follows a standard dispatch pattern:
+//! 1. Parse command-line arguments using Clap (in `app`).
+//! 2. Create output formatter based on user preferences.
+//! 3. Dispatch to appropriate command handler (in `commands`).
+//! 4. Format and display results using the output formatter.
+
 pub mod app;
 pub mod commands;
 pub mod output;
@@ -10,6 +29,16 @@ use app::{Cli, Command};
 use commands::{AddParams, RetrieveParams, SearchParams, UpdateParams};
 use output::OutputFormatter;
 
+/// Run the CLI application with parsed arguments.
+///
+/// This is the main entry point for the CLI. It determines the working directory,
+/// creates an output formatter, and dispatches to the appropriate command handler.
+///
+/// # Arguments
+/// * `cli` - Parsed command-line arguments
+///
+/// # Returns
+/// Ok(()) on success, or an error if the command fails
 pub fn run(cli: Cli) -> Result<()> {
     // Determine working directory
     let dir = cli

@@ -1,9 +1,12 @@
+//! Add a new memory to the store.
+
 use crate::cli::output::OutputFormatter;
 use crate::storage::MemoryStore;
 use crate::types::{Memory, MemoryType, Provenance, Visibility};
 use anyhow::{bail, Result};
 use std::path::Path;
 
+/// Parameters for the add command.
 pub struct AddParams {
     pub type_str: String,
     pub content: String,
@@ -17,6 +20,15 @@ pub struct AddParams {
     pub visibility_str: String,
 }
 
+/// Add a new memory to the store.
+///
+/// Creates a new memory with the specified parameters, automatically generating
+/// a summary if not provided and defaulting the physical scope to "/" if empty.
+///
+/// # Arguments
+/// * `dir` - The directory containing the EngramDB store
+/// * `params` - Memory creation parameters
+/// * `formatter` - Output formatter for success/error messages
 pub fn run_add(dir: &Path, params: AddParams, formatter: &OutputFormatter) -> Result<()> {
     // Parse type
     let type_ = parse_memory_type(&params.type_str)?;

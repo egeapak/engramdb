@@ -1,9 +1,21 @@
+//! List all memories with optional filtering.
+
 use crate::cli::output::OutputFormatter;
 use crate::storage::MemoryStore;
 use crate::types::{MemoryType, Status};
 use anyhow::{bail, Result};
 use std::path::Path;
 
+/// List all memories, optionally filtered by type, tags, or status.
+///
+/// Returns index entries (lightweight summaries) rather than full memory data.
+///
+/// # Arguments
+/// * `dir` - The directory containing the EngramDB store
+/// * `type_filter` - Filter by memory types (empty = no filter)
+/// * `tags_filter` - Filter by tags, OR logic (empty = no filter)
+/// * `status_filter` - Filter by status (None = no filter)
+/// * `formatter` - Output formatter for displaying the list
 pub fn run_list(
     dir: &Path,
     type_filter: Vec<String>,

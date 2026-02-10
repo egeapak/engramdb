@@ -1,4 +1,17 @@
-//! Index file operations for fast memory lookup
+//! Index file operations for fast memory lookup.
+//!
+//! This module provides the [`Index`] and [`IndexEntry`] types for efficient
+//! memory queries without parsing all memory files. The index stores a subset
+//! of memory metadata (id, type, summary, scopes, scores, timestamps) in JSON.
+//!
+//! Index operations include:
+//! - Load/save index from/to index.json
+//! - Add/update/remove entries
+//! - Rebuild index from memory files on disk
+//!
+//! Separate indexes exist for shared and personal memories, both using the
+//! same IndexEntry format. The index is automatically updated on create,
+//! update, and delete operations.
 
 use super::error::Result;
 use crate::types::{Memory, MemoryType, ProvenanceSource, Status};
@@ -7,11 +20,17 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
+/// In-memory representation of the index.json file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Index {
+    /// All indexed memory entries
     pub memories: Vec<IndexEntry>,
 }
 
+/// Lightweight metadata entry for a single memory in the index.
+///
+/// Contains a subset of Memory fields sufficient for filtering and sorting
+/// without loading full memory files from disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
     pub id: String,

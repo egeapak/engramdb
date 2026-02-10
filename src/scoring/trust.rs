@@ -1,3 +1,20 @@
+//! Trust and confidence weighting based on provenance source
+//!
+//! This module maps memory provenance sources to trust weights, reflecting the
+//! reliability and confidence level of information from different sources.
+//!
+//! # Default Trust Weights
+//!
+//! - **Human**: 1.0 - Highest trust for human-provided information
+//! - **Agent**: 0.85 - High trust for agent-generated content
+//! - **Imported**: 0.7 - Moderate trust for imported data
+//! - **Inferred**: 0.6 - Lower trust for inferred/derived information
+//!
+//! # Usage
+//!
+//! Trust weights can be customized via configuration using [`trust_weight_from_config`],
+//! or use the defaults via [`trust_weight`].
+
 use crate::types::{ProvenanceSource, TrustWeights};
 
 /// Get the default trust weight for a provenance source.

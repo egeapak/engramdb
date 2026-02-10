@@ -1,4 +1,14 @@
-//! Manifest file read/write operations
+//! Manifest file read/write operations.
+//!
+//! This module manages the manifest.toml file, which stores project metadata
+//! and statistics. The manifest includes:
+//! - Schema version (for future format changes)
+//! - Project name and description
+//! - Creation timestamp
+//! - Statistics (memory count, logical scopes)
+//!
+//! The manifest is automatically updated when memories are created, updated,
+//! or deleted, ensuring statistics remain accurate.
 
 use super::error::Result;
 use chrono::{DateTime, Utc};
@@ -6,18 +16,27 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
+/// Project manifest stored in manifest.toml.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Manifest {
+    /// Schema version for future compatibility
     pub schema_version: String,
+    /// Project name
     pub project: String,
+    /// When this manifest was created
     pub created_at: DateTime<Utc>,
+    /// Human-readable project description
     pub description: String,
+    /// Project statistics (updated automatically)
     pub stats: ManifestStats,
 }
 
+/// Statistics tracked in the manifest.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ManifestStats {
+    /// Total number of memories (shared + personal)
     pub memory_count: usize,
+    /// All unique logical scopes used in memories
     pub logical_scopes: Vec<String>,
 }
 

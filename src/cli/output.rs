@@ -1,3 +1,13 @@
+//! Output formatting for CLI commands.
+//!
+//! This module provides a unified output formatter that supports multiple output modes:
+//! - **Pretty**: Human-friendly output with colors and formatting (for terminals).
+//! - **JSON**: Structured JSON output for programmatic parsing.
+//! - **Plain**: Simple text output without colors (for non-TTY environments).
+//!
+//! The formatter automatically detects terminal capabilities and adjusts formatting
+//! accordingly.
+
 use crate::storage::index::IndexEntry;
 use crate::types::{Memory, MemoryType, Status};
 use owo_colors::{OwoColorize, Stream};
@@ -6,12 +16,24 @@ use std::io::{self, IsTerminal};
 
 use super::app::OutputFormat;
 
+/// Output formatter for CLI results.
+///
+/// Handles formatting and display of command results in different output modes.
+/// Automatically detects terminal capabilities and adjusts formatting.
 pub struct OutputFormatter {
     format: OutputFormat,
     use_color: bool,
 }
 
 impl OutputFormatter {
+    /// Create a new output formatter.
+    ///
+    /// Automatically detects terminal capabilities and selects appropriate formatting.
+    ///
+    /// # Arguments
+    /// * `format` - Explicit format selection (overrides defaults)
+    /// * `json` - Force JSON output
+    /// * `no_color` - Disable colored output
     pub fn new(format: Option<OutputFormat>, json: bool, no_color: bool) -> Self {
         let is_tty = io::stdout().is_terminal();
 
@@ -30,6 +52,7 @@ impl OutputFormatter {
         Self { format, use_color }
     }
 
+    /// Print a generic message.
     pub fn print_message(&self, message: &str) {
         match self.format {
             OutputFormat::Json => {
@@ -41,6 +64,7 @@ impl OutputFormatter {
         }
     }
 
+    /// Print a success message (with green color in pretty mode).
     pub fn print_success(&self, message: &str) {
         match self.format {
             OutputFormat::Json => {
@@ -66,6 +90,7 @@ impl OutputFormatter {
         }
     }
 
+    /// Print an error message (with red color in pretty mode).
     pub fn print_error(&self, message: &str) {
         match self.format {
             OutputFormat::Json => {
@@ -88,6 +113,7 @@ impl OutputFormatter {
         }
     }
 
+    /// Print a single memory in the configured format.
     pub fn print_memory(&self, memory: &Memory) {
         match self.format {
             OutputFormat::Json => {
@@ -177,6 +203,7 @@ impl OutputFormatter {
         println!("Visibility: {:?}", memory.visibility);
     }
 
+    /// Print a list of memory index entries in the configured format.
     pub fn print_memory_list(&self, entries: &[IndexEntry]) {
         match self.format {
             OutputFormat::Json => {
@@ -231,6 +258,7 @@ impl OutputFormatter {
         }
     }
 
+    /// Print statistics in the configured format.
     pub fn print_stats(&self, stats: &Stats) {
         match self.format {
             OutputFormat::Json => {
@@ -272,11 +300,17 @@ impl OutputFormatter {
     }
 }
 
+/// Statistics about the memory store.
 #[derive(Debug, serde::Serialize)]
 pub struct Stats {
+    /// Total number of memories
     pub total: usize,
+    /// Count of memories by type
     pub by_type: Vec<(MemoryType, usize)>,
+    /// Count of memories by status
     pub by_status: Vec<(Status, usize)>,
+    /// All unique logical scopes in use
     pub logical_scopes: Vec<String>,
+    /// Average criticality across all memories
     pub avg_criticality: f64,
 }

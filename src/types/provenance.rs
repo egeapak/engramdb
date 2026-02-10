@@ -1,3 +1,13 @@
+//! Provenance tracking for memory sources and creation context.
+//!
+//! This module defines the [`Provenance`] struct and [`ProvenanceSource`] enum,
+//! which track who or what created a memory. This information is used in
+//! trust scoring: human-created memories typically have higher trust weights
+//! than agent-created or inferred memories.
+//!
+//! Provenance includes optional fields for agent ID, model name, session ID,
+//! and a reason for creation, enabling full auditability and traceability.
+
 use serde::{Deserialize, Serialize};
 
 /// Source of a memory (who/what created it)

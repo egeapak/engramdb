@@ -1,9 +1,20 @@
+//! Delete a memory from the store.
+
 use crate::cli::output::OutputFormatter;
 use crate::storage::MemoryStore;
 use anyhow::Result;
 use std::io::{self, Write};
 use std::path::Path;
 
+/// Delete a memory by ID.
+///
+/// Prompts for confirmation unless `force` is true. Supports prefix matching for the ID.
+///
+/// # Arguments
+/// * `dir` - The directory containing the EngramDB store
+/// * `id` - The memory ID or prefix
+/// * `force` - Skip confirmation prompt if true
+/// * `formatter` - Output formatter for success/error messages
 pub fn run_delete(dir: &Path, id: &str, force: bool, formatter: &OutputFormatter) -> Result<()> {
     let store = MemoryStore::open(dir)?;
 

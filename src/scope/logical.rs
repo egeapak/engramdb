@@ -1,11 +1,41 @@
+//! Logical scope proximity based on hierarchical dot-notation tags
+//!
+//! This module calculates proximity bonuses between memory logical scopes and
+//! current logical scopes using hierarchical relationships in dot-notation.
+//!
+//! # Scoring
+//!
+//! - **0.3**: Exact match (e.g., "auth.oauth" == "auth.oauth")
+//! - **0.2**: Parent/child relationship (e.g., "auth" is parent of "auth.oauth")
+//! - **0.15**: Sibling relationship (e.g., "auth.jwt" and "auth.oauth" share parent "auth")
+//! - **0.0**: No relationship
+//!
+//! # Hierarchy Rules
+//!
+//! - Scopes are hierarchical using dot notation: "auth.oauth.google"
+//! - Parent-child relationships are bidirectional (both directions score 0.2)
+//! - Siblings must have the same immediate parent
+//!
+//! # Key Functions
+//!
+//! - [`proximity`]: Calculate highest proximity bonus between memory and current scopes
+
 /// Calculates proximity bonus based on logical scope hierarchy using dot-notation.
+///
 /// Returns the highest bonus from any pair of (memory_scope, current_scope).
 ///
-/// Scoring:
-/// - Exact match: 0.3
-/// - Parent scope match: 0.2
-/// - Sibling scope match: 0.15
-/// - No match: 0.0
+/// # Arguments
+/// * `memory_scopes` - Logical scope tags from the memory
+/// * `current_scopes` - Current logical scope tags
+///
+/// # Returns
+/// Proximity bonus from 0.0 to 0.3
+///
+/// # Scoring
+/// - **0.3**: Exact match
+/// - **0.2**: Parent scope match
+/// - **0.15**: Sibling scope match
+/// - **0.0**: No match
 pub fn proximity(memory_scopes: &[String], current_scopes: &[String]) -> f64 {
     let mut max_bonus = 0.0;
 
@@ -46,7 +76,13 @@ fn calculate_scope_bonus(memory_scope: &str, current_scope: &str) -> f64 {
 }
 
 /// Checks if scope A is a parent of scope B.
-/// A is a parent of B if B starts with A + "."
+///
+/// A is a parent of B if B starts with A followed by a dot.
+///
+/// # Examples
+/// - "auth" is parent of "auth.oauth" (true)
+/// - "auth.oauth" is parent of "auth.oauth.google" (true)
+/// - "auth" is NOT parent of "authentication" (false)
 fn is_parent_scope(parent: &str, child: &str) -> bool {
     if parent.is_empty() || child.is_empty() {
         return false;
@@ -60,7 +96,11 @@ fn is_parent_scope(parent: &str, child: &str) -> bool {
 }
 
 /// Checks if two scopes are siblings (share the same parent).
-/// For example, "auth.jwt" and "auth.oauth" are siblings with parent "auth".
+///
+/// # Examples
+/// - "auth.jwt" and "auth.oauth" are siblings (parent: "auth")
+/// - "api.users" and "api.posts" are siblings (parent: "api")
+/// - "auth" and "database" are NOT siblings (no common parent)
 fn are_siblings(scope_a: &str, scope_b: &str) -> bool {
     let parent_a = extract_parent(scope_a);
     let parent_b = extract_parent(scope_b);
@@ -73,8 +113,11 @@ fn are_siblings(scope_a: &str, scope_b: &str) -> bool {
 }
 
 /// Extracts the parent scope from a dot-notation scope.
-/// For example, "auth.oauth.google" → Some("auth.oauth")
-/// "auth" → None (no parent)
+///
+/// # Examples
+/// - "auth.oauth.google" → Some("auth.oauth")
+/// - "auth.oauth" → Some("auth")
+/// - "auth" → None (no parent)
 fn extract_parent(scope: &str) -> Option<String> {
     scope.rfind('.').map(|pos| scope[..pos].to_string())
 }

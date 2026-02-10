@@ -1,3 +1,16 @@
+//! Decay strategies and configuration for time-based relevance adjustment.
+//!
+//! This module defines how a memory's relevance score decreases over time.
+//! Strategies include:
+//! - None: no decay (e.g., architectural decisions)
+//! - Exponential: half-life based decay (e.g., debug notes)
+//! - Linear: constant decay rate
+//! - Step: discrete decay at intervals
+//!
+//! Each strategy can have a minimum floor value to prevent scores from
+//! reaching zero. Different [`MemoryType`](super::MemoryType) values use
+//! different default decay strategies.
+
 use chrono::Duration;
 use serde::{Deserialize, Serialize};
 

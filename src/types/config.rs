@@ -1,3 +1,17 @@
+//! Configuration types for EngramDB retrieval, scoring, and thresholds.
+//!
+//! This module defines all configuration structures used throughout EngramDB:
+//! - [`EngramConfig`] - top-level configuration with all subsections
+//! - [`RetrievalConfig`] - retrieval settings (thresholds, max results)
+//! - [`ScoringConfig`] - scoring mode weights (with_query, scope_only, degraded)
+//! - [`ScoringWeights`] - component weights for semantic, relevance, scope, trust
+//! - [`ScopeProximityConfig`] - physical scope bonuses (exact file, same dir, etc.)
+//! - [`LogicalBonusConfig`] - logical scope bonuses (exact, parent, sibling)
+//! - [`TrustWeights`] - trust scores by provenance source
+//! - [`ThresholdsConfig`] - thresholds for needs_review, gc, compress
+//!
+//! All structs provide sensible defaults and can be loaded from TOML files.
+
 use serde::{Deserialize, Serialize};
 
 /// Weights for scoring components

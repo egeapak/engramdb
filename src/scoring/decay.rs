@@ -1,3 +1,22 @@
+//! Time-based decay calculations for memory relevance
+//!
+//! This module implements various decay strategies that reduce memory relevance over time.
+//! Decay is a critical component of the scoring system, allowing recent information to be
+//! naturally prioritized while still preserving older memories at a reduced relevance.
+//!
+//! # Strategies
+//!
+//! - **None**: No decay, relevance remains constant
+//! - **Linear**: Relevance decreases linearly from 1.0 to floor over TTL
+//! - **Exponential**: Relevance halves every half-life period
+//! - **Step**: Full relevance until TTL, then drops to floor
+//!
+//! # Implementation Notes
+//!
+//! - All decay factors are clamped to [floor, 1.0] range
+//! - Missing TTL or half_life parameters result in no decay (factor = 1.0)
+//! - Future timestamps (created_at > now) are handled gracefully (factor = 1.0)
+
 use chrono::{DateTime, Utc};
 
 use crate::types::{Decay, DecayStrategy, Memory};

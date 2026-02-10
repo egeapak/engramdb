@@ -1,3 +1,12 @@
+//! Challenge struct for disputing memory validity.
+//!
+//! This module defines the [`Challenge`] struct, which represents a dispute
+//! or contradiction to a memory's validity. When a challenge is added to a
+//! memory, its status changes to Challenged, triggering human review.
+//!
+//! Challenges include a timestamp, optional agent ID, evidence explaining
+//! the contradiction, and an optional source file that conflicts with the memory.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
