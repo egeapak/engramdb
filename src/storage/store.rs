@@ -118,8 +118,13 @@ impl MemoryStore {
     /// Get a memory by ID (supports prefix matching)
     pub fn get(&self, id: &str) -> Result<Memory> {
         // Try shared memories first
-        if let Ok(memory) = self.get_from_dir(id, &paths::memories_dir(&self.project_dir)) {
-            return Ok(memory);
+        match self.get_from_dir(id, &paths::memories_dir(&self.project_dir)) {
+            Ok(memory) => return Ok(memory),
+            Err(StorageError::Validation(msg)) => return Err(StorageError::Validation(msg)),
+            Err(StorageError::NotFound(_)) => {
+                // Fall through to personal
+            }
+            Err(e) => return Err(e),
         }
 
         // Try personal memories
@@ -375,5 +380,256 @@ impl MemoryStore {
         fs::write(&registry_path, content)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Memory, MemoryType, Provenance, Visibility};
+    use tempfile::TempDir;
+
+    fn create_test_memory(id: &str, visibility: Visibility) -> Memory {
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Test summary",
+            "Test content",
+            Provenance::human(),
+        );
+        memory.id = id.to_string();
+        memory.visibility = visibility;
+        memory
+    }
+
+    #[test]
+    fn test_init_creates_structure() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+
+        let store = MemoryStore::init(project_dir).unwrap();
+
+        // Check main directories
+        assert!(project_dir.join(".engramdb").exists());
+        assert!(project_dir.join(".engramdb/memories").exists());
+
+        // Check files
+        assert!(project_dir.join(".engramdb/manifest.toml").exists());
+        assert!(project_dir.join(".engramdb/config.toml").exists());
+        assert!(project_dir.join(".engramdb/index.json").exists());
+
+        // Check personal directories
+        assert!(paths::personal_memories_dir(&store.project_id).exists());
+        assert!(paths::lancedb_dir(&store.project_id).exists());
+    }
+
+    #[test]
+    fn test_open_uninitialized() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+
+        let result = MemoryStore::open(project_dir);
+        assert!(result.is_err());
+        match result {
+            Err(StorageError::NotInitialized) => {},
+            _ => panic!("Expected NotInitialized error"),
+        }
+    }
+
+    #[test]
+    fn test_create_and_get() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+
+        let store = MemoryStore::init(project_dir).unwrap();
+        let memory = create_test_memory("test-create-123", Visibility::Shared);
+
+        let created_id = store.create(&memory).unwrap();
+        assert_eq!(created_id, "test-create-123");
+
+        let retrieved = store.get("test-create-123").unwrap();
+        assert_eq!(retrieved.id, "test-create-123");
+        assert_eq!(retrieved.summary, "Test summary");
+        assert_eq!(retrieved.content, "Test content");
+    }
+
+    #[test]
+    fn test_get_prefix_matching() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+
+        let store = MemoryStore::init(project_dir).unwrap();
+        let memory = create_test_memory("abcd1234-5678-90ab-cdef-1234567890ab", Visibility::Shared);
+
+        store.create(&memory).unwrap();
+
+        // Should match with prefix
+        let retrieved = store.get("abcd1234").unwrap();
+        assert_eq!(retrieved.id, "abcd1234-5678-90ab-cdef-1234567890ab");
+
+        // Even shorter prefix
+        let retrieved = store.get("abcd").unwrap();
+        assert_eq!(retrieved.id, "abcd1234-5678-90ab-cdef-1234567890ab");
+    }
+
+    #[test]
+    fn test_get_ambiguous_prefix() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+
+        let store = MemoryStore::init(project_dir).unwrap();
+
+        // Create two memories with same prefix
+        // We'll manually set IDs to ensure they start the same
+        let memory1 = create_test_memory("aaaa1111-0000-0000-0000-000000000001", Visibility::Shared);
+        let memory2 = create_test_memory("aaaa2222-0000-0000-0000-000000000002", Visibility::Shared);
+
+        store.create(&memory1).unwrap();
+        store.create(&memory2).unwrap();
+
+        // Verify both exist with full IDs
+        assert!(store.get("aaaa1111-0000-0000-0000-000000000001").is_ok());
+        assert!(store.get("aaaa2222-0000-0000-0000-000000000002").is_ok());
+
+        // Verify both can be found with unique prefixes
+        assert!(store.get("aaaa1111").is_ok());
+        assert!(store.get("aaaa2222").is_ok());
+
+        // Should fail with ambiguous prefix "aaaa"
+        let result = store.get("aaaa");
+        assert!(result.is_err());
+        match result {
+            Err(StorageError::Validation(msg)) => {
+                assert!(msg.contains("Ambiguous"));
+                assert!(msg.contains("2 memories"));
+            },
+            other => panic!("Expected Validation error for ambiguous prefix, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_get_not_found() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+
+        let store = MemoryStore::init(project_dir).unwrap();
+
+        let result = store.get("nonexistent-id");
+        assert!(result.is_err());
+        match result {
+            Err(StorageError::NotFound(id)) => {
+                assert_eq!(id, "nonexistent-id");
+            },
+            _ => panic!("Expected NotFound error"),
+        }
+    }
+
+    #[test]
+    fn test_update_modifies_memory() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+
+        let store = MemoryStore::init(project_dir).unwrap();
+        let memory = create_test_memory("test-update-123", Visibility::Shared);
+
+        store.create(&memory).unwrap();
+
+        // Update summary
+        let mut update = MemoryUpdate::new();
+        update.summary = Some("Updated summary".to_string());
+
+        store.update("test-update-123", update).unwrap();
+
+        let retrieved = store.get("test-update-123").unwrap();
+        assert_eq!(retrieved.summary, "Updated summary");
+        assert_eq!(retrieved.content, "Test content"); // Content unchanged
+    }
+
+    #[test]
+    fn test_delete_removes_memory() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+
+        let store = MemoryStore::init(project_dir).unwrap();
+        let memory = create_test_memory("test-delete-123", Visibility::Shared);
+
+        store.create(&memory).unwrap();
+
+        // Verify it exists
+        assert!(store.get("test-delete-123").is_ok());
+
+        // Delete it
+        store.delete("test-delete-123").unwrap();
+
+        // Verify it's gone
+        let result = store.get("test-delete-123");
+        assert!(result.is_err());
+        match result {
+            Err(StorageError::NotFound(_)) => {},
+            _ => panic!("Expected NotFound error after delete"),
+        }
+    }
+
+    #[test]
+    fn test_list_returns_all() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+
+        let store = MemoryStore::init(project_dir).unwrap();
+
+        // Create 3 memories
+        let memory1 = create_test_memory("list-test-1", Visibility::Shared);
+        let memory2 = create_test_memory("list-test-2", Visibility::Shared);
+        let memory3 = create_test_memory("list-test-3", Visibility::Personal);
+
+        store.create(&memory1).unwrap();
+        store.create(&memory2).unwrap();
+        store.create(&memory3).unwrap();
+
+        let entries = store.list().unwrap();
+        assert_eq!(entries.len(), 3);
+
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert!(ids.contains(&"list-test-1"));
+        assert!(ids.contains(&"list-test-2"));
+        assert!(ids.contains(&"list-test-3"));
+    }
+
+    #[test]
+    fn test_reindex_rebuilds_from_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+
+        let store = MemoryStore::init(project_dir).unwrap();
+
+        // Create some memories
+        let memory1 = create_test_memory("reindex-test-1", Visibility::Shared);
+        let memory2 = create_test_memory("reindex-test-2", Visibility::Shared);
+
+        store.create(&memory1).unwrap();
+        store.create(&memory2).unwrap();
+
+        // Verify they're in the index
+        assert_eq!(store.list().unwrap().len(), 2);
+
+        // Overwrite index with empty
+        let empty_index = index::Index::default();
+        let index_path = project_dir.join(".engramdb/index.json");
+        index::save_index(&index_path, &empty_index).unwrap();
+
+        // Verify index is now empty
+        let loaded = index::load_index(&index_path).unwrap();
+        assert_eq!(loaded.memories.len(), 0);
+
+        // Reindex
+        let count = store.reindex().unwrap();
+        assert_eq!(count, 2);
+
+        // Verify entries are restored
+        let entries = store.list().unwrap();
+        assert_eq!(entries.len(), 2);
+
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert!(ids.contains(&"reindex-test-1"));
+        assert!(ids.contains(&"reindex-test-2"));
     }
 }

@@ -86,3 +86,48 @@ impl Decay {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decay_none() {
+        let decay = Decay::none();
+
+        assert_eq!(decay.strategy, DecayStrategy::None);
+        assert_eq!(decay.half_life, None);
+        assert_eq!(decay.ttl, None);
+        assert_eq!(decay.floor, 0.0);
+    }
+
+    #[test]
+    fn test_decay_none_with_floor() {
+        let decay = Decay::none_with_floor(0.5);
+
+        assert_eq!(decay.strategy, DecayStrategy::None);
+        assert_eq!(decay.floor, 0.5);
+        assert_eq!(decay.half_life, None);
+        assert_eq!(decay.ttl, None);
+    }
+
+    #[test]
+    fn test_decay_exponential() {
+        let decay = Decay::exponential(Duration::days(14));
+
+        assert_eq!(decay.strategy, DecayStrategy::Exponential);
+        assert_eq!(decay.half_life, Some(Duration::days(14)));
+        assert_eq!(decay.ttl, None);
+        assert_eq!(decay.floor, 0.0);
+    }
+
+    #[test]
+    fn test_decay_linear() {
+        let decay = Decay::linear(Duration::days(30));
+
+        assert_eq!(decay.strategy, DecayStrategy::Linear);
+        assert_eq!(decay.ttl, Some(Duration::days(30)));
+        assert_eq!(decay.half_life, None);
+        assert_eq!(decay.floor, 0.0);
+    }
+}

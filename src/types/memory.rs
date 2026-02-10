@@ -307,3 +307,224 @@ impl MemoryUpdate {
         memory.mark_updated();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::DecayStrategy;
+
+    #[test]
+    fn test_memory_new_defaults() {
+        let memory = Memory::new(
+            MemoryType::Decision,
+            "Test summary",
+            "Test content",
+            Provenance::human(),
+        );
+
+        assert_eq!(memory.criticality, 0.5);
+        assert_eq!(memory.confidence, 0.8);
+        assert_eq!(memory.physical, vec!["/".to_string()]);
+        assert_eq!(memory.status, Status::Active);
+        assert_eq!(memory.visibility, Visibility::Shared);
+        assert!(memory.tags.is_empty());
+        assert!(memory.logical.is_empty());
+        assert!(memory.supersedes.is_empty());
+        assert!(memory.challenges.is_empty());
+    }
+
+    #[test]
+    fn test_memory_type_default_decay() {
+        assert_eq!(
+            MemoryType::Decision.default_decay().unwrap().strategy,
+            DecayStrategy::None
+        );
+        assert_eq!(
+            MemoryType::Convention.default_decay().unwrap().strategy,
+            DecayStrategy::None
+        );
+        assert_eq!(
+            MemoryType::Context.default_decay().unwrap().strategy,
+            DecayStrategy::None
+        );
+        assert_eq!(
+            MemoryType::Relationship.default_decay().unwrap().strategy,
+            DecayStrategy::None
+        );
+        assert_eq!(
+            MemoryType::Preference.default_decay().unwrap().strategy,
+            DecayStrategy::None
+        );
+
+        let hazard_decay = MemoryType::Hazard.default_decay().unwrap();
+        assert_eq!(hazard_decay.strategy, DecayStrategy::None);
+        assert_eq!(hazard_decay.floor, 0.5);
+
+        let intent_decay = MemoryType::Intent.default_decay().unwrap();
+        assert_eq!(intent_decay.strategy, DecayStrategy::Exponential);
+        assert_eq!(intent_decay.half_life, Some(Duration::days(14)));
+
+        let debug_decay = MemoryType::Debug.default_decay().unwrap();
+        assert_eq!(debug_decay.strategy, DecayStrategy::Exponential);
+        assert_eq!(debug_decay.half_life, Some(Duration::days(30)));
+    }
+
+    #[test]
+    fn test_memory_touch() {
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Test",
+            "Content",
+            Provenance::human(),
+        );
+        let original_access = memory.accessed_at;
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        memory.touch();
+
+        assert!(memory.accessed_at > original_access);
+    }
+
+    #[test]
+    fn test_memory_add_challenge() {
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Test",
+            "Content",
+            Provenance::human(),
+        );
+        let original_updated = memory.updated_at;
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let challenge = Challenge::new("Evidence of contradiction");
+        memory.add_challenge(challenge);
+
+        assert_eq!(memory.challenges.len(), 1);
+        assert_eq!(memory.status, Status::Challenged);
+        assert!(memory.updated_at > original_updated);
+    }
+
+    #[test]
+    fn test_memory_is_expired_none() {
+        let memory = Memory::new(
+            MemoryType::Decision,
+            "Test",
+            "Content",
+            Provenance::human(),
+        );
+
+        assert!(!memory.is_expired());
+    }
+
+    #[test]
+    fn test_memory_is_expired_future() {
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Test",
+            "Content",
+            Provenance::human(),
+        );
+        memory.expires_at = Some(Utc::now() + Duration::days(1));
+
+        assert!(!memory.is_expired());
+    }
+
+    #[test]
+    fn test_memory_is_expired_past() {
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Test",
+            "Content",
+            Provenance::human(),
+        );
+        memory.expires_at = Some(Utc::now() - Duration::days(1));
+
+        assert!(memory.is_expired());
+    }
+
+    #[test]
+    fn test_memory_is_active() {
+        // Active and not expired
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Test",
+            "Content",
+            Provenance::human(),
+        );
+        assert!(memory.is_active());
+
+        // Challenged status
+        memory.status = Status::Challenged;
+        assert!(!memory.is_active());
+
+        // Expired
+        memory.status = Status::Active;
+        memory.expires_at = Some(Utc::now() - Duration::days(1));
+        assert!(!memory.is_active());
+    }
+
+    #[test]
+    fn test_memory_update_apply_partial() {
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Original summary",
+            "Original content",
+            Provenance::human(),
+        );
+        let original_content = memory.content.clone();
+        let original_updated = memory.updated_at;
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let mut update = MemoryUpdate::new();
+        update.summary = Some("New summary".to_string());
+        update.apply_to(&mut memory);
+
+        assert_eq!(memory.summary, "New summary");
+        assert_eq!(memory.content, original_content);
+        assert!(memory.updated_at > original_updated);
+    }
+
+    #[test]
+    fn test_memory_update_apply_all_fields() {
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Original",
+            "Original",
+            Provenance::human(),
+        );
+
+        let update = MemoryUpdate {
+            type_: Some(MemoryType::Convention),
+            summary: Some("New summary".to_string()),
+            content: Some("New content".to_string()),
+            details: Some("New details".to_string()),
+            physical: Some(vec!["/src/main.rs".to_string()]),
+            logical: Some(vec!["app.core".to_string()]),
+            tags: Some(vec!["tag1".to_string()]),
+            criticality: Some(0.9),
+            decay: Some(Decay::exponential(Duration::days(7))),
+            provenance: Some(Provenance::agent("test-agent")),
+            confidence: Some(0.95),
+            supersedes: Some(vec!["old-id".to_string()]),
+            status: Some(Status::NeedsReview),
+            visibility: Some(Visibility::Personal),
+            expires_at: Some(Utc::now() + Duration::days(30)),
+        };
+
+        update.apply_to(&mut memory);
+
+        assert_eq!(memory.type_, MemoryType::Convention);
+        assert_eq!(memory.summary, "New summary");
+        assert_eq!(memory.content, "New content");
+        assert_eq!(memory.details, Some("New details".to_string()));
+        assert_eq!(memory.physical, vec!["/src/main.rs".to_string()]);
+        assert_eq!(memory.logical, vec!["app.core".to_string()]);
+        assert_eq!(memory.tags, vec!["tag1".to_string()]);
+        assert_eq!(memory.criticality, 0.9);
+        assert_eq!(memory.confidence, 0.95);
+        assert_eq!(memory.supersedes, vec!["old-id".to_string()]);
+        assert_eq!(memory.status, Status::NeedsReview);
+        assert_eq!(memory.visibility, Visibility::Personal);
+        assert!(memory.expires_at.is_some());
+    }
+}

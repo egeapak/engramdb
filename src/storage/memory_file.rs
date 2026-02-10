@@ -4,7 +4,7 @@ use crate::types::Memory;
 use super::error::{Result, StorageError};
 
 /// Parse a memory file in frontmatter markdown format:
-/// ```
+/// ```text
 /// ---
 /// <YAML frontmatter>
 /// ---
@@ -114,10 +114,21 @@ id: test-123
 type: hazard
 summary: Test memory
 content: ""
-status: active
-visibility: shared
+physical:
+  - "/"
+logical: []
+tags: []
+criticality: 0.5
+provenance:
+  source: human
+confidence: 0.8
+supersedes: []
+status: Active
+visibility: Shared
+challenges: []
 created_at: "2026-01-15T10:00:00Z"
 updated_at: "2026-01-15T10:00:00Z"
+accessed_at: "2026-01-15T10:00:00Z"
 ---
 
 ## Content
@@ -140,5 +151,165 @@ These are the details.
         assert_eq!(memory.id, reparsed.id);
         assert_eq!(memory.content, reparsed.content);
         assert_eq!(memory.details, reparsed.details);
+    }
+
+    #[test]
+    fn test_parse_without_details() {
+        let input = r#"---
+id: test-456
+type: decision
+summary: Test without details
+content: ""
+physical:
+  - "/"
+logical: []
+tags: []
+criticality: 0.5
+provenance:
+  source: human
+confidence: 0.8
+supersedes: []
+status: Active
+visibility: Shared
+challenges: []
+created_at: "2026-01-15T10:00:00Z"
+updated_at: "2026-01-15T10:00:00Z"
+accessed_at: "2026-01-15T10:00:00Z"
+---
+
+## Content
+
+Main content only.
+"#;
+
+        let memory = parse_memory_file(input).unwrap();
+        assert_eq!(memory.id, "test-456");
+        assert_eq!(memory.content, "Main content only.");
+        assert_eq!(memory.details, None);
+    }
+
+    #[test]
+    fn test_parse_missing_frontmatter() {
+        let input = r#"
+## Content
+
+No frontmatter here.
+"#;
+
+        let result = parse_memory_file(input);
+        assert!(result.is_err());
+        match result {
+            Err(StorageError::InvalidFormat(msg)) => {
+                assert!(msg.contains("Missing frontmatter"));
+            }
+            _ => panic!("Expected InvalidFormat error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_multiline_content() {
+        let input = r#"---
+id: test-789
+type: context
+summary: Multiline test
+content: ""
+physical:
+  - "/"
+logical: []
+tags: []
+criticality: 0.5
+provenance:
+  source: human
+confidence: 0.8
+supersedes: []
+status: Active
+visibility: Shared
+challenges: []
+created_at: "2026-01-15T10:00:00Z"
+updated_at: "2026-01-15T10:00:00Z"
+accessed_at: "2026-01-15T10:00:00Z"
+---
+
+## Content
+
+First paragraph here.
+
+Second paragraph here.
+
+Third paragraph here.
+"#;
+
+        let memory = parse_memory_file(input).unwrap();
+        assert_eq!(memory.id, "test-789");
+        assert!(memory.content.contains("First paragraph"));
+        assert!(memory.content.contains("Second paragraph"));
+        assert!(memory.content.contains("Third paragraph"));
+        // Check that newlines are preserved
+        assert!(memory.content.contains("\n\n"));
+    }
+
+    #[test]
+    fn test_write_without_details() {
+        use crate::types::{Memory, MemoryType, Provenance};
+
+        let memory = Memory {
+            id: "test-write-1".to_string(),
+            type_: MemoryType::Hazard,
+            summary: "Test summary".to_string(),
+            content: "Test content".to_string(),
+            details: None,
+            physical: vec!["/".to_string()],
+            logical: vec![],
+            tags: vec![],
+            criticality: 0.5,
+            decay: None,
+            provenance: Provenance::human(),
+            confidence: 0.8,
+            supersedes: vec![],
+            status: crate::types::Status::Active,
+            visibility: crate::types::Visibility::Shared,
+            challenges: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            accessed_at: chrono::Utc::now(),
+            expires_at: None,
+        };
+
+        let written = write_memory_file(&memory).unwrap();
+        assert!(written.contains("## Content"));
+        assert!(!written.contains("## Details"));
+    }
+
+    #[test]
+    fn test_parse_empty_content_section() {
+        let input = r#"---
+id: test-empty
+type: debug
+summary: Empty content test
+content: ""
+physical:
+  - "/"
+logical: []
+tags: []
+criticality: 0.5
+provenance:
+  source: human
+confidence: 0.8
+supersedes: []
+status: Active
+visibility: Shared
+challenges: []
+created_at: "2026-01-15T10:00:00Z"
+updated_at: "2026-01-15T10:00:00Z"
+accessed_at: "2026-01-15T10:00:00Z"
+---
+
+## Content
+
+"#;
+
+        let memory = parse_memory_file(input).unwrap();
+        assert_eq!(memory.id, "test-empty");
+        assert_eq!(memory.content, "");
     }
 }

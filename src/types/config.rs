@@ -239,3 +239,124 @@ impl EngramConfig {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_defaults() {
+        let config = EngramConfig::default();
+
+        // Retrieval config
+        assert_eq!(config.retrieval.max_results, 20);
+        assert_eq!(config.retrieval.relevance_threshold, 0.5);
+        assert!(!config.retrieval.include_expired);
+
+        // Trust weights
+        assert_eq!(config.trust_weights.human, 1.0);
+        assert_eq!(config.trust_weights.agent, 0.9);
+        assert_eq!(config.trust_weights.inferred, 0.6);
+        assert_eq!(config.trust_weights.imported, 0.7);
+
+        // Scope proximity
+        assert_eq!(config.scope_proximity.exact_file, 1.0);
+        assert_eq!(config.scope_proximity.same_directory, 0.7);
+        assert_eq!(config.scope_proximity.same_module, 0.4);
+        assert_eq!(config.scope_proximity.project_root, 0.1);
+
+        // Logical bonus
+        assert_eq!(config.logical_bonus.exact, 1.0);
+        assert_eq!(config.logical_bonus.parent, 0.5);
+        assert_eq!(config.logical_bonus.sibling, 0.3);
+
+        // Thresholds
+        assert_eq!(config.thresholds.needs_review, 0.3);
+        assert_eq!(config.thresholds.gc, 0.1);
+        assert_eq!(config.thresholds.compress, 0.2);
+
+        // Scoring weights - with_query
+        assert_eq!(config.retrieval.scoring.with_query.semantic, Some(0.5));
+        assert_eq!(config.retrieval.scoring.with_query.relevance, 0.3);
+        assert_eq!(config.retrieval.scoring.with_query.scope, 0.15);
+        assert_eq!(config.retrieval.scoring.with_query.trust, 0.05);
+
+        // Scoring weights - scope_only
+        assert_eq!(config.retrieval.scoring.scope_only.semantic, None);
+        assert_eq!(config.retrieval.scoring.scope_only.relevance, 0.5);
+        assert_eq!(config.retrieval.scoring.scope_only.scope, 0.4);
+        assert_eq!(config.retrieval.scoring.scope_only.trust, 0.1);
+
+        // Scoring weights - degraded
+        assert_eq!(config.retrieval.scoring.degraded.semantic, None);
+        assert_eq!(config.retrieval.scoring.degraded.relevance, 0.6);
+        assert_eq!(config.retrieval.scoring.degraded.scope, 0.3);
+        assert_eq!(config.retrieval.scoring.degraded.trust, 0.1);
+    }
+
+    #[test]
+    fn test_config_toml_roundtrip() {
+        let original = EngramConfig::default();
+
+        // Create a temporary file
+        let temp_dir = std::env::temp_dir();
+        let temp_path = temp_dir.join("test_config_roundtrip.toml");
+
+        // Save to file
+        original.to_toml_file(&temp_path).unwrap();
+
+        // Load from file
+        let loaded = EngramConfig::from_toml_file(&temp_path).unwrap();
+
+        // Clean up
+        std::fs::remove_file(&temp_path).ok();
+
+        // Verify all values match
+        assert_eq!(loaded.retrieval.max_results, original.retrieval.max_results);
+        assert_eq!(loaded.trust_weights.human, original.trust_weights.human);
+        assert_eq!(loaded.scope_proximity.exact_file, original.scope_proximity.exact_file);
+        assert_eq!(loaded.logical_bonus.exact, original.logical_bonus.exact);
+        assert_eq!(loaded.thresholds.needs_review, original.thresholds.needs_review);
+    }
+
+    #[test]
+    fn test_config_partial_toml() {
+        // Create TOML with only [retrieval] section (minimal fields)
+        // Note: scoring field has default in the struct, so it should use defaults if not provided
+        let partial_toml = r#"
+[retrieval]
+max_results = 50
+relevance_threshold = 0.7
+include_expired = true
+
+[retrieval.scoring.with_query]
+semantic = 0.5
+relevance = 0.3
+scope = 0.15
+trust = 0.05
+
+[retrieval.scoring.scope_only]
+relevance = 0.5
+scope = 0.4
+trust = 0.1
+
+[retrieval.scoring.degraded]
+relevance = 0.6
+scope = 0.3
+trust = 0.1
+"#;
+
+        let config: EngramConfig = toml::from_str(partial_toml).unwrap();
+
+        // Verify retrieval section was parsed
+        assert_eq!(config.retrieval.max_results, 50);
+        assert_eq!(config.retrieval.relevance_threshold, 0.7);
+        assert!(config.retrieval.include_expired);
+
+        // Verify other sections use defaults (thanks to #[serde(default)])
+        assert_eq!(config.trust_weights.human, 1.0);
+        assert_eq!(config.scope_proximity.exact_file, 1.0);
+        assert_eq!(config.logical_bonus.exact, 1.0);
+        assert_eq!(config.thresholds.needs_review, 0.3);
+    }
+}

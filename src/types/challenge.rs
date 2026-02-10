@@ -42,3 +42,32 @@ impl Challenge {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_challenge_new() {
+        let challenge = Challenge::new("evidence");
+
+        assert_eq!(challenge.evidence, "evidence");
+        assert_eq!(challenge.agent_id, None);
+        assert_eq!(challenge.source_file, None);
+        // Verify timestamp is approximately now (within 1 second)
+        let now = Utc::now();
+        let diff = (now - challenge.timestamp).num_seconds().abs();
+        assert!(diff < 1);
+    }
+
+    #[test]
+    fn test_challenge_builder() {
+        let challenge = Challenge::new("evidence")
+            .with_agent("a1")
+            .with_source_file("f.rs");
+
+        assert_eq!(challenge.evidence, "evidence");
+        assert_eq!(challenge.agent_id, Some("a1".to_string()));
+        assert_eq!(challenge.source_file, Some("f.rs".to_string()));
+    }
+}

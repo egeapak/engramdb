@@ -169,4 +169,20 @@ mod tests {
         assert_eq!(extract_parent("auth"), None);
         assert_eq!(extract_parent(""), None);
     }
+
+    #[test]
+    fn test_proximity_empty_scopes() {
+        // Both empty scopes should return 0.0 proximity
+        let memory: Vec<String> = vec![];
+        let current: Vec<String> = vec![];
+        assert_eq!(proximity(&memory, &current), 0.0);
+    }
+
+    #[test]
+    fn test_proximity_deeply_nested() {
+        // Deeply nested exact match should still return 0.3
+        let memory = vec!["a.b.c.d.e".to_string()];
+        let current = vec!["a.b.c.d.e".to_string()];
+        assert_eq!(proximity(&memory, &current), 0.3);
+    }
 }

@@ -212,4 +212,26 @@ mod tests {
         let score = proximity(&scopes, "src/api/auth/handlers.rs");
         assert_eq!(score, 0.6); // Should pick the highest matching score
     }
+
+    #[test]
+    fn test_matches_empty_patterns() {
+        // Empty patterns should not match any path
+        assert!(!matches(&[], "src/main.rs"));
+        assert!(!matches(&[], "any/path/file.rs"));
+    }
+
+    #[test]
+    fn test_proximity_empty_patterns() {
+        // Empty patterns should return 0.0 proximity
+        let score = proximity(&[], "src/api/handlers.rs");
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn test_proximity_same_directory_non_glob() {
+        // Two files in the same directory should have 0.85 proximity
+        // The memory scope is "src/api/a.rs" and query path is "src/api/b.rs"
+        let score = proximity(&["src/api/a.rs".to_string()], "src/api/b.rs");
+        assert_eq!(score, 0.85);
+    }
 }

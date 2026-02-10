@@ -110,4 +110,34 @@ mod tests {
             "github.com/user/repo"
         );
     }
+
+    #[test]
+    fn test_normalize_without_git_suffix() {
+        // URL without .git suffix should still work
+        assert_eq!(
+            normalize_git_remote("https://github.com/user/repo"),
+            "github.com/user/repo"
+        );
+        assert_eq!(
+            normalize_git_remote("git@github.com:user/repo"),
+            "github.com/user/repo"
+        );
+    }
+
+    #[test]
+    fn test_hash_consistency() {
+        let input = "github.com/user/repo";
+        let hash1 = hash_string(input);
+        let hash2 = hash_string(input);
+        assert_eq!(hash1, hash2, "Same input should produce same hash");
+    }
+
+    #[test]
+    fn test_hash_length_16() {
+        let input = "test-input";
+        let hash = hash_string(input);
+        assert_eq!(hash.len(), 16, "Hash should be exactly 16 characters");
+        // Verify it's valid hex
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 }
