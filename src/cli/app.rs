@@ -89,8 +89,8 @@ pub enum Command {
         #[arg(long, short = 'l')]
         logical: Vec<String>,
 
-        /// Tags (can be repeated)
-        #[arg(long)]
+        /// Tags (comma-separated or repeated)
+        #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
 
         /// Criticality score (0.0 to 1.0)
@@ -158,8 +158,8 @@ pub enum Command {
         #[arg(long, short = 't')]
         type_: Vec<String>,
 
-        /// Filter by tags (can be repeated)
-        #[arg(long)]
+        /// Filter by tags (comma-separated or repeated)
+        #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
 
         /// Minimum criticality
@@ -192,8 +192,8 @@ pub enum Command {
         #[arg(long, short = 't')]
         type_: Vec<String>,
 
-        /// Filter by tags (can be repeated)
-        #[arg(long)]
+        /// Filter by tags (comma-separated or repeated)
+        #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
 
         /// Filter by physical scope
@@ -219,8 +219,8 @@ pub enum Command {
         #[arg(long, short = 't')]
         type_: Vec<String>,
 
-        /// Filter by tags (can be repeated)
-        #[arg(long)]
+        /// Filter by tags (comma-separated or repeated)
+        #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
 
         /// Filter by status
@@ -269,8 +269,8 @@ pub enum Command {
         #[arg(long, short = 'l')]
         logical: Vec<String>,
 
-        /// New tags (replaces existing)
-        #[arg(long)]
+        /// New tags (comma-separated or repeated, replaces existing)
+        #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
 
         /// Tags to add (comma-separated)
