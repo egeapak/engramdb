@@ -242,4 +242,80 @@ pub enum Command {
 
     /// Show statistics
     Stats,
+
+    /// Challenge a memory's validity
+    Challenge {
+        /// Memory ID (supports prefix matching)
+        id: String,
+
+        /// Evidence or reason for the challenge
+        #[arg(long, short = 'e')]
+        evidence: String,
+
+        /// Source file that contradicts this memory
+        #[arg(long)]
+        source_file: Option<String>,
+    },
+
+    /// Run garbage collection on low-relevance memories
+    Gc {
+        /// Actually delete (default is dry-run)
+        #[arg(long)]
+        confirm: bool,
+
+        /// Score threshold for GC (default from config)
+        #[arg(long)]
+        threshold: Option<f64>,
+    },
+
+    /// Compress memories by scope
+    Compress {
+        /// Filter by logical scope
+        #[arg(long)]
+        scope: Option<String>,
+
+        /// Score threshold for compression
+        #[arg(long)]
+        threshold: Option<f64>,
+
+        /// List compression candidates
+        #[arg(long)]
+        confirm: bool,
+    },
+
+    /// Start the MCP server
+    Serve {
+        /// Transport type (stdio or sse)
+        #[arg(long, default_value = "stdio")]
+        transport: String,
+
+        /// Port for SSE transport
+        #[arg(long)]
+        port: Option<u16>,
+    },
+
+    /// Generate shell completions
+    Completions {
+        /// Shell type
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+
+    /// Rebuild index and re-embed memories
+    Reindex {
+        /// Only re-embed, don't rebuild index
+        #[arg(long)]
+        embeddings_only: bool,
+
+        /// Only rebuild index, don't re-embed
+        #[arg(long)]
+        index_only: bool,
+    },
+
+    /// Interactive review of challenged/stale memories
+    Review {
+        /// Filter by logical scope
+        #[arg(long)]
+        scope: Option<String>,
+    },
 }

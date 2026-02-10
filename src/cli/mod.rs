@@ -26,7 +26,7 @@ use std::env;
 use std::path::PathBuf;
 
 use app::{Cli, Command};
-use commands::{AddParams, RetrieveParams, SearchParams, UpdateParams};
+use commands::{AddParams, ChallengeParams, RetrieveParams, SearchParams, UpdateParams};
 use output::OutputFormatter;
 
 /// Run the CLI application with parsed arguments.
@@ -157,5 +157,38 @@ pub fn run(cli: Cli) -> Result<()> {
         ),
         Command::Delete { id, force } => commands::run_delete(&dir, &id, force, &formatter),
         Command::Stats => commands::run_stats(&dir, &formatter),
+        Command::Challenge {
+            id,
+            evidence,
+            source_file,
+        } => commands::run_challenge(
+            &dir,
+            ChallengeParams {
+                id,
+                evidence,
+                source_file,
+            },
+            &formatter,
+        ),
+        Command::Gc { confirm, threshold } => {
+            commands::run_gc(&dir, confirm, threshold, &formatter)
+        }
+        Command::Compress {
+            scope,
+            threshold,
+            confirm,
+        } => commands::run_compress(&dir, scope, threshold, confirm, &formatter),
+        Command::Serve { transport, port } => {
+            commands::run_serve(&dir, &transport, port, &formatter)
+        }
+        Command::Completions { shell } => {
+            commands::run_completions(shell);
+            Ok(())
+        }
+        Command::Reindex {
+            embeddings_only,
+            index_only,
+        } => commands::run_reindex(&dir, embeddings_only, index_only, &formatter),
+        Command::Review { scope } => commands::run_review(&dir, scope, &formatter),
     }
 }
