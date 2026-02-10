@@ -1,6 +1,7 @@
 //! Memory creation operation.
 
 use crate::ops::parse_decay_strategy;
+use crate::retrieval::engine::RetrievalEngine;
 use crate::storage::MemoryStore;
 use crate::types::{Decay, DecayStrategy, Memory, MemoryType, Provenance, Visibility};
 use anyhow::Result;
@@ -34,7 +35,14 @@ pub struct CreateResult {
 }
 
 /// Create a new memory in the store.
-pub fn create_memory(store: &MemoryStore, params: CreateParams) -> Result<CreateResult> {
+///
+/// If `engine` is provided and has embeddings available, the memory is
+/// automatically embedded into the vector store after creation.
+pub fn create_memory(
+    store: &MemoryStore,
+    params: CreateParams,
+    engine: Option<&RetrievalEngine>,
+) -> Result<CreateResult> {
     // Generate summary if not provided (truncate content to 100 chars)
     let summary = params.summary.unwrap_or_else(|| {
         let max_len = 100;
@@ -106,6 +114,14 @@ pub fn create_memory(store: &MemoryStore, params: CreateParams) -> Result<Create
 
     let id = store.create(&memory)?;
 
+    // Embed the newly created memory if an engine with embeddings is available
+    if let Some(engine) = engine {
+        if engine.embeddings_available() {
+            let saved = store.get(&id)?;
+            engine.embed_memory(&saved)?;
+        }
+    }
+
     Ok(CreateResult {
         id,
         summary: memory.summary,
@@ -154,7 +170,7 @@ mod tests {
         params.decay_half_life = Some(604800); // 7 days in seconds
         params.decay_floor = Some(0.3);
 
-        let result = create_memory(&store, params).unwrap();
+        let result = create_memory(&store, params, None).unwrap();
         let memory = store.get(&result.id).unwrap();
 
         assert!(memory.decay.is_some());
@@ -171,7 +187,7 @@ mod tests {
         let mut params = minimal_create_params();
         params.decay_strategy = Some("linear".to_string());
 
-        let result = create_memory(&store, params).unwrap();
+        let result = create_memory(&store, params, None).unwrap();
         let memory = store.get(&result.id).unwrap();
 
         assert!(memory.decay.is_some());
@@ -188,7 +204,7 @@ mod tests {
         let mut params = minimal_create_params();
         params.decay_floor = Some(0.5);
 
-        let result = create_memory(&store, params).unwrap();
+        let result = create_memory(&store, params, None).unwrap();
         let memory = store.get(&result.id).unwrap();
 
         assert!(memory.decay.is_some());
@@ -205,7 +221,7 @@ mod tests {
         let mut params = minimal_create_params();
         params.decay_strategy = Some("invalid_strategy".to_string());
 
-        let result = create_memory(&store, params);
+        let result = create_memory(&store, params, None);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -222,7 +238,7 @@ mod tests {
         params.decay_ttl = Some(2592000); // 30 days in seconds
         params.decay_floor = Some(0.2);
 
-        let result = create_memory(&store, params).unwrap();
+        let result = create_memory(&store, params, None).unwrap();
 
         // Reload from disk
         let memory = store.get(&result.id).unwrap();
@@ -240,7 +256,7 @@ mod tests {
 
         let params = minimal_create_params();
 
-        let result = create_memory(&store, params).unwrap();
+        let result = create_memory(&store, params, None).unwrap();
         let memory = store.get(&result.id).unwrap();
 
         // Decision type has default decay of None
@@ -257,7 +273,7 @@ mod tests {
         params.decay_strategy = Some("linear".to_string());
         params.decay_ttl = Some(86400); // 1 day in seconds
 
-        let result = create_memory(&store, params).unwrap();
+        let result = create_memory(&store, params, None).unwrap();
         let memory = store.get(&result.id).unwrap();
 
         assert!(memory.decay.is_some());

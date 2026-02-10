@@ -115,6 +115,7 @@ pub fn compress_apply(
             decay_ttl: None,
             decay_floor: None,
         },
+        None,
     )?;
 
     Ok(CompressApplyResult {
@@ -162,6 +163,7 @@ mod tests {
                 decay_ttl: None,
                 decay_floor: None,
             },
+            None,
         )
         .unwrap();
         result.id

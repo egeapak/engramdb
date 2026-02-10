@@ -412,6 +412,7 @@ impl EngramDbServer {
     )]
     fn memory_create(&self, #[tool(aggr)] input: CreateInput) -> Result<String, String> {
         let store = self.open_store()?;
+        let engine = self.build_engine()?;
         let type_ = ops::parse_memory_type(&input.type_)
             .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
@@ -440,6 +441,7 @@ impl EngramDbServer {
                 decay_ttl: input.decay_ttl,
                 decay_floor: input.decay_floor,
             },
+            Some(&engine),
         )
         .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
@@ -581,6 +583,7 @@ impl EngramDbServer {
     )]
     fn memory_update(&self, #[tool(aggr)] input: UpdateInput) -> Result<String, String> {
         let store = self.open_store()?;
+        let engine = self.build_engine()?;
 
         let type_ = input
             .type_
@@ -619,6 +622,7 @@ impl EngramDbServer {
                 decay_ttl: input.decay_ttl,
                 decay_floor: input.decay_floor,
             },
+            Some(&engine),
         )
         .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 

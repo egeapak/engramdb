@@ -1,6 +1,7 @@
 //! Update memory operation.
 
 use crate::ops::parse_decay_strategy;
+use crate::retrieval::engine::RetrievalEngine;
 use crate::storage::MemoryStore;
 use crate::types::{Decay, DecayStrategy, MemoryType, MemoryUpdate, Status, Visibility};
 use anyhow::Result;
@@ -31,7 +32,15 @@ pub struct UpdateParams {
 }
 
 /// Update an existing memory.
-pub fn update_memory(store: &MemoryStore, id: &str, params: UpdateParams) -> Result<bool> {
+///
+/// If `engine` is provided and has embeddings available, the memory is
+/// re-embedded into the vector store after the update succeeds.
+pub fn update_memory(
+    store: &MemoryStore,
+    id: &str,
+    params: UpdateParams,
+    engine: Option<&RetrievalEngine>,
+) -> Result<bool> {
     // Load the existing memory to handle tag operations
     let mut memory = store.get(id)?;
 
@@ -130,6 +139,15 @@ pub fn update_memory(store: &MemoryStore, id: &str, params: UpdateParams) -> Res
     final_update.decay = memory.decay;
 
     store.update(id, final_update)?;
+
+    // Re-embed the updated memory if an engine with embeddings is available
+    if let Some(engine) = engine {
+        if engine.embeddings_available() {
+            let saved = store.get(id)?;
+            engine.embed_memory(&saved)?;
+        }
+    }
+
     Ok(true)
 }
 
@@ -189,7 +207,7 @@ mod tests {
         let mut params = empty_update_params();
         params.tags_add = Some(vec!["tag2".to_string(), "tag3".to_string()]);
 
-        update_memory(&store, &id, params).unwrap();
+        update_memory(&store, &id, params, None).unwrap();
 
         let memory = store.get(&id).unwrap();
         assert_eq!(memory.tags.len(), 3);
@@ -207,7 +225,7 @@ mod tests {
         let mut params = empty_update_params();
         params.tags_remove = Some(vec!["tag1".to_string()]);
 
-        update_memory(&store, &id, params).unwrap();
+        update_memory(&store, &id, params, None).unwrap();
 
         let memory = store.get(&id).unwrap();
         assert_eq!(memory.tags.len(), 1);
@@ -224,7 +242,7 @@ mod tests {
         let mut params = empty_update_params();
         params.tags_remove = Some(vec!["tag1".to_string(), "tag2".to_string()]);
 
-        update_memory(&store, &id, params).unwrap();
+        update_memory(&store, &id, params, None).unwrap();
 
         let memory = store.get(&id).unwrap();
         assert_eq!(memory.tags.len(), 0);
@@ -240,7 +258,7 @@ mod tests {
         params.tags = Some(vec!["new1".to_string(), "new2".to_string()]);
         params.tags_add = Some(vec!["new2".to_string(), "new3".to_string()]);
 
-        update_memory(&store, &id, params).unwrap();
+        update_memory(&store, &id, params, None).unwrap();
 
         let memory = store.get(&id).unwrap();
         assert_eq!(memory.tags.len(), 3);
@@ -260,7 +278,7 @@ mod tests {
         let mut params = empty_update_params();
         params.supersedes = Some(vec!["old-id-1".to_string(), "old-id-2".to_string()]);
 
-        update_memory(&store, &id, params).unwrap();
+        update_memory(&store, &id, params, None).unwrap();
 
         let memory = store.get(&id).unwrap();
         assert_eq!(memory.supersedes.len(), 2);
@@ -277,7 +295,7 @@ mod tests {
         let mut params = empty_update_params();
         params.supersedes = Some(vec!["prev-memory".to_string()]);
 
-        update_memory(&store, &id, params).unwrap();
+        update_memory(&store, &id, params, None).unwrap();
 
         // Reload from disk
         let memory = store.get(&id).unwrap();
@@ -304,7 +322,7 @@ mod tests {
         let mut params = empty_update_params();
         params.tags_add = Some(vec!["first".to_string()]);
 
-        update_memory(&store, &id, params).unwrap();
+        update_memory(&store, &id, params, None).unwrap();
 
         let memory = store.get(&id).unwrap();
         assert_eq!(memory.tags.len(), 1);
@@ -320,7 +338,7 @@ mod tests {
         let mut params = empty_update_params();
         params.tags_remove = Some(vec!["nonexistent".to_string()]);
 
-        update_memory(&store, &id, params).unwrap();
+        update_memory(&store, &id, params, None).unwrap();
 
         let memory = store.get(&id).unwrap();
         // Should still have original tags
@@ -341,7 +359,7 @@ mod tests {
         params.tags_add = Some(vec!["b".to_string(), "c".to_string()]);
         params.tags_remove = Some(vec!["a".to_string()]);
 
-        update_memory(&store, &id, params).unwrap();
+        update_memory(&store, &id, params, None).unwrap();
 
         let memory = store.get(&id).unwrap();
         assert_eq!(memory.tags.len(), 2);
@@ -361,7 +379,7 @@ mod tests {
         params.decay_half_life = Some(604800); // 7 days
         params.decay_floor = Some(0.4);
 
-        update_memory(&store, &id, params).unwrap();
+        update_memory(&store, &id, params, None).unwrap();
 
         let memory = store.get(&id).unwrap();
         assert!(memory.decay.is_some());
@@ -382,7 +400,7 @@ mod tests {
         let mut params = empty_update_params();
         params.decay_floor = Some(0.25);
 
-        update_memory(&store, &id, params).unwrap();
+        update_memory(&store, &id, params, None).unwrap();
 
         let memory = store.get(&id).unwrap();
         assert!(memory.decay.is_some());
@@ -400,7 +418,7 @@ mod tests {
         let mut params = empty_update_params();
         params.decay_strategy = Some("invalid".to_string());
 
-        let result = update_memory(&store, &id, params);
+        let result = update_memory(&store, &id, params, None);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -419,7 +437,7 @@ mod tests {
         let mut params = empty_update_params();
         params.decay_strategy = Some("linear".to_string());
 
-        update_memory(&store, &id, params).unwrap();
+        update_memory(&store, &id, params, None).unwrap();
 
         let memory = store.get(&id).unwrap();
         assert!(memory.decay.is_some());
@@ -438,7 +456,7 @@ mod tests {
         let mut params = empty_update_params();
         params.decay_strategy = Some("none".to_string());
 
-        update_memory(&store, &id, params).unwrap();
+        update_memory(&store, &id, params, None).unwrap();
 
         let memory = store.get(&id).unwrap();
         assert!(memory.decay.is_some());

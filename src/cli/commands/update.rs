@@ -1,7 +1,7 @@
 //! Update an existing memory.
 
 use crate::cli::output::OutputFormatter;
-use crate::ops::{parse_memory_type, parse_status, parse_visibility};
+use crate::ops::{self, parse_memory_type, parse_status, parse_visibility};
 use crate::ops::{update_memory, UpdateParams as OpsUpdateParams};
 use crate::storage::paths::memory_path;
 use crate::storage::MemoryStore;
@@ -79,6 +79,11 @@ pub fn run_update(dir: &Path, params: UpdateParams, formatter: &OutputFormatter)
     }
 
     let store = MemoryStore::open(dir)?;
+
+    // Build engine for auto-embedding on update
+    let config_path = dir.join(".engramdb").join("config.toml");
+    let engine_store = MemoryStore::open(dir)?;
+    let engine = ops::build_engine(engine_store, &config_path);
 
     let type_ = params.type_.map(|s| parse_memory_type(&s)).transpose()?;
     let visibility = params
@@ -162,6 +167,7 @@ pub fn run_update(dir: &Path, params: UpdateParams, formatter: &OutputFormatter)
             decay_ttl: None,
             decay_floor: None,
         },
+        Some(&engine),
     )?;
 
     formatter.print_success(&format!("Updated memory {}", params.id));

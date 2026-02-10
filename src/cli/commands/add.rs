@@ -1,7 +1,7 @@
 //! Add a new memory to the store.
 
 use crate::cli::output::OutputFormatter;
-use crate::ops::{create_memory, parse_memory_type, parse_visibility, CreateParams};
+use crate::ops::{self, create_memory, parse_memory_type, parse_visibility, CreateParams};
 use crate::storage::MemoryStore;
 use crate::types::{MemoryType, Provenance, Visibility};
 use anyhow::{anyhow, bail, Context, Result};
@@ -44,6 +44,11 @@ pub fn run_add(dir: &Path, params: AddParams, formatter: &OutputFormatter) -> Re
         Err(_) => MemoryStore::init(dir)?,
     };
 
+    // Build engine for auto-embedding on create
+    let config_path = dir.join(".engramdb").join("config.toml");
+    let engine_store = MemoryStore::open(dir).unwrap_or_else(|_| MemoryStore::init(dir).unwrap());
+    let engine = ops::build_engine(engine_store, &config_path);
+
     // Handle details file
     let details_from_file = if let Some(ref details_file) = params.details_file {
         Some(fs::read_to_string(details_file).context("Failed to read details file")?)
@@ -56,15 +61,15 @@ pub fn run_add(dir: &Path, params: AddParams, formatter: &OutputFormatter) -> Re
     // Determine mode: interactive, editor, or direct CLI
     if params.editor {
         // Editor mode
-        run_editor_mode(&store, params, final_details, formatter)
+        run_editor_mode(&store, params, final_details, formatter, &engine)
     } else if params.interactive
         || (params.type_str.is_none() || params.content.is_none() || params.summary.is_none())
     {
         // Interactive mode: if --interactive is set OR if required fields are missing
-        run_interactive_mode(&store, params, final_details, formatter)
+        run_interactive_mode(&store, params, final_details, formatter, &engine)
     } else {
         // Direct CLI mode: all required fields provided
-        run_direct_mode(&store, params, final_details, formatter)
+        run_direct_mode(&store, params, final_details, formatter, &engine)
     }
 }
 
@@ -74,6 +79,7 @@ fn run_direct_mode(
     params: AddParams,
     final_details: Option<String>,
     formatter: &OutputFormatter,
+    engine: &crate::retrieval::engine::RetrievalEngine,
 ) -> Result<()> {
     let type_ = parse_memory_type(
         params
@@ -105,6 +111,7 @@ fn run_direct_mode(
             decay_ttl: None,
             decay_floor: None,
         },
+        Some(engine),
     )?;
 
     formatter.print_success(&format!("Created memory {}", result.id));
@@ -117,6 +124,7 @@ fn run_interactive_mode(
     params: AddParams,
     final_details: Option<String>,
     formatter: &OutputFormatter,
+    engine: &crate::retrieval::engine::RetrievalEngine,
 ) -> Result<()> {
     // Prompt for memory type
     let type_ = if let Some(type_str) = params.type_str {
@@ -249,6 +257,7 @@ fn run_interactive_mode(
             decay_ttl: None,
             decay_floor: None,
         },
+        Some(engine),
     )?;
 
     formatter.print_success(&format!("Created memory {}", result.id));
@@ -261,6 +270,7 @@ fn run_editor_mode(
     params: AddParams,
     final_details: Option<String>,
     formatter: &OutputFormatter,
+    engine: &crate::retrieval::engine::RetrievalEngine,
 ) -> Result<()> {
     // Create a temporary file with template
     let temp_dir = env::temp_dir();
@@ -333,6 +343,7 @@ fn run_editor_mode(
             decay_ttl: None,
             decay_floor: None,
         },
+        Some(engine),
     )?;
 
     formatter.print_success(&format!("Created memory {}", result.id));
