@@ -1,8 +1,10 @@
 //! Display statistics about the memory store.
 
 use crate::cli::output::{OutputFormatter, Stats};
+use crate::embeddings::OnnxProvider;
 use crate::ops::compute_stats;
 use crate::storage::MemoryStore;
+use crate::types::Status;
 use anyhow::Result;
 use std::path::Path;
 
@@ -18,6 +20,21 @@ pub fn run_stats(dir: &Path, formatter: &OutputFormatter) -> Result<()> {
     let store = MemoryStore::open(dir)?;
     let store_stats = compute_stats(&store)?;
 
+    // Extract health warning counts before moving data into Stats
+    let challenged_count = store_stats
+        .by_status
+        .iter()
+        .find(|(s, _)| matches!(s, Status::Challenged))
+        .map(|(_, count)| *count)
+        .unwrap_or(0);
+
+    let needs_review_count = store_stats
+        .by_status
+        .iter()
+        .find(|(s, _)| matches!(s, Status::NeedsReview))
+        .map(|(_, count)| *count)
+        .unwrap_or(0);
+
     let stats = Stats {
         total: store_stats.total,
         by_type: store_stats.by_type,
@@ -27,5 +44,32 @@ pub fn run_stats(dir: &Path, formatter: &OutputFormatter) -> Result<()> {
     };
 
     formatter.print_stats(&stats);
+
+    // Print embeddings status
+    println!();
+    let embeddings_available = OnnxProvider::try_new().is_some();
+    if embeddings_available {
+        println!("Embeddings: Available");
+    } else {
+        println!("Embeddings: Not available");
+    }
+
+    if challenged_count > 0 || needs_review_count > 0 {
+        println!();
+        println!("Health Warnings:");
+        if challenged_count > 0 {
+            formatter.print_error(&format!(
+                "  {} memories are challenged (run 'engramdb review --challenged-only')",
+                challenged_count
+            ));
+        }
+        if needs_review_count > 0 {
+            formatter.print_error(&format!(
+                "  {} memories need review (run 'engramdb review --stale-only')",
+                needs_review_count
+            ));
+        }
+    }
+
     Ok(())
 }

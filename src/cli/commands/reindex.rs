@@ -44,10 +44,22 @@ pub fn run_reindex(
         None
     };
 
+    // Print progress before starting
+    if !embeddings_only {
+        println!("Reindexing...");
+    }
+    if !index_only && engine.is_some() {
+        println!("Regenerating embeddings...");
+    }
+
     let result = reindex(&store, engine.as_ref(), embeddings_only)?;
 
+    // Print results
     if result.indexed > 0 {
-        formatter.print_success(&format!("Indexed {} memories.", result.indexed));
+        formatter.print_success(&format!(
+            "Done. Rebuilt index with {} entries.",
+            result.indexed
+        ));
     }
     if result.embedded > 0 {
         formatter.print_success(&format!("Embedded {} memories.", result.embedded));

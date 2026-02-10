@@ -128,6 +128,13 @@ impl OutputFormatter {
         }
     }
 
+    /// Print a memory with full details without truncation.
+    pub fn print_memory_full(&self, memory: &Memory) {
+        // For now, this is identical to print_memory
+        // In the future, print_memory might add truncation logic
+        self.print_memory(memory);
+    }
+
     fn print_memory_pretty(&self, memory: &Memory) {
         let id_display = if self.use_color {
             memory

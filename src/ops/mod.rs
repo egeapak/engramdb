@@ -22,7 +22,7 @@ pub use create::{create_memory, CreateParams, CreateResult};
 pub use delete::delete_memory;
 pub use gc::{gc_memories, GcResult};
 pub use get::get_memory;
-pub use parsing::{parse_memory_type, parse_status, parse_visibility};
+pub use parsing::{parse_decay_strategy, parse_memory_type, parse_status, parse_visibility};
 pub use reindex::{reindex, ReindexResult};
 pub use retrieve::retrieve_memories;
 pub use review::review_memories;

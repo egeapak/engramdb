@@ -31,9 +31,9 @@ pub fn gc_memories(
     for entry in &entries {
         let memory = store.get(&entry.id)?;
         let context = ScoringContext::scope_only(None, vec![]);
-        let score = composite_score(&memory, &context, config, now);
+        let breakdown = composite_score(&memory, &context, config, now);
 
-        if score < threshold {
+        if breakdown.final_score < threshold {
             candidates.push(memory.id.clone());
         }
     }

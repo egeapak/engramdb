@@ -9,6 +9,8 @@ pub enum ErrorCode {
     StoreNotInitialized,
     IndexCorrupt,
     EmbeddingUnavailable,
+    CompressFailed,
+    ConcurrentWrite,
 }
 
 impl ErrorCode {
@@ -19,6 +21,8 @@ impl ErrorCode {
             Self::StoreNotInitialized => "STORE_NOT_INITIALIZED",
             Self::IndexCorrupt => "INDEX_CORRUPT",
             Self::EmbeddingUnavailable => "EMBEDDING_UNAVAILABLE",
+            Self::CompressFailed => "COMPRESS_FAILED",
+            Self::ConcurrentWrite => "CONCURRENT_WRITE",
         }
     }
 }

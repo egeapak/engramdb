@@ -6,7 +6,7 @@
 
 use super::filters::{apply_index_filters, SearchFilters};
 use crate::embeddings::EmbeddingProvider;
-use crate::scoring::{composite_score, ScoringContext};
+use crate::scoring::{composite_score, ScoreBreakdown, ScoringContext};
 use crate::storage::{MemoryStore, Result};
 use crate::types::{EngramConfig, Memory, MemoryType};
 use crate::vector::{VectorMetadata, VectorStore};
@@ -63,6 +63,8 @@ pub struct ScoredMemory {
     pub memory: Memory,
     /// Relevance score (0.0 to 1.0+, higher is more relevant)
     pub score: f64,
+    /// Detailed breakdown of score components
+    pub score_breakdown: ScoreBreakdown,
 }
 
 /// Result of a retrieval operation.
@@ -73,6 +75,9 @@ pub struct RetrievalResult {
 
     /// Total number of memories before limit was applied
     pub total: usize,
+
+    /// Query mode used: "with_embeddings", "degraded", or "scope_only"
+    pub query_mode: String,
 }
 
 /// Main retrieval engine for EngramDB.
@@ -218,6 +223,17 @@ impl RetrievalEngine {
             None
         };
 
+        // Determine query mode for the entire retrieval
+        let query_mode = if query.query.is_some() {
+            if semantic_scores_map.is_some() {
+                "with_embeddings"
+            } else {
+                "degraded"
+            }
+        } else {
+            "scope_only"
+        };
+
         // Step 3 & 4: Load memories and calculate scores
         let mut scored_memories: Vec<ScoredMemory> = filtered_entries
             .iter()
@@ -265,9 +281,13 @@ impl RetrievalEngine {
                     ScoringContext::scope_only(query.path.clone(), query.logical.clone())
                 };
 
-                let score = composite_score(&memory, &context, &self.config, Utc::now());
+                let breakdown = composite_score(&memory, &context, &self.config, Utc::now());
 
-                Some(ScoredMemory { memory, score })
+                Some(ScoredMemory {
+                    memory,
+                    score: breakdown.final_score,
+                    score_breakdown: breakdown,
+                })
             })
             .collect();
 
@@ -312,6 +332,7 @@ impl RetrievalEngine {
         Ok(RetrievalResult {
             memories: scored_memories,
             total,
+            query_mode: query_mode.to_string(),
         })
     }
 
@@ -367,9 +388,22 @@ impl RetrievalEngine {
 
                 let mut results: Vec<ScoredMemory> = combined
                     .into_iter()
-                    .map(|(idx, score)| ScoredMemory {
-                        memory: memories[idx].clone(),
-                        score,
+                    .map(|(idx, score)| {
+                        let memory = &memories[idx];
+                        // Create a simplified breakdown for search results
+                        let breakdown = ScoreBreakdown {
+                            final_score: score,
+                            semantic: semantic_scores.get(&memory.id).map(|s| s * 0.5),
+                            relevance: memory.criticality,
+                            scope: 0.0, // Search doesn't use scope
+                            trust: 1.0, // Search doesn't apply trust weighting
+                            decay: 1.0, // Search doesn't apply decay
+                        };
+                        ScoredMemory {
+                            memory: memory.clone(),
+                            score,
+                            score_breakdown: breakdown,
+                        }
                     })
                     .collect();
                 results.sort_by(|a, b| {
@@ -382,9 +416,22 @@ impl RetrievalEngine {
                 // Keyword-only
                 keyword_results
                     .into_iter()
-                    .map(|(idx, score)| ScoredMemory {
-                        memory: memories[idx].clone(),
-                        score,
+                    .map(|(idx, score)| {
+                        let memory = &memories[idx];
+                        // Create a simplified breakdown for keyword-only search
+                        let breakdown = ScoreBreakdown {
+                            final_score: score,
+                            semantic: None,
+                            relevance: memory.criticality,
+                            scope: 0.0,
+                            trust: 1.0,
+                            decay: 1.0,
+                        };
+                        ScoredMemory {
+                            memory: memory.clone(),
+                            score,
+                            score_breakdown: breakdown,
+                        }
                     })
                     .collect()
             };
@@ -678,6 +725,116 @@ mod tests {
         assert_eq!(result.memories[0].memory.summary, "Test memory");
         assert_eq!(result.memories[0].memory.content, "");
         assert_eq!(result.memories[0].memory.details, None);
+    }
+
+    #[test]
+    fn test_retrieve_score_breakdown() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Test memory",
+            "This is the content",
+            Provenance::human(),
+        );
+        memory.visibility = Visibility::Shared;
+        memory.criticality = 0.8;
+        memory.physical = vec!["src/test.rs".to_string()];
+
+        store.create(&memory).unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+
+        let query = RetrievalQuery {
+            path: Some("src/test.rs".to_string()),
+            ..Default::default()
+        };
+
+        let result = engine.retrieve(&query).unwrap();
+
+        assert_eq!(result.memories.len(), 1);
+        // Verify score_breakdown is populated
+        let sm = &result.memories[0];
+        assert!(sm.score_breakdown.final_score > 0.0);
+        assert_eq!(sm.score, sm.score_breakdown.final_score);
+        assert!(sm.score_breakdown.relevance > 0.0);
+        assert!(sm.score_breakdown.scope > 0.0);
+        assert!(sm.score_breakdown.trust > 0.0);
+        assert_eq!(sm.score_breakdown.decay, 1.0); // No decay
+        assert!(sm.score_breakdown.semantic.is_none()); // No query
+    }
+
+    #[test]
+    fn test_retrieve_query_mode_scope_only() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Test memory",
+            "This is the content",
+            Provenance::human(),
+        );
+        memory.visibility = Visibility::Shared;
+        memory.criticality = 0.8;
+
+        store.create(&memory).unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+
+        let query = RetrievalQuery::default();
+
+        let result = engine.retrieve(&query).unwrap();
+
+        assert_eq!(result.query_mode, "scope_only");
+    }
+
+    #[test]
+    fn test_retrieve_query_mode_degraded() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Test memory",
+            "This is the content",
+            Provenance::human(),
+        );
+        memory.visibility = Visibility::Shared;
+        memory.criticality = 0.8;
+
+        store.create(&memory).unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+
+        let query = RetrievalQuery {
+            query: Some("test".to_string()),
+            ..Default::default()
+        };
+
+        let result = engine.retrieve(&query).unwrap();
+
+        // Without embeddings configured, should be degraded mode
+        assert_eq!(result.query_mode, "degraded");
     }
 
     #[test]

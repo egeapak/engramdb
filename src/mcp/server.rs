@@ -60,6 +60,21 @@ struct CreateInput {
 
     #[schemars(description = "Visibility: shared or personal (default shared)")]
     visibility: Option<String>,
+
+    #[schemars(description = "IDs of memories this supersedes")]
+    supersedes: Option<Vec<String>>,
+
+    #[schemars(description = "Decay strategy: none, linear, exponential, or step")]
+    decay_strategy: Option<String>,
+
+    #[schemars(description = "Half-life in seconds for decay")]
+    decay_half_life: Option<u64>,
+
+    #[schemars(description = "TTL in seconds for decay")]
+    decay_ttl: Option<u64>,
+
+    #[schemars(description = "Minimum decay factor (0.0-1.0)")]
+    decay_floor: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -149,6 +164,12 @@ struct UpdateInput {
     #[schemars(description = "New tags")]
     tags: Option<Vec<String>>,
 
+    #[schemars(description = "Tags to add (merged with existing)")]
+    tags_add: Option<Vec<String>>,
+
+    #[schemars(description = "Tags to remove")]
+    tags_remove: Option<Vec<String>>,
+
     #[schemars(description = "New criticality")]
     criticality: Option<f64>,
 
@@ -157,6 +178,21 @@ struct UpdateInput {
 
     #[schemars(description = "New visibility")]
     visibility: Option<String>,
+
+    #[schemars(description = "IDs of memories this supersedes")]
+    supersedes: Option<Vec<String>>,
+
+    #[schemars(description = "Decay strategy: none, linear, exponential, or step")]
+    decay_strategy: Option<String>,
+
+    #[schemars(description = "Half-life in seconds for decay")]
+    decay_half_life: Option<u64>,
+
+    #[schemars(description = "TTL in seconds for decay")]
+    decay_ttl: Option<u64>,
+
+    #[schemars(description = "Minimum decay factor (0.0-1.0)")]
+    decay_floor: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -277,10 +313,22 @@ fn memory_to_output(m: &crate::types::Memory, include_details: bool) -> MemoryOu
 }
 
 #[derive(Serialize)]
+struct ScoreBreakdownOutput {
+    final_score: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    semantic: Option<f64>,
+    relevance: f64,
+    scope: f64,
+    trust: f64,
+    decay: f64,
+}
+
+#[derive(Serialize)]
 struct ScoredMemoryOutput {
     #[serde(flatten)]
     memory: MemoryOutput,
     score: f64,
+    score_breakdown: ScoreBreakdownOutput,
 }
 
 // ---------------------------------------------------------------------------
@@ -368,6 +416,11 @@ impl EngramDbServer {
                 details: input.details,
                 visibility,
                 provenance: Provenance::agent("mcp"),
+                supersedes: input.supersedes.unwrap_or_default(),
+                decay_strategy: input.decay_strategy,
+                decay_half_life: input.decay_half_life,
+                decay_ttl: input.decay_ttl,
+                decay_floor: input.decay_floor,
             },
         )
         .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
@@ -420,12 +473,21 @@ impl EngramDbServer {
             .map(|sm| ScoredMemoryOutput {
                 memory: memory_to_output(&sm.memory, include_details),
                 score: sm.score,
+                score_breakdown: ScoreBreakdownOutput {
+                    final_score: sm.score_breakdown.final_score,
+                    semantic: sm.score_breakdown.semantic,
+                    relevance: sm.score_breakdown.relevance,
+                    scope: sm.score_breakdown.scope,
+                    trust: sm.score_breakdown.trust,
+                    decay: sm.score_breakdown.decay,
+                },
             })
             .collect();
 
         serde_json::to_string(&serde_json::json!({
             "memories": memories,
             "total": result.total,
+            "query_mode": result.query_mode,
         }))
         .map_err(|e| e.to_string())
     }
@@ -467,6 +529,14 @@ impl EngramDbServer {
             .map(|sm| ScoredMemoryOutput {
                 memory: memory_to_output(&sm.memory, false),
                 score: sm.score,
+                score_breakdown: ScoreBreakdownOutput {
+                    final_score: sm.score_breakdown.final_score,
+                    semantic: sm.score_breakdown.semantic,
+                    relevance: sm.score_breakdown.relevance,
+                    scope: sm.score_breakdown.scope,
+                    trust: sm.score_breakdown.trust,
+                    decay: sm.score_breakdown.decay,
+                },
             })
             .collect();
 
@@ -519,10 +589,17 @@ impl EngramDbServer {
                 physical: input.physical,
                 logical: input.logical,
                 tags: input.tags,
+                tags_add: input.tags_add,
+                tags_remove: input.tags_remove,
                 criticality: input.criticality,
                 confidence: input.confidence,
                 visibility,
                 status: None,
+                supersedes: input.supersedes,
+                decay_strategy: input.decay_strategy,
+                decay_half_life: input.decay_half_life,
+                decay_ttl: input.decay_ttl,
+                decay_floor: input.decay_floor,
             },
         )
         .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
@@ -611,9 +688,16 @@ impl EngramDbServer {
                         physical: None,
                         logical: None,
                         tags: None,
+                        tags_add: None,
+                        tags_remove: None,
                         criticality: None,
                         confidence: None,
                         visibility: None,
+                        supersedes: None,
+                        decay_strategy: None,
+                        decay_half_life: None,
+                        decay_ttl: None,
+                        decay_floor: None,
                     },
                 )
                 .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
@@ -631,9 +715,16 @@ impl EngramDbServer {
                         physical: None,
                         logical: None,
                         tags: None,
+                        tags_add: None,
+                        tags_remove: None,
                         criticality: None,
                         confidence: None,
                         visibility: None,
+                        supersedes: None,
+                        decay_strategy: None,
+                        decay_half_life: None,
+                        decay_ttl: None,
+                        decay_floor: None,
                     },
                 )
                 .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
@@ -811,7 +902,7 @@ impl ServerHandler for EngramDbServer {
                 .enable_prompts()
                 .build(),
             server_info: Implementation {
-                name: "engramdb".to_string(),
+                name: "EngramDB".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
             instructions: Some(
@@ -998,8 +1089,8 @@ impl ServerHandler for EngramDbServer {
                     if let Ok(result) = ops::retrieve_memories(&engine, &query) {
                         for sm in &result.memories {
                             let status_marker = match sm.memory.status {
-                                Status::Challenged => " [challenged]",
-                                Status::NeedsReview => " [needs_review]",
+                                Status::Challenged => " ⚠️",
+                                Status::NeedsReview => " 🕐",
                                 _ => "",
                             };
                             memory_text.push_str(&format!(
@@ -1018,8 +1109,8 @@ impl ServerHandler for EngramDbServer {
                     "You are working on a project with a persistent memory store (EngramDB).\n\
                          Before making changes, review these relevant memories:\n\n\
                          {}\n\
-                         Memories marked [challenged] may be inaccurate.\n\
-                         Memories marked [needs_review] are flagged for review.\n\n\
+                         Memories marked ⚠️ may be inaccurate.\n\
+                         Memories marked 🕐 are flagged for review.\n\n\
                          When you discover important patterns, decisions, or hazards during \
                          this session, store them using the memory_create tool.\n\
                          If you encounter evidence that contradicts an existing memory, \

@@ -20,6 +20,7 @@ pub struct SearchParams {
     pub physical: Option<String>,
     pub logical: Vec<String>,
     pub min_criticality: Option<f64>,
+    pub max_results: usize,
 }
 
 /// Search memories by keyword.
@@ -78,7 +79,10 @@ pub fn run_search(dir: &Path, params: SearchParams, formatter: &OutputFormatter)
     };
 
     // Perform search
-    let results = crate::ops::search_memories(&engine, &params.query, &filters)?;
+    let mut results = crate::ops::search_memories(&engine, &params.query, &filters)?;
+
+    // Apply max_results limit
+    results.truncate(params.max_results);
 
     // Display results
     display_search_results(&results, formatter)?;

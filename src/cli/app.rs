@@ -57,17 +57,25 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Command {
     /// Initialize a new EngramDB store
-    Init,
+    Init {
+        /// Skip embedding model initialization
+        #[arg(long)]
+        no_embeddings: bool,
+
+        /// Path to a config template file
+        #[arg(long)]
+        template: Option<PathBuf>,
+    },
 
     /// Add a new memory
     Add {
         /// Type of memory
         #[arg(long, short = 't', value_name = "TYPE")]
-        type_: String,
+        type_: Option<String>,
 
         /// Memory content
         #[arg(long, short = 'c')]
-        content: String,
+        content: Option<String>,
 
         /// Brief summary (auto-generated if not provided)
         #[arg(long, short = 's')]
@@ -86,8 +94,8 @@ pub enum Command {
         tags: Vec<String>,
 
         /// Criticality score (0.0 to 1.0)
-        #[arg(long, default_value = "0.5")]
-        criticality: f64,
+        #[arg(long)]
+        criticality: Option<f64>,
 
         /// Confidence score (0.0 to 1.0)
         #[arg(long, default_value = "0.8")]
@@ -98,14 +106,38 @@ pub enum Command {
         details: Option<String>,
 
         /// Visibility (shared or personal)
-        #[arg(long, default_value = "shared")]
-        visibility: String,
+        #[arg(long)]
+        visibility: Option<String>,
+
+        /// Launch interactive TUI prompts
+        #[arg(long, short = 'i')]
+        interactive: bool,
+
+        /// Open $EDITOR for content entry
+        #[arg(long, short = 'e')]
+        editor: bool,
+
+        /// Read details from file
+        #[arg(long)]
+        details_file: Option<PathBuf>,
     },
 
     /// Get a memory by ID
     Get {
         /// Memory ID (supports prefix matching)
         id: String,
+
+        /// Show complete details without truncation
+        #[arg(long, short = 'f')]
+        full: bool,
+
+        /// Output the raw markdown file contents
+        #[arg(long)]
+        raw: bool,
+
+        /// Print the memory's file path instead of content
+        #[arg(long)]
+        path: bool,
     },
 
     /// Retrieve memories by context
@@ -137,6 +169,18 @@ pub enum Command {
         /// Maximum number of results
         #[arg(long, default_value = "10")]
         max_results: usize,
+
+        /// Detail level: summary, content, full
+        #[arg(long)]
+        detail_level: Option<String>,
+
+        /// Include expired memories
+        #[arg(long)]
+        include_expired: bool,
+
+        /// Show relevance scores alongside results
+        #[arg(long)]
+        show_scores: bool,
     },
 
     /// Search memories by keyword
@@ -163,6 +207,10 @@ pub enum Command {
         /// Minimum criticality
         #[arg(long)]
         min_criticality: Option<f64>,
+
+        /// Maximum number of results to display
+        #[arg(long, short = 'n', default_value = "10")]
+        max_results: usize,
     },
 
     /// List all memories
@@ -178,6 +226,22 @@ pub enum Command {
         /// Filter by status
         #[arg(long, short = 's')]
         status: Option<String>,
+
+        /// Filter by scope (matches physical or logical scopes)
+        #[arg(long)]
+        scope: Option<String>,
+
+        /// Sort field: criticality (default), created, updated, type
+        #[arg(long, default_value = "criticality")]
+        sort: String,
+
+        /// Reverse sort order
+        #[arg(long, short = 'r')]
+        reverse: bool,
+
+        /// Maximum number of results to display
+        #[arg(long, short = 'n')]
+        limit: Option<usize>,
     },
 
     /// Update an existing memory
@@ -209,6 +273,14 @@ pub enum Command {
         #[arg(long)]
         tags: Vec<String>,
 
+        /// Tags to add (comma-separated)
+        #[arg(long = "tags-add")]
+        tags_add: Option<String>,
+
+        /// Tags to remove (comma-separated)
+        #[arg(long = "tags-remove")]
+        tags_remove: Option<String>,
+
         /// New criticality
         #[arg(long)]
         criticality: Option<f64>,
@@ -221,6 +293,10 @@ pub enum Command {
         #[arg(long)]
         details: Option<String>,
 
+        /// Read details from file
+        #[arg(long = "details-file")]
+        details_file: Option<PathBuf>,
+
         /// New visibility
         #[arg(long)]
         visibility: Option<String>,
@@ -228,6 +304,14 @@ pub enum Command {
         /// New status
         #[arg(long)]
         status: Option<String>,
+
+        /// IDs of memories this one supersedes (comma-separated)
+        #[arg(long)]
+        supersedes: Option<String>,
+
+        /// Open memory file in $EDITOR
+        #[arg(long, short = 'e')]
+        editor: bool,
     },
 
     /// Delete a memory
@@ -317,5 +401,17 @@ pub enum Command {
         /// Filter by logical scope
         #[arg(long)]
         scope: Option<String>,
+
+        /// Filter by memory type
+        #[arg(long, short = 't')]
+        type_: Option<String>,
+
+        /// Only show Status::Challenged memories
+        #[arg(long)]
+        challenged_only: bool,
+
+        /// Only show Status::NeedsReview memories
+        #[arg(long)]
+        stale_only: bool,
     },
 }

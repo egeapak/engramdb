@@ -50,7 +50,10 @@ pub fn run(cli: Cli) -> Result<()> {
 
     // Dispatch to command handlers
     match cli.command {
-        Command::Init => commands::run_init(&dir, &formatter),
+        Command::Init {
+            no_embeddings,
+            template,
+        } => commands::run_init(&dir, no_embeddings, template, &formatter),
         Command::Add {
             type_,
             content,
@@ -62,6 +65,9 @@ pub fn run(cli: Cli) -> Result<()> {
             confidence,
             details,
             visibility,
+            interactive,
+            editor,
+            details_file,
         } => commands::run_add(
             &dir,
             AddParams {
@@ -75,10 +81,18 @@ pub fn run(cli: Cli) -> Result<()> {
                 confidence,
                 details,
                 visibility_str: visibility,
+                interactive,
+                editor,
+                details_file,
             },
             &formatter,
         ),
-        Command::Get { id } => commands::run_get(&dir, &id, &formatter),
+        Command::Get {
+            id,
+            full,
+            raw,
+            path,
+        } => commands::run_get(&dir, &id, full, raw, path, &formatter),
         Command::Retrieve {
             path,
             logical,
@@ -87,6 +101,9 @@ pub fn run(cli: Cli) -> Result<()> {
             tags,
             min_criticality,
             max_results,
+            detail_level,
+            include_expired,
+            show_scores,
         } => commands::run_retrieve(
             &dir,
             RetrieveParams {
@@ -97,6 +114,9 @@ pub fn run(cli: Cli) -> Result<()> {
                 tags,
                 min_criticality,
                 max_results,
+                detail_level,
+                include_expired,
+                show_scores,
             },
             &formatter,
         ),
@@ -107,6 +127,7 @@ pub fn run(cli: Cli) -> Result<()> {
             physical,
             logical,
             min_criticality,
+            max_results,
         } => commands::run_search(
             &dir,
             SearchParams {
@@ -116,6 +137,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 physical,
                 logical,
                 min_criticality,
+                max_results,
             },
             &formatter,
         ),
@@ -123,7 +145,13 @@ pub fn run(cli: Cli) -> Result<()> {
             type_,
             tags,
             status,
-        } => commands::run_list(&dir, type_, tags, status, &formatter),
+            scope,
+            sort,
+            reverse,
+            limit,
+        } => commands::run_list(
+            &dir, type_, tags, status, scope, &sort, reverse, limit, &formatter,
+        ),
         Command::Update {
             id,
             type_,
@@ -132,11 +160,16 @@ pub fn run(cli: Cli) -> Result<()> {
             physical,
             logical,
             tags,
+            tags_add,
+            tags_remove,
             criticality,
             confidence,
             details,
+            details_file,
             visibility,
             status,
+            supersedes,
+            editor,
         } => commands::run_update(
             &dir,
             UpdateParams {
@@ -147,11 +180,16 @@ pub fn run(cli: Cli) -> Result<()> {
                 physical,
                 logical,
                 tags,
+                tags_add,
+                tags_remove,
                 criticality,
                 confidence,
                 details,
+                details_file,
                 visibility,
                 status,
+                supersedes,
+                editor,
             },
             &formatter,
         ),
@@ -189,6 +227,11 @@ pub fn run(cli: Cli) -> Result<()> {
             embeddings_only,
             index_only,
         } => commands::run_reindex(&dir, embeddings_only, index_only, &formatter),
-        Command::Review { scope } => commands::run_review(&dir, scope, &formatter),
+        Command::Review {
+            scope,
+            type_,
+            challenged_only,
+            stale_only,
+        } => commands::run_review(&dir, scope, type_, challenged_only, stale_only, &formatter),
     }
 }

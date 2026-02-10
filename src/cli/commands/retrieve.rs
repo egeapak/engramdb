@@ -20,6 +20,9 @@ pub struct RetrieveParams {
     pub tags: Vec<String>,
     pub min_criticality: Option<f64>,
     pub max_results: usize,
+    pub detail_level: Option<String>,
+    pub include_expired: bool,
+    pub show_scores: bool,
 }
 
 /// Retrieve memories based on context and query.
@@ -68,6 +71,23 @@ pub fn run_retrieve(dir: &Path, params: RetrieveParams, formatter: &OutputFormat
         None
     };
 
+    // Parse detail_level
+    let detail_level = if let Some(ref level_str) = params.detail_level {
+        match level_str.to_lowercase().as_str() {
+            "summary" => DetailLevel::Summary,
+            "content" => DetailLevel::Content,
+            "full" => DetailLevel::Full,
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Invalid detail level: {}. Must be summary, content, or full",
+                    level_str
+                ))
+            }
+        }
+    } else {
+        DetailLevel::Content
+    };
+
     // Build retrieval query
     let query = RetrievalQuery {
         path: params.path,
@@ -77,15 +97,15 @@ pub fn run_retrieve(dir: &Path, params: RetrieveParams, formatter: &OutputFormat
         tags,
         min_criticality: params.min_criticality,
         max_results: Some(params.max_results),
-        include_expired: None,
-        detail_level: DetailLevel::Content,
+        include_expired: Some(params.include_expired),
+        detail_level,
     };
 
     // Perform retrieval
     let result = crate::ops::retrieve_memories(&engine, &query)?;
 
     // Display results
-    display_retrieval_result(&result, formatter)?;
+    display_retrieval_result(&result, params.show_scores, formatter)?;
 
     Ok(())
 }
@@ -93,6 +113,7 @@ pub fn run_retrieve(dir: &Path, params: RetrieveParams, formatter: &OutputFormat
 /// Display retrieval results in the appropriate format
 fn display_retrieval_result(
     result: &crate::retrieval::engine::RetrievalResult,
+    show_scores: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
     // Check if we're in JSON mode by checking if formatter would use JSON
@@ -125,22 +146,33 @@ fn display_retrieval_result(
 
             for sm in &result.memories {
                 let id_short = &sm.memory.id[..8.min(sm.memory.id.len())];
-                let score_str = format!("[{:.2}]", sm.score);
                 let type_str = format!("{:?}", sm.memory.type_);
 
-                if use_color {
+                if show_scores {
+                    let score_str = format!("[{:.2}]", sm.score);
+                    if use_color {
+                        println!(
+                            "  {} {} {}  {}",
+                            score_str.if_supports_color(Stream::Stdout, |text| text.green()),
+                            id_short.if_supports_color(Stream::Stdout, |text| text.cyan()),
+                            type_str.if_supports_color(Stream::Stdout, |text| text.yellow()),
+                            sm.memory.summary
+                        );
+                    } else {
+                        println!(
+                            "  {} {} {}  {}",
+                            score_str, id_short, type_str, sm.memory.summary
+                        );
+                    }
+                } else if use_color {
                     println!(
-                        "  {} {} {}  {}",
-                        score_str.if_supports_color(Stream::Stdout, |text| text.green()),
+                        "  {} {}  {}",
                         id_short.if_supports_color(Stream::Stdout, |text| text.cyan()),
                         type_str.if_supports_color(Stream::Stdout, |text| text.yellow()),
                         sm.memory.summary
                     );
                 } else {
-                    println!(
-                        "  {} {} {}  {}",
-                        score_str, id_short, type_str, sm.memory.summary
-                    );
+                    println!("  {} {}  {}", id_short, type_str, sm.memory.summary);
                 }
             }
         }

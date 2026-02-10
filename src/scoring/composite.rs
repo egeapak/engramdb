@@ -5,6 +5,23 @@ use crate::types::{EngramConfig, Memory, Status};
 use super::decay::effective_relevance;
 use super::trust::trust_weight_from_config;
 
+/// Breakdown of composite score components.
+#[derive(Debug, Clone)]
+pub struct ScoreBreakdown {
+    /// The final composite score (0.0 to 1.0+)
+    pub final_score: f64,
+    /// Semantic similarity score (if available)
+    pub semantic: Option<f64>,
+    /// Effective relevance score (criticality * decay)
+    pub relevance: f64,
+    /// Scope proximity score
+    pub scope: f64,
+    /// Trust weight based on provenance
+    pub trust: f64,
+    /// Decay factor (1.0 = no decay)
+    pub decay: f64,
+}
+
 /// Context for scoring a memory during retrieval.
 #[derive(Debug, Clone)]
 pub struct ScoringContext {
@@ -89,13 +106,13 @@ impl ScoringContext {
 /// * `now` - Current timestamp
 ///
 /// # Returns
-/// Composite score from 0.0 to 1.0+
+/// ScoreBreakdown with component scores and final composite score
 pub fn composite_score(
     memory: &Memory,
     context: &ScoringContext,
     config: &EngramConfig,
     now: DateTime<Utc>,
-) -> f64 {
+) -> ScoreBreakdown {
     // Calculate component scores
     let relevance = effective_relevance(memory, now);
 
@@ -107,6 +124,9 @@ pub fn composite_score(
     );
 
     let trust = trust_weight_from_config(memory.provenance.source, &config.trust_weights);
+
+    // Calculate decay factor
+    let decay_factor_value = super::decay::decay_factor(memory.created_at, now, &memory.decay);
 
     // Determine which weights to use based on context
     let weights = if context.semantic_score.is_some() {
@@ -125,11 +145,15 @@ pub fn composite_score(
         weights.relevance * relevance + weights.scope * scope_score + weights.trust * trust;
 
     // Add semantic component if available
-    if let (Some(semantic_weight), Some(semantic_score)) =
+    let semantic_contribution = if let (Some(semantic_weight), Some(semantic_score)) =
         (weights.semantic, context.semantic_score)
     {
-        score += semantic_weight * semantic_score;
-    }
+        let contrib = semantic_weight * semantic_score;
+        score += contrib;
+        Some(contrib)
+    } else {
+        None
+    };
 
     // Apply challenge penalty if memory is challenged
     if memory.status == Status::Challenged {
@@ -138,7 +162,14 @@ pub fn composite_score(
         score *= 1.0 - challenge_penalty;
     }
 
-    score
+    ScoreBreakdown {
+        final_score: score,
+        semantic: semantic_contribution,
+        relevance,
+        scope: scope_score,
+        trust,
+        decay: decay_factor_value,
+    }
 }
 
 #[cfg(test)]
@@ -184,16 +215,18 @@ mod tests {
         let config = EngramConfig::default();
         let now = Utc::now();
 
-        let score = composite_score(&memory, &context, &config, now);
+        let breakdown = composite_score(&memory, &context, &config, now);
 
         // Should be > 0 and use with_query weights
-        assert!(score > 0.0);
+        assert!(breakdown.final_score > 0.0);
+        // Semantic should contribute
+        assert!(breakdown.semantic.is_some());
         // Semantic should contribute: 0.5 * 0.9 = 0.45
         // Relevance: 0.3 * 0.8 = 0.24
         // Scope: 0.15 * 1.0 = 0.15 (exact match)
         // Trust: 0.05 * 1.0 = 0.05
         // Total: ~0.89
-        assert!((score - 0.89).abs() < 0.1);
+        assert!((breakdown.final_score - 0.89).abs() < 0.1);
     }
 
     #[test]
@@ -207,16 +240,17 @@ mod tests {
         let config = EngramConfig::default();
         let now = Utc::now();
 
-        let score = composite_score(&memory, &context, &config, now);
+        let breakdown = composite_score(&memory, &context, &config, now);
 
         // Should be > 0 and use degraded weights
-        assert!(score > 0.0);
+        assert!(breakdown.final_score > 0.0);
         // No semantic component
+        assert!(breakdown.semantic.is_none());
         // Relevance: 0.6 * 0.8 = 0.48
         // Scope: 0.3 * 1.0 = 0.30
         // Trust: 0.1 * 1.0 = 0.10
         // Total: ~0.88
-        assert!((score - 0.88).abs() < 0.1);
+        assert!((breakdown.final_score - 0.88).abs() < 0.1);
     }
 
     #[test]
@@ -229,15 +263,17 @@ mod tests {
         let config = EngramConfig::default();
         let now = Utc::now();
 
-        let score = composite_score(&memory, &context, &config, now);
+        let breakdown = composite_score(&memory, &context, &config, now);
 
         // Should be > 0 and use scope_only weights
-        assert!(score > 0.0);
+        assert!(breakdown.final_score > 0.0);
+        // No semantic component
+        assert!(breakdown.semantic.is_none());
         // Relevance: 0.5 * 0.8 = 0.4
         // Scope: 0.4 * 1.0 = 0.4
         // Trust: 0.1 * 1.0 = 0.1
         // Total: ~0.9
-        assert!((score - 0.9).abs() < 0.1);
+        assert!((breakdown.final_score - 0.9).abs() < 0.1);
     }
 
     #[test]
@@ -252,12 +288,14 @@ mod tests {
         let config = EngramConfig::default();
         let now = Utc::now();
 
-        let score = composite_score(&memory, &context, &config, now);
-        let score_without_challenge =
+        let breakdown = composite_score(&memory, &context, &config, now);
+        let breakdown_without_challenge =
             composite_score(&create_test_memory(), &context, &config, now);
 
         // Should be 70% of non-challenged score (30% penalty)
-        assert!((score - score_without_challenge * 0.7).abs() < 0.01);
+        assert!(
+            (breakdown.final_score - breakdown_without_challenge.final_score * 0.7).abs() < 0.01
+        );
     }
 
     #[test]
@@ -273,12 +311,14 @@ mod tests {
         let config = EngramConfig::default();
         let now = Utc::now();
 
-        let score = composite_score(&memory, &context, &config, now);
+        let breakdown = composite_score(&memory, &context, &config, now);
 
         // Relevance should be affected by decay: 0.8 * 0.5 = 0.4
         // Total score should be lower than without decay
-        assert!(score < 0.9);
-        assert!(score > 0.0);
+        assert!(breakdown.final_score < 0.9);
+        assert!(breakdown.final_score > 0.0);
+        // Decay factor should be around 0.5 for exponential decay at half-life
+        assert!((breakdown.decay - 0.5).abs() < 0.1);
     }
 
     #[test]
@@ -293,11 +333,11 @@ mod tests {
         let config = EngramConfig::default();
         let now = Utc::now();
 
-        let score = composite_score(&memory, &context, &config, now);
-        let score_active = composite_score(&create_test_memory(), &context, &config, now);
+        let breakdown = composite_score(&memory, &context, &config, now);
+        let breakdown_active = composite_score(&create_test_memory(), &context, &config, now);
 
         // Status::NeedsReview should NOT get the 0.8x penalty (only Challenged does)
-        assert!((score - score_active).abs() < 0.01);
+        assert!((breakdown.final_score - breakdown_active.final_score).abs() < 0.01);
     }
 
     #[test]
@@ -312,13 +352,14 @@ mod tests {
         let config = EngramConfig::default();
         let now = Utc::now();
 
-        let score = composite_score(&memory, &context, &config, now);
+        let breakdown = composite_score(&memory, &context, &config, now);
 
         // With criticality=0.0, relevance component is 0.0, so score should be much lower
         // Scope: 0.4 * 1.0 = 0.4
         // Trust: 0.1 * 1.0 = 0.1
         // Total: ~0.5
-        assert!((score - 0.5).abs() < 0.1);
+        assert!((breakdown.final_score - 0.5).abs() < 0.1);
+        assert!((breakdown.relevance - 0.0).abs() < 0.01);
     }
 
     #[test]
@@ -333,13 +374,14 @@ mod tests {
         let config = EngramConfig::default();
         let now = Utc::now();
 
-        let score = composite_score(&memory, &context, &config, now);
+        let breakdown = composite_score(&memory, &context, &config, now);
 
         // Scope component = 0.0, but other components still contribute
         // Relevance: 0.5 * 0.8 = 0.4
         // Trust: 0.1 * 1.0 = 0.1
         // Total: ~0.5
-        assert!((score - 0.5).abs() < 0.1);
+        assert!((breakdown.final_score - 0.5).abs() < 0.1);
+        assert!((breakdown.scope - 0.0).abs() < 0.01);
     }
 
     #[test]
@@ -357,7 +399,7 @@ mod tests {
         let config = EngramConfig::default();
         let now = Utc::now();
 
-        let score = composite_score(&memory, &context, &config, now);
+        let breakdown = composite_score(&memory, &context, &config, now);
 
         // All components at 1.0 -> final score should be at max
         // Semantic: 0.5 * 1.0 = 0.5
@@ -365,7 +407,67 @@ mod tests {
         // Scope: 0.15 * 1.0 = 0.15
         // Trust: 0.05 * 1.0 = 0.05
         // Total: 1.0
-        assert!((score - 1.0).abs() < 0.1);
-        assert!(score <= 1.1); // Reasonable cap
+        assert!((breakdown.final_score - 1.0).abs() < 0.1);
+        assert!(breakdown.final_score <= 1.1); // Reasonable cap
+        assert_eq!(breakdown.decay, 1.0); // No decay
+    }
+
+    #[test]
+    fn test_score_breakdown_structure() {
+        let memory = create_test_memory();
+        let context = ScoringContext::with_semantic(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+            "test query".to_string(),
+            0.8,
+        );
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let breakdown = composite_score(&memory, &context, &config, now);
+
+        // Verify all fields are populated
+        assert!(breakdown.final_score > 0.0);
+        assert!(breakdown.semantic.is_some());
+        assert!(breakdown.relevance >= 0.0);
+        assert!(breakdown.scope >= 0.0);
+        assert!(breakdown.trust >= 0.0);
+        assert!(breakdown.decay >= 0.0);
+        assert!(breakdown.decay <= 1.0);
+    }
+
+    #[test]
+    fn test_score_breakdown_degraded_mode() {
+        let memory = create_test_memory();
+        let context = ScoringContext::with_query_degraded(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+            "test query".to_string(),
+        );
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let breakdown = composite_score(&memory, &context, &config, now);
+
+        // In degraded mode, semantic should be None
+        assert!(breakdown.semantic.is_none());
+        assert!(breakdown.final_score > 0.0);
+    }
+
+    #[test]
+    fn test_score_breakdown_scope_only_mode() {
+        let memory = create_test_memory();
+        let context = ScoringContext::scope_only(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+        );
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let breakdown = composite_score(&memory, &context, &config, now);
+
+        // In scope-only mode, semantic should be None
+        assert!(breakdown.semantic.is_none());
+        assert!(breakdown.final_score > 0.0);
     }
 }

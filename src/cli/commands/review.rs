@@ -15,10 +15,34 @@ use std::path::Path;
 /// # Arguments
 /// * `dir` - The directory containing the EngramDB store
 /// * `scope` - Optional logical scope filter
+/// * `type_str` - Optional memory type filter
+/// * `challenged_only` - Only show Status::Challenged memories
+/// * `stale_only` - Only show Status::NeedsReview memories
 /// * `formatter` - Output formatter for success/error messages
-pub fn run_review(dir: &Path, scope: Option<String>, formatter: &OutputFormatter) -> Result<()> {
+pub fn run_review(
+    dir: &Path,
+    scope: Option<String>,
+    type_str: Option<String>,
+    challenged_only: bool,
+    stale_only: bool,
+    formatter: &OutputFormatter,
+) -> Result<()> {
     let store = MemoryStore::open(dir)?;
-    let memories = review_memories(&store, scope.as_deref(), None)?;
+
+    let mut memories = review_memories(&store, scope.as_deref(), None)?;
+
+    // Apply type filter if provided
+    if let Some(ref t) = type_str {
+        let type_filter = crate::ops::parse_memory_type(t)?;
+        memories.retain(|m| m.type_ == type_filter);
+    }
+
+    // Apply status filters
+    if challenged_only {
+        memories.retain(|m| matches!(m.status, Status::Challenged));
+    } else if stale_only {
+        memories.retain(|m| matches!(m.status, Status::NeedsReview));
+    }
 
     if memories.is_empty() {
         formatter.print_message("No memories need review.");
@@ -65,10 +89,17 @@ pub fn run_review(dir: &Path, scope: Option<String>, formatter: &OutputFormatter
                         physical: None,
                         logical: None,
                         tags: None,
+                        tags_add: None,
+                        tags_remove: None,
                         criticality: None,
                         confidence: None,
                         details: None,
                         visibility: None,
+                        supersedes: None,
+                        decay_strategy: None,
+                        decay_half_life: None,
+                        decay_ttl: None,
+                        decay_floor: None,
                     },
                 )?;
                 formatter.print_success(&format!(
@@ -100,10 +131,17 @@ pub fn run_review(dir: &Path, scope: Option<String>, formatter: &OutputFormatter
                         physical: None,
                         logical: None,
                         tags: None,
+                        tags_add: None,
+                        tags_remove: None,
                         criticality: None,
                         confidence: None,
                         details: None,
                         visibility: None,
+                        supersedes: None,
+                        decay_strategy: None,
+                        decay_half_life: None,
+                        decay_ttl: None,
+                        decay_floor: None,
                     },
                 )?;
                 formatter.print_success(&format!(

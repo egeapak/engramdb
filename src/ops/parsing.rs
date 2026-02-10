@@ -3,7 +3,7 @@
 //! These functions are used by both CLI and MCP boundaries to convert
 //! user-provided strings into typed enums.
 
-use crate::types::{MemoryType, Status, Visibility};
+use crate::types::{DecayStrategy, MemoryType, Status, Visibility};
 use anyhow::{bail, Result};
 
 /// Parse a string into a MemoryType enum.
@@ -41,6 +41,20 @@ pub fn parse_status(s: &str) -> Result<Status> {
         "challenged" => Ok(Status::Challenged),
         _ => bail!(
             "Invalid status: {}. Valid values: active, needsreview, challenged",
+            s
+        ),
+    }
+}
+
+/// Parse a string into a DecayStrategy enum.
+pub fn parse_decay_strategy(s: &str) -> Result<DecayStrategy> {
+    match s.to_lowercase().as_str() {
+        "none" => Ok(DecayStrategy::None),
+        "linear" => Ok(DecayStrategy::Linear),
+        "exponential" => Ok(DecayStrategy::Exponential),
+        "step" => Ok(DecayStrategy::Step),
+        _ => bail!(
+            "Invalid decay strategy: {}. Valid values: none, linear, exponential, step",
             s
         ),
     }
@@ -112,5 +126,38 @@ mod tests {
     #[test]
     fn test_parse_status_invalid() {
         assert!(parse_status("invalid").is_err());
+    }
+
+    #[test]
+    fn test_parse_decay_strategy_valid() {
+        assert_eq!(parse_decay_strategy("none").unwrap(), DecayStrategy::None);
+        assert_eq!(
+            parse_decay_strategy("linear").unwrap(),
+            DecayStrategy::Linear
+        );
+        assert_eq!(
+            parse_decay_strategy("exponential").unwrap(),
+            DecayStrategy::Exponential
+        );
+        assert_eq!(parse_decay_strategy("step").unwrap(), DecayStrategy::Step);
+    }
+
+    #[test]
+    fn test_parse_decay_strategy_case_insensitive() {
+        assert_eq!(parse_decay_strategy("None").unwrap(), DecayStrategy::None);
+        assert_eq!(
+            parse_decay_strategy("LINEAR").unwrap(),
+            DecayStrategy::Linear
+        );
+        assert_eq!(
+            parse_decay_strategy("Exponential").unwrap(),
+            DecayStrategy::Exponential
+        );
+    }
+
+    #[test]
+    fn test_parse_decay_strategy_invalid() {
+        assert!(parse_decay_strategy("invalid").is_err());
+        assert!(parse_decay_strategy("").is_err());
     }
 }
