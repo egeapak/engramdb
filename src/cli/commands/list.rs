@@ -1,8 +1,8 @@
-use anyhow::{Result, bail};
-use std::path::Path;
+use crate::cli::output::OutputFormatter;
 use crate::storage::MemoryStore;
 use crate::types::{MemoryType, Status};
-use crate::cli::output::OutputFormatter;
+use anyhow::{bail, Result};
+use std::path::Path;
 
 pub fn run_list(
     dir: &Path,
@@ -24,9 +24,7 @@ pub fn run_list(
     }
 
     if !tags_filter.is_empty() {
-        entries.retain(|e| {
-            tags_filter.iter().any(|tag| e.tags.contains(tag))
-        });
+        entries.retain(|e| tags_filter.iter().any(|tag| e.tags.contains(tag)));
     }
 
     if let Some(status_str) = status_filter {
@@ -57,6 +55,9 @@ fn parse_status(s: &str) -> Result<Status> {
         "active" => Ok(Status::Active),
         "needsreview" | "needs-review" | "needs_review" => Ok(Status::NeedsReview),
         "challenged" => Ok(Status::Challenged),
-        _ => bail!("Invalid status: {}. Valid values: active, needsreview, challenged", s),
+        _ => bail!(
+            "Invalid status: {}. Valid values: active, needsreview, challenged",
+            s
+        ),
     }
 }

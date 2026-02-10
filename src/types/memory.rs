@@ -371,12 +371,7 @@ mod tests {
 
     #[test]
     fn test_memory_touch() {
-        let mut memory = Memory::new(
-            MemoryType::Decision,
-            "Test",
-            "Content",
-            Provenance::human(),
-        );
+        let mut memory = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
         let original_access = memory.accessed_at;
 
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -387,12 +382,7 @@ mod tests {
 
     #[test]
     fn test_memory_add_challenge() {
-        let mut memory = Memory::new(
-            MemoryType::Decision,
-            "Test",
-            "Content",
-            Provenance::human(),
-        );
+        let mut memory = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
         let original_updated = memory.updated_at;
 
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -406,24 +396,14 @@ mod tests {
 
     #[test]
     fn test_memory_is_expired_none() {
-        let memory = Memory::new(
-            MemoryType::Decision,
-            "Test",
-            "Content",
-            Provenance::human(),
-        );
+        let memory = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
 
         assert!(!memory.is_expired());
     }
 
     #[test]
     fn test_memory_is_expired_future() {
-        let mut memory = Memory::new(
-            MemoryType::Decision,
-            "Test",
-            "Content",
-            Provenance::human(),
-        );
+        let mut memory = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
         memory.expires_at = Some(Utc::now() + Duration::days(1));
 
         assert!(!memory.is_expired());
@@ -431,12 +411,7 @@ mod tests {
 
     #[test]
     fn test_memory_is_expired_past() {
-        let mut memory = Memory::new(
-            MemoryType::Decision,
-            "Test",
-            "Content",
-            Provenance::human(),
-        );
+        let mut memory = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
         memory.expires_at = Some(Utc::now() - Duration::days(1));
 
         assert!(memory.is_expired());
@@ -445,12 +420,7 @@ mod tests {
     #[test]
     fn test_memory_is_active() {
         // Active and not expired
-        let mut memory = Memory::new(
-            MemoryType::Decision,
-            "Test",
-            "Content",
-            Provenance::human(),
-        );
+        let mut memory = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
         assert!(memory.is_active());
 
         // Challenged status

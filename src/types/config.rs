@@ -189,7 +189,7 @@ impl Default for RetrievalConfig {
 }
 
 /// Top-level EngramDB configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EngramConfig {
     /// Retrieval settings
     #[serde(default)]
@@ -212,28 +212,21 @@ pub struct EngramConfig {
     pub thresholds: ThresholdsConfig,
 }
 
-impl Default for EngramConfig {
-    fn default() -> Self {
-        Self {
-            retrieval: RetrievalConfig::default(),
-            scope_proximity: ScopeProximityConfig::default(),
-            logical_bonus: LogicalBonusConfig::default(),
-            trust_weights: TrustWeights::default(),
-            thresholds: ThresholdsConfig::default(),
-        }
-    }
-}
-
 impl EngramConfig {
     /// Load configuration from a TOML file
-    pub fn from_toml_file(path: impl AsRef<std::path::Path>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_toml_file(
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = std::fs::read_to_string(path)?;
         let config = toml::from_str(&contents)?;
         Ok(config)
     }
 
     /// Save configuration to a TOML file
-    pub fn to_toml_file(&self, path: impl AsRef<std::path::Path>) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn to_toml_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let toml_string = toml::to_string_pretty(self)?;
         std::fs::write(path, toml_string)?;
         Ok(())
@@ -314,9 +307,15 @@ mod tests {
         // Verify all values match
         assert_eq!(loaded.retrieval.max_results, original.retrieval.max_results);
         assert_eq!(loaded.trust_weights.human, original.trust_weights.human);
-        assert_eq!(loaded.scope_proximity.exact_file, original.scope_proximity.exact_file);
+        assert_eq!(
+            loaded.scope_proximity.exact_file,
+            original.scope_proximity.exact_file
+        );
         assert_eq!(loaded.logical_bonus.exact, original.logical_bonus.exact);
-        assert_eq!(loaded.thresholds.needs_review, original.thresholds.needs_review);
+        assert_eq!(
+            loaded.thresholds.needs_review,
+            original.thresholds.needs_review
+        );
     }
 
     #[test]

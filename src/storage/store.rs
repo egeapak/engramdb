@@ -1,12 +1,12 @@
 //! Main storage orchestrator - MemoryStore
 
-use crate::types::{Memory, MemoryUpdate, Visibility};
 use super::error::{Result, StorageError};
-use super::{paths, project_id, manifest, index, memory_file};
-use std::path::{Path, PathBuf};
-use std::fs;
+use super::{index, manifest, memory_file, paths, project_id};
+use crate::types::{Memory, MemoryUpdate, Visibility};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryEntry {
@@ -15,17 +15,9 @@ pub struct RegistryEntry {
     pub last_opened: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Registry {
     pub projects: Vec<RegistryEntry>,
-}
-
-impl Default for Registry {
-    fn default() -> Self {
-        Self {
-            projects: Vec::new(),
-        }
-    }
 }
 
 pub struct MemoryStore {
@@ -49,7 +41,10 @@ impl MemoryStore {
 
         // Create empty config.toml
         let config_path = engramdb_dir.join("config.toml");
-        fs::write(config_path, "# EngramDB configuration\n# See documentation for available settings\n")?;
+        fs::write(
+            config_path,
+            "# EngramDB configuration\n# See documentation for available settings\n",
+        )?;
 
         // Create empty index.json
         let index_path = engramdb_dir.join("index.json");
@@ -203,7 +198,10 @@ impl MemoryStore {
     /// Delete a memory
     pub fn delete(&self, id: &str) -> Result<()> {
         // Try to delete from shared
-        if self.delete_from_dir(id, &paths::memories_dir(&self.project_dir)).is_ok() {
+        if self
+            .delete_from_dir(id, &paths::memories_dir(&self.project_dir))
+            .is_ok()
+        {
             self.update_manifest_stats()?;
             return Ok(());
         }
@@ -364,7 +362,11 @@ impl MemoryStore {
         let abs_path = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         let path_str = abs_path.to_string_lossy().to_string();
 
-        if let Some(entry) = registry.projects.iter_mut().find(|e| e.project_id == project_id) {
+        if let Some(entry) = registry
+            .projects
+            .iter_mut()
+            .find(|e| e.project_id == project_id)
+        {
             entry.last_opened = chrono::Utc::now();
             entry.project_path = path_str;
         } else {
@@ -430,7 +432,7 @@ mod tests {
         let result = MemoryStore::open(project_dir);
         assert!(result.is_err());
         match result {
-            Err(StorageError::NotInitialized) => {},
+            Err(StorageError::NotInitialized) => {}
             _ => panic!("Expected NotInitialized error"),
         }
     }
@@ -480,8 +482,10 @@ mod tests {
 
         // Create two memories with same prefix
         // We'll manually set IDs to ensure they start the same
-        let memory1 = create_test_memory("aaaa1111-0000-0000-0000-000000000001", Visibility::Shared);
-        let memory2 = create_test_memory("aaaa2222-0000-0000-0000-000000000002", Visibility::Shared);
+        let memory1 =
+            create_test_memory("aaaa1111-0000-0000-0000-000000000001", Visibility::Shared);
+        let memory2 =
+            create_test_memory("aaaa2222-0000-0000-0000-000000000002", Visibility::Shared);
 
         store.create(&memory1).unwrap();
         store.create(&memory2).unwrap();
@@ -501,8 +505,11 @@ mod tests {
             Err(StorageError::Validation(msg)) => {
                 assert!(msg.contains("Ambiguous"));
                 assert!(msg.contains("2 memories"));
-            },
-            other => panic!("Expected Validation error for ambiguous prefix, got: {:?}", other),
+            }
+            other => panic!(
+                "Expected Validation error for ambiguous prefix, got: {:?}",
+                other
+            ),
         }
     }
 
@@ -518,7 +525,7 @@ mod tests {
         match result {
             Err(StorageError::NotFound(id)) => {
                 assert_eq!(id, "nonexistent-id");
-            },
+            }
             _ => panic!("Expected NotFound error"),
         }
     }
@@ -564,7 +571,7 @@ mod tests {
         let result = store.get("test-delete-123");
         assert!(result.is_err());
         match result {
-            Err(StorageError::NotFound(_)) => {},
+            Err(StorageError::NotFound(_)) => {}
             _ => panic!("Expected NotFound error after delete"),
         }
     }

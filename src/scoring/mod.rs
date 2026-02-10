@@ -3,7 +3,6 @@
 /// This module provides functionality to calculate composite scores for memories
 /// based on multiple factors including semantic similarity, relevance (criticality + decay),
 /// scope proximity, and trust/provenance.
-
 mod composite;
 mod decay;
 mod trust;

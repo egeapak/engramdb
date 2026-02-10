@@ -1,5 +1,5 @@
-use crate::types::{Memory, MemoryType, Status};
 use crate::storage::index::IndexEntry;
+use crate::types::{Memory, MemoryType, Status};
 use owo_colors::{OwoColorize, Stream};
 use serde_json;
 use std::io::{self, IsTerminal};
@@ -44,12 +44,18 @@ impl OutputFormatter {
     pub fn print_success(&self, message: &str) {
         match self.format {
             OutputFormat::Json => {
-                println!("{}", serde_json::json!({ "success": true, "message": message }));
+                println!(
+                    "{}",
+                    serde_json::json!({ "success": true, "message": message })
+                );
             }
             OutputFormat::Pretty => {
                 if self.use_color {
-                    println!("{} {}", "✓".if_supports_color(Stream::Stdout, |text| text.green()),
-                             message.if_supports_color(Stream::Stdout, |text| text.green()));
+                    println!(
+                        "{} {}",
+                        "✓".if_supports_color(Stream::Stdout, |text| text.green()),
+                        message.if_supports_color(Stream::Stdout, |text| text.green())
+                    );
                 } else {
                     println!("✓ {}", message);
                 }
@@ -67,8 +73,11 @@ impl OutputFormatter {
             }
             OutputFormat::Pretty => {
                 if self.use_color {
-                    eprintln!("{} {}", "✗".if_supports_color(Stream::Stderr, |text| text.red()),
-                              message.if_supports_color(Stream::Stderr, |text| text.red()));
+                    eprintln!(
+                        "{} {}",
+                        "✗".if_supports_color(Stream::Stderr, |text| text.red()),
+                        message.if_supports_color(Stream::Stderr, |text| text.red())
+                    );
                 } else {
                     eprintln!("✗ {}", message);
                 }
@@ -95,13 +104,18 @@ impl OutputFormatter {
 
     fn print_memory_pretty(&self, memory: &Memory) {
         let id_display = if self.use_color {
-            memory.id.if_supports_color(Stream::Stdout, |text| text.cyan()).to_string()
+            memory
+                .id
+                .if_supports_color(Stream::Stdout, |text| text.cyan())
+                .to_string()
         } else {
             memory.id.clone()
         };
 
         let type_display = if self.use_color {
-            format!("{:?}", memory.type_).if_supports_color(Stream::Stdout, |text| text.yellow()).to_string()
+            format!("{:?}", memory.type_)
+                .if_supports_color(Stream::Stdout, |text| text.yellow())
+                .to_string()
         } else {
             format!("{:?}", memory.type_)
         };
@@ -186,13 +200,17 @@ impl OutputFormatter {
         for entry in entries {
             let id_short = &entry.id[..8.min(entry.id.len())];
             let id_display = if self.use_color {
-                id_short.if_supports_color(Stream::Stdout, |text| text.cyan()).to_string()
+                id_short
+                    .if_supports_color(Stream::Stdout, |text| text.cyan())
+                    .to_string()
             } else {
                 id_short.to_string()
             };
 
             let type_display = if self.use_color {
-                format!("{:?}", entry.type_).if_supports_color(Stream::Stdout, |text| text.yellow()).to_string()
+                format!("{:?}", entry.type_)
+                    .if_supports_color(Stream::Stdout, |text| text.yellow())
+                    .to_string()
             } else {
                 format!("{:?}", entry.type_)
             };

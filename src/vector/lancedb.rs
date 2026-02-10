@@ -8,13 +8,14 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arrow_array::{
-    Array, ArrayRef, FixedSizeListArray, Float32Array, Float64Array, RecordBatch, RecordBatchIterator, StringArray,
+    Array, ArrayRef, FixedSizeListArray, Float32Array, Float64Array, RecordBatch,
+    RecordBatchIterator, StringArray,
 };
 use arrow_schema::{DataType, Field, Schema};
-use lancedb::{connect, Connection, Table};
-use lancedb::query::{ExecutableQuery, QueryBase};
-use tokio::runtime::Runtime;
 use futures::stream::StreamExt;
+use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::{connect, Connection, Table};
+use tokio::runtime::Runtime;
 
 use super::{VectorMatch, VectorMetadata, VectorStore};
 
@@ -111,10 +112,8 @@ impl LanceDbStore {
                     // Table doesn't exist, create it with empty data
                     let empty_batch = RecordBatch::new_empty(schema.clone());
                     let schema_ref = schema.clone();
-                    let batches = RecordBatchIterator::new(
-                        vec![Ok(empty_batch)].into_iter(),
-                        schema_ref,
-                    );
+                    let batches =
+                        RecordBatchIterator::new(vec![Ok(empty_batch)].into_iter(), schema_ref);
                     connection
                         .create_table(&table_name, batches)
                         .execute()
@@ -141,7 +140,12 @@ impl LanceDbStore {
     }
 
     /// Create a RecordBatch from a single vector and metadata
-    fn create_batch(&self, id: &str, vector: Vec<f32>, metadata: VectorMetadata) -> Result<RecordBatch> {
+    fn create_batch(
+        &self,
+        id: &str,
+        vector: Vec<f32>,
+        metadata: VectorMetadata,
+    ) -> Result<RecordBatch> {
         // Validate vector dimensions
         if vector.len() != self.dimensions {
             anyhow::bail!(
@@ -171,8 +175,8 @@ impl LanceDbStore {
             .context("Failed to serialize physical scope")?;
         let logical_json = serde_json::to_string(&metadata.logical)
             .context("Failed to serialize logical scope")?;
-        let tags_json = serde_json::to_string(&metadata.tags)
-            .context("Failed to serialize tags")?;
+        let tags_json =
+            serde_json::to_string(&metadata.tags).context("Failed to serialize tags")?;
 
         let physical_array = StringArray::from(vec![physical_json.as_str()]);
         let logical_array = StringArray::from(vec![logical_json.as_str()]);
@@ -209,10 +213,7 @@ impl VectorStore for LanceDbStore {
 
             // Add new record
             let schema_ref = batch.schema();
-            let batches = RecordBatchIterator::new(
-                vec![Ok(batch)].into_iter(),
-                schema_ref,
-            );
+            let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema_ref);
             table
                 .add(batches)
                 .execute()
@@ -281,7 +282,11 @@ impl VectorStore for LanceDbStore {
             }
 
             // Sort by score descending (should already be sorted, but ensure)
-            matches.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            matches.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
             Ok(matches)
         })
@@ -472,7 +477,9 @@ mod tests {
         };
 
         // Add only 2 vectors
-        store.upsert("id1", vector1.clone(), metadata.clone()).unwrap();
+        store
+            .upsert("id1", vector1.clone(), metadata.clone())
+            .unwrap();
         store.upsert("id2", vector2, metadata).unwrap();
 
         // Search with limit=100

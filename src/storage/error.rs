@@ -58,8 +58,8 @@ mod tests {
     #[test]
     fn test_error_from_json() {
         let bad_json = "{ invalid json }";
-        let result: Result<serde_json::Value> = serde_json::from_str(bad_json)
-            .map_err(|e| e.into());
+        let result: Result<serde_json::Value> =
+            serde_json::from_str(bad_json).map_err(|e| e.into());
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), StorageError::Json(_)));

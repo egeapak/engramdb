@@ -66,7 +66,9 @@ mod tests {
     #[test]
     fn test_personal_dir() {
         let result = personal_dir("abc123");
-        assert!(result.to_string_lossy().ends_with("projects/abc123/personal"));
+        assert!(result
+            .to_string_lossy()
+            .ends_with("projects/abc123/personal"));
     }
 
     #[test]
@@ -78,6 +80,8 @@ mod tests {
     #[test]
     fn test_lancedb_dir() {
         let result = lancedb_dir("abc123");
-        assert!(result.to_string_lossy().ends_with("projects/abc123/lancedb"));
+        assert!(result
+            .to_string_lossy()
+            .ends_with("projects/abc123/lancedb"));
     }
 }

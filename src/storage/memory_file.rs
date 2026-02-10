@@ -1,7 +1,7 @@
 //! Frontmatter markdown parser and writer for memory files
 
-use crate::types::Memory;
 use super::error::{Result, StorageError};
+use crate::types::Memory;
 
 /// Parse a memory file in frontmatter markdown format:
 /// ```text
@@ -24,12 +24,14 @@ pub fn parse_memory_file(content: &str) -> Result<Memory> {
     parts.next();
 
     // Get frontmatter
-    let frontmatter = parts.next()
+    let frontmatter = parts
+        .next()
         .ok_or_else(|| StorageError::InvalidFormat("Missing frontmatter".to_string()))?
         .trim();
 
     // Get body
-    let body = parts.next()
+    let body = parts
+        .next()
         .ok_or_else(|| StorageError::InvalidFormat("Missing body after frontmatter".to_string()))?;
 
     // Parse frontmatter as YAML
@@ -56,7 +58,7 @@ fn parse_body_sections(body: &str) -> std::collections::HashMap<String, String> 
     let mut current_content = Vec::new();
 
     for line in body.lines() {
-        if line.starts_with("## ") {
+        if let Some(header) = line.strip_prefix("## ") {
             // Save previous section if any
             if let Some(section_name) = current_section.take() {
                 sections.insert(section_name, current_content.join("\n").trim().to_string());
@@ -64,7 +66,7 @@ fn parse_body_sections(body: &str) -> std::collections::HashMap<String, String> 
             }
 
             // Start new section
-            current_section = Some(line[3..].trim().to_string());
+            current_section = Some(header.trim().to_string());
         } else if current_section.is_some() {
             current_content.push(line);
         }
@@ -91,13 +93,13 @@ pub fn write_memory_file(memory: &Memory) -> Result<String> {
     // Write content section
     output.push_str("## Content\n\n");
     output.push_str(&memory.content);
-    output.push_str("\n");
+    output.push('\n');
 
     // Write details section if present
     if let Some(details) = &memory.details {
         output.push_str("\n## Details\n\n");
         output.push_str(details);
-        output.push_str("\n");
+        output.push('\n');
     }
 
     Ok(output)
@@ -378,7 +380,9 @@ No problem!
         let memory = parse_memory_file(input).unwrap();
         assert_eq!(memory.id, "test-dashes");
         assert!(memory.content.contains("---"));
-        assert!(memory.content.contains("And it should still parse correctly"));
+        assert!(memory
+            .content
+            .contains("And it should still parse correctly"));
         assert!(memory.details.is_some());
         let details = memory.details.unwrap();
         assert!(details.contains("---"));

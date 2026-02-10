@@ -1,7 +1,7 @@
+use crate::cli::output::OutputFormatter;
+use crate::storage::MemoryStore;
 use anyhow::Result;
 use std::path::Path;
-use crate::storage::MemoryStore;
-use crate::cli::output::OutputFormatter;
 
 pub fn run_init(dir: &Path, formatter: &OutputFormatter) -> Result<()> {
     MemoryStore::init(dir)?;

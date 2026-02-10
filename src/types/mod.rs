@@ -1,5 +1,4 @@
 /// Core data model types for EngramDB
-
 mod challenge;
 pub mod config;
 mod decay;

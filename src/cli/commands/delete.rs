@@ -1,15 +1,10 @@
-use anyhow::Result;
-use std::path::Path;
-use std::io::{self, Write};
-use crate::storage::MemoryStore;
 use crate::cli::output::OutputFormatter;
+use crate::storage::MemoryStore;
+use anyhow::Result;
+use std::io::{self, Write};
+use std::path::Path;
 
-pub fn run_delete(
-    dir: &Path,
-    id: &str,
-    force: bool,
-    formatter: &OutputFormatter,
-) -> Result<()> {
+pub fn run_delete(dir: &Path, id: &str, force: bool, formatter: &OutputFormatter) -> Result<()> {
     let store = MemoryStore::open(dir)?;
 
     // Get the memory to confirm what we're deleting

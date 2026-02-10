@@ -1,10 +1,10 @@
 //! Manifest file read/write operations
 
-use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
 use super::error::Result;
-use std::path::Path;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::Path;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Manifest {
@@ -75,9 +75,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let manifest_path = dir.path().join("manifest.toml");
 
-        let mut original = Manifest::default();
-        original.project = "test_project".to_string();
-        original.description = "Test description".to_string();
+        let mut original = Manifest {
+            project: "test_project".to_string(),
+            description: "Test description".to_string(),
+            ..Default::default()
+        };
         original.stats.memory_count = 42;
         original.stats.logical_scopes = vec!["scope1".to_string(), "scope2".to_string()];
 
@@ -95,7 +97,10 @@ mod tests {
     fn test_load_manifest_file_not_found() {
         let result = load_manifest(Path::new("/nonexistent/path/manifest.toml"));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), super::super::error::StorageError::Io(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            super::super::error::StorageError::Io(_)
+        ));
     }
 
     #[test]
@@ -107,7 +112,10 @@ mod tests {
 
         let result = load_manifest(&manifest_path);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), super::super::error::StorageError::Toml(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            super::super::error::StorageError::Toml(_)
+        ));
     }
 
     #[test]

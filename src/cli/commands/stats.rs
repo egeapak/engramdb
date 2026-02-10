@@ -1,9 +1,9 @@
-use anyhow::Result;
-use std::path::Path;
-use std::collections::{HashMap, HashSet};
+use crate::cli::output::{OutputFormatter, Stats};
 use crate::storage::MemoryStore;
 use crate::types::{MemoryType, Status};
-use crate::cli::output::{OutputFormatter, Stats};
+use anyhow::Result;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 pub fn run_stats(dir: &Path, formatter: &OutputFormatter) -> Result<()> {
     let store = MemoryStore::open(dir)?;

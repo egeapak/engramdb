@@ -8,16 +8,16 @@
 //! - Project identity computation
 //! - Path resolution
 
+pub mod config;
 pub mod error;
-pub mod memory_file;
 pub mod index;
 pub mod manifest;
-pub mod config;
-pub mod project_id;
+pub mod memory_file;
 pub mod paths;
+pub mod project_id;
 pub mod store;
 
 pub use error::{Result, StorageError};
-pub use store::MemoryStore;
 pub use index::{Index, IndexEntry};
 pub use manifest::Manifest;
+pub use store::MemoryStore;

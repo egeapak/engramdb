@@ -174,7 +174,10 @@ mod tests {
             // embed_batch(&["text"]) should equal vec![embed("text")]
             assert_eq!(single_embedding.len(), batch_embedding.len());
             for (a, b) in single_embedding.iter().zip(batch_embedding.iter()) {
-                assert!((a - b).abs() < 1e-6, "Single and batch embeddings should match");
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "Single and batch embeddings should match"
+                );
             }
         }
     }

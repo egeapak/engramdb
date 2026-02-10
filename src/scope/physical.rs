@@ -106,10 +106,8 @@ fn calculate_glob_score(pattern: &str, current_path: &str) -> f64 {
     }
 
     // If the pattern is like "src/api/**", it's a parent module pattern
-    if pattern.contains("**") {
-        if current_path.starts_with(pattern_dir) || pattern_dir.is_empty() {
-            return 0.6;
-        }
+    if pattern.contains("**") && (current_path.starts_with(pattern_dir) || pattern_dir.is_empty()) {
+        return 0.6;
     }
 
     // For other glob patterns that match, default to parent score
@@ -134,8 +132,7 @@ fn is_parent_directory(pattern: &str, current_path: &str) -> bool {
         return false;
     }
 
-    if current_path.starts_with(pattern_normalized) {
-        let remainder = &current_path[pattern_normalized.len()..];
+    if let Some(remainder) = current_path.strip_prefix(pattern_normalized) {
         // Check if there's a path separator after the pattern
         remainder.starts_with('/')
     } else {
@@ -174,7 +171,10 @@ mod tests {
 
     #[test]
     fn test_proximity_exact() {
-        let score = proximity(&["src/api/auth/handlers.rs".to_string()], "src/api/auth/handlers.rs");
+        let score = proximity(
+            &["src/api/auth/handlers.rs".to_string()],
+            "src/api/auth/handlers.rs",
+        );
         assert_eq!(score, 1.0);
     }
 

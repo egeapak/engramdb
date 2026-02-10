@@ -1,8 +1,8 @@
 //! Project identity computation based on git remote or working directory
 
-use sha2::{Sha256, Digest};
-use std::path::Path;
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::path::Path;
 
 /// Compute a project ID from the project directory.
 ///
@@ -19,7 +19,8 @@ pub fn compute_project_id(project_dir: &Path) -> String {
     }
 
     // Fallback to absolute path
-    let abs_path = project_dir.canonicalize()
+    let abs_path = project_dir
+        .canonicalize()
         .unwrap_or_else(|_| project_dir.to_path_buf());
     let path_str = abs_path.to_string_lossy();
     hash_string(&path_str)

@@ -60,19 +60,43 @@ mod tests {
             inferred: 0.5,
         };
 
-        assert_eq!(trust_weight_from_config(ProvenanceSource::Human, &weights), 1.0);
-        assert_eq!(trust_weight_from_config(ProvenanceSource::Agent, &weights), 0.9);
-        assert_eq!(trust_weight_from_config(ProvenanceSource::Imported, &weights), 0.75);
-        assert_eq!(trust_weight_from_config(ProvenanceSource::Inferred, &weights), 0.5);
+        assert_eq!(
+            trust_weight_from_config(ProvenanceSource::Human, &weights),
+            1.0
+        );
+        assert_eq!(
+            trust_weight_from_config(ProvenanceSource::Agent, &weights),
+            0.9
+        );
+        assert_eq!(
+            trust_weight_from_config(ProvenanceSource::Imported, &weights),
+            0.75
+        );
+        assert_eq!(
+            trust_weight_from_config(ProvenanceSource::Inferred, &weights),
+            0.5
+        );
     }
 
     #[test]
     fn test_trust_weight_from_default_config() {
         let weights = TrustWeights::default();
 
-        assert_eq!(trust_weight_from_config(ProvenanceSource::Human, &weights), 1.0);
-        assert_eq!(trust_weight_from_config(ProvenanceSource::Agent, &weights), 0.9);
-        assert_eq!(trust_weight_from_config(ProvenanceSource::Imported, &weights), 0.7);
-        assert_eq!(trust_weight_from_config(ProvenanceSource::Inferred, &weights), 0.6);
+        assert_eq!(
+            trust_weight_from_config(ProvenanceSource::Human, &weights),
+            1.0
+        );
+        assert_eq!(
+            trust_weight_from_config(ProvenanceSource::Agent, &weights),
+            0.9
+        );
+        assert_eq!(
+            trust_weight_from_config(ProvenanceSource::Imported, &weights),
+            0.7
+        );
+        assert_eq!(
+            trust_weight_from_config(ProvenanceSource::Inferred, &weights),
+            0.6
+        );
     }
 }

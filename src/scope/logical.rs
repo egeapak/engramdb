@@ -76,11 +76,7 @@ fn are_siblings(scope_a: &str, scope_b: &str) -> bool {
 /// For example, "auth.oauth.google" → Some("auth.oauth")
 /// "auth" → None (no parent)
 fn extract_parent(scope: &str) -> Option<String> {
-    if let Some(pos) = scope.rfind('.') {
-        Some(scope[..pos].to_string())
-    } else {
-        None
-    }
+    scope.rfind('.').map(|pos| scope[..pos].to_string())
 }
 
 #[cfg(test)]
@@ -137,10 +133,7 @@ mod tests {
     #[test]
     fn test_proximity_multiple_current_scopes() {
         let memory = vec!["auth.oauth".to_string()];
-        let current = vec![
-            "database.postgres".to_string(),
-            "auth.oauth".to_string(),
-        ];
+        let current = vec!["database.postgres".to_string(), "auth.oauth".to_string()];
         assert_eq!(proximity(&memory, &current), 0.3);
     }
 
@@ -164,7 +157,10 @@ mod tests {
 
     #[test]
     fn test_extract_parent() {
-        assert_eq!(extract_parent("auth.oauth.google"), Some("auth.oauth".to_string()));
+        assert_eq!(
+            extract_parent("auth.oauth.google"),
+            Some("auth.oauth".to_string())
+        );
         assert_eq!(extract_parent("auth.oauth"), Some("auth".to_string()));
         assert_eq!(extract_parent("auth"), None);
         assert_eq!(extract_parent(""), None);

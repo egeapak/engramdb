@@ -37,11 +37,7 @@ impl ScoringContext {
     }
 
     /// Create a new ScoringContext with a query (degraded mode, no embeddings)
-    pub fn with_query_degraded(
-        path: Option<String>,
-        logical: Vec<String>,
-        query: String,
-    ) -> Self {
+    pub fn with_query_degraded(path: Option<String>, logical: Vec<String>, query: String) -> Self {
         Self {
             path,
             logical,
@@ -125,9 +121,8 @@ pub fn composite_score(
     };
 
     // Calculate base score
-    let mut score = weights.relevance * relevance
-        + weights.scope * scope_score
-        + weights.trust * trust;
+    let mut score =
+        weights.relevance * relevance + weights.scope * scope_score + weights.trust * trust;
 
     // Add semantic component if available
     if let (Some(semantic_weight), Some(semantic_score)) =
@@ -258,12 +253,8 @@ mod tests {
         let now = Utc::now();
 
         let score = composite_score(&memory, &context, &config, now);
-        let score_without_challenge = composite_score(
-            &create_test_memory(),
-            &context,
-            &config,
-            now,
-        );
+        let score_without_challenge =
+            composite_score(&create_test_memory(), &context, &config, now);
 
         // Should be 70% of non-challenged score (30% penalty)
         assert!((score - score_without_challenge * 0.7).abs() < 0.01);
@@ -303,12 +294,7 @@ mod tests {
         let now = Utc::now();
 
         let score = composite_score(&memory, &context, &config, now);
-        let score_active = composite_score(
-            &create_test_memory(),
-            &context,
-            &config,
-            now,
-        );
+        let score_active = composite_score(&create_test_memory(), &context, &config, now);
 
         // Status::NeedsReview should NOT get the 0.8x penalty (only Challenged does)
         assert!((score - score_active).abs() < 0.01);

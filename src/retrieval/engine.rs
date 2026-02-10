@@ -1,29 +1,24 @@
 //! Retrieval engine for EngramDB
 
-use crate::storage::{MemoryStore, Result};
-use crate::types::{Memory, MemoryType, EngramConfig};
-use crate::scoring::{composite_score, ScoringContext};
+use super::filters::{apply_index_filters, SearchFilters};
 use crate::embeddings::EmbeddingProvider;
-use crate::vector::{VectorStore, VectorMetadata};
-use super::filters::{SearchFilters, apply_index_filters};
+use crate::scoring::{composite_score, ScoringContext};
+use crate::storage::{MemoryStore, Result};
+use crate::types::{EngramConfig, Memory, MemoryType};
+use crate::vector::{VectorMetadata, VectorStore};
 use chrono::Utc;
 use std::collections::HashMap;
 
 /// Detail level for retrieved memories
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DetailLevel {
     /// Just summaries from index (minimal data)
     Summary,
     /// Summary + content (default)
+    #[default]
     Content,
     /// Everything including details field
     Full,
-}
-
-impl Default for DetailLevel {
-    fn default() -> Self {
-        DetailLevel::Content
-    }
 }
 
 /// Query parameters for retrieval
@@ -175,7 +170,10 @@ impl RetrievalEngine {
         let semantic_scores_map: Option<HashMap<String, f64>> = if let Some(ref q) = query.query {
             if let (Some(provider), Some(vs)) = (&self.embedding_provider, &self.vector_store) {
                 if let Ok(query_vector) = provider.embed(q) {
-                    let limit = query.max_results.unwrap_or(self.config.retrieval.max_results) * 3;
+                    let limit = query
+                        .max_results
+                        .unwrap_or(self.config.retrieval.max_results)
+                        * 3;
                     if let Ok(matches) = vs.search(query_vector, limit) {
                         Some(matches.into_iter().map(|m| (m.id, m.score)).collect())
                     } else {
@@ -199,7 +197,9 @@ impl RetrievalEngine {
                 let memory = self.store.get(&entry.id).ok()?;
 
                 // Skip expired memories unless include_expired is true
-                let include_expired = query.include_expired.unwrap_or(self.config.retrieval.include_expired);
+                let include_expired = query
+                    .include_expired
+                    .unwrap_or(self.config.retrieval.include_expired);
                 if memory.is_expired() && !include_expired {
                     return None;
                 }
@@ -233,10 +233,7 @@ impl RetrievalEngine {
                     }
                 } else {
                     // Scope-only retrieval
-                    ScoringContext::scope_only(
-                        query.path.clone(),
-                        query.logical.clone(),
-                    )
+                    ScoringContext::scope_only(query.path.clone(), query.logical.clone())
                 };
 
                 let score = composite_score(&memory, &context, &self.config, Utc::now());
@@ -251,14 +248,18 @@ impl RetrievalEngine {
 
         // Step 6: Sort by score descending
         scored_memories.sort_by(|a, b| {
-            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Track total before applying limit
         let total = scored_memories.len();
 
         // Step 7: Apply max_results limit
-        let max_results = query.max_results.unwrap_or(self.config.retrieval.max_results);
+        let max_results = query
+            .max_results
+            .unwrap_or(self.config.retrieval.max_results);
         scored_memories.truncate(max_results);
 
         // Step 8: Strip details based on detail_level
@@ -310,51 +311,54 @@ impl RetrievalEngine {
         let keyword_results = crate::search::keyword_search(query_text, &memories);
 
         // Step 3.5: If embeddings available, combine with semantic results
-        let scored_memories: Vec<ScoredMemory> = if let (Some(provider), Some(vs)) =
-            (&self.embedding_provider, &self.vector_store)
-        {
-            // Get semantic scores
-            let semantic_scores: HashMap<String, f64> =
-                if let Ok(query_vector) = provider.embed(query_text) {
-                    vs.search(query_vector, memories.len())
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|m| (m.id, m.score))
-                        .collect()
-                } else {
-                    HashMap::new()
-                };
+        let scored_memories: Vec<ScoredMemory> =
+            if let (Some(provider), Some(vs)) = (&self.embedding_provider, &self.vector_store) {
+                // Get semantic scores
+                let semantic_scores: HashMap<String, f64> =
+                    if let Ok(query_vector) = provider.embed(query_text) {
+                        vs.search(query_vector, memories.len())
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|m| (m.id, m.score))
+                            .collect()
+                    } else {
+                        HashMap::new()
+                    };
 
-            // Combine keyword + semantic scores
-            let mut combined: HashMap<usize, f64> = HashMap::new();
-            for (idx, kw_score) in &keyword_results {
-                combined.insert(*idx, *kw_score * 0.5);
-            }
-            for (idx, memory) in memories.iter().enumerate() {
-                if let Some(&sem_score) = semantic_scores.get(&memory.id) {
-                    *combined.entry(idx).or_insert(0.0) += sem_score * 0.5;
+                // Combine keyword + semantic scores
+                let mut combined: HashMap<usize, f64> = HashMap::new();
+                for (idx, kw_score) in &keyword_results {
+                    combined.insert(*idx, *kw_score * 0.5);
                 }
-            }
+                for (idx, memory) in memories.iter().enumerate() {
+                    if let Some(&sem_score) = semantic_scores.get(&memory.id) {
+                        *combined.entry(idx).or_insert(0.0) += sem_score * 0.5;
+                    }
+                }
 
-            let mut results: Vec<ScoredMemory> = combined
-                .into_iter()
-                .map(|(idx, score)| ScoredMemory {
-                    memory: memories[idx].clone(),
-                    score,
-                })
-                .collect();
-            results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-            results
-        } else {
-            // Keyword-only
-            keyword_results
-                .into_iter()
-                .map(|(idx, score)| ScoredMemory {
-                    memory: memories[idx].clone(),
-                    score,
-                })
-                .collect()
-        };
+                let mut results: Vec<ScoredMemory> = combined
+                    .into_iter()
+                    .map(|(idx, score)| ScoredMemory {
+                        memory: memories[idx].clone(),
+                        score,
+                    })
+                    .collect();
+                results.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                results
+            } else {
+                // Keyword-only
+                keyword_results
+                    .into_iter()
+                    .map(|(idx, score)| ScoredMemory {
+                        memory: memories[idx].clone(),
+                        score,
+                    })
+                    .collect()
+            };
 
         Ok(scored_memories)
     }
@@ -386,8 +390,8 @@ mod tests {
 
     #[test]
     fn test_engine_new() {
-        use tempfile::TempDir;
         use crate::types::EngramConfig;
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let store = MemoryStore::init(temp_dir.path()).unwrap();
@@ -399,8 +403,8 @@ mod tests {
 
     #[test]
     fn test_retrieve_empty_store() {
-        use tempfile::TempDir;
         use crate::types::EngramConfig;
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let store = MemoryStore::init(temp_dir.path()).unwrap();
@@ -416,8 +420,8 @@ mod tests {
 
     #[test]
     fn test_retrieve_returns_scored_memories() {
-        use tempfile::TempDir;
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let store = MemoryStore::init(temp_dir.path()).unwrap();
@@ -465,14 +469,17 @@ mod tests {
         assert_eq!(result.total, 2);
 
         // The first (highest scoring) should be the auth memory
-        assert_eq!(result.memories[0].memory.physical, vec!["src/auth/**".to_string()]);
+        assert_eq!(
+            result.memories[0].memory.physical,
+            vec!["src/auth/**".to_string()]
+        );
         assert!(result.memories[0].score > result.memories[1].score);
     }
 
     #[test]
     fn test_retrieve_filters_by_type() {
-        use tempfile::TempDir;
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let store = MemoryStore::init(temp_dir.path()).unwrap();
@@ -518,8 +525,8 @@ mod tests {
 
     #[test]
     fn test_retrieve_respects_max_results() {
-        use tempfile::TempDir;
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let store = MemoryStore::init(temp_dir.path()).unwrap();
@@ -556,9 +563,9 @@ mod tests {
 
     #[test]
     fn test_retrieve_excludes_expired() {
-        use tempfile::TempDir;
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
-        use chrono::{Utc, Duration};
+        use chrono::{Duration, Utc};
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let store = MemoryStore::init(temp_dir.path()).unwrap();
@@ -606,8 +613,8 @@ mod tests {
 
     #[test]
     fn test_retrieve_detail_level_summary() {
-        use tempfile::TempDir;
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let store = MemoryStore::init(temp_dir.path()).unwrap();
@@ -646,8 +653,8 @@ mod tests {
 
     #[test]
     fn test_search_keyword_integration() {
-        use tempfile::TempDir;
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let store = MemoryStore::init(temp_dir.path()).unwrap();

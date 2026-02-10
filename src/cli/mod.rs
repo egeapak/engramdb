@@ -1,28 +1,27 @@
 pub mod app;
-pub mod output;
 pub mod commands;
+pub mod output;
 
 use anyhow::Result;
 use std::env;
 use std::path::PathBuf;
 
 use app::{Cli, Command};
+use commands::{AddParams, RetrieveParams, SearchParams, UpdateParams};
 use output::OutputFormatter;
 
 pub fn run(cli: Cli) -> Result<()> {
     // Determine working directory
-    let dir = cli.dir.unwrap_or_else(|| {
-        env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    });
+    let dir = cli
+        .dir
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
     // Create output formatter
     let formatter = OutputFormatter::new(cli.format, cli.json, cli.no_color);
 
     // Dispatch to command handlers
     match cli.command {
-        Command::Init => {
-            commands::run_init(&dir, &formatter)
-        }
+        Command::Init => commands::run_init(&dir, &formatter),
         Command::Add {
             type_,
             content,
@@ -34,11 +33,11 @@ pub fn run(cli: Cli) -> Result<()> {
             confidence,
             details,
             visibility,
-        } => {
-            commands::run_add(
-                &dir,
-                &type_,
-                &content,
+        } => commands::run_add(
+            &dir,
+            AddParams {
+                type_str: type_,
+                content,
                 summary,
                 physical,
                 logical,
@@ -46,13 +45,11 @@ pub fn run(cli: Cli) -> Result<()> {
                 criticality,
                 confidence,
                 details,
-                &visibility,
-                &formatter,
-            )
-        }
-        Command::Get { id } => {
-            commands::run_get(&dir, &id, &formatter)
-        }
+                visibility_str: visibility,
+            },
+            &formatter,
+        ),
+        Command::Get { id } => commands::run_get(&dir, &id, &formatter),
         Command::Retrieve {
             path,
             logical,
@@ -61,19 +58,19 @@ pub fn run(cli: Cli) -> Result<()> {
             tags,
             min_criticality,
             max_results,
-        } => {
-            commands::run_retrieve(
-                &dir,
+        } => commands::run_retrieve(
+            &dir,
+            RetrieveParams {
                 path,
                 logical,
                 query,
-                type_,
+                type_filter: type_,
                 tags,
                 min_criticality,
                 max_results,
-                &formatter,
-            )
-        }
+            },
+            &formatter,
+        ),
         Command::Search {
             query,
             type_,
@@ -81,25 +78,23 @@ pub fn run(cli: Cli) -> Result<()> {
             physical,
             logical,
             min_criticality,
-        } => {
-            commands::run_search(
-                &dir,
-                &query,
-                type_,
+        } => commands::run_search(
+            &dir,
+            SearchParams {
+                query,
+                type_filter: type_,
                 tags,
                 physical,
                 logical,
                 min_criticality,
-                &formatter,
-            )
-        }
+            },
+            &formatter,
+        ),
         Command::List {
             type_,
             tags,
             status,
-        } => {
-            commands::run_list(&dir, type_, tags, status, &formatter)
-        }
+        } => commands::run_list(&dir, type_, tags, status, &formatter),
         Command::Update {
             id,
             type_,
@@ -113,10 +108,10 @@ pub fn run(cli: Cli) -> Result<()> {
             details,
             visibility,
             status,
-        } => {
-            commands::run_update(
-                &dir,
-                &id,
+        } => commands::run_update(
+            &dir,
+            UpdateParams {
+                id,
                 type_,
                 content,
                 summary,
@@ -128,14 +123,10 @@ pub fn run(cli: Cli) -> Result<()> {
                 details,
                 visibility,
                 status,
-                &formatter,
-            )
-        }
-        Command::Delete { id, force } => {
-            commands::run_delete(&dir, &id, force, &formatter)
-        }
-        Command::Stats => {
-            commands::run_stats(&dir, &formatter)
-        }
+            },
+            &formatter,
+        ),
+        Command::Delete { id, force } => commands::run_delete(&dir, &id, force, &formatter),
+        Command::Stats => commands::run_stats(&dir, &formatter),
     }
 }

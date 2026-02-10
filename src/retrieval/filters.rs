@@ -1,8 +1,8 @@
 //! Filtering logic for memory retrieval
 
+use crate::scope::physical;
 use crate::storage::IndexEntry;
 use crate::types::MemoryType;
-use crate::scope::physical;
 
 /// Search filters for restricting retrieval results
 #[derive(Debug, Clone, Default)]
@@ -78,7 +78,7 @@ pub fn apply_index_filters(entries: Vec<IndexEntry>, filters: &SearchFilters) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Status, ProvenanceSource};
+    use crate::types::{ProvenanceSource, Status};
     use chrono::Utc;
 
     fn create_test_entry(
@@ -134,15 +134,38 @@ mod tests {
 
         let filtered = apply_index_filters(entries, &filters);
         assert_eq!(filtered.len(), 2);
-        assert!(filtered.iter().all(|e| e.type_ == MemoryType::Decision || e.type_ == MemoryType::Convention));
+        assert!(filtered
+            .iter()
+            .all(|e| e.type_ == MemoryType::Decision || e.type_ == MemoryType::Convention));
     }
 
     #[test]
     fn test_filter_by_tags_or_logic() {
         let entries = vec![
-            create_test_entry("1", MemoryType::Decision, vec!["auth".to_string()], vec![], vec![], 0.5),
-            create_test_entry("2", MemoryType::Convention, vec!["api".to_string(), "rest".to_string()], vec![], vec![], 0.7),
-            create_test_entry("3", MemoryType::Hazard, vec!["database".to_string()], vec![], vec![], 0.6),
+            create_test_entry(
+                "1",
+                MemoryType::Decision,
+                vec!["auth".to_string()],
+                vec![],
+                vec![],
+                0.5,
+            ),
+            create_test_entry(
+                "2",
+                MemoryType::Convention,
+                vec!["api".to_string(), "rest".to_string()],
+                vec![],
+                vec![],
+                0.7,
+            ),
+            create_test_entry(
+                "3",
+                MemoryType::Hazard,
+                vec!["database".to_string()],
+                vec![],
+                vec![],
+                0.6,
+            ),
         ];
 
         let filters = SearchFilters {
@@ -157,9 +180,30 @@ mod tests {
     #[test]
     fn test_filter_by_physical_scope() {
         let entries = vec![
-            create_test_entry("1", MemoryType::Decision, vec![], vec!["src/api/**".to_string()], vec![], 0.5),
-            create_test_entry("2", MemoryType::Convention, vec![], vec!["src/db/**".to_string()], vec![], 0.7),
-            create_test_entry("3", MemoryType::Hazard, vec![], vec!["/".to_string()], vec![], 0.6),
+            create_test_entry(
+                "1",
+                MemoryType::Decision,
+                vec![],
+                vec!["src/api/**".to_string()],
+                vec![],
+                0.5,
+            ),
+            create_test_entry(
+                "2",
+                MemoryType::Convention,
+                vec![],
+                vec!["src/db/**".to_string()],
+                vec![],
+                0.7,
+            ),
+            create_test_entry(
+                "3",
+                MemoryType::Hazard,
+                vec![],
+                vec!["/".to_string()],
+                vec![],
+                0.6,
+            ),
         ];
 
         let filters = SearchFilters {
@@ -174,9 +218,30 @@ mod tests {
     #[test]
     fn test_filter_by_logical_scope() {
         let entries = vec![
-            create_test_entry("1", MemoryType::Decision, vec![], vec![], vec!["auth".to_string()], 0.5),
-            create_test_entry("2", MemoryType::Convention, vec![], vec![], vec!["api".to_string(), "auth".to_string()], 0.7),
-            create_test_entry("3", MemoryType::Hazard, vec![], vec![], vec!["database".to_string()], 0.6),
+            create_test_entry(
+                "1",
+                MemoryType::Decision,
+                vec![],
+                vec![],
+                vec!["auth".to_string()],
+                0.5,
+            ),
+            create_test_entry(
+                "2",
+                MemoryType::Convention,
+                vec![],
+                vec![],
+                vec!["api".to_string(), "auth".to_string()],
+                0.7,
+            ),
+            create_test_entry(
+                "3",
+                MemoryType::Hazard,
+                vec![],
+                vec![],
+                vec!["database".to_string()],
+                0.6,
+            ),
         ];
 
         let filters = SearchFilters {
@@ -208,9 +273,30 @@ mod tests {
     #[test]
     fn test_multiple_filters() {
         let entries = vec![
-            create_test_entry("1", MemoryType::Decision, vec!["auth".to_string()], vec!["src/api/**".to_string()], vec![], 0.8),
-            create_test_entry("2", MemoryType::Convention, vec!["auth".to_string()], vec!["src/db/**".to_string()], vec![], 0.7),
-            create_test_entry("3", MemoryType::Decision, vec!["database".to_string()], vec!["src/api/**".to_string()], vec![], 0.9),
+            create_test_entry(
+                "1",
+                MemoryType::Decision,
+                vec!["auth".to_string()],
+                vec!["src/api/**".to_string()],
+                vec![],
+                0.8,
+            ),
+            create_test_entry(
+                "2",
+                MemoryType::Convention,
+                vec!["auth".to_string()],
+                vec!["src/db/**".to_string()],
+                vec![],
+                0.7,
+            ),
+            create_test_entry(
+                "3",
+                MemoryType::Decision,
+                vec!["database".to_string()],
+                vec!["src/api/**".to_string()],
+                vec![],
+                0.9,
+            ),
         ];
 
         let filters = SearchFilters {

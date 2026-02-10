@@ -1,65 +1,65 @@
-use anyhow::{Result, bail};
-use std::path::Path;
+use crate::cli::output::OutputFormatter;
 use crate::storage::MemoryStore;
 use crate::types::{MemoryType, MemoryUpdate, Status, Visibility};
-use crate::cli::output::OutputFormatter;
+use anyhow::{bail, Result};
+use std::path::Path;
 
-pub fn run_update(
-    dir: &Path,
-    id: &str,
-    type_: Option<String>,
-    content: Option<String>,
-    summary: Option<String>,
-    physical: Vec<String>,
-    logical: Vec<String>,
-    tags: Vec<String>,
-    criticality: Option<f64>,
-    confidence: Option<f64>,
-    details: Option<String>,
-    visibility: Option<String>,
-    status: Option<String>,
-    formatter: &OutputFormatter,
-) -> Result<()> {
+pub struct UpdateParams {
+    pub id: String,
+    pub type_: Option<String>,
+    pub content: Option<String>,
+    pub summary: Option<String>,
+    pub physical: Vec<String>,
+    pub logical: Vec<String>,
+    pub tags: Vec<String>,
+    pub criticality: Option<f64>,
+    pub confidence: Option<f64>,
+    pub details: Option<String>,
+    pub visibility: Option<String>,
+    pub status: Option<String>,
+}
+
+pub fn run_update(dir: &Path, params: UpdateParams, formatter: &OutputFormatter) -> Result<()> {
     let store = MemoryStore::open(dir)?;
 
     // Build update
     let mut update = MemoryUpdate::new();
 
-    if let Some(type_str) = type_ {
+    if let Some(type_str) = params.type_ {
         update.type_ = Some(parse_memory_type(&type_str)?);
     }
 
-    update.content = content;
-    update.summary = summary;
-    update.details = details;
+    update.content = params.content;
+    update.summary = params.summary;
+    update.details = params.details;
 
-    if !physical.is_empty() {
-        update.physical = Some(physical);
+    if !params.physical.is_empty() {
+        update.physical = Some(params.physical);
     }
 
-    if !logical.is_empty() {
-        update.logical = Some(logical);
+    if !params.logical.is_empty() {
+        update.logical = Some(params.logical);
     }
 
-    if !tags.is_empty() {
-        update.tags = Some(tags);
+    if !params.tags.is_empty() {
+        update.tags = Some(params.tags);
     }
 
-    update.criticality = criticality;
-    update.confidence = confidence;
+    update.criticality = params.criticality;
+    update.confidence = params.confidence;
 
-    if let Some(vis_str) = visibility {
+    if let Some(vis_str) = params.visibility {
         update.visibility = Some(parse_visibility(&vis_str)?);
     }
 
-    if let Some(status_str) = status {
+    if let Some(status_str) = params.status {
         update.status = Some(parse_status(&status_str)?);
     }
 
     // Apply update
-    store.update(id, update)?;
+    store.update(&params.id, update)?;
 
-    formatter.print_success(&format!("Updated memory {}", id));
+    formatter.print_success(&format!("Updated memory {}", params.id));
     Ok(())
 }
 
@@ -90,6 +90,9 @@ fn parse_status(s: &str) -> Result<Status> {
         "active" => Ok(Status::Active),
         "needsreview" | "needs-review" | "needs_review" => Ok(Status::NeedsReview),
         "challenged" => Ok(Status::Challenged),
-        _ => bail!("Invalid status: {}. Valid values: active, needsreview, challenged", s),
+        _ => bail!(
+            "Invalid status: {}. Valid values: active, needsreview, challenged",
+            s
+        ),
     }
 }

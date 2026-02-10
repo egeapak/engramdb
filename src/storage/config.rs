@@ -1,9 +1,9 @@
 //! Configuration loading with defaults
 
-use crate::types::EngramConfig;
 use super::error::Result;
-use std::path::Path;
+use crate::types::EngramConfig;
 use std::fs;
+use std::path::Path;
 
 /// Load configuration from config.toml, or return defaults if file doesn't exist
 pub fn load_config(config_path: &Path) -> Result<EngramConfig> {
@@ -29,8 +29,14 @@ mod tests {
         let config = load_config(&config_path).unwrap();
         let default_config = EngramConfig::default();
 
-        assert_eq!(config.retrieval.max_results, default_config.retrieval.max_results);
-        assert_eq!(config.retrieval.relevance_threshold, default_config.retrieval.relevance_threshold);
+        assert_eq!(
+            config.retrieval.max_results,
+            default_config.retrieval.max_results
+        );
+        assert_eq!(
+            config.retrieval.relevance_threshold,
+            default_config.retrieval.relevance_threshold
+        );
     }
 
     #[test]
@@ -88,6 +94,9 @@ imported = 0.65
 
         let result = load_config(&config_path);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), super::super::error::StorageError::Toml(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            super::super::error::StorageError::Toml(_)
+        ));
     }
 }

@@ -1,13 +1,13 @@
 //! Index file operations for fast memory lookup
 
-use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
-use crate::types::{Memory, MemoryType, Status, ProvenanceSource};
 use super::error::Result;
-use std::path::Path;
+use crate::types::{Memory, MemoryType, ProvenanceSource, Status};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Index {
     pub memories: Vec<IndexEntry>,
 }
@@ -50,14 +50,6 @@ impl From<&Memory> for IndexEntry {
             created_at: memory.created_at,
             updated_at: memory.updated_at,
             expires_at: memory.expires_at,
-        }
-    }
-}
-
-impl Default for Index {
-    fn default() -> Self {
-        Self {
-            memories: Vec::new(),
         }
     }
 }

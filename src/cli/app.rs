@@ -9,7 +9,11 @@ pub enum OutputFormat {
 }
 
 #[derive(Parser)]
-#[command(name = "engramdb", about = "Project-scoped memory store for coding agents", version)]
+#[command(
+    name = "engramdb",
+    about = "Project-scoped memory store for coding agents",
+    version
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,

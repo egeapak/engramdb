@@ -99,15 +99,10 @@ fn tokenize(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{MemoryType, Status, Visibility, Provenance, ProvenanceSource};
+    use crate::types::{MemoryType, Provenance, ProvenanceSource, Status, Visibility};
     use chrono::Utc;
 
-    fn create_test_memory(
-        id: &str,
-        summary: &str,
-        content: &str,
-        tags: Vec<String>,
-    ) -> Memory {
+    fn create_test_memory(id: &str, summary: &str, content: &str, tags: Vec<String>) -> Memory {
         Memory {
             id: id.to_string(),
             type_: MemoryType::Decision,
@@ -172,7 +167,12 @@ mod tests {
     #[test]
     fn test_keyword_search_tag_match() {
         let memories = vec![
-            create_test_memory("1", "System design", "Details", vec!["auth".to_string(), "security".to_string()]),
+            create_test_memory(
+                "1",
+                "System design",
+                "Details",
+                vec!["auth".to_string(), "security".to_string()],
+            ),
             create_test_memory("2", "API design", "Details", vec!["rest".to_string()]),
         ];
 
@@ -184,9 +184,24 @@ mod tests {
     #[test]
     fn test_keyword_search_weighted_scoring() {
         let memories = vec![
-            create_test_memory("1", "auth system design", "Details about the system", vec![]),
-            create_test_memory("2", "System overview", "Details about auth implementation", vec![]),
-            create_test_memory("3", "API design", "System details", vec!["auth".to_string()]),
+            create_test_memory(
+                "1",
+                "auth system design",
+                "Details about the system",
+                vec![],
+            ),
+            create_test_memory(
+                "2",
+                "System overview",
+                "Details about auth implementation",
+                vec![],
+            ),
+            create_test_memory(
+                "3",
+                "API design",
+                "System details",
+                vec!["auth".to_string()],
+            ),
         ];
 
         let results = keyword_search("auth", &memories);
@@ -203,7 +218,12 @@ mod tests {
     #[test]
     fn test_keyword_search_multiple_tokens() {
         let memories = vec![
-            create_test_memory("1", "Authentication and authorization", "Security details", vec![]),
+            create_test_memory(
+                "1",
+                "Authentication and authorization",
+                "Security details",
+                vec![],
+            ),
             create_test_memory("2", "Database design", "Authentication mechanisms", vec![]),
             create_test_memory("3", "API design", "REST principles", vec![]),
         ];
@@ -211,7 +231,7 @@ mod tests {
         let results = keyword_search("authentication authorization", &memories);
 
         // Memory 1 should score highest (both tokens in summary)
-        assert!(results.len() > 0);
+        assert!(!results.is_empty());
         assert_eq!(results[0].0, 0);
     }
 
@@ -228,9 +248,7 @@ mod tests {
 
     #[test]
     fn test_keyword_search_empty_query() {
-        let memories = vec![
-            create_test_memory("1", "Test memory", "Content", vec![]),
-        ];
+        let memories = vec![create_test_memory("1", "Test memory", "Content", vec![])];
 
         let results = keyword_search("", &memories);
         assert_eq!(results.len(), 0);
@@ -238,9 +256,12 @@ mod tests {
 
     #[test]
     fn test_keyword_search_case_insensitive() {
-        let memories = vec![
-            create_test_memory("1", "Authentication System", "Details", vec![]),
-        ];
+        let memories = vec![create_test_memory(
+            "1",
+            "Authentication System",
+            "Details",
+            vec![],
+        )];
 
         let results = keyword_search("AUTHENTICATION", &memories);
         assert_eq!(results.len(), 1);

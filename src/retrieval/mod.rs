@@ -4,5 +4,5 @@ pub mod engine;
 pub mod filters;
 
 // Re-export main types and functions
-pub use engine::{RetrievalEngine, RetrievalQuery, RetrievalResult, ScoredMemory, DetailLevel};
-pub use filters::{SearchFilters, apply_index_filters};
+pub use engine::{DetailLevel, RetrievalEngine, RetrievalQuery, RetrievalResult, ScoredMemory};
+pub use filters::{apply_index_filters, SearchFilters};

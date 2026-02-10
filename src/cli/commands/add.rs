@@ -1,57 +1,57 @@
-use anyhow::{Result, bail};
-use std::path::Path;
+use crate::cli::output::OutputFormatter;
 use crate::storage::MemoryStore;
 use crate::types::{Memory, MemoryType, Provenance, Visibility};
-use crate::cli::output::OutputFormatter;
+use anyhow::{bail, Result};
+use std::path::Path;
 
-pub fn run_add(
-    dir: &Path,
-    type_str: &str,
-    content: &str,
-    summary: Option<String>,
-    physical: Vec<String>,
-    logical: Vec<String>,
-    tags: Vec<String>,
-    criticality: f64,
-    confidence: f64,
-    details: Option<String>,
-    visibility_str: &str,
-    formatter: &OutputFormatter,
-) -> Result<()> {
+pub struct AddParams {
+    pub type_str: String,
+    pub content: String,
+    pub summary: Option<String>,
+    pub physical: Vec<String>,
+    pub logical: Vec<String>,
+    pub tags: Vec<String>,
+    pub criticality: f64,
+    pub confidence: f64,
+    pub details: Option<String>,
+    pub visibility_str: String,
+}
+
+pub fn run_add(dir: &Path, params: AddParams, formatter: &OutputFormatter) -> Result<()> {
     // Parse type
-    let type_ = parse_memory_type(type_str)?;
+    let type_ = parse_memory_type(&params.type_str)?;
 
     // Parse visibility
-    let visibility = parse_visibility(visibility_str)?;
+    let visibility = parse_visibility(&params.visibility_str)?;
 
     // Generate summary if not provided
-    let summary = summary.unwrap_or_else(|| {
+    let summary = params.summary.unwrap_or_else(|| {
         let max_len = 100;
-        if content.len() <= max_len {
-            content.to_string()
+        if params.content.len() <= max_len {
+            params.content.clone()
         } else {
-            format!("{}...", &content[..max_len])
+            format!("{}...", &params.content[..max_len])
         }
     });
 
     // Use default physical scope if empty
-    let physical = if physical.is_empty() {
+    let physical = if params.physical.is_empty() {
         vec!["/".to_string()]
     } else {
-        physical
+        params.physical
     };
 
     // Create provenance (CLI source is human)
     let provenance = Provenance::human();
 
     // Create memory
-    let mut memory = Memory::new(type_, summary, content, provenance);
+    let mut memory = Memory::new(type_, summary, &params.content, provenance);
     memory.physical = physical;
-    memory.logical = logical;
-    memory.tags = tags;
-    memory.criticality = criticality;
-    memory.confidence = confidence;
-    memory.details = details;
+    memory.logical = params.logical;
+    memory.tags = params.tags;
+    memory.criticality = params.criticality;
+    memory.confidence = params.confidence;
+    memory.details = params.details;
     memory.visibility = visibility;
 
     // Open or initialize store
