@@ -2,13 +2,14 @@
 
 use super::{EmbeddingError, EmbeddingProvider};
 use anyhow::{Context, Result};
-use fastembed::TextEmbedding;
+use fastembed::{InitOptions, TextEmbedding};
 
 /// ONNX-based embedding provider using all-MiniLM-L6-v2 model.
 ///
 /// This provider uses the fastembed crate to generate embeddings locally
-/// using ONNX Runtime. The model is downloaded and cached automatically
-/// on first use.
+/// using ONNX Runtime. The model is downloaded and cached in an
+/// XDG-compatible location (`$XDG_CACHE_HOME/engramdb/models` or
+/// `~/.cache/engramdb/models`) so it is shared across all projects.
 pub struct OnnxProvider {
     model: TextEmbedding,
     dimensions: usize,
@@ -17,16 +18,20 @@ pub struct OnnxProvider {
 impl OnnxProvider {
     /// Create a new ONNX provider with the all-MiniLM-L6-v2 model.
     ///
-    /// The model will be downloaded if not already cached locally.
-    /// Downloads may take some time on first initialization.
+    /// The model is cached at `$XDG_CACHE_HOME/engramdb/models` (or
+    /// `~/.cache/engramdb/models`) so it only downloads once per machine.
     ///
     /// # Returns
     /// A new provider instance, or an error if model initialization fails.
     pub fn new() -> Result<Self> {
-        // fastembed v4 uses Default::default() for InitOptions
-        // The default model is already AllMiniLML6V2
-        let model = TextEmbedding::try_new(Default::default())
-            .context("Failed to initialize embedding model")?;
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("engramdb")
+            .join("models");
+
+        let options = InitOptions::default().with_cache_dir(cache_dir);
+        let model =
+            TextEmbedding::try_new(options).context("Failed to initialize embedding model")?;
 
         Ok(Self {
             model,
