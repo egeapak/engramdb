@@ -352,19 +352,15 @@ pub enum Command {
         threshold: Option<f64>,
     },
 
-    /// Compress memories by scope
+    /// List compression candidates (actual compression requires MCP mode)
     Compress {
         /// Filter by logical scope
         #[arg(long)]
         scope: Option<String>,
 
-        /// Score threshold for compression
+        /// Criticality threshold for candidates (default 0.4)
         #[arg(long)]
         threshold: Option<f64>,
-
-        /// List compression candidates
-        #[arg(long)]
-        confirm: bool,
     },
 
     /// Start the MCP server

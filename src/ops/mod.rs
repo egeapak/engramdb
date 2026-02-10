@@ -5,6 +5,7 @@
 //! results — no CLI formatting or MCP serialization happens here.
 
 pub mod challenge;
+pub mod compress;
 pub mod create;
 pub mod delete;
 pub mod gc;
@@ -19,6 +20,10 @@ pub mod stats;
 pub mod update;
 
 pub use challenge::{challenge_memory, ChallengeResult};
+pub use compress::{
+    compress_apply, compress_candidates, CompressApplyResult, CompressCandidate,
+    CompressCandidatesResult,
+};
 pub use create::{create_memory, CreateParams, CreateResult};
 pub use delete::delete_memory;
 pub use gc::{gc_memories, GcResult};

@@ -1238,16 +1238,10 @@ Create a new memory.
         "default": 0.8,
         "description": "How certain you are about this information. 0.0 = speculation, 1.0 = verified fact."
       },
-      "decay": {
-        "type": "object",
-        "description": "Override the default decay for this memory type. Omit to use type-based defaults.",
-        "properties": {
-          "strategy": { "type": "string", "enum": ["linear", "exponential", "step", "none"] },
-          "half_life": { "type": "string", "description": "Duration string, e.g., '14d', '4h', '2w'" },
-          "ttl": { "type": "string" },
-          "floor": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
-        }
-      },
+      "decay_strategy": { "type": "string", "enum": ["linear", "exponential", "step", "none"], "description": "Override the default decay strategy. Omit to use type-based defaults." },
+      "decay_half_life": { "type": "integer", "description": "Half-life in seconds for exponential decay." },
+      "decay_ttl": { "type": "integer", "description": "Time-to-live in seconds for linear/step decay." },
+      "decay_floor": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Minimum decay factor." },
       "supersedes": {
         "type": "array",
         "items": { "type": "string" },
@@ -1264,6 +1258,8 @@ Create a new memory.
   }
 }
 ```
+
+> **Design note:** Decay fields are flat (`decay_strategy`, `decay_half_life`, etc.) rather than nested under a `decay` object. This is intentional for LLM tool-calling ergonomics — flat schemas are easier for models to populate correctly.
 
 **Response:**
 ```json
@@ -1454,7 +1450,10 @@ Fetch a single memory with full details.
       "tags": { "type": "array", "items": { "type": "string" } },
       "criticality": { "type": "number" },
       "confidence": { "type": "number" },
-      "decay": { "type": "object" },
+      "decay_strategy": { "type": "string", "enum": ["linear", "exponential", "step", "none"], "description": "Override the decay strategy." },
+      "decay_half_life": { "type": "integer", "description": "Half-life in seconds for exponential decay." },
+      "decay_ttl": { "type": "integer", "description": "Time-to-live in seconds for linear/step decay." },
+      "decay_floor": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Minimum decay factor." },
       "supersedes": { "type": "array", "items": { "type": "string" } },
       "visibility": { "type": "string", "enum": ["shared", "personal"] }
     }
@@ -1547,20 +1546,65 @@ Fetch a single memory with full details.
 
 ---
 
-#### `memory_compress`
+#### `memory_compress_candidates`
+
+List memories eligible for compression. Review candidates before calling `memory_compress_apply`.
 
 ```json
 {
-  "name": "memory_compress",
-  "description": "Summarize a group of low-relevance memories in a scope into a single distilled memory. Source memories are archived, not deleted. Always dry_run first and present the result to the user for approval.",
+  "name": "memory_compress_candidates",
+  "description": "List memories eligible for compression — those with criticality at or below the threshold. Review candidates before calling memory_compress_apply.",
   "inputSchema": {
     "type": "object",
     "properties": {
-      "scope": { "type": "string", "description": "Logical or physical scope to compress." },
-      "threshold": { "type": "number", "default": 0.4, "description": "Memories with relevance below this are candidates." },
-      "dry_run": { "type": "boolean", "default": true }
+      "scope": { "type": "string", "description": "Logical or physical scope to filter candidates." },
+      "threshold": { "type": "number", "default": 0.4, "description": "Criticality threshold. Memories at or below this value are candidates." }
     }
   }
+}
+```
+
+**Response:**
+```json
+{
+  "candidates": [
+    { "id": "019...", "type": "debug", "summary": "...", "criticality": 0.1 }
+  ],
+  "total": 3,
+  "threshold": 0.4
+}
+```
+
+---
+
+#### `memory_compress_apply`
+
+Compress multiple memories into a single summary memory. The agent provides the summary and content; the system creates the new memory (type `context`, provenance `agent:compress`) and records `supersedes` on the new memory automatically.
+
+```json
+{
+  "name": "memory_compress_apply",
+  "description": "Compress multiple memories into a single summary memory. You provide the summary and content; the system creates the new memory and marks source memories as superseded. Always call memory_compress_candidates first.",
+  "inputSchema": {
+    "type": "object",
+    "required": ["source_ids", "summary", "content"],
+    "properties": {
+      "source_ids": { "type": "array", "items": { "type": "string" }, "description": "IDs of memories to compress." },
+      "summary": { "type": "string", "description": "One-line summary of the compressed memory." },
+      "content": { "type": "string", "description": "Full content of the compressed memory." },
+      "scope": { "type": "array", "items": { "type": "string" }, "description": "Logical scopes for the new memory." },
+      "tags": { "type": "array", "items": { "type": "string" }, "description": "Tags for the new memory." }
+    }
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "new_id": "019...",
+  "superseded_count": 3,
+  "applied": true
 }
 ```
 

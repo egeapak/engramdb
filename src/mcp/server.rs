@@ -1,6 +1,6 @@
 //! EngramDB MCP server implementation.
 //!
-//! Defines the server struct, all MCP tools (13), resources (2), and prompts (2).
+//! Defines the server struct, all MCP tools (14), resources (2), and prompts (2).
 //! Tools delegate to the `ops` layer; the server opens a fresh `MemoryStore`
 //! per request so it always sees the latest on-disk state.
 
@@ -238,15 +238,32 @@ struct ResolveInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct CompressInput {
-    #[schemars(description = "Logical or physical scope to compress")]
+struct CompressCandidatesInput {
+    #[schemars(description = "Logical or physical scope to filter candidates")]
     scope: Option<String>,
 
-    #[schemars(description = "Relevance threshold for candidates (default 0.4)")]
+    #[schemars(
+        description = "Criticality threshold — memories at or below this are candidates (default 0.4)"
+    )]
     threshold: Option<f64>,
+}
 
-    #[schemars(description = "If true, list candidates only (dry run, default true)")]
-    dry_run: Option<bool>,
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CompressApplyInput {
+    #[schemars(description = "IDs of memories to compress into a single summary")]
+    source_ids: Vec<String>,
+
+    #[schemars(description = "One-line summary of the compressed memory")]
+    summary: String,
+
+    #[schemars(description = "Full content of the compressed memory")]
+    content: String,
+
+    #[schemars(description = "Logical scopes for the new memory")]
+    scope: Option<Vec<String>>,
+
+    #[schemars(description = "Tags for the new memory")]
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -707,43 +724,46 @@ impl EngramDbServer {
     }
 
     #[tool(
-        description = "List compression candidates. LLM-based summarization is not yet available."
+        description = "List memories eligible for compression. Returns candidates with criticality at or below the threshold. Review candidates before calling memory_compress_apply."
     )]
-    fn memory_compress(&self, #[tool(aggr)] input: CompressInput) -> Result<String, String> {
+    fn memory_compress_candidates(
+        &self,
+        #[tool(aggr)] input: CompressCandidatesInput,
+    ) -> Result<String, String> {
         let store = self.open_store()?;
-        let entries = store.list().map_err(|e| e.to_string())?;
-
-        let filtered: Vec<_> = entries
-            .iter()
-            .filter(|e| {
-                if let Some(ref scope) = input.scope {
-                    e.logical.iter().any(|s| s == scope)
-                } else {
-                    true
-                }
-            })
-            .collect();
-
-        let threshold = input.threshold.unwrap_or(0.4);
-        let candidates: Vec<serde_json::Value> = filtered
-            .iter()
-            .map(|e| {
-                serde_json::json!({
-                    "id": e.id,
-                    "type": format!("{:?}", e.type_).to_lowercase(),
-                    "summary": e.summary,
-                })
-            })
-            .collect();
-
-        let dry_run = input.dry_run.unwrap_or(true);
+        let result = ops::compress_candidates(&store, input.scope.as_deref(), input.threshold)
+            .map_err(|e| e.to_string())?;
 
         serde_json::to_string(&serde_json::json!({
-            "candidates": candidates,
-            "total": filtered.len(),
-            "threshold": threshold,
-            "dry_run": dry_run,
-            "note": "LLM-based compression is not yet available. Create summary memories manually."
+            "candidates": result.candidates,
+            "total": result.total,
+            "threshold": result.threshold,
+        }))
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Compress multiple memories into a single summary memory. You provide the summary and content; the system creates the new memory and marks source memories as superseded. Always call memory_compress_candidates first."
+    )]
+    fn memory_compress_apply(
+        &self,
+        #[tool(aggr)] input: CompressApplyInput,
+    ) -> Result<String, String> {
+        let store = self.open_store()?;
+        let result = ops::compress_apply(
+            &store,
+            input.source_ids,
+            input.summary,
+            input.content,
+            input.scope,
+            input.tags,
+        )
+        .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+
+        serde_json::to_string(&serde_json::json!({
+            "new_id": result.new_id,
+            "superseded_count": result.superseded_count,
+            "applied": true,
         }))
         .map_err(|e| e.to_string())
     }

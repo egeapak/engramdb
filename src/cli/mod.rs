@@ -211,11 +211,9 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Gc { confirm, threshold } => {
             commands::run_gc(&dir, confirm, threshold, &formatter)
         }
-        Command::Compress {
-            scope,
-            threshold,
-            confirm,
-        } => commands::run_compress(&dir, scope, threshold, confirm, &formatter),
+        Command::Compress { scope, threshold } => {
+            commands::run_compress(&dir, scope, threshold, &formatter)
+        }
         Command::Serve { transport, port } => {
             commands::run_serve(&dir, &transport, port, &formatter)
         }
