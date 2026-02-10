@@ -1,20 +1,37 @@
-//! MCP server entry point (stub for M6).
+//! Start the MCP server.
 
 use crate::cli::output::OutputFormatter;
+use crate::mcp::server;
 use anyhow::Result;
 use std::path::Path;
 
-/// Start the MCP server (stub).
+/// Start the MCP server with the specified transport.
 pub fn run_serve(
-    _dir: &Path,
+    dir: &Path,
     transport: &str,
     port: Option<u16>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    formatter.print_message("MCP server will be available in a future release.");
-    formatter.print_message(&format!("  Transport: {}", transport));
-    if let Some(port) = port {
-        formatter.print_message(&format!("  Port: {}", port));
+    let dir = dir.to_path_buf();
+
+    let rt = tokio::runtime::Runtime::new()?;
+
+    match transport {
+        "stdio" => {
+            rt.block_on(server::run_stdio(dir))?;
+        }
+        "sse" => {
+            let port = port.unwrap_or(3100);
+            formatter.print_message(&format!(
+                "Starting EngramDB MCP server (SSE) on port {}...",
+                port
+            ));
+            rt.block_on(server::run_sse(dir, port))?;
+        }
+        other => {
+            anyhow::bail!("Unknown transport: {}. Use 'stdio' or 'sse'.", other);
+        }
     }
+
     Ok(())
 }
