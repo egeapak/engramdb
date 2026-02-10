@@ -1,6 +1,53 @@
 [package]
 name = "engramdb"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+
+[[bin]]
+name = "engramdb"
+path = "src/main.rs"
+
+[lib]
+name = "engramdb"
+path = "src/lib.rs"
 
 [dependencies]
+# MCP Server
+rmcp = { version = "0.1", features = ["macros", "server", "transport-io", "transport-sse-server"] }
+
+# Vector DB & Embeddings
+lancedb = "0.15"
+fastembed = "4"
+arrow-array = "53"
+arrow-schema = "53"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+inquire = "0.7"
+owo-colors = { version = "4", features = ["supports-colors"] }
+
+# Utilities
+uuid = { version = "1", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+globset = "0.4"
+sha2 = "0.10"
+dirs = "6"
+
+# Async
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync"] }
+futures = "0.3"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"

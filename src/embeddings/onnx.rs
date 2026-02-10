@@ -1,0 +1,124 @@
+//! ONNX-based embedding provider using the fastembed crate.
+
+use super::{EmbeddingError, EmbeddingProvider};
+use anyhow::{Context, Result};
+use fastembed::TextEmbedding;
+
+/// ONNX-based embedding provider using all-MiniLM-L6-v2 model.
+///
+/// This provider uses the fastembed crate to generate embeddings locally
+/// using ONNX Runtime. The model is downloaded and cached automatically
+/// on first use.
+pub struct OnnxProvider {
+    model: TextEmbedding,
+    dimensions: usize,
+}
+
+impl OnnxProvider {
+    /// Create a new ONNX provider with the all-MiniLM-L6-v2 model.
+    ///
+    /// The model will be downloaded if not already cached locally.
+    /// Downloads may take some time on first initialization.
+    ///
+    /// # Returns
+    /// A new provider instance, or an error if model initialization fails.
+    pub fn new() -> Result<Self> {
+        // fastembed v4 uses Default::default() for InitOptions
+        // The default model is already AllMiniLML6V2
+        let model = TextEmbedding::try_new(Default::default())
+            .context("Failed to initialize embedding model")?;
+
+        Ok(Self {
+            model,
+            dimensions: 384, // all-MiniLM-L6-v2 produces 384-dimensional embeddings
+        })
+    }
+
+    /// Try to create a new provider, returning None if unavailable.
+    ///
+    /// This is useful for graceful degradation when embeddings are optional.
+    ///
+    /// # Returns
+    /// Some(provider) if successful, None if model initialization fails.
+    pub fn try_new() -> Option<Self> {
+        Self::new().ok()
+    }
+}
+
+impl EmbeddingProvider for OnnxProvider {
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        // fastembed's embed method takes a Vec of inputs and returns Vec<Vec<f32>>
+        let embeddings = self
+            .model
+            .embed(vec![text.to_string()], None)
+            .context("Failed to generate embedding")?;
+
+        // Extract the first (and only) embedding
+        embeddings
+            .into_iter()
+            .next()
+            .ok_or_else(|| EmbeddingError::Failed("No embedding returned".to_string()).into())
+    }
+
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        // Convert &str to String for fastembed
+        let texts: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
+
+        self.model
+            .embed(texts, None)
+            .context("Failed to generate batch embeddings")
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_provider_creation() {
+        // This test requires the model to be downloaded, so we use try_new
+        let provider = OnnxProvider::try_new();
+        assert!(provider.is_some(), "Provider should initialize");
+    }
+
+    #[test]
+    fn test_dimensions() {
+        if let Some(provider) = OnnxProvider::try_new() {
+            assert_eq!(provider.dimensions(), 384);
+        }
+    }
+
+    #[test]
+    fn test_embed_single() {
+        if let Some(provider) = OnnxProvider::try_new() {
+            let result = provider.embed("Hello, world!");
+            assert!(result.is_ok(), "Embedding should succeed");
+
+            let embedding = result.unwrap();
+            assert_eq!(embedding.len(), 384);
+
+            // Embeddings should not be all zeros
+            assert!(embedding.iter().any(|&x| x != 0.0));
+        }
+    }
+
+    #[test]
+    fn test_embed_batch() {
+        if let Some(provider) = OnnxProvider::try_new() {
+            let texts = vec!["First text", "Second text", "Third text"];
+            let result = provider.embed_batch(&texts);
+            assert!(result.is_ok(), "Batch embedding should succeed");
+
+            let embeddings = result.unwrap();
+            assert_eq!(embeddings.len(), 3);
+
+            for embedding in embeddings {
+                assert_eq!(embedding.len(), 384);
+            }
+        }
+    }
+}
