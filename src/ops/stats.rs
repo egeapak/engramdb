@@ -79,7 +79,7 @@ pub fn compute_stats(store: &MemoryStore) -> Result<StoreStats> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Memory, MemoryType, Provenance};
+    use crate::types::{Memory, MemoryType, Provenance, Status};
     use chrono::Duration;
     use tempfile::TempDir;
 
@@ -164,5 +164,221 @@ mod tests {
         assert!(stats.oldest.is_none());
         assert!(stats.newest.is_none());
         assert_eq!(stats.avg_criticality, 0.0);
+    }
+
+    #[test]
+    fn test_compute_stats_by_type_multiple_types() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+
+        // 2 Decision + 1 Hazard + 3 Context
+        for _ in 0..2 {
+            store
+                .create(&Memory::new(
+                    MemoryType::Decision,
+                    "Decision",
+                    "Content",
+                    Provenance::human(),
+                ))
+                .unwrap();
+        }
+        store
+            .create(&Memory::new(
+                MemoryType::Hazard,
+                "Hazard",
+                "Content",
+                Provenance::human(),
+            ))
+            .unwrap();
+        for _ in 0..3 {
+            store
+                .create(&Memory::new(
+                    MemoryType::Context,
+                    "Context",
+                    "Content",
+                    Provenance::human(),
+                ))
+                .unwrap();
+        }
+
+        let stats = compute_stats(&store).unwrap();
+        assert_eq!(stats.total, 6);
+
+        let decision_count = stats
+            .by_type
+            .iter()
+            .find(|(t, _)| *t == MemoryType::Decision)
+            .unwrap()
+            .1;
+        assert_eq!(decision_count, 2);
+
+        let hazard_count = stats
+            .by_type
+            .iter()
+            .find(|(t, _)| *t == MemoryType::Hazard)
+            .unwrap()
+            .1;
+        assert_eq!(hazard_count, 1);
+
+        let context_count = stats
+            .by_type
+            .iter()
+            .find(|(t, _)| *t == MemoryType::Context)
+            .unwrap()
+            .1;
+        assert_eq!(context_count, 3);
+    }
+
+    #[test]
+    fn test_compute_stats_by_status_mixed() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+
+        // 2 Active
+        store
+            .create(&Memory::new(
+                MemoryType::Decision,
+                "Active 1",
+                "Content",
+                Provenance::human(),
+            ))
+            .unwrap();
+        store
+            .create(&Memory::new(
+                MemoryType::Decision,
+                "Active 2",
+                "Content",
+                Provenance::human(),
+            ))
+            .unwrap();
+
+        // 1 NeedsReview
+        let mut needs_review = Memory::new(
+            MemoryType::Decision,
+            "Needs review",
+            "Content",
+            Provenance::human(),
+        );
+        needs_review.status = Status::NeedsReview;
+        store.create(&needs_review).unwrap();
+
+        // 1 Challenged
+        let mut challenged = Memory::new(
+            MemoryType::Decision,
+            "Challenged",
+            "Content",
+            Provenance::human(),
+        );
+        challenged.status = Status::Challenged;
+        store.create(&challenged).unwrap();
+
+        let stats = compute_stats(&store).unwrap();
+        assert_eq!(stats.total, 4);
+
+        let active_count = stats
+            .by_status
+            .iter()
+            .find(|(s, _)| *s == Status::Active)
+            .unwrap()
+            .1;
+        assert_eq!(active_count, 2);
+
+        let needs_review_count = stats
+            .by_status
+            .iter()
+            .find(|(s, _)| *s == Status::NeedsReview)
+            .unwrap()
+            .1;
+        assert_eq!(needs_review_count, 1);
+
+        let challenged_count = stats
+            .by_status
+            .iter()
+            .find(|(s, _)| *s == Status::Challenged)
+            .unwrap()
+            .1;
+        assert_eq!(challenged_count, 1);
+    }
+
+    #[test]
+    fn test_compute_stats_by_scope_no_logical_scopes() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+
+        // Memories with empty logical scopes (default)
+        store
+            .create(&Memory::new(
+                MemoryType::Decision,
+                "Test 1",
+                "Content",
+                Provenance::human(),
+            ))
+            .unwrap();
+        store
+            .create(&Memory::new(
+                MemoryType::Context,
+                "Test 2",
+                "Content",
+                Provenance::human(),
+            ))
+            .unwrap();
+
+        let stats = compute_stats(&store).unwrap();
+        assert_eq!(stats.total, 2);
+        assert!(stats.by_scope.is_empty());
+    }
+
+    #[test]
+    fn test_compute_stats_avg_criticality_calculation() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+
+        let criticalities = [0.2, 0.5, 0.8];
+        for &crit in &criticalities {
+            let mut mem = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
+            mem.criticality = crit;
+            store.create(&mem).unwrap();
+        }
+
+        let stats = compute_stats(&store).unwrap();
+        assert!((stats.avg_criticality - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_compute_stats_oldest_newest_ordering() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+
+        let mut mem1 = Memory::new(
+            MemoryType::Decision,
+            "Oldest",
+            "Content",
+            Provenance::human(),
+        );
+        mem1.created_at = Utc::now() - Duration::hours(2);
+        store.create(&mem1).unwrap();
+
+        let mut mem2 = Memory::new(
+            MemoryType::Decision,
+            "Middle",
+            "Content",
+            Provenance::human(),
+        );
+        mem2.created_at = Utc::now() - Duration::hours(1);
+        store.create(&mem2).unwrap();
+
+        let mem3 = Memory::new(
+            MemoryType::Decision,
+            "Newest",
+            "Content",
+            Provenance::human(),
+        );
+        store.create(&mem3).unwrap();
+
+        let stats = compute_stats(&store).unwrap();
+        let oldest = stats.oldest.unwrap();
+        let newest = stats.newest.unwrap();
+        assert!(oldest < newest);
+        assert_eq!(oldest, mem1.created_at);
     }
 }

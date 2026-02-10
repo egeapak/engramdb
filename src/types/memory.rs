@@ -523,4 +523,34 @@ mod tests {
         assert_eq!(memory.visibility, Visibility::Personal);
         assert!(memory.expires_at.is_some());
     }
+
+    #[test]
+    fn test_memory_verified_at_default_is_none() {
+        let memory = Memory::new(
+            MemoryType::Decision,
+            "Test summary",
+            "Test content",
+            Provenance::human(),
+        );
+        assert!(memory.verified_at.is_none());
+    }
+
+    #[test]
+    fn test_memory_verified_at_serialization_roundtrip() {
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Test summary",
+            "Test content",
+            Provenance::human(),
+        );
+        let now = Utc::now();
+        memory.verified_at = Some(now);
+
+        let json = serde_json::to_string(&memory).unwrap();
+        let deserialized: Memory = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.verified_at, Some(now));
+        assert_eq!(deserialized.summary, "Test summary");
+        assert_eq!(deserialized.content, "Test content");
+    }
 }

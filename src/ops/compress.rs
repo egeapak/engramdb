@@ -126,7 +126,7 @@ pub fn compress_apply(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{MemoryType, Provenance, Visibility};
+    use crate::types::{Memory, MemoryType, Provenance, ProvenanceSource, Visibility};
     use tempfile::TempDir;
 
     fn setup_store() -> (TempDir, MemoryStore) {
@@ -282,5 +282,161 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Source memory not found"));
+    }
+
+    #[test]
+    fn test_compress_candidates_default_threshold_is_0_4() {
+        let (_temp, store) = setup_store();
+
+        add_memory(&store, MemoryType::Debug, "low crit", 0.3, vec![]);
+        add_memory(&store, MemoryType::Decision, "high crit", 0.9, vec![]);
+
+        let result = compress_candidates(&store, None, None).unwrap();
+
+        assert_eq!(result.threshold, 0.4);
+        assert_eq!(result.total, 1);
+    }
+
+    #[test]
+    fn test_compress_candidates_includes_equal_to_threshold() {
+        let (_temp, store) = setup_store();
+
+        add_memory(&store, MemoryType::Debug, "below threshold", 0.39, vec![]);
+        add_memory(&store, MemoryType::Debug, "at threshold", 0.4, vec![]);
+        add_memory(&store, MemoryType::Debug, "above threshold", 0.41, vec![]);
+
+        let result = compress_candidates(&store, None, Some(0.4)).unwrap();
+
+        assert_eq!(result.total, 2);
+        let summaries: Vec<&str> = result
+            .candidates
+            .iter()
+            .map(|c| c.summary.as_str())
+            .collect();
+        assert!(summaries.contains(&"below threshold"));
+        assert!(summaries.contains(&"at threshold"));
+        assert!(!summaries.contains(&"above threshold"));
+    }
+
+    #[test]
+    fn test_compress_candidates_physical_scope_match() {
+        let (_temp, store) = setup_store();
+
+        // Create memory with specific physical scope using Memory::new directly
+        let mut mem_auth = Memory::new(
+            MemoryType::Debug,
+            "auth debug",
+            "Auth content",
+            Provenance::human(),
+        );
+        mem_auth.physical = vec!["/src/auth/".to_string()];
+        mem_auth.criticality = 0.1;
+        store.create(&mem_auth).unwrap();
+
+        let mut mem_db = Memory::new(
+            MemoryType::Debug,
+            "db debug",
+            "DB content",
+            Provenance::human(),
+        );
+        mem_db.physical = vec!["/src/db/".to_string()];
+        mem_db.criticality = 0.1;
+        store.create(&mem_db).unwrap();
+
+        let result = compress_candidates(&store, Some("/src/auth/"), Some(0.4)).unwrap();
+
+        assert_eq!(result.total, 1);
+        assert_eq!(result.candidates[0].summary, "auth debug");
+    }
+
+    #[test]
+    fn test_compress_apply_empty_source_ids_returns_error() {
+        let (_temp, store) = setup_store();
+
+        let result = compress_apply(
+            &store,
+            vec![],
+            "Summary".to_string(),
+            "Content".to_string(),
+            None,
+            None,
+        );
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must not be empty"));
+    }
+
+    #[test]
+    fn test_compress_apply_creates_context_type_with_agent_provenance() {
+        let (_temp, store) = setup_store();
+
+        let id = add_memory(&store, MemoryType::Debug, "source debug", 0.1, vec![]);
+
+        let result = compress_apply(
+            &store,
+            vec![id],
+            "Compressed summary".to_string(),
+            "Compressed content".to_string(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let new_memory = store.get(&result.new_id).unwrap();
+        assert_eq!(new_memory.type_, MemoryType::Context);
+        assert_eq!(new_memory.provenance.source, ProvenanceSource::Agent);
+        assert_eq!(new_memory.provenance.agent_id, Some("compress".to_string()));
+    }
+
+    #[test]
+    fn test_compress_apply_with_scope_and_tags() {
+        let (_temp, store) = setup_store();
+
+        let id = add_memory(&store, MemoryType::Debug, "source", 0.1, vec![]);
+
+        let result = compress_apply(
+            &store,
+            vec![id],
+            "Scoped summary".to_string(),
+            "Scoped content".to_string(),
+            Some(vec!["app.auth".to_string(), "app.core".to_string()]),
+            Some(vec!["compressed".to_string(), "auth".to_string()]),
+        )
+        .unwrap();
+
+        let new_memory = store.get(&result.new_id).unwrap();
+        assert_eq!(
+            new_memory.logical,
+            vec!["app.auth".to_string(), "app.core".to_string()]
+        );
+        assert_eq!(
+            new_memory.tags,
+            vec!["compressed".to_string(), "auth".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_compress_apply_partial_invalid_source_ids_returns_error() {
+        let (_temp, store) = setup_store();
+
+        let valid_id = add_memory(&store, MemoryType::Debug, "valid source", 0.1, vec![]);
+        let count_before = store.list().unwrap().len();
+
+        let result = compress_apply(
+            &store,
+            vec![valid_id, "nonexistent-id".to_string()],
+            "Summary".to_string(),
+            "Content".to_string(),
+            None,
+            None,
+        );
+
+        assert!(result.is_err());
+        // Verify no new memory was created
+        let count_after = store.list().unwrap().len();
+        assert_eq!(count_before, count_after);
     }
 }

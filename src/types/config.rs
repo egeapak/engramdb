@@ -372,4 +372,36 @@ trust = 0.15
         assert_eq!(config.logical_bonus.exact, 0.3);
         assert_eq!(config.thresholds.needs_review, 0.3);
     }
+
+    #[test]
+    fn test_config_scoring_weights_sum_to_one() {
+        let config = EngramConfig::default();
+
+        // with_query: all weights (including semantic) sum to 1.0
+        let wq = &config.retrieval.scoring.with_query;
+        let wq_sum = wq.semantic.unwrap_or(0.0) + wq.relevance + wq.scope + wq.trust;
+        assert!(
+            (wq_sum - 1.0).abs() < f64::EPSILON,
+            "with_query weights sum to {}, expected 1.0",
+            wq_sum
+        );
+
+        // scope_only: non-None weights sum to 1.0
+        let so = &config.retrieval.scoring.scope_only;
+        let so_sum = so.semantic.unwrap_or(0.0) + so.relevance + so.scope + so.trust;
+        assert!(
+            (so_sum - 1.0).abs() < f64::EPSILON,
+            "scope_only weights sum to {}, expected 1.0",
+            so_sum
+        );
+
+        // degraded: non-None weights sum to 1.0
+        let dg = &config.retrieval.scoring.degraded;
+        let dg_sum = dg.semantic.unwrap_or(0.0) + dg.relevance + dg.scope + dg.trust;
+        assert!(
+            (dg_sum - 1.0).abs() < f64::EPSILON,
+            "degraded weights sum to {}, expected 1.0",
+            dg_sum
+        );
+    }
 }
