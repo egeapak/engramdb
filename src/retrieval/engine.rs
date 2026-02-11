@@ -121,18 +121,25 @@ impl RetrievalEngine {
         self.embedding_provider.is_some()
     }
 
-    /// Embed and upsert a memory's vector into the store.
+    /// Chunk, embed, and upsert a memory's vectors into the store.
     ///
-    /// Generates an embedding for the memory's content and stores it in LanceDB
-    /// for future semantic search. Does nothing if no embedding provider is configured.
+    /// Splits the memory's text into chunks that fit the provider's token limit,
+    /// batch-embeds them, and stores the resulting vectors in the LanceDB chunks
+    /// table. Does nothing if no embedding provider is configured.
     ///
     /// # Arguments
     /// * `memory` - The memory to embed
     pub async fn embed_memory(&self, memory: &Memory) -> anyhow::Result<()> {
         if let Some(provider) = &self.embedding_provider {
             let text = format!("{} {}", memory.summary, memory.content);
-            let vector = provider.embed(&text).await?;
-            self.store.update_vector(&memory.id, vector).await?;
+            let chunks = crate::embeddings::chunk_text(&text, provider.max_tokens());
+            if chunks.is_empty() {
+                self.store.delete_chunks(&memory.id).await?;
+                return Ok(());
+            }
+            let chunk_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
+            let vectors = provider.embed_batch(&chunk_refs).await?;
+            self.store.upsert_chunks(&memory.id, vectors).await?;
         }
         Ok(())
     }

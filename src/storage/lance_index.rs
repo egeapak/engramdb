@@ -1,16 +1,18 @@
 //! Unified LanceDB index for metadata and vector storage.
 //!
-//! Replaces both `index.json` and the separate `vector/` module with a single
-//! project-local LanceDB table that stores memory metadata alongside optional
-//! embedding vectors.
+//! Stores memory metadata in a `memories` table and embedding vectors in a
+//! separate `chunks` table (one row per text chunk per memory). At search
+//! time the chunks table is queried and results are aggregated by memory_id
+//! using max-score.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arrow_array::{
     Array, ArrayRef, FixedSizeListArray, Float32Array, Float64Array, RecordBatch,
-    RecordBatchIterator, StringArray,
+    RecordBatchIterator, StringArray, UInt32Array,
 };
 use arrow_schema::{DataType, Field, Schema};
 use futures::stream::StreamExt;
@@ -80,17 +82,19 @@ pub struct VectorMatch {
 
 /// Unified LanceDB wrapper for metadata and vector storage.
 ///
-/// Stores all memory index entries in a single LanceDB table with an optional
-/// vector column for embeddings.
+/// Stores memory index entries in a `memories` table and embedding vectors
+/// in a separate `chunks` table. Vector search queries the chunks table and
+/// aggregates results by memory_id using max-score.
 pub struct LanceIndex {
     connection: Arc<Connection>,
     table_name: String,
+    chunks_table_name: String,
     dimensions: usize,
 }
 
 impl LanceIndex {
     /// Create or open a LanceIndex at the given path.
-    pub async fn new(db_path: &Path) -> Result<Self> {
+    pub async fn new(db_path: &Path, dimensions: usize) -> Result<Self> {
         let db_path_str = db_path
             .to_str()
             .context("Invalid database path (not valid UTF-8)")?;
@@ -104,15 +108,17 @@ impl LanceIndex {
         let store = Self {
             connection,
             table_name: "memories".to_string(),
-            dimensions: 384,
+            chunks_table_name: "chunks".to_string(),
+            dimensions,
         };
 
         store.ensure_table_exists().await?;
+        store.ensure_chunks_table_exists().await?;
         Ok(store)
     }
 
-    /// Arrow schema for the memories table.
-    fn schema(&self) -> Arc<Schema> {
+    /// Arrow schema for the memories table (metadata only, no vector).
+    fn memories_schema(&self) -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("summary", DataType::Utf8, false),
@@ -128,20 +134,28 @@ impl LanceIndex {
             Field::new("created_at", DataType::Utf8, false),
             Field::new("updated_at", DataType::Utf8, false),
             Field::new("expires_at", DataType::Utf8, true),
+        ]))
+    }
+
+    /// Arrow schema for the chunks table (embedding vectors per chunk).
+    fn chunks_schema(&self) -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new("memory_id", DataType::Utf8, false),
+            Field::new("chunk_index", DataType::UInt32, false),
             Field::new(
                 "vector",
                 DataType::FixedSizeList(
                     Arc::new(Field::new("item", DataType::Float32, true)),
                     self.dimensions as i32,
                 ),
-                true, // nullable
+                false,
             ),
         ]))
     }
 
     async fn ensure_table_exists(&self) -> Result<()> {
         let table_name = self.table_name.clone();
-        let schema = self.schema();
+        let schema = self.memories_schema();
         let connection = Arc::clone(&self.connection);
 
         match connection.open_table(&table_name).execute().await {
@@ -155,7 +169,29 @@ impl LanceIndex {
                     .create_table(&table_name, batches)
                     .execute()
                     .await
-                    .context("Failed to create LanceDB table")?;
+                    .context("Failed to create LanceDB memories table")?;
+                Ok(())
+            }
+        }
+    }
+
+    async fn ensure_chunks_table_exists(&self) -> Result<()> {
+        let table_name = self.chunks_table_name.clone();
+        let schema = self.chunks_schema();
+        let connection = Arc::clone(&self.connection);
+
+        match connection.open_table(&table_name).execute().await {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                let empty_batch = RecordBatch::new_empty(schema.clone());
+                let schema_ref = schema.clone();
+                let batches =
+                    RecordBatchIterator::new(vec![Ok(empty_batch)].into_iter(), schema_ref);
+                connection
+                    .create_table(&table_name, batches)
+                    .execute()
+                    .await
+                    .context("Failed to create LanceDB chunks table")?;
                 Ok(())
             }
         }
@@ -169,12 +205,23 @@ impl LanceIndex {
             .open_table(&table_name)
             .execute()
             .await
-            .context("Failed to open LanceDB table")
+            .context("Failed to open LanceDB memories table")
     }
 
-    /// Upsert a metadata entry with an optional vector.
-    pub async fn upsert(&self, entry: &IndexEntry, vector: Option<Vec<f32>>) -> Result<()> {
-        let batch = self.entry_to_batch(entry, vector)?;
+    async fn open_chunks_table(&self) -> Result<Table> {
+        let table_name = self.chunks_table_name.clone();
+        let connection = Arc::clone(&self.connection);
+
+        connection
+            .open_table(&table_name)
+            .execute()
+            .await
+            .context("Failed to open LanceDB chunks table")
+    }
+
+    /// Upsert a metadata entry (no vector — vectors go in the chunks table).
+    pub async fn upsert(&self, entry: &IndexEntry) -> Result<()> {
+        let batch = self.entry_to_batch(entry)?;
         let table = self.open_table().await?;
         let id = entry.id.clone();
 
@@ -190,19 +237,18 @@ impl LanceIndex {
         Ok(())
     }
 
-    /// Delete an entry by ID.
+    /// Delete an entry by ID from the memories table.
     pub async fn delete(&self, id: &str) -> Result<()> {
         let table = self.open_table().await?;
-        let id_owned = id.to_string();
 
         table
-            .delete(&format!("id = '{}'", id_owned))
+            .delete(&format!("id = '{}'", id))
             .await
             .context("Failed to delete entry")?;
         Ok(())
     }
 
-    /// List all entries in the table.
+    /// List all entries in the memories table.
     pub async fn list(&self) -> Result<Vec<IndexEntry>> {
         let table = self.open_table().await?;
 
@@ -236,12 +282,77 @@ impl LanceIndex {
         Ok(entries)
     }
 
-    /// Return the number of entries in the table.
+    /// Return the number of entries in the memories table.
     pub async fn count(&self) -> Result<usize> {
         Ok(self.list().await?.len())
     }
 
-    /// Perform ANN vector search.
+    /// Upsert embedding chunks for a memory.
+    ///
+    /// Deletes any existing chunks for this memory_id, then inserts new rows
+    /// (one per chunk vector with ascending chunk_index).
+    pub async fn upsert_chunks(&self, memory_id: &str, chunks: Vec<Vec<f32>>) -> Result<()> {
+        // Delete existing chunks for this memory
+        self.delete_chunks(memory_id).await?;
+
+        if chunks.is_empty() {
+            return Ok(());
+        }
+
+        let table = self.open_chunks_table().await?;
+        let schema = self.chunks_schema();
+
+        let num_chunks = chunks.len();
+
+        // Build arrays
+        let memory_ids: Vec<&str> = vec![memory_id; num_chunks];
+        let memory_id_array = StringArray::from(memory_ids);
+        let chunk_indices: Vec<u32> = (0..num_chunks as u32).collect();
+        let chunk_index_array = UInt32Array::from(chunk_indices);
+
+        // Build the vector FixedSizeList array for all chunks
+        let all_values: Vec<f32> = chunks.into_iter().flatten().collect();
+        let values_array = Float32Array::from(all_values);
+        let vector_array = FixedSizeListArray::new(
+            Arc::new(Field::new("item", DataType::Float32, true)),
+            self.dimensions as i32,
+            Arc::new(values_array) as ArrayRef,
+            None,
+        );
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(memory_id_array) as ArrayRef,
+                Arc::new(chunk_index_array) as ArrayRef,
+                Arc::new(vector_array) as ArrayRef,
+            ],
+        )
+        .context("Failed to create chunks RecordBatch")?;
+
+        let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+        table
+            .add(batches)
+            .execute()
+            .await
+            .context("Failed to insert chunks")?;
+
+        Ok(())
+    }
+
+    /// Delete all chunks for a given memory_id.
+    pub async fn delete_chunks(&self, memory_id: &str) -> Result<()> {
+        let table = self.open_chunks_table().await?;
+
+        let _ = table.delete(&format!("memory_id = '{}'", memory_id)).await;
+        Ok(())
+    }
+
+    /// Perform ANN vector search against the chunks table.
+    ///
+    /// Queries the chunks table, groups results by memory_id, and takes the
+    /// max score per memory. Returns one `VectorMatch` per unique memory,
+    /// sorted by score descending, truncated to `limit`.
     pub async fn vector_search(&self, query: Vec<f32>, limit: usize) -> Result<Vec<VectorMatch>> {
         if query.len() != self.dimensions {
             anyhow::bail!(
@@ -251,27 +362,30 @@ impl LanceIndex {
             );
         }
 
-        let table = self.open_table().await?;
+        let table = self.open_chunks_table().await?;
 
+        // Fetch more rows than needed to ensure enough unique memories after dedup
+        let chunk_limit = limit * 5;
         let mut stream = table
             .vector_search(query)?
-            .limit(limit)
+            .limit(chunk_limit)
             .execute()
             .await
             .context("Failed to execute vector search")?;
 
-        let mut matches = Vec::new();
+        // Aggregate: max score per memory_id
+        let mut score_map: HashMap<String, f64> = HashMap::new();
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result.context("Failed to read search result batch")?;
 
             let ids = batch
-                .column_by_name("id")
-                .context("Missing 'id' column")?
+                .column_by_name("memory_id")
+                .context("Missing 'memory_id' column")?
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .context("Failed to cast 'id' column")?;
+                .context("Failed to cast 'memory_id' column")?;
 
-            let scores = batch
+            let distances = batch
                 .column_by_name("_distance")
                 .context("Missing '_distance' column")?
                 .as_any()
@@ -279,12 +393,20 @@ impl LanceIndex {
                 .context("Failed to cast '_distance' column")?;
 
             for i in 0..batch.num_rows() {
-                let id = ids.value(i).to_string();
-                let distance = scores.value(i) as f64;
+                let memory_id = ids.value(i).to_string();
+                let distance = distances.value(i) as f64;
                 let score = 1.0 / (1.0 + distance);
-                matches.push(VectorMatch { id, score });
+                let entry = score_map.entry(memory_id).or_insert(0.0);
+                if score > *entry {
+                    *entry = score;
+                }
             }
         }
+
+        let mut matches: Vec<VectorMatch> = score_map
+            .into_iter()
+            .map(|(id, score)| VectorMatch { id, score })
+            .collect();
 
         matches.sort_by(|a, b| {
             b.score
@@ -292,51 +414,46 @@ impl LanceIndex {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
+        matches.truncate(limit);
         Ok(matches)
     }
 
-    /// Update just the vector column for a given ID.
-    pub async fn update_vector(&self, id: &str, vector: Vec<f32>) -> Result<()> {
-        if vector.len() != self.dimensions {
-            anyhow::bail!(
-                "Vector dimension mismatch: expected {}, got {}",
-                self.dimensions,
-                vector.len()
-            );
-        }
-
-        // LanceDB doesn't support partial column updates easily, so we read + upsert
-        let entries = self.list().await?;
-        let entry = entries
-            .iter()
-            .find(|e| e.id == id)
-            .context(format!("Entry not found: {}", id))?
-            .clone();
-        self.upsert(&entry, Some(vector)).await
-    }
-
-    /// Drop and recreate the table (for reindex).
+    /// Drop and recreate both memories and chunks tables (for reindex).
     pub async fn clear(&self) -> Result<()> {
-        let table_name = self.table_name.clone();
-        let schema = self.schema();
         let connection = Arc::clone(&self.connection);
 
-        let _ = connection.drop_table(&table_name).await;
-
-        let empty_batch = RecordBatch::new_empty(schema.clone());
-        let schema_ref = schema.clone();
-        let batches = RecordBatchIterator::new(vec![Ok(empty_batch)].into_iter(), schema_ref);
+        // Drop and recreate memories table
+        let _ = connection.drop_table(&self.table_name).await;
+        let memories_schema = self.memories_schema();
+        let empty_memories = RecordBatch::new_empty(memories_schema.clone());
+        let batches = RecordBatchIterator::new(
+            vec![Ok(empty_memories)].into_iter(),
+            memories_schema.clone(),
+        );
         connection
-            .create_table(&table_name, batches)
+            .create_table(&self.table_name, batches)
             .execute()
             .await
-            .context("Failed to recreate LanceDB table")?;
+            .context("Failed to recreate LanceDB memories table")?;
+
+        // Drop and recreate chunks table
+        let _ = connection.drop_table(&self.chunks_table_name).await;
+        let chunks_schema = self.chunks_schema();
+        let empty_chunks = RecordBatch::new_empty(chunks_schema.clone());
+        let batches =
+            RecordBatchIterator::new(vec![Ok(empty_chunks)].into_iter(), chunks_schema.clone());
+        connection
+            .create_table(&self.chunks_table_name, batches)
+            .execute()
+            .await
+            .context("Failed to recreate LanceDB chunks table")?;
+
         Ok(())
     }
 
     // ---- Arrow conversion helpers ----
 
-    fn entry_to_batch(&self, entry: &IndexEntry, vector: Option<Vec<f32>>) -> Result<RecordBatch> {
+    fn entry_to_batch(&self, entry: &IndexEntry) -> Result<RecordBatch> {
         let id_array = StringArray::from(vec![entry.id.as_str()]);
         let summary_array = StringArray::from(vec![entry.summary.as_str()]);
         let type_array = StringArray::from(vec![format!("{:?}", entry.type_).to_lowercase()]);
@@ -368,33 +485,8 @@ impl LanceIndex {
             None => StringArray::from(vec![Option::<&str>::None]),
         };
 
-        // Build vector column (nullable)
-        let vector_array: ArrayRef = if let Some(v) = vector {
-            if v.len() != self.dimensions {
-                anyhow::bail!(
-                    "Vector dimension mismatch: expected {}, got {}",
-                    self.dimensions,
-                    v.len()
-                );
-            }
-            let values = Float32Array::from(v);
-            Arc::new(FixedSizeListArray::new(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                self.dimensions as i32,
-                Arc::new(values) as ArrayRef,
-                None,
-            ))
-        } else {
-            // Null vector — use FixedSizeListArray::new_null to create a single-row null array
-            Arc::new(FixedSizeListArray::new_null(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                self.dimensions as i32,
-                1, // one row
-            ))
-        };
-
         let batch = RecordBatch::try_new(
-            self.schema(),
+            self.memories_schema(),
             vec![
                 Arc::new(id_array) as ArrayRef,
                 Arc::new(summary_array) as ArrayRef,
@@ -410,7 +502,6 @@ impl LanceIndex {
                 Arc::new(created_at_array) as ArrayRef,
                 Arc::new(updated_at_array) as ArrayRef,
                 Arc::new(expires_at_array) as ArrayRef,
-                vector_array,
             ],
         )
         .context("Failed to create RecordBatch")?;
@@ -632,17 +723,17 @@ mod tests {
     #[tokio::test]
     async fn test_lance_index_creation() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).await;
+        let lance = LanceIndex::new(temp_dir.path(), 384).await;
         assert!(lance.is_ok());
     }
 
     #[tokio::test]
     async fn test_upsert_and_list() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
 
         let entry = create_test_entry("test-1");
-        lance.upsert(&entry, None).await.unwrap();
+        lance.upsert(&entry).await.unwrap();
 
         let entries = lance.list().await.unwrap();
         assert_eq!(entries.len(), 1);
@@ -654,13 +745,13 @@ mod tests {
     #[tokio::test]
     async fn test_upsert_replaces_existing() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
 
         let mut entry = create_test_entry("test-1");
-        lance.upsert(&entry, None).await.unwrap();
+        lance.upsert(&entry).await.unwrap();
 
         entry.summary = "Updated summary".to_string();
-        lance.upsert(&entry, None).await.unwrap();
+        lance.upsert(&entry).await.unwrap();
 
         let entries = lance.list().await.unwrap();
         assert_eq!(entries.len(), 1);
@@ -670,10 +761,10 @@ mod tests {
     #[tokio::test]
     async fn test_delete() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
 
         let entry = create_test_entry("test-1");
-        lance.upsert(&entry, None).await.unwrap();
+        lance.upsert(&entry).await.unwrap();
         lance.delete("test-1").await.unwrap();
 
         let entries = lance.list().await.unwrap();
@@ -683,10 +774,14 @@ mod tests {
     #[tokio::test]
     async fn test_clear() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
 
-        lance.upsert(&create_test_entry("a"), None).await.unwrap();
-        lance.upsert(&create_test_entry("b"), None).await.unwrap();
+        lance.upsert(&create_test_entry("a")).await.unwrap();
+        lance.upsert(&create_test_entry("b")).await.unwrap();
+        lance
+            .upsert_chunks("a", vec![vec![0.1f32; 384]])
+            .await
+            .unwrap();
 
         lance.clear().await.unwrap();
 
@@ -695,62 +790,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_nullable_vector() {
+    async fn test_upsert_chunks() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
 
-        // Upsert without vector
-        let entry = create_test_entry("no-vec");
-        lance.upsert(&entry, None).await.unwrap();
+        let entry = create_test_entry("chunk-test");
+        lance.upsert(&entry).await.unwrap();
 
-        // Upsert with vector
-        let entry2 = create_test_entry("with-vec");
-        lance
-            .upsert(&entry2, Some(vec![0.1f32; 384]))
-            .await
-            .unwrap();
+        // Insert two chunks
+        let chunks = vec![vec![0.1f32; 384], vec![0.2f32; 384]];
+        lance.upsert_chunks("chunk-test", chunks).await.unwrap();
 
-        let entries = lance.list().await.unwrap();
-        assert_eq!(entries.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_vector_search() {
-        let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
-
-        let entry = create_test_entry("vec-search");
-        lance.upsert(&entry, Some(vec![0.1f32; 384])).await.unwrap();
-
+        // Should be searchable
         let matches = lance.vector_search(vec![0.1f32; 384], 10).await.unwrap();
         assert!(!matches.is_empty());
-        assert_eq!(matches[0].id, "vec-search");
+        assert_eq!(matches[0].id, "chunk-test");
     }
 
     #[tokio::test]
-    async fn test_update_vector() {
+    async fn test_delete_chunks() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
 
-        let entry = create_test_entry("update-vec");
-        lance.upsert(&entry, None).await.unwrap();
-
-        // Update vector
+        let entry = create_test_entry("del-chunk");
+        lance.upsert(&entry).await.unwrap();
         lance
-            .update_vector("update-vec", vec![0.2f32; 384])
+            .upsert_chunks("del-chunk", vec![vec![0.1f32; 384]])
             .await
             .unwrap();
 
-        // Should be searchable now
-        let matches = lance.vector_search(vec![0.2f32; 384], 10).await.unwrap();
+        // Verify searchable
+        let matches = lance.vector_search(vec![0.1f32; 384], 10).await.unwrap();
         assert!(!matches.is_empty());
-        assert_eq!(matches[0].id, "update-vec");
+
+        // Delete chunks
+        lance.delete_chunks("del-chunk").await.unwrap();
+
+        // Should no longer appear in search
+        let matches = lance.vector_search(vec![0.1f32; 384], 10).await.unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_vector_search_max_score_aggregation() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        // Memory A has two chunks: one close to query, one far
+        let entry_a = create_test_entry("mem-a");
+        lance.upsert(&entry_a).await.unwrap();
+        let chunk_close = vec![0.5f32; 384];
+        let chunk_far = vec![-0.5f32; 384];
+        lance
+            .upsert_chunks("mem-a", vec![chunk_close, chunk_far])
+            .await
+            .unwrap();
+
+        // Memory B has one chunk that's moderately close
+        let entry_b = create_test_entry("mem-b");
+        lance.upsert(&entry_b).await.unwrap();
+        let chunk_mid = vec![0.3f32; 384];
+        lance.upsert_chunks("mem-b", vec![chunk_mid]).await.unwrap();
+
+        // Search for something close to chunk_close
+        let query = vec![0.5f32; 384];
+        let matches = lance.vector_search(query, 10).await.unwrap();
+
+        assert_eq!(matches.len(), 2);
+        // mem-a should rank first (its best chunk is closer to query)
+        assert_eq!(matches[0].id, "mem-a");
+        assert_eq!(matches[1].id, "mem-b");
+        // Max-score: mem-a's score should be from its close chunk, not averaged
+        assert!(matches[0].score > matches[1].score);
     }
 
     #[tokio::test]
     async fn test_search_empty_store() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
 
         let results = lance.vector_search(vec![0.1f32; 384], 10).await;
         assert!(results.is_ok());
@@ -778,11 +895,11 @@ mod tests {
     #[tokio::test]
     async fn test_visibility_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
 
         let mut entry = create_test_entry("personal-mem");
         entry.visibility = Visibility::Personal;
-        lance.upsert(&entry, None).await.unwrap();
+        lance.upsert(&entry).await.unwrap();
 
         let entries = lance.list().await.unwrap();
         assert_eq!(entries.len(), 1);

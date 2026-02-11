@@ -20,6 +20,7 @@
 use super::error::{Result, StorageError};
 use super::lance_index::{IndexEntry, LanceIndex, VectorMatch};
 use super::{manifest, memory_file, paths, project_id};
+use crate::storage::config::load_config;
 use crate::types::{Memory, MemoryUpdate, Visibility};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -95,8 +96,12 @@ impl MemoryStore {
         let lance_path = paths::lancedb_dir(&project_id)?;
         async_fs::create_dir_all(&lance_path).await?;
 
-        // Initialize LanceIndex
-        let lance_index = LanceIndex::new(&lance_path)
+        // Load config to get embedding dimensions
+        let config_path = engramdb_dir.join("config.toml");
+        let config = load_config(&config_path).await.unwrap_or_default();
+
+        // Initialize LanceIndex with configured dimensions
+        let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB init failed: {}", e)))?;
 
@@ -124,11 +129,15 @@ impl MemoryStore {
         // Compute project ID
         let project_id = project_id::compute_project_id(dir);
 
+        // Load config to get embedding dimensions
+        let config_path = engramdb_dir.join("config.toml");
+        let config = load_config(&config_path).await.unwrap_or_default();
+
         // Open (or create) global LanceDB
         let lance_path = paths::lancedb_dir(&project_id)?;
         async_fs::create_dir_all(&lance_path).await?;
 
-        let lance_index = LanceIndex::new(&lance_path)
+        let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB open failed: {}", e)))?;
 
@@ -154,10 +163,10 @@ impl MemoryStore {
         let content = memory_file::write_memory_file(memory)?;
         async_fs::write(&file_path, content).await?;
 
-        // Upsert to LanceDB (vector=None for now)
+        // Upsert metadata to LanceDB (vectors stored separately in chunks table)
         let entry = IndexEntry::from(memory);
         self.lance_index
-            .upsert(&entry, None)
+            .upsert(&entry)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
 
@@ -248,10 +257,10 @@ impl MemoryStore {
             async_fs::write(&file_path, content).await?;
         }
 
-        // Upsert to LanceDB (preserving existing vector if present)
+        // Upsert metadata to LanceDB (chunks are managed separately)
         let entry = IndexEntry::from(&memory);
         self.lance_index
-            .upsert(&entry, None)
+            .upsert(&entry)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
 
@@ -277,11 +286,17 @@ impl MemoryStore {
                 .await?;
         }
 
-        // Delete from LanceDB
+        // Delete from LanceDB (metadata + chunks)
         self.lance_index
             .delete(&full_id)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB delete failed: {}", e)))?;
+        self.lance_index
+            .delete_chunks(&full_id)
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e))
+            })?;
 
         // Update manifest stats
         self.update_manifest_stats().await?;
@@ -327,12 +342,20 @@ impl MemoryStore {
         Ok(count)
     }
 
-    /// Update the vector embedding for a memory.
-    pub async fn update_vector(&self, id: &str, vector: Vec<f32>) -> Result<()> {
+    /// Upsert embedding chunks for a memory.
+    pub async fn upsert_chunks(&self, memory_id: &str, chunks: Vec<Vec<f32>>) -> Result<()> {
         self.lance_index
-            .update_vector(id, vector)
+            .upsert_chunks(memory_id, chunks)
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB update_vector failed: {}", e)))
+            .map_err(|e| StorageError::Validation(format!("LanceDB upsert_chunks failed: {}", e)))
+    }
+
+    /// Delete all embedding chunks for a memory.
+    pub async fn delete_chunks(&self, memory_id: &str) -> Result<()> {
+        self.lance_index
+            .delete_chunks(memory_id)
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e)))
     }
 
     /// Perform vector similarity search.
@@ -410,12 +433,9 @@ impl MemoryStore {
                 let memory = memory_file::parse_memory_file(&content)?;
                 let mut index_entry = IndexEntry::from(&memory);
                 index_entry.visibility = visibility;
-                self.lance_index
-                    .upsert(&index_entry, None)
-                    .await
-                    .map_err(|e| {
-                        StorageError::Validation(format!("LanceDB upsert failed: {}", e))
-                    })?;
+                self.lance_index.upsert(&index_entry).await.map_err(|e| {
+                    StorageError::Validation(format!("LanceDB upsert failed: {}", e))
+                })?;
                 count += 1;
             }
         }

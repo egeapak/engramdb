@@ -3,8 +3,10 @@
 //! This module provides a trait-based interface for text embedding generation,
 //! along with an ONNX-based implementation using the fastembed crate.
 
+mod chunking;
 mod onnx;
 
+pub use chunking::chunk_text;
 pub use onnx::OnnxProvider;
 
 use anyhow::Result;
@@ -54,4 +56,10 @@ pub trait EmbeddingProvider: Send + Sync {
     /// # Returns
     /// The number of dimensions in each embedding vector.
     fn dimensions(&self) -> usize;
+
+    /// Get the maximum number of input tokens this provider supports.
+    ///
+    /// Text longer than this will be silently truncated by the model.
+    /// Use this to chunk text before embedding.
+    fn max_tokens(&self) -> usize;
 }

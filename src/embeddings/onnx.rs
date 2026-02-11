@@ -16,6 +16,7 @@ use std::sync::Arc;
 pub struct OnnxProvider {
     model: Arc<TextEmbedding>,
     dimensions: usize,
+    max_tokens: usize,
 }
 
 impl OnnxProvider {
@@ -41,6 +42,7 @@ impl OnnxProvider {
         Ok(Self {
             model: Arc::new(model),
             dimensions: 384, // all-MiniLM-L6-v2 produces 384-dimensional embeddings
+            max_tokens: 256, // all-MiniLM-L6-v2 truncates at 256 tokens
         })
     }
 
@@ -93,6 +95,10 @@ impl EmbeddingProvider for OnnxProvider {
     fn dimensions(&self) -> usize {
         self.dimensions
     }
+
+    fn max_tokens(&self) -> usize {
+        self.max_tokens
+    }
 }
 
 #[cfg(test)]
@@ -110,6 +116,13 @@ mod tests {
     fn test_dimensions() {
         if let Some(provider) = OnnxProvider::try_new() {
             assert_eq!(provider.dimensions(), 384);
+        }
+    }
+
+    #[test]
+    fn test_max_tokens() {
+        if let Some(provider) = OnnxProvider::try_new() {
+            assert_eq!(provider.max_tokens(), 256);
         }
     }
 

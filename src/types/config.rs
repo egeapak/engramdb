@@ -219,6 +219,27 @@ impl Default for RetrievalConfig {
     }
 }
 
+/// Embeddings provider configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingsConfig {
+    /// Provider name ("onnx", future: "ollama")
+    pub provider: String,
+    /// Embedding vector dimensionality (384 for MiniLM, 768 for nomic, etc.)
+    pub dimensions: usize,
+    /// Maximum input tokens before truncation (256 for MiniLM)
+    pub max_tokens: usize,
+}
+
+impl Default for EmbeddingsConfig {
+    fn default() -> Self {
+        Self {
+            provider: "onnx".to_string(),
+            dimensions: 384,
+            max_tokens: 256,
+        }
+    }
+}
+
 /// Top-level EngramDB configuration
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EngramConfig {
@@ -229,6 +250,10 @@ pub struct EngramConfig {
     /// Search-specific settings
     #[serde(default)]
     pub search: SearchConfig,
+
+    /// Embeddings provider settings
+    #[serde(default)]
+    pub embeddings: EmbeddingsConfig,
 
     /// Physical scope proximity bonuses
     #[serde(default)]
@@ -321,6 +346,11 @@ mod tests {
         // Search config
         assert_eq!(config.search.semantic_weight, 3.0);
         assert_eq!(config.search.threshold, 0.0);
+
+        // Embeddings config
+        assert_eq!(config.embeddings.provider, "onnx");
+        assert_eq!(config.embeddings.dimensions, 384);
+        assert_eq!(config.embeddings.max_tokens, 256);
     }
 
     #[test]
