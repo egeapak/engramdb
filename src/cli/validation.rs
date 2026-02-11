@@ -45,4 +45,28 @@ mod tests {
     fn test_validate_score_way_too_high() {
         assert!(validate_score(2.0, "criticality").is_err());
     }
+
+    #[test]
+    fn test_validate_score_boundary_just_above() {
+        let err = validate_score(1.0000001, "x").unwrap_err();
+        assert!(err.to_string().contains("0.0 and 1.0"));
+    }
+
+    #[test]
+    fn test_validate_score_boundary_just_below() {
+        let err = validate_score(-0.0000001, "x").unwrap_err();
+        assert!(err.to_string().contains("0.0 and 1.0"));
+    }
+
+    #[test]
+    fn test_validate_score_nan() {
+        let err = validate_score(f64::NAN, "x").unwrap_err();
+        assert!(err.to_string().contains("0.0 and 1.0"));
+    }
+
+    #[test]
+    fn test_validate_score_infinity() {
+        let err = validate_score(f64::INFINITY, "x").unwrap_err();
+        assert!(err.to_string().contains("0.0 and 1.0"));
+    }
 }

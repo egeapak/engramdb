@@ -143,7 +143,7 @@ mod tests {
         }
     }
 
-    async fn setup_test_store() -> (TempDir, MemoryStore) {
+    async fn setup_test_store() -> (TempDir, MemoryStore, InMemoryRegistry) {
         let temp_dir = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
@@ -179,14 +179,13 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         store.create(&mem3).await.unwrap();
 
-        (temp_dir, store)
+        (temp_dir, store, registry)
     }
 
     #[tokio::test]
     async fn test_scope_filter_physical() {
-        let (temp_dir, _store) = setup_test_store().await;
+        let (temp_dir, _store, registry) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
-        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
@@ -208,9 +207,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_scope_filter_logical() {
-        let (temp_dir, _store) = setup_test_store().await;
+        let (temp_dir, _store, registry) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
-        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
@@ -232,9 +230,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_scope_filter_no_match() {
-        let (temp_dir, _store) = setup_test_store().await;
+        let (temp_dir, _store, registry) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
-        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
@@ -256,7 +253,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sort_by_criticality() {
-        let (_temp_dir, store) = setup_test_store().await;
+        let (_temp_dir, store, _registry) = setup_test_store().await;
         let entries = store.list().await.unwrap();
 
         // Verify test data has different criticality scores
@@ -269,9 +266,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sort_by_created() {
-        let (temp_dir, _store) = setup_test_store().await;
+        let (temp_dir, _store, registry) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
-        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
@@ -293,9 +289,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sort_by_updated() {
-        let (temp_dir, _store) = setup_test_store().await;
+        let (temp_dir, _store, registry) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
-        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
@@ -317,9 +312,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sort_by_type() {
-        let (temp_dir, _store) = setup_test_store().await;
+        let (temp_dir, _store, registry) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
-        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
@@ -341,9 +335,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_sort_field() {
-        let (temp_dir, _store) = setup_test_store().await;
+        let (temp_dir, _store, registry) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
-        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
@@ -369,9 +362,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_reverse_sort() {
-        let (temp_dir, _store) = setup_test_store().await;
+        let (temp_dir, _store, registry) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
-        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
@@ -393,9 +385,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_limit() {
-        let (temp_dir, _store) = setup_test_store().await;
+        let (temp_dir, _store, registry) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
-        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
@@ -417,9 +408,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_combined_filters_and_sorting() {
-        let (temp_dir, _store) = setup_test_store().await;
+        let (temp_dir, _store, registry) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
-        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),

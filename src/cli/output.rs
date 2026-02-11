@@ -705,3 +705,214 @@ pub struct Stats {
     /// Average criticality across all memories
     pub avg_criticality: f64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::retrieval::engine::{RetrievalResult, ScoredMemory};
+    use crate::scoring::ScoreBreakdown;
+    use crate::types::{Memory, MemoryType, Provenance, Status, Visibility};
+
+    fn test_memory() -> Memory {
+        Memory {
+            id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            type_: MemoryType::Decision,
+            summary: "Test summary".to_string(),
+            content: "Test content".to_string(),
+            details: None,
+            physical: vec![],
+            logical: vec![],
+            tags: vec![],
+            criticality: 0.8,
+            decay: None,
+            provenance: Provenance::human(),
+            confidence: 0.9,
+            supersedes: vec![],
+            status: Status::Active,
+            visibility: Visibility::Shared,
+            challenges: vec![],
+            verified_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            accessed_at: chrono::Utc::now(),
+            expires_at: None,
+        }
+    }
+
+    fn test_score_breakdown() -> ScoreBreakdown {
+        ScoreBreakdown {
+            final_score: 0.75,
+            semantic: Some(0.8),
+            keyword: None,
+            relevance: 0.7,
+            scope: 0.6,
+            trust: 1.0,
+            decay: 1.0,
+            criticality: 0.8,
+        }
+    }
+
+    fn test_index_entry() -> IndexEntry {
+        IndexEntry {
+            id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            type_: MemoryType::Decision,
+            summary: "Test index entry".to_string(),
+            physical: vec![],
+            logical: vec![],
+            tags: vec![],
+            criticality: 0.8,
+            confidence: 0.9,
+            provenance_source: crate::types::ProvenanceSource::Human,
+            status: Status::Active,
+            visibility: Visibility::Shared,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            expires_at: None,
+        }
+    }
+
+    // ========================================
+    // 1. short_id helper tests
+    // ========================================
+
+    #[test]
+    fn test_short_id_normal() {
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(short_id(uuid), "550e8400-e29b");
+    }
+
+    #[test]
+    fn test_short_id_short_input() {
+        let short_str = "12345";
+        assert_eq!(short_id(short_str), "12345");
+    }
+
+    #[test]
+    fn test_short_id_exact_13() {
+        let exact = "1234567890123";
+        assert_eq!(short_id(exact), "1234567890123");
+    }
+
+    // ========================================
+    // 2. Constructor tests
+    // ========================================
+
+    #[test]
+    fn test_formatter_json_flag_overrides() {
+        let formatter = OutputFormatter::new(Some(OutputFormat::Pretty), true, false);
+        // Verify JSON format by checking that print_message produces JSON output
+        // We can't easily capture stdout, but we can verify the formatter doesn't panic
+        formatter.print_message("test");
+    }
+
+    #[test]
+    fn test_formatter_explicit_format() {
+        let formatter = OutputFormatter::new(Some(OutputFormat::Plain), false, false);
+        // Verify it doesn't panic with plain format
+        formatter.print_message("test");
+    }
+
+    // ========================================
+    // 3. print_search_results format routing
+    // ========================================
+
+    #[test]
+    fn test_search_results_json_format() {
+        let formatter = OutputFormatter::new(Some(OutputFormat::Json), false, false);
+        let memory = test_memory();
+        let scored = ScoredMemory {
+            memory,
+            score: 0.85,
+            score_breakdown: test_score_breakdown(),
+        };
+        let results = vec![scored];
+
+        // Verify it doesn't panic
+        formatter.print_search_results(&results);
+    }
+
+    #[test]
+    fn test_search_results_empty() {
+        let formatter_json = OutputFormatter::new(Some(OutputFormat::Json), false, false);
+        let formatter_pretty = OutputFormatter::new(Some(OutputFormat::Pretty), false, false);
+        let formatter_plain = OutputFormatter::new(Some(OutputFormat::Plain), false, false);
+
+        let empty: Vec<ScoredMemory> = vec![];
+
+        // Verify none panic with empty results
+        formatter_json.print_search_results(&empty);
+        formatter_pretty.print_search_results(&empty);
+        formatter_plain.print_search_results(&empty);
+    }
+
+    // ========================================
+    // 4. print_retrieval_result format routing
+    // ========================================
+
+    #[test]
+    fn test_retrieval_result_json_format() {
+        let formatter = OutputFormatter::new(Some(OutputFormat::Json), false, false);
+        let memory = test_memory();
+        let scored = ScoredMemory {
+            memory,
+            score: 0.85,
+            score_breakdown: test_score_breakdown(),
+        };
+        let result = RetrievalResult {
+            memories: vec![scored],
+            total: 1,
+            query_mode: "with_embeddings".to_string(),
+        };
+
+        // Verify it doesn't panic
+        formatter.print_retrieval_result(&result, true);
+        formatter.print_retrieval_result(&result, false);
+    }
+
+    #[test]
+    fn test_retrieval_result_empty() {
+        let formatter_json = OutputFormatter::new(Some(OutputFormat::Json), false, false);
+        let formatter_pretty = OutputFormatter::new(Some(OutputFormat::Pretty), false, false);
+        let formatter_plain = OutputFormatter::new(Some(OutputFormat::Plain), false, false);
+
+        let empty_result = RetrievalResult {
+            memories: vec![],
+            total: 0,
+            query_mode: "scope_only".to_string(),
+        };
+
+        // Verify none panic with empty results
+        formatter_json.print_retrieval_result(&empty_result, true);
+        formatter_pretty.print_retrieval_result(&empty_result, false);
+        formatter_plain.print_retrieval_result(&empty_result, true);
+    }
+
+    // ========================================
+    // 5. print_memory_list verbose flag
+    // ========================================
+
+    #[test]
+    fn test_print_memory_list_json_ignores_verbose() {
+        let formatter = OutputFormatter::new(Some(OutputFormat::Json), false, false);
+        let entries = vec![test_index_entry()];
+
+        // Both verbose=true and verbose=false should produce same output
+        // We verify neither panics
+        formatter.print_memory_list(&entries, true);
+        formatter.print_memory_list(&entries, false);
+    }
+
+    #[test]
+    fn test_print_memory_list_empty() {
+        let formatter_json = OutputFormatter::new(Some(OutputFormat::Json), false, false);
+        let formatter_pretty = OutputFormatter::new(Some(OutputFormat::Pretty), false, false);
+        let formatter_plain = OutputFormatter::new(Some(OutputFormat::Plain), false, false);
+
+        let empty: Vec<IndexEntry> = vec![];
+
+        // Verify none panic with empty entries
+        formatter_json.print_memory_list(&empty, false);
+        formatter_pretty.print_memory_list(&empty, true);
+        formatter_plain.print_memory_list(&empty, false);
+    }
+}

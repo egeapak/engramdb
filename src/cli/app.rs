@@ -478,4 +478,93 @@ mod tests {
             _ => panic!("Expected Completions command"),
         }
     }
+
+    #[test]
+    fn test_quiet_flag_is_global() {
+        let cli = Cli::try_parse_from(["engramdb", "-q", "list"]).unwrap();
+        assert!(cli.quiet);
+    }
+
+    #[test]
+    fn test_verbose_flag_is_global() {
+        let cli = Cli::try_parse_from(["engramdb", "-v", "list"]).unwrap();
+        assert!(cli.verbose);
+    }
+
+    #[test]
+    fn test_format_flag_is_global() {
+        let cli = Cli::try_parse_from(["engramdb", "--format", "json", "list"]).unwrap();
+        match cli.format {
+            Some(OutputFormat::Json) => {} // expected
+            other => panic!("Expected Json, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_search_command_parses() {
+        let cli = Cli::try_parse_from(["engramdb", "search", "test query"]).unwrap();
+        match cli.command {
+            Command::Search { query, .. } => {
+                assert_eq!(query, "test query");
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    #[test]
+    fn test_add_command_all_flags() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "add",
+            "-t",
+            "decision",
+            "-c",
+            "content",
+            "-s",
+            "summary",
+            "--criticality",
+            "0.5",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add {
+                type_,
+                content,
+                summary,
+                criticality,
+                ..
+            } => {
+                assert_eq!(type_, Some("decision".to_string()));
+                assert_eq!(content, Some("content".to_string()));
+                assert_eq!(summary, Some("summary".to_string()));
+                assert_eq!(criticality, Some(0.5));
+            }
+            _ => panic!("Expected Add command"),
+        }
+    }
+
+    #[test]
+    fn test_gc_command_flags() {
+        let cli =
+            Cli::try_parse_from(["engramdb", "gc", "--confirm", "--threshold", "0.1"]).unwrap();
+        match cli.command {
+            Command::Gc { confirm, threshold } => {
+                assert!(confirm);
+                assert_eq!(threshold, Some(0.1));
+            }
+            _ => panic!("Expected Gc command"),
+        }
+    }
+
+    #[test]
+    fn test_serve_command_defaults() {
+        let cli = Cli::try_parse_from(["engramdb", "serve"]).unwrap();
+        match cli.command {
+            Command::Serve { transport, port } => {
+                assert_eq!(transport, "stdio");
+                assert_eq!(port, None);
+            }
+            _ => panic!("Expected Serve command"),
+        }
+    }
 }
