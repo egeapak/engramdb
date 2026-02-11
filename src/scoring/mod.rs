@@ -1,8 +1,8 @@
 //! Scoring engine for EngramDB
 //!
 //! This module provides functionality to calculate composite scores for memories
-//! based on multiple factors including semantic similarity, relevance (criticality + decay),
-//! scope proximity, and trust/provenance.
+//! based on multiple factors including semantic similarity, relevance (criticality * decay),
+//! scope proximity, and trust (as a multiplier).
 //!
 //! # Key Components
 //!
@@ -16,14 +16,16 @@
 //!
 //! The composite scoring operates in three modes:
 //!
-//! 1. **With query + embeddings**: Uses semantic similarity along with other factors
-//! 2. **With query, no embeddings** (degraded): Uses keyword search with adjusted weights
-//! 3. **Scope-only**: Uses only scope proximity, relevance, and trust
+//! 1. **With query + embeddings**: `base = sem_w*semantic + rel_w*(criticality*decay) + scope_w*scope`
+//! 2. **With query, no embeddings** (degraded): `base = rel_w*(criticality*decay) + scope_w*scope`
+//! 3. **Scope-only**: `base = rel_w*(criticality*decay) + scope_w*scope`
+//!
+//! Then: `score = base * trust_weight`, with `* 0.7` if challenged.
 //!
 //! # Design Decisions
 //!
-//! - Challenged memories receive a 30% penalty to their final score
-//! - All scores are normalized to [0.0, 1.0] range (though can exceed 1.0 in edge cases)
+//! - Trust is a multiplier on the entire score, not a weighted component
+//! - Challenged memories receive a 30% penalty (`* 0.7`) to their final score
 //! - Decay strategies include None, Linear, Exponential, and Step functions
 //! - Trust weights vary by provenance source to reflect confidence in the information
 mod composite;

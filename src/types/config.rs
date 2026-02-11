@@ -4,7 +4,7 @@
 //! - [`EngramConfig`] - top-level configuration with all subsections
 //! - [`RetrievalConfig`] - retrieval settings (thresholds, max results)
 //! - [`ScoringConfig`] - scoring mode weights (with_query, scope_only, degraded)
-//! - [`ScoringWeights`] - component weights for semantic, relevance, scope, trust
+//! - [`ScoringWeights`] - component weights for semantic, relevance, scope
 //! - [`ScopeProximityConfig`] - physical scope bonuses (exact file, same dir, etc.)
 //! - [`LogicalBonusConfig`] - logical scope bonuses (exact, parent, sibling)
 //! - [`TrustWeights`] - trust scores by provenance source
@@ -14,30 +14,29 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Weights for scoring components
+/// Weights for scoring components.
+///
+/// Trust is applied as a multiplier on the entire score (from `TrustWeights`),
+/// not as a weighted component here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScoringWeights {
     /// Semantic similarity weight (optional - not available in degraded mode)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub semantic: Option<f64>,
 
-    /// Relevance weight
+    /// Relevance weight (criticality * decay)
     pub relevance: f64,
 
     /// Scope proximity weight
     pub scope: f64,
-
-    /// Trust/provenance weight
-    pub trust: f64,
 }
 
 impl Default for ScoringWeights {
     fn default() -> Self {
         Self {
-            semantic: Some(0.3),
-            relevance: 0.4,
-            scope: 0.2,
-            trust: 0.1,
+            semantic: Some(0.35),
+            relevance: 0.45,
+            scope: 0.20,
         }
     }
 }
@@ -61,15 +60,13 @@ impl Default for ScoringConfig {
             with_query: ScoringWeights::default(),
             scope_only: ScoringWeights {
                 semantic: None,
-                relevance: 0.4,
-                scope: 0.4,
-                trust: 0.2,
+                relevance: 0.50,
+                scope: 0.50,
             },
             degraded: ScoringWeights {
                 semantic: None,
-                relevance: 0.6,
-                scope: 0.25,
-                trust: 0.15,
+                relevance: 0.70,
+                scope: 0.30,
             },
         }
     }
@@ -152,6 +149,26 @@ impl Default for TrustWeights {
     }
 }
 
+/// Search-specific configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchConfig {
+    /// Weight applied to semantic (cosine) similarity in search scoring.
+    /// Higher values make semantic matches dominate over keyword matches.
+    pub semantic_weight: f64,
+
+    /// Minimum score threshold for search results (results below this are filtered out).
+    pub threshold: f64,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            semantic_weight: 3.0,
+            threshold: 0.0,
+        }
+    }
+}
+
 /// Thresholds for various operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThresholdsConfig {
@@ -208,6 +225,10 @@ pub struct EngramConfig {
     /// Retrieval settings
     #[serde(default)]
     pub retrieval: RetrievalConfig,
+
+    /// Search-specific settings
+    #[serde(default)]
+    pub search: SearchConfig,
 
     /// Physical scope proximity bonuses
     #[serde(default)]
@@ -283,22 +304,23 @@ mod tests {
         assert_eq!(config.thresholds.compress, 0.4);
 
         // Scoring weights - with_query
-        assert_eq!(config.retrieval.scoring.with_query.semantic, Some(0.3));
-        assert_eq!(config.retrieval.scoring.with_query.relevance, 0.4);
-        assert_eq!(config.retrieval.scoring.with_query.scope, 0.2);
-        assert_eq!(config.retrieval.scoring.with_query.trust, 0.1);
+        assert_eq!(config.retrieval.scoring.with_query.semantic, Some(0.35));
+        assert_eq!(config.retrieval.scoring.with_query.relevance, 0.45);
+        assert_eq!(config.retrieval.scoring.with_query.scope, 0.20);
 
         // Scoring weights - scope_only
         assert_eq!(config.retrieval.scoring.scope_only.semantic, None);
-        assert_eq!(config.retrieval.scoring.scope_only.relevance, 0.4);
-        assert_eq!(config.retrieval.scoring.scope_only.scope, 0.4);
-        assert_eq!(config.retrieval.scoring.scope_only.trust, 0.2);
+        assert_eq!(config.retrieval.scoring.scope_only.relevance, 0.50);
+        assert_eq!(config.retrieval.scoring.scope_only.scope, 0.50);
 
         // Scoring weights - degraded
         assert_eq!(config.retrieval.scoring.degraded.semantic, None);
-        assert_eq!(config.retrieval.scoring.degraded.relevance, 0.6);
-        assert_eq!(config.retrieval.scoring.degraded.scope, 0.25);
-        assert_eq!(config.retrieval.scoring.degraded.trust, 0.15);
+        assert_eq!(config.retrieval.scoring.degraded.relevance, 0.70);
+        assert_eq!(config.retrieval.scoring.degraded.scope, 0.30);
+
+        // Search config
+        assert_eq!(config.search.semantic_weight, 3.0);
+        assert_eq!(config.search.threshold, 0.0);
     }
 
     #[test]
@@ -343,20 +365,17 @@ relevance_threshold = 0.7
 include_expired = true
 
 [retrieval.scoring.with_query]
-semantic = 0.3
-relevance = 0.4
-scope = 0.2
-trust = 0.1
+semantic = 0.35
+relevance = 0.45
+scope = 0.20
 
 [retrieval.scoring.scope_only]
-relevance = 0.4
-scope = 0.4
-trust = 0.2
+relevance = 0.50
+scope = 0.50
 
 [retrieval.scoring.degraded]
-relevance = 0.6
-scope = 0.25
-trust = 0.15
+relevance = 0.70
+scope = 0.30
 "#;
 
         let config: EngramConfig = toml::from_str(partial_toml).unwrap();
@@ -377,27 +396,28 @@ trust = 0.15
     fn test_config_scoring_weights_sum_to_one() {
         let config = EngramConfig::default();
 
-        // with_query: all weights (including semantic) sum to 1.0
+        // with_query: semantic + relevance + scope sum to 1.0
+        // (trust is now a multiplier, not a weighted component)
         let wq = &config.retrieval.scoring.with_query;
-        let wq_sum = wq.semantic.unwrap_or(0.0) + wq.relevance + wq.scope + wq.trust;
+        let wq_sum = wq.semantic.unwrap_or(0.0) + wq.relevance + wq.scope;
         assert!(
             (wq_sum - 1.0).abs() < f64::EPSILON,
             "with_query weights sum to {}, expected 1.0",
             wq_sum
         );
 
-        // scope_only: non-None weights sum to 1.0
+        // scope_only: relevance + scope sum to 1.0
         let so = &config.retrieval.scoring.scope_only;
-        let so_sum = so.semantic.unwrap_or(0.0) + so.relevance + so.scope + so.trust;
+        let so_sum = so.semantic.unwrap_or(0.0) + so.relevance + so.scope;
         assert!(
             (so_sum - 1.0).abs() < f64::EPSILON,
             "scope_only weights sum to {}, expected 1.0",
             so_sum
         );
 
-        // degraded: non-None weights sum to 1.0
+        // degraded: relevance + scope sum to 1.0
         let dg = &config.retrieval.scoring.degraded;
-        let dg_sum = dg.semantic.unwrap_or(0.0) + dg.relevance + dg.scope + dg.trust;
+        let dg_sum = dg.semantic.unwrap_or(0.0) + dg.relevance + dg.scope;
         assert!(
             (dg_sum - 1.0).abs() < f64::EPSILON,
             "degraded weights sum to {}, expected 1.0",

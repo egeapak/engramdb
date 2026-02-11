@@ -334,10 +334,13 @@ struct ScoreBreakdownOutput {
     final_score: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     semantic: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keyword: Option<f64>,
     relevance: f64,
     scope: f64,
     trust: f64,
     decay: f64,
+    criticality: f64,
 }
 
 #[derive(Serialize)]
@@ -496,10 +499,12 @@ impl EngramDbServer {
                 score_breakdown: ScoreBreakdownOutput {
                     final_score: sm.score_breakdown.final_score,
                     semantic: sm.score_breakdown.semantic,
+                    keyword: sm.score_breakdown.keyword,
                     relevance: sm.score_breakdown.relevance,
                     scope: sm.score_breakdown.scope,
                     trust: sm.score_breakdown.trust,
                     decay: sm.score_breakdown.decay,
+                    criticality: sm.score_breakdown.criticality,
                 },
             })
             .collect();
@@ -552,10 +557,12 @@ impl EngramDbServer {
                 score_breakdown: ScoreBreakdownOutput {
                     final_score: sm.score_breakdown.final_score,
                     semantic: sm.score_breakdown.semantic,
+                    keyword: sm.score_breakdown.keyword,
                     relevance: sm.score_breakdown.relevance,
                     scope: sm.score_breakdown.scope,
                     trust: sm.score_breakdown.trust,
                     decay: sm.score_breakdown.decay,
+                    criticality: sm.score_breakdown.criticality,
                 },
             })
             .collect();

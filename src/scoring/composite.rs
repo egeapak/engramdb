@@ -6,20 +6,26 @@ use super::decay::effective_relevance;
 use super::trust::trust_weight_from_config;
 
 /// Breakdown of composite score components.
+///
+/// All values are raw (unweighted) scores for transparency.
 #[derive(Debug, Clone)]
 pub struct ScoreBreakdown {
-    /// The final composite score (0.0 to 1.0+)
+    /// The final composite score
     pub final_score: f64,
-    /// Semantic similarity score (if available)
+    /// Raw semantic (cosine) similarity score (if available)
     pub semantic: Option<f64>,
+    /// Raw keyword match score (if available — only set for search, not retrieve)
+    pub keyword: Option<f64>,
     /// Effective relevance score (criticality * decay)
     pub relevance: f64,
     /// Scope proximity score
     pub scope: f64,
-    /// Trust weight based on provenance
+    /// Trust weight based on provenance (used as multiplier)
     pub trust: f64,
     /// Decay factor (1.0 = no decay)
     pub decay: f64,
+    /// Raw criticality value
+    pub criticality: f64,
 }
 
 /// Context for scoring a memory during retrieval.
@@ -87,17 +93,19 @@ impl ScoringContext {
 ///
 /// 1. **With query + embeddings** (semantic_score is Some):
 ///    - Uses `config.retrieval.scoring.with_query` weights
-///    - score = semantic * semantic_score + relevance * relevance + scope * scope_proximity + trust * trust
+///    - base = 0.35*semantic + 0.45*(criticality*decay) + 0.20*scope
 ///
 /// 2. **With query, no embeddings** (query is Some, semantic_score is None):
 ///    - Uses `config.retrieval.scoring.degraded` weights
-///    - score = relevance * relevance + scope * scope_proximity + trust * trust
+///    - base = 0.70*(criticality*decay) + 0.30*scope
 ///
 /// 3. **Scope-only** (no query):
 ///    - Uses `config.retrieval.scoring.scope_only` weights
-///    - score = relevance * relevance + scope * scope_proximity + trust * trust
+///    - base = 0.50*(criticality*decay) + 0.50*scope
 ///
-/// Challenge penalty: if memory.status == Status::Challenged, multiply final score by (1.0 - challenge_penalty)
+/// Then: `score = base * trust_weight`
+///
+/// Challenge penalty: if memory.status == Status::Challenged, `score *= 0.7`
 ///
 /// # Arguments
 /// * `memory` - The memory to score
@@ -140,35 +148,36 @@ pub fn composite_score(
         &config.retrieval.scoring.scope_only
     };
 
-    // Calculate base score
-    let mut score =
-        weights.relevance * relevance + weights.scope * scope_score + weights.trust * trust;
+    // Calculate base score (trust is a multiplier, not a weighted component)
+    let mut score = weights.relevance * relevance + weights.scope * scope_score;
 
-    // Add semantic component if available
-    let semantic_contribution = if let (Some(semantic_weight), Some(semantic_score)) =
+    // Add semantic component if available (store raw score in breakdown)
+    let raw_semantic = if let (Some(semantic_weight), Some(semantic_score)) =
         (weights.semantic, context.semantic_score)
     {
-        let contrib = semantic_weight * semantic_score;
-        score += contrib;
-        Some(contrib)
+        score += semantic_weight * semantic_score;
+        Some(semantic_score)
     } else {
         None
     };
 
+    // Apply trust as a multiplier on the entire base score
+    score *= trust;
+
     // Apply challenge penalty if memory is challenged
     if memory.status == Status::Challenged {
-        // Default challenge penalty is 0.3
-        let challenge_penalty = 0.3;
-        score *= 1.0 - challenge_penalty;
+        score *= 0.7;
     }
 
     ScoreBreakdown {
         final_score: score,
-        semantic: semantic_contribution,
+        semantic: raw_semantic,
+        keyword: None,
         relevance,
         scope: scope_score,
         trust,
         decay: decay_factor_value,
+        criticality: memory.criticality,
     }
 }
 
@@ -220,14 +229,15 @@ mod tests {
 
         // Should be > 0 and use with_query weights
         assert!(breakdown.final_score > 0.0);
-        // Semantic should contribute
-        assert!(breakdown.semantic.is_some());
-        // Semantic should contribute: 0.5 * 0.9 = 0.45
-        // Relevance: 0.3 * 0.8 = 0.24
-        // Scope: 0.15 * 1.0 = 0.15 (exact match)
-        // Trust: 0.05 * 1.0 = 0.05
-        // Total: ~0.89
-        assert!((breakdown.final_score - 0.89).abs() < 0.1);
+        // Semantic should store the raw cosine similarity
+        assert_eq!(breakdown.semantic, Some(0.9));
+        // keyword should be None for retrieve
+        assert!(breakdown.keyword.is_none());
+        // criticality should be raw value
+        assert_eq!(breakdown.criticality, 0.8);
+        // base = 0.35*0.9 + 0.45*0.8 + 0.20*1.0 = 0.315 + 0.36 + 0.20 = 0.875
+        // * trust(1.0) = 0.875
+        assert!((breakdown.final_score - 0.875).abs() < 0.05);
     }
 
     #[test]
@@ -247,11 +257,9 @@ mod tests {
         assert!(breakdown.final_score > 0.0);
         // No semantic component
         assert!(breakdown.semantic.is_none());
-        // Relevance: 0.6 * 0.8 = 0.48
-        // Scope: 0.3 * 1.0 = 0.30
-        // Trust: 0.1 * 1.0 = 0.10
-        // Total: ~0.88
-        assert!((breakdown.final_score - 0.88).abs() < 0.1);
+        // base = 0.70*0.8 + 0.30*1.0 = 0.56 + 0.30 = 0.86
+        // * trust(1.0) = 0.86
+        assert!((breakdown.final_score - 0.86).abs() < 0.05);
     }
 
     #[test]
@@ -270,11 +278,9 @@ mod tests {
         assert!(breakdown.final_score > 0.0);
         // No semantic component
         assert!(breakdown.semantic.is_none());
-        // Relevance: 0.5 * 0.8 = 0.4
-        // Scope: 0.4 * 1.0 = 0.4
-        // Trust: 0.1 * 1.0 = 0.1
-        // Total: ~0.9
-        assert!((breakdown.final_score - 0.9).abs() < 0.1);
+        // base = 0.50*0.8 + 0.50*1.0 = 0.40 + 0.50 = 0.90
+        // * trust(1.0) = 0.90
+        assert!((breakdown.final_score - 0.90).abs() < 0.05);
     }
 
     #[test]
@@ -314,11 +320,11 @@ mod tests {
 
         let breakdown = composite_score(&memory, &context, &config, now);
 
-        // Relevance should be affected by decay: 0.8 * 0.5 = 0.4
-        // Total score should be lower than without decay
+        // relevance = criticality(0.8) * decay(~0.5) = ~0.4
+        // base = 0.50*0.4 + 0.50*1.0 = 0.70
+        // * trust(1.0) = 0.70
         assert!(breakdown.final_score < 0.9);
         assert!(breakdown.final_score > 0.0);
-        // Decay factor should be around 0.5 for exponential decay at half-life
         assert!((breakdown.decay - 0.5).abs() < 0.1);
     }
 
@@ -355,12 +361,12 @@ mod tests {
 
         let breakdown = composite_score(&memory, &context, &config, now);
 
-        // With criticality=0.0, relevance component is 0.0, so score should be much lower
-        // Scope: 0.4 * 1.0 = 0.4
-        // Trust: 0.2 * 1.0 = 0.2
-        // Total: ~0.6
-        assert!((breakdown.final_score - 0.6).abs() < 0.1);
+        // With criticality=0.0, relevance component is 0.0
+        // base = 0.50*0.0 + 0.50*1.0 = 0.50
+        // * trust(1.0) = 0.50
+        assert!((breakdown.final_score - 0.50).abs() < 0.05);
         assert!((breakdown.relevance - 0.0).abs() < 0.01);
+        assert_eq!(breakdown.criticality, 0.0);
     }
 
     #[test]
@@ -377,11 +383,9 @@ mod tests {
 
         let breakdown = composite_score(&memory, &context, &config, now);
 
-        // Scope component = 0.0, but other components still contribute
-        // Relevance: 0.5 * 0.8 = 0.4
-        // Trust: 0.1 * 1.0 = 0.1
-        // Total: ~0.5
-        assert!((breakdown.final_score - 0.5).abs() < 0.1);
+        // base = 0.50*0.8 + 0.50*0.0 = 0.40
+        // * trust(1.0) = 0.40
+        assert!((breakdown.final_score - 0.40).abs() < 0.05);
         assert!((breakdown.scope - 0.0).abs() < 0.01);
     }
 
@@ -402,15 +406,12 @@ mod tests {
 
         let breakdown = composite_score(&memory, &context, &config, now);
 
-        // All components at 1.0 -> final score should be at max
-        // Semantic: 0.5 * 1.0 = 0.5
-        // Relevance: 0.3 * 1.0 = 0.3
-        // Scope: 0.15 * 1.0 = 0.15
-        // Trust: 0.05 * 1.0 = 0.05
-        // Total: 1.0
-        assert!((breakdown.final_score - 1.0).abs() < 0.1);
-        assert!(breakdown.final_score <= 1.1); // Reasonable cap
-        assert_eq!(breakdown.decay, 1.0); // No decay
+        // base = 0.35*1.0 + 0.45*1.0 + 0.20*1.0 = 1.0
+        // * trust(1.0) = 1.0
+        assert!((breakdown.final_score - 1.0).abs() < 0.05);
+        assert!(breakdown.final_score <= 1.1);
+        assert_eq!(breakdown.decay, 1.0);
+        assert_eq!(breakdown.semantic, Some(1.0));
     }
 
     #[test]

@@ -6,7 +6,7 @@ use crate::types::Memory;
 ///
 /// Returns a vector of (index, score) tuples where:
 /// - index: the index into the memories slice
-/// - score: relevance score from 0.0 to 1.0
+/// - score: raw weighted match score (unbounded)
 ///
 /// # Algorithm
 /// 1. Tokenize query into lowercase words
@@ -15,7 +15,7 @@ use crate::types::Memory;
 ///    - Summary match: 3x weight
 ///    - Tag match: 2x weight
 ///    - Content match: 1x weight
-/// 4. Score = weighted_matches / (total_query_tokens * 3) to normalize to [0, 1]
+/// 4. Score = raw weighted_matches (no normalization)
 /// 5. Filter out zero scores and sort by score descending
 ///
 /// # Arguments
@@ -58,9 +58,8 @@ pub fn keyword_search(query: &str, memories: &[Memory]) -> Vec<(usize, f64)> {
 /// - Tag match: 2x
 /// - Content match: 1x
 ///
-/// Score is normalized to [0.0, 1.0] based on maximum possible weighted matches.
+/// Returns raw weighted matches (unbounded). No normalization is applied.
 fn calculate_keyword_score(query_tokens: &[String], memory: &Memory) -> f64 {
-    // Tokenize memory fields
     let summary_tokens = tokenize(&memory.summary);
     let content_tokens = tokenize(&memory.content);
     let tag_tokens: Vec<String> = memory.tags.iter().flat_map(|tag| tokenize(tag)).collect();
@@ -68,30 +67,20 @@ fn calculate_keyword_score(query_tokens: &[String], memory: &Memory) -> f64 {
     let mut weighted_matches = 0.0;
 
     for token in query_tokens {
-        // Check summary (3x weight)
         if summary_tokens.contains(token) {
             weighted_matches += 3.0;
         }
 
-        // Check tags (2x weight)
         if tag_tokens.contains(token) {
             weighted_matches += 2.0;
         }
 
-        // Check content (1x weight)
         if content_tokens.contains(token) {
             weighted_matches += 1.0;
         }
     }
 
-    // Normalize to [0, 1] range
-    // Maximum possible score is query_tokens.len() * 3.0 (if all tokens match in summary)
-    let max_score = query_tokens.len() as f64 * 3.0;
-    if max_score > 0.0 {
-        (weighted_matches / max_score).min(1.0)
-    } else {
-        0.0
-    }
+    weighted_matches
 }
 
 /// Tokenize a string into lowercase words.
@@ -217,12 +206,15 @@ mod tests {
         let results = keyword_search("auth", &memories);
         assert_eq!(results.len(), 3);
 
-        // Memory 1 should score highest (summary match = 3x weight)
+        // Memory 1 should score highest (summary match = 3.0)
         assert_eq!(results[0].0, 0);
+        assert_eq!(results[0].1, 3.0);
 
-        // Memory 3 should score higher than memory 2 (tag 2x > content 1x)
+        // Memory 3 should score higher than memory 2 (tag 2.0 > content 1.0)
         assert_eq!(results[1].0, 2);
+        assert_eq!(results[1].1, 2.0);
         assert_eq!(results[2].0, 1);
+        assert_eq!(results[2].1, 1.0);
     }
 
     #[test]

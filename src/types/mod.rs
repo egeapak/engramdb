@@ -21,7 +21,7 @@ mod provenance;
 pub use challenge::Challenge;
 pub use config::{
     EngramConfig, LogicalBonusConfig, RetrievalConfig, ScopeProximityConfig, ScoringConfig,
-    ScoringWeights, ThresholdsConfig, TrustWeights,
+    ScoringWeights, SearchConfig, ThresholdsConfig, TrustWeights,
 };
 pub use decay::{Decay, DecayStrategy};
 pub use memory::{Memory, MemoryType, MemoryUpdate, Status, Visibility};

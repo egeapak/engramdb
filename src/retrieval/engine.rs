@@ -336,15 +336,31 @@ impl RetrievalEngine {
         })
     }
 
-    /// Perform keyword-based search
+    /// Perform keyword-based search with quality signals.
+    ///
+    /// # Scoring formula
+    /// ```text
+    /// content_score = keyword_raw + cosine_similarity * semantic_weight
+    /// score = content_score * decay_factor * trust_weight
+    /// if challenged: score *= 0.7
+    /// ```
     ///
     /// # Algorithm
     /// 1. Load all memories
     /// 2. Apply filters
     /// 3. Run keyword search
-    /// 4. Sort by keyword score descending
-    /// 5. Return results
+    /// 4. If embeddings available, get semantic scores
+    /// 5. Combine: content = keyword_raw + semantic * semantic_weight
+    /// 6. Apply decay, trust, challenge penalty
+    /// 7. Apply threshold, sort, return
     pub fn search(&self, query_text: &str, filters: &SearchFilters) -> Result<Vec<ScoredMemory>> {
+        use crate::scoring::{decay_factor, trust_weight_from_config};
+        use crate::types::Status;
+
+        let now = Utc::now();
+        let semantic_weight = self.config.search.semantic_weight;
+        let threshold = self.config.search.threshold;
+
         // Step 1: Load all index entries
         let all_entries = self.store.list()?;
 
@@ -357,84 +373,92 @@ impl RetrievalEngine {
             .filter_map(|entry| self.store.get(&entry.id).ok())
             .collect();
 
-        // Step 3: Run keyword search
+        // Step 3: Run keyword search (raw unbounded scores)
         let keyword_results = crate::search::keyword_search(query_text, &memories);
 
-        // Step 3.5: If embeddings available, combine with semantic results
-        let scored_memories: Vec<ScoredMemory> =
+        // Step 4: Get semantic scores if embeddings available
+        let semantic_scores: HashMap<String, f64> =
             if let (Some(provider), Some(vs)) = (&self.embedding_provider, &self.vector_store) {
-                // Get semantic scores
-                let semantic_scores: HashMap<String, f64> =
-                    if let Ok(query_vector) = provider.embed(query_text) {
-                        vs.search(query_vector, memories.len())
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|m| (m.id, m.score))
-                            .collect()
-                    } else {
-                        HashMap::new()
-                    };
-
-                // Combine keyword + semantic scores
-                let mut combined: HashMap<usize, f64> = HashMap::new();
-                for (idx, kw_score) in &keyword_results {
-                    combined.insert(*idx, *kw_score * 0.5);
+                if let Ok(query_vector) = provider.embed(query_text) {
+                    vs.search(query_vector, memories.len())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|m| (m.id, m.score))
+                        .collect()
+                } else {
+                    HashMap::new()
                 }
-                for (idx, memory) in memories.iter().enumerate() {
-                    if let Some(&sem_score) = semantic_scores.get(&memory.id) {
-                        *combined.entry(idx).or_insert(0.0) += sem_score * 0.5;
-                    }
-                }
-
-                let mut results: Vec<ScoredMemory> = combined
-                    .into_iter()
-                    .map(|(idx, score)| {
-                        let memory = &memories[idx];
-                        // Create a simplified breakdown for search results
-                        let breakdown = ScoreBreakdown {
-                            final_score: score,
-                            semantic: semantic_scores.get(&memory.id).map(|s| s * 0.5),
-                            relevance: memory.criticality,
-                            scope: 0.0, // Search doesn't use scope
-                            trust: 1.0, // Search doesn't apply trust weighting
-                            decay: 1.0, // Search doesn't apply decay
-                        };
-                        ScoredMemory {
-                            memory: memory.clone(),
-                            score,
-                            score_breakdown: breakdown,
-                        }
-                    })
-                    .collect();
-                results.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                results
             } else {
-                // Keyword-only
-                keyword_results
-                    .into_iter()
-                    .map(|(idx, score)| {
-                        let memory = &memories[idx];
-                        // Create a simplified breakdown for keyword-only search
-                        let breakdown = ScoreBreakdown {
-                            final_score: score,
-                            semantic: None,
-                            relevance: memory.criticality,
-                            scope: 0.0,
-                            trust: 1.0,
-                            decay: 1.0,
-                        };
-                        ScoredMemory {
-                            memory: memory.clone(),
-                            score,
-                            score_breakdown: breakdown,
-                        }
-                    })
-                    .collect()
+                HashMap::new()
             };
+
+        // Step 5: Build a map of keyword scores by index
+        let keyword_map: HashMap<usize, f64> = keyword_results.into_iter().collect();
+
+        // Step 6: Score every memory that has either keyword or semantic match
+        let mut scored_memories: Vec<ScoredMemory> = Vec::new();
+
+        for (idx, memory) in memories.iter().enumerate() {
+            let kw_score = keyword_map.get(&idx).copied().unwrap_or(0.0);
+            let sem_score = semantic_scores.get(&memory.id).copied().unwrap_or(0.0);
+
+            // Skip memories with no matches at all
+            if kw_score == 0.0 && sem_score == 0.0 {
+                continue;
+            }
+
+            // content = keyword_raw + semantic * semantic_weight
+            let content_score = kw_score + sem_score * semantic_weight;
+
+            // Quality signals
+            let decay = decay_factor(memory.created_at, now, &memory.decay);
+            let trust =
+                trust_weight_from_config(memory.provenance.source, &self.config.trust_weights);
+
+            // score = content * decay * trust
+            let mut score = content_score * decay * trust;
+
+            // Challenge penalty
+            if memory.status == Status::Challenged {
+                score *= 0.7;
+            }
+
+            // Compute informational relevance (criticality * decay)
+            let relevance = memory.criticality * decay;
+
+            let breakdown = ScoreBreakdown {
+                final_score: score,
+                semantic: if sem_score > 0.0 {
+                    Some(sem_score)
+                } else {
+                    None
+                },
+                keyword: if kw_score > 0.0 { Some(kw_score) } else { None },
+                relevance,
+                scope: 0.0,
+                trust,
+                decay,
+                criticality: memory.criticality,
+            };
+
+            scored_memories.push(ScoredMemory {
+                memory: memory.clone(),
+                score,
+                score_breakdown: breakdown,
+            });
+        }
+
+        // Step 7: Apply threshold
+        if threshold > 0.0 {
+            scored_memories.retain(|sm| sm.score >= threshold);
+        }
+
+        // Sort by score descending
+        scored_memories.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         Ok(scored_memories)
     }
@@ -875,6 +899,13 @@ mod tests {
         // Should find memory1 with higher score
         assert!(!results.is_empty());
         assert_eq!(results[0].memory.summary, "Authentication system");
+        // Raw keyword score: summary(3) + content(1) = 4.0, * decay(1.0) * trust(1.0) = 4.0
         assert!(results[0].score > 0.0);
+        // Should have keyword breakdown
+        assert!(results[0].score_breakdown.keyword.is_some());
+        // Trust should be the real trust weight
+        assert_eq!(results[0].score_breakdown.trust, 1.0);
+        // Decay should be real
+        assert_eq!(results[0].score_breakdown.decay, 1.0);
     }
 }
