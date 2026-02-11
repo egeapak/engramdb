@@ -222,7 +222,9 @@ impl Default for RetrievalConfig {
 /// Embeddings provider configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingsConfig {
-    /// Provider name ("onnx", future: "ollama")
+    /// Embedding model name. Transport (ONNX/Ollama) is resolved automatically.
+    /// Supported: "all-minilm" (default, 384d), "nomic-embed-text" (768d), "mxbai-embed-large" (1024d).
+    /// "onnx" is a backward-compat alias for "all-minilm".
     pub provider: String,
     /// Embedding vector dimensionality (384 for MiniLM, 768 for nomic, etc.)
     pub dimensions: usize,

@@ -38,14 +38,40 @@ pub use search::search_memories;
 pub use stats::{compute_stats, StoreStats};
 pub use update::{update_memory, UpdateParams};
 
-use crate::embeddings::{EmbeddingProvider, OnnxProvider};
+use crate::embeddings::{
+    EmbeddingProvider, OllamaProvider, OnnxProvider, ALL_MINILM, MXBAI_EMBED_LARGE,
+    NOMIC_EMBED_TEXT,
+};
 use crate::retrieval::engine::RetrievalEngine;
 use crate::storage::MemoryStore;
+
+/// Try to create an embedding provider for the given model name.
+/// For models with multiple backends, tries them in priority order.
+fn resolve_provider(model: &str) -> Option<Box<dyn EmbeddingProvider>> {
+    match model {
+        "onnx" | "all-minilm" => {
+            // Prefer local ONNX (no server needed), fall back to Ollama
+            if let Some(p) = OnnxProvider::try_new() {
+                return Some(Box::new(p));
+            }
+            OllamaProvider::try_new(ALL_MINILM).map(|p| Box::new(p) as _)
+        }
+        "nomic-embed-text" => OllamaProvider::try_new(NOMIC_EMBED_TEXT).map(|p| Box::new(p) as _),
+        "mxbai-embed-large" => OllamaProvider::try_new(MXBAI_EMBED_LARGE).map(|p| Box::new(p) as _),
+        other => {
+            eprintln!(
+                "Warning: unknown embedding model '{}', embeddings disabled",
+                other
+            );
+            None
+        }
+    }
+}
 
 /// Build a `RetrievalEngine` with optional embeddings from a store + config path.
 ///
 /// This is the shared helper that CLI and MCP callers use so they don't duplicate
-/// the ONNX wiring.  Returns an engine that always works for storage operations;
+/// the provider wiring.  Returns an engine that always works for storage operations;
 /// embeddings are attached on a best-effort basis.  Vector storage is handled
 /// by the MemoryStore's integrated LanceDB.
 pub async fn build_engine(store: MemoryStore, config_path: &std::path::Path) -> RetrievalEngine {
@@ -54,25 +80,15 @@ pub async fn build_engine(store: MemoryStore, config_path: &std::path::Path) -> 
         .unwrap_or_default();
     let mut engine = RetrievalEngine::new(store, config.clone());
 
-    match config.embeddings.provider.as_str() {
-        "onnx" => {
-            if let Some(provider) = OnnxProvider::try_new() {
-                if provider.dimensions() != config.embeddings.dimensions {
-                    eprintln!(
-                        "Warning: provider dimensions ({}) != config dimensions ({})",
-                        provider.dimensions(),
-                        config.embeddings.dimensions
-                    );
-                }
-                engine = engine.with_embedding_provider(Box::new(provider));
-            }
-        }
-        other => {
+    if let Some(provider) = resolve_provider(config.embeddings.provider.as_str()) {
+        if provider.dimensions() != config.embeddings.dimensions {
             eprintln!(
-                "Warning: unknown embedding provider '{}', embeddings disabled",
-                other
+                "Warning: provider dimensions ({}) != config dimensions ({})",
+                provider.dimensions(),
+                config.embeddings.dimensions
             );
         }
+        engine = engine.with_embedding_provider(provider);
     }
 
     engine

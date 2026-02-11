@@ -1,7 +1,9 @@
 //! Display statistics about the memory store.
 
 use crate::cli::output::{OutputFormatter, Stats};
-use crate::embeddings::OnnxProvider;
+use crate::embeddings::{
+    OllamaProvider, OnnxProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT,
+};
 use crate::ops::compute_stats;
 use crate::storage::{MemoryStore, RegistryBackend};
 use crate::types::Status;
@@ -55,12 +57,12 @@ pub async fn run_stats(
 
     // Print embeddings status
     println!();
-    let embeddings_available = OnnxProvider::try_new().is_some();
-    if embeddings_available {
-        println!("Embeddings: Available");
-    } else {
-        println!("Embeddings: Not available");
-    }
+    let config_path = dir.join(".engramdb/config.toml");
+    let config = crate::storage::config::load_config(&config_path)
+        .await
+        .unwrap_or_default();
+    let model = config.embeddings.provider.as_str();
+    print_embeddings_status(model).await;
 
     if challenged_count > 0 || needs_review_count > 0 {
         println!();
@@ -80,4 +82,58 @@ pub async fn run_stats(
     }
 
     Ok(())
+}
+
+/// Print the embeddings availability status for the given model name.
+async fn print_embeddings_status(model: &str) {
+    match model {
+        "onnx" | "all-minilm" => {
+            if OnnxProvider::try_new().is_some() {
+                println!("Embeddings: Available (all-minilm via ONNX)");
+                return;
+            }
+            // ONNX unavailable — check Ollama fallback
+            if let Some(provider) = OllamaProvider::try_new(ALL_MINILM) {
+                match provider.check_model_available().await {
+                    Ok(true) => {
+                        println!("Embeddings: Available (all-minilm via Ollama)");
+                        return;
+                    }
+                    Ok(false) => {
+                        println!(
+                            "Embeddings: Not available (run 'engramdb init' to download model)"
+                        );
+                        return;
+                    }
+                    Err(_) => {}
+                }
+            }
+            println!("Embeddings: Not available (run 'engramdb init' to download model)");
+        }
+        "nomic-embed-text" | "mxbai-embed-large" => {
+            let spec = if model == "nomic-embed-text" {
+                NOMIC_EMBED_TEXT
+            } else {
+                MXBAI_EMBED_LARGE
+            };
+            if let Some(provider) = OllamaProvider::try_new(spec) {
+                match provider.check_model_available().await {
+                    Ok(true) => {
+                        println!("Embeddings: Available ({} via Ollama)", model);
+                    }
+                    Ok(false) => {
+                        println!("Embeddings: Not available (run 'ollama pull {}')", model);
+                    }
+                    Err(_) => {
+                        println!("Embeddings: Not available (Ollama server not reachable)");
+                    }
+                }
+            } else {
+                println!("Embeddings: Not available (Ollama server not reachable)");
+            }
+        }
+        other => {
+            println!("Embeddings: Not available (unknown provider '{}')", other);
+        }
+    }
 }

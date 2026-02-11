@@ -2260,6 +2260,7 @@ dependencies = [
  "inquire",
  "lancedb",
  "owo-colors",
+ "reqwest",
  "rmcp",
  "serde",
  "serde_json",

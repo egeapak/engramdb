@@ -4,9 +4,13 @@
 //! along with an ONNX-based implementation using the fastembed crate.
 
 mod chunking;
+mod ollama;
 mod onnx;
 
 pub use chunking::chunk_text;
+pub use ollama::{
+    OllamaModelSpec, OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT,
+};
 pub use onnx::OnnxProvider;
 
 use anyhow::Result;

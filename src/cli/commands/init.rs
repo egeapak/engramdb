@@ -1,7 +1,9 @@
 //! Initialize a new EngramDB store.
 
 use crate::cli::output::OutputFormatter;
-use crate::embeddings::OnnxProvider;
+use crate::embeddings::{
+    OllamaModelSpec, OllamaProvider, OnnxProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT,
+};
 use crate::storage::{MemoryStore, RegistryBackend};
 use anyhow::{Context, Result};
 use std::fs;
@@ -38,14 +40,38 @@ pub async fn run_init(
 
     // Initialize embeddings unless --no-embeddings
     if !no_embeddings {
-        formatter.print_message("Initializing embedding model (first run downloads ~23MB)...");
-        match OnnxProvider::new() {
-            Ok(_) => {
-                formatter.print_success("Embedding model ready.");
+        let config_path = dir.join(".engramdb/config.toml");
+        let config = crate::storage::config::load_config(&config_path)
+            .await
+            .unwrap_or_default();
+
+        match config.embeddings.provider.as_str() {
+            "onnx" | "all-minilm" => {
+                formatter
+                    .print_message("Initializing embedding model (first run downloads ~23MB)...");
+                match OnnxProvider::new() {
+                    Ok(_) => {
+                        formatter.print_success("Embedding model ready (all-minilm via ONNX).");
+                    }
+                    Err(_) => {
+                        // ONNX failed — try Ollama fallback
+                        formatter
+                            .print_message("ONNX model unavailable, trying Ollama fallback...");
+                        init_ollama_model(ALL_MINILM, formatter).await;
+                    }
+                }
             }
-            Err(e) => {
-                formatter.print_error(&format!("Warning: Could not initialize embeddings: {}", e));
-                formatter.print_message("Run 'engramdb reindex --embeddings-only' later to retry.");
+            "nomic-embed-text" => {
+                init_ollama_model(NOMIC_EMBED_TEXT, formatter).await;
+            }
+            "mxbai-embed-large" => {
+                init_ollama_model(MXBAI_EMBED_LARGE, formatter).await;
+            }
+            other => {
+                formatter.print_error(&format!(
+                    "Unknown embedding provider '{}', skipping initialization.",
+                    other
+                ));
             }
         }
     }
@@ -61,6 +87,51 @@ pub async fn run_init(
     );
 
     Ok(())
+}
+
+/// Try to initialize an Ollama-backed embedding model.
+///
+/// Checks if the model is already pulled; if not, auto-pulls it.
+/// Prints progress and errors via the formatter.
+async fn init_ollama_model(spec: OllamaModelSpec, formatter: &OutputFormatter) {
+    let provider = match OllamaProvider::new(spec) {
+        Ok(p) => p,
+        Err(e) => {
+            formatter.print_error(&format!("Could not create Ollama client: {}", e));
+            return;
+        }
+    };
+
+    match provider.check_model_available().await {
+        Ok(true) => {
+            formatter.print_success(&format!(
+                "Embedding model ready ({} via Ollama).",
+                spec.model_name
+            ));
+        }
+        Ok(false) => {
+            formatter.print_message(&format!(
+                "Pulling embedding model '{}' from Ollama (this may take a minute)...",
+                spec.model_name
+            ));
+            match provider.pull_model().await {
+                Ok(()) => {
+                    formatter.print_success(&format!(
+                        "Embedding model ready ({} via Ollama).",
+                        spec.model_name
+                    ));
+                }
+                Err(e) => {
+                    formatter.print_error(&format!("Failed to pull model: {}", e));
+                    formatter.print_message(&provider.installation_hint());
+                }
+            }
+        }
+        Err(_) => {
+            formatter.print_error("Could not connect to Ollama server. Is Ollama running?");
+            formatter.print_message(&provider.installation_hint());
+        }
+    }
 }
 
 #[cfg(test)]
