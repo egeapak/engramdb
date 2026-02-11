@@ -252,6 +252,11 @@ impl LanceIndex {
         })
     }
 
+    /// Return the number of entries in the table.
+    pub fn count(&self) -> Result<usize> {
+        Ok(self.list()?.len())
+    }
+
     /// Perform ANN vector search.
     pub fn vector_search(&self, query: Vec<f32>, limit: usize) -> Result<Vec<VectorMatch>> {
         if query.len() != self.dimensions {

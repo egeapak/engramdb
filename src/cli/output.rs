@@ -113,6 +113,29 @@ impl OutputFormatter {
         }
     }
 
+    /// Print a warning message (with yellow color in pretty mode).
+    pub fn print_warning(&self, message: &str) {
+        match self.format {
+            OutputFormat::Json => {
+                eprintln!("{}", serde_json::json!({ "warning": message }));
+            }
+            OutputFormat::Pretty => {
+                if self.use_color {
+                    eprintln!(
+                        "{} {}",
+                        "⚠".if_supports_color(Stream::Stderr, |text| text.yellow()),
+                        message.if_supports_color(Stream::Stderr, |text| text.yellow())
+                    );
+                } else {
+                    eprintln!("Warning: {}", message);
+                }
+            }
+            OutputFormat::Plain => {
+                eprintln!("Warning: {}", message);
+            }
+        }
+    }
+
     /// Print a single memory in the configured format.
     pub fn print_memory(&self, memory: &Memory) {
         match self.format {

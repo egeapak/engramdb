@@ -34,6 +34,9 @@ pub fn run_list(
     formatter: &OutputFormatter,
 ) -> Result<()> {
     let store = MemoryStore::open(dir)?;
+    if let Ok(Some(warning)) = store.check_staleness() {
+        formatter.print_warning(&warning);
+    }
     let mut entries = store.list()?;
 
     // Apply filters

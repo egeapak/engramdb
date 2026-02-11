@@ -5,12 +5,15 @@
 //! - Global config dir (platform-specific via `dirs::config_dir()`):
 //!   - macOS: `~/Library/Application Support/engramdb/`
 //!   - Linux: `$XDG_CONFIG_HOME/engramdb/` (default `~/.config/engramdb/`)
-//! - Personal project paths (`<global_config_dir>/projects/{id}/personal/`)
-//! - LanceDB vector storage paths
+//! - Global data dir (platform-specific via `dirs::data_dir()`):
+//!   - macOS: `~/Library/Application Support/engramdb/`
+//!   - Linux: `$XDG_DATA_HOME/engramdb/` (default `~/.local/share/engramdb/`)
+//! - Personal project paths (`<global_data_dir>/projects/{id}/personal/`)
+//! - LanceDB vector storage paths (`<global_data_dir>/projects/{id}/lancedb/`)
 //! - Registry path
 //!
-//! Functions that depend on `dirs::config_dir()` return `Result<PathBuf>` so
-//! callers can handle the (rare) case where the platform config directory
+//! Functions that depend on platform directories return `Result<PathBuf>` so
+//! callers can handle the (rare) case where the platform directory
 //! cannot be determined.
 
 use super::error::{Result, StorageError};
@@ -30,15 +33,29 @@ pub fn memories_dir(dir: &Path) -> PathBuf {
 ///
 /// - macOS: `~/Library/Application Support/engramdb/`
 /// - Linux: `$XDG_CONFIG_HOME/engramdb/` (default `~/.config/engramdb/`)
+///
+/// Used only for the global registry and future global settings.
 pub fn global_config_dir() -> Result<PathBuf> {
     dirs::config_dir()
         .ok_or_else(|| StorageError::Validation("Could not determine config directory".to_string()))
         .map(|p| p.join("engramdb"))
 }
 
+/// Returns the global data directory (platform-specific).
+///
+/// - macOS: `~/Library/Application Support/engramdb/`
+/// - Linux: `$XDG_DATA_HOME/engramdb/` (default `~/.local/share/engramdb/`)
+///
+/// Used for per-project personal memories and LanceDB indices.
+pub fn global_data_dir() -> Result<PathBuf> {
+    dirs::data_dir()
+        .ok_or_else(|| StorageError::Validation("Could not determine data directory".to_string()))
+        .map(|p| p.join("engramdb"))
+}
+
 /// Returns the personal project directory for a given project ID
 pub fn personal_dir(project_id: &str) -> Result<PathBuf> {
-    Ok(global_config_dir()?
+    Ok(global_data_dir()?
         .join("projects")
         .join(project_id)
         .join("personal"))
@@ -49,9 +66,12 @@ pub fn personal_memories_dir(project_id: &str) -> Result<PathBuf> {
     Ok(personal_dir(project_id)?.join("memories"))
 }
 
-/// Returns the project-local LanceDB directory (.engramdb/lancedb/).
-pub fn lancedb_dir(project_dir: &Path) -> PathBuf {
-    project_dir.join(".engramdb").join("lancedb")
+/// Returns the global LanceDB directory for a given project ID.
+pub fn lancedb_dir(project_id: &str) -> Result<PathBuf> {
+    Ok(global_data_dir()?
+        .join("projects")
+        .join(project_id)
+        .join("lancedb"))
 }
 
 /// Returns the global registry path (`<global_config_dir>/registry.json`)
@@ -123,9 +143,9 @@ mod tests {
     #[test]
     fn test_personal_dir() {
         let result = personal_dir("abc123").unwrap();
-        assert!(result
-            .to_string_lossy()
-            .ends_with("projects/abc123/personal"));
+        let path_str = result.to_string_lossy();
+        assert!(path_str.contains("engramdb"));
+        assert!(path_str.ends_with("projects/abc123/personal"));
     }
 
     #[test]
@@ -136,9 +156,16 @@ mod tests {
 
     #[test]
     fn test_lancedb_dir() {
-        let path = Path::new("/tmp/my_project");
-        let result = lancedb_dir(path);
-        assert_eq!(result, PathBuf::from("/tmp/my_project/.engramdb/lancedb"));
+        let result = lancedb_dir("abc123").unwrap();
+        let path_str = result.to_string_lossy();
+        assert!(path_str.contains("engramdb"));
+        assert!(path_str.ends_with("projects/abc123/lancedb"));
+    }
+
+    #[test]
+    fn test_global_data_dir() {
+        let result = global_data_dir().unwrap();
+        assert!(result.to_string_lossy().ends_with("engramdb"));
     }
 
     #[test]

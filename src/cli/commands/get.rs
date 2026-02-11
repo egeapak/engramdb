@@ -28,6 +28,9 @@ pub fn run_get(
     formatter: &OutputFormatter,
 ) -> Result<()> {
     let store = MemoryStore::open(dir)?;
+    if let Ok(Some(warning)) = store.check_staleness() {
+        formatter.print_warning(&warning);
+    }
     let memory = get_memory(&store, id)?;
 
     // Handle --path flag: print file path and exit

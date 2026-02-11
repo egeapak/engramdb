@@ -133,14 +133,20 @@ mod tests {
         let result = run_init(project_dir, true, None, &formatter);
         assert!(result.is_ok(), "Init should succeed");
 
-        // Check main directories
+        // Check project-local directories
         assert!(project_dir.join(".engramdb").exists());
         assert!(project_dir.join(".engramdb/memories").exists());
 
         // Check files
         assert!(project_dir.join(".engramdb/manifest.toml").exists());
         assert!(project_dir.join(".engramdb/config.toml").exists());
-        assert!(project_dir.join(".engramdb/lancedb").exists());
+
+        // LanceDB should NOT be in the project directory
+        assert!(!project_dir.join(".engramdb/lancedb").exists());
+
+        // LanceDB should be in the global data directory
+        let pid = project_id::compute_project_id(project_dir);
+        assert!(paths::lancedb_dir(&pid).unwrap().exists());
     }
 
     #[test]

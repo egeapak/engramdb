@@ -28,6 +28,9 @@ pub struct SearchParams {
 /// * `formatter` - Output formatter for displaying results
 pub fn run_search(dir: &Path, params: SearchParams, formatter: &OutputFormatter) -> Result<()> {
     let store = MemoryStore::open(dir)?;
+    if let Ok(Some(warning)) = store.check_staleness() {
+        formatter.print_warning(&warning);
+    }
     let config_path = dir.join(".engramdb").join("config.toml");
     let engine = crate::ops::build_engine(store, &config_path);
 

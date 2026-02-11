@@ -87,16 +87,16 @@ impl MemoryStore {
             "# EngramDB configuration\n# See documentation for available settings\n",
         )?;
 
-        // Create project-local LanceDB directory
-        let lance_path = paths::lancedb_dir(dir);
+        // Compute project ID before creating global directories
+        let project_id = project_id::compute_project_id(dir);
+
+        // Create global LanceDB directory
+        let lance_path = paths::lancedb_dir(&project_id)?;
         fs::create_dir_all(&lance_path)?;
 
         // Initialize LanceIndex
         let lance_index = LanceIndex::new(&lance_path)
             .map_err(|e| StorageError::Validation(format!("LanceDB init failed: {}", e)))?;
-
-        // Compute project ID
-        let project_id = project_id::compute_project_id(dir);
 
         // Create personal directories
         fs::create_dir_all(paths::personal_memories_dir(&project_id)?)?;
@@ -119,23 +119,21 @@ impl MemoryStore {
             return Err(StorageError::NotInitialized);
         }
 
-        // Open (or create) LanceDB
-        let lance_path = paths::lancedb_dir(dir);
+        // Compute project ID
+        let project_id = project_id::compute_project_id(dir);
+
+        // Open (or create) global LanceDB
+        let lance_path = paths::lancedb_dir(&project_id)?;
         fs::create_dir_all(&lance_path)?;
 
         let lance_index = LanceIndex::new(&lance_path)
             .map_err(|e| StorageError::Validation(format!("LanceDB open failed: {}", e)))?;
 
-        // Compute project ID
-        let project_id = project_id::compute_project_id(dir);
-
-        // Auto-migrate from legacy index.json if LanceDB is empty
         let store = Self {
             project_dir: dir.to_path_buf(),
             project_id,
             lance_index,
         };
-        store.maybe_migrate_from_index_json()?;
 
         // Update registry
         Self::update_registry(dir, &store.project_id)?;
@@ -402,94 +400,25 @@ impl MemoryStore {
         Ok(count)
     }
 
-    /// Migrate legacy index.json into LanceDB if it exists and LanceDB is empty.
-    fn maybe_migrate_from_index_json(&self) -> Result<()> {
-        let shared_index_path = paths::project_dir(&self.project_dir).join("index.json");
-        if !shared_index_path.exists() {
-            return Ok(());
+    /// Check whether the LanceDB index is stale compared to memory files on disk.
+    ///
+    /// Returns `Some(warning_message)` if the counts differ, `None` if in sync.
+    pub fn check_staleness(&self) -> Result<Option<String>> {
+        let shared_dir = paths::memories_dir(&self.project_dir);
+        let personal_dir = paths::personal_memories_dir(&self.project_id)?;
+        let md_count = count_md_files(&shared_dir) + count_md_files(&personal_dir);
+        let lance_count = self
+            .lance_index
+            .count()
+            .map_err(|e| StorageError::Validation(format!("LanceDB count failed: {}", e)))?;
+        if md_count != lance_count {
+            Ok(Some(format!(
+                "Index may be stale ({} memories on disk, {} indexed). Run 'engramdb reindex' to rebuild.",
+                md_count, lance_count
+            )))
+        } else {
+            Ok(None)
         }
-
-        // Check if LanceDB is already populated
-        let existing = self.lance_index.list().unwrap_or_default();
-        if !existing.is_empty() {
-            return Ok(());
-        }
-
-        // Read old index.json
-        let content = fs::read_to_string(&shared_index_path)?;
-        let old_index: serde_json::Value = serde_json::from_str(&content)?;
-
-        if let Some(memories) = old_index.get("memories").and_then(|v| v.as_array()) {
-            for mem_val in memories {
-                // Parse the old IndexEntry format (which didn't have visibility)
-                if let Ok(old_entry) = serde_json::from_value::<OldIndexEntry>(mem_val.clone()) {
-                    let entry = IndexEntry {
-                        id: old_entry.id,
-                        type_: old_entry.type_,
-                        summary: old_entry.summary,
-                        physical: old_entry.physical,
-                        logical: old_entry.logical,
-                        tags: old_entry.tags,
-                        criticality: old_entry.criticality,
-                        confidence: old_entry.confidence,
-                        provenance_source: old_entry.provenance_source,
-                        status: old_entry.status,
-                        visibility: Visibility::Shared,
-                        created_at: old_entry.created_at,
-                        updated_at: old_entry.updated_at,
-                        expires_at: old_entry.expires_at,
-                    };
-                    let _ = self.lance_index.upsert(&entry, None);
-                }
-            }
-        }
-
-        // Also migrate personal index if it exists
-        if let Ok(personal_index_path) =
-            paths::personal_dir(&self.project_id).map(|p| p.join("index.json"))
-        {
-            if personal_index_path.exists() {
-                if let Ok(content) = fs::read_to_string(&personal_index_path) {
-                    if let Ok(old_index) = serde_json::from_str::<serde_json::Value>(&content) {
-                        if let Some(memories) = old_index.get("memories").and_then(|v| v.as_array())
-                        {
-                            for mem_val in memories {
-                                if let Ok(old_entry) =
-                                    serde_json::from_value::<OldIndexEntry>(mem_val.clone())
-                                {
-                                    let entry = IndexEntry {
-                                        id: old_entry.id,
-                                        type_: old_entry.type_,
-                                        summary: old_entry.summary,
-                                        physical: old_entry.physical,
-                                        logical: old_entry.logical,
-                                        tags: old_entry.tags,
-                                        criticality: old_entry.criticality,
-                                        confidence: old_entry.confidence,
-                                        provenance_source: old_entry.provenance_source,
-                                        status: old_entry.status,
-                                        visibility: Visibility::Personal,
-                                        created_at: old_entry.created_at,
-                                        updated_at: old_entry.updated_at,
-                                        expires_at: old_entry.expires_at,
-                                    };
-                                    let _ = self.lance_index.upsert(&entry, None);
-                                }
-                            }
-                        }
-                    }
-                }
-                // Rename personal index.json
-                let backup = personal_index_path.with_extension("json.bak");
-                let _ = fs::rename(&personal_index_path, &backup);
-            }
-        }
-
-        // Rename shared index.json to backup
-        let backup_path = shared_index_path.with_extension("json.bak");
-        let _ = fs::rename(&shared_index_path, &backup_path);
-
-        Ok(())
     }
 
     fn update_manifest_stats(&self) -> Result<()> {
@@ -550,31 +479,20 @@ impl MemoryStore {
     }
 }
 
-/// Legacy index entry format (pre-LanceDB migration).
-/// Matches the old `index.rs` IndexEntry which didn't have a visibility field.
-#[derive(Debug, Deserialize)]
-struct OldIndexEntry {
-    id: String,
-    #[serde(rename = "type")]
-    type_: MemoryType,
-    summary: String,
-    #[serde(default)]
-    physical: Vec<String>,
-    #[serde(default)]
-    logical: Vec<String>,
-    #[serde(default)]
-    tags: Vec<String>,
-    criticality: f64,
-    confidence: f64,
-    provenance_source: ProvenanceSource,
-    status: Status,
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
-    #[serde(default)]
-    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+/// Count `.md` files in a directory. Returns 0 if the directory doesn't exist.
+fn count_md_files(dir: &Path) -> usize {
+    if !dir.exists() {
+        return 0;
+    }
+    fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("md"))
+                .count()
+        })
+        .unwrap_or(0)
 }
-
-use crate::types::{MemoryType, ProvenanceSource, Status};
 
 #[cfg(test)]
 mod tests {
@@ -601,10 +519,15 @@ mod tests {
 
         let store = MemoryStore::init(project_dir).unwrap();
 
-        // Check main directories
+        // Check project-local directories
         assert!(project_dir.join(".engramdb").exists());
         assert!(project_dir.join(".engramdb/memories").exists());
-        assert!(project_dir.join(".engramdb/lancedb").exists());
+
+        // LanceDB should NOT be in the project directory
+        assert!(!project_dir.join(".engramdb/lancedb").exists());
+
+        // LanceDB should be in the global data directory
+        assert!(paths::lancedb_dir(&store.project_id).unwrap().exists());
 
         // Check files
         assert!(project_dir.join(".engramdb/manifest.toml").exists());
@@ -832,5 +755,43 @@ mod tests {
 
         assert_eq!(shared_entry.visibility, Visibility::Shared);
         assert_eq!(personal_entry.visibility, Visibility::Personal);
+    }
+
+    #[test]
+    fn test_check_staleness_in_sync() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+
+        let store = MemoryStore::init(project_dir).unwrap();
+        let memory = create_test_memory("staleness-sync-1", Visibility::Shared);
+        store.create(&memory).unwrap();
+
+        let result = store.check_staleness().unwrap();
+        assert!(
+            result.is_none(),
+            "Expected no staleness warning when in sync"
+        );
+    }
+
+    #[test]
+    fn test_check_staleness_detects_mismatch() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+
+        let store = MemoryStore::init(project_dir).unwrap();
+        let memory = create_test_memory("staleness-mismatch-1", Visibility::Shared);
+        store.create(&memory).unwrap();
+
+        // Delete LanceDB entry but leave the .md file
+        store.lance_index.clear().unwrap();
+
+        let result = store.check_staleness().unwrap();
+        assert!(
+            result.is_some(),
+            "Expected staleness warning after clearing index"
+        );
+        let warning = result.unwrap();
+        assert!(warning.contains("1 memories on disk"));
+        assert!(warning.contains("0 indexed"));
     }
 }
