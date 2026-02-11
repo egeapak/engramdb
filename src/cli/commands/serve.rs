@@ -14,11 +14,9 @@ pub async fn run_serve(
 ) -> Result<()> {
     let dir = dir.to_path_buf();
 
-    let rt = tokio::runtime::Runtime::new()?;
-
     match transport {
         "stdio" => {
-            rt.block_on(server::run_stdio(dir))?;
+            server::run_stdio(dir).await?;
         }
         "sse" => {
             let port = port.unwrap_or(3100);
@@ -26,7 +24,7 @@ pub async fn run_serve(
                 "Starting EngramDB MCP server (SSE) on port {}...",
                 port
             ));
-            rt.block_on(server::run_sse(dir, port))?;
+            server::run_sse(dir, port).await?;
         }
         other => {
             anyhow::bail!("Unknown transport: {}. Use 'stdio' or 'sse'.", other);

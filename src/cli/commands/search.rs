@@ -5,8 +5,6 @@ use crate::ops::parse_memory_type;
 use crate::retrieval::filters::SearchFilters;
 use crate::storage::{MemoryStore, RegistryBackend};
 use anyhow::Result;
-use owo_colors::{OwoColorize, Stream};
-use std::io::{self, IsTerminal};
 use std::path::Path;
 
 /// Parameters for the search command.
@@ -75,62 +73,7 @@ pub async fn run_search(
     results.truncate(params.max_results);
 
     // Display results
-    display_search_results(&results, formatter)?;
-
-    Ok(())
-}
-
-/// Display search results in the appropriate format
-fn display_search_results(
-    results: &[crate::retrieval::engine::ScoredMemory],
-    formatter: &OutputFormatter,
-) -> Result<()> {
-    // Check if we're in JSON mode
-    let is_tty = io::stdout().is_terminal();
-
-    if !is_tty {
-        // JSON mode
-        let json_output = results
-            .iter()
-            .map(|sm| {
-                serde_json::json!({
-                    "memory": sm.memory,
-                    "score": sm.score,
-                })
-            })
-            .collect::<Vec<_>>();
-        println!("{}", serde_json::to_string_pretty(&json_output)?);
-    } else {
-        // Pretty mode
-        if results.is_empty() {
-            formatter.print_message("No memories found.");
-        } else {
-            formatter.print_message(&format!("Found {} memories:\n", results.len()));
-
-            let use_color = is_tty;
-
-            for sm in results {
-                let id_short = &sm.memory.id[..8.min(sm.memory.id.len())];
-                let score_str = format!("[{:.2}]", sm.score);
-                let type_str = format!("{:?}", sm.memory.type_);
-
-                if use_color {
-                    println!(
-                        "  {} {} {}  {}",
-                        score_str.if_supports_color(Stream::Stdout, |text| text.green()),
-                        id_short.if_supports_color(Stream::Stdout, |text| text.cyan()),
-                        type_str.if_supports_color(Stream::Stdout, |text| text.yellow()),
-                        sm.memory.summary
-                    );
-                } else {
-                    println!(
-                        "  {} {} {}  {}",
-                        score_str, id_short, type_str, sm.memory.summary
-                    );
-                }
-            }
-        }
-    }
+    formatter.print_search_results(&results);
 
     Ok(())
 }

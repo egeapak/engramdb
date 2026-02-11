@@ -164,7 +164,7 @@ impl Default for SearchConfig {
     fn default() -> Self {
         Self {
             semantic_weight: 3.0,
-            threshold: 0.0,
+            threshold: 2.0,
         }
     }
 }
@@ -347,7 +347,7 @@ mod tests {
 
         // Search config
         assert_eq!(config.search.semantic_weight, 3.0);
-        assert_eq!(config.search.threshold, 0.0);
+        assert_eq!(config.search.threshold, 2.0);
 
         // Embeddings config
         assert_eq!(config.embeddings.provider, "onnx");
@@ -474,7 +474,7 @@ threshold = 0.25
         // Empty TOML: all sections use #[serde(default)] on EngramConfig
         let config: EngramConfig = toml::from_str("").unwrap();
         assert_eq!(config.search.semantic_weight, 3.0);
-        assert_eq!(config.search.threshold, 0.0);
+        assert_eq!(config.search.threshold, 2.0);
     }
 
     #[test]

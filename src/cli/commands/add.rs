@@ -1,6 +1,7 @@
 //! Add a new memory to the store.
 
 use crate::cli::output::OutputFormatter;
+use crate::cli::validation::validate_score;
 use crate::ops::{self, create_memory, parse_memory_type, parse_visibility, CreateParams};
 use crate::storage::{MemoryStore, RegistryBackend};
 use crate::types::{MemoryType, Provenance, Visibility};
@@ -8,6 +9,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use inquire::{CustomType, Select, Text};
 use std::env;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -75,6 +77,23 @@ pub async fn run_add(
     } else if params.interactive
         || (params.type_str.is_none() || params.content.is_none() || params.summary.is_none())
     {
+        // Check if we're in a terminal before trying interactive mode
+        if !std::io::stdin().is_terminal() && !params.interactive {
+            let mut missing = Vec::new();
+            if params.type_str.is_none() {
+                missing.push("--type");
+            }
+            if params.content.is_none() {
+                missing.push("--content");
+            }
+            if params.summary.is_none() {
+                missing.push("--summary");
+            }
+            bail!(
+                "Missing required arguments: {}. Provide all required flags or run from an interactive terminal.",
+                missing.join(", ")
+            );
+        }
         // Interactive mode: if --interactive is set OR if required fields are missing
         run_interactive_mode(&store, params, final_details, formatter, &engine).await
     } else {
@@ -110,8 +129,8 @@ async fn run_direct_mode(
             physical: params.physical,
             logical: params.logical,
             tags: params.tags,
-            criticality: params.criticality.unwrap_or(0.5),
-            confidence: params.confidence,
+            criticality: validate_score(params.criticality.unwrap_or(0.5), "criticality")?,
+            confidence: validate_score(params.confidence, "confidence")?,
             details: final_details,
             visibility,
             provenance: Provenance::human(),

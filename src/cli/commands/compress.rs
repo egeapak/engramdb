@@ -28,7 +28,7 @@ pub async fn run_compress(
     ));
 
     for candidate in &result.candidates {
-        let id_short = &candidate.id[..8.min(candidate.id.len())];
+        let id_short = &candidate.id[..13.min(candidate.id.len())];
         println!(
             "  {} {:8}  {} (criticality: {:.2})",
             id_short, candidate.type_, candidate.summary, candidate.criticality

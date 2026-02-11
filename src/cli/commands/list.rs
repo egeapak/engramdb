@@ -33,6 +33,7 @@ pub async fn run_list(
     sort_field: &str,
     reverse: bool,
     limit: Option<usize>,
+    verbose: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
     let store = MemoryStore::open(dir, registry).await?;
@@ -99,7 +100,7 @@ pub async fn run_list(
         entries.truncate(max);
     }
 
-    formatter.print_memory_list(&entries);
+    formatter.print_memory_list(&entries, verbose);
     Ok(())
 }
 
@@ -197,6 +198,7 @@ mod tests {
             "criticality",
             false,
             None,
+            false,
             &formatter,
         )
         .await;
@@ -220,6 +222,7 @@ mod tests {
             "criticality",
             false,
             None,
+            false,
             &formatter,
         )
         .await;
@@ -243,6 +246,7 @@ mod tests {
             "criticality",
             false,
             None,
+            false,
             &formatter,
         )
         .await;
@@ -279,6 +283,7 @@ mod tests {
             "created",
             false,
             None,
+            false,
             &formatter,
         )
         .await;
@@ -302,6 +307,7 @@ mod tests {
             "updated",
             false,
             None,
+            false,
             &formatter,
         )
         .await;
@@ -325,6 +331,7 @@ mod tests {
             "type",
             false,
             None,
+            false,
             &formatter,
         )
         .await;
@@ -348,6 +355,7 @@ mod tests {
             "invalid",
             false,
             None,
+            false,
             &formatter,
         )
         .await;
@@ -375,6 +383,7 @@ mod tests {
             "criticality",
             true,
             None,
+            false,
             &formatter,
         )
         .await;
@@ -398,6 +407,7 @@ mod tests {
             "criticality",
             false,
             Some(2),
+            false,
             &formatter,
         )
         .await;
@@ -421,6 +431,7 @@ mod tests {
             "criticality",
             false,
             Some(1),
+            false,
             &formatter,
         )
         .await;

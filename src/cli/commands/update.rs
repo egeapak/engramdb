@@ -1,6 +1,7 @@
 //! Update an existing memory.
 
 use crate::cli::output::OutputFormatter;
+use crate::cli::validation::validate_score;
 use crate::ops::{self, parse_memory_type, parse_status, parse_visibility};
 use crate::ops::{update_memory, UpdateParams as OpsUpdateParams};
 use crate::storage::paths::memory_path;
@@ -163,8 +164,14 @@ pub async fn run_update(
             tags,
             tags_add,
             tags_remove,
-            criticality: params.criticality,
-            confidence: params.confidence,
+            criticality: params
+                .criticality
+                .map(|v| validate_score(v, "criticality"))
+                .transpose()?,
+            confidence: params
+                .confidence
+                .map(|v| validate_score(v, "confidence"))
+                .transpose()?,
             details,
             visibility,
             status,

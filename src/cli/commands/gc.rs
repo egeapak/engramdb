@@ -32,8 +32,21 @@ pub async fn run_gc(
             result.count
         ));
         for id in &result.removed {
-            let id_short = &id[..8.min(id.len())];
-            println!("  {}", id_short);
+            let id_short = &id[..13.min(id.len())];
+            match store.get(id).await {
+                Ok(memory) => {
+                    println!(
+                        "  {} {:8}  {} (criticality: {:.2})",
+                        id_short,
+                        format!("{:?}", memory.type_),
+                        memory.summary,
+                        memory.criticality
+                    );
+                }
+                Err(_) => {
+                    println!("  {}", id_short);
+                }
+            }
         }
         formatter.print_message("\nRun with --confirm to delete these memories.");
     } else {

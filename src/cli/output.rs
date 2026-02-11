@@ -8,6 +8,7 @@
 //! The formatter automatically detects terminal capabilities and adjusts formatting
 //! accordingly.
 
+use crate::retrieval::engine::{RetrievalResult, ScoredMemory};
 use crate::storage::IndexEntry;
 use crate::types::{Memory, MemoryType, Status};
 use owo_colors::{OwoColorize, Stream};
@@ -15,6 +16,11 @@ use serde_json;
 use std::io::{self, IsTerminal};
 
 use super::app::OutputFormat;
+
+/// Helper function to truncate IDs to 13 characters
+fn short_id(id: &str) -> &str {
+    &id[..13.min(id.len())]
+}
 
 /// Output formatter for CLI results.
 ///
@@ -233,29 +239,199 @@ impl OutputFormatter {
         println!("Visibility: {:?}", memory.visibility);
     }
 
+    /// Print search results in the configured format.
+    pub fn print_search_results(&self, results: &[ScoredMemory]) {
+        match self.format {
+            OutputFormat::Json => {
+                let json_output = results
+                    .iter()
+                    .map(|sm| {
+                        serde_json::json!({
+                            "memory": sm.memory,
+                            "score": sm.score,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                println!("{}", serde_json::to_string_pretty(&json_output).unwrap());
+            }
+            OutputFormat::Pretty => {
+                self.print_search_results_pretty(results);
+            }
+            OutputFormat::Plain => {
+                self.print_search_results_plain(results);
+            }
+        }
+    }
+
+    fn print_search_results_pretty(&self, results: &[ScoredMemory]) {
+        if results.is_empty() {
+            println!("No memories found.");
+            return;
+        }
+
+        println!("Found {} memories:\n", results.len());
+
+        for sm in results {
+            let id_short = short_id(&sm.memory.id);
+            let score_str = format!("[{:.2}]", sm.score);
+            let type_str = format!("{:?}", sm.memory.type_);
+
+            if self.use_color {
+                println!(
+                    "  {} {} {}  {}",
+                    score_str.if_supports_color(Stream::Stdout, |text| text.green()),
+                    id_short.if_supports_color(Stream::Stdout, |text| text.cyan()),
+                    type_str.if_supports_color(Stream::Stdout, |text| text.yellow()),
+                    sm.memory.summary
+                );
+            } else {
+                println!(
+                    "  {} {} {}  {}",
+                    score_str, id_short, type_str, sm.memory.summary
+                );
+            }
+        }
+    }
+
+    fn print_search_results_plain(&self, results: &[ScoredMemory]) {
+        if results.is_empty() {
+            println!("No memories found.");
+            return;
+        }
+
+        println!("Found {} memories:\n", results.len());
+
+        for sm in results {
+            let id_short = short_id(&sm.memory.id);
+            let score_str = format!("[{:.2}]", sm.score);
+            let type_str = format!("{:?}", sm.memory.type_);
+            println!(
+                "  {} {} {}  {}",
+                score_str, id_short, type_str, sm.memory.summary
+            );
+        }
+    }
+
+    /// Print retrieval results in the configured format.
+    pub fn print_retrieval_result(&self, result: &RetrievalResult, show_scores: bool) {
+        match self.format {
+            OutputFormat::Json => {
+                let json_output = serde_json::json!({
+                    "memories": result.memories.iter().map(|sm| {
+                        serde_json::json!({
+                            "memory": sm.memory,
+                            "score": sm.score,
+                        })
+                    }).collect::<Vec<_>>(),
+                    "total": result.total,
+                });
+                println!("{}", serde_json::to_string_pretty(&json_output).unwrap());
+            }
+            OutputFormat::Pretty => {
+                self.print_retrieval_result_pretty(result, show_scores);
+            }
+            OutputFormat::Plain => {
+                self.print_retrieval_result_plain(result, show_scores);
+            }
+        }
+    }
+
+    fn print_retrieval_result_pretty(&self, result: &RetrievalResult, show_scores: bool) {
+        if result.memories.is_empty() {
+            println!("No memories found.");
+            return;
+        }
+
+        println!(
+            "Found {} memories (out of {} total):\n",
+            result.memories.len(),
+            result.total
+        );
+
+        for sm in &result.memories {
+            let id_short = short_id(&sm.memory.id);
+            let type_str = format!("{:?}", sm.memory.type_);
+
+            if show_scores {
+                let score_str = format!("[{:.2}]", sm.score);
+                if self.use_color {
+                    println!(
+                        "  {} {} {}  {}",
+                        score_str.if_supports_color(Stream::Stdout, |text| text.green()),
+                        id_short.if_supports_color(Stream::Stdout, |text| text.cyan()),
+                        type_str.if_supports_color(Stream::Stdout, |text| text.yellow()),
+                        sm.memory.summary
+                    );
+                } else {
+                    println!(
+                        "  {} {} {}  {}",
+                        score_str, id_short, type_str, sm.memory.summary
+                    );
+                }
+            } else if self.use_color {
+                println!(
+                    "  {} {}  {}",
+                    id_short.if_supports_color(Stream::Stdout, |text| text.cyan()),
+                    type_str.if_supports_color(Stream::Stdout, |text| text.yellow()),
+                    sm.memory.summary
+                );
+            } else {
+                println!("  {} {}  {}", id_short, type_str, sm.memory.summary);
+            }
+        }
+    }
+
+    fn print_retrieval_result_plain(&self, result: &RetrievalResult, show_scores: bool) {
+        if result.memories.is_empty() {
+            println!("No memories found.");
+            return;
+        }
+
+        println!(
+            "Found {} memories (out of {} total):\n",
+            result.memories.len(),
+            result.total
+        );
+
+        for sm in &result.memories {
+            let id_short = short_id(&sm.memory.id);
+            let type_str = format!("{:?}", sm.memory.type_);
+
+            if show_scores {
+                let score_str = format!("[{:.2}]", sm.score);
+                println!(
+                    "  {} {} {}  {}",
+                    score_str, id_short, type_str, sm.memory.summary
+                );
+            } else {
+                println!("  {} {}  {}", id_short, type_str, sm.memory.summary);
+            }
+        }
+    }
+
     /// Print a list of memory index entries in the configured format.
-    pub fn print_memory_list(&self, entries: &[IndexEntry]) {
+    pub fn print_memory_list(&self, entries: &[IndexEntry], verbose: bool) {
         match self.format {
             OutputFormat::Json => {
                 println!("{}", serde_json::to_string_pretty(entries).unwrap());
             }
             OutputFormat::Pretty => {
-                self.print_list_pretty(entries);
+                self.print_list_pretty(entries, verbose);
             }
             OutputFormat::Plain => {
-                self.print_list_plain(entries);
+                self.print_list_plain(entries, verbose);
             }
         }
     }
 
-    fn print_list_pretty(&self, entries: &[IndexEntry]) {
+    fn print_list_pretty(&self, entries: &[IndexEntry], verbose: bool) {
         if entries.is_empty() {
             println!("No memories found.");
             return;
         }
 
         for entry in entries {
-            let id_short = &entry.id[..8.min(entry.id.len())];
+            let id_short = short_id(&entry.id);
             let id_display = if self.use_color {
                 id_short
                     .if_supports_color(Stream::Stdout, |text| text.cyan())
@@ -273,18 +449,38 @@ impl OutputFormatter {
             };
 
             println!("{} {} {}", id_display, type_display, entry.summary);
+
+            if verbose {
+                println!(
+                    "    Criticality: {:.2}  Status: {:?}  Visibility: {:?}",
+                    entry.criticality, entry.status, entry.visibility
+                );
+                if !entry.tags.is_empty() {
+                    println!("    Tags: {}", entry.tags.join(", "));
+                }
+            }
         }
     }
 
-    fn print_list_plain(&self, entries: &[IndexEntry]) {
+    fn print_list_plain(&self, entries: &[IndexEntry], verbose: bool) {
         if entries.is_empty() {
             println!("No memories found.");
             return;
         }
 
         for entry in entries {
-            let id_short = &entry.id[..8.min(entry.id.len())];
+            let id_short = short_id(&entry.id);
             println!("{} {:?} {}", id_short, entry.type_, entry.summary);
+
+            if verbose {
+                println!(
+                    "    Criticality: {:.2}  Status: {:?}  Visibility: {:?}",
+                    entry.criticality, entry.status, entry.visibility
+                );
+                if !entry.tags.is_empty() {
+                    println!("    Tags: {}", entry.tags.join(", "));
+                }
+            }
         }
     }
 
@@ -385,7 +581,7 @@ impl OutputFormatter {
                     return;
                 }
                 for entry in entries {
-                    let id_short = &entry.project_id[..8.min(entry.project_id.len())];
+                    let id_short = short_id(&entry.project_id);
                     let id_display = if self.use_color {
                         id_short
                             .if_supports_color(Stream::Stdout, |text| text.cyan())
@@ -417,7 +613,7 @@ impl OutputFormatter {
                     return;
                 }
                 for entry in entries {
-                    let id_short = &entry.project_id[..8.min(entry.project_id.len())];
+                    let id_short = short_id(&entry.project_id);
                     let status = if entry.exists { "ok" } else { "missing" };
                     println!(
                         "{} {} {} {}",

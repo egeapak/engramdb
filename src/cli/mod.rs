@@ -20,6 +20,7 @@
 pub mod app;
 pub mod commands;
 pub mod output;
+pub mod validation;
 
 use anyhow::Result;
 use std::env;
@@ -168,7 +169,17 @@ pub async fn run(cli: Cli) -> Result<()> {
             limit,
         } => {
             commands::run_list(
-                &dir, &registry, type_, tags, status, scope, &sort, reverse, limit, &formatter,
+                &dir,
+                &registry,
+                type_,
+                tags,
+                status,
+                scope,
+                &sort,
+                reverse,
+                limit,
+                cli.verbose,
+                &formatter,
             )
             .await
         }

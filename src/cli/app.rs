@@ -170,7 +170,7 @@ pub enum Command {
         logical: Vec<String>,
 
         /// Query text for semantic search
-        #[arg(long, short = 'q')]
+        #[arg(long)]
         query: Option<String>,
 
         /// Filter by type (can be repeated)
@@ -435,4 +435,47 @@ pub enum Command {
         #[arg(long)]
         stale_only: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_retrieve_with_query_long_flag() {
+        // Test that `retrieve --query test` works without conflicting with global `-q`
+        let result = Cli::try_parse_from(["engramdb", "retrieve", "--query", "test"]);
+        assert!(
+            result.is_ok(),
+            "Failed to parse retrieve --query: {:?}",
+            result.err()
+        );
+
+        let cli = result.unwrap();
+        match cli.command {
+            Command::Retrieve { query, .. } => {
+                assert_eq!(query, Some("test".to_string()));
+            }
+            _ => panic!("Expected Retrieve command"),
+        }
+    }
+
+    #[test]
+    fn test_completions_command_works() {
+        // Test that completions bash works (this also previously panicked from -q conflict)
+        let result = Cli::try_parse_from(["engramdb", "completions", "bash"]);
+        assert!(
+            result.is_ok(),
+            "Failed to parse completions bash: {:?}",
+            result.err()
+        );
+
+        let cli = result.unwrap();
+        match cli.command {
+            Command::Completions { shell } => {
+                assert_eq!(shell, clap_complete::Shell::Bash);
+            }
+            _ => panic!("Expected Completions command"),
+        }
+    }
 }
