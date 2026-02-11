@@ -16,11 +16,16 @@ use std::path::Path;
 /// * `id` - The memory ID or prefix
 /// * `force` - Skip confirmation prompt if true
 /// * `formatter` - Output formatter for success/error messages
-pub fn run_delete(dir: &Path, id: &str, force: bool, formatter: &OutputFormatter) -> Result<()> {
-    let store = MemoryStore::open(dir)?;
+pub async fn run_delete(
+    dir: &Path,
+    id: &str,
+    force: bool,
+    formatter: &OutputFormatter,
+) -> Result<()> {
+    let store = MemoryStore::open(dir).await?;
 
     // Get the memory to confirm what we're deleting
-    let memory = get_memory(&store, id)?;
+    let memory = get_memory(&store, id).await?;
 
     // Confirm deletion unless --force
     if !force {
@@ -36,7 +41,7 @@ pub fn run_delete(dir: &Path, id: &str, force: bool, formatter: &OutputFormatter
         }
     }
 
-    delete_memory(&store, &memory.id)?;
+    delete_memory(&store, &memory.id).await?;
 
     formatter.print_success(&format!("Deleted memory {}", memory.id));
     Ok(())

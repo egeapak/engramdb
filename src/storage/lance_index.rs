@@ -16,7 +16,6 @@ use arrow_schema::{DataType, Field, Schema};
 use futures::stream::StreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::{connect, Connection, Table};
-use tokio::runtime::Runtime;
 
 use crate::types::{Memory, MemoryType, ProvenanceSource, Status, Visibility};
 use chrono::{DateTime, Utc};
@@ -87,33 +86,28 @@ pub struct LanceIndex {
     connection: Arc<Connection>,
     table_name: String,
     dimensions: usize,
-    runtime: Runtime,
 }
 
 impl LanceIndex {
     /// Create or open a LanceIndex at the given path.
-    pub fn new(db_path: &Path) -> Result<Self> {
-        let runtime = Runtime::new().context("Failed to create tokio runtime")?;
+    pub async fn new(db_path: &Path) -> Result<Self> {
         let db_path_str = db_path
             .to_str()
             .context("Invalid database path (not valid UTF-8)")?;
 
-        let connection = runtime.block_on(async {
-            connect(db_path_str)
-                .execute()
-                .await
-                .context("Failed to connect to LanceDB")
-        })?;
+        let connection = connect(db_path_str)
+            .execute()
+            .await
+            .context("Failed to connect to LanceDB")?;
 
         let connection = Arc::new(connection);
         let store = Self {
             connection,
             table_name: "memories".to_string(),
             dimensions: 384,
-            runtime,
         };
 
-        store.ensure_table_exists()?;
+        store.ensure_table_exists().await?;
         Ok(store)
     }
 
@@ -145,120 +139,110 @@ impl LanceIndex {
         ]))
     }
 
-    fn ensure_table_exists(&self) -> Result<()> {
+    async fn ensure_table_exists(&self) -> Result<()> {
         let table_name = self.table_name.clone();
         let schema = self.schema();
         let connection = Arc::clone(&self.connection);
 
-        self.runtime.block_on(async move {
-            match connection.open_table(&table_name).execute().await {
-                Ok(_) => Ok(()),
-                Err(_) => {
-                    let empty_batch = RecordBatch::new_empty(schema.clone());
-                    let schema_ref = schema.clone();
-                    let batches =
-                        RecordBatchIterator::new(vec![Ok(empty_batch)].into_iter(), schema_ref);
-                    connection
-                        .create_table(&table_name, batches)
-                        .execute()
-                        .await
-                        .context("Failed to create LanceDB table")?;
-                    Ok(())
-                }
+        match connection.open_table(&table_name).execute().await {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                let empty_batch = RecordBatch::new_empty(schema.clone());
+                let schema_ref = schema.clone();
+                let batches =
+                    RecordBatchIterator::new(vec![Ok(empty_batch)].into_iter(), schema_ref);
+                connection
+                    .create_table(&table_name, batches)
+                    .execute()
+                    .await
+                    .context("Failed to create LanceDB table")?;
+                Ok(())
             }
-        })
+        }
     }
 
-    fn open_table(&self) -> Result<Table> {
+    async fn open_table(&self) -> Result<Table> {
         let table_name = self.table_name.clone();
         let connection = Arc::clone(&self.connection);
 
-        self.runtime.block_on(async move {
-            connection
-                .open_table(&table_name)
-                .execute()
-                .await
-                .context("Failed to open LanceDB table")
-        })
+        connection
+            .open_table(&table_name)
+            .execute()
+            .await
+            .context("Failed to open LanceDB table")
     }
 
     /// Upsert a metadata entry with an optional vector.
-    pub fn upsert(&self, entry: &IndexEntry, vector: Option<Vec<f32>>) -> Result<()> {
+    pub async fn upsert(&self, entry: &IndexEntry, vector: Option<Vec<f32>>) -> Result<()> {
         let batch = self.entry_to_batch(entry, vector)?;
-        let table = self.open_table()?;
+        let table = self.open_table().await?;
         let id = entry.id.clone();
 
-        self.runtime.block_on(async move {
-            let _ = table.delete(&format!("id = '{}'", id)).await;
+        let _ = table.delete(&format!("id = '{}'", id)).await;
 
-            let schema_ref = batch.schema();
-            let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema_ref);
-            table
-                .add(batches)
-                .execute()
-                .await
-                .context("Failed to upsert entry")?;
-            Ok(())
-        })
+        let schema_ref = batch.schema();
+        let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema_ref);
+        table
+            .add(batches)
+            .execute()
+            .await
+            .context("Failed to upsert entry")?;
+        Ok(())
     }
 
     /// Delete an entry by ID.
-    pub fn delete(&self, id: &str) -> Result<()> {
-        let table = self.open_table()?;
+    pub async fn delete(&self, id: &str) -> Result<()> {
+        let table = self.open_table().await?;
         let id_owned = id.to_string();
 
-        self.runtime.block_on(async move {
-            table
-                .delete(&format!("id = '{}'", id_owned))
-                .await
-                .context("Failed to delete entry")?;
-            Ok(())
-        })
+        table
+            .delete(&format!("id = '{}'", id_owned))
+            .await
+            .context("Failed to delete entry")?;
+        Ok(())
     }
 
     /// List all entries in the table.
-    pub fn list(&self) -> Result<Vec<IndexEntry>> {
-        let table = self.open_table()?;
+    pub async fn list(&self) -> Result<Vec<IndexEntry>> {
+        let table = self.open_table().await?;
 
-        self.runtime.block_on(async move {
-            let mut stream = table
-                .query()
-                .select(lancedb::query::Select::Columns(vec![
-                    "id".into(),
-                    "summary".into(),
-                    "type".into(),
-                    "status".into(),
-                    "provenance_source".into(),
-                    "visibility".into(),
-                    "criticality".into(),
-                    "confidence".into(),
-                    "physical".into(),
-                    "logical".into(),
-                    "tags".into(),
-                    "created_at".into(),
-                    "updated_at".into(),
-                    "expires_at".into(),
-                ]))
-                .execute()
-                .await
-                .context("Failed to query LanceDB table")?;
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec![
+                "id".into(),
+                "summary".into(),
+                "type".into(),
+                "status".into(),
+                "provenance_source".into(),
+                "visibility".into(),
+                "criticality".into(),
+                "confidence".into(),
+                "physical".into(),
+                "logical".into(),
+                "tags".into(),
+                "created_at".into(),
+                "updated_at".into(),
+                "expires_at".into(),
+            ]))
+            .execute()
+            .await
+            .context("Failed to query LanceDB table")?;
 
-            let mut entries = Vec::new();
-            while let Some(batch_result) = stream.next().await {
-                let batch = batch_result.context("Failed to read batch")?;
-                entries.extend(batch_to_entries(&batch)?);
-            }
-            Ok(entries)
-        })
+        let mut entries = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read batch")?;
+            entries.extend(batch_to_entries(&batch)?);
+        }
+        Ok(entries)
     }
 
     /// Return the number of entries in the table.
-    pub fn count(&self) -> Result<usize> {
-        Ok(self.list()?.len())
+    pub async fn count(&self) -> Result<usize> {
+        Ok(self.list().await?.len())
     }
 
     /// Perform ANN vector search.
-    pub fn vector_search(&self, query: Vec<f32>, limit: usize) -> Result<Vec<VectorMatch>> {
+    pub async fn vector_search(&self, query: Vec<f32>, limit: usize) -> Result<Vec<VectorMatch>> {
         if query.len() != self.dimensions {
             anyhow::bail!(
                 "Query vector dimension mismatch: expected {}, got {}",
@@ -267,54 +251,52 @@ impl LanceIndex {
             );
         }
 
-        let table = self.open_table()?;
+        let table = self.open_table().await?;
 
-        self.runtime.block_on(async move {
-            let mut stream = table
-                .vector_search(query)?
-                .limit(limit)
-                .execute()
-                .await
-                .context("Failed to execute vector search")?;
+        let mut stream = table
+            .vector_search(query)?
+            .limit(limit)
+            .execute()
+            .await
+            .context("Failed to execute vector search")?;
 
-            let mut matches = Vec::new();
-            while let Some(batch_result) = stream.next().await {
-                let batch = batch_result.context("Failed to read search result batch")?;
+        let mut matches = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read search result batch")?;
 
-                let ids = batch
-                    .column_by_name("id")
-                    .context("Missing 'id' column")?
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .context("Failed to cast 'id' column")?;
+            let ids = batch
+                .column_by_name("id")
+                .context("Missing 'id' column")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("Failed to cast 'id' column")?;
 
-                let scores = batch
-                    .column_by_name("_distance")
-                    .context("Missing '_distance' column")?
-                    .as_any()
-                    .downcast_ref::<Float32Array>()
-                    .context("Failed to cast '_distance' column")?;
+            let scores = batch
+                .column_by_name("_distance")
+                .context("Missing '_distance' column")?
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .context("Failed to cast '_distance' column")?;
 
-                for i in 0..batch.num_rows() {
-                    let id = ids.value(i).to_string();
-                    let distance = scores.value(i) as f64;
-                    let score = 1.0 / (1.0 + distance);
-                    matches.push(VectorMatch { id, score });
-                }
+            for i in 0..batch.num_rows() {
+                let id = ids.value(i).to_string();
+                let distance = scores.value(i) as f64;
+                let score = 1.0 / (1.0 + distance);
+                matches.push(VectorMatch { id, score });
             }
+        }
 
-            matches.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+        matches.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
-            Ok(matches)
-        })
+        Ok(matches)
     }
 
     /// Update just the vector column for a given ID.
-    pub fn update_vector(&self, id: &str, vector: Vec<f32>) -> Result<()> {
+    pub async fn update_vector(&self, id: &str, vector: Vec<f32>) -> Result<()> {
         if vector.len() != self.dimensions {
             anyhow::bail!(
                 "Vector dimension mismatch: expected {}, got {}",
@@ -324,34 +306,32 @@ impl LanceIndex {
         }
 
         // LanceDB doesn't support partial column updates easily, so we read + upsert
-        let entries = self.list()?;
+        let entries = self.list().await?;
         let entry = entries
             .iter()
             .find(|e| e.id == id)
             .context(format!("Entry not found: {}", id))?
             .clone();
-        self.upsert(&entry, Some(vector))
+        self.upsert(&entry, Some(vector)).await
     }
 
     /// Drop and recreate the table (for reindex).
-    pub fn clear(&self) -> Result<()> {
+    pub async fn clear(&self) -> Result<()> {
         let table_name = self.table_name.clone();
         let schema = self.schema();
         let connection = Arc::clone(&self.connection);
 
-        self.runtime.block_on(async move {
-            let _ = connection.drop_table(&table_name).await;
+        let _ = connection.drop_table(&table_name).await;
 
-            let empty_batch = RecordBatch::new_empty(schema.clone());
-            let schema_ref = schema.clone();
-            let batches = RecordBatchIterator::new(vec![Ok(empty_batch)].into_iter(), schema_ref);
-            connection
-                .create_table(&table_name, batches)
-                .execute()
-                .await
-                .context("Failed to recreate LanceDB table")?;
-            Ok(())
-        })
+        let empty_batch = RecordBatch::new_empty(schema.clone());
+        let schema_ref = schema.clone();
+        let batches = RecordBatchIterator::new(vec![Ok(empty_batch)].into_iter(), schema_ref);
+        connection
+            .create_table(&table_name, batches)
+            .execute()
+            .await
+            .context("Failed to recreate LanceDB table")?;
+        Ok(())
     }
 
     // ---- Arrow conversion helpers ----
@@ -649,126 +629,130 @@ mod tests {
         IndexEntry::from(&memory)
     }
 
-    #[test]
-    fn test_lance_index_creation() {
+    #[tokio::test]
+    async fn test_lance_index_creation() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path());
+        let lance = LanceIndex::new(temp_dir.path()).await;
         assert!(lance.is_ok());
     }
 
-    #[test]
-    fn test_upsert_and_list() {
+    #[tokio::test]
+    async fn test_upsert_and_list() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).unwrap();
+        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
 
         let entry = create_test_entry("test-1");
-        lance.upsert(&entry, None).unwrap();
+        lance.upsert(&entry, None).await.unwrap();
 
-        let entries = lance.list().unwrap();
+        let entries = lance.list().await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, "test-1");
         assert_eq!(entries[0].summary, "Test summary");
         assert_eq!(entries[0].visibility, Visibility::Shared);
     }
 
-    #[test]
-    fn test_upsert_replaces_existing() {
+    #[tokio::test]
+    async fn test_upsert_replaces_existing() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).unwrap();
+        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
 
         let mut entry = create_test_entry("test-1");
-        lance.upsert(&entry, None).unwrap();
+        lance.upsert(&entry, None).await.unwrap();
 
         entry.summary = "Updated summary".to_string();
-        lance.upsert(&entry, None).unwrap();
+        lance.upsert(&entry, None).await.unwrap();
 
-        let entries = lance.list().unwrap();
+        let entries = lance.list().await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].summary, "Updated summary");
     }
 
-    #[test]
-    fn test_delete() {
+    #[tokio::test]
+    async fn test_delete() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).unwrap();
+        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
 
         let entry = create_test_entry("test-1");
-        lance.upsert(&entry, None).unwrap();
-        lance.delete("test-1").unwrap();
+        lance.upsert(&entry, None).await.unwrap();
+        lance.delete("test-1").await.unwrap();
 
-        let entries = lance.list().unwrap();
+        let entries = lance.list().await.unwrap();
         assert!(entries.is_empty());
     }
 
-    #[test]
-    fn test_clear() {
+    #[tokio::test]
+    async fn test_clear() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).unwrap();
+        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
 
-        lance.upsert(&create_test_entry("a"), None).unwrap();
-        lance.upsert(&create_test_entry("b"), None).unwrap();
+        lance.upsert(&create_test_entry("a"), None).await.unwrap();
+        lance.upsert(&create_test_entry("b"), None).await.unwrap();
 
-        lance.clear().unwrap();
+        lance.clear().await.unwrap();
 
-        let entries = lance.list().unwrap();
+        let entries = lance.list().await.unwrap();
         assert!(entries.is_empty());
     }
 
-    #[test]
-    fn test_nullable_vector() {
+    #[tokio::test]
+    async fn test_nullable_vector() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).unwrap();
+        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
 
         // Upsert without vector
         let entry = create_test_entry("no-vec");
-        lance.upsert(&entry, None).unwrap();
+        lance.upsert(&entry, None).await.unwrap();
 
         // Upsert with vector
         let entry2 = create_test_entry("with-vec");
-        lance.upsert(&entry2, Some(vec![0.1f32; 384])).unwrap();
+        lance
+            .upsert(&entry2, Some(vec![0.1f32; 384]))
+            .await
+            .unwrap();
 
-        let entries = lance.list().unwrap();
+        let entries = lance.list().await.unwrap();
         assert_eq!(entries.len(), 2);
     }
 
-    #[test]
-    fn test_vector_search() {
+    #[tokio::test]
+    async fn test_vector_search() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).unwrap();
+        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
 
         let entry = create_test_entry("vec-search");
-        lance.upsert(&entry, Some(vec![0.1f32; 384])).unwrap();
+        lance.upsert(&entry, Some(vec![0.1f32; 384])).await.unwrap();
 
-        let matches = lance.vector_search(vec![0.1f32; 384], 10).unwrap();
+        let matches = lance.vector_search(vec![0.1f32; 384], 10).await.unwrap();
         assert!(!matches.is_empty());
         assert_eq!(matches[0].id, "vec-search");
     }
 
-    #[test]
-    fn test_update_vector() {
+    #[tokio::test]
+    async fn test_update_vector() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).unwrap();
+        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
 
         let entry = create_test_entry("update-vec");
-        lance.upsert(&entry, None).unwrap();
+        lance.upsert(&entry, None).await.unwrap();
 
         // Update vector
         lance
             .update_vector("update-vec", vec![0.2f32; 384])
+            .await
             .unwrap();
 
         // Should be searchable now
-        let matches = lance.vector_search(vec![0.2f32; 384], 10).unwrap();
+        let matches = lance.vector_search(vec![0.2f32; 384], 10).await.unwrap();
         assert!(!matches.is_empty());
         assert_eq!(matches[0].id, "update-vec");
     }
 
-    #[test]
-    fn test_search_empty_store() {
+    #[tokio::test]
+    async fn test_search_empty_store() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).unwrap();
+        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
 
-        let results = lance.vector_search(vec![0.1f32; 384], 10);
+        let results = lance.vector_search(vec![0.1f32; 384], 10).await;
         assert!(results.is_ok());
         assert!(results.unwrap().is_empty());
     }
@@ -791,16 +775,16 @@ mod tests {
         assert_eq!(entry.status, Status::Active);
     }
 
-    #[test]
-    fn test_visibility_roundtrip() {
+    #[tokio::test]
+    async fn test_visibility_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
-        let lance = LanceIndex::new(temp_dir.path()).unwrap();
+        let lance = LanceIndex::new(temp_dir.path()).await.unwrap();
 
         let mut entry = create_test_entry("personal-mem");
         entry.visibility = Visibility::Personal;
-        lance.upsert(&entry, None).unwrap();
+        lance.upsert(&entry, None).await.unwrap();
 
-        let entries = lance.list().unwrap();
+        let entries = lance.list().await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].visibility, Visibility::Personal);
     }

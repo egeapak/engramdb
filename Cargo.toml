@@ -43,6 +43,7 @@ dirs = "6"
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync"] }
 futures = "0.3"
+async-trait = "0.1"
 
 # Logging
 tracing = "0.1"

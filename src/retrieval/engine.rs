@@ -128,11 +128,11 @@ impl RetrievalEngine {
     ///
     /// # Arguments
     /// * `memory` - The memory to embed
-    pub fn embed_memory(&self, memory: &Memory) -> anyhow::Result<()> {
+    pub async fn embed_memory(&self, memory: &Memory) -> anyhow::Result<()> {
         if let Some(provider) = &self.embedding_provider {
             let text = format!("{} {}", memory.summary, memory.content);
-            let vector = provider.embed(&text)?;
-            self.store.update_vector(&memory.id, vector)?;
+            let vector = provider.embed(&text).await?;
+            self.store.update_vector(&memory.id, vector).await?;
         }
         Ok(())
     }
@@ -159,9 +159,9 @@ impl RetrievalEngine {
     /// 7. Take top max_results
     /// 8. Strip details based on detail_level
     /// 9. Return RetrievalResult with total count before limit
-    pub fn retrieve(&self, query: &RetrievalQuery) -> Result<RetrievalResult> {
+    pub async fn retrieve(&self, query: &RetrievalQuery) -> Result<RetrievalResult> {
         // Step 1: Load all index entries
-        let all_entries = self.store.list()?;
+        let all_entries = self.store.list().await?;
 
         // Step 2: Apply filters
         let filters = SearchFilters {
@@ -177,12 +177,12 @@ impl RetrievalEngine {
         // Step 2.5: If query text provided and embeddings available, get semantic scores
         let semantic_scores_map: Option<HashMap<String, f64>> = if let Some(ref q) = query.query {
             if let Some(provider) = &self.embedding_provider {
-                if let Ok(query_vector) = provider.embed(q) {
+                if let Ok(query_vector) = provider.embed(q).await {
                     let limit = query
                         .max_results
                         .unwrap_or(self.config.retrieval.max_results)
                         * 3;
-                    if let Ok(matches) = self.store.vector_search(query_vector, limit) {
+                    if let Ok(matches) = self.store.vector_search(query_vector, limit).await {
                         Some(matches.into_iter().map(|m| (m.id, m.score)).collect())
                     } else {
                         None
@@ -209,41 +209,35 @@ impl RetrievalEngine {
         };
 
         // Step 3 & 4: Load memories and calculate scores
-        let mut scored_memories: Vec<ScoredMemory> = filtered_entries
-            .iter()
-            .filter_map(|entry| {
-                // Load full memory
-                let memory = self.store.get(&entry.id).ok()?;
+        let mut scored_memories: Vec<ScoredMemory> = Vec::new();
+        for entry in filtered_entries.iter() {
+            // Load full memory
+            let memory = match self.store.get(&entry.id).await {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
 
-                // Skip expired memories unless include_expired is true
-                let include_expired = query
-                    .include_expired
-                    .unwrap_or(self.config.retrieval.include_expired);
-                if memory.is_expired() && !include_expired {
-                    return None;
-                }
+            // Skip expired memories unless include_expired is true
+            let include_expired = query
+                .include_expired
+                .unwrap_or(self.config.retrieval.include_expired);
+            if memory.is_expired() && !include_expired {
+                continue;
+            }
 
-                // Calculate composite score
-                let context = if let Some(ref q) = query.query {
-                    if let Some(ref semantic_scores) = semantic_scores_map {
-                        if let Some(&sem_score) = semantic_scores.get(&memory.id) {
-                            // Full mode: query + embeddings
-                            ScoringContext::with_semantic(
-                                query.path.clone(),
-                                query.logical.clone(),
-                                q.clone(),
-                                sem_score,
-                            )
-                        } else {
-                            // Memory not in vector results, degraded mode
-                            ScoringContext::with_query_degraded(
-                                query.path.clone(),
-                                query.logical.clone(),
-                                q.clone(),
-                            )
-                        }
+            // Calculate composite score
+            let context = if let Some(ref q) = query.query {
+                if let Some(ref semantic_scores) = semantic_scores_map {
+                    if let Some(&sem_score) = semantic_scores.get(&memory.id) {
+                        // Full mode: query + embeddings
+                        ScoringContext::with_semantic(
+                            query.path.clone(),
+                            query.logical.clone(),
+                            q.clone(),
+                            sem_score,
+                        )
                     } else {
-                        // No embeddings available, degraded mode
+                        // Memory not in vector results, degraded mode
                         ScoringContext::with_query_degraded(
                             query.path.clone(),
                             query.logical.clone(),
@@ -251,19 +245,26 @@ impl RetrievalEngine {
                         )
                     }
                 } else {
-                    // Scope-only retrieval
-                    ScoringContext::scope_only(query.path.clone(), query.logical.clone())
-                };
+                    // No embeddings available, degraded mode
+                    ScoringContext::with_query_degraded(
+                        query.path.clone(),
+                        query.logical.clone(),
+                        q.clone(),
+                    )
+                }
+            } else {
+                // Scope-only retrieval
+                ScoringContext::scope_only(query.path.clone(), query.logical.clone())
+            };
 
-                let breakdown = composite_score(&memory, &context, &self.config, Utc::now());
+            let breakdown = composite_score(&memory, &context, &self.config, Utc::now());
 
-                Some(ScoredMemory {
-                    memory,
-                    score: breakdown.final_score,
-                    score_breakdown: breakdown,
-                })
-            })
-            .collect();
+            scored_memories.push(ScoredMemory {
+                memory,
+                score: breakdown.final_score,
+                score_breakdown: breakdown,
+            });
+        }
 
         // Step 5: Filter by relevance threshold
         let relevance_threshold = self.config.retrieval.relevance_threshold;
@@ -327,7 +328,11 @@ impl RetrievalEngine {
     /// 5. Combine: content = keyword_raw + semantic * semantic_weight
     /// 6. Apply decay, trust, challenge penalty
     /// 7. Apply threshold, sort, return
-    pub fn search(&self, query_text: &str, filters: &SearchFilters) -> Result<Vec<ScoredMemory>> {
+    pub async fn search(
+        &self,
+        query_text: &str,
+        filters: &SearchFilters,
+    ) -> Result<Vec<ScoredMemory>> {
         use crate::scoring::{decay_factor, trust_weight_from_config};
         use crate::types::Status;
 
@@ -336,16 +341,18 @@ impl RetrievalEngine {
         let threshold = self.config.search.threshold;
 
         // Step 1: Load all index entries
-        let all_entries = self.store.list()?;
+        let all_entries = self.store.list().await?;
 
         // Step 2: Apply filters
         let filtered_entries = apply_index_filters(all_entries, filters);
 
         // Load full memories
-        let memories: Vec<Memory> = filtered_entries
-            .iter()
-            .filter_map(|entry| self.store.get(&entry.id).ok())
-            .collect();
+        let mut memories: Vec<Memory> = Vec::new();
+        for entry in filtered_entries.iter() {
+            if let Ok(memory) = self.store.get(&entry.id).await {
+                memories.push(memory);
+            }
+        }
 
         // Step 3: Run keyword search (raw unbounded scores)
         let keyword_results = crate::search::keyword_search(query_text, &memories);
@@ -353,9 +360,10 @@ impl RetrievalEngine {
         // Step 4: Get semantic scores if embeddings available
         let semantic_scores: HashMap<String, f64> = if let Some(provider) = &self.embedding_provider
         {
-            if let Ok(query_vector) = provider.embed(query_text) {
+            if let Ok(query_vector) = provider.embed(query_text).await {
                 self.store
                     .vector_search(query_vector, memories.len())
+                    .await
                     .unwrap_or_default()
                     .into_iter()
                     .map(|m| (m.id, m.score))
@@ -463,43 +471,43 @@ mod tests {
 
     // Integration tests with real MemoryStore
 
-    #[test]
-    fn test_engine_new() {
+    #[tokio::test]
+    async fn test_engine_new() {
         use crate::types::EngramConfig;
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
         let config = EngramConfig::default();
 
         let engine = RetrievalEngine::new(store, config);
         assert!(!engine.embeddings_available());
     }
 
-    #[test]
-    fn test_retrieve_empty_store() {
+    #[tokio::test]
+    async fn test_retrieve_empty_store() {
         use crate::types::EngramConfig;
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
         let config = EngramConfig::default();
 
         let engine = RetrievalEngine::new(store, config);
         let query = RetrievalQuery::default();
-        let result = engine.retrieve(&query).unwrap();
+        let result = engine.retrieve(&query).await.unwrap();
 
         assert_eq!(result.memories.len(), 0);
         assert_eq!(result.total, 0);
     }
 
-    #[test]
-    fn test_retrieve_returns_scored_memories() {
+    #[tokio::test]
+    async fn test_retrieve_returns_scored_memories() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         // Use a config with lower threshold to ensure memories are returned
         let mut config = EngramConfig::default();
@@ -526,8 +534,8 @@ mod tests {
         memory2.visibility = Visibility::Shared;
         memory2.criticality = 0.9;
 
-        store.create(&memory1).unwrap();
-        store.create(&memory2).unwrap();
+        store.create(&memory1).await.unwrap();
+        store.create(&memory2).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
 
@@ -537,7 +545,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.retrieve(&query).unwrap();
+        let result = engine.retrieve(&query).await.unwrap();
 
         // Both should be returned, but the one with matching scope should score higher
         assert_eq!(result.memories.len(), 2);
@@ -551,13 +559,13 @@ mod tests {
         assert!(result.memories[0].score > result.memories[1].score);
     }
 
-    #[test]
-    fn test_retrieve_filters_by_type() {
+    #[tokio::test]
+    async fn test_retrieve_filters_by_type() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         let mut config = EngramConfig::default();
         config.retrieval.relevance_threshold = 0.0;
@@ -581,8 +589,8 @@ mod tests {
         context.visibility = Visibility::Shared;
         context.criticality = 0.8;
 
-        store.create(&decision).unwrap();
-        store.create(&context).unwrap();
+        store.create(&decision).await.unwrap();
+        store.create(&context).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
 
@@ -592,19 +600,19 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.retrieve(&query).unwrap();
+        let result = engine.retrieve(&query).await.unwrap();
 
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].memory.type_, MemoryType::Decision);
     }
 
-    #[test]
-    fn test_retrieve_respects_max_results() {
+    #[tokio::test]
+    async fn test_retrieve_respects_max_results() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         let mut config = EngramConfig::default();
         config.retrieval.relevance_threshold = 0.0;
@@ -619,7 +627,7 @@ mod tests {
             );
             memory.visibility = Visibility::Shared;
             memory.criticality = 0.8;
-            store.create(&memory).unwrap();
+            store.create(&memory).await.unwrap();
         }
 
         let engine = RetrievalEngine::new(store, config);
@@ -630,20 +638,20 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.retrieve(&query).unwrap();
+        let result = engine.retrieve(&query).await.unwrap();
 
         assert_eq!(result.memories.len(), 2);
         assert_eq!(result.total, 5);
     }
 
-    #[test]
-    fn test_retrieve_excludes_expired() {
+    #[tokio::test]
+    async fn test_retrieve_excludes_expired() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use chrono::{Duration, Utc};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         let mut config = EngramConfig::default();
         config.retrieval.relevance_threshold = 0.0;
@@ -669,8 +677,8 @@ mod tests {
         active.visibility = Visibility::Shared;
         active.criticality = 0.8;
 
-        store.create(&expired).unwrap();
-        store.create(&active).unwrap();
+        store.create(&expired).await.unwrap();
+        store.create(&active).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
 
@@ -680,19 +688,19 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.retrieve(&query).unwrap();
+        let result = engine.retrieve(&query).await.unwrap();
 
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].memory.summary, "Active memory");
     }
 
-    #[test]
-    fn test_retrieve_detail_level_summary() {
+    #[tokio::test]
+    async fn test_retrieve_detail_level_summary() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         let mut config = EngramConfig::default();
         config.retrieval.relevance_threshold = 0.0;
@@ -708,7 +716,7 @@ mod tests {
         memory.visibility = Visibility::Shared;
         memory.criticality = 0.8;
 
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
 
@@ -718,7 +726,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.retrieve(&query).unwrap();
+        let result = engine.retrieve(&query).await.unwrap();
 
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].memory.summary, "Test memory");
@@ -726,13 +734,13 @@ mod tests {
         assert_eq!(result.memories[0].memory.details, None);
     }
 
-    #[test]
-    fn test_retrieve_score_breakdown() {
+    #[tokio::test]
+    async fn test_retrieve_score_breakdown() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         let mut config = EngramConfig::default();
         config.retrieval.relevance_threshold = 0.0;
@@ -747,7 +755,7 @@ mod tests {
         memory.criticality = 0.8;
         memory.physical = vec!["src/test.rs".to_string()];
 
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
 
@@ -756,7 +764,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.retrieve(&query).unwrap();
+        let result = engine.retrieve(&query).await.unwrap();
 
         assert_eq!(result.memories.len(), 1);
         // Verify score_breakdown is populated
@@ -770,13 +778,13 @@ mod tests {
         assert!(sm.score_breakdown.semantic.is_none()); // No query
     }
 
-    #[test]
-    fn test_retrieve_query_mode_scope_only() {
+    #[tokio::test]
+    async fn test_retrieve_query_mode_scope_only() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         let mut config = EngramConfig::default();
         config.retrieval.relevance_threshold = 0.0;
@@ -790,24 +798,24 @@ mod tests {
         memory.visibility = Visibility::Shared;
         memory.criticality = 0.8;
 
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
 
         let query = RetrievalQuery::default();
 
-        let result = engine.retrieve(&query).unwrap();
+        let result = engine.retrieve(&query).await.unwrap();
 
         assert_eq!(result.query_mode, "scope_only");
     }
 
-    #[test]
-    fn test_retrieve_query_mode_degraded() {
+    #[tokio::test]
+    async fn test_retrieve_query_mode_degraded() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         let mut config = EngramConfig::default();
         config.retrieval.relevance_threshold = 0.0;
@@ -821,7 +829,7 @@ mod tests {
         memory.visibility = Visibility::Shared;
         memory.criticality = 0.8;
 
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
 
@@ -830,19 +838,19 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.retrieve(&query).unwrap();
+        let result = engine.retrieve(&query).await.unwrap();
 
         // Without embeddings configured, should be degraded mode
         assert_eq!(result.query_mode, "degraded");
     }
 
-    #[test]
-    fn test_search_keyword_integration() {
+    #[tokio::test]
+    async fn test_search_keyword_integration() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
         let config = EngramConfig::default();
 
         // Create memories with specific keywords
@@ -862,14 +870,14 @@ mod tests {
         );
         memory2.visibility = Visibility::Shared;
 
-        store.create(&memory1).unwrap();
-        store.create(&memory2).unwrap();
+        store.create(&memory1).await.unwrap();
+        store.create(&memory2).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
 
         // Search for "authentication"
         let filters = SearchFilters::default();
-        let results = engine.search("authentication", &filters).unwrap();
+        let results = engine.search("authentication", &filters).await.unwrap();
 
         // Should find memory1 with higher score
         assert!(!results.is_empty());
@@ -884,13 +892,13 @@ mod tests {
         assert_eq!(results[0].score_breakdown.decay, 1.0);
     }
 
-    #[test]
-    fn test_search_applies_trust_multiplier() {
+    #[tokio::test]
+    async fn test_search_applies_trust_multiplier() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
         let config = EngramConfig::default();
 
         // Human memory
@@ -901,7 +909,7 @@ mod tests {
             Provenance::human(),
         );
         human_mem.visibility = Visibility::Shared;
-        store.create(&human_mem).unwrap();
+        store.create(&human_mem).await.unwrap();
 
         // Inferred memory with same content
         let mut inferred_mem = Memory::new(
@@ -911,11 +919,11 @@ mod tests {
             Provenance::inferred(),
         );
         inferred_mem.visibility = Visibility::Shared;
-        store.create(&inferred_mem).unwrap();
+        store.create(&inferred_mem).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
         let filters = SearchFilters::default();
-        let results = engine.search("authentication", &filters).unwrap();
+        let results = engine.search("authentication", &filters).await.unwrap();
 
         assert_eq!(results.len(), 2);
         // Both should have same keyword score, but different trust
@@ -939,14 +947,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_search_applies_decay() {
+    #[tokio::test]
+    async fn test_search_applies_decay() {
         use crate::types::{Decay, EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use chrono::{Duration, Utc};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
         let config = EngramConfig::default();
 
         // Fresh memory (no decay)
@@ -957,7 +965,7 @@ mod tests {
             Provenance::human(),
         );
         fresh.visibility = Visibility::Shared;
-        store.create(&fresh).unwrap();
+        store.create(&fresh).await.unwrap();
 
         // Old memory with exponential decay at half-life
         let mut old = Memory::new(
@@ -969,11 +977,11 @@ mod tests {
         old.visibility = Visibility::Shared;
         old.created_at = Utc::now() - Duration::days(7);
         old.decay = Some(Decay::exponential(Duration::days(7)));
-        store.create(&old).unwrap();
+        store.create(&old).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
         let filters = SearchFilters::default();
-        let results = engine.search("authentication", &filters).unwrap();
+        let results = engine.search("authentication", &filters).await.unwrap();
 
         assert_eq!(results.len(), 2);
         let fresh_result = results.iter().find(|r| r.memory.id == fresh.id).unwrap();
@@ -989,13 +997,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_search_applies_challenge_penalty() {
+    #[tokio::test]
+    async fn test_search_applies_challenge_penalty() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Status, Visibility};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
         let config = EngramConfig::default();
 
         // Active memory
@@ -1006,7 +1014,7 @@ mod tests {
             Provenance::human(),
         );
         active.visibility = Visibility::Shared;
-        store.create(&active).unwrap();
+        store.create(&active).await.unwrap();
 
         // Challenged memory with same content
         let mut challenged = Memory::new(
@@ -1017,11 +1025,11 @@ mod tests {
         );
         challenged.visibility = Visibility::Shared;
         challenged.status = Status::Challenged;
-        store.create(&challenged).unwrap();
+        store.create(&challenged).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
         let filters = SearchFilters::default();
-        let results = engine.search("authentication", &filters).unwrap();
+        let results = engine.search("authentication", &filters).await.unwrap();
 
         assert_eq!(results.len(), 2);
         let active_result = results.iter().find(|r| r.memory.id == active.id).unwrap();
@@ -1039,13 +1047,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_search_threshold_filters_results() {
+    #[tokio::test]
+    async fn test_search_threshold_filters_results() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         let mut config = EngramConfig::default();
         // Set a high threshold that filters out low-scoring results
@@ -1058,23 +1066,23 @@ mod tests {
             Provenance::human(),
         );
         memory.visibility = Visibility::Shared;
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
         let filters = SearchFilters::default();
-        let results = engine.search("authentication", &filters).unwrap();
+        let results = engine.search("authentication", &filters).await.unwrap();
 
         // Keyword score is at most ~4.0, well below threshold of 100
         assert!(results.is_empty());
     }
 
-    #[test]
-    fn test_search_threshold_zero_returns_all() {
+    #[tokio::test]
+    async fn test_search_threshold_zero_returns_all() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         let mut config = EngramConfig::default();
         config.search.threshold = 0.0;
@@ -1086,22 +1094,22 @@ mod tests {
             Provenance::human(),
         );
         memory.visibility = Visibility::Shared;
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
         let filters = SearchFilters::default();
-        let results = engine.search("authentication", &filters).unwrap();
+        let results = engine.search("authentication", &filters).await.unwrap();
 
         assert_eq!(results.len(), 1);
     }
 
-    #[test]
-    fn test_search_breakdown_has_keyword_and_criticality() {
+    #[tokio::test]
+    async fn test_search_breakdown_has_keyword_and_criticality() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
         let config = EngramConfig::default();
 
         let mut memory = Memory::new(
@@ -1112,11 +1120,11 @@ mod tests {
         );
         memory.visibility = Visibility::Shared;
         memory.criticality = 0.7;
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
         let filters = SearchFilters::default();
-        let results = engine.search("authentication", &filters).unwrap();
+        let results = engine.search("authentication", &filters).await.unwrap();
 
         assert_eq!(results.len(), 1);
         let bd = &results[0].score_breakdown;

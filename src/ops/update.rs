@@ -35,14 +35,14 @@ pub struct UpdateParams {
 ///
 /// If `engine` is provided and has embeddings available, the memory is
 /// re-embedded into the vector store after the update succeeds.
-pub fn update_memory(
+pub async fn update_memory(
     store: &MemoryStore,
     id: &str,
     params: UpdateParams,
     engine: Option<&RetrievalEngine>,
 ) -> Result<bool> {
     // Load the existing memory to handle tag operations
-    let mut memory = store.get(id)?;
+    let mut memory = store.get(id).await?;
 
     // Apply direct field updates
     let mut update = MemoryUpdate::new();
@@ -138,13 +138,13 @@ pub fn update_memory(
     final_update.supersedes = Some(memory.supersedes);
     final_update.decay = memory.decay;
 
-    store.update(id, final_update)?;
+    store.update(id, final_update).await?;
 
     // Re-embed the updated memory if an engine with embeddings is available
     if let Some(engine) = engine {
         if engine.embeddings_available() {
-            let saved = store.get(id)?;
-            engine.embed_memory(&saved)?;
+            let saved = store.get(id).await?;
+            engine.embed_memory(&saved).await?;
         }
     }
 
@@ -158,13 +158,13 @@ mod tests {
     use crate::types::{Memory, MemoryType, Provenance};
     use tempfile::TempDir;
 
-    fn setup_test_store() -> (TempDir, MemoryStore) {
+    async fn setup_test_store() -> (TempDir, MemoryStore) {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
         (temp_dir, store)
     }
 
-    fn create_test_memory(store: &MemoryStore) -> String {
+    async fn create_test_memory(store: &MemoryStore) -> String {
         let mut memory = Memory::new(
             MemoryType::Decision,
             "Test memory",
@@ -172,7 +172,7 @@ mod tests {
             Provenance::human(),
         );
         memory.tags = vec!["tag1".to_string(), "tag2".to_string()];
-        store.create(&memory).unwrap()
+        store.create(&memory).await.unwrap()
     }
 
     fn empty_update_params() -> UpdateParams {
@@ -198,69 +198,69 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_update_tags_add_appends_and_deduplicates() {
-        let (_temp, store) = setup_test_store();
-        let id = create_test_memory(&store);
+    #[tokio::test]
+    async fn test_update_tags_add_appends_and_deduplicates() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
 
         // Add new tags, including one duplicate
         let mut params = empty_update_params();
         params.tags_add = Some(vec!["tag2".to_string(), "tag3".to_string()]);
 
-        update_memory(&store, &id, params, None).unwrap();
+        update_memory(&store, &id, params, None).await.unwrap();
 
-        let memory = store.get(&id).unwrap();
+        let memory = store.get(&id).await.unwrap();
         assert_eq!(memory.tags.len(), 3);
         assert!(memory.tags.contains(&"tag1".to_string()));
         assert!(memory.tags.contains(&"tag2".to_string()));
         assert!(memory.tags.contains(&"tag3".to_string()));
     }
 
-    #[test]
-    fn test_update_tags_remove_filters_correctly() {
-        let (_temp, store) = setup_test_store();
-        let id = create_test_memory(&store);
+    #[tokio::test]
+    async fn test_update_tags_remove_filters_correctly() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
 
         // Remove one tag
         let mut params = empty_update_params();
         params.tags_remove = Some(vec!["tag1".to_string()]);
 
-        update_memory(&store, &id, params, None).unwrap();
+        update_memory(&store, &id, params, None).await.unwrap();
 
-        let memory = store.get(&id).unwrap();
+        let memory = store.get(&id).await.unwrap();
         assert_eq!(memory.tags.len(), 1);
         assert!(!memory.tags.contains(&"tag1".to_string()));
         assert!(memory.tags.contains(&"tag2".to_string()));
     }
 
-    #[test]
-    fn test_update_tags_remove_multiple() {
-        let (_temp, store) = setup_test_store();
-        let id = create_test_memory(&store);
+    #[tokio::test]
+    async fn test_update_tags_remove_multiple() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
 
         // Remove both tags
         let mut params = empty_update_params();
         params.tags_remove = Some(vec!["tag1".to_string(), "tag2".to_string()]);
 
-        update_memory(&store, &id, params, None).unwrap();
+        update_memory(&store, &id, params, None).await.unwrap();
 
-        let memory = store.get(&id).unwrap();
+        let memory = store.get(&id).await.unwrap();
         assert_eq!(memory.tags.len(), 0);
     }
 
-    #[test]
-    fn test_update_tags_combined_replace_then_add() {
-        let (_temp, store) = setup_test_store();
-        let id = create_test_memory(&store);
+    #[tokio::test]
+    async fn test_update_tags_combined_replace_then_add() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
 
         // Replace tags with new set, then add more
         let mut params = empty_update_params();
         params.tags = Some(vec!["new1".to_string(), "new2".to_string()]);
         params.tags_add = Some(vec!["new2".to_string(), "new3".to_string()]);
 
-        update_memory(&store, &id, params, None).unwrap();
+        update_memory(&store, &id, params, None).await.unwrap();
 
-        let memory = store.get(&id).unwrap();
+        let memory = store.get(&id).await.unwrap();
         assert_eq!(memory.tags.len(), 3);
         assert!(memory.tags.contains(&"new1".to_string()));
         assert!(memory.tags.contains(&"new2".to_string()));
@@ -269,88 +269,88 @@ mod tests {
         assert!(!memory.tags.contains(&"tag2".to_string()));
     }
 
-    #[test]
-    fn test_update_supersedes_persists() {
-        let (_temp, store) = setup_test_store();
-        let id = create_test_memory(&store);
+    #[tokio::test]
+    async fn test_update_supersedes_persists() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
 
         // Set supersedes
         let mut params = empty_update_params();
         params.supersedes = Some(vec!["old-id-1".to_string(), "old-id-2".to_string()]);
 
-        update_memory(&store, &id, params, None).unwrap();
+        update_memory(&store, &id, params, None).await.unwrap();
 
-        let memory = store.get(&id).unwrap();
+        let memory = store.get(&id).await.unwrap();
         assert_eq!(memory.supersedes.len(), 2);
         assert!(memory.supersedes.contains(&"old-id-1".to_string()));
         assert!(memory.supersedes.contains(&"old-id-2".to_string()));
     }
 
-    #[test]
-    fn test_update_supersedes_roundtrip() {
-        let (_temp, store) = setup_test_store();
-        let id = create_test_memory(&store);
+    #[tokio::test]
+    async fn test_update_supersedes_roundtrip() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
 
         // Set supersedes
         let mut params = empty_update_params();
         params.supersedes = Some(vec!["prev-memory".to_string()]);
 
-        update_memory(&store, &id, params, None).unwrap();
+        update_memory(&store, &id, params, None).await.unwrap();
 
         // Reload from disk
-        let memory = store.get(&id).unwrap();
+        let memory = store.get(&id).await.unwrap();
         assert_eq!(memory.supersedes, vec!["prev-memory".to_string()]);
     }
 
-    #[test]
-    fn test_supersedes_defaults_to_empty_vec() {
-        let (_temp, store) = setup_test_store();
-        let id = create_test_memory(&store);
+    #[tokio::test]
+    async fn test_supersedes_defaults_to_empty_vec() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
 
         // Get memory without setting supersedes
-        let memory = store.get(&id).unwrap();
+        let memory = store.get(&id).await.unwrap();
         assert_eq!(memory.supersedes.len(), 0);
     }
 
-    #[test]
-    fn test_update_tags_add_to_empty() {
-        let (_temp, store) = setup_test_store();
+    #[tokio::test]
+    async fn test_update_tags_add_to_empty() {
+        let (_temp, store) = setup_test_store().await;
         let mut memory = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
         memory.tags = vec![];
-        let id = store.create(&memory).unwrap();
+        let id = store.create(&memory).await.unwrap();
 
         let mut params = empty_update_params();
         params.tags_add = Some(vec!["first".to_string()]);
 
-        update_memory(&store, &id, params, None).unwrap();
+        update_memory(&store, &id, params, None).await.unwrap();
 
-        let memory = store.get(&id).unwrap();
+        let memory = store.get(&id).await.unwrap();
         assert_eq!(memory.tags.len(), 1);
         assert_eq!(memory.tags[0], "first");
     }
 
-    #[test]
-    fn test_update_tags_remove_nonexistent() {
-        let (_temp, store) = setup_test_store();
-        let id = create_test_memory(&store);
+    #[tokio::test]
+    async fn test_update_tags_remove_nonexistent() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
 
         // Try to remove a tag that doesn't exist
         let mut params = empty_update_params();
         params.tags_remove = Some(vec!["nonexistent".to_string()]);
 
-        update_memory(&store, &id, params, None).unwrap();
+        update_memory(&store, &id, params, None).await.unwrap();
 
-        let memory = store.get(&id).unwrap();
+        let memory = store.get(&id).await.unwrap();
         // Should still have original tags
         assert_eq!(memory.tags.len(), 2);
         assert!(memory.tags.contains(&"tag1".to_string()));
         assert!(memory.tags.contains(&"tag2".to_string()));
     }
 
-    #[test]
-    fn test_update_all_tag_operations_combined() {
-        let (_temp, store) = setup_test_store();
-        let id = create_test_memory(&store);
+    #[tokio::test]
+    async fn test_update_all_tag_operations_combined() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
 
         // Replace with ["a", "b"], add ["b", "c"], remove ["a"]
         // Final result should be ["b", "c"]
@@ -359,19 +359,19 @@ mod tests {
         params.tags_add = Some(vec!["b".to_string(), "c".to_string()]);
         params.tags_remove = Some(vec!["a".to_string()]);
 
-        update_memory(&store, &id, params, None).unwrap();
+        update_memory(&store, &id, params, None).await.unwrap();
 
-        let memory = store.get(&id).unwrap();
+        let memory = store.get(&id).await.unwrap();
         assert_eq!(memory.tags.len(), 2);
         assert!(memory.tags.contains(&"b".to_string()));
         assert!(memory.tags.contains(&"c".to_string()));
         assert!(!memory.tags.contains(&"a".to_string()));
     }
 
-    #[test]
-    fn test_update_decay_config_on_existing_memory() {
-        let (_temp, store) = setup_test_store();
-        let id = create_test_memory(&store);
+    #[tokio::test]
+    async fn test_update_decay_config_on_existing_memory() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
 
         // Update decay config
         let mut params = empty_update_params();
@@ -379,9 +379,9 @@ mod tests {
         params.decay_half_life = Some(604800); // 7 days
         params.decay_floor = Some(0.4);
 
-        update_memory(&store, &id, params, None).unwrap();
+        update_memory(&store, &id, params, None).await.unwrap();
 
-        let memory = store.get(&id).unwrap();
+        let memory = store.get(&id).await.unwrap();
         assert!(memory.decay.is_some());
         let decay = memory.decay.unwrap();
         assert_eq!(decay.strategy, DecayStrategy::Exponential);
@@ -389,20 +389,20 @@ mod tests {
         assert_eq!(decay.floor, 0.4);
     }
 
-    #[test]
-    fn test_update_decay_partial_fields() {
-        let (_temp, store) = setup_test_store();
+    #[tokio::test]
+    async fn test_update_decay_partial_fields() {
+        let (_temp, store) = setup_test_store().await;
         let memory = Memory::new(MemoryType::Intent, "Test", "Content", Provenance::human());
         // Intent has default exponential decay with 14 days half-life
-        let id = store.create(&memory).unwrap();
+        let id = store.create(&memory).await.unwrap();
 
         // Update only the floor, should keep existing strategy
         let mut params = empty_update_params();
         params.decay_floor = Some(0.25);
 
-        update_memory(&store, &id, params, None).unwrap();
+        update_memory(&store, &id, params, None).await.unwrap();
 
-        let memory = store.get(&id).unwrap();
+        let memory = store.get(&id).await.unwrap();
         assert!(memory.decay.is_some());
         let decay = memory.decay.unwrap();
         assert_eq!(decay.strategy, DecayStrategy::Exponential); // Kept from original
@@ -410,15 +410,15 @@ mod tests {
         assert_eq!(decay.floor, 0.25); // Updated
     }
 
-    #[test]
-    fn test_update_decay_invalid_strategy_returns_error() {
-        let (_temp, store) = setup_test_store();
-        let id = create_test_memory(&store);
+    #[tokio::test]
+    async fn test_update_decay_invalid_strategy_returns_error() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
 
         let mut params = empty_update_params();
         params.decay_strategy = Some("invalid".to_string());
 
-        let result = update_memory(&store, &id, params, None);
+        let result = update_memory(&store, &id, params, None).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -426,20 +426,20 @@ mod tests {
             .contains("Invalid decay strategy"));
     }
 
-    #[test]
-    fn test_update_decay_change_strategy_preserve_other_fields() {
-        let (_temp, store) = setup_test_store();
+    #[tokio::test]
+    async fn test_update_decay_change_strategy_preserve_other_fields() {
+        let (_temp, store) = setup_test_store().await;
         let memory = Memory::new(MemoryType::Debug, "Test", "Content", Provenance::human());
         // Debug has default exponential with 30 days half-life
-        let id = store.create(&memory).unwrap();
+        let id = store.create(&memory).await.unwrap();
 
         // Change only strategy to linear
         let mut params = empty_update_params();
         params.decay_strategy = Some("linear".to_string());
 
-        update_memory(&store, &id, params, None).unwrap();
+        update_memory(&store, &id, params, None).await.unwrap();
 
-        let memory = store.get(&id).unwrap();
+        let memory = store.get(&id).await.unwrap();
         assert!(memory.decay.is_some());
         let decay = memory.decay.unwrap();
         assert_eq!(decay.strategy, DecayStrategy::Linear);
@@ -447,18 +447,18 @@ mod tests {
         assert_eq!(decay.half_life, Some(Duration::days(30)));
     }
 
-    #[test]
-    fn test_update_decay_none_strategy() {
-        let (_temp, store) = setup_test_store();
-        let id = create_test_memory(&store);
+    #[tokio::test]
+    async fn test_update_decay_none_strategy() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
 
         // Set decay to none
         let mut params = empty_update_params();
         params.decay_strategy = Some("none".to_string());
 
-        update_memory(&store, &id, params, None).unwrap();
+        update_memory(&store, &id, params, None).await.unwrap();
 
-        let memory = store.get(&id).unwrap();
+        let memory = store.get(&id).await.unwrap();
         assert!(memory.decay.is_some());
         let decay = memory.decay.unwrap();
         assert_eq!(decay.strategy, DecayStrategy::None);

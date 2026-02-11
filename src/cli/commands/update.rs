@@ -38,10 +38,15 @@ pub struct UpdateParams {
 /// * `dir` - The directory containing the EngramDB store
 /// * `params` - Update parameters (only non-None fields are updated)
 /// * `formatter` - Output formatter for success/error messages
-pub fn run_update(dir: &Path, params: UpdateParams, formatter: &OutputFormatter) -> Result<()> {
+pub async fn run_update(
+    dir: &Path,
+    params: UpdateParams,
+    formatter: &OutputFormatter,
+) -> Result<()> {
     // Handle editor flag first if present
     if params.editor {
         let memory_file_path = memory_path(dir, &params.id)
+            .await
             .with_context(|| format!("Memory {} not found", params.id))?;
 
         let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
@@ -78,12 +83,12 @@ pub fn run_update(dir: &Path, params: UpdateParams, formatter: &OutputFormatter)
         }
     }
 
-    let store = MemoryStore::open(dir)?;
+    let store = MemoryStore::open(dir).await?;
 
     // Build engine for auto-embedding on update
     let config_path = dir.join(".engramdb").join("config.toml");
-    let engine_store = MemoryStore::open(dir)?;
-    let engine = ops::build_engine(engine_store, &config_path);
+    let engine_store = MemoryStore::open(dir).await?;
+    let engine = ops::build_engine(engine_store, &config_path).await;
 
     let type_ = params.type_.map(|s| parse_memory_type(&s)).transpose()?;
     let visibility = params
@@ -168,7 +173,8 @@ pub fn run_update(dir: &Path, params: UpdateParams, formatter: &OutputFormatter)
             decay_floor: None,
         },
         Some(&engine),
-    )?;
+    )
+    .await?;
 
     formatter.print_success(&format!("Updated memory {}", params.id));
     Ok(())

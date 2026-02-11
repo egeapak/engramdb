@@ -15,21 +15,18 @@ use std::path::Path;
 /// * `embeddings_only` - If true, only re-embed memories (skip index rebuild)
 /// * `index_only` - If true, only rebuild index (skip embeddings)
 /// * `formatter` - Output formatter for success/error messages
-pub fn run_reindex(
+pub async fn run_reindex(
     dir: &Path,
     embeddings_only: bool,
     index_only: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir)?;
+    let store = MemoryStore::open(dir).await?;
     let config_path = dir.join(".engramdb").join("config.toml");
 
     // Set up engine with embeddings if not index_only
     let engine = if !index_only {
-        Some(crate::ops::build_engine(
-            MemoryStore::open(dir)?,
-            &config_path,
-        ))
+        Some(crate::ops::build_engine(MemoryStore::open(dir).await?, &config_path).await)
     } else {
         None
     };
@@ -42,7 +39,7 @@ pub fn run_reindex(
         println!("Regenerating embeddings...");
     }
 
-    let result = reindex(&store, engine.as_ref(), embeddings_only)?;
+    let result = reindex(&store, engine.as_ref(), embeddings_only).await?;
 
     // Print results
     if result.indexed > 0 {

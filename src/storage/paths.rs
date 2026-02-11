@@ -18,6 +18,7 @@
 
 use super::error::{Result, StorageError};
 use std::path::{Path, PathBuf};
+use tokio::fs as async_fs;
 
 /// Returns the project-specific EngramDB directory (.engramdb/)
 pub fn project_dir(dir: &Path) -> PathBuf {
@@ -82,10 +83,10 @@ pub fn registry_path() -> Result<PathBuf> {
 /// Returns the memory file path for a given memory ID
 /// Note: This function tries to find the memory in both shared and personal directories
 /// by checking for files that start with the given ID prefix.
-pub fn memory_path(dir: &Path, id: &str) -> Option<PathBuf> {
+pub async fn memory_path(dir: &Path, id: &str) -> Option<PathBuf> {
     // Try shared memories first
     let shared_dir = memories_dir(dir);
-    if let Some(path) = find_memory_in_dir(&shared_dir, id) {
+    if let Some(path) = find_memory_in_dir(&shared_dir, id).await {
         return Some(path);
     }
 
@@ -95,22 +96,22 @@ pub fn memory_path(dir: &Path, id: &str) -> Option<PathBuf> {
     use crate::storage::project_id::compute_project_id;
     let project_id = compute_project_id(dir);
     if let Ok(personal_dir) = personal_memories_dir(&project_id) {
-        return find_memory_in_dir(&personal_dir, id);
+        return find_memory_in_dir(&personal_dir, id).await;
     }
     None
 }
 
 /// Helper function to find a memory file by ID prefix in a directory
-fn find_memory_in_dir(dir: &Path, id: &str) -> Option<PathBuf> {
+pub async fn find_memory_in_dir(dir: &Path, id: &str) -> Option<PathBuf> {
     if !dir.exists() {
         return None;
     }
 
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(mut entries) = async_fs::read_dir(dir).await else {
         return None;
     };
 
-    for entry in entries.flatten() {
+    while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
         if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
             if filename.starts_with(id) {
@@ -168,49 +169,49 @@ mod tests {
         assert!(result.to_string_lossy().ends_with("engramdb"));
     }
 
-    #[test]
-    fn test_find_memory_in_dir_with_exact_match() {
+    #[tokio::test]
+    async fn test_find_memory_in_dir_with_exact_match() {
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let test_id = "abc123";
         let file_path = temp_dir.path().join(format!("{}.md", test_id));
-        std::fs::write(&file_path, "test content").unwrap();
+        tokio::fs::write(&file_path, "test content").await.unwrap();
 
-        let result = find_memory_in_dir(temp_dir.path(), test_id);
+        let result = find_memory_in_dir(temp_dir.path(), test_id).await;
         assert!(result.is_some());
         assert_eq!(result.unwrap(), file_path);
     }
 
-    #[test]
-    fn test_find_memory_in_dir_with_prefix_match() {
+    #[tokio::test]
+    async fn test_find_memory_in_dir_with_prefix_match() {
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let full_id = "abc123-456-789";
         let file_path = temp_dir.path().join(format!("{}.md", full_id));
-        std::fs::write(&file_path, "test content").unwrap();
+        tokio::fs::write(&file_path, "test content").await.unwrap();
 
-        let result = find_memory_in_dir(temp_dir.path(), "abc");
+        let result = find_memory_in_dir(temp_dir.path(), "abc").await;
         assert!(result.is_some());
         assert_eq!(result.unwrap(), file_path);
     }
 
-    #[test]
-    fn test_find_memory_in_dir_not_found() {
+    #[tokio::test]
+    async fn test_find_memory_in_dir_not_found() {
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let result = find_memory_in_dir(temp_dir.path(), "nonexistent");
+        let result = find_memory_in_dir(temp_dir.path(), "nonexistent").await;
         assert!(result.is_none());
     }
 
-    #[test]
-    fn test_find_memory_in_dir_nonexistent_dir() {
+    #[tokio::test]
+    async fn test_find_memory_in_dir_nonexistent_dir() {
         use std::path::Path;
 
         let nonexistent_path = Path::new("/nonexistent/directory");
-        let result = find_memory_in_dir(nonexistent_path, "test");
+        let result = find_memory_in_dir(nonexistent_path, "test").await;
         assert!(result.is_none());
     }
 }

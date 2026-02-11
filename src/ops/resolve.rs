@@ -31,19 +31,19 @@ pub struct ResolveResult {
 /// - Keep: Set status to Active, clear challenges, set verified_at to now
 /// - Update: Same as keep, plus update content/summary
 /// - Delete: Remove the memory entirely
-pub fn resolve_memory(store: &MemoryStore, params: ResolveParams) -> Result<ResolveResult> {
+pub async fn resolve_memory(store: &MemoryStore, params: ResolveParams) -> Result<ResolveResult> {
     match params.action {
         ResolveAction::Keep => {
             // Get memory, modify it directly, then save it back
-            let mut memory = store.get(&params.id)?;
+            let mut memory = store.get(&params.id).await?;
             memory.status = Status::Active;
             memory.challenges.clear();
             memory.verified_at = Some(Utc::now());
             memory.mark_updated();
 
             // Delete and recreate to ensure challenges are cleared
-            store.delete(&params.id)?;
-            store.create(&memory)?;
+            store.delete(&params.id).await?;
+            store.create(&memory).await?;
 
             Ok(ResolveResult {
                 resolved: true,
@@ -52,7 +52,7 @@ pub fn resolve_memory(store: &MemoryStore, params: ResolveParams) -> Result<Reso
         }
         ResolveAction::Update => {
             // Get memory, modify it directly, then save it back
-            let mut memory = store.get(&params.id)?;
+            let mut memory = store.get(&params.id).await?;
 
             if let Some(content) = params.updated_content {
                 memory.content = content;
@@ -67,8 +67,8 @@ pub fn resolve_memory(store: &MemoryStore, params: ResolveParams) -> Result<Reso
             memory.mark_updated();
 
             // Delete and recreate to ensure challenges are cleared
-            store.delete(&params.id)?;
-            store.create(&memory)?;
+            store.delete(&params.id).await?;
+            store.create(&memory).await?;
 
             Ok(ResolveResult {
                 resolved: true,
@@ -76,7 +76,7 @@ pub fn resolve_memory(store: &MemoryStore, params: ResolveParams) -> Result<Reso
             })
         }
         ResolveAction::Delete => {
-            store.delete(&params.id)?;
+            store.delete(&params.id).await?;
             Ok(ResolveResult {
                 resolved: true,
                 action: "delete".to_string(),
@@ -91,10 +91,10 @@ mod tests {
     use crate::types::{Challenge, Memory, MemoryType, Provenance, Status};
     use tempfile::TempDir;
 
-    #[test]
-    fn test_resolve_keep() {
+    #[tokio::test]
+    async fn test_resolve_keep() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         // Create a challenged memory
         let mut memory = Memory::new(
@@ -107,7 +107,7 @@ mod tests {
         memory.add_challenge(Challenge::new("Test challenge"));
 
         let id = memory.id.clone();
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
         // Resolve with Keep
         let result = resolve_memory(
@@ -119,22 +119,23 @@ mod tests {
                 updated_summary: None,
             },
         )
+        .await
         .unwrap();
 
         assert_eq!(result.action, "keep");
         assert!(result.resolved);
 
         // Verify memory was updated
-        let updated = store.get(&id).unwrap();
+        let updated = store.get(&id).await.unwrap();
         assert_eq!(updated.status, Status::Active);
         assert!(updated.challenges.is_empty());
         assert!(updated.verified_at.is_some());
     }
 
-    #[test]
-    fn test_resolve_update() {
+    #[tokio::test]
+    async fn test_resolve_update() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         // Create a challenged memory
         let mut memory = Memory::new(
@@ -147,7 +148,7 @@ mod tests {
         memory.add_challenge(Challenge::new("Test challenge"));
 
         let id = memory.id.clone();
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
         // Resolve with Update
         let result = resolve_memory(
@@ -159,13 +160,14 @@ mod tests {
                 updated_summary: Some("Updated summary".to_string()),
             },
         )
+        .await
         .unwrap();
 
         assert_eq!(result.action, "update");
         assert!(result.resolved);
 
         // Verify memory was updated
-        let updated = store.get(&id).unwrap();
+        let updated = store.get(&id).await.unwrap();
         assert_eq!(updated.status, Status::Active);
         assert!(updated.challenges.is_empty());
         assert!(updated.verified_at.is_some());
@@ -173,10 +175,10 @@ mod tests {
         assert_eq!(updated.summary, "Updated summary");
     }
 
-    #[test]
-    fn test_resolve_delete() {
+    #[tokio::test]
+    async fn test_resolve_delete() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         // Create a memory
         let memory = Memory::new(
@@ -187,7 +189,7 @@ mod tests {
         );
 
         let id = memory.id.clone();
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
         // Resolve with Delete
         let result = resolve_memory(
@@ -199,19 +201,20 @@ mod tests {
                 updated_summary: None,
             },
         )
+        .await
         .unwrap();
 
         assert_eq!(result.action, "delete");
         assert!(result.resolved);
 
         // Verify memory was deleted
-        assert!(store.get(&id).is_err());
+        assert!(store.get(&id).await.is_err());
     }
 
-    #[test]
-    fn test_resolve_keep_from_needs_review_status() {
+    #[tokio::test]
+    async fn test_resolve_keep_from_needs_review_status() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         let mut memory = Memory::new(
             MemoryType::Decision,
@@ -223,7 +226,7 @@ mod tests {
         memory.add_challenge(Challenge::new("Flagged for review"));
 
         let id = memory.id.clone();
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
         let result = resolve_memory(
             &store,
@@ -234,19 +237,20 @@ mod tests {
                 updated_summary: None,
             },
         )
+        .await
         .unwrap();
 
         assert!(result.resolved);
-        let updated = store.get(&id).unwrap();
+        let updated = store.get(&id).await.unwrap();
         assert_eq!(updated.status, Status::Active);
         assert!(updated.verified_at.is_some());
         assert!(updated.challenges.is_empty());
     }
 
-    #[test]
-    fn test_resolve_update_only_content_preserves_summary() {
+    #[tokio::test]
+    async fn test_resolve_update_only_content_preserves_summary() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         let mut memory = Memory::new(
             MemoryType::Decision,
@@ -258,7 +262,7 @@ mod tests {
         memory.add_challenge(Challenge::new("Challenge"));
 
         let id = memory.id.clone();
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
         resolve_memory(
             &store,
@@ -269,17 +273,18 @@ mod tests {
                 updated_summary: None,
             },
         )
+        .await
         .unwrap();
 
-        let updated = store.get(&id).unwrap();
+        let updated = store.get(&id).await.unwrap();
         assert_eq!(updated.summary, "Original summary");
         assert_eq!(updated.content, "New content only");
     }
 
-    #[test]
-    fn test_resolve_update_only_summary_preserves_content() {
+    #[tokio::test]
+    async fn test_resolve_update_only_summary_preserves_content() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         let mut memory = Memory::new(
             MemoryType::Decision,
@@ -291,7 +296,7 @@ mod tests {
         memory.add_challenge(Challenge::new("Challenge"));
 
         let id = memory.id.clone();
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
         resolve_memory(
             &store,
@@ -302,17 +307,18 @@ mod tests {
                 updated_summary: Some("New summary only".to_string()),
             },
         )
+        .await
         .unwrap();
 
-        let updated = store.get(&id).unwrap();
+        let updated = store.get(&id).await.unwrap();
         assert_eq!(updated.summary, "New summary only");
         assert_eq!(updated.content, "Original content");
     }
 
-    #[test]
-    fn test_resolve_keep_clears_multiple_challenges() {
+    #[tokio::test]
+    async fn test_resolve_keep_clears_multiple_challenges() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         let mut memory = Memory::new(
             MemoryType::Decision,
@@ -326,7 +332,7 @@ mod tests {
         assert_eq!(memory.challenges.len(), 3);
 
         let id = memory.id.clone();
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
         resolve_memory(
             &store,
@@ -337,17 +343,18 @@ mod tests {
                 updated_summary: None,
             },
         )
+        .await
         .unwrap();
 
-        let updated = store.get(&id).unwrap();
+        let updated = store.get(&id).await.unwrap();
         assert!(updated.challenges.is_empty());
         assert_eq!(updated.status, Status::Active);
     }
 
-    #[test]
-    fn test_resolve_keep_preserves_other_fields() {
+    #[tokio::test]
+    async fn test_resolve_keep_preserves_other_fields() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         let mut memory = Memory::new(
             MemoryType::Hazard,
@@ -363,7 +370,7 @@ mod tests {
         memory.add_challenge(Challenge::new("Test challenge"));
 
         let id = memory.id.clone();
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
         resolve_memory(
             &store,
@@ -374,9 +381,10 @@ mod tests {
                 updated_summary: None,
             },
         )
+        .await
         .unwrap();
 
-        let updated = store.get(&id).unwrap();
+        let updated = store.get(&id).await.unwrap();
         assert_eq!(updated.type_, MemoryType::Hazard);
         assert_eq!(
             updated.tags,
@@ -387,10 +395,10 @@ mod tests {
         assert_eq!(updated.physical, vec!["/src/main.rs".to_string()]);
     }
 
-    #[test]
-    fn test_resolve_keep_nonexistent_id_returns_error() {
+    #[tokio::test]
+    async fn test_resolve_keep_nonexistent_id_returns_error() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         let result = resolve_memory(
             &store,
@@ -400,15 +408,16 @@ mod tests {
                 updated_content: None,
                 updated_summary: None,
             },
-        );
+        )
+        .await;
 
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_resolve_update_nonexistent_id_returns_error() {
+    #[tokio::test]
+    async fn test_resolve_update_nonexistent_id_returns_error() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         let result = resolve_memory(
             &store,
@@ -418,7 +427,8 @@ mod tests {
                 updated_content: Some("New content".to_string()),
                 updated_summary: Some("New summary".to_string()),
             },
-        );
+        )
+        .await;
 
         assert!(result.is_err());
     }

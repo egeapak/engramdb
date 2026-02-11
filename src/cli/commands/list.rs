@@ -22,7 +22,7 @@ use std::path::Path;
 /// * `limit` - Maximum number of results to display
 /// * `formatter` - Output formatter for displaying the list
 #[allow(clippy::too_many_arguments)]
-pub fn run_list(
+pub async fn run_list(
     dir: &Path,
     type_filter: Vec<String>,
     tags_filter: Vec<String>,
@@ -33,11 +33,11 @@ pub fn run_list(
     limit: Option<usize>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir)?;
-    if let Ok(Some(warning)) = store.check_staleness() {
+    let store = MemoryStore::open(dir).await?;
+    if let Ok(Some(warning)) = store.check_staleness().await {
         formatter.print_warning(&warning);
     }
-    let mut entries = store.list()?;
+    let mut entries = store.list().await?;
 
     // Apply filters
     if !type_filter.is_empty() {
@@ -140,9 +140,9 @@ mod tests {
         }
     }
 
-    fn setup_test_store() -> (TempDir, MemoryStore) {
+    async fn setup_test_store() -> (TempDir, MemoryStore) {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
 
         // Create memories with different properties
         let mem1 = create_test_memory(
@@ -169,18 +169,18 @@ mod tests {
             vec!["app.core".to_string()],
         );
 
-        store.create(&mem1).unwrap();
+        store.create(&mem1).await.unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
-        store.create(&mem2).unwrap();
+        store.create(&mem2).await.unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
-        store.create(&mem3).unwrap();
+        store.create(&mem3).await.unwrap();
 
         (temp_dir, store)
     }
 
-    #[test]
-    fn test_scope_filter_physical() {
-        let (temp_dir, _store) = setup_test_store();
+    #[tokio::test]
+    async fn test_scope_filter_physical() {
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let result = run_list(
@@ -193,14 +193,15 @@ mod tests {
             false,
             None,
             &formatter,
-        );
+        )
+        .await;
 
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_scope_filter_logical() {
-        let (temp_dir, _store) = setup_test_store();
+    #[tokio::test]
+    async fn test_scope_filter_logical() {
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let result = run_list(
@@ -213,14 +214,15 @@ mod tests {
             false,
             None,
             &formatter,
-        );
+        )
+        .await;
 
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_scope_filter_no_match() {
-        let (temp_dir, _store) = setup_test_store();
+    #[tokio::test]
+    async fn test_scope_filter_no_match() {
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let result = run_list(
@@ -233,15 +235,16 @@ mod tests {
             false,
             None,
             &formatter,
-        );
+        )
+        .await;
 
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_sort_by_criticality() {
-        let (_temp_dir, store) = setup_test_store();
-        let entries = store.list().unwrap();
+    #[tokio::test]
+    async fn test_sort_by_criticality() {
+        let (_temp_dir, store) = setup_test_store().await;
+        let entries = store.list().await.unwrap();
 
         // Verify test data has different criticality scores
         assert_eq!(entries.len(), 3);
@@ -251,9 +254,9 @@ mod tests {
         assert!(criticalities.contains(&0.5));
     }
 
-    #[test]
-    fn test_sort_by_created() {
-        let (temp_dir, _store) = setup_test_store();
+    #[tokio::test]
+    async fn test_sort_by_created() {
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let result = run_list(
@@ -266,14 +269,15 @@ mod tests {
             false,
             None,
             &formatter,
-        );
+        )
+        .await;
 
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_sort_by_updated() {
-        let (temp_dir, _store) = setup_test_store();
+    #[tokio::test]
+    async fn test_sort_by_updated() {
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let result = run_list(
@@ -286,14 +290,15 @@ mod tests {
             false,
             None,
             &formatter,
-        );
+        )
+        .await;
 
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_sort_by_type() {
-        let (temp_dir, _store) = setup_test_store();
+    #[tokio::test]
+    async fn test_sort_by_type() {
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let result = run_list(
@@ -306,14 +311,15 @@ mod tests {
             false,
             None,
             &formatter,
-        );
+        )
+        .await;
 
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_invalid_sort_field() {
-        let (temp_dir, _store) = setup_test_store();
+    #[tokio::test]
+    async fn test_invalid_sort_field() {
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let result = run_list(
@@ -326,7 +332,8 @@ mod tests {
             false,
             None,
             &formatter,
-        );
+        )
+        .await;
 
         assert!(result.is_err());
         assert!(result
@@ -335,9 +342,9 @@ mod tests {
             .contains("Invalid sort field"));
     }
 
-    #[test]
-    fn test_reverse_sort() {
-        let (temp_dir, _store) = setup_test_store();
+    #[tokio::test]
+    async fn test_reverse_sort() {
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let result = run_list(
@@ -350,14 +357,15 @@ mod tests {
             true,
             None,
             &formatter,
-        );
+        )
+        .await;
 
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_limit() {
-        let (temp_dir, _store) = setup_test_store();
+    #[tokio::test]
+    async fn test_limit() {
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let result = run_list(
@@ -370,14 +378,15 @@ mod tests {
             false,
             Some(2),
             &formatter,
-        );
+        )
+        .await;
 
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_combined_filters_and_sorting() {
-        let (temp_dir, _store) = setup_test_store();
+    #[tokio::test]
+    async fn test_combined_filters_and_sorting() {
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let result = run_list(
@@ -390,7 +399,8 @@ mod tests {
             false,
             Some(1),
             &formatter,
-        );
+        )
+        .await;
 
         assert!(result.is_ok());
     }

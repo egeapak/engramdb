@@ -365,26 +365,28 @@ impl EngramDbServer {
     }
 
     /// Open a MemoryStore, auto-initializing if needed.
-    fn open_store(&self) -> Result<MemoryStore, String> {
+    async fn open_store(&self) -> Result<MemoryStore, String> {
         let engramdb_dir = self.dir.join(".engramdb");
         if !engramdb_dir.exists() {
             MemoryStore::init(&self.dir)
+                .await
                 .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()))?;
         }
         MemoryStore::open(&self.dir)
+            .await
             .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()))
     }
 
-    fn load_config(&self) -> crate::types::EngramConfig {
+    async fn load_config(&self) -> crate::types::EngramConfig {
         let config_path = self.dir.join(".engramdb").join("config.toml");
-        load_config(&config_path).unwrap_or_default()
+        load_config(&config_path).await.unwrap_or_default()
     }
 
     /// Build a RetrievalEngine with optional embeddings support.
-    fn build_engine(&self) -> Result<RetrievalEngine, String> {
-        let store = self.open_store()?;
+    async fn build_engine(&self) -> Result<RetrievalEngine, String> {
+        let store = self.open_store().await?;
         let config_path = self.dir.join(".engramdb").join("config.toml");
-        Ok(ops::build_engine(store, &config_path))
+        Ok(ops::build_engine(store, &config_path).await)
     }
 }
 
@@ -397,9 +399,9 @@ impl EngramDbServer {
     #[tool(
         description = "Store a new memory about the project. Use after discovering important patterns, making architectural decisions, encountering hazards, or learning conventions."
     )]
-    fn memory_create(&self, #[tool(aggr)] input: CreateInput) -> Result<String, String> {
-        let store = self.open_store()?;
-        let engine = self.build_engine()?;
+    async fn memory_create(&self, #[tool(aggr)] input: CreateInput) -> Result<String, String> {
+        let store = self.open_store().await?;
+        let engine = self.build_engine().await?;
         let type_ = ops::parse_memory_type(&input.type_)
             .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
@@ -430,6 +432,7 @@ impl EngramDbServer {
             },
             Some(&engine),
         )
+        .await
         .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
         serde_json::to_string(&CreateOutput {
@@ -443,8 +446,8 @@ impl EngramDbServer {
     #[tool(
         description = "Get memories relevant to your current working context. Call before modifying files to surface decisions, hazards, and conventions."
     )]
-    fn memory_retrieve(&self, #[tool(aggr)] input: RetrieveInput) -> Result<String, String> {
-        let engine = self.build_engine()?;
+    async fn memory_retrieve(&self, #[tool(aggr)] input: RetrieveInput) -> Result<String, String> {
+        let engine = self.build_engine().await?;
 
         let type_filter = if let Some(types) = &input.types {
             let mut parsed = Vec::new();
@@ -471,7 +474,9 @@ impl EngramDbServer {
             ..RetrievalQuery::default()
         };
 
-        let result = ops::retrieve_memories(&engine, &query).map_err(|e| e.to_string())?;
+        let result = ops::retrieve_memories(&engine, &query)
+            .await
+            .map_err(|e| e.to_string())?;
 
         let include_details = input.detail_level.as_deref() == Some("full");
         let memories: Vec<ScoredMemoryOutput> = result
@@ -504,8 +509,8 @@ impl EngramDbServer {
     #[tool(
         description = "Search across all memories by text content. Use when you need specific knowledge regardless of file context."
     )]
-    fn memory_search(&self, #[tool(aggr)] input: SearchInput) -> Result<String, String> {
-        let engine = self.build_engine()?;
+    async fn memory_search(&self, #[tool(aggr)] input: SearchInput) -> Result<String, String> {
+        let engine = self.build_engine().await?;
 
         let type_filter = if let Some(types) = &input.types {
             let mut parsed = Vec::new();
@@ -528,8 +533,9 @@ impl EngramDbServer {
             min_criticality: input.min_criticality,
         };
 
-        let results =
-            ops::search_memories(&engine, &input.query, &filters).map_err(|e| e.to_string())?;
+        let results = ops::search_memories(&engine, &input.query, &filters)
+            .await
+            .map_err(|e| e.to_string())?;
 
         let max = input.max_results.unwrap_or(10);
         let memories: Vec<ScoredMemoryOutput> = results
@@ -561,9 +567,10 @@ impl EngramDbServer {
     #[tool(
         description = "Get the full content of a specific memory, including the 'details' field."
     )]
-    fn memory_get(&self, #[tool(aggr)] input: GetInput) -> Result<String, String> {
-        let store = self.open_store()?;
+    async fn memory_get(&self, #[tool(aggr)] input: GetInput) -> Result<String, String> {
+        let store = self.open_store().await?;
         let memory = ops::get_memory(&store, &input.id)
+            .await
             .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
         serde_json::to_string(&memory_to_output(&memory, true)).map_err(|e| e.to_string())
@@ -572,9 +579,9 @@ impl EngramDbServer {
     #[tool(
         description = "Update an existing memory. Any field can be updated except 'id' and 'created_at'."
     )]
-    fn memory_update(&self, #[tool(aggr)] input: UpdateInput) -> Result<String, String> {
-        let store = self.open_store()?;
-        let engine = self.build_engine()?;
+    async fn memory_update(&self, #[tool(aggr)] input: UpdateInput) -> Result<String, String> {
+        let store = self.open_store().await?;
+        let engine = self.build_engine().await?;
 
         let type_ = input
             .type_
@@ -615,6 +622,7 @@ impl EngramDbServer {
             },
             Some(&engine),
         )
+        .await
         .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
         serde_json::to_string(&serde_json::json!({
@@ -627,9 +635,10 @@ impl EngramDbServer {
     #[tool(
         description = "Permanently delete a memory. Prefer memory_update with supersedes for corrections."
     )]
-    fn memory_delete(&self, #[tool(aggr)] input: DeleteInput) -> Result<String, String> {
-        let store = self.open_store()?;
+    async fn memory_delete(&self, #[tool(aggr)] input: DeleteInput) -> Result<String, String> {
+        let store = self.open_store().await?;
         ops::delete_memory(&store, &input.id)
+            .await
             .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
         serde_json::to_string(&serde_json::json!({
@@ -642,14 +651,18 @@ impl EngramDbServer {
     #[tool(
         description = "Flag a memory as potentially incorrect. Reduces retrieval score by 30% and marks for human review."
     )]
-    fn memory_challenge(&self, #[tool(aggr)] input: ChallengeInput) -> Result<String, String> {
-        let store = self.open_store()?;
+    async fn memory_challenge(
+        &self,
+        #[tool(aggr)] input: ChallengeInput,
+    ) -> Result<String, String> {
+        let store = self.open_store().await?;
         let result = ops::challenge_memory(
             &store,
             &input.id,
             &input.evidence,
             input.source_file.as_deref(),
         )
+        .await
         .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
         serde_json::to_string(&serde_json::json!({
@@ -662,9 +675,10 @@ impl EngramDbServer {
     #[tool(
         description = "List memories that need human attention - either stale (needs_review) or challenged."
     )]
-    fn memory_review(&self, #[tool(aggr)] input: ReviewInput) -> Result<String, String> {
-        let store = self.open_store()?;
+    async fn memory_review(&self, #[tool(aggr)] input: ReviewInput) -> Result<String, String> {
+        let store = self.open_store().await?;
         let memories = ops::review_memories(&store, input.scope.as_deref(), input.max_results)
+            .await
             .map_err(|e| e.to_string())?;
 
         let outputs: Vec<MemoryOutput> = memories
@@ -682,8 +696,8 @@ impl EngramDbServer {
     #[tool(
         description = "Resolve a challenged or needs_review memory. Use 'keep' to confirm, 'update' to correct, or 'delete' to remove."
     )]
-    fn memory_resolve(&self, #[tool(aggr)] input: ResolveInput) -> Result<String, String> {
-        let store = self.open_store()?;
+    async fn memory_resolve(&self, #[tool(aggr)] input: ResolveInput) -> Result<String, String> {
+        let store = self.open_store().await?;
 
         let action = match input.action.as_str() {
             "keep" => ops::ResolveAction::Keep,
@@ -709,6 +723,7 @@ impl EngramDbServer {
                 updated_summary: input.updated_summary,
             },
         )
+        .await
         .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
         serde_json::to_string(&serde_json::json!({
@@ -722,12 +737,13 @@ impl EngramDbServer {
     #[tool(
         description = "List memories eligible for compression. Returns candidates with criticality at or below the threshold. Review candidates before calling memory_compress_apply."
     )]
-    fn memory_compress_candidates(
+    async fn memory_compress_candidates(
         &self,
         #[tool(aggr)] input: CompressCandidatesInput,
     ) -> Result<String, String> {
-        let store = self.open_store()?;
+        let store = self.open_store().await?;
         let result = ops::compress_candidates(&store, input.scope.as_deref(), input.threshold)
+            .await
             .map_err(|e| e.to_string())?;
 
         serde_json::to_string(&serde_json::json!({
@@ -741,11 +757,11 @@ impl EngramDbServer {
     #[tool(
         description = "Compress multiple memories into a single summary memory. You provide the summary and content; the system creates the new memory and marks source memories as superseded. Always call memory_compress_candidates first."
     )]
-    fn memory_compress_apply(
+    async fn memory_compress_apply(
         &self,
         #[tool(aggr)] input: CompressApplyInput,
     ) -> Result<String, String> {
-        let store = self.open_store()?;
+        let store = self.open_store().await?;
         let result = ops::compress_apply(
             &store,
             input.source_ids,
@@ -754,6 +770,7 @@ impl EngramDbServer {
             input.scope,
             input.tags,
         )
+        .await
         .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
         serde_json::to_string(&serde_json::json!({
@@ -765,9 +782,11 @@ impl EngramDbServer {
     }
 
     #[tool(description = "Get an overview of the memory store - counts by type, scope, status.")]
-    fn memory_stats(&self) -> Result<String, String> {
-        let store = self.open_store()?;
-        let stats = ops::compute_stats(&store).map_err(|e| e.to_string())?;
+    async fn memory_stats(&self) -> Result<String, String> {
+        let store = self.open_store().await?;
+        let stats = ops::compute_stats(&store)
+            .await
+            .map_err(|e| e.to_string())?;
 
         let by_type: serde_json::Map<String, serde_json::Value> = stats
             .by_type
@@ -813,12 +832,13 @@ impl EngramDbServer {
     #[tool(
         description = "Garbage collect memories that have decayed below the GC threshold. Always dry_run first."
     )]
-    fn memory_gc(&self, #[tool(aggr)] input: GcInput) -> Result<String, String> {
-        let store = self.open_store()?;
-        let config = self.load_config();
+    async fn memory_gc(&self, #[tool(aggr)] input: GcInput) -> Result<String, String> {
+        let store = self.open_store().await?;
+        let config = self.load_config().await;
         let dry_run = input.dry_run.unwrap_or(true);
 
         let result = ops::gc_memories(&store, &config, dry_run, input.threshold)
+            .await
             .map_err(|e| e.to_string())?;
 
         serde_json::to_string(&serde_json::json!({
@@ -830,14 +850,14 @@ impl EngramDbServer {
     }
 
     #[tool(description = "Rebuild the search index and regenerate embedding vectors.")]
-    fn memory_reindex(&self, #[tool(aggr)] input: ReindexInput) -> Result<String, String> {
-        let store = self.open_store()?;
+    async fn memory_reindex(&self, #[tool(aggr)] input: ReindexInput) -> Result<String, String> {
+        let store = self.open_store().await?;
         let embeddings_only = input.embeddings_only.unwrap_or(false);
 
         let engine = if !embeddings_only {
             None
         } else {
-            self.build_engine().ok()
+            self.build_engine().await.ok()
         };
 
         // For full reindex, also try to build engine for embeddings
@@ -845,7 +865,7 @@ impl EngramDbServer {
             engine.as_ref()
         } else if !embeddings_only {
             // Build engine for embedding during full reindex
-            let e = self.build_engine().ok();
+            let e = self.build_engine().await.ok();
             // We can't return a reference to a local, so we skip embeddings here
             // and do index-only
             drop(e);
@@ -854,8 +874,9 @@ impl EngramDbServer {
             None
         };
 
-        let result =
-            ops::reindex(&store, engine_ref, embeddings_only).map_err(|e| e.to_string())?;
+        let result = ops::reindex(&store, engine_ref, embeddings_only)
+            .await
+            .map_err(|e| e.to_string())?;
 
         serde_json::to_string(&serde_json::json!({
             "indexed": result.indexed,
@@ -946,9 +967,11 @@ impl ServerHandler for EngramDbServer {
             if uri == "memory://index" {
                 let store = self
                     .open_store()
+                    .await
                     .map_err(|e| rmcp::Error::internal_error(e, None))?;
                 let entries = store
                     .list()
+                    .await
                     .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
 
                 let index: Vec<serde_json::Value> = entries
@@ -975,6 +998,7 @@ impl ServerHandler for EngramDbServer {
             } else if let Some(path) = uri.strip_prefix("memory://context/") {
                 let engine = self
                     .build_engine()
+                    .await
                     .map_err(|e| rmcp::Error::internal_error(e, None))?;
 
                 let query = RetrievalQuery {
@@ -983,6 +1007,7 @@ impl ServerHandler for EngramDbServer {
                     ..RetrievalQuery::default()
                 };
                 let result = ops::retrieve_memories(&engine, &query)
+                    .await
                     .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
 
                 let memories: Vec<serde_json::Value> = result
@@ -1059,13 +1084,13 @@ impl ServerHandler for EngramDbServer {
 
                 let mut memory_text = String::new();
 
-                if let Ok(engine) = self.build_engine() {
+                if let Ok(engine) = self.build_engine().await {
                     let query = RetrievalQuery {
                         path,
                         max_results: Some(10),
                         ..RetrievalQuery::default()
                     };
-                    if let Ok(result) = ops::retrieve_memories(&engine, &query) {
+                    if let Ok(result) = ops::retrieve_memories(&engine, &query).await {
                         for sm in &result.memories {
                             let status_marker = match sm.memory.status {
                                 Status::Challenged => " ⚠️",
@@ -1104,8 +1129,8 @@ impl ServerHandler for EngramDbServer {
             }
             "memory-session-end" => {
                 let mut stats_text = String::new();
-                if let Ok(store) = self.open_store() {
-                    if let Ok(stats) = ops::compute_stats(&store) {
+                if let Ok(store) = self.open_store().await {
+                    if let Ok(stats) = ops::compute_stats(&store).await {
                         let review_count = stats
                             .by_status
                             .iter()

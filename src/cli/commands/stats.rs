@@ -16,9 +16,9 @@ use std::path::Path;
 /// # Arguments
 /// * `dir` - The directory containing the EngramDB store
 /// * `formatter` - Output formatter for displaying statistics
-pub fn run_stats(dir: &Path, formatter: &OutputFormatter) -> Result<()> {
-    let store = MemoryStore::open(dir)?;
-    let store_stats = compute_stats(&store)?;
+pub async fn run_stats(dir: &Path, formatter: &OutputFormatter) -> Result<()> {
+    let store = MemoryStore::open(dir).await?;
+    let store_stats = compute_stats(&store).await?;
 
     // Extract health warning counts before moving data into Stats
     let challenged_count = store_stats

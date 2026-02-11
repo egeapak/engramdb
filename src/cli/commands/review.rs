@@ -19,7 +19,7 @@ use std::path::Path;
 /// * `challenged_only` - Only show Status::Challenged memories
 /// * `stale_only` - Only show Status::NeedsReview memories
 /// * `formatter` - Output formatter for success/error messages
-pub fn run_review(
+pub async fn run_review(
     dir: &Path,
     scope: Option<String>,
     type_str: Option<String>,
@@ -27,9 +27,9 @@ pub fn run_review(
     stale_only: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir)?;
+    let store = MemoryStore::open(dir).await?;
 
-    let mut memories = review_memories(&store, scope.as_deref(), None)?;
+    let mut memories = review_memories(&store, scope.as_deref(), None).await?;
 
     // Apply type filter if provided
     if let Some(ref t) = type_str {
@@ -86,7 +86,8 @@ pub fn run_review(
                         updated_content: None,
                         updated_summary: None,
                     },
-                )?;
+                )
+                .await?;
                 formatter.print_success(&format!(
                     "Kept memory {} as Active.",
                     &memory.id[..8.min(memory.id.len())]
@@ -113,7 +114,8 @@ pub fn run_review(
                             Some(new_summary)
                         },
                     },
-                )?;
+                )
+                .await?;
                 formatter.print_success(&format!(
                     "Updated memory {}.",
                     &memory.id[..8.min(memory.id.len())]
@@ -128,7 +130,8 @@ pub fn run_review(
                         updated_content: None,
                         updated_summary: None,
                     },
-                )?;
+                )
+                .await?;
                 formatter.print_success(&format!(
                     "Deleted memory {}.",
                     &memory.id[..8.min(memory.id.len())]

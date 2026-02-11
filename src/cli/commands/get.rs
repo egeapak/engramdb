@@ -5,8 +5,8 @@ use crate::ops::get_memory;
 use crate::storage::{paths, MemoryStore};
 use crate::types::Visibility;
 use anyhow::Result;
-use std::fs;
 use std::path::Path;
+use tokio::fs;
 
 /// Retrieve and display a single memory by ID.
 ///
@@ -19,7 +19,7 @@ use std::path::Path;
 /// * `raw` - Output the raw markdown file contents
 /// * `path_only` - Print the memory's file path instead of content
 /// * `formatter` - Output formatter for displaying the memory
-pub fn run_get(
+pub async fn run_get(
     dir: &Path,
     id: &str,
     full: bool,
@@ -27,11 +27,11 @@ pub fn run_get(
     path_only: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir)?;
-    if let Ok(Some(warning)) = store.check_staleness() {
+    let store = MemoryStore::open(dir).await?;
+    if let Ok(Some(warning)) = store.check_staleness().await {
         formatter.print_warning(&warning);
     }
-    let memory = get_memory(&store, id)?;
+    let memory = get_memory(&store, id).await?;
 
     // Handle --path flag: print file path and exit
     if path_only {
@@ -53,7 +53,7 @@ pub fn run_get(
                 paths::personal_memories_dir(&store.project_id)?.join(format!("{}.md", memory.id))
             }
         };
-        let content = fs::read_to_string(&file_path)?;
+        let content = fs::read_to_string(&file_path).await?;
         print!("{}", content);
         return Ok(());
     }

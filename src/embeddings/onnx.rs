@@ -2,7 +2,9 @@
 
 use super::{EmbeddingError, EmbeddingProvider};
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use fastembed::{InitOptions, TextEmbedding};
+use std::sync::Arc;
 
 /// ONNX-based embedding provider using all-MiniLM-L6-v2 model.
 ///
@@ -12,7 +14,7 @@ use fastembed::{InitOptions, TextEmbedding};
 /// - macOS: `~/Library/Caches/engramdb/models`
 /// - Linux: `$XDG_CACHE_HOME/engramdb/models` (default `~/.cache/engramdb/models`)
 pub struct OnnxProvider {
-    model: TextEmbedding,
+    model: Arc<TextEmbedding>,
     dimensions: usize,
 }
 
@@ -37,7 +39,7 @@ impl OnnxProvider {
             TextEmbedding::try_new(options).context("Failed to initialize embedding model")?;
 
         Ok(Self {
-            model,
+            model: Arc::new(model),
             dimensions: 384, // all-MiniLM-L6-v2 produces 384-dimensional embeddings
         })
     }
@@ -53,13 +55,19 @@ impl OnnxProvider {
     }
 }
 
+#[async_trait]
 impl EmbeddingProvider for OnnxProvider {
-    fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        // fastembed's embed method takes a Vec of inputs and returns Vec<Vec<f32>>
-        let embeddings = self
-            .model
-            .embed(vec![text.to_string()], None)
-            .context("Failed to generate embedding")?;
+    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let text_owned = text.to_string();
+        let model = Arc::clone(&self.model);
+        // fastembed's embed method is CPU-bound, so run it in a blocking task
+        let embeddings = tokio::task::spawn_blocking(move || {
+            model
+                .embed(vec![text_owned], None)
+                .context("Failed to generate embedding")
+        })
+        .await
+        .context("Task panicked")??;
 
         // Extract the first (and only) embedding
         embeddings
@@ -68,13 +76,18 @@ impl EmbeddingProvider for OnnxProvider {
             .ok_or_else(|| EmbeddingError::Failed("No embedding returned".to_string()).into())
     }
 
-    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         // Convert &str to String for fastembed
-        let texts: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
+        let texts_owned: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
+        let model = Arc::clone(&self.model);
 
-        self.model
-            .embed(texts, None)
-            .context("Failed to generate batch embeddings")
+        tokio::task::spawn_blocking(move || {
+            model
+                .embed(texts_owned, None)
+                .context("Failed to generate batch embeddings")
+        })
+        .await
+        .context("Task panicked")?
     }
 
     fn dimensions(&self) -> usize {
@@ -100,10 +113,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_embed_single() {
+    #[tokio::test]
+    async fn test_embed_single() {
         if let Some(provider) = OnnxProvider::try_new() {
-            let result = provider.embed("Hello, world!");
+            let result = provider.embed("Hello, world!").await;
             assert!(result.is_ok(), "Embedding should succeed");
 
             let embedding = result.unwrap();
@@ -114,11 +127,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_embed_batch() {
+    #[tokio::test]
+    async fn test_embed_batch() {
         if let Some(provider) = OnnxProvider::try_new() {
             let texts = vec!["First text", "Second text", "Third text"];
-            let result = provider.embed_batch(&texts);
+            let result = provider.embed_batch(&texts).await;
             assert!(result.is_ok(), "Batch embedding should succeed");
 
             let embeddings = result.unwrap();
@@ -130,10 +143,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_embed_empty_string() {
+    #[tokio::test]
+    async fn test_embed_empty_string() {
         if let Some(provider) = OnnxProvider::try_new() {
-            let result = provider.embed("");
+            let result = provider.embed("").await;
             assert!(result.is_ok(), "Empty string embedding should succeed");
 
             let embedding = result.unwrap();
@@ -142,11 +155,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_embed_batch_empty_slice() {
+    #[tokio::test]
+    async fn test_embed_batch_empty_slice() {
         if let Some(provider) = OnnxProvider::try_new() {
             let empty: Vec<&str> = vec![];
-            let result = provider.embed_batch(&empty);
+            let result = provider.embed_batch(&empty).await;
             assert!(result.is_ok(), "Empty batch should succeed");
 
             let embeddings = result.unwrap();
@@ -154,12 +167,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_embed_consistency() {
+    #[tokio::test]
+    async fn test_embed_consistency() {
         if let Some(provider) = OnnxProvider::try_new() {
             let text = "hello";
-            let embedding1 = provider.embed(text).unwrap();
-            let embedding2 = provider.embed(text).unwrap();
+            let embedding1 = provider.embed(text).await.unwrap();
+            let embedding2 = provider.embed(text).await.unwrap();
 
             // Same text should produce identical embeddings
             assert_eq!(embedding1.len(), embedding2.len());
@@ -169,12 +182,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_embed_batch_single_matches_embed() {
+    #[tokio::test]
+    async fn test_embed_batch_single_matches_embed() {
         if let Some(provider) = OnnxProvider::try_new() {
             let text = "test text";
-            let single_embedding = provider.embed(text).unwrap();
-            let batch_embeddings = provider.embed_batch(&[text]).unwrap();
+            let single_embedding = provider.embed(text).await.unwrap();
+            let batch_embeddings = provider.embed_batch(&[text]).await.unwrap();
 
             assert_eq!(batch_embeddings.len(), 1);
             let batch_embedding = &batch_embeddings[0];

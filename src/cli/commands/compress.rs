@@ -7,14 +7,14 @@ use anyhow::Result;
 use std::path::Path;
 
 /// List compression candidates and direct users to MCP mode.
-pub fn run_compress(
+pub async fn run_compress(
     dir: &Path,
     scope: Option<String>,
     threshold: Option<f64>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir)?;
-    let result = ops::compress_candidates(&store, scope.as_deref(), threshold)?;
+    let store = MemoryStore::open(dir).await?;
+    let result = ops::compress_candidates(&store, scope.as_deref(), threshold).await?;
 
     if result.candidates.is_empty() {
         formatter.print_message("No compression candidates found.");

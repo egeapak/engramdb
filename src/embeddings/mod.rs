@@ -8,6 +8,7 @@ mod onnx;
 pub use onnx::OnnxProvider;
 
 use anyhow::Result;
+use async_trait::async_trait;
 
 /// Error types for embedding operations.
 #[derive(Debug, thiserror::Error)]
@@ -25,6 +26,7 @@ pub enum EmbeddingError {
 ///
 /// Implementations should be thread-safe (Send + Sync) to allow
 /// concurrent embedding generation.
+#[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
     /// Generate an embedding for a single text input.
     ///
@@ -33,7 +35,7 @@ pub trait EmbeddingProvider: Send + Sync {
     ///
     /// # Returns
     /// A vector of floats representing the embedding, or an error.
-    fn embed(&self, text: &str) -> Result<Vec<f32>>;
+    async fn embed(&self, text: &str) -> Result<Vec<f32>>;
 
     /// Generate embeddings for multiple text inputs in a batch.
     ///
@@ -45,7 +47,7 @@ pub trait EmbeddingProvider: Send + Sync {
     ///
     /// # Returns
     /// A vector of embeddings (one per input text), or an error.
-    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
+    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
 
     /// Get the dimensionality of embeddings produced by this provider.
     ///

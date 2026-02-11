@@ -14,18 +14,19 @@ pub struct ChallengeParams {
 }
 
 /// Challenge a memory by providing counter-evidence.
-pub fn run_challenge(
+pub async fn run_challenge(
     dir: &Path,
     params: ChallengeParams,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir)?;
+    let store = MemoryStore::open(dir).await?;
     let result = challenge_memory(
         &store,
         &params.id,
         &params.evidence,
         params.source_file.as_deref(),
-    )?;
+    )
+    .await?;
 
     if result.challenged {
         formatter.print_success(&format!(

@@ -47,8 +47,10 @@ use crate::storage::MemoryStore;
 /// the ONNX wiring.  Returns an engine that always works for storage operations;
 /// embeddings are attached on a best-effort basis.  Vector storage is handled
 /// by the MemoryStore's integrated LanceDB.
-pub fn build_engine(store: MemoryStore, config_path: &std::path::Path) -> RetrievalEngine {
-    let config = crate::storage::config::load_config(config_path).unwrap_or_default();
+pub async fn build_engine(store: MemoryStore, config_path: &std::path::Path) -> RetrievalEngine {
+    let config = crate::storage::config::load_config(config_path)
+        .await
+        .unwrap_or_default();
     let mut engine = RetrievalEngine::new(store, config);
 
     if let Some(provider) = OnnxProvider::try_new() {

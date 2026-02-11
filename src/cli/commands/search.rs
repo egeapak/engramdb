@@ -26,13 +26,17 @@ pub struct SearchParams {
 /// * `dir` - The directory containing the EngramDB store
 /// * `params` - Search query parameters
 /// * `formatter` - Output formatter for displaying results
-pub fn run_search(dir: &Path, params: SearchParams, formatter: &OutputFormatter) -> Result<()> {
-    let store = MemoryStore::open(dir)?;
-    if let Ok(Some(warning)) = store.check_staleness() {
+pub async fn run_search(
+    dir: &Path,
+    params: SearchParams,
+    formatter: &OutputFormatter,
+) -> Result<()> {
+    let store = MemoryStore::open(dir).await?;
+    if let Ok(Some(warning)) = store.check_staleness().await {
         formatter.print_warning(&warning);
     }
     let config_path = dir.join(".engramdb").join("config.toml");
-    let engine = crate::ops::build_engine(store, &config_path);
+    let engine = crate::ops::build_engine(store, &config_path).await;
 
     // Parse type filters
     let types = if !params.type_filter.is_empty() {
@@ -63,7 +67,7 @@ pub fn run_search(dir: &Path, params: SearchParams, formatter: &OutputFormatter)
     };
 
     // Perform search
-    let mut results = crate::ops::search_memories(&engine, &params.query, &filters)?;
+    let mut results = crate::ops::search_memories(&engine, &params.query, &filters).await?;
 
     // Apply max_results limit
     results.truncate(params.max_results);

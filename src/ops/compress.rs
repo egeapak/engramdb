@@ -36,12 +36,12 @@ pub struct CompressApplyResult {
 }
 
 /// List memories eligible for compression based on criticality threshold and scope.
-pub fn compress_candidates(
+pub async fn compress_candidates(
     store: &MemoryStore,
     scope: Option<&str>,
     threshold: Option<f64>,
 ) -> Result<CompressCandidatesResult> {
-    let entries = store.list()?;
+    let entries = store.list().await?;
     let threshold = threshold.unwrap_or(0.4);
 
     let candidates: Vec<CompressCandidate> = entries
@@ -74,7 +74,7 @@ pub fn compress_candidates(
 ///
 /// The new memory is created as type Context with provenance agent("compress").
 /// The caller (typically an LLM agent) provides the summary and content.
-pub fn compress_apply(
+pub async fn compress_apply(
     store: &MemoryStore,
     source_ids: Vec<String>,
     summary: String,
@@ -90,6 +90,7 @@ pub fn compress_apply(
     for id in &source_ids {
         store
             .get(id)
+            .await
             .map_err(|_| anyhow::anyhow!("Source memory not found: {}", id))?;
     }
 
@@ -116,7 +117,8 @@ pub fn compress_apply(
             decay_floor: None,
         },
         None,
-    )?;
+    )
+    .await?;
 
     Ok(CompressApplyResult {
         new_id: result.id,
@@ -130,13 +132,13 @@ mod tests {
     use crate::types::{Memory, MemoryType, Provenance, ProvenanceSource, Visibility};
     use tempfile::TempDir;
 
-    fn setup_store() -> (TempDir, MemoryStore) {
+    async fn setup_store() -> (TempDir, MemoryStore) {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
         (temp_dir, store)
     }
 
-    fn add_memory(
+    async fn add_memory(
         store: &MemoryStore,
         type_: MemoryType,
         summary: &str,
@@ -165,31 +167,34 @@ mod tests {
             },
             None,
         )
+        .await
         .unwrap();
         result.id
     }
 
-    #[test]
-    fn test_compress_candidates_basic() {
-        let (_temp, store) = setup_store();
+    #[tokio::test]
+    async fn test_compress_candidates_basic() {
+        let (_temp, store) = setup_store().await;
 
-        add_memory(&store, MemoryType::Debug, "low crit debug", 0.1, vec![]);
+        add_memory(&store, MemoryType::Debug, "low crit debug", 0.1, vec![]).await;
         add_memory(
             &store,
             MemoryType::Decision,
             "high crit decision",
             0.9,
             vec![],
-        );
+        )
+        .await;
         add_memory(
             &store,
             MemoryType::Context,
             "medium crit context",
             0.3,
             vec![],
-        );
+        )
+        .await;
 
-        let result = compress_candidates(&store, None, Some(0.4)).unwrap();
+        let result = compress_candidates(&store, None, Some(0.4)).await.unwrap();
 
         assert_eq!(result.total, 2);
         assert_eq!(result.threshold, 0.4);
@@ -203,9 +208,9 @@ mod tests {
         assert!(!summaries.contains(&"high crit decision"));
     }
 
-    #[test]
-    fn test_compress_candidates_scope_filter() {
-        let (_temp, store) = setup_store();
+    #[tokio::test]
+    async fn test_compress_candidates_scope_filter() {
+        let (_temp, store) = setup_store().await;
 
         add_memory(
             &store,
@@ -213,38 +218,42 @@ mod tests {
             "auth debug",
             0.1,
             vec!["auth".to_string()],
-        );
+        )
+        .await;
         add_memory(
             &store,
             MemoryType::Debug,
             "db debug",
             0.1,
             vec!["db".to_string()],
-        );
+        )
+        .await;
 
-        let result = compress_candidates(&store, Some("auth"), Some(0.4)).unwrap();
+        let result = compress_candidates(&store, Some("auth"), Some(0.4))
+            .await
+            .unwrap();
 
         assert_eq!(result.total, 1);
         assert_eq!(result.candidates[0].summary, "auth debug");
     }
 
-    #[test]
-    fn test_compress_candidates_empty() {
-        let (_temp, store) = setup_store();
+    #[tokio::test]
+    async fn test_compress_candidates_empty() {
+        let (_temp, store) = setup_store().await;
 
-        add_memory(&store, MemoryType::Decision, "important", 0.9, vec![]);
+        add_memory(&store, MemoryType::Decision, "important", 0.9, vec![]).await;
 
-        let result = compress_candidates(&store, None, Some(0.4)).unwrap();
+        let result = compress_candidates(&store, None, Some(0.4)).await.unwrap();
         assert_eq!(result.total, 0);
         assert!(result.candidates.is_empty());
     }
 
-    #[test]
-    fn test_compress_apply_basic() {
-        let (_temp, store) = setup_store();
+    #[tokio::test]
+    async fn test_compress_apply_basic() {
+        let (_temp, store) = setup_store().await;
 
-        let id1 = add_memory(&store, MemoryType::Debug, "debug 1", 0.1, vec![]);
-        let id2 = add_memory(&store, MemoryType::Debug, "debug 2", 0.2, vec![]);
+        let id1 = add_memory(&store, MemoryType::Debug, "debug 1", 0.1, vec![]).await;
+        let id2 = add_memory(&store, MemoryType::Debug, "debug 2", 0.2, vec![]).await;
 
         let result = compress_apply(
             &store,
@@ -254,21 +263,22 @@ mod tests {
             None,
             None,
         )
+        .await
         .unwrap();
 
         assert_eq!(result.superseded_count, 2);
 
         // Verify the new memory exists and has correct supersedes
-        let new_memory = store.get(&result.new_id).unwrap();
+        let new_memory = store.get(&result.new_id).await.unwrap();
         assert_eq!(new_memory.type_, MemoryType::Context);
         assert_eq!(new_memory.summary, "Combined debug summary");
         assert!(new_memory.supersedes.contains(&id1));
         assert!(new_memory.supersedes.contains(&id2));
     }
 
-    #[test]
-    fn test_compress_apply_invalid_source() {
-        let (_temp, store) = setup_store();
+    #[tokio::test]
+    async fn test_compress_apply_invalid_source() {
+        let (_temp, store) = setup_store().await;
 
         let result = compress_apply(
             &store,
@@ -277,7 +287,8 @@ mod tests {
             "Content".to_string(),
             None,
             None,
-        );
+        )
+        .await;
 
         assert!(result.is_err());
         assert!(result
@@ -286,28 +297,28 @@ mod tests {
             .contains("Source memory not found"));
     }
 
-    #[test]
-    fn test_compress_candidates_default_threshold_is_0_4() {
-        let (_temp, store) = setup_store();
+    #[tokio::test]
+    async fn test_compress_candidates_default_threshold_is_0_4() {
+        let (_temp, store) = setup_store().await;
 
-        add_memory(&store, MemoryType::Debug, "low crit", 0.3, vec![]);
-        add_memory(&store, MemoryType::Decision, "high crit", 0.9, vec![]);
+        add_memory(&store, MemoryType::Debug, "low crit", 0.3, vec![]).await;
+        add_memory(&store, MemoryType::Decision, "high crit", 0.9, vec![]).await;
 
-        let result = compress_candidates(&store, None, None).unwrap();
+        let result = compress_candidates(&store, None, None).await.unwrap();
 
         assert_eq!(result.threshold, 0.4);
         assert_eq!(result.total, 1);
     }
 
-    #[test]
-    fn test_compress_candidates_includes_equal_to_threshold() {
-        let (_temp, store) = setup_store();
+    #[tokio::test]
+    async fn test_compress_candidates_includes_equal_to_threshold() {
+        let (_temp, store) = setup_store().await;
 
-        add_memory(&store, MemoryType::Debug, "below threshold", 0.39, vec![]);
-        add_memory(&store, MemoryType::Debug, "at threshold", 0.4, vec![]);
-        add_memory(&store, MemoryType::Debug, "above threshold", 0.41, vec![]);
+        add_memory(&store, MemoryType::Debug, "below threshold", 0.39, vec![]).await;
+        add_memory(&store, MemoryType::Debug, "at threshold", 0.4, vec![]).await;
+        add_memory(&store, MemoryType::Debug, "above threshold", 0.41, vec![]).await;
 
-        let result = compress_candidates(&store, None, Some(0.4)).unwrap();
+        let result = compress_candidates(&store, None, Some(0.4)).await.unwrap();
 
         assert_eq!(result.total, 2);
         let summaries: Vec<&str> = result
@@ -320,9 +331,9 @@ mod tests {
         assert!(!summaries.contains(&"above threshold"));
     }
 
-    #[test]
-    fn test_compress_candidates_physical_scope_match() {
-        let (_temp, store) = setup_store();
+    #[tokio::test]
+    async fn test_compress_candidates_physical_scope_match() {
+        let (_temp, store) = setup_store().await;
 
         // Create memory with specific physical scope using Memory::new directly
         let mut mem_auth = Memory::new(
@@ -333,7 +344,7 @@ mod tests {
         );
         mem_auth.physical = vec!["/src/auth/".to_string()];
         mem_auth.criticality = 0.1;
-        store.create(&mem_auth).unwrap();
+        store.create(&mem_auth).await.unwrap();
 
         let mut mem_db = Memory::new(
             MemoryType::Debug,
@@ -343,17 +354,19 @@ mod tests {
         );
         mem_db.physical = vec!["/src/db/".to_string()];
         mem_db.criticality = 0.1;
-        store.create(&mem_db).unwrap();
+        store.create(&mem_db).await.unwrap();
 
-        let result = compress_candidates(&store, Some("/src/auth/"), Some(0.4)).unwrap();
+        let result = compress_candidates(&store, Some("/src/auth/"), Some(0.4))
+            .await
+            .unwrap();
 
         assert_eq!(result.total, 1);
         assert_eq!(result.candidates[0].summary, "auth debug");
     }
 
-    #[test]
-    fn test_compress_apply_empty_source_ids_returns_error() {
-        let (_temp, store) = setup_store();
+    #[tokio::test]
+    async fn test_compress_apply_empty_source_ids_returns_error() {
+        let (_temp, store) = setup_store().await;
 
         let result = compress_apply(
             &store,
@@ -362,7 +375,8 @@ mod tests {
             "Content".to_string(),
             None,
             None,
-        );
+        )
+        .await;
 
         assert!(result.is_err());
         assert!(result
@@ -371,11 +385,11 @@ mod tests {
             .contains("must not be empty"));
     }
 
-    #[test]
-    fn test_compress_apply_creates_context_type_with_agent_provenance() {
-        let (_temp, store) = setup_store();
+    #[tokio::test]
+    async fn test_compress_apply_creates_context_type_with_agent_provenance() {
+        let (_temp, store) = setup_store().await;
 
-        let id = add_memory(&store, MemoryType::Debug, "source debug", 0.1, vec![]);
+        let id = add_memory(&store, MemoryType::Debug, "source debug", 0.1, vec![]).await;
 
         let result = compress_apply(
             &store,
@@ -385,19 +399,20 @@ mod tests {
             None,
             None,
         )
+        .await
         .unwrap();
 
-        let new_memory = store.get(&result.new_id).unwrap();
+        let new_memory = store.get(&result.new_id).await.unwrap();
         assert_eq!(new_memory.type_, MemoryType::Context);
         assert_eq!(new_memory.provenance.source, ProvenanceSource::Agent);
         assert_eq!(new_memory.provenance.agent_id, Some("compress".to_string()));
     }
 
-    #[test]
-    fn test_compress_apply_with_scope_and_tags() {
-        let (_temp, store) = setup_store();
+    #[tokio::test]
+    async fn test_compress_apply_with_scope_and_tags() {
+        let (_temp, store) = setup_store().await;
 
-        let id = add_memory(&store, MemoryType::Debug, "source", 0.1, vec![]);
+        let id = add_memory(&store, MemoryType::Debug, "source", 0.1, vec![]).await;
 
         let result = compress_apply(
             &store,
@@ -407,9 +422,10 @@ mod tests {
             Some(vec!["app.auth".to_string(), "app.core".to_string()]),
             Some(vec!["compressed".to_string(), "auth".to_string()]),
         )
+        .await
         .unwrap();
 
-        let new_memory = store.get(&result.new_id).unwrap();
+        let new_memory = store.get(&result.new_id).await.unwrap();
         assert_eq!(
             new_memory.logical,
             vec!["app.auth".to_string(), "app.core".to_string()]
@@ -420,12 +436,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_compress_apply_partial_invalid_source_ids_returns_error() {
-        let (_temp, store) = setup_store();
+    #[tokio::test]
+    async fn test_compress_apply_partial_invalid_source_ids_returns_error() {
+        let (_temp, store) = setup_store().await;
 
-        let valid_id = add_memory(&store, MemoryType::Debug, "valid source", 0.1, vec![]);
-        let count_before = store.list().unwrap().len();
+        let valid_id = add_memory(&store, MemoryType::Debug, "valid source", 0.1, vec![]).await;
+        let count_before = store.list().await.unwrap().len();
 
         let result = compress_apply(
             &store,
@@ -434,11 +450,12 @@ mod tests {
             "Content".to_string(),
             None,
             None,
-        );
+        )
+        .await;
 
         assert!(result.is_err());
         // Verify no new memory was created
-        let count_after = store.list().unwrap().len();
+        let count_after = store.list().await.unwrap().len();
         assert_eq!(count_before, count_after);
     }
 }

@@ -13,7 +13,6 @@
 use super::error::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::Path;
 
 /// Project manifest stored in manifest.toml.
@@ -56,17 +55,17 @@ impl Default for Manifest {
 }
 
 /// Load manifest from manifest.toml
-pub fn load_manifest(path: &Path) -> Result<Manifest> {
-    let content = fs::read_to_string(path)?;
+pub async fn load_manifest(path: &Path) -> Result<Manifest> {
+    let content = tokio::fs::read_to_string(path).await?;
     let manifest: Manifest = toml::from_str(&content)?;
     Ok(manifest)
 }
 
 /// Save manifest to manifest.toml
-pub fn save_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
+pub async fn save_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
     let content = toml::to_string_pretty(manifest)
         .map_err(|e| super::error::StorageError::Validation(e.to_string()))?;
-    fs::write(path, content)?;
+    tokio::fs::write(path, content).await?;
     Ok(())
 }
 
@@ -89,8 +88,8 @@ mod tests {
         assert!(manifest.stats.logical_scopes.is_empty());
     }
 
-    #[test]
-    fn test_save_load_roundtrip() {
+    #[tokio::test]
+    async fn test_save_load_roundtrip() {
         let dir = tempdir().unwrap();
         let manifest_path = dir.path().join("manifest.toml");
 
@@ -102,8 +101,8 @@ mod tests {
         original.stats.memory_count = 42;
         original.stats.logical_scopes = vec!["scope1".to_string(), "scope2".to_string()];
 
-        save_manifest(&manifest_path, &original).unwrap();
-        let loaded = load_manifest(&manifest_path).unwrap();
+        save_manifest(&manifest_path, &original).await.unwrap();
+        let loaded = load_manifest(&manifest_path).await.unwrap();
 
         assert_eq!(loaded.schema_version, original.schema_version);
         assert_eq!(loaded.project, original.project);
@@ -112,9 +111,9 @@ mod tests {
         assert_eq!(loaded.stats.logical_scopes, original.stats.logical_scopes);
     }
 
-    #[test]
-    fn test_load_manifest_file_not_found() {
-        let result = load_manifest(Path::new("/nonexistent/path/manifest.toml"));
+    #[tokio::test]
+    async fn test_load_manifest_file_not_found() {
+        let result = load_manifest(Path::new("/nonexistent/path/manifest.toml")).await;
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -122,14 +121,16 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_load_manifest_invalid_toml() {
+    #[tokio::test]
+    async fn test_load_manifest_invalid_toml() {
         let dir = tempdir().unwrap();
         let manifest_path = dir.path().join("manifest.toml");
 
-        fs::write(&manifest_path, "invalid { toml content").unwrap();
+        tokio::fs::write(&manifest_path, "invalid { toml content")
+            .await
+            .unwrap();
 
-        let result = load_manifest(&manifest_path);
+        let result = load_manifest(&manifest_path).await;
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),

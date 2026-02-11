@@ -6,7 +6,7 @@ use anyhow::Result;
 use std::path::Path;
 
 /// Start the MCP server with the specified transport.
-pub fn run_serve(
+pub async fn run_serve(
     dir: &Path,
     transport: &str,
     port: Option<u16>,

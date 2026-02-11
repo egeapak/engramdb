@@ -16,20 +16,20 @@ pub struct GcResult {
 ///
 /// Identifies memories with effective relevance below the threshold
 /// and optionally deletes them.
-pub fn gc_memories(
+pub async fn gc_memories(
     store: &MemoryStore,
     config: &EngramConfig,
     dry_run: bool,
     threshold: Option<f64>,
 ) -> Result<GcResult> {
     let threshold = threshold.unwrap_or(config.thresholds.gc);
-    let entries = store.list()?;
+    let entries = store.list().await?;
     let now = Utc::now();
 
     let mut candidates = Vec::new();
 
     for entry in &entries {
-        let memory = store.get(&entry.id)?;
+        let memory = store.get(&entry.id).await?;
         let context = ScoringContext::scope_only(None, vec![]);
         let breakdown = composite_score(&memory, &context, config, now);
 
@@ -40,7 +40,7 @@ pub fn gc_memories(
 
     if !dry_run {
         for id in &candidates {
-            store.delete(id)?;
+            store.delete(id).await?;
         }
     }
 

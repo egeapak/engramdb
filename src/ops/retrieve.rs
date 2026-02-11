@@ -7,10 +7,10 @@ use anyhow::Result;
 ///
 /// This delegates to the RetrievalEngine which handles scope matching,
 /// semantic search, and composite scoring.
-pub fn retrieve_memories(
+pub async fn retrieve_memories(
     engine: &RetrievalEngine,
     query: &RetrievalQuery,
 ) -> Result<RetrievalResult> {
-    let result = engine.retrieve(query)?;
+    let result = engine.retrieve(query).await?;
     Ok(result)
 }

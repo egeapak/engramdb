@@ -23,8 +23,8 @@ use super::{manifest, memory_file, paths, project_id};
 use crate::types::{Memory, MemoryUpdate, Visibility};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fs;
 use std::path::{Path, PathBuf};
+use tokio::fs as async_fs;
 
 /// Entry in the global registry tracking a single project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,12 +59,12 @@ pub struct MemoryStore {
 
 impl MemoryStore {
     /// Initialize a new EngramDB store in the given directory.
-    pub fn init(dir: &Path) -> Result<Self> {
+    pub async fn init(dir: &Path) -> Result<Self> {
         let engramdb_dir = paths::project_dir(dir);
 
         // Create directory structure
-        fs::create_dir_all(&engramdb_dir)?;
-        fs::create_dir_all(paths::memories_dir(dir))?;
+        async_fs::create_dir_all(&engramdb_dir).await?;
+        async_fs::create_dir_all(paths::memories_dir(dir)).await?;
 
         // Create manifest.toml with project name derived from directory
         let manifest_path = engramdb_dir.join("manifest.toml");
@@ -78,31 +78,33 @@ impl MemoryStore {
             project: project_name,
             ..Default::default()
         };
-        manifest::save_manifest(&manifest_path, &manifest)?;
+        manifest::save_manifest(&manifest_path, &manifest).await?;
 
         // Create empty config.toml
         let config_path = engramdb_dir.join("config.toml");
-        fs::write(
+        async_fs::write(
             config_path,
             "# EngramDB configuration\n# See documentation for available settings\n",
-        )?;
+        )
+        .await?;
 
         // Compute project ID before creating global directories
         let project_id = project_id::compute_project_id(dir);
 
         // Create global LanceDB directory
         let lance_path = paths::lancedb_dir(&project_id)?;
-        fs::create_dir_all(&lance_path)?;
+        async_fs::create_dir_all(&lance_path).await?;
 
         // Initialize LanceIndex
         let lance_index = LanceIndex::new(&lance_path)
+            .await
             .map_err(|e| StorageError::Validation(format!("LanceDB init failed: {}", e)))?;
 
         // Create personal directories
-        fs::create_dir_all(paths::personal_memories_dir(&project_id)?)?;
+        async_fs::create_dir_all(paths::personal_memories_dir(&project_id)?).await?;
 
         // Update registry
-        Self::update_registry(dir, &project_id)?;
+        Self::update_registry(dir, &project_id).await?;
 
         Ok(Self {
             project_dir: dir.to_path_buf(),
@@ -112,7 +114,7 @@ impl MemoryStore {
     }
 
     /// Open an existing EngramDB store.
-    pub fn open(dir: &Path) -> Result<Self> {
+    pub async fn open(dir: &Path) -> Result<Self> {
         let engramdb_dir = paths::project_dir(dir);
 
         if !engramdb_dir.exists() {
@@ -124,9 +126,10 @@ impl MemoryStore {
 
         // Open (or create) global LanceDB
         let lance_path = paths::lancedb_dir(&project_id)?;
-        fs::create_dir_all(&lance_path)?;
+        async_fs::create_dir_all(&lance_path).await?;
 
         let lance_index = LanceIndex::new(&lance_path)
+            .await
             .map_err(|e| StorageError::Validation(format!("LanceDB open failed: {}", e)))?;
 
         let store = Self {
@@ -136,37 +139,41 @@ impl MemoryStore {
         };
 
         // Update registry
-        Self::update_registry(dir, &store.project_id)?;
+        Self::update_registry(dir, &store.project_id).await?;
 
         Ok(store)
     }
 
     /// Create a new memory.
-    pub fn create(&self, memory: &Memory) -> Result<String> {
+    pub async fn create(&self, memory: &Memory) -> Result<String> {
         let memories_dir = self.get_memories_dir(&memory.visibility)?;
-        fs::create_dir_all(&memories_dir)?;
+        async_fs::create_dir_all(&memories_dir).await?;
 
         // Write memory file
         let file_path = memories_dir.join(format!("{}.md", memory.id));
         let content = memory_file::write_memory_file(memory)?;
-        fs::write(&file_path, content)?;
+        async_fs::write(&file_path, content).await?;
 
         // Upsert to LanceDB (vector=None for now)
         let entry = IndexEntry::from(memory);
         self.lance_index
             .upsert(&entry, None)
+            .await
             .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
 
         // Update manifest stats
-        self.update_manifest_stats()?;
+        self.update_manifest_stats().await?;
 
         Ok(memory.id.clone())
     }
 
     /// Get a memory by ID (supports prefix matching).
-    pub fn get(&self, id: &str) -> Result<Memory> {
+    pub async fn get(&self, id: &str) -> Result<Memory> {
         // Try shared memories first
-        match self.get_from_dir(id, &paths::memories_dir(&self.project_dir)) {
+        match self
+            .get_from_dir(id, &paths::memories_dir(&self.project_dir))
+            .await
+        {
             Ok(memory) => return Ok(memory),
             Err(StorageError::Validation(msg)) => return Err(StorageError::Validation(msg)),
             Err(StorageError::NotFound(_)) => {
@@ -177,17 +184,18 @@ impl MemoryStore {
 
         // Try personal memories
         self.get_from_dir(id, &paths::personal_memories_dir(&self.project_id)?)
+            .await
     }
 
-    fn get_from_dir(&self, id: &str, dir: &Path) -> Result<Memory> {
+    async fn get_from_dir(&self, id: &str, dir: &Path) -> Result<Memory> {
         if !dir.exists() {
             return Err(StorageError::NotFound(id.to_string()));
         }
 
         let mut matches = Vec::new();
 
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
+        let mut entries = async_fs::read_dir(dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
 
             if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
@@ -200,7 +208,7 @@ impl MemoryStore {
         match matches.len() {
             0 => Err(StorageError::NotFound(id.to_string())),
             1 => {
-                let content = fs::read_to_string(&matches[0])?;
+                let content = async_fs::read_to_string(&matches[0]).await?;
                 memory_file::parse_memory_file(&content)
             }
             _ => Err(StorageError::Validation(format!(
@@ -212,9 +220,9 @@ impl MemoryStore {
     }
 
     /// Update a memory.
-    pub fn update(&self, id: &str, updates: MemoryUpdate) -> Result<()> {
+    pub async fn update(&self, id: &str, updates: MemoryUpdate) -> Result<()> {
         // Get existing memory
-        let mut memory = self.get(id)?;
+        let mut memory = self.get(id).await?;
         let old_visibility = memory.visibility;
 
         // Apply updates
@@ -223,71 +231,78 @@ impl MemoryStore {
         // Check if visibility changed
         if memory.visibility != old_visibility {
             // Delete from old location (file only)
-            self.delete_file_from_dir(id, &self.get_memories_dir(&old_visibility)?)?;
+            self.delete_file_from_dir(id, &self.get_memories_dir(&old_visibility)?)
+                .await?;
 
             // Write to new location
             let memories_dir = self.get_memories_dir(&memory.visibility)?;
-            fs::create_dir_all(&memories_dir)?;
+            async_fs::create_dir_all(&memories_dir).await?;
             let file_path = memories_dir.join(format!("{}.md", memory.id));
             let content = memory_file::write_memory_file(&memory)?;
-            fs::write(&file_path, content)?;
+            async_fs::write(&file_path, content).await?;
         } else {
             // Write updated memory
             let memories_dir = self.get_memories_dir(&memory.visibility)?;
             let file_path = memories_dir.join(format!("{}.md", memory.id));
             let content = memory_file::write_memory_file(&memory)?;
-            fs::write(&file_path, content)?;
+            async_fs::write(&file_path, content).await?;
         }
 
         // Upsert to LanceDB (preserving existing vector if present)
         let entry = IndexEntry::from(&memory);
         self.lance_index
             .upsert(&entry, None)
+            .await
             .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
 
         // Update manifest stats
-        self.update_manifest_stats()?;
+        self.update_manifest_stats().await?;
 
         Ok(())
     }
 
     /// Delete a memory.
-    pub fn delete(&self, id: &str) -> Result<()> {
+    pub async fn delete(&self, id: &str) -> Result<()> {
         // Resolve full ID first via the index
-        let full_id = self.resolve_full_id(id)?;
+        let full_id = self.resolve_full_id(id).await?;
 
         // Try to delete file from shared
-        let shared_deleted =
-            self.delete_file_from_dir(&full_id, &paths::memories_dir(&self.project_dir));
+        let shared_deleted = self
+            .delete_file_from_dir(&full_id, &paths::memories_dir(&self.project_dir))
+            .await;
 
         // If not in shared, try personal
         if shared_deleted.is_err() {
-            self.delete_file_from_dir(&full_id, &paths::personal_memories_dir(&self.project_id)?)?;
+            self.delete_file_from_dir(&full_id, &paths::personal_memories_dir(&self.project_id)?)
+                .await?;
         }
 
         // Delete from LanceDB
         self.lance_index
             .delete(&full_id)
+            .await
             .map_err(|e| StorageError::Validation(format!("LanceDB delete failed: {}", e)))?;
 
         // Update manifest stats
-        self.update_manifest_stats()?;
+        self.update_manifest_stats().await?;
 
         Ok(())
     }
 
     /// List all memories (returns index entries from LanceDB).
-    pub fn list(&self) -> Result<Vec<IndexEntry>> {
+    pub async fn list(&self) -> Result<Vec<IndexEntry>> {
         self.lance_index
             .list()
+            .await
             .map_err(|e| StorageError::Validation(format!("LanceDB list failed: {}", e)))
     }
 
     /// Rebuild LanceDB index from memory files on disk.
-    pub fn reindex(&self) -> Result<usize> {
+    pub async fn reindex(&self) -> Result<usize> {
         // Clear LanceDB
         self.lance_index
             .clear()
+            .await
             .map_err(|e| StorageError::Validation(format!("LanceDB clear failed: {}", e)))?;
 
         let mut count = 0;
@@ -295,32 +310,36 @@ impl MemoryStore {
         // Reindex shared memories
         let shared_dir = paths::memories_dir(&self.project_dir);
         if shared_dir.exists() {
-            count += self.reindex_dir(&shared_dir, Visibility::Shared)?;
+            count += self.reindex_dir(&shared_dir, Visibility::Shared).await?;
         }
 
         // Reindex personal memories
         let personal_dir = paths::personal_memories_dir(&self.project_id)?;
         if personal_dir.exists() {
-            count += self.reindex_dir(&personal_dir, Visibility::Personal)?;
+            count += self
+                .reindex_dir(&personal_dir, Visibility::Personal)
+                .await?;
         }
 
         // Update manifest stats
-        self.update_manifest_stats()?;
+        self.update_manifest_stats().await?;
 
         Ok(count)
     }
 
     /// Update the vector embedding for a memory.
-    pub fn update_vector(&self, id: &str, vector: Vec<f32>) -> Result<()> {
+    pub async fn update_vector(&self, id: &str, vector: Vec<f32>) -> Result<()> {
         self.lance_index
             .update_vector(id, vector)
+            .await
             .map_err(|e| StorageError::Validation(format!("LanceDB update_vector failed: {}", e)))
     }
 
     /// Perform vector similarity search.
-    pub fn vector_search(&self, query: Vec<f32>, limit: usize) -> Result<Vec<VectorMatch>> {
+    pub async fn vector_search(&self, query: Vec<f32>, limit: usize) -> Result<Vec<VectorMatch>> {
         self.lance_index
             .vector_search(query, limit)
+            .await
             .map_err(|e| StorageError::Validation(format!("LanceDB vector_search failed: {}", e)))
     }
 
@@ -334,14 +353,14 @@ impl MemoryStore {
     }
 
     /// Delete just the .md file from a directory (does not touch LanceDB).
-    fn delete_file_from_dir(&self, id: &str, dir: &Path) -> Result<()> {
+    async fn delete_file_from_dir(&self, id: &str, dir: &Path) -> Result<()> {
         if !dir.exists() {
             return Err(StorageError::NotFound(id.to_string()));
         }
 
         let mut matches = Vec::new();
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
+        let mut entries = async_fs::read_dir(dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
                 if filename.starts_with(id) {
@@ -353,7 +372,7 @@ impl MemoryStore {
         match matches.len() {
             0 => Err(StorageError::NotFound(id.to_string())),
             1 => {
-                fs::remove_file(&matches[0])?;
+                async_fs::remove_file(&matches[0]).await?;
                 Ok(())
             }
             _ => Err(StorageError::Validation(format!(
@@ -365,8 +384,8 @@ impl MemoryStore {
     }
 
     /// Resolve a prefix ID to a full ID using the LanceDB index.
-    fn resolve_full_id(&self, id: &str) -> Result<String> {
-        let entries = self.list()?;
+    async fn resolve_full_id(&self, id: &str) -> Result<String> {
+        let entries = self.list().await?;
         let matches: Vec<&IndexEntry> = entries.iter().filter(|e| e.id.starts_with(id)).collect();
 
         match matches.len() {
@@ -381,19 +400,22 @@ impl MemoryStore {
     }
 
     /// Reindex all .md files in a directory with a given visibility.
-    fn reindex_dir(&self, dir: &Path, visibility: Visibility) -> Result<usize> {
+    async fn reindex_dir(&self, dir: &Path, visibility: Visibility) -> Result<usize> {
         let mut count = 0;
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
+        let mut entries = async_fs::read_dir(dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("md") {
-                let content = fs::read_to_string(&path)?;
+                let content = async_fs::read_to_string(&path).await?;
                 let memory = memory_file::parse_memory_file(&content)?;
                 let mut index_entry = IndexEntry::from(&memory);
                 index_entry.visibility = visibility;
-                self.lance_index.upsert(&index_entry, None).map_err(|e| {
-                    StorageError::Validation(format!("LanceDB upsert failed: {}", e))
-                })?;
+                self.lance_index
+                    .upsert(&index_entry, None)
+                    .await
+                    .map_err(|e| {
+                        StorageError::Validation(format!("LanceDB upsert failed: {}", e))
+                    })?;
                 count += 1;
             }
         }
@@ -403,13 +425,14 @@ impl MemoryStore {
     /// Check whether the LanceDB index is stale compared to memory files on disk.
     ///
     /// Returns `Some(warning_message)` if the counts differ, `None` if in sync.
-    pub fn check_staleness(&self) -> Result<Option<String>> {
+    pub async fn check_staleness(&self) -> Result<Option<String>> {
         let shared_dir = paths::memories_dir(&self.project_dir);
         let personal_dir = paths::personal_memories_dir(&self.project_id)?;
-        let md_count = count_md_files(&shared_dir) + count_md_files(&personal_dir);
+        let md_count = count_md_files(&shared_dir).await + count_md_files(&personal_dir).await;
         let lance_count = self
             .lance_index
             .count()
+            .await
             .map_err(|e| StorageError::Validation(format!("LanceDB count failed: {}", e)))?;
         if md_count != lance_count {
             Ok(Some(format!(
@@ -421,11 +444,11 @@ impl MemoryStore {
         }
     }
 
-    fn update_manifest_stats(&self) -> Result<()> {
+    async fn update_manifest_stats(&self) -> Result<()> {
         let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
-        let mut manifest = manifest::load_manifest(&manifest_path)?;
+        let mut manifest = manifest::load_manifest(&manifest_path).await?;
 
-        let entries = self.list()?;
+        let entries = self.list().await?;
         let memory_count = entries.len();
         let logical_scopes: Vec<String> = entries
             .iter()
@@ -435,20 +458,20 @@ impl MemoryStore {
             .collect();
 
         manifest::update_stats(&mut manifest, memory_count, logical_scopes);
-        manifest::save_manifest(&manifest_path, &manifest)?;
+        manifest::save_manifest(&manifest_path, &manifest).await?;
 
         Ok(())
     }
 
-    fn update_registry(dir: &Path, project_id: &str) -> Result<()> {
+    async fn update_registry(dir: &Path, project_id: &str) -> Result<()> {
         let registry_path = paths::registry_path()?;
 
         if let Some(parent) = registry_path.parent() {
-            fs::create_dir_all(parent)?;
+            async_fs::create_dir_all(parent).await?;
         }
 
         let mut registry = if registry_path.exists() {
-            let content = fs::read_to_string(&registry_path)?;
+            let content = async_fs::read_to_string(&registry_path).await?;
             serde_json::from_str(&content).unwrap_or_default()
         } else {
             Registry::default()
@@ -473,25 +496,27 @@ impl MemoryStore {
         }
 
         let content = serde_json::to_string_pretty(&registry)?;
-        fs::write(&registry_path, content)?;
+        async_fs::write(&registry_path, content).await?;
 
         Ok(())
     }
 }
 
 /// Count `.md` files in a directory. Returns 0 if the directory doesn't exist.
-fn count_md_files(dir: &Path) -> usize {
+async fn count_md_files(dir: &Path) -> usize {
     if !dir.exists() {
         return 0;
     }
-    fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("md"))
-                .count()
-        })
-        .unwrap_or(0)
+    let Ok(mut entries) = async_fs::read_dir(dir).await else {
+        return 0;
+    };
+    let mut count = 0;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if entry.path().extension().and_then(|s| s.to_str()) == Some("md") {
+            count += 1;
+        }
+    }
+    count
 }
 
 #[cfg(test)]
@@ -512,12 +537,12 @@ mod tests {
         memory
     }
 
-    #[test]
-    fn test_init_creates_structure() {
+    #[tokio::test]
+    async fn test_init_creates_structure() {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).unwrap();
+        let store = MemoryStore::init(project_dir).await.unwrap();
 
         // Check project-local directories
         assert!(project_dir.join(".engramdb").exists());
@@ -542,12 +567,12 @@ mod tests {
             .exists());
     }
 
-    #[test]
-    fn test_open_uninitialized() {
+    #[tokio::test]
+    async fn test_open_uninitialized() {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let result = MemoryStore::open(project_dir);
+        let result = MemoryStore::open(project_dir).await;
         assert!(result.is_err());
         match result {
             Err(StorageError::NotInitialized) => {}
@@ -555,61 +580,67 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_create_and_get() {
+    #[tokio::test]
+    async fn test_create_and_get() {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).unwrap();
+        let store = MemoryStore::init(project_dir).await.unwrap();
         let memory = create_test_memory("test-create-123", Visibility::Shared);
 
-        let created_id = store.create(&memory).unwrap();
+        let created_id = store.create(&memory).await.unwrap();
         assert_eq!(created_id, "test-create-123");
 
-        let retrieved = store.get("test-create-123").unwrap();
+        let retrieved = store.get("test-create-123").await.unwrap();
         assert_eq!(retrieved.id, "test-create-123");
         assert_eq!(retrieved.summary, "Test summary");
         assert_eq!(retrieved.content, "Test content");
     }
 
-    #[test]
-    fn test_get_prefix_matching() {
+    #[tokio::test]
+    async fn test_get_prefix_matching() {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).unwrap();
+        let store = MemoryStore::init(project_dir).await.unwrap();
         let memory = create_test_memory("abcd1234-5678-90ab-cdef-1234567890ab", Visibility::Shared);
 
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
-        let retrieved = store.get("abcd1234").unwrap();
+        let retrieved = store.get("abcd1234").await.unwrap();
         assert_eq!(retrieved.id, "abcd1234-5678-90ab-cdef-1234567890ab");
 
-        let retrieved = store.get("abcd").unwrap();
+        let retrieved = store.get("abcd").await.unwrap();
         assert_eq!(retrieved.id, "abcd1234-5678-90ab-cdef-1234567890ab");
     }
 
-    #[test]
-    fn test_get_ambiguous_prefix() {
+    #[tokio::test]
+    async fn test_get_ambiguous_prefix() {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).unwrap();
+        let store = MemoryStore::init(project_dir).await.unwrap();
 
         let memory1 =
             create_test_memory("aaaa1111-0000-0000-0000-000000000001", Visibility::Shared);
         let memory2 =
             create_test_memory("aaaa2222-0000-0000-0000-000000000002", Visibility::Shared);
 
-        store.create(&memory1).unwrap();
-        store.create(&memory2).unwrap();
+        store.create(&memory1).await.unwrap();
+        store.create(&memory2).await.unwrap();
 
-        assert!(store.get("aaaa1111-0000-0000-0000-000000000001").is_ok());
-        assert!(store.get("aaaa2222-0000-0000-0000-000000000002").is_ok());
-        assert!(store.get("aaaa1111").is_ok());
-        assert!(store.get("aaaa2222").is_ok());
+        assert!(store
+            .get("aaaa1111-0000-0000-0000-000000000001")
+            .await
+            .is_ok());
+        assert!(store
+            .get("aaaa2222-0000-0000-0000-000000000002")
+            .await
+            .is_ok());
+        assert!(store.get("aaaa1111").await.is_ok());
+        assert!(store.get("aaaa2222").await.is_ok());
 
-        let result = store.get("aaaa");
+        let result = store.get("aaaa").await;
         assert!(result.is_err());
         match result {
             Err(StorageError::Validation(msg)) => {
@@ -623,14 +654,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_get_not_found() {
+    #[tokio::test]
+    async fn test_get_not_found() {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).unwrap();
+        let store = MemoryStore::init(project_dir).await.unwrap();
 
-        let result = store.get("nonexistent-id");
+        let result = store.get("nonexistent-id").await;
         assert!(result.is_err());
         match result {
             Err(StorageError::NotFound(id)) => {
@@ -640,40 +671,40 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_update_modifies_memory() {
+    #[tokio::test]
+    async fn test_update_modifies_memory() {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).unwrap();
+        let store = MemoryStore::init(project_dir).await.unwrap();
         let memory = create_test_memory("test-update-123", Visibility::Shared);
 
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
         let mut update = MemoryUpdate::new();
         update.summary = Some("Updated summary".to_string());
 
-        store.update("test-update-123", update).unwrap();
+        store.update("test-update-123", update).await.unwrap();
 
-        let retrieved = store.get("test-update-123").unwrap();
+        let retrieved = store.get("test-update-123").await.unwrap();
         assert_eq!(retrieved.summary, "Updated summary");
         assert_eq!(retrieved.content, "Test content");
     }
 
-    #[test]
-    fn test_delete_removes_memory() {
+    #[tokio::test]
+    async fn test_delete_removes_memory() {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).unwrap();
+        let store = MemoryStore::init(project_dir).await.unwrap();
         let memory = create_test_memory("test-delete-123", Visibility::Shared);
 
-        store.create(&memory).unwrap();
-        assert!(store.get("test-delete-123").is_ok());
+        store.create(&memory).await.unwrap();
+        assert!(store.get("test-delete-123").await.is_ok());
 
-        store.delete("test-delete-123").unwrap();
+        store.delete("test-delete-123").await.unwrap();
 
-        let result = store.get("test-delete-123");
+        let result = store.get("test-delete-123").await;
         assert!(result.is_err());
         match result {
             Err(StorageError::NotFound(_)) => {}
@@ -681,22 +712,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_list_returns_all() {
+    #[tokio::test]
+    async fn test_list_returns_all() {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).unwrap();
+        let store = MemoryStore::init(project_dir).await.unwrap();
 
         let memory1 = create_test_memory("list-test-1", Visibility::Shared);
         let memory2 = create_test_memory("list-test-2", Visibility::Shared);
         let memory3 = create_test_memory("list-test-3", Visibility::Personal);
 
-        store.create(&memory1).unwrap();
-        store.create(&memory2).unwrap();
-        store.create(&memory3).unwrap();
+        store.create(&memory1).await.unwrap();
+        store.create(&memory2).await.unwrap();
+        store.create(&memory3).await.unwrap();
 
-        let entries = store.list().unwrap();
+        let entries = store.list().await.unwrap();
         assert_eq!(entries.len(), 3);
 
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
@@ -705,30 +736,30 @@ mod tests {
         assert!(ids.contains(&"list-test-3"));
     }
 
-    #[test]
-    fn test_reindex_rebuilds_from_files() {
+    #[tokio::test]
+    async fn test_reindex_rebuilds_from_files() {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).unwrap();
+        let store = MemoryStore::init(project_dir).await.unwrap();
 
         let memory1 = create_test_memory("reindex-test-1", Visibility::Shared);
         let memory2 = create_test_memory("reindex-test-2", Visibility::Shared);
 
-        store.create(&memory1).unwrap();
-        store.create(&memory2).unwrap();
+        store.create(&memory1).await.unwrap();
+        store.create(&memory2).await.unwrap();
 
-        assert_eq!(store.list().unwrap().len(), 2);
+        assert_eq!(store.list().await.unwrap().len(), 2);
 
         // Clear LanceDB to simulate corruption
-        store.lance_index.clear().unwrap();
-        assert_eq!(store.list().unwrap().len(), 0);
+        store.lance_index.clear().await.unwrap();
+        assert_eq!(store.list().await.unwrap().len(), 0);
 
         // Reindex
-        let count = store.reindex().unwrap();
+        let count = store.reindex().await.unwrap();
         assert_eq!(count, 2);
 
-        let entries = store.list().unwrap();
+        let entries = store.list().await.unwrap();
         assert_eq!(entries.len(), 2);
 
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
@@ -736,20 +767,20 @@ mod tests {
         assert!(ids.contains(&"reindex-test-2"));
     }
 
-    #[test]
-    fn test_list_includes_visibility() {
+    #[tokio::test]
+    async fn test_list_includes_visibility() {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).unwrap();
+        let store = MemoryStore::init(project_dir).await.unwrap();
 
         let shared = create_test_memory("vis-shared", Visibility::Shared);
         let personal = create_test_memory("vis-personal", Visibility::Personal);
 
-        store.create(&shared).unwrap();
-        store.create(&personal).unwrap();
+        store.create(&shared).await.unwrap();
+        store.create(&personal).await.unwrap();
 
-        let entries = store.list().unwrap();
+        let entries = store.list().await.unwrap();
         let shared_entry = entries.iter().find(|e| e.id == "vis-shared").unwrap();
         let personal_entry = entries.iter().find(|e| e.id == "vis-personal").unwrap();
 
@@ -757,35 +788,35 @@ mod tests {
         assert_eq!(personal_entry.visibility, Visibility::Personal);
     }
 
-    #[test]
-    fn test_check_staleness_in_sync() {
+    #[tokio::test]
+    async fn test_check_staleness_in_sync() {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).unwrap();
+        let store = MemoryStore::init(project_dir).await.unwrap();
         let memory = create_test_memory("staleness-sync-1", Visibility::Shared);
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
-        let result = store.check_staleness().unwrap();
+        let result = store.check_staleness().await.unwrap();
         assert!(
             result.is_none(),
             "Expected no staleness warning when in sync"
         );
     }
 
-    #[test]
-    fn test_check_staleness_detects_mismatch() {
+    #[tokio::test]
+    async fn test_check_staleness_detects_mismatch() {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).unwrap();
+        let store = MemoryStore::init(project_dir).await.unwrap();
         let memory = create_test_memory("staleness-mismatch-1", Visibility::Shared);
-        store.create(&memory).unwrap();
+        store.create(&memory).await.unwrap();
 
         // Delete LanceDB entry but leave the .md file
-        store.lance_index.clear().unwrap();
+        store.lance_index.clear().await.unwrap();
 
-        let result = store.check_staleness().unwrap();
+        let result = store.check_staleness().await.unwrap();
         assert!(
             result.is_some(),
             "Expected staleness warning after clearing index"

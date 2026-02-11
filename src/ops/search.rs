@@ -5,11 +5,11 @@ use crate::retrieval::filters::SearchFilters;
 use anyhow::Result;
 
 /// Search memories by keyword.
-pub fn search_memories(
+pub async fn search_memories(
     engine: &RetrievalEngine,
     query: &str,
     filters: &SearchFilters,
 ) -> Result<Vec<ScoredMemory>> {
-    let results = engine.search(query, filters)?;
+    let results = engine.search(query, filters).await?;
     Ok(results)
 }

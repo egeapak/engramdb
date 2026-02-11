@@ -37,17 +37,21 @@ pub struct AddParams {
 /// * `dir` - The directory containing the EngramDB store
 /// * `params` - Memory creation parameters
 /// * `formatter` - Output formatter for success/error messages
-pub fn run_add(dir: &Path, params: AddParams, formatter: &OutputFormatter) -> Result<()> {
+pub async fn run_add(dir: &Path, params: AddParams, formatter: &OutputFormatter) -> Result<()> {
     // Open or initialize store
-    let store = match MemoryStore::open(dir) {
+    let store = match MemoryStore::open(dir).await {
         Ok(s) => s,
-        Err(_) => MemoryStore::init(dir)?,
+        Err(_) => MemoryStore::init(dir).await?,
     };
 
     // Build engine for auto-embedding on create
     let config_path = dir.join(".engramdb").join("config.toml");
-    let engine_store = MemoryStore::open(dir).unwrap_or_else(|_| MemoryStore::init(dir).unwrap());
-    let engine = ops::build_engine(engine_store, &config_path);
+    // Reuse the already-opened store for the engine
+    let engine_store = MemoryStore::open(dir).await.unwrap_or_else(|_| {
+        // This shouldn't happen since we already opened it above, but handle it anyway
+        panic!("Failed to open store for engine after successful open")
+    });
+    let engine = ops::build_engine(engine_store, &config_path).await;
 
     // Handle details file
     let details_from_file = if let Some(ref details_file) = params.details_file {
@@ -61,20 +65,20 @@ pub fn run_add(dir: &Path, params: AddParams, formatter: &OutputFormatter) -> Re
     // Determine mode: interactive, editor, or direct CLI
     if params.editor {
         // Editor mode
-        run_editor_mode(&store, params, final_details, formatter, &engine)
+        run_editor_mode(&store, params, final_details, formatter, &engine).await
     } else if params.interactive
         || (params.type_str.is_none() || params.content.is_none() || params.summary.is_none())
     {
         // Interactive mode: if --interactive is set OR if required fields are missing
-        run_interactive_mode(&store, params, final_details, formatter, &engine)
+        run_interactive_mode(&store, params, final_details, formatter, &engine).await
     } else {
         // Direct CLI mode: all required fields provided
-        run_direct_mode(&store, params, final_details, formatter, &engine)
+        run_direct_mode(&store, params, final_details, formatter, &engine).await
     }
 }
 
 /// Run the add command in direct CLI mode.
-fn run_direct_mode(
+async fn run_direct_mode(
     store: &MemoryStore,
     params: AddParams,
     final_details: Option<String>,
@@ -112,14 +116,15 @@ fn run_direct_mode(
             decay_floor: None,
         },
         Some(engine),
-    )?;
+    )
+    .await?;
 
     formatter.print_success(&format!("Created memory {}", result.id));
     Ok(())
 }
 
 /// Run the add command in interactive mode.
-fn run_interactive_mode(
+async fn run_interactive_mode(
     store: &MemoryStore,
     params: AddParams,
     final_details: Option<String>,
@@ -258,14 +263,15 @@ fn run_interactive_mode(
             decay_floor: None,
         },
         Some(engine),
-    )?;
+    )
+    .await?;
 
     formatter.print_success(&format!("Created memory {}", result.id));
     Ok(())
 }
 
 /// Run the add command in editor mode.
-fn run_editor_mode(
+async fn run_editor_mode(
     store: &MemoryStore,
     params: AddParams,
     final_details: Option<String>,
@@ -344,7 +350,8 @@ fn run_editor_mode(
             decay_floor: None,
         },
         Some(engine),
-    )?;
+    )
+    .await?;
 
     formatter.print_success(&format!("Created memory {}", result.id));
     Ok(())

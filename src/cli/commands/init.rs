@@ -33,14 +33,14 @@ struct Registry {
 /// * `no_embeddings` - Skip embedding model initialization
 /// * `template` - Optional path to config template file
 /// * `formatter` - Output formatter for success/error messages
-pub fn run_init(
+pub async fn run_init(
     dir: &Path,
     no_embeddings: bool,
     template: Option<PathBuf>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
     // Initialize the store
-    let store = MemoryStore::init(dir)?;
+    let store = MemoryStore::init(dir).await?;
 
     // Copy template if provided
     if let Some(template_path) = template {
@@ -124,13 +124,13 @@ mod tests {
     use crate::storage::project_id;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_init_creates_structure() {
+    #[tokio::test]
+    async fn test_init_creates_structure() {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
         let formatter = OutputFormatter::new(None, false, true);
 
-        let result = run_init(project_dir, true, None, &formatter);
+        let result = run_init(project_dir, true, None, &formatter).await;
         assert!(result.is_ok(), "Init should succeed");
 
         // Check project-local directories
@@ -149,8 +149,8 @@ mod tests {
         assert!(paths::lancedb_dir(&pid).unwrap().exists());
     }
 
-    #[test]
-    fn test_init_with_template() {
+    #[tokio::test]
+    async fn test_init_with_template() {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
         let template_dir = TempDir::new().unwrap();
@@ -161,7 +161,7 @@ mod tests {
         fs::write(&template_path, template_content).unwrap();
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_init(project_dir, true, Some(template_path), &formatter);
+        let result = run_init(project_dir, true, Some(template_path), &formatter).await;
         assert!(result.is_ok(), "Init with template should succeed");
 
         // Check that config was copied
@@ -172,15 +172,15 @@ mod tests {
         assert_eq!(config_content, template_content);
     }
 
-    #[test]
-    fn test_init_no_embeddings_flag() {
+    #[tokio::test]
+    async fn test_init_no_embeddings_flag() {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
         let formatter = OutputFormatter::new(None, false, true);
 
         // This test verifies that --no-embeddings doesn't cause errors
         // (actual embedding init is tested separately in embeddings module)
-        let result = run_init(project_dir, true, None, &formatter);
+        let result = run_init(project_dir, true, None, &formatter).await;
         assert!(result.is_ok(), "Init with --no-embeddings should succeed");
     }
 

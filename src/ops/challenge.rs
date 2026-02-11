@@ -14,13 +14,13 @@ pub struct ChallengeResult {
 ///
 /// Adds a challenge to the memory, sets its status to Challenged,
 /// and persists the change.
-pub fn challenge_memory(
+pub async fn challenge_memory(
     store: &MemoryStore,
     id: &str,
     evidence: &str,
     source_file: Option<&str>,
 ) -> Result<ChallengeResult> {
-    let mut memory = store.get(id)?;
+    let mut memory = store.get(id).await?;
 
     let mut challenge = Challenge::new(evidence);
     if let Some(sf) = source_file {
@@ -30,8 +30,8 @@ pub fn challenge_memory(
     memory.add_challenge(challenge);
 
     // MemoryUpdate doesn't support challenges field, so delete and recreate
-    store.delete(&memory.id)?;
-    store.create(&memory)?;
+    store.delete(&memory.id).await?;
+    store.create(&memory).await?;
 
     Ok(ChallengeResult {
         challenged: true,

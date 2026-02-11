@@ -9,16 +9,15 @@
 
 use super::error::Result;
 use crate::types::EngramConfig;
-use std::fs;
 use std::path::Path;
 
 /// Load configuration from config.toml, or return defaults if file doesn't exist
-pub fn load_config(config_path: &Path) -> Result<EngramConfig> {
+pub async fn load_config(config_path: &Path) -> Result<EngramConfig> {
     if !config_path.exists() {
         return Ok(EngramConfig::default());
     }
 
-    let content = fs::read_to_string(config_path)?;
+    let content = tokio::fs::read_to_string(config_path).await?;
     let config: EngramConfig = toml::from_str(&content)?;
     Ok(config)
 }
@@ -28,12 +27,12 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn test_load_config_returns_defaults_when_missing() {
+    #[tokio::test]
+    async fn test_load_config_returns_defaults_when_missing() {
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
 
-        let config = load_config(&config_path).unwrap();
+        let config = load_config(&config_path).await.unwrap();
         let default_config = EngramConfig::default();
 
         assert_eq!(
@@ -46,8 +45,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_load_config_from_valid_file() {
+    #[tokio::test]
+    async fn test_load_config_from_valid_file() {
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
 
@@ -79,9 +78,9 @@ agent = 0.85
 inferred = 0.55
 imported = 0.65
 "#;
-        fs::write(&config_path, toml_content).unwrap();
+        tokio::fs::write(&config_path, toml_content).await.unwrap();
 
-        let config = load_config(&config_path).unwrap();
+        let config = load_config(&config_path).await.unwrap();
 
         assert_eq!(config.retrieval.max_results, 10);
         assert_eq!(config.retrieval.relevance_threshold, 0.8);
@@ -92,14 +91,16 @@ imported = 0.65
         assert_eq!(config.trust_weights.imported, 0.65);
     }
 
-    #[test]
-    fn test_load_config_invalid_toml() {
+    #[tokio::test]
+    async fn test_load_config_invalid_toml() {
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
 
-        fs::write(&config_path, "invalid { toml content").unwrap();
+        tokio::fs::write(&config_path, "invalid { toml content")
+            .await
+            .unwrap();
 
-        let result = load_config(&config_path);
+        let result = load_config(&config_path).await;
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),

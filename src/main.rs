@@ -2,7 +2,8 @@ use anyhow::Result;
 use clap::Parser;
 use engramdb::cli::app::Cli;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
-    engramdb::cli::run(cli)
+    engramdb::cli::run(cli).await
 }

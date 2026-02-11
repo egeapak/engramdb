@@ -7,25 +7,26 @@ use anyhow::Result;
 /// List memories that need review (status = NeedsReview or Challenged).
 ///
 /// Returns memories sorted by criticality descending.
-pub fn review_memories(
+pub async fn review_memories(
     store: &MemoryStore,
     scope: Option<&str>,
     max_results: Option<usize>,
 ) -> Result<Vec<Memory>> {
-    let entries = store.list()?;
+    let entries = store.list().await?;
 
-    let mut memories: Vec<Memory> = entries
-        .iter()
-        .filter(|e| e.status == Status::NeedsReview || e.status == Status::Challenged)
-        .filter(|e| {
+    let mut memories: Vec<Memory> = Vec::new();
+    for e in entries.iter() {
+        if e.status == Status::NeedsReview || e.status == Status::Challenged {
             if let Some(scope) = scope {
-                e.logical.iter().any(|s| s == scope)
-            } else {
-                true
+                if !e.logical.iter().any(|s| s == scope) {
+                    continue;
+                }
             }
-        })
-        .filter_map(|e| store.get(&e.id).ok())
-        .collect();
+            if let Ok(memory) = store.get(&e.id).await {
+                memories.push(memory);
+            }
+        }
+    }
 
     // Sort by criticality descending
     memories.sort_by(|a, b| {

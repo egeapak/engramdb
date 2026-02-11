@@ -29,13 +29,17 @@ pub struct RetrieveParams {
 /// * `dir` - The directory containing the EngramDB store
 /// * `params` - Retrieval query parameters
 /// * `formatter` - Output formatter for displaying results
-pub fn run_retrieve(dir: &Path, params: RetrieveParams, formatter: &OutputFormatter) -> Result<()> {
-    let store = MemoryStore::open(dir)?;
-    if let Ok(Some(warning)) = store.check_staleness() {
+pub async fn run_retrieve(
+    dir: &Path,
+    params: RetrieveParams,
+    formatter: &OutputFormatter,
+) -> Result<()> {
+    let store = MemoryStore::open(dir).await?;
+    if let Ok(Some(warning)) = store.check_staleness().await {
         formatter.print_warning(&warning);
     }
     let config_path = dir.join(".engramdb").join("config.toml");
-    let engine = crate::ops::build_engine(store, &config_path);
+    let engine = crate::ops::build_engine(store, &config_path).await;
 
     // Parse type filters
     let types = if !params.type_filter.is_empty() {
@@ -87,7 +91,7 @@ pub fn run_retrieve(dir: &Path, params: RetrieveParams, formatter: &OutputFormat
     };
 
     // Perform retrieval
-    let result = crate::ops::retrieve_memories(&engine, &query)?;
+    let result = crate::ops::retrieve_memories(&engine, &query).await?;
 
     // Display results
     display_retrieval_result(&result, params.show_scores, formatter)?;

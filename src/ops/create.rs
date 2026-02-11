@@ -38,7 +38,7 @@ pub struct CreateResult {
 ///
 /// If `engine` is provided and has embeddings available, the memory is
 /// automatically embedded into the vector store after creation.
-pub fn create_memory(
+pub async fn create_memory(
     store: &MemoryStore,
     params: CreateParams,
     engine: Option<&RetrievalEngine>,
@@ -112,13 +112,13 @@ pub fn create_memory(
         memory.decay = Some(decay);
     }
 
-    let id = store.create(&memory)?;
+    let id = store.create(&memory).await?;
 
     // Embed the newly created memory if an engine with embeddings is available
     if let Some(engine) = engine {
         if engine.embeddings_available() {
-            let saved = store.get(&id)?;
-            engine.embed_memory(&saved)?;
+            let saved = store.get(&id).await?;
+            engine.embed_memory(&saved).await?;
         }
     }
 
@@ -134,9 +134,9 @@ mod tests {
     use crate::types::{DecayStrategy, MemoryType, Provenance, Visibility};
     use tempfile::TempDir;
 
-    fn setup_test_store() -> (TempDir, MemoryStore) {
+    async fn setup_test_store() -> (TempDir, MemoryStore) {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
         (temp_dir, store)
     }
 
@@ -161,17 +161,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_create_memory_with_custom_decay_all_fields() {
-        let (_temp, store) = setup_test_store();
+    #[tokio::test]
+    async fn test_create_memory_with_custom_decay_all_fields() {
+        let (_temp, store) = setup_test_store().await;
 
         let mut params = minimal_create_params();
         params.decay_strategy = Some("exponential".to_string());
         params.decay_half_life = Some(604800); // 7 days in seconds
         params.decay_floor = Some(0.3);
 
-        let result = create_memory(&store, params, None).unwrap();
-        let memory = store.get(&result.id).unwrap();
+        let result = create_memory(&store, params, None).await.unwrap();
+        let memory = store.get(&result.id).await.unwrap();
 
         assert!(memory.decay.is_some());
         let decay = memory.decay.unwrap();
@@ -180,15 +180,15 @@ mod tests {
         assert_eq!(decay.floor, 0.3);
     }
 
-    #[test]
-    fn test_create_memory_with_partial_decay_only_strategy() {
-        let (_temp, store) = setup_test_store();
+    #[tokio::test]
+    async fn test_create_memory_with_partial_decay_only_strategy() {
+        let (_temp, store) = setup_test_store().await;
 
         let mut params = minimal_create_params();
         params.decay_strategy = Some("linear".to_string());
 
-        let result = create_memory(&store, params, None).unwrap();
-        let memory = store.get(&result.id).unwrap();
+        let result = create_memory(&store, params, None).await.unwrap();
+        let memory = store.get(&result.id).await.unwrap();
 
         assert!(memory.decay.is_some());
         let decay = memory.decay.unwrap();
@@ -197,15 +197,15 @@ mod tests {
         assert_eq!(decay.floor, 0.0);
     }
 
-    #[test]
-    fn test_create_memory_with_partial_decay_only_floor() {
-        let (_temp, store) = setup_test_store();
+    #[tokio::test]
+    async fn test_create_memory_with_partial_decay_only_floor() {
+        let (_temp, store) = setup_test_store().await;
 
         let mut params = minimal_create_params();
         params.decay_floor = Some(0.5);
 
-        let result = create_memory(&store, params, None).unwrap();
-        let memory = store.get(&result.id).unwrap();
+        let result = create_memory(&store, params, None).await.unwrap();
+        let memory = store.get(&result.id).await.unwrap();
 
         assert!(memory.decay.is_some());
         let decay = memory.decay.unwrap();
@@ -214,14 +214,14 @@ mod tests {
         assert_eq!(decay.floor, 0.5);
     }
 
-    #[test]
-    fn test_create_memory_invalid_decay_strategy_returns_error() {
-        let (_temp, store) = setup_test_store();
+    #[tokio::test]
+    async fn test_create_memory_invalid_decay_strategy_returns_error() {
+        let (_temp, store) = setup_test_store().await;
 
         let mut params = minimal_create_params();
         params.decay_strategy = Some("invalid_strategy".to_string());
 
-        let result = create_memory(&store, params, None);
+        let result = create_memory(&store, params, None).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -229,19 +229,19 @@ mod tests {
             .contains("Invalid decay strategy"));
     }
 
-    #[test]
-    fn test_create_memory_decay_config_persists_through_save_load() {
-        let (_temp, store) = setup_test_store();
+    #[tokio::test]
+    async fn test_create_memory_decay_config_persists_through_save_load() {
+        let (_temp, store) = setup_test_store().await;
 
         let mut params = minimal_create_params();
         params.decay_strategy = Some("step".to_string());
         params.decay_ttl = Some(2592000); // 30 days in seconds
         params.decay_floor = Some(0.2);
 
-        let result = create_memory(&store, params, None).unwrap();
+        let result = create_memory(&store, params, None).await.unwrap();
 
         // Reload from disk
-        let memory = store.get(&result.id).unwrap();
+        let memory = store.get(&result.id).await.unwrap();
 
         assert!(memory.decay.is_some());
         let decay = memory.decay.unwrap();
@@ -250,14 +250,14 @@ mod tests {
         assert_eq!(decay.floor, 0.2);
     }
 
-    #[test]
-    fn test_create_memory_no_decay_fields_uses_type_default() {
-        let (_temp, store) = setup_test_store();
+    #[tokio::test]
+    async fn test_create_memory_no_decay_fields_uses_type_default() {
+        let (_temp, store) = setup_test_store().await;
 
         let params = minimal_create_params();
 
-        let result = create_memory(&store, params, None).unwrap();
-        let memory = store.get(&result.id).unwrap();
+        let result = create_memory(&store, params, None).await.unwrap();
+        let memory = store.get(&result.id).await.unwrap();
 
         // Decision type has default decay of None
         assert!(memory.decay.is_some());
@@ -265,16 +265,16 @@ mod tests {
         assert_eq!(decay.strategy, DecayStrategy::None);
     }
 
-    #[test]
-    fn test_create_memory_with_linear_decay_and_ttl() {
-        let (_temp, store) = setup_test_store();
+    #[tokio::test]
+    async fn test_create_memory_with_linear_decay_and_ttl() {
+        let (_temp, store) = setup_test_store().await;
 
         let mut params = minimal_create_params();
         params.decay_strategy = Some("linear".to_string());
         params.decay_ttl = Some(86400); // 1 day in seconds
 
-        let result = create_memory(&store, params, None).unwrap();
-        let memory = store.get(&result.id).unwrap();
+        let result = create_memory(&store, params, None).await.unwrap();
+        let memory = store.get(&result.id).await.unwrap();
 
         assert!(memory.decay.is_some());
         let decay = memory.decay.unwrap();
