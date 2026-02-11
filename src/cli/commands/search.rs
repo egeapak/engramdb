@@ -1,12 +1,9 @@
 //! Search memories by keyword.
 
 use crate::cli::output::OutputFormatter;
-use crate::embeddings::OnnxProvider;
 use crate::ops::parse_memory_type;
-use crate::retrieval::engine::RetrievalEngine;
 use crate::retrieval::filters::SearchFilters;
 use crate::storage::MemoryStore;
-use crate::vector::LanceDbStore;
 use anyhow::Result;
 use owo_colors::{OwoColorize, Stream};
 use std::io::{self, IsTerminal};
@@ -30,25 +27,9 @@ pub struct SearchParams {
 /// * `params` - Search query parameters
 /// * `formatter` - Output formatter for displaying results
 pub fn run_search(dir: &Path, params: SearchParams, formatter: &OutputFormatter) -> Result<()> {
-    // Open store and load config
     let store = MemoryStore::open(dir)?;
     let config_path = dir.join(".engramdb").join("config.toml");
-    let config = crate::storage::config::load_config(&config_path)?;
-
-    // Create retrieval engine
-    let mut engine = RetrievalEngine::new(store, config);
-
-    // Try to add embeddings (optional - proceed without if they fail)
-    if let (Some(provider), Some(lancedb_path)) = (
-        OnnxProvider::try_new(),
-        crate::storage::paths::lancedb_dir(&engine.store().project_id)
-            .ok()
-            .and_then(|p| std::fs::canonicalize(p).ok()),
-    ) {
-        if let Ok(vector_store) = LanceDbStore::new(lancedb_path, "memories".to_string(), 384) {
-            engine = engine.with_embeddings(Box::new(provider), Box::new(vector_store));
-        }
-    }
+    let engine = crate::ops::build_engine(store, &config_path);
 
     // Parse type filters
     let types = if !params.type_filter.is_empty() {

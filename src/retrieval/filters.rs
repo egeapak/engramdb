@@ -82,7 +82,7 @@ pub fn apply_index_filters(entries: Vec<IndexEntry>, filters: &SearchFilters) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ProvenanceSource, Status};
+    use crate::types::{ProvenanceSource, Status, Visibility};
     use chrono::Utc;
 
     fn create_test_entry(
@@ -104,6 +104,7 @@ mod tests {
             confidence: 0.8,
             provenance_source: ProvenanceSource::Human,
             status: Status::Active,
+            visibility: Visibility::Shared,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             expires_at: None,

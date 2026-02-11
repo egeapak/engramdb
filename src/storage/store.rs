@@ -5,18 +5,21 @@
 //! - Initialize new EngramDB stores with `init()`
 //! - Open existing stores with `open()`
 //! - Create, read, update, delete memories (CRUD operations)
-//! - List all memories via index
+//! - List all memories via unified LanceDB index
 //! - Rebuild index from files with `reindex()`
+//! - Vector search and embedding storage via LanceDB
 //!
 //! MemoryStore handles both shared (project-level) and personal (user-level)
-//! memories, maintaining separate indexes for each. It also manages the global
-//! registry of projects and updates manifest statistics automatically.
+//! memories in a single LanceDB table with a `visibility` column. It also
+//! manages the global registry of projects and updates manifest statistics
+//! automatically.
 //!
 //! ID matching supports prefix matching for convenience (e.g., "abcd" matches
 //! "abcd1234-5678-..."), with ambiguity detection.
 
 use super::error::{Result, StorageError};
-use super::{index, manifest, memory_file, paths, project_id};
+use super::lance_index::{IndexEntry, LanceIndex, VectorMatch};
+use super::{manifest, memory_file, paths, project_id};
 use crate::types::{Memory, MemoryUpdate, Visibility};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -43,17 +46,19 @@ pub struct Registry {
 
 /// Main storage interface for EngramDB operations.
 ///
-/// Manages memory files, indexes, manifest, and coordinates between
-/// shared (project-level) and personal (user-level) storage locations.
+/// Manages memory files, a unified LanceDB index, manifest, and coordinates
+/// between shared (project-level) and personal (user-level) storage locations.
 pub struct MemoryStore {
     /// Root directory of the project (contains .engramdb/)
     pub project_dir: PathBuf,
     /// Unique identifier for this project
     pub project_id: String,
+    /// Unified LanceDB index (metadata + optional vectors)
+    lance_index: LanceIndex,
 }
 
 impl MemoryStore {
-    /// Initialize a new EngramDB store in the given directory
+    /// Initialize a new EngramDB store in the given directory.
     pub fn init(dir: &Path) -> Result<Self> {
         let engramdb_dir = paths::project_dir(dir);
 
@@ -82,17 +87,19 @@ impl MemoryStore {
             "# EngramDB configuration\n# See documentation for available settings\n",
         )?;
 
-        // Create empty index.json
-        let index_path = engramdb_dir.join("index.json");
-        let empty_index = index::Index::default();
-        index::save_index(&index_path, &empty_index)?;
+        // Create project-local LanceDB directory
+        let lance_path = paths::lancedb_dir(dir);
+        fs::create_dir_all(&lance_path)?;
+
+        // Initialize LanceIndex
+        let lance_index = LanceIndex::new(&lance_path)
+            .map_err(|e| StorageError::Validation(format!("LanceDB init failed: {}", e)))?;
 
         // Compute project ID
         let project_id = project_id::compute_project_id(dir);
 
         // Create personal directories
         fs::create_dir_all(paths::personal_memories_dir(&project_id)?)?;
-        fs::create_dir_all(paths::lancedb_dir(&project_id)?)?;
 
         // Update registry
         Self::update_registry(dir, &project_id)?;
@@ -100,10 +107,11 @@ impl MemoryStore {
         Ok(Self {
             project_dir: dir.to_path_buf(),
             project_id,
+            lance_index,
         })
     }
 
-    /// Open an existing EngramDB store
+    /// Open an existing EngramDB store.
     pub fn open(dir: &Path) -> Result<Self> {
         let engramdb_dir = paths::project_dir(dir);
 
@@ -111,19 +119,31 @@ impl MemoryStore {
             return Err(StorageError::NotInitialized);
         }
 
+        // Open (or create) LanceDB
+        let lance_path = paths::lancedb_dir(dir);
+        fs::create_dir_all(&lance_path)?;
+
+        let lance_index = LanceIndex::new(&lance_path)
+            .map_err(|e| StorageError::Validation(format!("LanceDB open failed: {}", e)))?;
+
         // Compute project ID
         let project_id = project_id::compute_project_id(dir);
 
-        // Update registry
-        Self::update_registry(dir, &project_id)?;
-
-        Ok(Self {
+        // Auto-migrate from legacy index.json if LanceDB is empty
+        let store = Self {
             project_dir: dir.to_path_buf(),
             project_id,
-        })
+            lance_index,
+        };
+        store.maybe_migrate_from_index_json()?;
+
+        // Update registry
+        Self::update_registry(dir, &store.project_id)?;
+
+        Ok(store)
     }
 
-    /// Create a new memory
+    /// Create a new memory.
     pub fn create(&self, memory: &Memory) -> Result<String> {
         let memories_dir = self.get_memories_dir(&memory.visibility)?;
         fs::create_dir_all(&memories_dir)?;
@@ -133,12 +153,11 @@ impl MemoryStore {
         let content = memory_file::write_memory_file(memory)?;
         fs::write(&file_path, content)?;
 
-        // Update index
-        let index_path = self.get_index_path(&memory.visibility)?;
-        let mut idx = index::load_index(&index_path)?;
-        let entry = index::IndexEntry::from(memory);
-        index::add_entry(&mut idx, entry);
-        index::save_index(&index_path, &idx)?;
+        // Upsert to LanceDB (vector=None for now)
+        let entry = IndexEntry::from(memory);
+        self.lance_index
+            .upsert(&entry, None)
+            .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
 
         // Update manifest stats
         self.update_manifest_stats()?;
@@ -146,7 +165,7 @@ impl MemoryStore {
         Ok(memory.id.clone())
     }
 
-    /// Get a memory by ID (supports prefix matching)
+    /// Get a memory by ID (supports prefix matching).
     pub fn get(&self, id: &str) -> Result<Memory> {
         // Try shared memories first
         match self.get_from_dir(id, &paths::memories_dir(&self.project_dir)) {
@@ -194,7 +213,7 @@ impl MemoryStore {
         }
     }
 
-    /// Update a memory
+    /// Update a memory.
     pub fn update(&self, id: &str, updates: MemoryUpdate) -> Result<()> {
         // Get existing memory
         let mut memory = self.get(id)?;
@@ -205,25 +224,28 @@ impl MemoryStore {
 
         // Check if visibility changed
         if memory.visibility != old_visibility {
-            // Delete from old location
-            self.delete_from_dir(id, &self.get_memories_dir(&old_visibility)?)?;
+            // Delete from old location (file only)
+            self.delete_file_from_dir(id, &self.get_memories_dir(&old_visibility)?)?;
 
             // Write to new location
-            self.create(&memory)?;
+            let memories_dir = self.get_memories_dir(&memory.visibility)?;
+            fs::create_dir_all(&memories_dir)?;
+            let file_path = memories_dir.join(format!("{}.md", memory.id));
+            let content = memory_file::write_memory_file(&memory)?;
+            fs::write(&file_path, content)?;
         } else {
             // Write updated memory
             let memories_dir = self.get_memories_dir(&memory.visibility)?;
             let file_path = memories_dir.join(format!("{}.md", memory.id));
             let content = memory_file::write_memory_file(&memory)?;
             fs::write(&file_path, content)?;
-
-            // Update index
-            let index_path = self.get_index_path(&memory.visibility)?;
-            let mut idx = index::load_index(&index_path)?;
-            let entry = index::IndexEntry::from(&memory);
-            index::update_entry(&mut idx, entry);
-            index::save_index(&index_path, &idx)?;
         }
+
+        // Upsert to LanceDB (preserving existing vector if present)
+        let entry = IndexEntry::from(&memory);
+        self.lance_index
+            .upsert(&entry, None)
+            .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
 
         // Update manifest stats
         self.update_manifest_stats()?;
@@ -231,38 +253,101 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Delete a memory
+    /// Delete a memory.
     pub fn delete(&self, id: &str) -> Result<()> {
-        // Try to delete from shared
-        if self
-            .delete_from_dir(id, &paths::memories_dir(&self.project_dir))
-            .is_ok()
-        {
-            self.update_manifest_stats()?;
-            return Ok(());
+        // Resolve full ID first via the index
+        let full_id = self.resolve_full_id(id)?;
+
+        // Try to delete file from shared
+        let shared_deleted =
+            self.delete_file_from_dir(&full_id, &paths::memories_dir(&self.project_dir));
+
+        // If not in shared, try personal
+        if shared_deleted.is_err() {
+            self.delete_file_from_dir(&full_id, &paths::personal_memories_dir(&self.project_id)?)?;
         }
 
-        // Try to delete from personal
-        self.delete_from_dir(id, &paths::personal_memories_dir(&self.project_id)?)?;
+        // Delete from LanceDB
+        self.lance_index
+            .delete(&full_id)
+            .map_err(|e| StorageError::Validation(format!("LanceDB delete failed: {}", e)))?;
+
+        // Update manifest stats
         self.update_manifest_stats()?;
+
         Ok(())
     }
 
-    fn delete_from_dir(&self, id: &str, dir: &Path) -> Result<()> {
+    /// List all memories (returns index entries from LanceDB).
+    pub fn list(&self) -> Result<Vec<IndexEntry>> {
+        self.lance_index
+            .list()
+            .map_err(|e| StorageError::Validation(format!("LanceDB list failed: {}", e)))
+    }
+
+    /// Rebuild LanceDB index from memory files on disk.
+    pub fn reindex(&self) -> Result<usize> {
+        // Clear LanceDB
+        self.lance_index
+            .clear()
+            .map_err(|e| StorageError::Validation(format!("LanceDB clear failed: {}", e)))?;
+
+        let mut count = 0;
+
+        // Reindex shared memories
+        let shared_dir = paths::memories_dir(&self.project_dir);
+        if shared_dir.exists() {
+            count += self.reindex_dir(&shared_dir, Visibility::Shared)?;
+        }
+
+        // Reindex personal memories
+        let personal_dir = paths::personal_memories_dir(&self.project_id)?;
+        if personal_dir.exists() {
+            count += self.reindex_dir(&personal_dir, Visibility::Personal)?;
+        }
+
+        // Update manifest stats
+        self.update_manifest_stats()?;
+
+        Ok(count)
+    }
+
+    /// Update the vector embedding for a memory.
+    pub fn update_vector(&self, id: &str, vector: Vec<f32>) -> Result<()> {
+        self.lance_index
+            .update_vector(id, vector)
+            .map_err(|e| StorageError::Validation(format!("LanceDB update_vector failed: {}", e)))
+    }
+
+    /// Perform vector similarity search.
+    pub fn vector_search(&self, query: Vec<f32>, limit: usize) -> Result<Vec<VectorMatch>> {
+        self.lance_index
+            .vector_search(query, limit)
+            .map_err(|e| StorageError::Validation(format!("LanceDB vector_search failed: {}", e)))
+    }
+
+    // ---- Helper methods ----
+
+    fn get_memories_dir(&self, visibility: &Visibility) -> Result<PathBuf> {
+        match visibility {
+            Visibility::Shared => Ok(paths::memories_dir(&self.project_dir)),
+            Visibility::Personal => paths::personal_memories_dir(&self.project_id),
+        }
+    }
+
+    /// Delete just the .md file from a directory (does not touch LanceDB).
+    fn delete_file_from_dir(&self, id: &str, dir: &Path) -> Result<()> {
         if !dir.exists() {
             return Err(StorageError::NotFound(id.to_string()));
         }
 
         let mut matches = Vec::new();
-
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
-
             if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
                 if filename.starts_with(id) {
-                    let fname = filename.to_string();
-                    matches.push((path, fname));
+                    matches.push(path);
                 }
             }
         }
@@ -270,21 +355,7 @@ impl MemoryStore {
         match matches.len() {
             0 => Err(StorageError::NotFound(id.to_string())),
             1 => {
-                let (path, memory_id) = &matches[0];
-                fs::remove_file(path)?;
-
-                // Update index based on directory
-                let visibility = if dir == paths::memories_dir(&self.project_dir) {
-                    Visibility::Shared
-                } else {
-                    Visibility::Personal
-                };
-
-                let index_path = self.get_index_path(&visibility)?;
-                let mut idx = index::load_index(&index_path)?;
-                index::remove_entry(&mut idx, memory_id);
-                index::save_index(&index_path, &idx)?;
-
+                fs::remove_file(&matches[0])?;
                 Ok(())
             }
             _ => Err(StorageError::Validation(format!(
@@ -295,74 +366,136 @@ impl MemoryStore {
         }
     }
 
-    /// List all memories (returns index entries)
-    pub fn list(&self) -> Result<Vec<index::IndexEntry>> {
-        let mut all_entries = Vec::new();
+    /// Resolve a prefix ID to a full ID using the LanceDB index.
+    fn resolve_full_id(&self, id: &str) -> Result<String> {
+        let entries = self.list()?;
+        let matches: Vec<&IndexEntry> = entries.iter().filter(|e| e.id.starts_with(id)).collect();
 
-        // Load shared index
-        let shared_index_path = paths::project_dir(&self.project_dir).join("index.json");
-        if let Ok(idx) = index::load_index(&shared_index_path) {
-            all_entries.extend(idx.memories);
+        match matches.len() {
+            0 => Err(StorageError::NotFound(id.to_string())),
+            1 => Ok(matches[0].id.clone()),
+            _ => Err(StorageError::Validation(format!(
+                "Ambiguous ID prefix '{}': matches {} memories",
+                id,
+                matches.len()
+            ))),
         }
-
-        // Load personal index
-        let personal_index_path = paths::personal_dir(&self.project_id)?.join("index.json");
-        if let Ok(idx) = index::load_index(&personal_index_path) {
-            all_entries.extend(idx.memories);
-        }
-
-        Ok(all_entries)
     }
 
-    /// Rebuild index from memory files
-    pub fn reindex(&self) -> Result<usize> {
+    /// Reindex all .md files in a directory with a given visibility.
+    fn reindex_dir(&self, dir: &Path, visibility: Visibility) -> Result<usize> {
         let mut count = 0;
-
-        // Reindex shared memories
-        let shared_dir = paths::memories_dir(&self.project_dir);
-        if shared_dir.exists() {
-            let idx = index::rebuild_index_from_files(&shared_dir)?;
-            count += idx.memories.len();
-            let index_path = paths::project_dir(&self.project_dir).join("index.json");
-            index::save_index(&index_path, &idx)?;
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("md") {
+                let content = fs::read_to_string(&path)?;
+                let memory = memory_file::parse_memory_file(&content)?;
+                let mut index_entry = IndexEntry::from(&memory);
+                index_entry.visibility = visibility;
+                self.lance_index.upsert(&index_entry, None).map_err(|e| {
+                    StorageError::Validation(format!("LanceDB upsert failed: {}", e))
+                })?;
+                count += 1;
+            }
         }
-
-        // Reindex personal memories
-        let personal_dir = paths::personal_memories_dir(&self.project_id)?;
-        if personal_dir.exists() {
-            let idx = index::rebuild_index_from_files(&personal_dir)?;
-            count += idx.memories.len();
-            let index_path = paths::personal_dir(&self.project_id)?.join("index.json");
-            index::save_index(&index_path, &idx)?;
-        }
-
-        // Update manifest stats
-        self.update_manifest_stats()?;
-
         Ok(count)
     }
 
-    // Helper methods
-
-    fn get_memories_dir(&self, visibility: &Visibility) -> Result<PathBuf> {
-        match visibility {
-            Visibility::Shared => Ok(paths::memories_dir(&self.project_dir)),
-            Visibility::Personal => paths::personal_memories_dir(&self.project_id),
+    /// Migrate legacy index.json into LanceDB if it exists and LanceDB is empty.
+    fn maybe_migrate_from_index_json(&self) -> Result<()> {
+        let shared_index_path = paths::project_dir(&self.project_dir).join("index.json");
+        if !shared_index_path.exists() {
+            return Ok(());
         }
-    }
 
-    fn get_index_path(&self, visibility: &Visibility) -> Result<PathBuf> {
-        match visibility {
-            Visibility::Shared => Ok(paths::project_dir(&self.project_dir).join("index.json")),
-            Visibility::Personal => Ok(paths::personal_dir(&self.project_id)?.join("index.json")),
+        // Check if LanceDB is already populated
+        let existing = self.lance_index.list().unwrap_or_default();
+        if !existing.is_empty() {
+            return Ok(());
         }
+
+        // Read old index.json
+        let content = fs::read_to_string(&shared_index_path)?;
+        let old_index: serde_json::Value = serde_json::from_str(&content)?;
+
+        if let Some(memories) = old_index.get("memories").and_then(|v| v.as_array()) {
+            for mem_val in memories {
+                // Parse the old IndexEntry format (which didn't have visibility)
+                if let Ok(old_entry) = serde_json::from_value::<OldIndexEntry>(mem_val.clone()) {
+                    let entry = IndexEntry {
+                        id: old_entry.id,
+                        type_: old_entry.type_,
+                        summary: old_entry.summary,
+                        physical: old_entry.physical,
+                        logical: old_entry.logical,
+                        tags: old_entry.tags,
+                        criticality: old_entry.criticality,
+                        confidence: old_entry.confidence,
+                        provenance_source: old_entry.provenance_source,
+                        status: old_entry.status,
+                        visibility: Visibility::Shared,
+                        created_at: old_entry.created_at,
+                        updated_at: old_entry.updated_at,
+                        expires_at: old_entry.expires_at,
+                    };
+                    let _ = self.lance_index.upsert(&entry, None);
+                }
+            }
+        }
+
+        // Also migrate personal index if it exists
+        if let Ok(personal_index_path) =
+            paths::personal_dir(&self.project_id).map(|p| p.join("index.json"))
+        {
+            if personal_index_path.exists() {
+                if let Ok(content) = fs::read_to_string(&personal_index_path) {
+                    if let Ok(old_index) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(memories) = old_index.get("memories").and_then(|v| v.as_array())
+                        {
+                            for mem_val in memories {
+                                if let Ok(old_entry) =
+                                    serde_json::from_value::<OldIndexEntry>(mem_val.clone())
+                                {
+                                    let entry = IndexEntry {
+                                        id: old_entry.id,
+                                        type_: old_entry.type_,
+                                        summary: old_entry.summary,
+                                        physical: old_entry.physical,
+                                        logical: old_entry.logical,
+                                        tags: old_entry.tags,
+                                        criticality: old_entry.criticality,
+                                        confidence: old_entry.confidence,
+                                        provenance_source: old_entry.provenance_source,
+                                        status: old_entry.status,
+                                        visibility: Visibility::Personal,
+                                        created_at: old_entry.created_at,
+                                        updated_at: old_entry.updated_at,
+                                        expires_at: old_entry.expires_at,
+                                    };
+                                    let _ = self.lance_index.upsert(&entry, None);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Rename personal index.json
+                let backup = personal_index_path.with_extension("json.bak");
+                let _ = fs::rename(&personal_index_path, &backup);
+            }
+        }
+
+        // Rename shared index.json to backup
+        let backup_path = shared_index_path.with_extension("json.bak");
+        let _ = fs::rename(&shared_index_path, &backup_path);
+
+        Ok(())
     }
 
     fn update_manifest_stats(&self) -> Result<()> {
         let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
         let mut manifest = manifest::load_manifest(&manifest_path)?;
 
-        // Count memories and collect logical scopes
         let entries = self.list()?;
         let memory_count = entries.len();
         let logical_scopes: Vec<String> = entries
@@ -381,12 +514,10 @@ impl MemoryStore {
     fn update_registry(dir: &Path, project_id: &str) -> Result<()> {
         let registry_path = paths::registry_path()?;
 
-        // Create registry directory if needed
         if let Some(parent) = registry_path.parent() {
             fs::create_dir_all(parent)?;
         }
 
-        // Load or create registry
         let mut registry = if registry_path.exists() {
             let content = fs::read_to_string(&registry_path)?;
             serde_json::from_str(&content).unwrap_or_default()
@@ -394,7 +525,6 @@ impl MemoryStore {
             Registry::default()
         };
 
-        // Update or add entry
         let abs_path = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         let path_str = abs_path.to_string_lossy().to_string();
 
@@ -413,13 +543,38 @@ impl MemoryStore {
             });
         }
 
-        // Save registry
         let content = serde_json::to_string_pretty(&registry)?;
         fs::write(&registry_path, content)?;
 
         Ok(())
     }
 }
+
+/// Legacy index entry format (pre-LanceDB migration).
+/// Matches the old `index.rs` IndexEntry which didn't have a visibility field.
+#[derive(Debug, Deserialize)]
+struct OldIndexEntry {
+    id: String,
+    #[serde(rename = "type")]
+    type_: MemoryType,
+    summary: String,
+    #[serde(default)]
+    physical: Vec<String>,
+    #[serde(default)]
+    logical: Vec<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    criticality: f64,
+    confidence: f64,
+    provenance_source: ProvenanceSource,
+    status: Status,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+use crate::types::{MemoryType, ProvenanceSource, Status};
 
 #[cfg(test)]
 mod tests {
@@ -449,17 +604,19 @@ mod tests {
         // Check main directories
         assert!(project_dir.join(".engramdb").exists());
         assert!(project_dir.join(".engramdb/memories").exists());
+        assert!(project_dir.join(".engramdb/lancedb").exists());
 
         // Check files
         assert!(project_dir.join(".engramdb/manifest.toml").exists());
         assert!(project_dir.join(".engramdb/config.toml").exists());
-        assert!(project_dir.join(".engramdb/index.json").exists());
+
+        // No index.json should be created
+        assert!(!project_dir.join(".engramdb/index.json").exists());
 
         // Check personal directories
         assert!(paths::personal_memories_dir(&store.project_id)
             .unwrap()
             .exists());
-        assert!(paths::lancedb_dir(&store.project_id).unwrap().exists());
     }
 
     #[test]
@@ -502,11 +659,9 @@ mod tests {
 
         store.create(&memory).unwrap();
 
-        // Should match with prefix
         let retrieved = store.get("abcd1234").unwrap();
         assert_eq!(retrieved.id, "abcd1234-5678-90ab-cdef-1234567890ab");
 
-        // Even shorter prefix
         let retrieved = store.get("abcd").unwrap();
         assert_eq!(retrieved.id, "abcd1234-5678-90ab-cdef-1234567890ab");
     }
@@ -518,8 +673,6 @@ mod tests {
 
         let store = MemoryStore::init(project_dir).unwrap();
 
-        // Create two memories with same prefix
-        // We'll manually set IDs to ensure they start the same
         let memory1 =
             create_test_memory("aaaa1111-0000-0000-0000-000000000001", Visibility::Shared);
         let memory2 =
@@ -528,15 +681,11 @@ mod tests {
         store.create(&memory1).unwrap();
         store.create(&memory2).unwrap();
 
-        // Verify both exist with full IDs
         assert!(store.get("aaaa1111-0000-0000-0000-000000000001").is_ok());
         assert!(store.get("aaaa2222-0000-0000-0000-000000000002").is_ok());
-
-        // Verify both can be found with unique prefixes
         assert!(store.get("aaaa1111").is_ok());
         assert!(store.get("aaaa2222").is_ok());
 
-        // Should fail with ambiguous prefix "aaaa"
         let result = store.get("aaaa");
         assert!(result.is_err());
         match result {
@@ -578,7 +727,6 @@ mod tests {
 
         store.create(&memory).unwrap();
 
-        // Update summary
         let mut update = MemoryUpdate::new();
         update.summary = Some("Updated summary".to_string());
 
@@ -586,7 +734,7 @@ mod tests {
 
         let retrieved = store.get("test-update-123").unwrap();
         assert_eq!(retrieved.summary, "Updated summary");
-        assert_eq!(retrieved.content, "Test content"); // Content unchanged
+        assert_eq!(retrieved.content, "Test content");
     }
 
     #[test]
@@ -598,14 +746,10 @@ mod tests {
         let memory = create_test_memory("test-delete-123", Visibility::Shared);
 
         store.create(&memory).unwrap();
-
-        // Verify it exists
         assert!(store.get("test-delete-123").is_ok());
 
-        // Delete it
         store.delete("test-delete-123").unwrap();
 
-        // Verify it's gone
         let result = store.get("test-delete-123");
         assert!(result.is_err());
         match result {
@@ -621,7 +765,6 @@ mod tests {
 
         let store = MemoryStore::init(project_dir).unwrap();
 
-        // Create 3 memories
         let memory1 = create_test_memory("list-test-1", Visibility::Shared);
         let memory2 = create_test_memory("list-test-2", Visibility::Shared);
         let memory3 = create_test_memory("list-test-3", Visibility::Personal);
@@ -646,35 +789,48 @@ mod tests {
 
         let store = MemoryStore::init(project_dir).unwrap();
 
-        // Create some memories
         let memory1 = create_test_memory("reindex-test-1", Visibility::Shared);
         let memory2 = create_test_memory("reindex-test-2", Visibility::Shared);
 
         store.create(&memory1).unwrap();
         store.create(&memory2).unwrap();
 
-        // Verify they're in the index
         assert_eq!(store.list().unwrap().len(), 2);
 
-        // Overwrite index with empty
-        let empty_index = index::Index::default();
-        let index_path = project_dir.join(".engramdb/index.json");
-        index::save_index(&index_path, &empty_index).unwrap();
-
-        // Verify index is now empty
-        let loaded = index::load_index(&index_path).unwrap();
-        assert_eq!(loaded.memories.len(), 0);
+        // Clear LanceDB to simulate corruption
+        store.lance_index.clear().unwrap();
+        assert_eq!(store.list().unwrap().len(), 0);
 
         // Reindex
         let count = store.reindex().unwrap();
         assert_eq!(count, 2);
 
-        // Verify entries are restored
         let entries = store.list().unwrap();
         assert_eq!(entries.len(), 2);
 
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
         assert!(ids.contains(&"reindex-test-1"));
         assert!(ids.contains(&"reindex-test-2"));
+    }
+
+    #[test]
+    fn test_list_includes_visibility() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+
+        let store = MemoryStore::init(project_dir).unwrap();
+
+        let shared = create_test_memory("vis-shared", Visibility::Shared);
+        let personal = create_test_memory("vis-personal", Visibility::Personal);
+
+        store.create(&shared).unwrap();
+        store.create(&personal).unwrap();
+
+        let entries = store.list().unwrap();
+        let shared_entry = entries.iter().find(|e| e.id == "vis-shared").unwrap();
+        let personal_entry = entries.iter().find(|e| e.id == "vis-personal").unwrap();
+
+        assert_eq!(shared_entry.visibility, Visibility::Shared);
+        assert_eq!(personal_entry.visibility, Visibility::Personal);
     }
 }

@@ -8,7 +8,7 @@
 //! The formatter automatically detects terminal capabilities and adjusts formatting
 //! accordingly.
 
-use crate::storage::index::IndexEntry;
+use crate::storage::IndexEntry;
 use crate::types::{Memory, MemoryType, Status};
 use owo_colors::{OwoColorize, Stream};
 use serde_json;

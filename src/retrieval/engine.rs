@@ -9,7 +9,6 @@ use crate::embeddings::EmbeddingProvider;
 use crate::scoring::{composite_score, ScoreBreakdown, ScoringContext};
 use crate::storage::{MemoryStore, Result};
 use crate::types::{EngramConfig, Memory, MemoryType};
-use crate::vector::{VectorMetadata, VectorStore};
 use chrono::Utc;
 use std::collections::HashMap;
 
@@ -89,76 +88,51 @@ pub struct RetrievalEngine {
     store: MemoryStore,
     config: EngramConfig,
     embedding_provider: Option<Box<dyn EmbeddingProvider>>,
-    vector_store: Option<Box<dyn VectorStore>>,
 }
 
 impl RetrievalEngine {
     /// Create a new retrieval engine.
     ///
-    /// Embeddings are not enabled by default. Use [`with_embeddings`](Self::with_embeddings)
-    /// to add semantic search capabilities.
+    /// Embeddings are not enabled by default. Use [`with_embedding_provider`](Self::with_embedding_provider)
+    /// to add semantic search capabilities. Vector storage is handled by the
+    /// MemoryStore's integrated LanceDB.
     pub fn new(store: MemoryStore, config: EngramConfig) -> Self {
         Self {
             store,
             config,
             embedding_provider: None,
-            vector_store: None,
         }
     }
 
-    /// Add embedding support to the retrieval engine.
+    /// Add an embedding provider to the retrieval engine.
     ///
-    /// Enables semantic search capabilities. Returns self for method chaining.
-    pub fn with_embeddings(
-        mut self,
-        provider: Box<dyn EmbeddingProvider>,
-        vector_store: Box<dyn VectorStore>,
-    ) -> Self {
+    /// Enables semantic search capabilities. Vector storage is handled by
+    /// the MemoryStore's integrated LanceDB. Returns self for method chaining.
+    pub fn with_embedding_provider(mut self, provider: Box<dyn EmbeddingProvider>) -> Self {
         self.embedding_provider = Some(provider);
-        self.vector_store = Some(vector_store);
         self
     }
 
     /// Check if embeddings are available.
     ///
-    /// Returns true if both an embedding provider and vector store are configured.
+    /// Returns true if an embedding provider is configured. Vector storage
+    /// is always available via the MemoryStore's LanceDB.
     pub fn embeddings_available(&self) -> bool {
-        self.embedding_provider.is_some() && self.vector_store.is_some()
+        self.embedding_provider.is_some()
     }
 
-    /// Embed and upsert a memory into the vector store.
+    /// Embed and upsert a memory's vector into the store.
     ///
-    /// Generates an embedding for the memory's content and stores it in the vector database
-    /// for future semantic search. Does nothing if embeddings are not available.
+    /// Generates an embedding for the memory's content and stores it in LanceDB
+    /// for future semantic search. Does nothing if no embedding provider is configured.
     ///
     /// # Arguments
     /// * `memory` - The memory to embed
     pub fn embed_memory(&self, memory: &Memory) -> anyhow::Result<()> {
-        if let (Some(provider), Some(vs)) = (&self.embedding_provider, &self.vector_store) {
+        if let Some(provider) = &self.embedding_provider {
             let text = format!("{} {}", memory.summary, memory.content);
             let vector = provider.embed(&text)?;
-            let metadata = VectorMetadata {
-                type_: format!("{:?}", memory.type_).to_lowercase(),
-                criticality: memory.criticality,
-                physical: memory.physical.clone(),
-                logical: memory.logical.clone(),
-                tags: memory.tags.clone(),
-            };
-            vs.upsert(&memory.id, vector, metadata)?;
-        }
-        Ok(())
-    }
-
-    /// Remove a memory from the vector store.
-    ///
-    /// Deletes the embedding associated with this memory ID. Does nothing if
-    /// embeddings are not available.
-    ///
-    /// # Arguments
-    /// * `id` - The memory ID to remove
-    pub fn remove_from_vector_store(&self, id: &str) -> anyhow::Result<()> {
-        if let Some(vs) = &self.vector_store {
-            vs.delete(id)?;
+            self.store.update_vector(&memory.id, vector)?;
         }
         Ok(())
     }
@@ -202,13 +176,13 @@ impl RetrievalEngine {
 
         // Step 2.5: If query text provided and embeddings available, get semantic scores
         let semantic_scores_map: Option<HashMap<String, f64>> = if let Some(ref q) = query.query {
-            if let (Some(provider), Some(vs)) = (&self.embedding_provider, &self.vector_store) {
+            if let Some(provider) = &self.embedding_provider {
                 if let Ok(query_vector) = provider.embed(q) {
                     let limit = query
                         .max_results
                         .unwrap_or(self.config.retrieval.max_results)
                         * 3;
-                    if let Ok(matches) = vs.search(query_vector, limit) {
+                    if let Ok(matches) = self.store.vector_search(query_vector, limit) {
                         Some(matches.into_iter().map(|m| (m.id, m.score)).collect())
                     } else {
                         None
@@ -377,20 +351,21 @@ impl RetrievalEngine {
         let keyword_results = crate::search::keyword_search(query_text, &memories);
 
         // Step 4: Get semantic scores if embeddings available
-        let semantic_scores: HashMap<String, f64> =
-            if let (Some(provider), Some(vs)) = (&self.embedding_provider, &self.vector_store) {
-                if let Ok(query_vector) = provider.embed(query_text) {
-                    vs.search(query_vector, memories.len())
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|m| (m.id, m.score))
-                        .collect()
-                } else {
-                    HashMap::new()
-                }
+        let semantic_scores: HashMap<String, f64> = if let Some(provider) = &self.embedding_provider
+        {
+            if let Ok(query_vector) = provider.embed(query_text) {
+                self.store
+                    .vector_search(query_vector, memories.len())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|m| (m.id, m.score))
+                    .collect()
             } else {
                 HashMap::new()
-            };
+            }
+        } else {
+            HashMap::new()
+        };
 
         // Step 5: Build a map of keyword scores by index
         let keyword_map: HashMap<usize, f64> = keyword_results.into_iter().collect();

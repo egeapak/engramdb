@@ -25,7 +25,7 @@
 //!
 //! - Uses `storage::MemoryStore` to load memories from disk.
 //! - Uses `scoring::composite_score` to rank memories by relevance.
-//! - Uses `embeddings::EmbeddingProvider` and `vector::VectorStore` for semantic search (optional).
+//! - Uses `embeddings::EmbeddingProvider` for semantic search (optional); vectors stored in LanceDB via `MemoryStore`.
 //! - Uses `scope::physical` for file path pattern matching.
 
 pub mod engine;

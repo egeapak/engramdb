@@ -140,7 +140,7 @@ mod tests {
         // Check files
         assert!(project_dir.join(".engramdb/manifest.toml").exists());
         assert!(project_dir.join(".engramdb/config.toml").exists());
-        assert!(project_dir.join(".engramdb/index.json").exists());
+        assert!(project_dir.join(".engramdb/lancedb").exists());
     }
 
     #[test]

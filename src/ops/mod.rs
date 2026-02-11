@@ -40,27 +40,19 @@ pub use update::{update_memory, UpdateParams};
 use crate::embeddings::OnnxProvider;
 use crate::retrieval::engine::RetrievalEngine;
 use crate::storage::MemoryStore;
-use crate::vector::LanceDbStore;
 
 /// Build a `RetrievalEngine` with optional embeddings from a store + config path.
 ///
 /// This is the shared helper that CLI and MCP callers use so they don't duplicate
-/// the ONNX / LanceDB wiring.  Returns an engine that always works for storage
-/// operations; embeddings are attached on a best-effort basis.
+/// the ONNX wiring.  Returns an engine that always works for storage operations;
+/// embeddings are attached on a best-effort basis.  Vector storage is handled
+/// by the MemoryStore's integrated LanceDB.
 pub fn build_engine(store: MemoryStore, config_path: &std::path::Path) -> RetrievalEngine {
     let config = crate::storage::config::load_config(config_path).unwrap_or_default();
-    let project_id = store.project_id.clone();
     let mut engine = RetrievalEngine::new(store, config);
 
     if let Some(provider) = OnnxProvider::try_new() {
-        if let Some(lance_path) = crate::storage::paths::lancedb_dir(&project_id)
-            .ok()
-            .and_then(|p| std::fs::canonicalize(p).ok())
-        {
-            if let Ok(vector_store) = LanceDbStore::new(lance_path, "memories".to_string(), 384) {
-                engine = engine.with_embeddings(Box::new(provider), Box::new(vector_store));
-            }
-        }
+        engine = engine.with_embedding_provider(Box::new(provider));
     }
 
     engine

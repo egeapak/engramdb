@@ -8,4 +8,3 @@ pub mod scoring;
 pub mod search;
 pub mod storage;
 pub mod types;
-pub mod vector;

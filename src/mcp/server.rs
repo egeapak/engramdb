@@ -12,7 +12,6 @@ use rmcp::tool;
 use rmcp::{ServerHandler, ServiceExt};
 use serde::{Deserialize, Serialize};
 
-use crate::embeddings::OnnxProvider;
 use crate::mcp::error::{error_response, ErrorCode};
 use crate::ops;
 use crate::retrieval::engine::{RetrievalEngine, RetrievalQuery};
@@ -20,7 +19,6 @@ use crate::retrieval::filters::SearchFilters;
 use crate::storage::config::load_config;
 use crate::storage::MemoryStore;
 use crate::types::{Provenance, Status, Visibility};
-use crate::vector::LanceDbStore;
 
 // ---------------------------------------------------------------------------
 // Input parameter structs for tool aggregation
@@ -385,22 +383,8 @@ impl EngramDbServer {
     /// Build a RetrievalEngine with optional embeddings support.
     fn build_engine(&self) -> Result<RetrievalEngine, String> {
         let store = self.open_store()?;
-        let config = self.load_config();
-        let mut engine = RetrievalEngine::new(store, config);
-
-        if let Some(provider) = OnnxProvider::try_new() {
-            let store_for_id = self.open_store()?;
-            if let Some(lance_path) = crate::storage::paths::lancedb_dir(&store_for_id.project_id)
-                .ok()
-                .and_then(|p| std::fs::canonicalize(p).ok())
-            {
-                if let Ok(vector_store) = LanceDbStore::new(lance_path, "memories".to_string(), 384)
-                {
-                    engine = engine.with_embeddings(Box::new(provider), Box::new(vector_store));
-                }
-            }
-        }
-        Ok(engine)
+        let config_path = self.dir.join(".engramdb").join("config.toml");
+        Ok(ops::build_engine(store, &config_path))
     }
 }
 

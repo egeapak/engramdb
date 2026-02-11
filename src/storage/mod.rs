@@ -10,7 +10,7 @@
 
 pub mod config;
 pub mod error;
-pub mod index;
+pub mod lance_index;
 pub mod manifest;
 pub mod memory_file;
 pub mod paths;
@@ -18,6 +18,6 @@ pub mod project_id;
 pub mod store;
 
 pub use error::{Result, StorageError};
-pub use index::{Index, IndexEntry};
+pub use lance_index::{IndexEntry, VectorMatch};
 pub use manifest::Manifest;
 pub use store::MemoryStore;

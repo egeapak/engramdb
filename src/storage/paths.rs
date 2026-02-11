@@ -49,12 +49,9 @@ pub fn personal_memories_dir(project_id: &str) -> Result<PathBuf> {
     Ok(personal_dir(project_id)?.join("memories"))
 }
 
-/// Returns the LanceDB directory for a given project ID
-pub fn lancedb_dir(project_id: &str) -> Result<PathBuf> {
-    Ok(global_config_dir()?
-        .join("projects")
-        .join(project_id)
-        .join("lancedb"))
+/// Returns the project-local LanceDB directory (.engramdb/lancedb/).
+pub fn lancedb_dir(project_dir: &Path) -> PathBuf {
+    project_dir.join(".engramdb").join("lancedb")
 }
 
 /// Returns the global registry path (`<global_config_dir>/registry.json`)
@@ -139,10 +136,9 @@ mod tests {
 
     #[test]
     fn test_lancedb_dir() {
-        let result = lancedb_dir("abc123").unwrap();
-        assert!(result
-            .to_string_lossy()
-            .ends_with("projects/abc123/lancedb"));
+        let path = Path::new("/tmp/my_project");
+        let result = lancedb_dir(path);
+        assert_eq!(result, PathBuf::from("/tmp/my_project/.engramdb/lancedb"));
     }
 
     #[test]

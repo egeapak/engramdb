@@ -1,11 +1,8 @@
 //! Rebuild index and re-embed memories.
 
 use crate::cli::output::OutputFormatter;
-use crate::embeddings::OnnxProvider;
 use crate::ops::reindex;
-use crate::retrieval::engine::RetrievalEngine;
 use crate::storage::MemoryStore;
-use crate::vector::LanceDbStore;
 use anyhow::Result;
 use std::path::Path;
 
@@ -26,22 +23,13 @@ pub fn run_reindex(
 ) -> Result<()> {
     let store = MemoryStore::open(dir)?;
     let config_path = dir.join(".engramdb").join("config.toml");
-    let config = crate::storage::config::load_config(&config_path)?;
 
     // Set up engine with embeddings if not index_only
     let engine = if !index_only {
-        let mut engine = RetrievalEngine::new(MemoryStore::open(dir)?, config);
-        if let (Some(provider), Some(lancedb_path)) = (
-            OnnxProvider::try_new(),
-            crate::storage::paths::lancedb_dir(&store.project_id)
-                .ok()
-                .and_then(|p| std::fs::canonicalize(p).ok()),
-        ) {
-            if let Ok(vector_store) = LanceDbStore::new(lancedb_path, "memories".to_string(), 384) {
-                engine = engine.with_embeddings(Box::new(provider), Box::new(vector_store));
-            }
-        }
-        Some(engine)
+        Some(crate::ops::build_engine(
+            MemoryStore::open(dir)?,
+            &config_path,
+        ))
     } else {
         None
     };
