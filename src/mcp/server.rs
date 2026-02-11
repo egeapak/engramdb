@@ -35,8 +35,8 @@ struct CreateInput {
     #[schemars(description = "Core knowledge to store (max ~500 tokens)")]
     content: String,
 
-    #[schemars(description = "One-line summary (auto-generated if omitted)")]
-    summary: Option<String>,
+    #[schemars(description = "One-line summary, max 100 chars (required)")]
+    summary: String,
 
     #[schemars(description = "Extended details (lazy-loaded)")]
     details: Option<String>,

@@ -11,7 +11,7 @@ use chrono::Duration;
 pub struct CreateParams {
     pub type_: MemoryType,
     pub content: String,
-    pub summary: Option<String>,
+    pub summary: String,
     pub physical: Vec<String>,
     pub logical: Vec<String>,
     pub tags: Vec<String>,
@@ -34,6 +34,18 @@ pub struct CreateResult {
     pub summary: String,
 }
 
+/// Validate that a summary is non-empty and within the character limit.
+pub fn validate_summary(summary: &str) -> Result<()> {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("Summary cannot be empty");
+    }
+    if trimmed.len() > 100 {
+        anyhow::bail!("Summary must be <= 100 characters (got {})", trimmed.len());
+    }
+    Ok(())
+}
+
 /// Create a new memory in the store.
 ///
 /// If `engine` is provided and has embeddings available, the memory is
@@ -43,15 +55,8 @@ pub async fn create_memory(
     params: CreateParams,
     engine: Option<&RetrievalEngine>,
 ) -> Result<CreateResult> {
-    // Generate summary if not provided (truncate content to 100 chars)
-    let summary = params.summary.unwrap_or_else(|| {
-        let max_len = 100;
-        if params.content.len() <= max_len {
-            params.content.clone()
-        } else {
-            format!("{}...", &params.content[..max_len])
-        }
-    });
+    validate_summary(&params.summary)?;
+    let summary = params.summary;
 
     // Use default physical scope if empty
     let physical = if params.physical.is_empty() {
@@ -146,7 +151,7 @@ mod tests {
         CreateParams {
             type_: MemoryType::Decision,
             content: "Test content".to_string(),
-            summary: None,
+            summary: "Test summary".to_string(),
             physical: vec![],
             logical: vec![],
             tags: vec![],
@@ -283,5 +288,45 @@ mod tests {
         assert_eq!(decay.strategy, DecayStrategy::Linear);
         assert_eq!(decay.ttl, Some(Duration::seconds(86400)));
         assert_eq!(decay.half_life, None); // Should be None for linear
+    }
+
+    #[test]
+    fn test_validate_summary_rejects_empty() {
+        assert!(validate_summary("").is_err());
+        assert!(validate_summary("   ").is_err());
+        assert!(validate_summary("\n\t").is_err());
+    }
+
+    #[test]
+    fn test_validate_summary_rejects_too_long() {
+        let long = "a".repeat(101);
+        assert!(validate_summary(&long).is_err());
+    }
+
+    #[test]
+    fn test_validate_summary_accepts_valid() {
+        assert!(validate_summary("Short summary").is_ok());
+        assert!(validate_summary(&"a".repeat(100)).is_ok());
+        assert!(validate_summary("x").is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_create_memory_fails_with_empty_summary() {
+        let (_temp, store) = setup_test_store().await;
+        let mut params = minimal_create_params();
+        params.summary = "".to_string();
+        let result = create_memory(&store, params, None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn test_create_memory_fails_with_too_long_summary() {
+        let (_temp, store) = setup_test_store().await;
+        let mut params = minimal_create_params();
+        params.summary = "a".repeat(101);
+        let result = create_memory(&store, params, None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("100"));
     }
 }

@@ -25,7 +25,7 @@ pub use compress::{
     compress_apply, compress_candidates, CompressApplyResult, CompressCandidate,
     CompressCandidatesResult,
 };
-pub use create::{create_memory, CreateParams, CreateResult};
+pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
 pub use delete::delete_memory;
 pub use gc::{gc_memories, GcResult};
 pub use get::get_memory;

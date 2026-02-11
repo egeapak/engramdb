@@ -101,7 +101,7 @@ pub async fn compress_apply(
         CreateParams {
             type_: MemoryType::Context,
             content,
-            summary: Some(summary),
+            summary,
             physical: vec!["/".to_string()],
             logical: scope.unwrap_or_default(),
             tags: tags.unwrap_or_default(),
@@ -152,7 +152,7 @@ mod tests {
             CreateParams {
                 type_,
                 content: format!("Content for {}", summary),
-                summary: Some(summary.to_string()),
+                summary: summary.to_string(),
                 physical: vec!["/".to_string()],
                 logical,
                 tags: vec![],

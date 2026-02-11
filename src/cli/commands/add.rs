@@ -118,6 +118,10 @@ async fn run_direct_mode(
     )?;
     let visibility = parse_visibility(params.visibility_str.as_deref().unwrap_or("shared"))?;
 
+    let summary = params.summary.ok_or_else(|| {
+        anyhow!("Summary is required. Use --summary or -s flag, or use interactive mode.")
+    })?;
+
     let result = create_memory(
         store,
         CreateParams {
@@ -125,7 +129,7 @@ async fn run_direct_mode(
             content: params
                 .content
                 .ok_or_else(|| anyhow!("Content is required"))?,
-            summary: params.summary,
+            summary,
             physical: params.physical,
             logical: params.logical,
             tags: params.tags,
@@ -272,7 +276,7 @@ async fn run_interactive_mode(
         CreateParams {
             type_,
             content,
-            summary: Some(summary),
+            summary,
             physical,
             logical,
             tags,
@@ -359,7 +363,7 @@ async fn run_editor_mode(
         CreateParams {
             type_: parsed.type_,
             content: parsed.content,
-            summary: Some(parsed.summary),
+            summary: parsed.summary,
             physical: parsed.physical,
             logical: parsed.logical,
             tags: parsed.tags,
