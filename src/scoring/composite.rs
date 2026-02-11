@@ -439,6 +439,137 @@ mod tests {
     }
 
     #[test]
+    fn test_trust_multiplier_reduces_score_proportionally() {
+        let config = EngramConfig::default();
+        let context = ScoringContext::scope_only(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+        );
+        let now = Utc::now();
+
+        // Human provenance (trust = 1.0)
+        let human_memory = create_test_memory();
+        let human_breakdown = composite_score(&human_memory, &context, &config, now);
+
+        // Agent provenance (trust = 0.85)
+        let mut agent_memory = create_test_memory();
+        agent_memory.provenance = Provenance::agent("test-agent");
+        let agent_breakdown = composite_score(&agent_memory, &context, &config, now);
+
+        // Inferred provenance (trust = 0.6)
+        let mut inferred_memory = create_test_memory();
+        inferred_memory.provenance = Provenance::inferred();
+        let inferred_breakdown = composite_score(&inferred_memory, &context, &config, now);
+
+        // Imported provenance (trust = 0.7)
+        let mut imported_memory = create_test_memory();
+        imported_memory.provenance = Provenance::imported();
+        let imported_breakdown = composite_score(&imported_memory, &context, &config, now);
+
+        // Trust is a multiplier, so scores should be exactly proportional
+        let human_score = human_breakdown.final_score;
+        assert!(
+            (agent_breakdown.final_score - human_score * 0.85).abs() < 0.001,
+            "agent score {} should be {} (human * 0.85)",
+            agent_breakdown.final_score,
+            human_score * 0.85
+        );
+        assert!(
+            (imported_breakdown.final_score - human_score * 0.7).abs() < 0.001,
+            "imported score {} should be {} (human * 0.7)",
+            imported_breakdown.final_score,
+            human_score * 0.7
+        );
+        assert!(
+            (inferred_breakdown.final_score - human_score * 0.6).abs() < 0.001,
+            "inferred score {} should be {} (human * 0.6)",
+            inferred_breakdown.final_score,
+            human_score * 0.6
+        );
+
+        // Verify ordering: human > agent > imported > inferred
+        assert!(human_score > agent_breakdown.final_score);
+        assert!(agent_breakdown.final_score > imported_breakdown.final_score);
+        assert!(imported_breakdown.final_score > inferred_breakdown.final_score);
+    }
+
+    #[test]
+    fn test_trust_multiplier_with_semantic() {
+        let config = EngramConfig::default();
+        let context = ScoringContext::with_semantic(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+            "oauth authentication".to_string(),
+            0.9,
+        );
+        let now = Utc::now();
+
+        let human_memory = create_test_memory();
+        let human_score = composite_score(&human_memory, &context, &config, now).final_score;
+
+        let mut inferred_memory = create_test_memory();
+        inferred_memory.provenance = Provenance::inferred();
+        let inferred_score = composite_score(&inferred_memory, &context, &config, now).final_score;
+
+        // Inferred should be exactly 0.6x of human (trust multiplier applies to full base)
+        assert!(
+            (inferred_score - human_score * 0.6).abs() < 0.001,
+            "with semantic: inferred {} should be {} (human * 0.6)",
+            inferred_score,
+            human_score * 0.6
+        );
+    }
+
+    #[test]
+    fn test_trust_multiplier_combined_with_challenge() {
+        let config = EngramConfig::default();
+        let context = ScoringContext::scope_only(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+        );
+        let now = Utc::now();
+
+        // Human, active
+        let human_score =
+            composite_score(&create_test_memory(), &context, &config, now).final_score;
+
+        // Inferred + challenged: score = base * 0.6 * 0.7
+        let mut challenged_inferred = create_test_memory();
+        challenged_inferred.provenance = Provenance::inferred();
+        challenged_inferred.status = Status::Challenged;
+        let ci_score = composite_score(&challenged_inferred, &context, &config, now).final_score;
+
+        assert!(
+            (ci_score - human_score * 0.6 * 0.7).abs() < 0.001,
+            "challenged inferred {} should be {} (human * 0.6 * 0.7)",
+            ci_score,
+            human_score * 0.6 * 0.7
+        );
+    }
+
+    #[test]
+    fn test_breakdown_keyword_none_for_retrieve() {
+        let memory = create_test_memory();
+        let context = ScoringContext::with_semantic(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+            "test query".to_string(),
+            0.8,
+        );
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let breakdown = composite_score(&memory, &context, &config, now);
+
+        // keyword should always be None for retrieve (composite_score)
+        assert!(breakdown.keyword.is_none());
+        // criticality should be the raw value
+        assert_eq!(breakdown.criticality, 0.8);
+        // relevance should be criticality * decay
+        assert_eq!(breakdown.relevance, 0.8 * breakdown.decay);
+    }
+
+    #[test]
     fn test_score_breakdown_degraded_mode() {
         let memory = create_test_memory();
         let context = ScoringContext::with_query_degraded(

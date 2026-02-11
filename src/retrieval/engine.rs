@@ -908,4 +908,254 @@ mod tests {
         // Decay should be real
         assert_eq!(results[0].score_breakdown.decay, 1.0);
     }
+
+    #[test]
+    fn test_search_applies_trust_multiplier() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let config = EngramConfig::default();
+
+        // Human memory
+        let mut human_mem = Memory::new(
+            MemoryType::Decision,
+            "Authentication system",
+            "Details about authentication",
+            Provenance::human(),
+        );
+        human_mem.visibility = Visibility::Shared;
+        store.create(&human_mem).unwrap();
+
+        // Inferred memory with same content
+        let mut inferred_mem = Memory::new(
+            MemoryType::Decision,
+            "Authentication system",
+            "Details about authentication",
+            Provenance::inferred(),
+        );
+        inferred_mem.visibility = Visibility::Shared;
+        store.create(&inferred_mem).unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+        let filters = SearchFilters::default();
+        let results = engine.search("authentication", &filters).unwrap();
+
+        assert_eq!(results.len(), 2);
+        // Both should have same keyword score, but different trust
+        let human_result = results
+            .iter()
+            .find(|r| r.memory.id == human_mem.id)
+            .unwrap();
+        let inferred_result = results
+            .iter()
+            .find(|r| r.memory.id == inferred_mem.id)
+            .unwrap();
+
+        assert_eq!(human_result.score_breakdown.trust, 1.0);
+        assert_eq!(inferred_result.score_breakdown.trust, 0.6);
+        // Inferred should score exactly 0.6x of human
+        assert!(
+            (inferred_result.score - human_result.score * 0.6).abs() < 0.001,
+            "inferred {} should be {} (human * 0.6)",
+            inferred_result.score,
+            human_result.score * 0.6
+        );
+    }
+
+    #[test]
+    fn test_search_applies_decay() {
+        use crate::types::{Decay, EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use chrono::{Duration, Utc};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let config = EngramConfig::default();
+
+        // Fresh memory (no decay)
+        let mut fresh = Memory::new(
+            MemoryType::Decision,
+            "Authentication system",
+            "Details about authentication",
+            Provenance::human(),
+        );
+        fresh.visibility = Visibility::Shared;
+        store.create(&fresh).unwrap();
+
+        // Old memory with exponential decay at half-life
+        let mut old = Memory::new(
+            MemoryType::Decision,
+            "Authentication system",
+            "Details about authentication",
+            Provenance::human(),
+        );
+        old.visibility = Visibility::Shared;
+        old.created_at = Utc::now() - Duration::days(7);
+        old.decay = Some(Decay::exponential(Duration::days(7)));
+        store.create(&old).unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+        let filters = SearchFilters::default();
+        let results = engine.search("authentication", &filters).unwrap();
+
+        assert_eq!(results.len(), 2);
+        let fresh_result = results.iter().find(|r| r.memory.id == fresh.id).unwrap();
+        let old_result = results.iter().find(|r| r.memory.id == old.id).unwrap();
+
+        // Fresh has decay=1.0, old has decay~=0.5
+        assert_eq!(fresh_result.score_breakdown.decay, 1.0);
+        assert!((old_result.score_breakdown.decay - 0.5).abs() < 0.1);
+        // Old should score roughly half of fresh
+        assert!(old_result.score < fresh_result.score);
+        assert!(
+            (old_result.score - fresh_result.score * old_result.score_breakdown.decay).abs() < 0.01
+        );
+    }
+
+    #[test]
+    fn test_search_applies_challenge_penalty() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Status, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let config = EngramConfig::default();
+
+        // Active memory
+        let mut active = Memory::new(
+            MemoryType::Decision,
+            "Authentication system",
+            "Details about authentication",
+            Provenance::human(),
+        );
+        active.visibility = Visibility::Shared;
+        store.create(&active).unwrap();
+
+        // Challenged memory with same content
+        let mut challenged = Memory::new(
+            MemoryType::Decision,
+            "Authentication system",
+            "Details about authentication",
+            Provenance::human(),
+        );
+        challenged.visibility = Visibility::Shared;
+        challenged.status = Status::Challenged;
+        store.create(&challenged).unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+        let filters = SearchFilters::default();
+        let results = engine.search("authentication", &filters).unwrap();
+
+        assert_eq!(results.len(), 2);
+        let active_result = results.iter().find(|r| r.memory.id == active.id).unwrap();
+        let challenged_result = results
+            .iter()
+            .find(|r| r.memory.id == challenged.id)
+            .unwrap();
+
+        // Challenged should be exactly 0.7x of active
+        assert!(
+            (challenged_result.score - active_result.score * 0.7).abs() < 0.001,
+            "challenged {} should be {} (active * 0.7)",
+            challenged_result.score,
+            active_result.score * 0.7
+        );
+    }
+
+    #[test]
+    fn test_search_threshold_filters_results() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+
+        let mut config = EngramConfig::default();
+        // Set a high threshold that filters out low-scoring results
+        config.search.threshold = 100.0;
+
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Authentication system",
+            "Details about authentication",
+            Provenance::human(),
+        );
+        memory.visibility = Visibility::Shared;
+        store.create(&memory).unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+        let filters = SearchFilters::default();
+        let results = engine.search("authentication", &filters).unwrap();
+
+        // Keyword score is at most ~4.0, well below threshold of 100
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_threshold_zero_returns_all() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+
+        let mut config = EngramConfig::default();
+        config.search.threshold = 0.0;
+
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Authentication system",
+            "Details about auth",
+            Provenance::human(),
+        );
+        memory.visibility = Visibility::Shared;
+        store.create(&memory).unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+        let filters = SearchFilters::default();
+        let results = engine.search("authentication", &filters).unwrap();
+
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_search_breakdown_has_keyword_and_criticality() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path()).unwrap();
+        let config = EngramConfig::default();
+
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Authentication system",
+            "Details about authentication",
+            Provenance::human(),
+        );
+        memory.visibility = Visibility::Shared;
+        memory.criticality = 0.7;
+        store.create(&memory).unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+        let filters = SearchFilters::default();
+        let results = engine.search("authentication", &filters).unwrap();
+
+        assert_eq!(results.len(), 1);
+        let bd = &results[0].score_breakdown;
+        // keyword should be populated with raw score
+        assert!(bd.keyword.is_some());
+        // "authentication" matches in summary(3) + content(1) = 4.0
+        assert_eq!(bd.keyword.unwrap(), 4.0);
+        // criticality should be the raw value
+        assert_eq!(bd.criticality, 0.7);
+        // relevance should be criticality * decay
+        assert_eq!(bd.relevance, 0.7 * bd.decay);
+        // scope should be 0.0 for search
+        assert_eq!(bd.scope, 0.0);
+        // semantic should be None (no embeddings)
+        assert!(bd.semantic.is_none());
+    }
 }

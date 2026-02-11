@@ -424,4 +424,39 @@ scope = 0.30
             dg_sum
         );
     }
+
+    #[test]
+    fn test_search_config_custom_toml() {
+        let toml = r#"
+[search]
+semantic_weight = 5.0
+threshold = 0.25
+"#;
+        let config: EngramConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.search.semantic_weight, 5.0);
+        assert_eq!(config.search.threshold, 0.25);
+    }
+
+    #[test]
+    fn test_search_config_defaults_when_omitted() {
+        // Empty TOML: all sections use #[serde(default)] on EngramConfig
+        let config: EngramConfig = toml::from_str("").unwrap();
+        assert_eq!(config.search.semantic_weight, 3.0);
+        assert_eq!(config.search.threshold, 0.0);
+    }
+
+    #[test]
+    fn test_search_config_roundtrip() {
+        let mut config = EngramConfig::default();
+        config.search.semantic_weight = 7.5;
+        config.search.threshold = 0.1;
+
+        let temp_path = std::env::temp_dir().join("test_search_config_roundtrip.toml");
+        config.to_toml_file(&temp_path).unwrap();
+        let loaded = EngramConfig::from_toml_file(&temp_path).unwrap();
+        std::fs::remove_file(&temp_path).ok();
+
+        assert_eq!(loaded.search.semantic_weight, 7.5);
+        assert_eq!(loaded.search.threshold, 0.1);
+    }
 }

@@ -284,4 +284,40 @@ mod tests {
             assert!(results[i - 1].1 >= results[i].1);
         }
     }
+
+    #[test]
+    fn test_keyword_score_unbounded_multi_token() {
+        // A memory matching many tokens across summary+tag+content should exceed 1.0
+        let memories = vec![create_test_memory(
+            "1",
+            "auth password hashing",
+            "auth password hashing bcrypt",
+            vec!["auth".to_string(), "password".to_string()],
+        )];
+
+        let results = keyword_search("auth password hashing", &memories);
+        assert_eq!(results.len(), 1);
+
+        // auth: summary(3) + tag(2) + content(1) = 6
+        // password: summary(3) + tag(2) + content(1) = 6
+        // hashing: summary(3) + content(1) = 4
+        // total = 16.0
+        assert_eq!(results[0].1, 16.0);
+        assert!(results[0].1 > 1.0, "raw scores should be unbounded");
+    }
+
+    #[test]
+    fn test_keyword_single_token_all_fields_match() {
+        // Single token matching summary + tag + content = 3 + 2 + 1 = 6.0
+        let memories = vec![create_test_memory(
+            "1",
+            "security review",
+            "security details",
+            vec!["security".to_string()],
+        )];
+
+        let results = keyword_search("security", &memories);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1, 6.0);
+    }
 }
