@@ -29,6 +29,8 @@ use app::{Cli, Command};
 use commands::{AddParams, ChallengeParams, RetrieveParams, SearchParams, UpdateParams};
 use output::OutputFormatter;
 
+use crate::storage::FileRegistry;
+
 /// Run the CLI application with parsed arguments.
 ///
 /// This is the main entry point for the CLI. It determines the working directory,
@@ -48,12 +50,15 @@ pub async fn run(cli: Cli) -> Result<()> {
     // Create output formatter
     let formatter = OutputFormatter::new(cli.format, cli.json, cli.no_color);
 
+    // Create global file-backed registry for all commands
+    let registry = FileRegistry::global()?;
+
     // Dispatch to command handlers
     match cli.command {
         Command::Init {
             no_embeddings,
             template,
-        } => commands::run_init(&dir, no_embeddings, template, &formatter).await,
+        } => commands::run_init(&dir, &registry, no_embeddings, template, &formatter).await,
         Command::Add {
             type_,
             content,
@@ -71,6 +76,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         } => {
             commands::run_add(
                 &dir,
+                &registry,
                 AddParams {
                     type_str: type_,
                     content,
@@ -95,7 +101,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             full,
             raw,
             path,
-        } => commands::run_get(&dir, &id, full, raw, path, &formatter).await,
+        } => commands::run_get(&dir, &registry, &id, full, raw, path, &formatter).await,
         Command::Retrieve {
             path,
             logical,
@@ -110,6 +116,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         } => {
             commands::run_retrieve(
                 &dir,
+                &registry,
                 RetrieveParams {
                     path,
                     logical,
@@ -137,6 +144,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         } => {
             commands::run_search(
                 &dir,
+                &registry,
                 SearchParams {
                     query,
                     type_filter: type_,
@@ -160,7 +168,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             limit,
         } => {
             commands::run_list(
-                &dir, type_, tags, status, scope, &sort, reverse, limit, &formatter,
+                &dir, &registry, type_, tags, status, scope, &sort, reverse, limit, &formatter,
             )
             .await
         }
@@ -185,6 +193,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         } => {
             commands::run_update(
                 &dir,
+                &registry,
                 UpdateParams {
                     id,
                     type_,
@@ -208,8 +217,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Command::Delete { id, force } => commands::run_delete(&dir, &id, force, &formatter).await,
-        Command::Stats => commands::run_stats(&dir, &formatter).await,
+        Command::Delete { id, force } => {
+            commands::run_delete(&dir, &registry, &id, force, &formatter).await
+        }
+        Command::Stats => commands::run_stats(&dir, &registry, &formatter).await,
         Command::Challenge {
             id,
             evidence,
@@ -217,6 +228,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         } => {
             commands::run_challenge(
                 &dir,
+                &registry,
                 ChallengeParams {
                     id,
                     evidence,
@@ -227,10 +239,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Gc { confirm, threshold } => {
-            commands::run_gc(&dir, confirm, threshold, &formatter).await
+            commands::run_gc(&dir, &registry, confirm, threshold, &formatter).await
         }
         Command::Compress { scope, threshold } => {
-            commands::run_compress(&dir, scope, threshold, &formatter).await
+            commands::run_compress(&dir, &registry, scope, threshold, &formatter).await
         }
         Command::Serve { transport, port } => {
             commands::run_serve(&dir, &transport, port, &formatter).await
@@ -242,14 +254,26 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Reindex {
             embeddings_only,
             index_only,
-        } => commands::run_reindex(&dir, embeddings_only, index_only, &formatter).await,
+        } => commands::run_reindex(&dir, &registry, embeddings_only, index_only, &formatter).await,
         Command::Review {
             scope,
             type_,
             challenged_only,
             stale_only,
         } => {
-            commands::run_review(&dir, scope, type_, challenged_only, stale_only, &formatter).await
+            commands::run_review(
+                &dir,
+                &registry,
+                scope,
+                type_,
+                challenged_only,
+                stale_only,
+                &formatter,
+            )
+            .await
+        }
+        Command::Projects { command } => {
+            commands::run_projects(&dir, &registry, command, &formatter).await
         }
     }
 }

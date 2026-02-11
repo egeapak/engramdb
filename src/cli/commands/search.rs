@@ -3,7 +3,7 @@
 use crate::cli::output::OutputFormatter;
 use crate::ops::parse_memory_type;
 use crate::retrieval::filters::SearchFilters;
-use crate::storage::MemoryStore;
+use crate::storage::{MemoryStore, RegistryBackend};
 use anyhow::Result;
 use owo_colors::{OwoColorize, Stream};
 use std::io::{self, IsTerminal};
@@ -24,14 +24,16 @@ pub struct SearchParams {
 ///
 /// # Arguments
 /// * `dir` - The directory containing the EngramDB store
+/// * `registry` - The registry backend to use for project registration
 /// * `params` - Search query parameters
 /// * `formatter` - Output formatter for displaying results
 pub async fn run_search(
     dir: &Path,
+    registry: &dyn RegistryBackend,
     params: SearchParams,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = MemoryStore::open(dir, registry).await?;
     if let Ok(Some(warning)) = store.check_staleness().await {
         formatter.print_warning(&warning);
     }

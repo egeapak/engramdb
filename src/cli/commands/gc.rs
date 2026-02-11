@@ -2,7 +2,7 @@
 
 use crate::cli::output::OutputFormatter;
 use crate::ops::gc_memories;
-use crate::storage::MemoryStore;
+use crate::storage::{MemoryStore, RegistryBackend};
 use anyhow::Result;
 use std::path::Path;
 
@@ -12,11 +12,12 @@ use std::path::Path;
 /// Use --confirm to actually delete.
 pub async fn run_gc(
     dir: &Path,
+    registry: &dyn RegistryBackend,
     confirm: bool,
     threshold: Option<f64>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = MemoryStore::open(dir, registry).await?;
     let config_path = dir.join(".engramdb").join("config.toml");
     let config = crate::storage::config::load_config(&config_path).await?;
 

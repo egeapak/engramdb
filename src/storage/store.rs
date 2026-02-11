@@ -19,31 +19,13 @@
 
 use super::error::{Result, StorageError};
 use super::lance_index::{IndexEntry, LanceIndex, VectorMatch};
+use super::registry::RegistryBackend;
 use super::{manifest, memory_file, paths, project_id};
 use crate::storage::config::load_config;
 use crate::types::{Memory, MemoryUpdate, Visibility};
-use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tokio::fs as async_fs;
-
-/// Entry in the global registry tracking a single project.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegistryEntry {
-    /// Unique project identifier (hash of git remote or path)
-    pub project_id: String,
-    /// Absolute path to the project directory
-    pub project_path: String,
-    /// Last time this project was opened
-    pub last_opened: chrono::DateTime<chrono::Utc>,
-}
-
-/// Global registry of all EngramDB projects on this machine.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Registry {
-    /// List of all registered projects
-    pub projects: Vec<RegistryEntry>,
-}
 
 /// Main storage interface for EngramDB operations.
 ///
@@ -60,7 +42,7 @@ pub struct MemoryStore {
 
 impl MemoryStore {
     /// Initialize a new EngramDB store in the given directory.
-    pub async fn init(dir: &Path) -> Result<Self> {
+    pub async fn init(dir: &Path, registry: &dyn RegistryBackend) -> Result<Self> {
         let engramdb_dir = paths::project_dir(dir);
 
         // Create directory structure
@@ -109,7 +91,7 @@ impl MemoryStore {
         async_fs::create_dir_all(paths::personal_memories_dir(&project_id)?).await?;
 
         // Update registry
-        Self::update_registry(dir, &project_id).await?;
+        registry.update(dir, &project_id).await?;
 
         Ok(Self {
             project_dir: dir.to_path_buf(),
@@ -119,7 +101,7 @@ impl MemoryStore {
     }
 
     /// Open an existing EngramDB store.
-    pub async fn open(dir: &Path) -> Result<Self> {
+    pub async fn open(dir: &Path, registry: &dyn RegistryBackend) -> Result<Self> {
         let engramdb_dir = paths::project_dir(dir);
 
         if !engramdb_dir.exists() {
@@ -148,7 +130,7 @@ impl MemoryStore {
         };
 
         // Update registry
-        Self::update_registry(dir, &store.project_id).await?;
+        registry.update(dir, &store.project_id).await?;
 
         Ok(store)
     }
@@ -482,44 +464,6 @@ impl MemoryStore {
 
         Ok(())
     }
-
-    async fn update_registry(dir: &Path, project_id: &str) -> Result<()> {
-        let registry_path = paths::registry_path()?;
-
-        if let Some(parent) = registry_path.parent() {
-            async_fs::create_dir_all(parent).await?;
-        }
-
-        let mut registry = if registry_path.exists() {
-            let content = async_fs::read_to_string(&registry_path).await?;
-            serde_json::from_str(&content).unwrap_or_default()
-        } else {
-            Registry::default()
-        };
-
-        let abs_path = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-        let path_str = abs_path.to_string_lossy().to_string();
-
-        if let Some(entry) = registry
-            .projects
-            .iter_mut()
-            .find(|e| e.project_id == project_id)
-        {
-            entry.last_opened = chrono::Utc::now();
-            entry.project_path = path_str;
-        } else {
-            registry.projects.push(RegistryEntry {
-                project_id: project_id.to_string(),
-                project_path: path_str,
-                last_opened: chrono::Utc::now(),
-            });
-        }
-
-        let content = serde_json::to_string_pretty(&registry)?;
-        async_fs::write(&registry_path, content).await?;
-
-        Ok(())
-    }
 }
 
 /// Count `.md` files in a directory. Returns 0 if the directory doesn't exist.
@@ -542,6 +486,7 @@ async fn count_md_files(dir: &Path) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::registry::InMemoryRegistry;
     use crate::types::{Memory, MemoryType, Provenance, Visibility};
     use tempfile::TempDir;
 
@@ -562,7 +507,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).await.unwrap();
+        let store = MemoryStore::init(project_dir, &InMemoryRegistry::new())
+            .await
+            .unwrap();
 
         // Check project-local directories
         assert!(project_dir.join(".engramdb").exists());
@@ -592,7 +539,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let result = MemoryStore::open(project_dir).await;
+        let result = MemoryStore::open(project_dir, &InMemoryRegistry::new()).await;
         assert!(result.is_err());
         match result {
             Err(StorageError::NotInitialized) => {}
@@ -605,7 +552,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).await.unwrap();
+        let store = MemoryStore::init(project_dir, &InMemoryRegistry::new())
+            .await
+            .unwrap();
         let memory = create_test_memory("test-create-123", Visibility::Shared);
 
         let created_id = store.create(&memory).await.unwrap();
@@ -622,7 +571,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).await.unwrap();
+        let store = MemoryStore::init(project_dir, &InMemoryRegistry::new())
+            .await
+            .unwrap();
         let memory = create_test_memory("abcd1234-5678-90ab-cdef-1234567890ab", Visibility::Shared);
 
         store.create(&memory).await.unwrap();
@@ -639,7 +590,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).await.unwrap();
+        let store = MemoryStore::init(project_dir, &InMemoryRegistry::new())
+            .await
+            .unwrap();
 
         let memory1 =
             create_test_memory("aaaa1111-0000-0000-0000-000000000001", Visibility::Shared);
@@ -679,7 +632,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).await.unwrap();
+        let store = MemoryStore::init(project_dir, &InMemoryRegistry::new())
+            .await
+            .unwrap();
 
         let result = store.get("nonexistent-id").await;
         assert!(result.is_err());
@@ -696,7 +651,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).await.unwrap();
+        let store = MemoryStore::init(project_dir, &InMemoryRegistry::new())
+            .await
+            .unwrap();
         let memory = create_test_memory("test-update-123", Visibility::Shared);
 
         store.create(&memory).await.unwrap();
@@ -716,7 +673,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).await.unwrap();
+        let store = MemoryStore::init(project_dir, &InMemoryRegistry::new())
+            .await
+            .unwrap();
         let memory = create_test_memory("test-delete-123", Visibility::Shared);
 
         store.create(&memory).await.unwrap();
@@ -737,7 +696,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).await.unwrap();
+        let store = MemoryStore::init(project_dir, &InMemoryRegistry::new())
+            .await
+            .unwrap();
 
         let memory1 = create_test_memory("list-test-1", Visibility::Shared);
         let memory2 = create_test_memory("list-test-2", Visibility::Shared);
@@ -761,7 +722,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).await.unwrap();
+        let store = MemoryStore::init(project_dir, &InMemoryRegistry::new())
+            .await
+            .unwrap();
 
         let memory1 = create_test_memory("reindex-test-1", Visibility::Shared);
         let memory2 = create_test_memory("reindex-test-2", Visibility::Shared);
@@ -792,7 +755,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).await.unwrap();
+        let store = MemoryStore::init(project_dir, &InMemoryRegistry::new())
+            .await
+            .unwrap();
 
         let shared = create_test_memory("vis-shared", Visibility::Shared);
         let personal = create_test_memory("vis-personal", Visibility::Personal);
@@ -813,7 +778,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).await.unwrap();
+        let store = MemoryStore::init(project_dir, &InMemoryRegistry::new())
+            .await
+            .unwrap();
         let memory = create_test_memory("staleness-sync-1", Visibility::Shared);
         store.create(&memory).await.unwrap();
 
@@ -829,7 +796,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let store = MemoryStore::init(project_dir).await.unwrap();
+        let store = MemoryStore::init(project_dir, &InMemoryRegistry::new())
+            .await
+            .unwrap();
         let memory = create_test_memory("staleness-mismatch-1", Visibility::Shared);
         store.create(&memory).await.unwrap();
 

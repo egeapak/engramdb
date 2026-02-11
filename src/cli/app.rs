@@ -6,6 +6,25 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+/// Subcommands for `engramdb projects`.
+#[derive(Subcommand)]
+pub enum ProjectsCommand {
+    /// Show info about the current project (default)
+    Info,
+    /// List all registered projects
+    List,
+    /// Remove a project from the registry and delete its global data
+    Delete {
+        /// Project ID to delete
+        project_id: String,
+        /// Skip confirmation prompt
+        #[arg(long, short = 'f')]
+        force: bool,
+    },
+    /// Show aggregate statistics across all projects
+    Stats,
+}
+
 /// Output format for CLI commands.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum OutputFormat {
@@ -326,6 +345,12 @@ pub enum Command {
 
     /// Show statistics
     Stats,
+
+    /// Manage registered EngramDB projects
+    Projects {
+        #[command(subcommand)]
+        command: Option<ProjectsCommand>,
+    },
 
     /// Challenge a memory's validity
     Challenge {

@@ -2,7 +2,7 @@
 
 use crate::cli::output::OutputFormatter;
 use crate::ops::challenge_memory;
-use crate::storage::MemoryStore;
+use crate::storage::{MemoryStore, RegistryBackend};
 use anyhow::Result;
 use std::path::Path;
 
@@ -16,10 +16,11 @@ pub struct ChallengeParams {
 /// Challenge a memory by providing counter-evidence.
 pub async fn run_challenge(
     dir: &Path,
+    registry: &dyn RegistryBackend,
     params: ChallengeParams,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = MemoryStore::open(dir, registry).await?;
     let result = challenge_memory(
         &store,
         &params.id,

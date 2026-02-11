@@ -2,7 +2,7 @@
 
 use crate::cli::output::OutputFormatter;
 use crate::ops::reindex;
-use crate::storage::MemoryStore;
+use crate::storage::{MemoryStore, RegistryBackend};
 use anyhow::Result;
 use std::path::Path;
 
@@ -12,21 +12,23 @@ use std::path::Path;
 ///
 /// # Arguments
 /// * `dir` - The directory containing the EngramDB store
+/// * `registry` - The registry backend to use for project registration
 /// * `embeddings_only` - If true, only re-embed memories (skip index rebuild)
 /// * `index_only` - If true, only rebuild index (skip embeddings)
 /// * `formatter` - Output formatter for success/error messages
 pub async fn run_reindex(
     dir: &Path,
+    registry: &dyn RegistryBackend,
     embeddings_only: bool,
     index_only: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = MemoryStore::open(dir, registry).await?;
     let config_path = dir.join(".engramdb").join("config.toml");
 
     // Set up engine with embeddings if not index_only
     let engine = if !index_only {
-        Some(crate::ops::build_engine(MemoryStore::open(dir).await?, &config_path).await)
+        Some(crate::ops::build_engine(MemoryStore::open(dir, registry).await?, &config_path).await)
     } else {
         None
     };

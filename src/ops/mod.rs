@@ -11,6 +11,7 @@ pub mod delete;
 pub mod gc;
 pub mod get;
 pub mod parsing;
+pub mod projects;
 pub mod reindex;
 pub mod resolve;
 pub mod retrieve;

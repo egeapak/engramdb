@@ -2,26 +2,10 @@
 
 use crate::cli::output::OutputFormatter;
 use crate::embeddings::OnnxProvider;
-use crate::storage::{paths, MemoryStore};
+use crate::storage::{MemoryStore, RegistryBackend};
 use anyhow::{Context, Result};
-use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-
-/// Registry entry for tracking a project.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RegistryEntry {
-    project_path: String,
-    project_id: String,
-    initialized_at: String,
-}
-
-/// Global registry of EngramDB projects.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct Registry {
-    projects: Vec<RegistryEntry>,
-}
 
 /// Initialize a new EngramDB store in the specified directory.
 ///
@@ -30,17 +14,19 @@ struct Registry {
 ///
 /// # Arguments
 /// * `dir` - The directory to initialize the store in
+/// * `registry` - The registry backend to use for project registration
 /// * `no_embeddings` - Skip embedding model initialization
 /// * `template` - Optional path to config template file
 /// * `formatter` - Output formatter for success/error messages
 pub async fn run_init(
     dir: &Path,
+    registry: &dyn RegistryBackend,
     no_embeddings: bool,
     template: Option<PathBuf>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
     // Initialize the store
-    let store = MemoryStore::init(dir).await?;
+    let store = MemoryStore::init(dir, registry).await?;
 
     // Copy template if provided
     if let Some(template_path) = template {
@@ -64,9 +50,6 @@ pub async fn run_init(
         }
     }
 
-    // Update global registry
-    update_global_registry(dir, &store.project_id)?;
-
     // Print success and helpful info
     formatter.print_success(&format!(
         "Initialized EngramDB store at {}",
@@ -80,48 +63,12 @@ pub async fn run_init(
     Ok(())
 }
 
-/// Update the global registry with this project.
-fn update_global_registry(dir: &Path, project_id: &str) -> Result<()> {
-    let registry_path = paths::registry_path()?;
-
-    // Create registry directory if needed
-    if let Some(parent) = registry_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    // Load or create registry
-    let mut registry: Registry = if registry_path.exists() {
-        let content = fs::read_to_string(&registry_path)?;
-        serde_json::from_str(&content).unwrap_or_default()
-    } else {
-        Registry::default()
-    };
-
-    // Get absolute path
-    let abs_path = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-    let path_str = abs_path.to_string_lossy().to_string();
-
-    // Check if project already exists (dedup by project_path)
-    if !registry.projects.iter().any(|e| e.project_path == path_str) {
-        registry.projects.push(RegistryEntry {
-            project_path: path_str,
-            project_id: project_id.to_string(),
-            initialized_at: Utc::now().to_rfc3339(),
-        });
-
-        // Save registry
-        let content = serde_json::to_string_pretty(&registry)?;
-        fs::write(&registry_path, content)?;
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cli::output::OutputFormatter;
-    use crate::storage::project_id;
+    use crate::storage::{paths, project_id, InMemoryRegistry, Registry, RegistryEntry};
+    use chrono::Utc;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -129,8 +76,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
         let formatter = OutputFormatter::new(None, false, true);
+        let registry = InMemoryRegistry::new();
 
-        let result = run_init(project_dir, true, None, &formatter).await;
+        let result = run_init(project_dir, &registry, true, None, &formatter).await;
         assert!(result.is_ok(), "Init should succeed");
 
         // Check project-local directories
@@ -161,7 +109,15 @@ mod tests {
         fs::write(&template_path, template_content).unwrap();
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_init(project_dir, true, Some(template_path), &formatter).await;
+        let registry = InMemoryRegistry::new();
+        let result = run_init(
+            project_dir,
+            &registry,
+            true,
+            Some(template_path),
+            &formatter,
+        )
+        .await;
         assert!(result.is_ok(), "Init with template should succeed");
 
         // Check that config was copied
@@ -177,54 +133,53 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
         let formatter = OutputFormatter::new(None, false, true);
+        let registry = InMemoryRegistry::new();
 
-        // This test verifies that --no-embeddings doesn't cause errors
-        // (actual embedding init is tested separately in embeddings module)
-        let result = run_init(project_dir, true, None, &formatter).await;
+        let result = run_init(project_dir, &registry, true, None, &formatter).await;
         assert!(result.is_ok(), "Init with --no-embeddings should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_init_writes_valid_registry() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+        let formatter = OutputFormatter::new(None, false, true);
+        let registry = InMemoryRegistry::new();
+
+        run_init(project_dir, &registry, true, None, &formatter)
+            .await
+            .unwrap();
+
+        // Verify the registry content
+        let loaded = registry.load().await.unwrap();
+        assert_eq!(loaded.projects.len(), 1);
     }
 
     #[test]
     fn test_registry_creation_and_dedup() {
-        let temp_dir = TempDir::new().unwrap();
-        let project_dir = temp_dir.path();
-
-        // Use a custom registry path for testing
         let registry_dir = TempDir::new().unwrap();
         let test_registry_path = registry_dir.path().join("test_registry.json");
-
-        // Compute project ID
-        let project_id = project_id::compute_project_id(project_dir);
-        let abs_path = project_dir
-            .canonicalize()
-            .unwrap_or_else(|_| project_dir.to_path_buf());
-        let path_str = abs_path.to_string_lossy().to_string();
-
-        // Manually create registry directory and file for testing
         fs::create_dir_all(registry_dir.path()).unwrap();
 
-        // Create initial registry
         let mut registry = Registry::default();
         registry.projects.push(RegistryEntry {
-            project_path: path_str.clone(),
-            project_id: project_id.clone(),
-            initialized_at: Utc::now().to_rfc3339(),
+            project_path: "/path/to/project".to_string(),
+            project_id: "test-id".to_string(),
+            last_opened: Utc::now(),
         });
         let content = serde_json::to_string_pretty(&registry).unwrap();
         fs::write(&test_registry_path, content).unwrap();
 
-        // Load registry and verify
         let loaded: Registry =
             serde_json::from_str(&fs::read_to_string(&test_registry_path).unwrap()).unwrap();
         assert_eq!(loaded.projects.len(), 1);
-        assert_eq!(loaded.projects[0].project_path, path_str);
-        assert_eq!(loaded.projects[0].project_id, project_id);
+        assert_eq!(loaded.projects[0].project_id, "test-id");
 
-        // Try adding the same project again (simulate dedup logic)
-        if !loaded.projects.iter().any(|e| e.project_path == path_str) {
-            // This should NOT execute because we're deduping
-            panic!("Dedup logic failed");
-        }
+        // Dedup check: same path should not be added again
+        assert!(loaded
+            .projects
+            .iter()
+            .any(|e| e.project_path == "/path/to/project"));
     }
 
     #[test]
@@ -233,23 +188,21 @@ mod tests {
         let test_registry_path = registry_dir.path().join("test_registry.json");
         fs::create_dir_all(registry_dir.path()).unwrap();
 
-        // Create registry with multiple projects
         let mut registry = Registry::default();
         registry.projects.push(RegistryEntry {
             project_path: "/path/to/project1".to_string(),
             project_id: "id1".to_string(),
-            initialized_at: Utc::now().to_rfc3339(),
+            last_opened: Utc::now(),
         });
         registry.projects.push(RegistryEntry {
             project_path: "/path/to/project2".to_string(),
             project_id: "id2".to_string(),
-            initialized_at: Utc::now().to_rfc3339(),
+            last_opened: Utc::now(),
         });
 
         let content = serde_json::to_string_pretty(&registry).unwrap();
         fs::write(&test_registry_path, content).unwrap();
 
-        // Load and verify
         let loaded: Registry =
             serde_json::from_str(&fs::read_to_string(&test_registry_path).unwrap()).unwrap();
         assert_eq!(loaded.projects.len(), 2);

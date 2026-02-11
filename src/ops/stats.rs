@@ -79,6 +79,7 @@ pub async fn compute_stats(store: &MemoryStore) -> Result<StoreStats> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::InMemoryRegistry;
     use crate::types::{Memory, MemoryType, Provenance, Status};
     use chrono::Duration;
     use tempfile::TempDir;
@@ -86,7 +87,8 @@ mod tests {
     #[tokio::test]
     async fn test_compute_stats_basic() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let mut mem1 = Memory::new(
             MemoryType::Decision,
@@ -134,7 +136,8 @@ mod tests {
     #[tokio::test]
     async fn test_compute_stats_with_expired() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let mut mem1 = Memory::new(MemoryType::Debug, "Expired", "Content", Provenance::human());
         mem1.expires_at = Some(Utc::now() - Duration::days(1));
@@ -156,7 +159,8 @@ mod tests {
     #[tokio::test]
     async fn test_compute_stats_empty() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let stats = compute_stats(&store).await.unwrap();
         assert_eq!(stats.total, 0);
@@ -169,7 +173,8 @@ mod tests {
     #[tokio::test]
     async fn test_compute_stats_by_type_multiple_types() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         // 2 Decision + 1 Hazard + 3 Context
         for _ in 0..2 {
@@ -235,7 +240,8 @@ mod tests {
     #[tokio::test]
     async fn test_compute_stats_by_status_mixed() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         // 2 Active
         store
@@ -308,7 +314,8 @@ mod tests {
     #[tokio::test]
     async fn test_compute_stats_by_scope_no_logical_scopes() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         // Memories with empty logical scopes (default)
         store
@@ -338,7 +345,8 @@ mod tests {
     #[tokio::test]
     async fn test_compute_stats_avg_criticality_calculation() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let criticalities = [0.2, 0.5, 0.8];
         for &crit in &criticalities {
@@ -354,7 +362,8 @@ mod tests {
     #[tokio::test]
     async fn test_compute_stats_oldest_newest_ordering() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let mut mem1 = Memory::new(
             MemoryType::Decision,

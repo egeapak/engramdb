@@ -15,9 +15,11 @@ pub mod manifest;
 pub mod memory_file;
 pub mod paths;
 pub mod project_id;
+pub mod registry;
 pub mod store;
 
 pub use error::{Result, StorageError};
 pub use lance_index::{IndexEntry, VectorMatch};
 pub use manifest::Manifest;
+pub use registry::{FileRegistry, InMemoryRegistry, Registry, RegistryBackend, RegistryEntry};
 pub use store::MemoryStore;

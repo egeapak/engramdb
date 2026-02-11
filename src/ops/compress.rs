@@ -129,12 +129,14 @@ pub async fn compress_apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::InMemoryRegistry;
     use crate::types::{Memory, MemoryType, Provenance, ProvenanceSource, Visibility};
     use tempfile::TempDir;
 
     async fn setup_store() -> (TempDir, MemoryStore) {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
         (temp_dir, store)
     }
 

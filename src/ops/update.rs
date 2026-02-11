@@ -154,13 +154,14 @@ pub async fn update_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::MemoryStore;
+    use crate::storage::{InMemoryRegistry, MemoryStore};
     use crate::types::{Memory, MemoryType, Provenance};
     use tempfile::TempDir;
 
     async fn setup_test_store() -> (TempDir, MemoryStore) {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
         (temp_dir, store)
     }
 

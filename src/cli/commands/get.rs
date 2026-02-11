@@ -2,7 +2,7 @@
 
 use crate::cli::output::OutputFormatter;
 use crate::ops::get_memory;
-use crate::storage::{paths, MemoryStore};
+use crate::storage::{paths, MemoryStore, RegistryBackend};
 use crate::types::Visibility;
 use anyhow::Result;
 use std::path::Path;
@@ -14,6 +14,7 @@ use tokio::fs;
 ///
 /// # Arguments
 /// * `dir` - The directory containing the EngramDB store
+/// * `registry` - The registry backend to use for project registration
 /// * `id` - The memory ID or prefix
 /// * `full` - Show complete details without truncation
 /// * `raw` - Output the raw markdown file contents
@@ -21,13 +22,14 @@ use tokio::fs;
 /// * `formatter` - Output formatter for displaying the memory
 pub async fn run_get(
     dir: &Path,
+    registry: &dyn RegistryBackend,
     id: &str,
     full: bool,
     raw: bool,
     path_only: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = MemoryStore::open(dir, registry).await?;
     if let Ok(Some(warning)) = store.check_staleness().await {
         formatter.print_warning(&warning);
     }

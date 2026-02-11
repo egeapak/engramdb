@@ -2,7 +2,7 @@
 
 use crate::cli::output::OutputFormatter;
 use crate::ops::{self, review_memories};
-use crate::storage::MemoryStore;
+use crate::storage::{MemoryStore, RegistryBackend};
 use crate::types::Status;
 use anyhow::Result;
 use inquire::Select;
@@ -14,6 +14,7 @@ use std::path::Path;
 ///
 /// # Arguments
 /// * `dir` - The directory containing the EngramDB store
+/// * `registry` - The registry backend to use for project registration
 /// * `scope` - Optional logical scope filter
 /// * `type_str` - Optional memory type filter
 /// * `challenged_only` - Only show Status::Challenged memories
@@ -21,13 +22,14 @@ use std::path::Path;
 /// * `formatter` - Output formatter for success/error messages
 pub async fn run_review(
     dir: &Path,
+    registry: &dyn RegistryBackend,
     scope: Option<String>,
     type_str: Option<String>,
     challenged_only: bool,
     stale_only: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = MemoryStore::open(dir, registry).await?;
 
     let mut memories = review_memories(&store, scope.as_deref(), None).await?;
 

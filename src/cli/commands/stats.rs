@@ -3,7 +3,7 @@
 use crate::cli::output::{OutputFormatter, Stats};
 use crate::embeddings::OnnxProvider;
 use crate::ops::compute_stats;
-use crate::storage::MemoryStore;
+use crate::storage::{MemoryStore, RegistryBackend};
 use crate::types::Status;
 use anyhow::Result;
 use std::path::Path;
@@ -15,9 +15,14 @@ use std::path::Path;
 ///
 /// # Arguments
 /// * `dir` - The directory containing the EngramDB store
+/// * `registry` - The registry backend to use for project registration
 /// * `formatter` - Output formatter for displaying statistics
-pub async fn run_stats(dir: &Path, formatter: &OutputFormatter) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+pub async fn run_stats(
+    dir: &Path,
+    registry: &dyn RegistryBackend,
+    formatter: &OutputFormatter,
+) -> Result<()> {
+    let store = MemoryStore::open(dir, registry).await?;
     let store_stats = compute_stats(&store).await?;
 
     // Extract health warning counts before moving data into Stats

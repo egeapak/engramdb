@@ -2,7 +2,7 @@
 
 use crate::cli::output::OutputFormatter;
 use crate::ops::{parse_memory_type, parse_status};
-use crate::storage::MemoryStore;
+use crate::storage::{MemoryStore, RegistryBackend};
 use crate::types::MemoryType;
 use anyhow::{anyhow, Result};
 use std::path::Path;
@@ -13,6 +13,7 @@ use std::path::Path;
 ///
 /// # Arguments
 /// * `dir` - The directory containing the EngramDB store
+/// * `registry` - The registry backend to use for project registration
 /// * `type_filter` - Filter by memory types (empty = no filter)
 /// * `tags_filter` - Filter by tags, OR logic (empty = no filter)
 /// * `status_filter` - Filter by status (None = no filter)
@@ -24,6 +25,7 @@ use std::path::Path;
 #[allow(clippy::too_many_arguments)]
 pub async fn run_list(
     dir: &Path,
+    registry: &dyn RegistryBackend,
     type_filter: Vec<String>,
     tags_filter: Vec<String>,
     status_filter: Option<String>,
@@ -33,7 +35,7 @@ pub async fn run_list(
     limit: Option<usize>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = MemoryStore::open(dir, registry).await?;
     if let Ok(Some(warning)) = store.check_staleness().await {
         formatter.print_warning(&warning);
     }
@@ -104,7 +106,7 @@ pub async fn run_list(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::MemoryStore;
+    use crate::storage::{InMemoryRegistry, MemoryStore};
     use crate::types::{Memory, MemoryType, Provenance, Status, Visibility};
     use tempfile::TempDir;
 
@@ -142,7 +144,8 @@ mod tests {
 
     async fn setup_test_store() -> (TempDir, MemoryStore) {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         // Create memories with different properties
         let mem1 = create_test_memory(
@@ -182,9 +185,11 @@ mod tests {
     async fn test_scope_filter_physical() {
         let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
+        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
+            &registry,
             vec![],
             vec![],
             None,
@@ -203,9 +208,11 @@ mod tests {
     async fn test_scope_filter_logical() {
         let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
+        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
+            &registry,
             vec![],
             vec![],
             None,
@@ -224,9 +231,11 @@ mod tests {
     async fn test_scope_filter_no_match() {
         let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
+        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
+            &registry,
             vec![],
             vec![],
             None,
@@ -258,9 +267,11 @@ mod tests {
     async fn test_sort_by_created() {
         let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
+        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
+            &registry,
             vec![],
             vec![],
             None,
@@ -279,9 +290,11 @@ mod tests {
     async fn test_sort_by_updated() {
         let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
+        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
+            &registry,
             vec![],
             vec![],
             None,
@@ -300,9 +313,11 @@ mod tests {
     async fn test_sort_by_type() {
         let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
+        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
+            &registry,
             vec![],
             vec![],
             None,
@@ -321,9 +336,11 @@ mod tests {
     async fn test_invalid_sort_field() {
         let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
+        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
+            &registry,
             vec![],
             vec![],
             None,
@@ -346,9 +363,11 @@ mod tests {
     async fn test_reverse_sort() {
         let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
+        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
+            &registry,
             vec![],
             vec![],
             None,
@@ -367,9 +386,11 @@ mod tests {
     async fn test_limit() {
         let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
+        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
+            &registry,
             vec![],
             vec![],
             None,
@@ -388,9 +409,11 @@ mod tests {
     async fn test_combined_filters_and_sorting() {
         let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
+        let registry = InMemoryRegistry::new();
 
         let result = run_list(
             temp_dir.path(),
+            &registry,
             vec![],
             vec![],
             None,

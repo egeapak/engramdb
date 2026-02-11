@@ -2,7 +2,7 @@
 
 use crate::cli::output::OutputFormatter;
 use crate::ops::{delete_memory, get_memory};
-use crate::storage::MemoryStore;
+use crate::storage::{MemoryStore, RegistryBackend};
 use anyhow::Result;
 use std::io::{self, Write};
 use std::path::Path;
@@ -13,16 +13,18 @@ use std::path::Path;
 ///
 /// # Arguments
 /// * `dir` - The directory containing the EngramDB store
+/// * `registry` - The registry backend to use for project registration
 /// * `id` - The memory ID or prefix
 /// * `force` - Skip confirmation prompt if true
 /// * `formatter` - Output formatter for success/error messages
 pub async fn run_delete(
     dir: &Path,
+    registry: &dyn RegistryBackend,
     id: &str,
     force: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = MemoryStore::open(dir, registry).await?;
 
     // Get the memory to confirm what we're deleting
     let memory = get_memory(&store, id).await?;

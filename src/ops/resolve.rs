@@ -88,13 +88,15 @@ pub async fn resolve_memory(store: &MemoryStore, params: ResolveParams) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::InMemoryRegistry;
     use crate::types::{Challenge, Memory, MemoryType, Provenance, Status};
     use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_resolve_keep() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         // Create a challenged memory
         let mut memory = Memory::new(
@@ -135,7 +137,8 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_update() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         // Create a challenged memory
         let mut memory = Memory::new(
@@ -178,7 +181,8 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_delete() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         // Create a memory
         let memory = Memory::new(
@@ -214,7 +218,8 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_keep_from_needs_review_status() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let mut memory = Memory::new(
             MemoryType::Decision,
@@ -250,7 +255,8 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_update_only_content_preserves_summary() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let mut memory = Memory::new(
             MemoryType::Decision,
@@ -284,7 +290,8 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_update_only_summary_preserves_content() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let mut memory = Memory::new(
             MemoryType::Decision,
@@ -318,7 +325,8 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_keep_clears_multiple_challenges() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let mut memory = Memory::new(
             MemoryType::Decision,
@@ -354,7 +362,8 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_keep_preserves_other_fields() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let mut memory = Memory::new(
             MemoryType::Hazard,
@@ -398,7 +407,8 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_keep_nonexistent_id_returns_error() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let result = resolve_memory(
             &store,
@@ -417,7 +427,8 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_update_nonexistent_id_returns_error() {
         let temp_dir = TempDir::new().unwrap();
-        let store = MemoryStore::init(temp_dir.path()).await.unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let result = resolve_memory(
             &store,

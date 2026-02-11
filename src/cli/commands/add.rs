@@ -2,7 +2,7 @@
 
 use crate::cli::output::OutputFormatter;
 use crate::ops::{self, create_memory, parse_memory_type, parse_visibility, CreateParams};
-use crate::storage::MemoryStore;
+use crate::storage::{MemoryStore, RegistryBackend};
 use crate::types::{MemoryType, Provenance, Visibility};
 use anyhow::{anyhow, bail, Context, Result};
 use inquire::{CustomType, Select, Text};
@@ -35,19 +35,25 @@ pub struct AddParams {
 ///
 /// # Arguments
 /// * `dir` - The directory containing the EngramDB store
+/// * `registry` - The registry backend to use for project registration
 /// * `params` - Memory creation parameters
 /// * `formatter` - Output formatter for success/error messages
-pub async fn run_add(dir: &Path, params: AddParams, formatter: &OutputFormatter) -> Result<()> {
+pub async fn run_add(
+    dir: &Path,
+    registry: &dyn RegistryBackend,
+    params: AddParams,
+    formatter: &OutputFormatter,
+) -> Result<()> {
     // Open or initialize store
-    let store = match MemoryStore::open(dir).await {
+    let store = match MemoryStore::open(dir, registry).await {
         Ok(s) => s,
-        Err(_) => MemoryStore::init(dir).await?,
+        Err(_) => MemoryStore::init(dir, registry).await?,
     };
 
     // Build engine for auto-embedding on create
     let config_path = dir.join(".engramdb").join("config.toml");
     // Reuse the already-opened store for the engine
-    let engine_store = MemoryStore::open(dir).await.unwrap_or_else(|_| {
+    let engine_store = MemoryStore::open(dir, registry).await.unwrap_or_else(|_| {
         // This shouldn't happen since we already opened it above, but handle it anyway
         panic!("Failed to open store for engine after successful open")
     });

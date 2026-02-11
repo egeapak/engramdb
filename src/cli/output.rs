@@ -335,6 +335,158 @@ impl OutputFormatter {
             println!("{:?}: {}", type_, count);
         }
     }
+
+    /// Print project info in the configured format.
+    pub fn print_project_info(&self, info: &ProjectInfoOutput) {
+        match self.format {
+            OutputFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(info).unwrap());
+            }
+            OutputFormat::Pretty => {
+                let id_display = if self.use_color {
+                    info.project_id
+                        .as_str()
+                        .if_supports_color(Stream::Stdout, |text| text.cyan())
+                        .to_string()
+                } else {
+                    info.project_id.clone()
+                };
+                println!("Project: {}", info.project_name);
+                println!("ID: {}", id_display);
+                println!("Path: {}", info.project_path);
+                println!("Memories: {}", info.memory_count);
+                if !info.logical_scopes.is_empty() {
+                    println!("Scopes: {}", info.logical_scopes.join(", "));
+                }
+                println!("Created: {}", info.created_at.format("%Y-%m-%d %H:%M:%S"));
+            }
+            OutputFormat::Plain => {
+                println!("Project: {}", info.project_name);
+                println!("ID: {}", info.project_id);
+                println!("Path: {}", info.project_path);
+                println!("Memories: {}", info.memory_count);
+                if !info.logical_scopes.is_empty() {
+                    println!("Scopes: {}", info.logical_scopes.join(", "));
+                }
+                println!("Created: {}", info.created_at.format("%Y-%m-%d %H:%M:%S"));
+            }
+        }
+    }
+
+    /// Print a list of projects in the configured format.
+    pub fn print_project_list(&self, entries: &[ProjectListOutput]) {
+        match self.format {
+            OutputFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(entries).unwrap());
+            }
+            OutputFormat::Pretty => {
+                if entries.is_empty() {
+                    println!("No registered projects.");
+                    return;
+                }
+                for entry in entries {
+                    let id_short = &entry.project_id[..8.min(entry.project_id.len())];
+                    let id_display = if self.use_color {
+                        id_short
+                            .if_supports_color(Stream::Stdout, |text| text.cyan())
+                            .to_string()
+                    } else {
+                        id_short.to_string()
+                    };
+                    let status = if entry.exists {
+                        "ok".to_string()
+                    } else if self.use_color {
+                        "missing"
+                            .if_supports_color(Stream::Stdout, |text| text.red())
+                            .to_string()
+                    } else {
+                        "missing".to_string()
+                    };
+                    println!(
+                        "{} {} [{}] ({})",
+                        id_display,
+                        entry.project_path,
+                        entry.last_opened.format("%Y-%m-%d"),
+                        status,
+                    );
+                }
+            }
+            OutputFormat::Plain => {
+                if entries.is_empty() {
+                    println!("No registered projects.");
+                    return;
+                }
+                for entry in entries {
+                    let id_short = &entry.project_id[..8.min(entry.project_id.len())];
+                    let status = if entry.exists { "ok" } else { "missing" };
+                    println!(
+                        "{} {} {} {}",
+                        id_short,
+                        entry.project_path,
+                        entry.last_opened.format("%Y-%m-%d"),
+                        status,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Print aggregate statistics across all projects.
+    pub fn print_aggregate_stats(&self, stats: &AggregateStatsOutput) {
+        match self.format {
+            OutputFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(stats).unwrap());
+            }
+            OutputFormat::Pretty => {
+                println!("Total Projects: {}", stats.total_projects);
+                println!("Reachable: {}", stats.reachable_projects);
+                println!("Total Memories: {}", stats.total_memories);
+                if !stats.by_type.is_empty() {
+                    println!("\nBy Type:");
+                    for (type_, count) in &stats.by_type {
+                        println!("  {:?}: {}", type_, count);
+                    }
+                }
+            }
+            OutputFormat::Plain => {
+                println!("Projects: {}", stats.total_projects);
+                println!("Reachable: {}", stats.reachable_projects);
+                println!("Memories: {}", stats.total_memories);
+                for (type_, count) in &stats.by_type {
+                    println!("{:?}: {}", type_, count);
+                }
+            }
+        }
+    }
+}
+
+/// Output data for project info display.
+#[derive(Debug, serde::Serialize)]
+pub struct ProjectInfoOutput {
+    pub project_id: String,
+    pub project_name: String,
+    pub project_path: String,
+    pub memory_count: usize,
+    pub logical_scopes: Vec<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Output data for a single project list entry.
+#[derive(Debug, serde::Serialize)]
+pub struct ProjectListOutput {
+    pub project_id: String,
+    pub project_path: String,
+    pub last_opened: chrono::DateTime<chrono::Utc>,
+    pub exists: bool,
+}
+
+/// Output data for aggregate stats across projects.
+#[derive(Debug, serde::Serialize)]
+pub struct AggregateStatsOutput {
+    pub total_projects: usize,
+    pub reachable_projects: usize,
+    pub total_memories: usize,
+    pub by_type: Vec<(MemoryType, usize)>,
 }
 
 /// Statistics about the memory store.

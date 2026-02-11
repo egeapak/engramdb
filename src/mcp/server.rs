@@ -17,7 +17,7 @@ use crate::ops;
 use crate::retrieval::engine::{RetrievalEngine, RetrievalQuery};
 use crate::retrieval::filters::SearchFilters;
 use crate::storage::config::load_config;
-use crate::storage::MemoryStore;
+use crate::storage::{FileRegistry, MemoryStore};
 use crate::types::{Provenance, Status, Visibility};
 
 // ---------------------------------------------------------------------------
@@ -364,15 +364,22 @@ impl EngramDbServer {
         Self { dir }
     }
 
+    /// Get the global file-backed registry.
+    fn get_registry(&self) -> Result<FileRegistry, String> {
+        FileRegistry::global()
+            .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()))
+    }
+
     /// Open a MemoryStore, auto-initializing if needed.
     async fn open_store(&self) -> Result<MemoryStore, String> {
+        let registry = self.get_registry()?;
         let engramdb_dir = self.dir.join(".engramdb");
         if !engramdb_dir.exists() {
-            MemoryStore::init(&self.dir)
+            MemoryStore::init(&self.dir, &registry)
                 .await
                 .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()))?;
         }
-        MemoryStore::open(&self.dir)
+        MemoryStore::open(&self.dir, &registry)
             .await
             .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()))
     }

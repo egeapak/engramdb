@@ -3,7 +3,7 @@
 use crate::cli::output::OutputFormatter;
 use crate::ops::parse_memory_type;
 use crate::retrieval::engine::{DetailLevel, RetrievalQuery};
-use crate::storage::MemoryStore;
+use crate::storage::{MemoryStore, RegistryBackend};
 use anyhow::Result;
 use owo_colors::{OwoColorize, Stream};
 use std::io::{self, IsTerminal};
@@ -27,14 +27,16 @@ pub struct RetrieveParams {
 ///
 /// # Arguments
 /// * `dir` - The directory containing the EngramDB store
+/// * `registry` - The registry backend to use for project registration
 /// * `params` - Retrieval query parameters
 /// * `formatter` - Output formatter for displaying results
 pub async fn run_retrieve(
     dir: &Path,
+    registry: &dyn RegistryBackend,
     params: RetrieveParams,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = MemoryStore::open(dir, registry).await?;
     if let Ok(Some(warning)) = store.check_staleness().await {
         formatter.print_warning(&warning);
     }

@@ -2,18 +2,19 @@
 
 use crate::cli::output::OutputFormatter;
 use crate::ops;
-use crate::storage::MemoryStore;
+use crate::storage::{MemoryStore, RegistryBackend};
 use anyhow::Result;
 use std::path::Path;
 
 /// List compression candidates and direct users to MCP mode.
 pub async fn run_compress(
     dir: &Path,
+    registry: &dyn RegistryBackend,
     scope: Option<String>,
     threshold: Option<f64>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = MemoryStore::open(dir, registry).await?;
     let result = ops::compress_candidates(&store, scope.as_deref(), threshold).await?;
 
     if result.candidates.is_empty() {
