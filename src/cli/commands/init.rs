@@ -1,8 +1,10 @@
 //! Initialize a new EngramDB store.
 
 use crate::cli::output::OutputFormatter;
+use crate::embeddings::OnnxProvider;
+#[cfg(feature = "ollama")]
 use crate::embeddings::{
-    OllamaModelSpec, OllamaProvider, OnnxProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT,
+    OllamaModelSpec, OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT,
 };
 use crate::storage::{MemoryStore, RegistryBackend};
 use anyhow::{Context, Result};
@@ -54,16 +56,27 @@ pub async fn run_init(
                         formatter.print_success("Embedding model ready (all-minilm via ONNX).");
                     }
                     Err(_) => {
-                        // ONNX failed — try Ollama fallback
-                        formatter
-                            .print_message("ONNX model unavailable, trying Ollama fallback...");
-                        init_ollama_model(ALL_MINILM, formatter).await;
+                        #[cfg(feature = "ollama")]
+                        {
+                            // ONNX failed — try Ollama fallback
+                            formatter
+                                .print_message("ONNX model unavailable, trying Ollama fallback...");
+                            init_ollama_model(ALL_MINILM, formatter).await;
+                        }
+                        #[cfg(not(feature = "ollama"))]
+                        {
+                            formatter.print_error(
+                                "ONNX model unavailable and Ollama support is not enabled.",
+                            );
+                        }
                     }
                 }
             }
+            #[cfg(feature = "ollama")]
             "nomic-embed-text" => {
                 init_ollama_model(NOMIC_EMBED_TEXT, formatter).await;
             }
+            #[cfg(feature = "ollama")]
             "mxbai-embed-large" => {
                 init_ollama_model(MXBAI_EMBED_LARGE, formatter).await;
             }
@@ -89,6 +102,7 @@ pub async fn run_init(
     Ok(())
 }
 
+#[cfg(feature = "ollama")]
 /// Try to initialize an Ollama-backed embedding model.
 ///
 /// Checks if the model is already pulled; if not, auto-pulls it.

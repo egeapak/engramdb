@@ -6,9 +6,10 @@
 
 use std::path::PathBuf;
 
+use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::schemars::{self, JsonSchema};
-use rmcp::tool;
+use rmcp::{tool, tool_handler, tool_router};
 use rmcp::{ServerHandler, ServiceExt};
 use serde::{Deserialize, Serialize};
 
@@ -357,11 +358,16 @@ struct ScoredMemoryOutput {
 #[derive(Debug, Clone)]
 pub struct EngramDbServer {
     dir: PathBuf,
+    #[allow(dead_code)]
+    tool_router: rmcp::handler::server::tool::ToolRouter<Self>,
 }
 
 impl EngramDbServer {
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self {
+            dir,
+            tool_router: Self::tool_router(),
+        }
     }
 
     /// Get the global file-backed registry.
@@ -401,12 +407,15 @@ impl EngramDbServer {
 // Tool implementations
 // ---------------------------------------------------------------------------
 
-#[tool(tool_box)]
+#[tool_router]
 impl EngramDbServer {
     #[tool(
         description = "Store a new memory about the project. Use after discovering important patterns, making architectural decisions, encountering hazards, or learning conventions."
     )]
-    async fn memory_create(&self, #[tool(aggr)] input: CreateInput) -> Result<String, String> {
+    async fn memory_create(
+        &self,
+        Parameters(input): Parameters<CreateInput>,
+    ) -> Result<String, String> {
         let store = self.open_store().await?;
         let engine = self.build_engine().await?;
         let type_ = ops::parse_memory_type(&input.type_)
@@ -453,7 +462,10 @@ impl EngramDbServer {
     #[tool(
         description = "Get memories relevant to your current working context. Call before modifying files to surface decisions, hazards, and conventions."
     )]
-    async fn memory_retrieve(&self, #[tool(aggr)] input: RetrieveInput) -> Result<String, String> {
+    async fn memory_retrieve(
+        &self,
+        Parameters(input): Parameters<RetrieveInput>,
+    ) -> Result<String, String> {
         let engine = self.build_engine().await?;
 
         let type_filter = if let Some(types) = &input.types {
@@ -516,7 +528,10 @@ impl EngramDbServer {
     #[tool(
         description = "Search across all memories by text content. Use when you need specific knowledge regardless of file context."
     )]
-    async fn memory_search(&self, #[tool(aggr)] input: SearchInput) -> Result<String, String> {
+    async fn memory_search(
+        &self,
+        Parameters(input): Parameters<SearchInput>,
+    ) -> Result<String, String> {
         let engine = self.build_engine().await?;
 
         let type_filter = if let Some(types) = &input.types {
@@ -574,7 +589,7 @@ impl EngramDbServer {
     #[tool(
         description = "Get the full content of a specific memory, including the 'details' field."
     )]
-    async fn memory_get(&self, #[tool(aggr)] input: GetInput) -> Result<String, String> {
+    async fn memory_get(&self, Parameters(input): Parameters<GetInput>) -> Result<String, String> {
         let store = self.open_store().await?;
         let memory = ops::get_memory(&store, &input.id)
             .await
@@ -586,7 +601,10 @@ impl EngramDbServer {
     #[tool(
         description = "Update an existing memory. Any field can be updated except 'id' and 'created_at'."
     )]
-    async fn memory_update(&self, #[tool(aggr)] input: UpdateInput) -> Result<String, String> {
+    async fn memory_update(
+        &self,
+        Parameters(input): Parameters<UpdateInput>,
+    ) -> Result<String, String> {
         let store = self.open_store().await?;
         let engine = self.build_engine().await?;
 
@@ -642,7 +660,10 @@ impl EngramDbServer {
     #[tool(
         description = "Permanently delete a memory. Prefer memory_update with supersedes for corrections."
     )]
-    async fn memory_delete(&self, #[tool(aggr)] input: DeleteInput) -> Result<String, String> {
+    async fn memory_delete(
+        &self,
+        Parameters(input): Parameters<DeleteInput>,
+    ) -> Result<String, String> {
         let store = self.open_store().await?;
         ops::delete_memory(&store, &input.id)
             .await
@@ -660,7 +681,7 @@ impl EngramDbServer {
     )]
     async fn memory_challenge(
         &self,
-        #[tool(aggr)] input: ChallengeInput,
+        Parameters(input): Parameters<ChallengeInput>,
     ) -> Result<String, String> {
         let store = self.open_store().await?;
         let result = ops::challenge_memory(
@@ -682,7 +703,10 @@ impl EngramDbServer {
     #[tool(
         description = "List memories that need human attention - either stale (needs_review) or challenged."
     )]
-    async fn memory_review(&self, #[tool(aggr)] input: ReviewInput) -> Result<String, String> {
+    async fn memory_review(
+        &self,
+        Parameters(input): Parameters<ReviewInput>,
+    ) -> Result<String, String> {
         let store = self.open_store().await?;
         let memories = ops::review_memories(&store, input.scope.as_deref(), input.max_results)
             .await
@@ -703,7 +727,10 @@ impl EngramDbServer {
     #[tool(
         description = "Resolve a challenged or needs_review memory. Use 'keep' to confirm, 'update' to correct, or 'delete' to remove."
     )]
-    async fn memory_resolve(&self, #[tool(aggr)] input: ResolveInput) -> Result<String, String> {
+    async fn memory_resolve(
+        &self,
+        Parameters(input): Parameters<ResolveInput>,
+    ) -> Result<String, String> {
         let store = self.open_store().await?;
 
         let action = match input.action.as_str() {
@@ -746,7 +773,7 @@ impl EngramDbServer {
     )]
     async fn memory_compress_candidates(
         &self,
-        #[tool(aggr)] input: CompressCandidatesInput,
+        Parameters(input): Parameters<CompressCandidatesInput>,
     ) -> Result<String, String> {
         let store = self.open_store().await?;
         let result = ops::compress_candidates(&store, input.scope.as_deref(), input.threshold)
@@ -766,7 +793,7 @@ impl EngramDbServer {
     )]
     async fn memory_compress_apply(
         &self,
-        #[tool(aggr)] input: CompressApplyInput,
+        Parameters(input): Parameters<CompressApplyInput>,
     ) -> Result<String, String> {
         let store = self.open_store().await?;
         let result = ops::compress_apply(
@@ -839,7 +866,7 @@ impl EngramDbServer {
     #[tool(
         description = "Garbage collect memories that have decayed below the GC threshold. Always dry_run first."
     )]
-    async fn memory_gc(&self, #[tool(aggr)] input: GcInput) -> Result<String, String> {
+    async fn memory_gc(&self, Parameters(input): Parameters<GcInput>) -> Result<String, String> {
         let store = self.open_store().await?;
         let config = self.load_config().await;
         let dry_run = input.dry_run.unwrap_or(true);
@@ -857,7 +884,10 @@ impl EngramDbServer {
     }
 
     #[tool(description = "Rebuild the search index and regenerate embedding vectors.")]
-    async fn memory_reindex(&self, #[tool(aggr)] input: ReindexInput) -> Result<String, String> {
+    async fn memory_reindex(
+        &self,
+        Parameters(input): Parameters<ReindexInput>,
+    ) -> Result<String, String> {
         let store = self.open_store().await?;
         let embeddings_only = input.embeddings_only.unwrap_or(false);
 
@@ -898,11 +928,11 @@ impl EngramDbServer {
 // ServerHandler implementation
 // ---------------------------------------------------------------------------
 
-#[tool(tool_box)]
+#[tool_handler]
 impl ServerHandler for EngramDbServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
+            protocol_version: ProtocolVersion::LATEST,
             capabilities: ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -910,7 +940,11 @@ impl ServerHandler for EngramDbServer {
                 .build(),
             server_info: Implementation {
                 name: "engramdb".to_string(),
+                title: None,
                 version: env!("CARGO_PKG_VERSION").to_string(),
+                description: None,
+                icons: None,
+                website_url: None,
             },
             instructions: Some(
                 "Project-scoped persistent memory store for coding agents. \
@@ -923,21 +957,25 @@ impl ServerHandler for EngramDbServer {
 
     fn list_resources(
         &self,
-        _request: PaginatedRequestParam,
+        _request: Option<PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ListResourcesResult, rmcp::Error>> + Send + '_
+    ) -> impl std::future::Future<Output = Result<ListResourcesResult, rmcp::ErrorData>> + Send + '_
     {
         std::future::ready(Ok(ListResourcesResult {
+            meta: None,
             next_cursor: None,
             resources: vec![RawResource {
                 uri: "memory://index".to_string(),
                 name: "EngramDB Store Index".to_string(),
+                title: None,
                 description: Some(
                     "Lightweight index of all memories with summaries, scopes, tags, and scores."
                         .to_string(),
                 ),
                 mime_type: Some("application/json".to_string()),
                 size: None,
+                icons: None,
+                meta: None,
             }
             .no_annotation()],
         }))
@@ -945,19 +983,23 @@ impl ServerHandler for EngramDbServer {
 
     fn list_resource_templates(
         &self,
-        _request: PaginatedRequestParam,
+        _request: Option<PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ListResourceTemplatesResult, rmcp::Error>> + Send + '_
-    {
+    ) -> impl std::future::Future<Output = Result<ListResourceTemplatesResult, rmcp::ErrorData>>
+           + Send
+           + '_ {
         std::future::ready(Ok(ListResourceTemplatesResult {
+            meta: None,
             next_cursor: None,
             resource_templates: vec![RawResourceTemplate {
                 uri_template: "memory://context/{path}".to_string(),
                 name: "Contextual Memories".to_string(),
+                title: None,
                 description: Some(
                     "Memories relevant to the given file path, scored and sorted.".to_string(),
                 ),
                 mime_type: Some("application/json".to_string()),
+                icons: None,
             }
             .no_annotation()],
         }))
@@ -965,9 +1007,9 @@ impl ServerHandler for EngramDbServer {
 
     fn read_resource(
         &self,
-        request: ReadResourceRequestParam,
+        request: ReadResourceRequestParams,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ReadResourceResult, rmcp::Error>> + Send + '_
+    ) -> impl std::future::Future<Output = Result<ReadResourceResult, rmcp::ErrorData>> + Send + '_
     {
         let uri = request.uri;
         async move {
@@ -975,11 +1017,11 @@ impl ServerHandler for EngramDbServer {
                 let store = self
                     .open_store()
                     .await
-                    .map_err(|e| rmcp::Error::internal_error(e, None))?;
+                    .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
                 let entries = store
                     .list()
                     .await
-                    .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
                 let index: Vec<serde_json::Value> = entries
                     .iter()
@@ -997,7 +1039,7 @@ impl ServerHandler for EngramDbServer {
                     .collect();
 
                 let json = serde_json::to_string(&index)
-                    .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
                 Ok(ReadResourceResult {
                     contents: vec![ResourceContents::text(json, "memory://index")],
@@ -1006,7 +1048,7 @@ impl ServerHandler for EngramDbServer {
                 let engine = self
                     .build_engine()
                     .await
-                    .map_err(|e| rmcp::Error::internal_error(e, None))?;
+                    .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
 
                 let query = RetrievalQuery {
                     path: Some(path.to_string()),
@@ -1015,7 +1057,7 @@ impl ServerHandler for EngramDbServer {
                 };
                 let result = ops::retrieve_memories(&engine, &query)
                     .await
-                    .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
                 let memories: Vec<serde_json::Value> = result
                     .memories
@@ -1033,13 +1075,13 @@ impl ServerHandler for EngramDbServer {
                     .collect();
 
                 let json = serde_json::to_string(&memories)
-                    .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
                 Ok(ReadResourceResult {
                     contents: vec![ResourceContents::text(json, &uri)],
                 })
             } else {
-                Err(rmcp::Error::invalid_params(
+                Err(rmcp::ErrorData::invalid_params(
                     format!("Unknown resource URI: {}", uri),
                     None,
                 ))
@@ -1049,10 +1091,12 @@ impl ServerHandler for EngramDbServer {
 
     fn list_prompts(
         &self,
-        _request: PaginatedRequestParam,
+        _request: Option<PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ListPromptsResult, rmcp::Error>> + Send + '_ {
+    ) -> impl std::future::Future<Output = Result<ListPromptsResult, rmcp::ErrorData>> + Send + '_
+    {
         std::future::ready(Ok(ListPromptsResult {
+            meta: None,
             next_cursor: None,
             prompts: vec![
                 Prompt::new(
@@ -1060,6 +1104,7 @@ impl ServerHandler for EngramDbServer {
                     Some("Orientation prompt for the start of a coding session."),
                     Some(vec![PromptArgument {
                         name: "path".to_string(),
+                        title: None,
                         description: Some(
                             "The file or directory the agent will be working on.".to_string(),
                         ),
@@ -1077,9 +1122,9 @@ impl ServerHandler for EngramDbServer {
 
     async fn get_prompt(
         &self,
-        request: GetPromptRequestParam,
+        request: GetPromptRequestParams,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<GetPromptResult, rmcp::Error> {
+    ) -> Result<GetPromptResult, rmcp::ErrorData> {
         match request.name.as_str() {
             "memory-session-start" => {
                 let path = request
@@ -1167,7 +1212,7 @@ impl ServerHandler for EngramDbServer {
                     messages: vec![PromptMessage::new_text(PromptMessageRole::User, prompt)],
                 })
             }
-            _ => Err(rmcp::Error::invalid_params(
+            _ => Err(rmcp::ErrorData::invalid_params(
                 format!("Unknown prompt: {}", request.name),
                 None,
             )),
@@ -1187,18 +1232,28 @@ pub async fn run_stdio(dir: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Start the MCP server with SSE transport.
+/// Start the MCP server with streamable HTTP transport.
 pub async fn run_sse(dir: PathBuf, port: u16) -> anyhow::Result<()> {
-    use rmcp::transport::sse_server::SseServer;
-    use std::net::SocketAddr;
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    };
+    use std::sync::Arc;
 
-    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
-    let sse_server = SseServer::serve(addr).await?;
+    let config = StreamableHttpServerConfig::default();
+    let ct = config.cancellation_token.clone();
+    let service = StreamableHttpService::new(
+        move || Ok(EngramDbServer::new(dir.clone())),
+        Arc::new(LocalSessionManager::default()),
+        config,
+    );
 
-    let dir_clone = dir.clone();
-    let ct = sse_server.with_service(move || EngramDbServer::new(dir_clone.clone()));
-
+    let router = axum::Router::new().nest_service("/mcp", service);
+    let addr = format!("127.0.0.1:{}", port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("EngramDB MCP server listening on {}", addr);
-    ct.cancelled().await;
+
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move { ct.cancelled().await })
+        .await?;
     Ok(())
 }
