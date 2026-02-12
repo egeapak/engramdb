@@ -20,8 +20,9 @@ mod provenance;
 // Re-export all public types
 pub use challenge::Challenge;
 pub use config::{
-    EmbeddingsConfig, EngramConfig, LogicalBonusConfig, RetrievalConfig, ScopeProximityConfig,
-    ScoringConfig, ScoringWeights, SearchConfig, ThresholdsConfig, TrustWeights,
+    EmbeddingsConfig, EngramConfig, LogicalBonusConfig, RerankConfig, RetrievalConfig,
+    ScopeProximityConfig, ScoringConfig, ScoringWeights, SearchConfig, ThresholdsConfig,
+    TrustWeights,
 };
 pub use decay::{Decay, DecayStrategy};
 pub use memory::{Memory, MemoryType, MemoryUpdate, Status, Visibility};
