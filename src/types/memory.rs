@@ -560,4 +560,47 @@ mod tests {
         assert_eq!(deserialized.summary, "Test summary");
         assert_eq!(deserialized.content, "Test content");
     }
+
+    #[test]
+    fn test_memory_update_apply_challenges() {
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Original",
+            "Original",
+            Provenance::human(),
+        );
+        assert!(memory.challenges.is_empty());
+
+        let challenges = vec![
+            Challenge::new("First evidence"),
+            Challenge::new("Second evidence"),
+        ];
+        let mut update = MemoryUpdate::new();
+        update.challenges = Some(challenges);
+        update.status = Some(Status::Challenged);
+        update.apply_to(&mut memory);
+
+        assert_eq!(memory.challenges.len(), 2);
+        assert_eq!(memory.challenges[0].evidence, "First evidence");
+        assert_eq!(memory.challenges[1].evidence, "Second evidence");
+        assert_eq!(memory.status, Status::Challenged);
+    }
+
+    #[test]
+    fn test_memory_update_none_challenges_preserves_existing() {
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Original",
+            "Original",
+            Provenance::human(),
+        );
+        memory.add_challenge(Challenge::new("Existing challenge"));
+
+        let update = MemoryUpdate::new(); // all fields None
+        update.apply_to(&mut memory);
+
+        // challenges should be untouched
+        assert_eq!(memory.challenges.len(), 1);
+        assert_eq!(memory.challenges[0].evidence, "Existing challenge");
+    }
 }
