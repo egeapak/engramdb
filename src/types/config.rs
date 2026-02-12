@@ -273,6 +273,44 @@ impl Default for NliConfig {
     }
 }
 
+/// Configuration for cross-encoder reranking.
+///
+/// When enabled, a cross-encoder model jointly scores query+document pairs
+/// to refine the initial bi-encoder retrieval ranking. This is slower but
+/// more accurate for nuanced relevance judgments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RerankConfig {
+    /// Whether reranking is enabled (default: false)
+    pub enabled: bool,
+
+    /// Reranker model name (default: "bge-reranker-base").
+    /// Supported: "bge-reranker-base", "bge-reranker-v2-m3",
+    /// "jina-reranker-v1-turbo-en", "jina-reranker-v2-base-multilingual".
+    pub model: String,
+
+    /// Number of top candidates to rerank (default: 50).
+    /// Only the top N results from initial retrieval are passed to the
+    /// cross-encoder. Higher values improve quality but are slower.
+    pub top_n: usize,
+
+    /// Blend weight for rerank score vs original score (default: 0.5).
+    /// 0.0 = ignore rerank (original scores only),
+    /// 1.0 = use only rerank score.
+    /// Formula: blended = (1 - weight) * original + weight * rerank
+    pub weight: f64,
+}
+
+impl Default for RerankConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: "bge-reranker-base".to_string(),
+            top_n: 50,
+            weight: 0.5,
+        }
+    }
+}
+
 /// Top-level EngramDB configuration
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EngramConfig {
@@ -307,6 +345,10 @@ pub struct EngramConfig {
     /// NLI contradiction detection settings
     #[serde(default)]
     pub nli: NliConfig,
+
+    /// Cross-encoder reranking settings
+    #[serde(default)]
+    pub rerank: RerankConfig,
 }
 
 impl EngramConfig {
@@ -566,7 +608,6 @@ threshold = 0.25
 
     #[test]
     fn test_nli_config_omitted_uses_defaults() {
-        // Empty TOML: nli section should use defaults
         let config: EngramConfig = toml::from_str("").unwrap();
         assert!(!config.nli.enabled);
         assert_eq!(config.nli.contradiction_threshold, 0.7);
@@ -589,5 +630,67 @@ similarity_threshold = 0.4
         assert_eq!(config.nli.contradiction_threshold, 0.9);
         assert_eq!(config.nli.max_comparisons, 5);
         assert_eq!(config.nli.similarity_threshold, 0.4);
+    }
+
+    #[test]
+    fn test_rerank_config_defaults() {
+        let config = RerankConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.model, "bge-reranker-base");
+        assert_eq!(config.top_n, 50);
+        assert_eq!(config.weight, 0.5);
+    }
+
+    #[test]
+    fn test_rerank_config_disabled_by_default() {
+        let config = EngramConfig::default();
+        assert!(!config.rerank.enabled);
+        assert_eq!(config.rerank.model, "bge-reranker-base");
+        assert_eq!(config.rerank.top_n, 50);
+        assert_eq!(config.rerank.weight, 0.5);
+    }
+
+    #[test]
+    fn test_rerank_config_custom_toml() {
+        let toml = r#"
+[rerank]
+enabled = true
+model = "bge-reranker-v2-m3"
+top_n = 20
+weight = 0.7
+"#;
+        let config: EngramConfig = toml::from_str(toml).unwrap();
+        assert!(config.rerank.enabled);
+        assert_eq!(config.rerank.model, "bge-reranker-v2-m3");
+        assert_eq!(config.rerank.top_n, 20);
+        assert_eq!(config.rerank.weight, 0.7);
+    }
+
+    #[test]
+    fn test_rerank_config_defaults_when_omitted() {
+        let config: EngramConfig = toml::from_str("").unwrap();
+        assert!(!config.rerank.enabled);
+        assert_eq!(config.rerank.model, "bge-reranker-base");
+        assert_eq!(config.rerank.top_n, 50);
+        assert_eq!(config.rerank.weight, 0.5);
+    }
+
+    #[test]
+    fn test_rerank_config_toml_roundtrip() {
+        let mut config = EngramConfig::default();
+        config.rerank.enabled = true;
+        config.rerank.model = "jina-reranker-v1-turbo-en".to_string();
+        config.rerank.top_n = 30;
+        config.rerank.weight = 0.8;
+
+        let temp_path = std::env::temp_dir().join("test_rerank_config_roundtrip.toml");
+        config.to_toml_file(&temp_path).unwrap();
+        let loaded = EngramConfig::from_toml_file(&temp_path).unwrap();
+        std::fs::remove_file(&temp_path).ok();
+
+        assert!(loaded.rerank.enabled);
+        assert_eq!(loaded.rerank.model, "jina-reranker-v1-turbo-en");
+        assert_eq!(loaded.rerank.top_n, 30);
+        assert_eq!(loaded.rerank.weight, 0.8);
     }
 }

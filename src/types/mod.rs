@@ -20,7 +20,7 @@ mod provenance;
 // Re-export all public types
 pub use challenge::Challenge;
 pub use config::{
-    EmbeddingsConfig, EngramConfig, LogicalBonusConfig, NliConfig, RetrievalConfig,
+    EmbeddingsConfig, EngramConfig, LogicalBonusConfig, NliConfig, RerankConfig, RetrievalConfig,
     ScopeProximityConfig, ScoringConfig, ScoringWeights, SearchConfig, ThresholdsConfig,
     TrustWeights,
 };

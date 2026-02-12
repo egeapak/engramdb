@@ -16,6 +16,8 @@ pub struct ScoreBreakdown {
     pub semantic: Option<f64>,
     /// Raw keyword match score (if available — only set for search, not retrieve)
     pub keyword: Option<f64>,
+    /// Raw cross-encoder rerank score (if reranking was applied)
+    pub rerank: Option<f64>,
     /// Effective relevance score (criticality * decay)
     pub relevance: f64,
     /// Scope proximity score
@@ -173,6 +175,7 @@ pub fn composite_score(
         final_score: score,
         semantic: raw_semantic,
         keyword: None,
+        rerank: None,
         relevance,
         scope: scope_score,
         trust,
@@ -602,5 +605,23 @@ mod tests {
         // In scope-only mode, semantic should be None
         assert!(breakdown.semantic.is_none());
         assert!(breakdown.final_score > 0.0);
+    }
+
+    #[test]
+    fn test_composite_score_rerank_is_none() {
+        let memory = create_test_memory();
+        let context = ScoringContext::with_semantic(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+            "test query".to_string(),
+            0.8,
+        );
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let breakdown = composite_score(&memory, &context, &config, now);
+
+        // composite_score never sets rerank — it's populated later by the engine
+        assert!(breakdown.rerank.is_none());
     }
 }
