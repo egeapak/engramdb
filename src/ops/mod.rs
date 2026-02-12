@@ -38,38 +38,70 @@ pub use search::search_memories;
 pub use stats::{compute_stats, StoreStats};
 pub use update::{update_memory, UpdateParams};
 
-use crate::embeddings::{EmbeddingProvider, OnnxProvider};
+use crate::embeddings::{
+    EmbeddingProvider, OnnxProvider, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT,
+};
 #[cfg(feature = "ollama")]
 use crate::embeddings::{OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT};
 use crate::nli::OnnxNliProvider;
 use crate::retrieval::engine::RetrievalEngine;
 use crate::storage::MemoryStore;
+use crate::types::EmbeddingBackend;
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-/// Try to create an embedding provider for the given model name.
-/// For models with multiple backends, tries them in priority order.
-fn resolve_provider(model: &str) -> Option<Box<dyn EmbeddingProvider>> {
-    match model {
-        "onnx" | "all-minilm" => {
-            // Prefer local ONNX (no server needed), fall back to Ollama
-            if let Some(p) = OnnxProvider::try_new() {
-                return Some(Box::new(p));
-            }
-            #[cfg(feature = "ollama")]
-            {
-                OllamaProvider::try_new(ALL_MINILM).map(|p| Box::new(p) as _)
-            }
-            #[cfg(not(feature = "ollama"))]
-            {
-                None
-            }
+/// Resolve the effective embedding backend from the layered override chain.
+///
+/// Priority: `cli_override` > `ENGRAMDB_EMBEDDING_BACKEND` env var > config value.
+pub fn resolve_backend(
+    config_backend: EmbeddingBackend,
+    cli_override: Option<EmbeddingBackend>,
+) -> EmbeddingBackend {
+    if let Some(b) = cli_override {
+        return b;
+    }
+    if let Ok(val) = std::env::var("ENGRAMDB_EMBEDDING_BACKEND") {
+        if let Ok(b) = val.parse::<EmbeddingBackend>() {
+            return b;
         }
-        #[cfg(feature = "ollama")]
-        "nomic-embed-text" => OllamaProvider::try_new(NOMIC_EMBED_TEXT).map(|p| Box::new(p) as _),
-        #[cfg(feature = "ollama")]
-        "mxbai-embed-large" => OllamaProvider::try_new(MXBAI_EMBED_LARGE).map(|p| Box::new(p) as _),
+        eprintln!(
+            "Warning: invalid ENGRAMDB_EMBEDDING_BACKEND='{}', ignoring",
+            val
+        );
+    }
+    config_backend
+}
+
+/// Try to create an embedding provider for the given model name and backend.
+fn resolve_provider(model: &str, backend: EmbeddingBackend) -> Option<Box<dyn EmbeddingProvider>> {
+    #[cfg(not(feature = "ollama"))]
+    if backend == EmbeddingBackend::Ollama {
+        eprintln!(
+            "Warning: embedding backend 'ollama' selected but Ollama support is not compiled in"
+        );
+        return None;
+    }
+
+    match model {
+        "onnx" | "all-minilm" => try_onnx_then_ollama(
+            backend,
+            || OnnxProvider::try_new().map(|p| Box::new(p) as _),
+            #[cfg(feature = "ollama")]
+            || OllamaProvider::try_new(ALL_MINILM).map(|p| Box::new(p) as _),
+        ),
+        "nomic-embed-text" => try_onnx_then_ollama(
+            backend,
+            || OnnxProvider::try_with_model(ONNX_NOMIC_EMBED_TEXT).map(|p| Box::new(p) as _),
+            #[cfg(feature = "ollama")]
+            || OllamaProvider::try_new(NOMIC_EMBED_TEXT).map(|p| Box::new(p) as _),
+        ),
+        "mxbai-embed-large" => try_onnx_then_ollama(
+            backend,
+            || OnnxProvider::try_with_model(ONNX_MXBAI_EMBED_LARGE).map(|p| Box::new(p) as _),
+            #[cfg(feature = "ollama")]
+            || OllamaProvider::try_new(MXBAI_EMBED_LARGE).map(|p| Box::new(p) as _),
+        ),
         other => {
             eprintln!(
                 "Warning: unknown embedding model '{}', embeddings disabled",
@@ -78,6 +110,27 @@ fn resolve_provider(model: &str) -> Option<Box<dyn EmbeddingProvider>> {
             None
         }
     }
+}
+
+/// Shared logic: try ONNX and/or Ollama based on the backend preference.
+fn try_onnx_then_ollama(
+    backend: EmbeddingBackend,
+    try_onnx: impl FnOnce() -> Option<Box<dyn EmbeddingProvider>>,
+    #[cfg(feature = "ollama")] try_ollama: impl FnOnce() -> Option<Box<dyn EmbeddingProvider>>,
+) -> Option<Box<dyn EmbeddingProvider>> {
+    if backend != EmbeddingBackend::Ollama {
+        if let Some(p) = try_onnx() {
+            return Some(p);
+        }
+        if backend == EmbeddingBackend::Onnx {
+            return None;
+        }
+    }
+    #[cfg(feature = "ollama")]
+    if backend != EmbeddingBackend::Onnx {
+        return try_ollama();
+    }
+    None
 }
 
 /// Map a reranker model name string to a fastembed `RerankerModel` enum variant.
@@ -96,13 +149,18 @@ fn resolve_reranker_model(name: &str) -> RerankerModel {
 /// the provider wiring.  Returns an engine that always works for storage operations;
 /// embeddings and reranking are attached on a best-effort basis.  Vector storage is
 /// handled by the MemoryStore's integrated LanceDB.
-pub async fn build_engine(store: MemoryStore, config_path: &std::path::Path) -> RetrievalEngine {
+pub async fn build_engine(
+    store: MemoryStore,
+    config_path: &std::path::Path,
+    backend_override: Option<EmbeddingBackend>,
+) -> RetrievalEngine {
     let config = crate::storage::config::load_config(config_path)
         .await
         .unwrap_or_default();
     let mut engine = RetrievalEngine::new(store, config.clone());
 
-    if let Some(provider) = resolve_provider(config.embeddings.provider.as_str()) {
+    let backend = resolve_backend(config.embeddings.backend, backend_override);
+    if let Some(provider) = resolve_provider(config.embeddings.provider.as_str(), backend) {
         if provider.dimensions() != config.embeddings.dimensions {
             eprintln!(
                 "Warning: provider dimensions ({}) != config dimensions ({})",
@@ -115,7 +173,7 @@ pub async fn build_engine(store: MemoryStore, config_path: &std::path::Path) -> 
 
     // Initialize NLI provider if enabled
     if config.nli.enabled {
-        match OnnxNliProvider::try_new() {
+        match OnnxNliProvider::try_new(&config.nli.model) {
             Some(provider) => {
                 engine = engine.with_nli_provider(Box::new(provider));
             }
@@ -127,6 +185,13 @@ pub async fn build_engine(store: MemoryStore, config_path: &std::path::Path) -> 
 
     // Initialize cross-encoder reranker if enabled
     if config.rerank.enabled {
+        if !(0.0..=1.0).contains(&config.rerank.weight) {
+            eprintln!(
+                "Warning: rerank.weight ({}) is outside [0.0, 1.0], clamping",
+                config.rerank.weight
+            );
+        }
+
         let cache_dir = dirs::cache_dir()
             .unwrap_or_else(|| PathBuf::from(".cache"))
             .join("engramdb")

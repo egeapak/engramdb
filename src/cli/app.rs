@@ -70,6 +70,10 @@ pub struct Cli {
     /// Working directory (default: current directory)
     #[arg(long, global = true)]
     pub dir: Option<PathBuf>,
+
+    /// Embedding backend: auto, onnx, or ollama
+    #[arg(long = "embedding-backend", global = true)]
+    pub embedding_backend: Option<crate::types::EmbeddingBackend>,
 }
 
 /// Available CLI commands.

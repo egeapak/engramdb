@@ -31,6 +31,13 @@ use tokio::fs as async_fs;
 ///
 /// Manages memory files, a unified LanceDB index, manifest, and coordinates
 /// between shared (project-level) and personal (user-level) storage locations.
+///
+/// # Cloning
+/// Cloning is cheap (Arc'd LanceDB connection, paths). However, `update()`
+/// does a non-atomic read-modify-write on the filesystem, so concurrent
+/// updates to the **same** memory ID from different clones can race.
+/// Callers must ensure cloned handles don't write to overlapping IDs.
+#[derive(Clone)]
 pub struct MemoryStore {
     /// Root directory of the project (contains .engramdb/)
     pub project_dir: PathBuf,

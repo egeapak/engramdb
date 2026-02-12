@@ -290,12 +290,19 @@ impl RetrievalEngine {
         }
 
         let top_n = self.config.rerank.top_n.min(candidates.len());
-        let weight = self.config.rerank.weight;
+        let weight = self.config.rerank.weight.clamp(0.0, 1.0);
 
-        // Build document strings for the top N candidates
+        // Build document strings for the top N candidates, including details when available
         let documents: Vec<String> = candidates[..top_n]
             .iter()
-            .map(|sm| format!("{} {}", sm.memory.summary, sm.memory.content))
+            .map(|sm| {
+                let mut doc = format!("{} {}", sm.memory.summary, sm.memory.content);
+                if let Some(ref details) = sm.memory.details {
+                    doc.push(' ');
+                    doc.push_str(details);
+                }
+                doc
+            })
             .collect();
 
         // Run cross-encoder in spawn_blocking since it's CPU-bound
