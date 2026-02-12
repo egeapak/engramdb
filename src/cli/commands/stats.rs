@@ -1,9 +1,9 @@
 //! Display statistics about the memory store.
 
 use crate::cli::output::{OutputFormatter, Stats};
-use crate::embeddings::{
-    OllamaProvider, OnnxProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT,
-};
+use crate::embeddings::OnnxProvider;
+#[cfg(feature = "ollama")]
+use crate::embeddings::{OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT};
 use crate::ops::compute_stats;
 use crate::storage::{MemoryStore, RegistryBackend};
 use crate::types::Status;
@@ -92,24 +92,28 @@ async fn print_embeddings_status(model: &str) {
                 println!("Embeddings: Available (all-minilm via ONNX)");
                 return;
             }
-            // ONNX unavailable — check Ollama fallback
-            if let Some(provider) = OllamaProvider::try_new(ALL_MINILM) {
-                match provider.check_model_available().await {
-                    Ok(true) => {
-                        println!("Embeddings: Available (all-minilm via Ollama)");
-                        return;
+            #[cfg(feature = "ollama")]
+            {
+                // ONNX unavailable — check Ollama fallback
+                if let Some(provider) = OllamaProvider::try_new(ALL_MINILM) {
+                    match provider.check_model_available().await {
+                        Ok(true) => {
+                            println!("Embeddings: Available (all-minilm via Ollama)");
+                            return;
+                        }
+                        Ok(false) => {
+                            println!(
+                                "Embeddings: Not available (run 'engramdb init' to download model)"
+                            );
+                            return;
+                        }
+                        Err(_) => {}
                     }
-                    Ok(false) => {
-                        println!(
-                            "Embeddings: Not available (run 'engramdb init' to download model)"
-                        );
-                        return;
-                    }
-                    Err(_) => {}
                 }
             }
             println!("Embeddings: Not available (run 'engramdb init' to download model)");
         }
+        #[cfg(feature = "ollama")]
         "nomic-embed-text" | "mxbai-embed-large" => {
             let spec = if model == "nomic-embed-text" {
                 NOMIC_EMBED_TEXT

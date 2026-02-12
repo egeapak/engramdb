@@ -64,7 +64,9 @@ impl EmbeddingProvider for OnnxProvider {
         let model = Arc::clone(&self.model);
         // fastembed's embed method is CPU-bound, so run it in a blocking task
         let embeddings = tokio::task::spawn_blocking(move || {
-            let mut model = model.lock().expect("model mutex poisoned");
+            let mut model = model
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
             model
                 .embed(vec![text_owned], None)
                 .context("Failed to generate embedding")
@@ -85,7 +87,9 @@ impl EmbeddingProvider for OnnxProvider {
         let model = Arc::clone(&self.model);
 
         tokio::task::spawn_blocking(move || {
-            let mut model = model.lock().expect("model mutex poisoned");
+            let mut model = model
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
             model
                 .embed(texts_owned, None)
                 .context("Failed to generate batch embeddings")
