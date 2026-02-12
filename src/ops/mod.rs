@@ -70,6 +70,14 @@ fn resolve_provider(model: &str) -> Option<Box<dyn EmbeddingProvider>> {
         "nomic-embed-text" => OllamaProvider::try_new(NOMIC_EMBED_TEXT).map(|p| Box::new(p) as _),
         #[cfg(feature = "ollama")]
         "mxbai-embed-large" => OllamaProvider::try_new(MXBAI_EMBED_LARGE).map(|p| Box::new(p) as _),
+        #[cfg(not(feature = "ollama"))]
+        "nomic-embed-text" | "mxbai-embed-large" => {
+            eprintln!(
+                "Warning: embedding model '{}' requires Ollama support (compile with --features ollama), embeddings disabled",
+                model
+            );
+            None
+        }
         other => {
             eprintln!(
                 "Warning: unknown embedding model '{}', embeddings disabled",
@@ -115,7 +123,7 @@ pub async fn build_engine(store: MemoryStore, config_path: &std::path::Path) -> 
 
     // Initialize NLI provider if enabled
     if config.nli.enabled {
-        match OnnxNliProvider::try_new() {
+        match OnnxNliProvider::try_new(&config.nli.model) {
             Some(provider) => {
                 engine = engine.with_nli_provider(Box::new(provider));
             }
@@ -127,6 +135,13 @@ pub async fn build_engine(store: MemoryStore, config_path: &std::path::Path) -> 
 
     // Initialize cross-encoder reranker if enabled
     if config.rerank.enabled {
+        if !(0.0..=1.0).contains(&config.rerank.weight) {
+            eprintln!(
+                "Warning: rerank.weight ({}) is outside [0.0, 1.0], clamping",
+                config.rerank.weight
+            );
+        }
+
         let cache_dir = dirs::cache_dir()
             .unwrap_or_else(|| PathBuf::from(".cache"))
             .join("engramdb")

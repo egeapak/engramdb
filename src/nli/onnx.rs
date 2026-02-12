@@ -13,8 +13,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokenizers::Tokenizer;
 
-/// HuggingFace repository ID for the NLI model.
-const MODEL_REPO: &str = "cross-encoder/nli-deberta-v3-xsmall";
+/// Default HuggingFace repository ID for the NLI model.
+#[cfg(test)]
+const DEFAULT_MODEL_REPO: &str = "cross-encoder/nli-deberta-v3-xsmall";
 
 /// ONNX model file path within the repository.
 const MODEL_FILE: &str = "onnx/model.onnx";
@@ -41,13 +42,13 @@ pub struct OnnxNliProvider {
 }
 
 impl OnnxNliProvider {
-    /// Create a new ONNX NLI provider.
+    /// Create a new ONNX NLI provider with the specified model repository.
     ///
     /// Downloads the model and tokenizer from HuggingFace Hub if not cached.
     /// The files are cached in the default HuggingFace cache directory
     /// (`~/.cache/huggingface/hub/`).
-    pub fn new() -> Result<Self> {
-        let (model_path, tokenizer_path) = download_model_files()?;
+    pub fn new(model_repo: &str) -> Result<Self> {
+        let (model_path, tokenizer_path) = download_model_files(model_repo)?;
 
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
@@ -64,11 +65,11 @@ impl OnnxNliProvider {
         })
     }
 
-    /// Try to create a new provider, returning None if unavailable.
+    /// Try to create a new provider with the specified model, returning None if unavailable.
     ///
     /// Useful for graceful degradation when NLI is optional.
-    pub fn try_new() -> Option<Self> {
-        match Self::new() {
+    pub fn try_new(model_repo: &str) -> Option<Self> {
+        match Self::new(model_repo) {
             Ok(provider) => Some(provider),
             Err(e) => {
                 tracing::warn!("NLI provider unavailable: {}", e);
@@ -82,9 +83,9 @@ impl OnnxNliProvider {
 ///
 /// Returns `(model_path, tokenizer_path)`. Files are cached and reused
 /// on subsequent calls.
-fn download_model_files() -> Result<(PathBuf, PathBuf)> {
+fn download_model_files(model_repo: &str) -> Result<(PathBuf, PathBuf)> {
     let api = hf_hub::api::sync::Api::new().context("Failed to initialize HuggingFace API")?;
-    let repo = api.model(MODEL_REPO.to_string());
+    let repo = api.model(model_repo.to_string());
 
     let model_path = repo
         .get(MODEL_FILE)
@@ -96,9 +97,9 @@ fn download_model_files() -> Result<(PathBuf, PathBuf)> {
     Ok((model_path, tokenizer_path))
 }
 
-/// Run NLI inference on a single sentence pair (blocking).
-fn classify_sync(
-    session: &Mutex<Session>,
+/// Run NLI inference on a single sentence pair with an already-locked session.
+fn classify_one(
+    session: &mut Session,
     tokenizer: &Tokenizer,
     premise: &str,
     hypothesis: &str,
@@ -123,7 +124,6 @@ fn classify_sync(
     let type_tensor =
         ort::value::TensorRef::from_array_view(([1usize, length], token_type_ids.as_slice()))?;
 
-    let mut session = session.lock().expect("NLI session mutex poisoned");
     let outputs = session.run(ort::inputs![
         "input_ids" => ids_tensor,
         "attention_mask" => mask_tensor,
@@ -145,17 +145,30 @@ fn classify_sync(
     ))
 }
 
+/// Run NLI inference on a single sentence pair (blocking). Locks the session mutex.
+fn classify_sync(
+    session: &Mutex<Session>,
+    tokenizer: &Tokenizer,
+    premise: &str,
+    hypothesis: &str,
+) -> Result<NliResult> {
+    let mut session = session.lock().expect("NLI session mutex poisoned");
+    classify_one(&mut session, tokenizer, premise, hypothesis)
+}
+
 /// Run NLI inference on multiple sentence pairs (blocking).
+///
+/// Acquires the session lock once and processes all pairs sequentially,
+/// avoiding per-pair lock overhead.
 fn classify_batch_sync(
     session: &Mutex<Session>,
     tokenizer: &Tokenizer,
     pairs: &[(&str, &str)],
 ) -> Result<Vec<NliResult>> {
-    // For simplicity and to avoid padding complexity, process each pair individually.
-    // The model is small enough that per-pair inference is fast.
+    let mut session = session.lock().expect("NLI session mutex poisoned");
     pairs
         .iter()
-        .map(|(premise, hypothesis)| classify_sync(session, tokenizer, premise, hypothesis))
+        .map(|(premise, hypothesis)| classify_one(&mut session, tokenizer, premise, hypothesis))
         .collect()
 }
 
@@ -234,7 +247,7 @@ mod tests {
     #[test]
     fn test_provider_creation() {
         // This test requires model download; skip gracefully if unavailable
-        let provider = OnnxNliProvider::try_new();
+        let provider = OnnxNliProvider::try_new(DEFAULT_MODEL_REPO);
         if provider.is_none() {
             eprintln!("Skipping: NLI model not available");
             return;
@@ -244,7 +257,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_classify_contradiction() {
-        let provider = match OnnxNliProvider::try_new() {
+        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
             Some(p) => p,
             None => {
                 eprintln!("Skipping: NLI model not available");
@@ -270,7 +283,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_classify_entailment() {
-        let provider = match OnnxNliProvider::try_new() {
+        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
             Some(p) => p,
             None => {
                 eprintln!("Skipping: NLI model not available");
@@ -292,7 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_classify_neutral() {
-        let provider = match OnnxNliProvider::try_new() {
+        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
             Some(p) => p,
             None => {
                 eprintln!("Skipping: NLI model not available");
@@ -314,7 +327,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_classify_batch() {
-        let provider = match OnnxNliProvider::try_new() {
+        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
             Some(p) => p,
             None => {
                 eprintln!("Skipping: NLI model not available");
@@ -338,7 +351,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_softmax_sums_to_one() {
-        let provider = match OnnxNliProvider::try_new() {
+        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
             Some(p) => p,
             None => {
                 eprintln!("Skipping: NLI model not available");

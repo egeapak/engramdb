@@ -136,6 +136,13 @@ async fn print_embeddings_status(model: &str) {
                 println!("Embeddings: Not available (Ollama server not reachable)");
             }
         }
+        #[cfg(not(feature = "ollama"))]
+        "nomic-embed-text" | "mxbai-embed-large" => {
+            println!(
+                "Embeddings: Not available ('{}' requires Ollama support, compile with --features ollama)",
+                model
+            );
+        }
         other => {
             println!("Embeddings: Not available (unknown provider '{}')", other);
         }

@@ -31,6 +31,7 @@ use tokio::fs as async_fs;
 ///
 /// Manages memory files, a unified LanceDB index, manifest, and coordinates
 /// between shared (project-level) and personal (user-level) storage locations.
+#[derive(Clone)]
 pub struct MemoryStore {
     /// Root directory of the project (contains .engramdb/)
     pub project_dir: PathBuf,

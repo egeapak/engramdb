@@ -85,6 +85,7 @@ pub struct VectorMatch {
 /// Stores memory index entries in a `memories` table and embedding vectors
 /// in a separate `chunks` table. Vector search queries the chunks table and
 /// aggregates results by memory_id using max-score.
+#[derive(Clone)]
 pub struct LanceIndex {
     connection: Arc<Connection>,
     table_name: String,

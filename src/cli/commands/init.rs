@@ -80,6 +80,14 @@ pub async fn run_init(
             "mxbai-embed-large" => {
                 init_ollama_model(MXBAI_EMBED_LARGE, formatter).await;
             }
+            #[cfg(not(feature = "ollama"))]
+            "nomic-embed-text" | "mxbai-embed-large" => {
+                formatter.print_error(&format!(
+                    "Embedding provider '{}' requires Ollama support, which is not enabled. \
+                     Compile with --features ollama or use 'all-minilm'.",
+                    config.embeddings.provider
+                ));
+            }
             other => {
                 formatter.print_error(&format!(
                     "Unknown embedding provider '{}', skipping initialization.",
