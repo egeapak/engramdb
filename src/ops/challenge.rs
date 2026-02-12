@@ -147,4 +147,19 @@ mod tests {
         assert_eq!(reloaded.content, "We decided to use SQLite.");
         assert_eq!(reloaded.type_, MemoryType::Decision);
     }
+
+    #[tokio::test]
+    async fn test_challenge_preserves_memory_id() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
+
+        let result = challenge_memory(&store, &id, "Some evidence", None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.memory.id, id);
+
+        let reloaded = store.get(&id).await.unwrap();
+        assert_eq!(reloaded.id, id);
+    }
 }
