@@ -161,12 +161,8 @@ impl LanceIndex {
         match connection.open_table(&table_name).execute().await {
             Ok(_) => Ok(()),
             Err(_) => {
-                let empty_batch = RecordBatch::new_empty(schema.clone());
-                let schema_ref = schema.clone();
-                let batches =
-                    RecordBatchIterator::new(vec![Ok(empty_batch)].into_iter(), schema_ref);
                 connection
-                    .create_table(&table_name, batches)
+                    .create_empty_table(&table_name, schema)
                     .execute()
                     .await
                     .context("Failed to create LanceDB memories table")?;
@@ -183,12 +179,8 @@ impl LanceIndex {
         match connection.open_table(&table_name).execute().await {
             Ok(_) => Ok(()),
             Err(_) => {
-                let empty_batch = RecordBatch::new_empty(schema.clone());
-                let schema_ref = schema.clone();
-                let batches =
-                    RecordBatchIterator::new(vec![Ok(empty_batch)].into_iter(), schema_ref);
                 connection
-                    .create_table(&table_name, batches)
+                    .create_empty_table(&table_name, schema)
                     .execute()
                     .await
                     .context("Failed to create LanceDB chunks table")?;
@@ -423,27 +415,19 @@ impl LanceIndex {
         let connection = Arc::clone(&self.connection);
 
         // Drop and recreate memories table
-        let _ = connection.drop_table(&self.table_name).await;
+        let _ = connection.drop_table(&self.table_name, &[]).await;
         let memories_schema = self.memories_schema();
-        let empty_memories = RecordBatch::new_empty(memories_schema.clone());
-        let batches = RecordBatchIterator::new(
-            vec![Ok(empty_memories)].into_iter(),
-            memories_schema.clone(),
-        );
         connection
-            .create_table(&self.table_name, batches)
+            .create_empty_table(&self.table_name, memories_schema)
             .execute()
             .await
             .context("Failed to recreate LanceDB memories table")?;
 
         // Drop and recreate chunks table
-        let _ = connection.drop_table(&self.chunks_table_name).await;
+        let _ = connection.drop_table(&self.chunks_table_name, &[]).await;
         let chunks_schema = self.chunks_schema();
-        let empty_chunks = RecordBatch::new_empty(chunks_schema.clone());
-        let batches =
-            RecordBatchIterator::new(vec![Ok(empty_chunks)].into_iter(), chunks_schema.clone());
         connection
-            .create_table(&self.chunks_table_name, batches)
+            .create_empty_table(&self.chunks_table_name, chunks_schema)
             .execute()
             .await
             .context("Failed to recreate LanceDB chunks table")?;

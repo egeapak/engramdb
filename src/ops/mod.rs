@@ -38,10 +38,9 @@ pub use search::search_memories;
 pub use stats::{compute_stats, StoreStats};
 pub use update::{update_memory, UpdateParams};
 
-use crate::embeddings::{
-    EmbeddingProvider, OllamaProvider, OnnxProvider, ALL_MINILM, MXBAI_EMBED_LARGE,
-    NOMIC_EMBED_TEXT,
-};
+use crate::embeddings::{EmbeddingProvider, OnnxProvider};
+#[cfg(feature = "ollama")]
+use crate::embeddings::{OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT};
 use crate::retrieval::engine::RetrievalEngine;
 use crate::storage::MemoryStore;
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
@@ -57,9 +56,18 @@ fn resolve_provider(model: &str) -> Option<Box<dyn EmbeddingProvider>> {
             if let Some(p) = OnnxProvider::try_new() {
                 return Some(Box::new(p));
             }
-            OllamaProvider::try_new(ALL_MINILM).map(|p| Box::new(p) as _)
+            #[cfg(feature = "ollama")]
+            {
+                OllamaProvider::try_new(ALL_MINILM).map(|p| Box::new(p) as _)
+            }
+            #[cfg(not(feature = "ollama"))]
+            {
+                None
+            }
         }
+        #[cfg(feature = "ollama")]
         "nomic-embed-text" => OllamaProvider::try_new(NOMIC_EMBED_TEXT).map(|p| Box::new(p) as _),
+        #[cfg(feature = "ollama")]
         "mxbai-embed-large" => OllamaProvider::try_new(MXBAI_EMBED_LARGE).map(|p| Box::new(p) as _),
         other => {
             eprintln!(

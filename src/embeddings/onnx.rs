@@ -4,7 +4,7 @@ use super::{EmbeddingError, EmbeddingProvider};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use fastembed::{InitOptions, TextEmbedding};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// ONNX-based embedding provider using all-MiniLM-L6-v2 model.
 ///
@@ -14,7 +14,7 @@ use std::sync::Arc;
 /// - macOS: `~/Library/Caches/engramdb/models`
 /// - Linux: `$XDG_CACHE_HOME/engramdb/models` (default `~/.cache/engramdb/models`)
 pub struct OnnxProvider {
-    model: Arc<TextEmbedding>,
+    model: Arc<Mutex<TextEmbedding>>,
     dimensions: usize,
     max_tokens: usize,
 }
@@ -40,7 +40,7 @@ impl OnnxProvider {
             TextEmbedding::try_new(options).context("Failed to initialize embedding model")?;
 
         Ok(Self {
-            model: Arc::new(model),
+            model: Arc::new(Mutex::new(model)),
             dimensions: 384, // all-MiniLM-L6-v2 produces 384-dimensional embeddings
             max_tokens: 256, // all-MiniLM-L6-v2 truncates at 256 tokens
         })
@@ -64,6 +64,9 @@ impl EmbeddingProvider for OnnxProvider {
         let model = Arc::clone(&self.model);
         // fastembed's embed method is CPU-bound, so run it in a blocking task
         let embeddings = tokio::task::spawn_blocking(move || {
+            let mut model = model
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
             model
                 .embed(vec![text_owned], None)
                 .context("Failed to generate embedding")
@@ -84,6 +87,9 @@ impl EmbeddingProvider for OnnxProvider {
         let model = Arc::clone(&self.model);
 
         tokio::task::spawn_blocking(move || {
+            let mut model = model
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
             model
                 .embed(texts_owned, None)
                 .context("Failed to generate batch embeddings")
