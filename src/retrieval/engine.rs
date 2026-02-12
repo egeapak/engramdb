@@ -147,9 +147,9 @@ impl RetrievalEngine {
         self
     }
 
-    /// Check if NLI contradiction detection is available.
+    /// Check if NLI contradiction detection is available and enabled.
     pub fn nli_available(&self) -> bool {
-        self.nli_provider.is_some()
+        self.nli_provider.is_some() && self.config.nli.enabled
     }
 
     /// Check if reranking is available and enabled.
@@ -163,14 +163,14 @@ impl RetrievalEngine {
     /// to detect contradictions. Returns a list of (memory_id, NliResult) pairs
     /// where the contradiction probability exceeds the configured threshold.
     ///
-    /// Returns an empty vec if NLI or embeddings are unavailable.
+    /// Returns an empty vec if NLI is disabled, unavailable, or embeddings are missing.
     pub async fn detect_contradictions(
         &self,
         memory: &Memory,
     ) -> anyhow::Result<Vec<(String, NliResult)>> {
         let nli = match &self.nli_provider {
-            Some(p) => p,
-            None => return Ok(vec![]),
+            Some(p) if self.config.nli.enabled => p,
+            _ => return Ok(vec![]),
         };
 
         let embedding_provider = match &self.embedding_provider {
@@ -1430,8 +1430,102 @@ mod tests {
             .unwrap();
         let config = EngramConfig::default();
 
+        // NLI not available: no provider, config disabled by default
         let engine = RetrievalEngine::new(store, config);
         assert!(!engine.nli_available());
+    }
+
+    #[tokio::test]
+    async fn test_nli_available_requires_config_enabled() {
+        use crate::nli::{NliProvider, NliResult};
+        use crate::types::EngramConfig;
+        use tempfile::TempDir;
+
+        /// Dummy NLI provider for testing config gating.
+        struct DummyNli;
+
+        #[async_trait::async_trait]
+        impl NliProvider for DummyNli {
+            async fn classify(&self, _p: &str, _h: &str) -> anyhow::Result<NliResult> {
+                Ok(NliResult::from_probs(0.0, 1.0, 0.0))
+            }
+            async fn classify_batch(
+                &self,
+                _pairs: &[(&str, &str)],
+            ) -> anyhow::Result<Vec<NliResult>> {
+                Ok(vec![])
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        // Config disabled (default) + provider attached → nli_available should be false
+        let config = EngramConfig::default();
+        let engine = RetrievalEngine::new(store, config).with_nli_provider(Box::new(DummyNli));
+        assert!(
+            !engine.nli_available(),
+            "NLI should not be available when config.nli.enabled is false"
+        );
+
+        // Config enabled + provider attached → nli_available should be true
+        let store2 = MemoryStore::open(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut config2 = EngramConfig::default();
+        config2.nli.enabled = true;
+        let engine2 = RetrievalEngine::new(store2, config2).with_nli_provider(Box::new(DummyNli));
+        assert!(
+            engine2.nli_available(),
+            "NLI should be available when config.nli.enabled is true and provider is set"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detect_contradictions_disabled_by_config() {
+        use crate::nli::{NliProvider, NliResult};
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance};
+        use tempfile::TempDir;
+
+        /// Dummy NLI provider that panics if called — verifying config gating.
+        struct PanicNli;
+
+        #[async_trait::async_trait]
+        impl NliProvider for PanicNli {
+            async fn classify(&self, _p: &str, _h: &str) -> anyhow::Result<NliResult> {
+                panic!("NLI should not be called when disabled");
+            }
+            async fn classify_batch(
+                &self,
+                _pairs: &[(&str, &str)],
+            ) -> anyhow::Result<Vec<NliResult>> {
+                panic!("NLI should not be called when disabled");
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        // Config disabled + provider attached → detect_contradictions should short-circuit
+        let config = EngramConfig::default(); // nli.enabled = false
+        let engine = RetrievalEngine::new(store, config).with_nli_provider(Box::new(PanicNli));
+
+        let memory = Memory::new(
+            MemoryType::Decision,
+            "Test memory",
+            "Test content",
+            Provenance::human(),
+        );
+
+        let result = engine.detect_contradictions(&memory).await.unwrap();
+        assert!(
+            result.is_empty(),
+            "detect_contradictions should return empty when config.nli.enabled is false"
+        );
     }
 
     #[tokio::test]
