@@ -12,7 +12,7 @@ use crate::types::{EngramConfig, Memory, MemoryType};
 use chrono::Utc;
 use fastembed::TextRerank;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Detail level for retrieved memories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -90,7 +90,7 @@ pub struct RetrievalEngine {
     store: MemoryStore,
     config: EngramConfig,
     embedding_provider: Option<Box<dyn EmbeddingProvider>>,
-    reranker: Option<Arc<TextRerank>>,
+    reranker: Option<Arc<Mutex<TextRerank>>>,
 }
 
 impl RetrievalEngine {
@@ -122,7 +122,7 @@ impl RetrievalEngine {
     /// When configured (and `config.rerank.enabled` is true), retrieved results
     /// are re-scored using the cross-encoder before being returned. The reranker
     /// is wrapped in `Arc<Mutex<>>` because `TextRerank::rerank()` requires `&mut self`.
-    pub fn with_reranker(mut self, reranker: Arc<TextRerank>) -> Self {
+    pub fn with_reranker(mut self, reranker: Arc<Mutex<TextRerank>>) -> Self {
         self.reranker = Some(reranker);
         self
     }
@@ -204,8 +204,11 @@ impl RetrievalEngine {
         // Run cross-encoder in spawn_blocking since it's CPU-bound
         let query_owned = query_text.to_string();
         let rerank_results = tokio::task::spawn_blocking(move || {
+            let mut reranker_guard = reranker
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Failed to acquire reranker lock: {}", e))?;
             let doc_refs: Vec<&String> = documents.iter().collect();
-            reranker
+            reranker_guard
                 .rerank(&query_owned, doc_refs, false, None)
                 .map_err(|e| anyhow::anyhow!("Reranking failed: {}", e))
         })
@@ -1427,7 +1430,8 @@ mod tests {
         mem2.criticality = 0.8;
         store.create(&mem2).await.unwrap();
 
-        let engine = RetrievalEngine::new(store, config).with_reranker(Arc::new(reranker));
+        let engine =
+            RetrievalEngine::new(store, config).with_reranker(Arc::new(Mutex::new(reranker)));
 
         assert!(engine.reranking_available());
 
@@ -1519,7 +1523,7 @@ mod tests {
                 .unwrap(),
             config,
         )
-        .with_reranker(Arc::new(reranker));
+        .with_reranker(Arc::new(Mutex::new(reranker)));
 
         let result_rerank = engine_rerank.retrieve(&query).await.unwrap();
 
@@ -1580,7 +1584,8 @@ mod tests {
         memory.visibility = Visibility::Shared;
         store.create(&memory).await.unwrap();
 
-        let engine = RetrievalEngine::new(store, config).with_reranker(Arc::new(reranker));
+        let engine =
+            RetrievalEngine::new(store, config).with_reranker(Arc::new(Mutex::new(reranker)));
 
         let filters = SearchFilters::default();
         let results = engine.search("authentication", &filters).await.unwrap();
@@ -1673,7 +1678,8 @@ mod tests {
         let store2 = MemoryStore::open(temp_dir.path(), &InMemoryRegistry::new())
             .await
             .unwrap();
-        let engine_rerank = RetrievalEngine::new(store2, config).with_reranker(Arc::new(reranker));
+        let engine_rerank =
+            RetrievalEngine::new(store2, config).with_reranker(Arc::new(Mutex::new(reranker)));
 
         let result_rerank = engine_rerank.retrieve(&query).await.unwrap();
 
@@ -1785,7 +1791,8 @@ mod tests {
         let store2 = MemoryStore::open(temp_dir.path(), &InMemoryRegistry::new())
             .await
             .unwrap();
-        let engine_rerank = RetrievalEngine::new(store2, config).with_reranker(Arc::new(reranker));
+        let engine_rerank =
+            RetrievalEngine::new(store2, config).with_reranker(Arc::new(Mutex::new(reranker)));
 
         let results_rerank = engine_rerank
             .search("database migration strategy", &filters)

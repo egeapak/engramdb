@@ -45,7 +45,7 @@ use crate::retrieval::engine::RetrievalEngine;
 use crate::storage::MemoryStore;
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Try to create an embedding provider for the given model name.
 /// For models with multiple backends, tries them in priority order.
@@ -126,7 +126,7 @@ pub async fn build_engine(store: MemoryStore, config_path: &std::path::Path) -> 
 
         match TextRerank::try_new(options) {
             Ok(reranker) => {
-                engine = engine.with_reranker(Arc::new(reranker));
+                engine = engine.with_reranker(Arc::new(Mutex::new(reranker)));
             }
             Err(e) => {
                 eprintln!("Warning: reranker init failed, continuing without: {}", e);
