@@ -1,7 +1,7 @@
 //! Challenge a memory's validity.
 
 use crate::storage::MemoryStore;
-use crate::types::{Challenge, Memory};
+use crate::types::{Challenge, Memory, MemoryUpdate, Status};
 use anyhow::Result;
 
 /// Result of a challenge operation.
@@ -13,7 +13,7 @@ pub struct ChallengeResult {
 /// Challenge a memory by adding evidence against it.
 ///
 /// Adds a challenge to the memory, sets its status to Challenged,
-/// and persists the change.
+/// and persists the change via an in-place update.
 pub async fn challenge_memory(
     store: &MemoryStore,
     id: &str,
@@ -29,12 +29,137 @@ pub async fn challenge_memory(
 
     memory.add_challenge(challenge);
 
-    // MemoryUpdate doesn't support challenges field, so delete and recreate
-    store.delete(&memory.id).await?;
-    store.create(&memory).await?;
+    let mut update = MemoryUpdate::new();
+    update.status = Some(Status::Challenged);
+    update.challenges = Some(memory.challenges.clone());
+    store.update(&memory.id, update).await?;
 
     Ok(ChallengeResult {
         challenged: true,
         memory,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{InMemoryRegistry, MemoryStore};
+    use crate::types::{MemoryType, Provenance};
+    use tempfile::TempDir;
+
+    async fn setup_test_store() -> (TempDir, MemoryStore) {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        (temp_dir, store)
+    }
+
+    async fn create_test_memory(store: &MemoryStore) -> String {
+        let memory = Memory::new(
+            MemoryType::Decision,
+            "Use SQLite for the database",
+            "We decided to use SQLite.",
+            Provenance::human(),
+        );
+        store.create(&memory).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_challenge_persists_status_and_evidence() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
+
+        let result = challenge_memory(&store, &id, "Contradicts PostgreSQL decision", None)
+            .await
+            .unwrap();
+
+        assert!(result.challenged);
+        assert_eq!(result.memory.status, Status::Challenged);
+        assert_eq!(result.memory.challenges.len(), 1);
+        assert_eq!(
+            result.memory.challenges[0].evidence,
+            "Contradicts PostgreSQL decision"
+        );
+
+        // Verify the change roundtrips through the store
+        let reloaded = store.get(&id).await.unwrap();
+        assert_eq!(reloaded.status, Status::Challenged);
+        assert_eq!(reloaded.challenges.len(), 1);
+        assert_eq!(
+            reloaded.challenges[0].evidence,
+            "Contradicts PostgreSQL decision"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multiple_challenges_accumulate() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
+
+        challenge_memory(&store, &id, "First contradiction", None)
+            .await
+            .unwrap();
+        let result = challenge_memory(&store, &id, "Second contradiction", None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.memory.challenges.len(), 2);
+        assert_eq!(result.memory.challenges[0].evidence, "First contradiction");
+        assert_eq!(result.memory.challenges[1].evidence, "Second contradiction");
+
+        // Verify both survive a roundtrip
+        let reloaded = store.get(&id).await.unwrap();
+        assert_eq!(reloaded.challenges.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_challenge_with_source_file() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
+
+        let result = challenge_memory(&store, &id, "File-based evidence", Some("src/main.rs"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.memory.challenges[0].source_file.as_deref(),
+            Some("src/main.rs")
+        );
+
+        let reloaded = store.get(&id).await.unwrap();
+        assert_eq!(
+            reloaded.challenges[0].source_file.as_deref(),
+            Some("src/main.rs")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_challenge_preserves_memory_content() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
+
+        challenge_memory(&store, &id, "Some evidence", None)
+            .await
+            .unwrap();
+
+        let reloaded = store.get(&id).await.unwrap();
+        assert_eq!(reloaded.summary, "Use SQLite for the database");
+        assert_eq!(reloaded.content, "We decided to use SQLite.");
+        assert_eq!(reloaded.type_, MemoryType::Decision);
+    }
+
+    #[tokio::test]
+    async fn test_challenge_preserves_memory_id() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
+
+        let result = challenge_memory(&store, &id, "Some evidence", None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.memory.id, id);
+
+        let reloaded = store.get(&id).await.unwrap();
+        assert_eq!(reloaded.id, id);
+    }
 }

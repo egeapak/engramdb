@@ -242,6 +242,37 @@ impl Default for EmbeddingsConfig {
     }
 }
 
+/// NLI contradiction detection configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NliConfig {
+    /// Whether NLI contradiction detection is enabled
+    pub enabled: bool,
+
+    /// HuggingFace model repository ID
+    pub model: String,
+
+    /// Minimum contradiction probability to trigger a challenge (0.0-1.0)
+    pub contradiction_threshold: f64,
+
+    /// Maximum number of similar memories to compare against
+    pub max_comparisons: usize,
+
+    /// Minimum cosine similarity to consider a memory as a candidate for NLI check
+    pub similarity_threshold: f64,
+}
+
+impl Default for NliConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: "cross-encoder/nli-deberta-v3-xsmall".to_string(),
+            contradiction_threshold: 0.7,
+            max_comparisons: 10,
+            similarity_threshold: 0.3,
+        }
+    }
+}
+
 /// Configuration for cross-encoder reranking.
 ///
 /// When enabled, a cross-encoder model jointly scores query+document pairs
@@ -310,6 +341,10 @@ pub struct EngramConfig {
     /// Various thresholds
     #[serde(default)]
     pub thresholds: ThresholdsConfig,
+
+    /// NLI contradiction detection settings
+    #[serde(default)]
+    pub nli: NliConfig,
 
     /// Cross-encoder reranking settings
     #[serde(default)]
@@ -395,6 +430,13 @@ mod tests {
         assert_eq!(config.embeddings.provider, "onnx");
         assert_eq!(config.embeddings.dimensions, 384);
         assert_eq!(config.embeddings.max_tokens, 256);
+
+        // NLI config
+        assert!(!config.nli.enabled);
+        assert_eq!(config.nli.model, "cross-encoder/nli-deberta-v3-xsmall");
+        assert_eq!(config.nli.contradiction_threshold, 0.7);
+        assert_eq!(config.nli.max_comparisons, 10);
+        assert_eq!(config.nli.similarity_threshold, 0.3);
     }
 
     #[test]
@@ -532,6 +574,62 @@ threshold = 0.25
 
         assert_eq!(loaded.search.semantic_weight, 7.5);
         assert_eq!(loaded.search.threshold, 0.1);
+    }
+
+    #[test]
+    fn test_nli_config_defaults() {
+        let config = NliConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.model, "cross-encoder/nli-deberta-v3-xsmall");
+        assert_eq!(config.contradiction_threshold, 0.7);
+        assert_eq!(config.max_comparisons, 10);
+        assert_eq!(config.similarity_threshold, 0.3);
+    }
+
+    #[test]
+    fn test_nli_config_toml_roundtrip() {
+        let mut config = EngramConfig::default();
+        config.nli.enabled = true;
+        config.nli.contradiction_threshold = 0.85;
+        config.nli.max_comparisons = 20;
+        config.nli.similarity_threshold = 0.5;
+
+        let temp_path = std::env::temp_dir().join("test_nli_config_roundtrip.toml");
+        config.to_toml_file(&temp_path).unwrap();
+        let loaded = EngramConfig::from_toml_file(&temp_path).unwrap();
+        std::fs::remove_file(&temp_path).ok();
+
+        assert!(loaded.nli.enabled);
+        assert_eq!(loaded.nli.contradiction_threshold, 0.85);
+        assert_eq!(loaded.nli.max_comparisons, 20);
+        assert_eq!(loaded.nli.similarity_threshold, 0.5);
+        assert_eq!(loaded.nli.model, "cross-encoder/nli-deberta-v3-xsmall");
+    }
+
+    #[test]
+    fn test_nli_config_omitted_uses_defaults() {
+        let config: EngramConfig = toml::from_str("").unwrap();
+        assert!(!config.nli.enabled);
+        assert_eq!(config.nli.contradiction_threshold, 0.7);
+        assert_eq!(config.nli.max_comparisons, 10);
+    }
+
+    #[test]
+    fn test_nli_config_custom_toml() {
+        let toml = r#"
+[nli]
+enabled = true
+model = "custom-model/nli-v1"
+contradiction_threshold = 0.9
+max_comparisons = 5
+similarity_threshold = 0.4
+"#;
+        let config: EngramConfig = toml::from_str(toml).unwrap();
+        assert!(config.nli.enabled);
+        assert_eq!(config.nli.model, "custom-model/nli-v1");
+        assert_eq!(config.nli.contradiction_threshold, 0.9);
+        assert_eq!(config.nli.max_comparisons, 5);
+        assert_eq!(config.nli.similarity_threshold, 0.4);
     }
 
     #[test]

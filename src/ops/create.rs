@@ -124,6 +124,21 @@ pub async fn create_memory(
         if engine.embeddings_available() {
             let saved = store.get(&id).await?;
             engine.embed_memory(&saved).await?;
+
+            // Detect contradictions with existing memories (best-effort)
+            if engine.nli_available() {
+                if let Ok(contradictions) = engine.detect_contradictions(&saved).await {
+                    for (existing_id, nli_result) in &contradictions {
+                        let evidence = format!(
+                            "NLI contradiction detected (score: {:.2}): new memory '{}' contradicts this memory",
+                            nli_result.contradiction, saved.summary
+                        );
+                        let _ =
+                            super::challenge::challenge_memory(store, existing_id, &evidence, None)
+                                .await;
+                    }
+                }
+            }
         }
     }
 

@@ -41,6 +41,7 @@ pub use update::{update_memory, UpdateParams};
 use crate::embeddings::{EmbeddingProvider, OnnxProvider};
 #[cfg(feature = "ollama")]
 use crate::embeddings::{OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT};
+use crate::nli::OnnxNliProvider;
 use crate::retrieval::engine::RetrievalEngine;
 use crate::storage::MemoryStore;
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
@@ -110,6 +111,18 @@ pub async fn build_engine(store: MemoryStore, config_path: &std::path::Path) -> 
             );
         }
         engine = engine.with_embedding_provider(provider);
+    }
+
+    // Initialize NLI provider if enabled
+    if config.nli.enabled {
+        match OnnxNliProvider::try_new() {
+            Some(provider) => {
+                engine = engine.with_nli_provider(Box::new(provider));
+            }
+            None => {
+                eprintln!("Warning: NLI contradiction detection enabled but model unavailable");
+            }
+        }
     }
 
     // Initialize cross-encoder reranker if enabled
