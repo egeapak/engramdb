@@ -44,6 +44,7 @@ pub async fn run_add(
     dir: &Path,
     registry: &dyn RegistryBackend,
     params: AddParams,
+    embedding_backend: Option<crate::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
     // Open or initialize store
@@ -59,7 +60,7 @@ pub async fn run_add(
         // This shouldn't happen since we already opened it above, but handle it anyway
         panic!("Failed to open store for engine after successful open")
     });
-    let engine = ops::build_engine(engine_store, &config_path).await;
+    let engine = ops::build_engine(engine_store, &config_path, embedding_backend).await;
 
     // Handle details file
     let details_from_file = if let Some(ref details_file) = params.details_file {

@@ -19,7 +19,7 @@ use crate::retrieval::engine::{RetrievalEngine, RetrievalQuery};
 use crate::retrieval::filters::SearchFilters;
 use crate::storage::config::load_config;
 use crate::storage::{FileRegistry, MemoryStore};
-use crate::types::{Provenance, Status, Visibility};
+use crate::types::{EmbeddingBackend, Provenance, Status, Visibility};
 
 // ---------------------------------------------------------------------------
 // Input parameter structs for tool aggregation
@@ -358,14 +358,16 @@ struct ScoredMemoryOutput {
 #[derive(Debug, Clone)]
 pub struct EngramDbServer {
     dir: PathBuf,
+    embedding_backend: Option<EmbeddingBackend>,
     #[allow(dead_code)]
     tool_router: rmcp::handler::server::tool::ToolRouter<Self>,
 }
 
 impl EngramDbServer {
-    pub fn new(dir: PathBuf) -> Self {
+    pub fn new(dir: PathBuf, embedding_backend: Option<EmbeddingBackend>) -> Self {
         Self {
             dir,
+            embedding_backend,
             tool_router: Self::tool_router(),
         }
     }
@@ -399,7 +401,7 @@ impl EngramDbServer {
     async fn build_engine(&self) -> Result<RetrievalEngine, String> {
         let store = self.open_store().await?;
         let config_path = self.dir.join(".engramdb").join("config.toml");
-        Ok(ops::build_engine(store, &config_path).await)
+        Ok(ops::build_engine(store, &config_path, self.embedding_backend).await)
     }
 }
 
@@ -1225,15 +1227,22 @@ impl ServerHandler for EngramDbServer {
 // ---------------------------------------------------------------------------
 
 /// Start the MCP server with stdio transport.
-pub async fn run_stdio(dir: PathBuf) -> anyhow::Result<()> {
-    let server = EngramDbServer::new(dir);
+pub async fn run_stdio(
+    dir: PathBuf,
+    embedding_backend: Option<EmbeddingBackend>,
+) -> anyhow::Result<()> {
+    let server = EngramDbServer::new(dir, embedding_backend);
     let service = server.serve(rmcp::transport::io::stdio()).await?;
     service.waiting().await?;
     Ok(())
 }
 
 /// Start the MCP server with streamable HTTP transport.
-pub async fn run_sse(dir: PathBuf, port: u16) -> anyhow::Result<()> {
+pub async fn run_sse(
+    dir: PathBuf,
+    port: u16,
+    embedding_backend: Option<EmbeddingBackend>,
+) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
@@ -1242,7 +1251,7 @@ pub async fn run_sse(dir: PathBuf, port: u16) -> anyhow::Result<()> {
     let config = StreamableHttpServerConfig::default();
     let ct = config.cancellation_token.clone();
     let service = StreamableHttpService::new(
-        move || Ok(EngramDbServer::new(dir.clone())),
+        move || Ok(EngramDbServer::new(dir.clone(), embedding_backend)),
         Arc::new(LocalSessionManager::default()),
         config,
     );

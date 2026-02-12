@@ -48,6 +48,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         .dir
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
+    // Capture embedding backend override before moving cli fields
+    let backend = cli.embedding_backend;
+
     // Create output formatter
     let formatter = OutputFormatter::new(cli.format, cli.json, cli.no_color);
 
@@ -59,7 +62,17 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Init {
             no_embeddings,
             template,
-        } => commands::run_init(&dir, &registry, no_embeddings, template, &formatter).await,
+        } => {
+            commands::run_init(
+                &dir,
+                &registry,
+                no_embeddings,
+                template,
+                backend,
+                &formatter,
+            )
+            .await
+        }
         Command::Add {
             type_,
             content,
@@ -93,6 +106,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     editor,
                     details_file,
                 },
+                backend,
                 &formatter,
             )
             .await
@@ -130,6 +144,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     include_expired,
                     show_scores,
                 },
+                backend,
                 &formatter,
             )
             .await
@@ -155,6 +170,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     min_criticality,
                     max_results,
                 },
+                backend,
                 &formatter,
             )
             .await
@@ -224,6 +240,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     supersedes,
                     editor,
                 },
+                backend,
                 &formatter,
             )
             .await
@@ -231,7 +248,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Delete { id, force } => {
             commands::run_delete(&dir, &registry, &id, force, &formatter).await
         }
-        Command::Stats => commands::run_stats(&dir, &registry, &formatter).await,
+        Command::Stats => commands::run_stats(&dir, &registry, backend, &formatter).await,
         Command::Challenge {
             id,
             evidence,
@@ -256,7 +273,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             commands::run_compress(&dir, &registry, scope, threshold, &formatter).await
         }
         Command::Serve { transport, port } => {
-            commands::run_serve(&dir, &transport, port, &formatter).await
+            commands::run_serve(&dir, &transport, port, backend, &formatter).await
         }
         Command::Completions { shell } => {
             commands::run_completions(shell);
@@ -265,7 +282,17 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Reindex {
             embeddings_only,
             index_only,
-        } => commands::run_reindex(&dir, &registry, embeddings_only, index_only, &formatter).await,
+        } => {
+            commands::run_reindex(
+                &dir,
+                &registry,
+                embeddings_only,
+                index_only,
+                backend,
+                &formatter,
+            )
+            .await
+        }
         Command::Review {
             scope,
             type_,

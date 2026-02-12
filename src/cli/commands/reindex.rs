@@ -21,6 +21,7 @@ pub async fn run_reindex(
     registry: &dyn RegistryBackend,
     embeddings_only: bool,
     index_only: bool,
+    embedding_backend: Option<crate::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
     let store = MemoryStore::open(dir, registry).await?;
@@ -28,7 +29,14 @@ pub async fn run_reindex(
 
     // Set up engine with embeddings if not index_only
     let engine = if !index_only {
-        Some(crate::ops::build_engine(MemoryStore::open(dir, registry).await?, &config_path).await)
+        Some(
+            crate::ops::build_engine(
+                MemoryStore::open(dir, registry).await?,
+                &config_path,
+                embedding_backend,
+            )
+            .await,
+        )
     } else {
         None
     };

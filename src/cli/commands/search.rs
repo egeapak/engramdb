@@ -29,6 +29,7 @@ pub async fn run_search(
     dir: &Path,
     registry: &dyn RegistryBackend,
     params: SearchParams,
+    embedding_backend: Option<crate::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
     let store = MemoryStore::open(dir, registry).await?;
@@ -36,7 +37,7 @@ pub async fn run_search(
         formatter.print_warning(&warning);
     }
     let config_path = dir.join(".engramdb").join("config.toml");
-    let engine = crate::ops::build_engine(store, &config_path).await;
+    let engine = crate::ops::build_engine(store, &config_path, embedding_backend).await;
 
     // Parse type filters
     let types = if !params.type_filter.is_empty() {
@@ -143,7 +144,7 @@ mod tests {
             max_results: 10,
         };
 
-        let result = run_search(temp_dir.path(), &registry, params, &formatter).await;
+        let result = run_search(temp_dir.path(), &registry, params, None, &formatter).await;
         assert!(result.is_ok());
     }
 
@@ -162,7 +163,7 @@ mod tests {
             max_results: 10,
         };
 
-        let result = run_search(temp_dir.path(), &registry, params, &formatter).await;
+        let result = run_search(temp_dir.path(), &registry, params, None, &formatter).await;
         assert!(result.is_ok());
     }
 
@@ -181,7 +182,7 @@ mod tests {
             max_results: 1,
         };
 
-        let result = run_search(temp_dir.path(), &registry, params, &formatter).await;
+        let result = run_search(temp_dir.path(), &registry, params, None, &formatter).await;
         assert!(result.is_ok());
     }
 }

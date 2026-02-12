@@ -44,6 +44,7 @@ pub async fn run_update(
     dir: &Path,
     registry: &dyn RegistryBackend,
     params: UpdateParams,
+    embedding_backend: Option<crate::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
     // Handle editor flag first if present
@@ -91,7 +92,7 @@ pub async fn run_update(
     // Build engine for auto-embedding on update
     let config_path = dir.join(".engramdb").join("config.toml");
     let engine_store = MemoryStore::open(dir, registry).await?;
-    let engine = ops::build_engine(engine_store, &config_path).await;
+    let engine = ops::build_engine(engine_store, &config_path, embedding_backend).await;
 
     let type_ = params.type_.map(|s| parse_memory_type(&s)).transpose()?;
     let visibility = params

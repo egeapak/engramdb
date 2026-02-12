@@ -7,6 +7,7 @@ use crate::embeddings::{
 };
 use crate::embeddings::{OnnxProvider, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT};
 use crate::storage::{MemoryStore, RegistryBackend};
+use crate::types::EmbeddingBackend;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,7 @@ pub async fn run_init(
     registry: &dyn RegistryBackend,
     no_embeddings: bool,
     template: Option<PathBuf>,
+    embedding_backend: Option<EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
     // Initialize the store
@@ -47,82 +49,44 @@ pub async fn run_init(
             .await
             .unwrap_or_default();
 
+        let backend = crate::ops::resolve_backend(config.embeddings.backend, embedding_backend);
+
         match config.embeddings.provider.as_str() {
             "onnx" | "all-minilm" => {
-                formatter
-                    .print_message("Initializing embedding model (first run downloads ~23MB)...");
-                match OnnxProvider::new() {
-                    Ok(_) => {
-                        formatter.print_success("Embedding model ready (all-minilm via ONNX).");
-                    }
-                    Err(_) => {
-                        #[cfg(feature = "ollama")]
-                        {
-                            // ONNX failed — try Ollama fallback
-                            formatter
-                                .print_message("ONNX model unavailable, trying Ollama fallback...");
-                            init_ollama_model(ALL_MINILM, formatter).await;
-                        }
-                        #[cfg(not(feature = "ollama"))]
-                        {
-                            formatter.print_error(
-                                "ONNX model unavailable and Ollama support is not enabled.",
-                            );
-                        }
-                    }
-                }
+                init_model_with_backend(
+                    backend,
+                    "all-minilm",
+                    "~23MB",
+                    || OnnxProvider::new().map(|_| ()),
+                    #[cfg(feature = "ollama")]
+                    ALL_MINILM,
+                    formatter,
+                )
+                .await;
             }
             "nomic-embed-text" => {
-                let spec = ONNX_NOMIC_EMBED_TEXT;
-                formatter.print_message(
-                    "Initializing nomic-embed-text model (first run downloads ~270MB)...",
-                );
-                match OnnxProvider::with_model(spec) {
-                    Ok(_) => {
-                        formatter
-                            .print_success("Embedding model ready (nomic-embed-text via ONNX).");
-                    }
-                    Err(_) => {
-                        #[cfg(feature = "ollama")]
-                        {
-                            formatter
-                                .print_message("ONNX model unavailable, trying Ollama fallback...");
-                            init_ollama_model(NOMIC_EMBED_TEXT, formatter).await;
-                        }
-                        #[cfg(not(feature = "ollama"))]
-                        {
-                            formatter.print_error(
-                                "ONNX model unavailable and Ollama support is not enabled.",
-                            );
-                        }
-                    }
-                }
+                init_model_with_backend(
+                    backend,
+                    "nomic-embed-text",
+                    "~270MB",
+                    || OnnxProvider::with_model(ONNX_NOMIC_EMBED_TEXT).map(|_| ()),
+                    #[cfg(feature = "ollama")]
+                    NOMIC_EMBED_TEXT,
+                    formatter,
+                )
+                .await;
             }
             "mxbai-embed-large" => {
-                let spec = ONNX_MXBAI_EMBED_LARGE;
-                formatter.print_message(
-                    "Initializing mxbai-embed-large model (first run downloads ~650MB)...",
-                );
-                match OnnxProvider::with_model(spec) {
-                    Ok(_) => {
-                        formatter
-                            .print_success("Embedding model ready (mxbai-embed-large via ONNX).");
-                    }
-                    Err(_) => {
-                        #[cfg(feature = "ollama")]
-                        {
-                            formatter
-                                .print_message("ONNX model unavailable, trying Ollama fallback...");
-                            init_ollama_model(MXBAI_EMBED_LARGE, formatter).await;
-                        }
-                        #[cfg(not(feature = "ollama"))]
-                        {
-                            formatter.print_error(
-                                "ONNX model unavailable and Ollama support is not enabled.",
-                            );
-                        }
-                    }
-                }
+                init_model_with_backend(
+                    backend,
+                    "mxbai-embed-large",
+                    "~650MB",
+                    || OnnxProvider::with_model(ONNX_MXBAI_EMBED_LARGE).map(|_| ()),
+                    #[cfg(feature = "ollama")]
+                    MXBAI_EMBED_LARGE,
+                    formatter,
+                )
+                .await;
             }
             other => {
                 formatter.print_error(&format!(
@@ -144,6 +108,63 @@ pub async fn run_init(
     );
 
     Ok(())
+}
+
+/// Initialize an embedding model respecting the backend preference.
+async fn init_model_with_backend(
+    backend: EmbeddingBackend,
+    model_name: &str,
+    download_size: &str,
+    try_onnx: impl FnOnce() -> anyhow::Result<()>,
+    #[cfg(feature = "ollama")] ollama_spec: crate::embeddings::OllamaModelSpec,
+    formatter: &OutputFormatter,
+) {
+    // Handle explicit Ollama backend
+    if backend == EmbeddingBackend::Ollama {
+        #[cfg(feature = "ollama")]
+        {
+            formatter.print_message(&format!(
+                "Backend set to 'ollama', initializing {} via Ollama...",
+                model_name
+            ));
+            init_ollama_model(ollama_spec, formatter).await;
+        }
+        #[cfg(not(feature = "ollama"))]
+        {
+            formatter.print_error(
+                "Embedding backend 'ollama' selected but Ollama support is not compiled in.",
+            );
+        }
+        return;
+    }
+
+    // Try ONNX (for Auto and Onnx backends)
+    formatter.print_message(&format!(
+        "Initializing {} model (first run downloads {})...",
+        model_name, download_size
+    ));
+    match try_onnx() {
+        Ok(()) => {
+            formatter.print_success(&format!("Embedding model ready ({} via ONNX).", model_name));
+        }
+        Err(_) => {
+            if backend == EmbeddingBackend::Onnx {
+                formatter
+                    .print_error("ONNX model unavailable (backend set to 'onnx', no fallback).");
+                return;
+            }
+            // Auto mode: fall back to Ollama
+            #[cfg(feature = "ollama")]
+            {
+                formatter.print_message("ONNX model unavailable, trying Ollama fallback...");
+                init_ollama_model(ollama_spec, formatter).await;
+            }
+            #[cfg(not(feature = "ollama"))]
+            {
+                formatter.print_error("ONNX model unavailable and Ollama support is not enabled.");
+            }
+        }
+    }
 }
 
 #[cfg(feature = "ollama")]
@@ -207,7 +228,7 @@ mod tests {
         let formatter = OutputFormatter::new(None, false, true);
         let registry = InMemoryRegistry::new();
 
-        let result = run_init(project_dir, &registry, true, None, &formatter).await;
+        let result = run_init(project_dir, &registry, true, None, None, &formatter).await;
         assert!(result.is_ok(), "Init should succeed");
 
         // Check project-local directories
@@ -244,6 +265,7 @@ mod tests {
             &registry,
             true,
             Some(template_path),
+            None,
             &formatter,
         )
         .await;
@@ -264,7 +286,7 @@ mod tests {
         let formatter = OutputFormatter::new(None, false, true);
         let registry = InMemoryRegistry::new();
 
-        let result = run_init(project_dir, &registry, true, None, &formatter).await;
+        let result = run_init(project_dir, &registry, true, None, None, &formatter).await;
         assert!(result.is_ok(), "Init with --no-embeddings should succeed");
     }
 
@@ -275,7 +297,7 @@ mod tests {
         let formatter = OutputFormatter::new(None, false, true);
         let registry = InMemoryRegistry::new();
 
-        run_init(project_dir, &registry, true, None, &formatter)
+        run_init(project_dir, &registry, true, None, None, &formatter)
             .await
             .unwrap();
 

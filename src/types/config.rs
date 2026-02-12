@@ -219,10 +219,54 @@ impl Default for RetrievalConfig {
     }
 }
 
+/// Embedding transport backend preference.
+///
+/// Controls whether the local ONNX runtime (fastembed) or an Ollama server is
+/// used to run the embedding model.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmbeddingBackend {
+    /// Try ONNX first, fall back to Ollama (default).
+    #[default]
+    Auto,
+    /// Only use local ONNX runtime via fastembed.
+    Onnx,
+    /// Only use an Ollama server.
+    Ollama,
+}
+
+impl std::fmt::Display for EmbeddingBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => write!(f, "auto"),
+            Self::Onnx => write!(f, "onnx"),
+            Self::Ollama => write!(f, "ollama"),
+        }
+    }
+}
+
+impl std::str::FromStr for EmbeddingBackend {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "onnx" => Ok(Self::Onnx),
+            "ollama" => Ok(Self::Ollama),
+            other => Err(format!(
+                "unknown embedding backend '{}': expected auto, onnx, or ollama",
+                other
+            )),
+        }
+    }
+}
+
 /// Embeddings provider configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingsConfig {
-    /// Embedding model name. Transport (ONNX/Ollama) is resolved automatically.
+    /// Transport backend: "auto" (default), "onnx", or "ollama".
+    #[serde(default)]
+    pub backend: EmbeddingBackend,
+    /// Embedding model name.
     /// Supported: "all-minilm" (default, 384d), "nomic-embed-text" (768d), "mxbai-embed-large" (1024d).
     /// "onnx" is a backward-compat alias for "all-minilm".
     pub provider: String,
@@ -235,6 +279,7 @@ pub struct EmbeddingsConfig {
 impl Default for EmbeddingsConfig {
     fn default() -> Self {
         Self {
+            backend: EmbeddingBackend::default(),
             provider: "onnx".to_string(),
             dimensions: 384,
             max_tokens: 256,
