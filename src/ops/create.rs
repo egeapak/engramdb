@@ -129,6 +129,10 @@ pub async fn create_memory(
             // Vector search + NLI classification run inline (needs &engine), but
             // the resulting challenge writes are spawned so create_memory returns
             // without waiting for them.
+            //
+            // Safety: the spawned task only writes to *other* memory IDs (the
+            // contradicting existing ones), never to the newly created ID, so
+            // there is no concurrent-write race with the caller's store handle.
             if engine.nli_available() {
                 if let Ok(contradictions) = engine.detect_contradictions(&saved).await {
                     if !contradictions.is_empty() {
