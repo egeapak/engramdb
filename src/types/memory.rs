@@ -263,6 +263,9 @@ pub struct MemoryUpdate {
     pub status: Option<Status>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub challenges: Option<Vec<Challenge>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility: Option<Visibility>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -318,6 +321,9 @@ impl MemoryUpdate {
         }
         if let Some(status) = self.status {
             memory.status = status;
+        }
+        if let Some(ref challenges) = self.challenges {
+            memory.challenges = challenges.clone();
         }
         if let Some(visibility) = self.visibility {
             memory.visibility = visibility;
@@ -502,6 +508,7 @@ mod tests {
             confidence: Some(0.95),
             supersedes: Some(vec!["old-id".to_string()]),
             status: Some(Status::NeedsReview),
+            challenges: None,
             visibility: Some(Visibility::Personal),
             verified_at: Some(Utc::now()),
             expires_at: Some(Utc::now() + Duration::days(30)),

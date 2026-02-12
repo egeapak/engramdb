@@ -1,7 +1,7 @@
 //! Challenge a memory's validity.
 
 use crate::storage::MemoryStore;
-use crate::types::{Challenge, Memory};
+use crate::types::{Challenge, Memory, MemoryUpdate, Status};
 use anyhow::Result;
 
 /// Result of a challenge operation.
@@ -13,7 +13,7 @@ pub struct ChallengeResult {
 /// Challenge a memory by adding evidence against it.
 ///
 /// Adds a challenge to the memory, sets its status to Challenged,
-/// and persists the change.
+/// and persists the change via an in-place update.
 pub async fn challenge_memory(
     store: &MemoryStore,
     id: &str,
@@ -29,9 +29,10 @@ pub async fn challenge_memory(
 
     memory.add_challenge(challenge);
 
-    // MemoryUpdate doesn't support challenges field, so delete and recreate
-    store.delete(&memory.id).await?;
-    store.create(&memory).await?;
+    let mut update = MemoryUpdate::new();
+    update.status = Some(Status::Challenged);
+    update.challenges = Some(memory.challenges.clone());
+    store.update(&memory.id, update).await?;
 
     Ok(ChallengeResult {
         challenged: true,
