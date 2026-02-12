@@ -1589,4 +1589,231 @@ mod tests {
         // Should have rerank score populated
         assert!(results[0].score_breakdown.rerank.is_some());
     }
+
+    /// Scenario: Criticality-biased ordering gets corrected by reranking.
+    ///
+    /// Without reranking, a high-criticality but off-topic memory outranks a
+    /// low-criticality but on-topic memory (because degraded-mode scoring is
+    /// dominated by `0.70 * criticality * decay`).
+    ///
+    /// The cross-encoder sees the actual query+document pair and gives the
+    /// on-topic memory a much higher score (+6.88) vs the off-topic one (−9.38),
+    /// flipping the order.
+    #[tokio::test]
+    async fn test_rerank_flips_retrieve_order_criticality_bias() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use fastembed::{RerankInitOptions, TextRerank};
+        use tempfile::TempDir;
+
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
+            .join("engramdb")
+            .join("models");
+        let options = RerankInitOptions::default().with_cache_dir(cache_dir);
+        let reranker = match TextRerank::try_new(options) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        let temp_dir = TempDir::new().unwrap();
+
+        // ── Step 1: retrieve WITHOUT reranker ──────────────────────────────
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        // Off-topic but HIGH criticality → ranks first in degraded mode
+        let mut off_topic = Memory::new(
+            MemoryType::Decision,
+            "Project setup notes",
+            "Initial project configuration and folder structure with cargo init",
+            Provenance::human(),
+        );
+        off_topic.visibility = Visibility::Shared;
+        off_topic.criticality = 0.95;
+        store.create(&off_topic).await.unwrap();
+        let off_topic_id = off_topic.id.clone();
+
+        // On-topic but LOW criticality → ranks second in degraded mode
+        let mut on_topic = Memory::new(
+            MemoryType::Context,
+            "Rust borrow checker",
+            "The borrow checker enforces ownership rules at compile time, preventing data races and dangling references without a garbage collector",
+            Provenance::human(),
+        );
+        on_topic.visibility = Visibility::Shared;
+        on_topic.criticality = 0.3;
+        store.create(&on_topic).await.unwrap();
+        let on_topic_id = on_topic.id.clone();
+
+        let query = RetrievalQuery {
+            query: Some("how does the borrow checker work in Rust".to_string()),
+            ..Default::default()
+        };
+
+        let engine_no_rerank = RetrievalEngine::new(store, config.clone());
+        let result_no_rerank = engine_no_rerank.retrieve(&query).await.unwrap();
+
+        assert_eq!(result_no_rerank.memories.len(), 2);
+        // Without reranking: off-topic (criticality=0.95) is ranked first
+        assert_eq!(
+            result_no_rerank.memories[0].memory.id, off_topic_id,
+            "Without reranking, high-criticality off-topic memory should rank first"
+        );
+        assert_eq!(result_no_rerank.memories[1].memory.id, on_topic_id);
+
+        // ── Step 2: retrieve WITH reranker (weight = 0.7) ─────────────────
+        config.rerank.enabled = true;
+        config.rerank.weight = 0.7;
+        config.rerank.top_n = 10;
+
+        let store2 = MemoryStore::open(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let engine_rerank = RetrievalEngine::new(store2, config).with_reranker(Arc::new(reranker));
+
+        let result_rerank = engine_rerank.retrieve(&query).await.unwrap();
+
+        assert_eq!(result_rerank.memories.len(), 2);
+        // With reranking: on-topic memory should now rank first
+        assert_eq!(
+            result_rerank.memories[0].memory.id, on_topic_id,
+            "With reranking, the on-topic memory about borrow checker should rank first"
+        );
+        assert_eq!(result_rerank.memories[1].memory.id, off_topic_id);
+
+        // Cross-encoder raw score for on-topic should be much higher
+        let on_topic_rerank = result_rerank.memories[0]
+            .score_breakdown
+            .rerank
+            .expect("on-topic memory should have rerank score");
+        let off_topic_rerank = result_rerank.memories[1]
+            .score_breakdown
+            .rerank
+            .expect("off-topic memory should have rerank score");
+        assert!(
+            on_topic_rerank > off_topic_rerank,
+            "Cross-encoder should rate on-topic ({}) higher than off-topic ({})",
+            on_topic_rerank,
+            off_topic_rerank,
+        );
+    }
+
+    /// Scenario: Keyword-match bias gets corrected by reranking in search.
+    ///
+    /// Without reranking, a memory with many keyword hits in the summary
+    /// (summary match = 3 pts each) dominates a memory whose content is more
+    /// semantically relevant but has fewer keyword hits.
+    ///
+    /// The cross-encoder sees the full text and correctly prefers the
+    /// semantically relevant document, flipping the order.
+    #[tokio::test]
+    async fn test_rerank_flips_search_order_keyword_bias() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use fastembed::{RerankInitOptions, TextRerank};
+        use tempfile::TempDir;
+
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
+            .join("engramdb")
+            .join("models");
+        let options = RerankInitOptions::default().with_cache_dir(cache_dir);
+        let reranker = match TextRerank::try_new(options) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        let temp_dir = TempDir::new().unwrap();
+
+        // ── Step 1: search WITHOUT reranker ────────────────────────────────
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.search.threshold = 0.0;
+
+        // Has keyword "database" in summary (3 pts) + content (1 pt) = 4 pts
+        // But content is about config, NOT about migration strategy
+        let mut keyword_heavy = Memory::new(
+            MemoryType::Context,
+            "Database configuration",
+            "The application uses environment variables to configure database host, port, and credentials",
+            Provenance::human(),
+        );
+        keyword_heavy.visibility = Visibility::Shared;
+        keyword_heavy.criticality = 0.8;
+        store.create(&keyword_heavy).await.unwrap();
+        let keyword_heavy_id = keyword_heavy.id.clone();
+
+        // Has only keyword "migration" in content (1 pt)
+        // But content is ABOUT migration strategy → cross-encoder prefers this
+        let mut semantically_relevant = Memory::new(
+            MemoryType::Decision,
+            "Schema versioning plan",
+            "Use sequential migration files to evolve the schema, with up and down functions for rollback support",
+            Provenance::human(),
+        );
+        semantically_relevant.visibility = Visibility::Shared;
+        semantically_relevant.criticality = 0.8;
+        store.create(&semantically_relevant).await.unwrap();
+        let semantically_relevant_id = semantically_relevant.id.clone();
+
+        let filters = SearchFilters::default();
+        let engine_no_rerank = RetrievalEngine::new(store, config.clone());
+        let results_no_rerank = engine_no_rerank
+            .search("database migration strategy", &filters)
+            .await
+            .unwrap();
+
+        assert_eq!(results_no_rerank.len(), 2);
+        // Without reranking: keyword-heavy doc ranks first (4 pts vs 1 pt)
+        assert_eq!(
+            results_no_rerank[0].memory.id, keyword_heavy_id,
+            "Without reranking, keyword-heavy memory should rank first"
+        );
+        assert_eq!(results_no_rerank[1].memory.id, semantically_relevant_id);
+
+        // ── Step 2: search WITH reranker (weight = 0.8) ───────────────────
+        config.rerank.enabled = true;
+        config.rerank.weight = 0.8;
+        config.rerank.top_n = 10;
+
+        let store2 = MemoryStore::open(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let engine_rerank = RetrievalEngine::new(store2, config).with_reranker(Arc::new(reranker));
+
+        let results_rerank = engine_rerank
+            .search("database migration strategy", &filters)
+            .await
+            .unwrap();
+
+        assert_eq!(results_rerank.len(), 2);
+        // With reranking: the semantically relevant doc should now rank first
+        assert_eq!(
+            results_rerank[0].memory.id, semantically_relevant_id,
+            "With reranking, the schema-versioning memory should rank first"
+        );
+        assert_eq!(results_rerank[1].memory.id, keyword_heavy_id);
+
+        // Cross-encoder raw score for migration doc should be higher
+        let relevant_rerank = results_rerank[0]
+            .score_breakdown
+            .rerank
+            .expect("migration doc should have rerank score");
+        let keyword_rerank = results_rerank[1]
+            .score_breakdown
+            .rerank
+            .expect("keyword doc should have rerank score");
+        assert!(
+            relevant_rerank > keyword_rerank,
+            "Cross-encoder should rate migration doc ({}) higher than config doc ({})",
+            relevant_rerank,
+            keyword_rerank,
+        );
+    }
 }
