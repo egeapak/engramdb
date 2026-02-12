@@ -1,11 +1,11 @@
 //! Initialize a new EngramDB store.
 
 use crate::cli::output::OutputFormatter;
-use crate::embeddings::OnnxProvider;
 #[cfg(feature = "ollama")]
 use crate::embeddings::{
     OllamaModelSpec, OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT,
 };
+use crate::embeddings::{OnnxProvider, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT};
 use crate::storage::{MemoryStore, RegistryBackend};
 use anyhow::{Context, Result};
 use std::fs;
@@ -72,21 +72,57 @@ pub async fn run_init(
                     }
                 }
             }
-            #[cfg(feature = "ollama")]
             "nomic-embed-text" => {
-                init_ollama_model(NOMIC_EMBED_TEXT, formatter).await;
+                let spec = ONNX_NOMIC_EMBED_TEXT;
+                formatter.print_message(
+                    "Initializing nomic-embed-text model (first run downloads ~270MB)...",
+                );
+                match OnnxProvider::with_model(spec) {
+                    Ok(_) => {
+                        formatter
+                            .print_success("Embedding model ready (nomic-embed-text via ONNX).");
+                    }
+                    Err(_) => {
+                        #[cfg(feature = "ollama")]
+                        {
+                            formatter
+                                .print_message("ONNX model unavailable, trying Ollama fallback...");
+                            init_ollama_model(NOMIC_EMBED_TEXT, formatter).await;
+                        }
+                        #[cfg(not(feature = "ollama"))]
+                        {
+                            formatter.print_error(
+                                "ONNX model unavailable and Ollama support is not enabled.",
+                            );
+                        }
+                    }
+                }
             }
-            #[cfg(feature = "ollama")]
             "mxbai-embed-large" => {
-                init_ollama_model(MXBAI_EMBED_LARGE, formatter).await;
-            }
-            #[cfg(not(feature = "ollama"))]
-            "nomic-embed-text" | "mxbai-embed-large" => {
-                formatter.print_error(&format!(
-                    "Embedding provider '{}' requires Ollama support, which is not enabled. \
-                     Compile with --features ollama or use 'all-minilm'.",
-                    config.embeddings.provider
-                ));
+                let spec = ONNX_MXBAI_EMBED_LARGE;
+                formatter.print_message(
+                    "Initializing mxbai-embed-large model (first run downloads ~650MB)...",
+                );
+                match OnnxProvider::with_model(spec) {
+                    Ok(_) => {
+                        formatter
+                            .print_success("Embedding model ready (mxbai-embed-large via ONNX).");
+                    }
+                    Err(_) => {
+                        #[cfg(feature = "ollama")]
+                        {
+                            formatter
+                                .print_message("ONNX model unavailable, trying Ollama fallback...");
+                            init_ollama_model(MXBAI_EMBED_LARGE, formatter).await;
+                        }
+                        #[cfg(not(feature = "ollama"))]
+                        {
+                            formatter.print_error(
+                                "ONNX model unavailable and Ollama support is not enabled.",
+                            );
+                        }
+                    }
+                }
             }
             other => {
                 formatter.print_error(&format!(

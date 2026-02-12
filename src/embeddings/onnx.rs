@@ -3,10 +3,39 @@
 use super::{EmbeddingError, EmbeddingProvider};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use fastembed::{InitOptions, TextEmbedding};
+use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use std::sync::{Arc, Mutex};
 
-/// ONNX-based embedding provider using all-MiniLM-L6-v2 model.
+/// Specification for a fastembed-supported ONNX model.
+#[derive(Debug, Clone)]
+pub struct OnnxModelSpec {
+    pub fastembed_model: EmbeddingModel,
+    pub dimensions: usize,
+    pub max_tokens: usize,
+}
+
+/// all-MiniLM-L6-v2: 384-dimensional, 256 token context.
+pub const ONNX_ALL_MINILM: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::AllMiniLML6V2,
+    dimensions: 384,
+    max_tokens: 256,
+};
+
+/// nomic-embed-text-v1.5: 768-dimensional, 8192 token context.
+pub const ONNX_NOMIC_EMBED_TEXT: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::NomicEmbedTextV15,
+    dimensions: 768,
+    max_tokens: 8192,
+};
+
+/// mxbai-embed-large-v1: 1024-dimensional, 512 token context.
+pub const ONNX_MXBAI_EMBED_LARGE: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::MxbaiEmbedLargeV1,
+    dimensions: 1024,
+    max_tokens: 512,
+};
+
+/// ONNX-based embedding provider using fastembed.
 ///
 /// This provider uses the fastembed crate to generate embeddings locally
 /// using ONNX Runtime. The model is downloaded and cached in a
@@ -20,38 +49,38 @@ pub struct OnnxProvider {
 }
 
 impl OnnxProvider {
-    /// Create a new ONNX provider with the all-MiniLM-L6-v2 model.
+    /// Create a new ONNX provider with the specified model.
     ///
-    /// The model is cached in the platform cache directory
-    /// (`~/Library/Caches/engramdb/models` on macOS,
-    /// `$XDG_CACHE_HOME/engramdb/models` on Linux) so it only downloads
-    /// once per machine.
-    ///
-    /// # Returns
-    /// A new provider instance, or an error if model initialization fails.
-    pub fn new() -> Result<Self> {
+    /// The model is cached in the platform cache directory so it only
+    /// downloads once per machine.
+    pub fn with_model(spec: OnnxModelSpec) -> Result<Self> {
         let cache_dir = dirs::cache_dir()
             .context("Could not determine cache directory")?
             .join("engramdb")
             .join("models");
 
-        let options = InitOptions::default().with_cache_dir(cache_dir);
+        let options = InitOptions::new(spec.fastembed_model).with_cache_dir(cache_dir);
         let model =
             TextEmbedding::try_new(options).context("Failed to initialize embedding model")?;
 
         Ok(Self {
             model: Arc::new(Mutex::new(model)),
-            dimensions: 384, // all-MiniLM-L6-v2 produces 384-dimensional embeddings
-            max_tokens: 256, // all-MiniLM-L6-v2 truncates at 256 tokens
+            dimensions: spec.dimensions,
+            max_tokens: spec.max_tokens,
         })
     }
 
-    /// Try to create a new provider, returning None if unavailable.
-    ///
-    /// This is useful for graceful degradation when embeddings are optional.
-    ///
-    /// # Returns
-    /// Some(provider) if successful, None if model initialization fails.
+    /// Create a new ONNX provider with the default all-MiniLM-L6-v2 model.
+    pub fn new() -> Result<Self> {
+        Self::with_model(ONNX_ALL_MINILM)
+    }
+
+    /// Try to create a provider with the specified model, returning None if unavailable.
+    pub fn try_with_model(spec: OnnxModelSpec) -> Option<Self> {
+        Self::with_model(spec).ok()
+    }
+
+    /// Try to create a provider with the default model, returning None if unavailable.
     pub fn try_new() -> Option<Self> {
         Self::new().ok()
     }

@@ -38,7 +38,9 @@ pub use search::search_memories;
 pub use stats::{compute_stats, StoreStats};
 pub use update::{update_memory, UpdateParams};
 
-use crate::embeddings::{EmbeddingProvider, OnnxProvider};
+use crate::embeddings::{
+    EmbeddingProvider, OnnxProvider, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT,
+};
 #[cfg(feature = "ollama")]
 use crate::embeddings::{OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT};
 use crate::nli::OnnxNliProvider;
@@ -49,11 +51,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// Try to create an embedding provider for the given model name.
-/// For models with multiple backends, tries them in priority order.
+///
+/// Priority: local ONNX via fastembed (no server needed) → Ollama fallback.
+/// Fastembed natively supports all-minilm, nomic-embed-text, and mxbai-embed-large.
 fn resolve_provider(model: &str) -> Option<Box<dyn EmbeddingProvider>> {
     match model {
         "onnx" | "all-minilm" => {
-            // Prefer local ONNX (no server needed), fall back to Ollama
             if let Some(p) = OnnxProvider::try_new() {
                 return Some(Box::new(p));
             }
@@ -66,17 +69,31 @@ fn resolve_provider(model: &str) -> Option<Box<dyn EmbeddingProvider>> {
                 None
             }
         }
-        #[cfg(feature = "ollama")]
-        "nomic-embed-text" => OllamaProvider::try_new(NOMIC_EMBED_TEXT).map(|p| Box::new(p) as _),
-        #[cfg(feature = "ollama")]
-        "mxbai-embed-large" => OllamaProvider::try_new(MXBAI_EMBED_LARGE).map(|p| Box::new(p) as _),
-        #[cfg(not(feature = "ollama"))]
-        "nomic-embed-text" | "mxbai-embed-large" => {
-            eprintln!(
-                "Warning: embedding model '{}' requires Ollama support (compile with --features ollama), embeddings disabled",
-                model
-            );
-            None
+        "nomic-embed-text" => {
+            if let Some(p) = OnnxProvider::try_with_model(ONNX_NOMIC_EMBED_TEXT) {
+                return Some(Box::new(p));
+            }
+            #[cfg(feature = "ollama")]
+            {
+                OllamaProvider::try_new(NOMIC_EMBED_TEXT).map(|p| Box::new(p) as _)
+            }
+            #[cfg(not(feature = "ollama"))]
+            {
+                None
+            }
+        }
+        "mxbai-embed-large" => {
+            if let Some(p) = OnnxProvider::try_with_model(ONNX_MXBAI_EMBED_LARGE) {
+                return Some(Box::new(p));
+            }
+            #[cfg(feature = "ollama")]
+            {
+                OllamaProvider::try_new(MXBAI_EMBED_LARGE).map(|p| Box::new(p) as _)
+            }
+            #[cfg(not(feature = "ollama"))]
+            {
+                None
+            }
         }
         other => {
             eprintln!(
