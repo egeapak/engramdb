@@ -44,6 +44,9 @@ use crate::embeddings::{
 };
 use crate::retrieval::engine::RetrievalEngine;
 use crate::storage::MemoryStore;
+use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Try to create an embedding provider for the given model name.
 /// For models with multiple backends, tries them in priority order.
@@ -68,12 +71,22 @@ fn resolve_provider(model: &str) -> Option<Box<dyn EmbeddingProvider>> {
     }
 }
 
-/// Build a `RetrievalEngine` with optional embeddings from a store + config path.
+/// Map a reranker model name string to a fastembed `RerankerModel` enum variant.
+fn resolve_reranker_model(name: &str) -> RerankerModel {
+    match name {
+        "bge-reranker-v2-m3" => RerankerModel::BGERerankerV2M3,
+        "jina-reranker-v1-turbo-en" => RerankerModel::JINARerankerV1TurboEn,
+        "jina-reranker-v2-base-multilingual" => RerankerModel::JINARerankerV2BaseMultiligual,
+        _ => RerankerModel::BGERerankerBase, // default
+    }
+}
+
+/// Build a `RetrievalEngine` with optional embeddings and reranker from a store + config path.
 ///
 /// This is the shared helper that CLI and MCP callers use so they don't duplicate
 /// the provider wiring.  Returns an engine that always works for storage operations;
-/// embeddings are attached on a best-effort basis.  Vector storage is handled
-/// by the MemoryStore's integrated LanceDB.
+/// embeddings and reranking are attached on a best-effort basis.  Vector storage is
+/// handled by the MemoryStore's integrated LanceDB.
 pub async fn build_engine(store: MemoryStore, config_path: &std::path::Path) -> RetrievalEngine {
     let config = crate::storage::config::load_config(config_path)
         .await
@@ -89,6 +102,28 @@ pub async fn build_engine(store: MemoryStore, config_path: &std::path::Path) -> 
             );
         }
         engine = engine.with_embedding_provider(provider);
+    }
+
+    // Initialize cross-encoder reranker if enabled
+    if config.rerank.enabled {
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| PathBuf::from(".cache"))
+            .join("engramdb")
+            .join("models");
+
+        let model = resolve_reranker_model(&config.rerank.model);
+        let options = RerankInitOptions::new(model)
+            .with_cache_dir(cache_dir)
+            .with_show_download_progress(false);
+
+        match TextRerank::try_new(options) {
+            Ok(reranker) => {
+                engine = engine.with_reranker(Arc::new(reranker));
+            }
+            Err(e) => {
+                eprintln!("Warning: reranker init failed, continuing without: {}", e);
+            }
+        }
     }
 
     engine

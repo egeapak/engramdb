@@ -10,7 +10,9 @@ use crate::scoring::{composite_score, ScoreBreakdown, ScoringContext};
 use crate::storage::{MemoryStore, Result};
 use crate::types::{EngramConfig, Memory, MemoryType};
 use chrono::Utc;
+use fastembed::TextRerank;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Detail level for retrieved memories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -82,12 +84,13 @@ pub struct RetrievalResult {
 /// Main retrieval engine for EngramDB.
 ///
 /// Coordinates memory retrieval by combining storage access, optional semantic search,
-/// and relevance scoring. The engine can operate with or without embeddings, gracefully
-/// degrading to keyword-only search when semantic search is unavailable.
+/// optional cross-encoder reranking, and relevance scoring. The engine can operate
+/// with or without embeddings and reranking, gracefully degrading when unavailable.
 pub struct RetrievalEngine {
     store: MemoryStore,
     config: EngramConfig,
     embedding_provider: Option<Box<dyn EmbeddingProvider>>,
+    reranker: Option<Arc<TextRerank>>,
 }
 
 impl RetrievalEngine {
@@ -101,6 +104,7 @@ impl RetrievalEngine {
             store,
             config,
             embedding_provider: None,
+            reranker: None,
         }
     }
 
@@ -113,12 +117,27 @@ impl RetrievalEngine {
         self
     }
 
+    /// Add a cross-encoder reranker to the retrieval engine.
+    ///
+    /// When configured (and `config.rerank.enabled` is true), retrieved results
+    /// are re-scored using the cross-encoder before being returned. The reranker
+    /// is wrapped in `Arc<Mutex<>>` because `TextRerank::rerank()` requires `&mut self`.
+    pub fn with_reranker(mut self, reranker: Arc<TextRerank>) -> Self {
+        self.reranker = Some(reranker);
+        self
+    }
+
     /// Check if embeddings are available.
     ///
     /// Returns true if an embedding provider is configured. Vector storage
     /// is always available via the MemoryStore's LanceDB.
     pub fn embeddings_available(&self) -> bool {
         self.embedding_provider.is_some()
+    }
+
+    /// Check if reranking is available and enabled.
+    pub fn reranking_available(&self) -> bool {
+        self.reranker.is_some() && self.config.rerank.enabled
     }
 
     /// Chunk, embed, and upsert a memory's vectors into the store.
@@ -152,6 +171,84 @@ impl RetrievalEngine {
     /// Get a mutable reference to the memory store.
     pub fn store_mut(&mut self) -> &mut MemoryStore {
         &mut self.store
+    }
+
+    /// Apply cross-encoder reranking to scored candidates.
+    ///
+    /// Takes the top `config.rerank.top_n` candidates, scores them with the
+    /// cross-encoder, blends the rerank score with the original score, and
+    /// re-sorts. Candidates beyond `top_n` are left unchanged.
+    async fn apply_rerank(
+        &self,
+        query_text: &str,
+        candidates: &mut [ScoredMemory],
+    ) -> anyhow::Result<()> {
+        let reranker = match &self.reranker {
+            Some(r) if self.config.rerank.enabled => Arc::clone(r),
+            _ => return Ok(()),
+        };
+
+        if candidates.is_empty() {
+            return Ok(());
+        }
+
+        let top_n = self.config.rerank.top_n.min(candidates.len());
+        let weight = self.config.rerank.weight;
+
+        // Build document strings for the top N candidates
+        let documents: Vec<String> = candidates[..top_n]
+            .iter()
+            .map(|sm| format!("{} {}", sm.memory.summary, sm.memory.content))
+            .collect();
+
+        // Run cross-encoder in spawn_blocking since it's CPU-bound
+        let query_owned = query_text.to_string();
+        let rerank_results = tokio::task::spawn_blocking(move || {
+            let doc_refs: Vec<&String> = documents.iter().collect();
+            reranker
+                .rerank(&query_owned, doc_refs, false, None)
+                .map_err(|e| anyhow::anyhow!("Reranking failed: {}", e))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Rerank task panicked: {}", e))??;
+
+        // Find min/max for normalization
+        let scores: Vec<f64> = rerank_results.iter().map(|r| r.score as f64).collect();
+        let min_score = scores.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_score = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let score_range = max_score - min_score;
+
+        // Map rerank results back to candidates by original index
+        for result in &rerank_results {
+            let idx = result.index;
+            if idx < top_n {
+                let raw_rerank = result.score as f64;
+
+                // Normalize to [0, 1]
+                let normalized = if score_range > f64::EPSILON {
+                    (raw_rerank - min_score) / score_range
+                } else {
+                    1.0 // All scores equal — treat as maximum
+                };
+
+                // Blend: (1 - weight) * original + weight * normalized_rerank
+                let original = candidates[idx].score;
+                let blended = (1.0 - weight) * original + weight * normalized;
+
+                candidates[idx].score = blended;
+                candidates[idx].score_breakdown.final_score = blended;
+                candidates[idx].score_breakdown.rerank = Some(raw_rerank);
+            }
+        }
+
+        // Re-sort all candidates by blended score descending
+        candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        Ok(())
     }
 
     /// Retrieve memories based on a query
@@ -283,6 +380,13 @@ impl RetrievalEngine {
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+
+        // Step 6.5: Apply reranking if configured and query is present
+        if let Some(ref q) = query.query {
+            if let Err(e) = self.apply_rerank(q, &mut scored_memories).await {
+                eprintln!("Warning: reranking failed, using original scores: {}", e);
+            }
+        }
 
         // Track total before applying limit
         let total = scored_memories.len();
@@ -424,6 +528,7 @@ impl RetrievalEngine {
                     None
                 },
                 keyword: if kw_score > 0.0 { Some(kw_score) } else { None },
+                rerank: None,
                 relevance,
                 scope: 0.0,
                 trust,
@@ -449,6 +554,11 @@ impl RetrievalEngine {
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+
+        // Apply reranking if configured
+        if let Err(e) = self.apply_rerank(query_text, &mut scored_memories).await {
+            eprintln!("Warning: reranking failed, using original scores: {}", e);
+        }
 
         Ok(scored_memories)
     }
@@ -1182,5 +1292,301 @@ mod tests {
         assert_eq!(bd.scope, 0.0);
         // semantic should be None (no embeddings)
         assert!(bd.semantic.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_retrieve_without_reranker_has_no_rerank_scores() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Test memory",
+            "Test content for reranking",
+            Provenance::human(),
+        );
+        memory.visibility = Visibility::Shared;
+        memory.criticality = 0.8;
+        store.create(&memory).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+        assert!(!engine.reranking_available());
+
+        let query = RetrievalQuery {
+            query: Some("test".to_string()),
+            ..Default::default()
+        };
+        let result = engine.retrieve(&query).await.unwrap();
+
+        assert_eq!(result.memories.len(), 1);
+        // Without reranker, rerank score should be None
+        assert!(result.memories[0].score_breakdown.rerank.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_search_without_reranker_has_no_rerank_scores() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let config = EngramConfig::default();
+
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Authentication system",
+            "Details about authentication",
+            Provenance::human(),
+        );
+        memory.visibility = Visibility::Shared;
+        store.create(&memory).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+        let filters = SearchFilters::default();
+        let results = engine.search("authentication", &filters).await.unwrap();
+
+        assert!(!results.is_empty());
+        // Without reranker, rerank score should be None
+        for r in &results {
+            assert!(r.score_breakdown.rerank.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reranking_available_reflects_config() {
+        use crate::types::EngramConfig;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        // Reranking not available: no reranker set, config disabled
+        let config = EngramConfig::default();
+        let engine = RetrievalEngine::new(store, config);
+        assert!(!engine.reranking_available());
+    }
+
+    #[tokio::test]
+    async fn test_rerank_with_real_reranker() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use fastembed::{RerankInitOptions, TextRerank};
+        use tempfile::TempDir;
+
+        // Try to create a real reranker — skip test if model download fails
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
+            .join("engramdb")
+            .join("models");
+        let options = RerankInitOptions::default().with_cache_dir(cache_dir);
+        let reranker = match TextRerank::try_new(options) {
+            Ok(r) => r,
+            Err(_) => return, // Skip if reranker unavailable
+        };
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+        config.rerank.enabled = true;
+        config.rerank.weight = 0.5;
+        config.rerank.top_n = 10;
+
+        // Create memories with different relevance to "rust programming"
+        let mut mem1 = Memory::new(
+            MemoryType::Decision,
+            "Rust language choice",
+            "We chose Rust for its memory safety and performance guarantees",
+            Provenance::human(),
+        );
+        mem1.visibility = Visibility::Shared;
+        mem1.criticality = 0.8;
+        store.create(&mem1).await.unwrap();
+
+        let mut mem2 = Memory::new(
+            MemoryType::Context,
+            "Database setup",
+            "The database uses PostgreSQL with connection pooling",
+            Provenance::human(),
+        );
+        mem2.visibility = Visibility::Shared;
+        mem2.criticality = 0.8;
+        store.create(&mem2).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, config).with_reranker(Arc::new(reranker));
+
+        assert!(engine.reranking_available());
+
+        let query = RetrievalQuery {
+            query: Some("rust programming language".to_string()),
+            ..Default::default()
+        };
+
+        let result = engine.retrieve(&query).await.unwrap();
+
+        // Both memories should be returned
+        assert_eq!(result.memories.len(), 2);
+
+        // At least one should have a rerank score populated
+        let has_rerank = result
+            .memories
+            .iter()
+            .any(|m| m.score_breakdown.rerank.is_some());
+        assert!(has_rerank, "Rerank scores should be populated");
+    }
+
+    #[tokio::test]
+    async fn test_rerank_blend_weight_zero_preserves_original_order() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use fastembed::{RerankInitOptions, TextRerank};
+        use tempfile::TempDir;
+
+        // Try to create a real reranker — skip test if model download fails
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
+            .join("engramdb")
+            .join("models");
+        let options = RerankInitOptions::default().with_cache_dir(cache_dir);
+        let reranker = match TextRerank::try_new(options) {
+            Ok(r) => r,
+            Err(_) => return, // Skip if reranker unavailable
+        };
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+        config.rerank.enabled = true;
+        config.rerank.weight = 0.0; // Zero weight: should preserve original scores
+        config.rerank.top_n = 10;
+
+        let mut mem1 = Memory::new(
+            MemoryType::Decision,
+            "High criticality item",
+            "Important decision about architecture",
+            Provenance::human(),
+        );
+        mem1.visibility = Visibility::Shared;
+        mem1.criticality = 0.9;
+        store.create(&mem1).await.unwrap();
+
+        let mut mem2 = Memory::new(
+            MemoryType::Context,
+            "Lower criticality item",
+            "Some context about the project",
+            Provenance::human(),
+        );
+        mem2.visibility = Visibility::Shared;
+        mem2.criticality = 0.3;
+        store.create(&mem2).await.unwrap();
+
+        // First, get scores without reranker
+        let engine_no_rerank = RetrievalEngine::new(
+            MemoryStore::open(temp_dir.path(), &InMemoryRegistry::new())
+                .await
+                .unwrap(),
+            config.clone(),
+        );
+
+        let query = RetrievalQuery {
+            query: Some("architecture decision".to_string()),
+            ..Default::default()
+        };
+
+        let result_no_rerank = engine_no_rerank.retrieve(&query).await.unwrap();
+
+        // Now with reranker but weight=0.0
+        let engine_rerank = RetrievalEngine::new(
+            MemoryStore::open(temp_dir.path(), &InMemoryRegistry::new())
+                .await
+                .unwrap(),
+            config,
+        )
+        .with_reranker(Arc::new(reranker));
+
+        let result_rerank = engine_rerank.retrieve(&query).await.unwrap();
+
+        // With weight=0.0, blended = 1.0 * original + 0.0 * rerank = original
+        // Scores should be identical
+        assert_eq!(
+            result_no_rerank.memories.len(),
+            result_rerank.memories.len()
+        );
+        for (a, b) in result_no_rerank
+            .memories
+            .iter()
+            .zip(result_rerank.memories.iter())
+        {
+            assert!(
+                (a.score - b.score).abs() < 0.001,
+                "Scores should match with weight=0.0: {} vs {}",
+                a.score,
+                b.score
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_search_with_real_reranker() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use fastembed::{RerankInitOptions, TextRerank};
+        use tempfile::TempDir;
+
+        // Try to create a real reranker — skip test if model download fails
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
+            .join("engramdb")
+            .join("models");
+        let options = RerankInitOptions::default().with_cache_dir(cache_dir);
+        let reranker = match TextRerank::try_new(options) {
+            Ok(r) => r,
+            Err(_) => return, // Skip if reranker unavailable
+        };
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.search.threshold = 0.0;
+        config.rerank.enabled = true;
+        config.rerank.weight = 0.5;
+        config.rerank.top_n = 10;
+
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Authentication system",
+            "OAuth2 authentication with JWT tokens for API security",
+            Provenance::human(),
+        );
+        memory.visibility = Visibility::Shared;
+        store.create(&memory).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, config).with_reranker(Arc::new(reranker));
+
+        let filters = SearchFilters::default();
+        let results = engine.search("authentication", &filters).await.unwrap();
+
+        assert!(!results.is_empty());
+        // Should have rerank score populated
+        assert!(results[0].score_breakdown.rerank.is_some());
     }
 }
