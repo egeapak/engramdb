@@ -110,7 +110,7 @@ pub async fn compress_apply(
             details: None,
             visibility: Visibility::Shared,
             provenance: Provenance::agent("compress"),
-            supersedes: source_ids,
+            supersedes: source_ids.clone(),
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,
@@ -119,6 +119,11 @@ pub async fn compress_apply(
         None,
     )
     .await?;
+
+    // Delete source memories now that the compressed memory exists
+    for id in &source_ids {
+        store.delete(id).await?;
+    }
 
     Ok(CompressApplyResult {
         new_id: result.id,
