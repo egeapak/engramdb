@@ -11,16 +11,27 @@ path = "src/main.rs"
 name = "engramdb"
 path = "src/lib.rs"
 
+[features]
+default = ["ollama"]
+ollama = ["reqwest"]
+
 [dependencies]
 # MCP Server
-rmcp = { version = "0.1", features = ["macros", "server", "transport-io", "transport-sse-server"] }
+rmcp = { version = "0.15", features = ["macros", "server", "transport-io", "transport-streamable-http-server"] }
+axum = "0.8"
 
 # Vector DB & Embeddings
-lancedb = "0.15"
-fastembed = "4"
-reqwest = { version = "0.12", features = ["json"] }
-arrow-array = "53"
-arrow-schema = "53"
+lancedb = "0.26"
+fastembed = "5"
+reqwest = { version = "0.12", features = ["json"], optional = true }
+arrow-array = "57"
+arrow-schema = "57"
+
+# NLI (contradiction detection)
+ort = { version = "2.0.0-rc.11", default-features = false, features = ["download-binaries", "ndarray", "std"] }
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+hf-hub = "0.4"
+ndarray = { version = "0.17", default-features = false }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -42,7 +53,7 @@ sha2 = "0.10"
 dirs = "6"
 
 # Async
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net"] }
 futures = "0.3"
 async-trait = "0.1"
 
@@ -56,3 +67,6 @@ anyhow = "1"
 
 [dev-dependencies]
 tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
+regex = "1"

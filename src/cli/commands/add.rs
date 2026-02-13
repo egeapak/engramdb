@@ -44,6 +44,7 @@ pub async fn run_add(
     dir: &Path,
     registry: &dyn RegistryBackend,
     params: AddParams,
+    embedding_backend: Option<crate::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
     // Open or initialize store
@@ -59,7 +60,7 @@ pub async fn run_add(
         // This shouldn't happen since we already opened it above, but handle it anyway
         panic!("Failed to open store for engine after successful open")
     });
-    let engine = ops::build_engine(engine_store, &config_path).await;
+    let engine = ops::build_engine(engine_store, &config_path, embedding_backend).await;
 
     // Handle details file
     let details_from_file = if let Some(ref details_file) = params.details_file {
@@ -118,6 +119,10 @@ async fn run_direct_mode(
     )?;
     let visibility = parse_visibility(params.visibility_str.as_deref().unwrap_or("shared"))?;
 
+    let summary = params.summary.ok_or_else(|| {
+        anyhow!("Summary is required. Use --summary or -s flag, or use interactive mode.")
+    })?;
+
     let result = create_memory(
         store,
         CreateParams {
@@ -125,7 +130,7 @@ async fn run_direct_mode(
             content: params
                 .content
                 .ok_or_else(|| anyhow!("Content is required"))?,
-            summary: params.summary,
+            summary,
             physical: params.physical,
             logical: params.logical,
             tags: params.tags,
@@ -272,7 +277,7 @@ async fn run_interactive_mode(
         CreateParams {
             type_,
             content,
-            summary: Some(summary),
+            summary,
             physical,
             logical,
             tags,
@@ -359,7 +364,7 @@ async fn run_editor_mode(
         CreateParams {
             type_: parsed.type_,
             content: parsed.content,
-            summary: Some(parsed.summary),
+            summary: parsed.summary,
             physical: parsed.physical,
             logical: parsed.logical,
             tags: parsed.tags,

@@ -744,6 +744,7 @@ mod tests {
             final_score: 0.75,
             semantic: Some(0.8),
             keyword: None,
+            rerank: None,
             relevance: 0.7,
             scope: 0.6,
             trust: 1.0,

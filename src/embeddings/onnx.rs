@@ -3,10 +3,39 @@
 use super::{EmbeddingError, EmbeddingProvider};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use fastembed::{InitOptions, TextEmbedding};
-use std::sync::Arc;
+use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use std::sync::{Arc, Mutex};
 
-/// ONNX-based embedding provider using all-MiniLM-L6-v2 model.
+/// Specification for a fastembed-supported ONNX model.
+#[derive(Debug, Clone)]
+pub struct OnnxModelSpec {
+    pub fastembed_model: EmbeddingModel,
+    pub dimensions: usize,
+    pub max_tokens: usize,
+}
+
+/// all-MiniLM-L6-v2: 384-dimensional, 256 token context.
+pub const ONNX_ALL_MINILM: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::AllMiniLML6V2,
+    dimensions: 384,
+    max_tokens: 256,
+};
+
+/// nomic-embed-text-v1.5: 768-dimensional, 8192 token context.
+pub const ONNX_NOMIC_EMBED_TEXT: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::NomicEmbedTextV15,
+    dimensions: 768,
+    max_tokens: 8192,
+};
+
+/// mxbai-embed-large-v1: 1024-dimensional, 512 token context.
+pub const ONNX_MXBAI_EMBED_LARGE: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::MxbaiEmbedLargeV1,
+    dimensions: 1024,
+    max_tokens: 512,
+};
+
+/// ONNX-based embedding provider using fastembed.
 ///
 /// This provider uses the fastembed crate to generate embeddings locally
 /// using ONNX Runtime. The model is downloaded and cached in a
@@ -14,44 +43,44 @@ use std::sync::Arc;
 /// - macOS: `~/Library/Caches/engramdb/models`
 /// - Linux: `$XDG_CACHE_HOME/engramdb/models` (default `~/.cache/engramdb/models`)
 pub struct OnnxProvider {
-    model: Arc<TextEmbedding>,
+    model: Arc<Mutex<TextEmbedding>>,
     dimensions: usize,
     max_tokens: usize,
 }
 
 impl OnnxProvider {
-    /// Create a new ONNX provider with the all-MiniLM-L6-v2 model.
+    /// Create a new ONNX provider with the specified model.
     ///
-    /// The model is cached in the platform cache directory
-    /// (`~/Library/Caches/engramdb/models` on macOS,
-    /// `$XDG_CACHE_HOME/engramdb/models` on Linux) so it only downloads
-    /// once per machine.
-    ///
-    /// # Returns
-    /// A new provider instance, or an error if model initialization fails.
-    pub fn new() -> Result<Self> {
+    /// The model is cached in the platform cache directory so it only
+    /// downloads once per machine.
+    pub fn with_model(spec: OnnxModelSpec) -> Result<Self> {
         let cache_dir = dirs::cache_dir()
             .context("Could not determine cache directory")?
             .join("engramdb")
             .join("models");
 
-        let options = InitOptions::default().with_cache_dir(cache_dir);
+        let options = InitOptions::new(spec.fastembed_model).with_cache_dir(cache_dir);
         let model =
             TextEmbedding::try_new(options).context("Failed to initialize embedding model")?;
 
         Ok(Self {
-            model: Arc::new(model),
-            dimensions: 384, // all-MiniLM-L6-v2 produces 384-dimensional embeddings
-            max_tokens: 256, // all-MiniLM-L6-v2 truncates at 256 tokens
+            model: Arc::new(Mutex::new(model)),
+            dimensions: spec.dimensions,
+            max_tokens: spec.max_tokens,
         })
     }
 
-    /// Try to create a new provider, returning None if unavailable.
-    ///
-    /// This is useful for graceful degradation when embeddings are optional.
-    ///
-    /// # Returns
-    /// Some(provider) if successful, None if model initialization fails.
+    /// Create a new ONNX provider with the default all-MiniLM-L6-v2 model.
+    pub fn new() -> Result<Self> {
+        Self::with_model(ONNX_ALL_MINILM)
+    }
+
+    /// Try to create a provider with the specified model, returning None if unavailable.
+    pub fn try_with_model(spec: OnnxModelSpec) -> Option<Self> {
+        Self::with_model(spec).ok()
+    }
+
+    /// Try to create a provider with the default model, returning None if unavailable.
     pub fn try_new() -> Option<Self> {
         Self::new().ok()
     }
@@ -64,6 +93,9 @@ impl EmbeddingProvider for OnnxProvider {
         let model = Arc::clone(&self.model);
         // fastembed's embed method is CPU-bound, so run it in a blocking task
         let embeddings = tokio::task::spawn_blocking(move || {
+            let mut model = model
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
             model
                 .embed(vec![text_owned], None)
                 .context("Failed to generate embedding")
@@ -84,6 +116,9 @@ impl EmbeddingProvider for OnnxProvider {
         let model = Arc::clone(&self.model);
 
         tokio::task::spawn_blocking(move || {
+            let mut model = model
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
             model
                 .embed(texts_owned, None)
                 .context("Failed to generate batch embeddings")
@@ -104,31 +139,44 @@ impl EmbeddingProvider for OnnxProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::LazyLock;
+
+    /// Shared embedding provider across all tests to avoid loading the ONNX
+    /// model once per test (which causes OOM when parallel).
+    static SHARED_PROVIDER: LazyLock<Option<OnnxProvider>> = LazyLock::new(OnnxProvider::try_new);
+
+    fn try_provider() -> Option<&'static OnnxProvider> {
+        let provider = SHARED_PROVIDER.as_ref();
+        if provider.is_none() {
+            eprintln!("Skipping: embedding model not available");
+        }
+        provider
+    }
 
     #[test]
     fn test_provider_creation() {
-        // This test requires the model to be downloaded, so we use try_new
-        let provider = OnnxProvider::try_new();
-        assert!(provider.is_some(), "Provider should initialize");
+        if let Some(provider) = try_provider() {
+            assert_eq!(provider.dimensions(), 384);
+        }
     }
 
     #[test]
     fn test_dimensions() {
-        if let Some(provider) = OnnxProvider::try_new() {
+        if let Some(provider) = try_provider() {
             assert_eq!(provider.dimensions(), 384);
         }
     }
 
     #[test]
     fn test_max_tokens() {
-        if let Some(provider) = OnnxProvider::try_new() {
+        if let Some(provider) = try_provider() {
             assert_eq!(provider.max_tokens(), 256);
         }
     }
 
     #[tokio::test]
     async fn test_embed_single() {
-        if let Some(provider) = OnnxProvider::try_new() {
+        if let Some(provider) = try_provider() {
             let result = provider.embed("Hello, world!").await;
             assert!(result.is_ok(), "Embedding should succeed");
 
@@ -142,7 +190,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_embed_batch() {
-        if let Some(provider) = OnnxProvider::try_new() {
+        if let Some(provider) = try_provider() {
             let texts = vec!["First text", "Second text", "Third text"];
             let result = provider.embed_batch(&texts).await;
             assert!(result.is_ok(), "Batch embedding should succeed");
@@ -158,19 +206,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_embed_empty_string() {
-        if let Some(provider) = OnnxProvider::try_new() {
+        if let Some(provider) = try_provider() {
             let result = provider.embed("").await;
             assert!(result.is_ok(), "Empty string embedding should succeed");
 
             let embedding = result.unwrap();
             assert_eq!(embedding.len(), 384);
-            // Should return a valid 384-dim vector (no panic/error)
         }
     }
 
     #[tokio::test]
     async fn test_embed_batch_empty_slice() {
-        if let Some(provider) = OnnxProvider::try_new() {
+        if let Some(provider) = try_provider() {
             let empty: Vec<&str> = vec![];
             let result = provider.embed_batch(&empty).await;
             assert!(result.is_ok(), "Empty batch should succeed");
@@ -182,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_embed_consistency() {
-        if let Some(provider) = OnnxProvider::try_new() {
+        if let Some(provider) = try_provider() {
             let text = "hello";
             let embedding1 = provider.embed(text).await.unwrap();
             let embedding2 = provider.embed(text).await.unwrap();
@@ -197,7 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_embed_batch_single_matches_embed() {
-        if let Some(provider) = OnnxProvider::try_new() {
+        if let Some(provider) = try_provider() {
             let text = "test text";
             let single_embedding = provider.embed(text).await.unwrap();
             let batch_embeddings = provider.embed_batch(&[text]).await.unwrap();

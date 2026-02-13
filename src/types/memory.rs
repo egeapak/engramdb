@@ -263,6 +263,9 @@ pub struct MemoryUpdate {
     pub status: Option<Status>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub challenges: Option<Vec<Challenge>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility: Option<Visibility>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -318,6 +321,9 @@ impl MemoryUpdate {
         }
         if let Some(status) = self.status {
             memory.status = status;
+        }
+        if let Some(ref challenges) = self.challenges {
+            memory.challenges = challenges.clone();
         }
         if let Some(visibility) = self.visibility {
             memory.visibility = visibility;
@@ -502,6 +508,7 @@ mod tests {
             confidence: Some(0.95),
             supersedes: Some(vec!["old-id".to_string()]),
             status: Some(Status::NeedsReview),
+            challenges: None,
             visibility: Some(Visibility::Personal),
             verified_at: Some(Utc::now()),
             expires_at: Some(Utc::now() + Duration::days(30)),
@@ -552,5 +559,48 @@ mod tests {
         assert_eq!(deserialized.verified_at, Some(now));
         assert_eq!(deserialized.summary, "Test summary");
         assert_eq!(deserialized.content, "Test content");
+    }
+
+    #[test]
+    fn test_memory_update_apply_challenges() {
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Original",
+            "Original",
+            Provenance::human(),
+        );
+        assert!(memory.challenges.is_empty());
+
+        let challenges = vec![
+            Challenge::new("First evidence"),
+            Challenge::new("Second evidence"),
+        ];
+        let mut update = MemoryUpdate::new();
+        update.challenges = Some(challenges);
+        update.status = Some(Status::Challenged);
+        update.apply_to(&mut memory);
+
+        assert_eq!(memory.challenges.len(), 2);
+        assert_eq!(memory.challenges[0].evidence, "First evidence");
+        assert_eq!(memory.challenges[1].evidence, "Second evidence");
+        assert_eq!(memory.status, Status::Challenged);
+    }
+
+    #[test]
+    fn test_memory_update_none_challenges_preserves_existing() {
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Original",
+            "Original",
+            Provenance::human(),
+        );
+        memory.add_challenge(Challenge::new("Existing challenge"));
+
+        let update = MemoryUpdate::new(); // all fields None
+        update.apply_to(&mut memory);
+
+        // challenges should be untouched
+        assert_eq!(memory.challenges.len(), 1);
+        assert_eq!(memory.challenges[0].evidence, "Existing challenge");
     }
 }

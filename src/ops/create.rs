@@ -11,7 +11,7 @@ use chrono::Duration;
 pub struct CreateParams {
     pub type_: MemoryType,
     pub content: String,
-    pub summary: Option<String>,
+    pub summary: String,
     pub physical: Vec<String>,
     pub logical: Vec<String>,
     pub tags: Vec<String>,
@@ -34,6 +34,18 @@ pub struct CreateResult {
     pub summary: String,
 }
 
+/// Validate that a summary is non-empty and within the character limit.
+pub fn validate_summary(summary: &str) -> Result<()> {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("Summary cannot be empty");
+    }
+    if trimmed.len() > 100 {
+        anyhow::bail!("Summary must be <= 100 characters (got {})", trimmed.len());
+    }
+    Ok(())
+}
+
 /// Create a new memory in the store.
 ///
 /// If `engine` is provided and has embeddings available, the memory is
@@ -43,15 +55,8 @@ pub async fn create_memory(
     params: CreateParams,
     engine: Option<&RetrievalEngine>,
 ) -> Result<CreateResult> {
-    // Generate summary if not provided (truncate content to 100 chars)
-    let summary = params.summary.unwrap_or_else(|| {
-        let max_len = 100;
-        if params.content.len() <= max_len {
-            params.content.clone()
-        } else {
-            format!("{}...", &params.content[..max_len])
-        }
-    });
+    validate_summary(&params.summary)?;
+    let summary = params.summary;
 
     // Use default physical scope if empty
     let physical = if params.physical.is_empty() {
@@ -119,6 +124,46 @@ pub async fn create_memory(
         if engine.embeddings_available() {
             let saved = store.get(&id).await?;
             engine.embed_memory(&saved).await?;
+
+            // Detect contradictions with existing memories (best-effort, background).
+            // Vector search + NLI classification run inline (needs &engine), but
+            // the resulting challenge writes are spawned so create_memory returns
+            // without waiting for them.
+            //
+            // Note: challenge writes are best-effort. If two memories are created
+            // concurrently and both contradict the same existing memory, one
+            // challenge may be lost due to a read-modify-write race on the
+            // challenges vec. This is acceptable since NLI contradiction detection
+            // is advisory, not transactional.
+            if engine.nli_available() {
+                if let Ok(contradictions) = engine.detect_contradictions(&saved).await {
+                    if !contradictions.is_empty() {
+                        let store_clone = store.clone();
+                        tokio::spawn(async move {
+                            for (existing_id, nli_result) in &contradictions {
+                                let evidence = format!(
+                                    "NLI contradiction detected (score: {:.2}): new memory '{}' contradicts this memory",
+                                    nli_result.contradiction, saved.summary
+                                );
+                                if let Err(e) = crate::ops::challenge::challenge_memory(
+                                    &store_clone,
+                                    existing_id,
+                                    &evidence,
+                                    None,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        "Failed to challenge memory {} for NLI contradiction: {}",
+                                        existing_id,
+                                        e
+                                    );
+                                }
+                            }
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -146,7 +191,7 @@ mod tests {
         CreateParams {
             type_: MemoryType::Decision,
             content: "Test content".to_string(),
-            summary: None,
+            summary: "Test summary".to_string(),
             physical: vec![],
             logical: vec![],
             tags: vec![],
@@ -283,5 +328,45 @@ mod tests {
         assert_eq!(decay.strategy, DecayStrategy::Linear);
         assert_eq!(decay.ttl, Some(Duration::seconds(86400)));
         assert_eq!(decay.half_life, None); // Should be None for linear
+    }
+
+    #[test]
+    fn test_validate_summary_rejects_empty() {
+        assert!(validate_summary("").is_err());
+        assert!(validate_summary("   ").is_err());
+        assert!(validate_summary("\n\t").is_err());
+    }
+
+    #[test]
+    fn test_validate_summary_rejects_too_long() {
+        let long = "a".repeat(101);
+        assert!(validate_summary(&long).is_err());
+    }
+
+    #[test]
+    fn test_validate_summary_accepts_valid() {
+        assert!(validate_summary("Short summary").is_ok());
+        assert!(validate_summary(&"a".repeat(100)).is_ok());
+        assert!(validate_summary("x").is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_create_memory_fails_with_empty_summary() {
+        let (_temp, store) = setup_test_store().await;
+        let mut params = minimal_create_params();
+        params.summary = "".to_string();
+        let result = create_memory(&store, params, None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn test_create_memory_fails_with_too_long_summary() {
+        let (_temp, store) = setup_test_store().await;
+        let mut params = minimal_create_params();
+        params.summary = "a".repeat(101);
+        let result = create_memory(&store, params, None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("100"));
     }
 }

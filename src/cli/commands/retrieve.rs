@@ -32,6 +32,7 @@ pub async fn run_retrieve(
     dir: &Path,
     registry: &dyn RegistryBackend,
     params: RetrieveParams,
+    embedding_backend: Option<crate::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
     let store = MemoryStore::open(dir, registry).await?;
@@ -39,7 +40,7 @@ pub async fn run_retrieve(
         formatter.print_warning(&warning);
     }
     let config_path = dir.join(".engramdb").join("config.toml");
-    let engine = crate::ops::build_engine(store, &config_path).await;
+    let engine = crate::ops::build_engine(store, &config_path, embedding_backend).await;
 
     // Parse type filters
     let types = if !params.type_filter.is_empty() {
@@ -167,7 +168,7 @@ mod tests {
             show_scores: false,
         };
 
-        let result = run_retrieve(temp_dir.path(), &registry, params, &formatter).await;
+        let result = run_retrieve(temp_dir.path(), &registry, params, None, &formatter).await;
         assert!(result.is_ok());
     }
 
@@ -189,7 +190,7 @@ mod tests {
             show_scores: false,
         };
 
-        let result = run_retrieve(temp_dir.path(), &registry, params, &formatter).await;
+        let result = run_retrieve(temp_dir.path(), &registry, params, None, &formatter).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -215,7 +216,7 @@ mod tests {
             show_scores: false,
         };
 
-        let result = run_retrieve(temp_dir.path(), &registry, params, &formatter).await;
+        let result = run_retrieve(temp_dir.path(), &registry, params, None, &formatter).await;
         assert!(result.is_ok());
     }
 }

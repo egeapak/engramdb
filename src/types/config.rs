@@ -219,10 +219,54 @@ impl Default for RetrievalConfig {
     }
 }
 
+/// Embedding transport backend preference.
+///
+/// Controls whether the local ONNX runtime (fastembed) or an Ollama server is
+/// used to run the embedding model.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmbeddingBackend {
+    /// Try ONNX first, fall back to Ollama (default).
+    #[default]
+    Auto,
+    /// Only use local ONNX runtime via fastembed.
+    Onnx,
+    /// Only use an Ollama server.
+    Ollama,
+}
+
+impl std::fmt::Display for EmbeddingBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => write!(f, "auto"),
+            Self::Onnx => write!(f, "onnx"),
+            Self::Ollama => write!(f, "ollama"),
+        }
+    }
+}
+
+impl std::str::FromStr for EmbeddingBackend {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "onnx" => Ok(Self::Onnx),
+            "ollama" => Ok(Self::Ollama),
+            other => Err(format!(
+                "unknown embedding backend '{}': expected auto, onnx, or ollama",
+                other
+            )),
+        }
+    }
+}
+
 /// Embeddings provider configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingsConfig {
-    /// Embedding model name. Transport (ONNX/Ollama) is resolved automatically.
+    /// Transport backend: "auto" (default), "onnx", or "ollama".
+    #[serde(default)]
+    pub backend: EmbeddingBackend,
+    /// Embedding model name.
     /// Supported: "all-minilm" (default, 384d), "nomic-embed-text" (768d), "mxbai-embed-large" (1024d).
     /// "onnx" is a backward-compat alias for "all-minilm".
     pub provider: String,
@@ -235,9 +279,114 @@ pub struct EmbeddingsConfig {
 impl Default for EmbeddingsConfig {
     fn default() -> Self {
         Self {
+            backend: EmbeddingBackend::default(),
             provider: "onnx".to_string(),
             dimensions: 384,
             max_tokens: 256,
+        }
+    }
+}
+
+/// NLI contradiction detection configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NliConfig {
+    /// Whether NLI contradiction detection is enabled
+    pub enabled: bool,
+
+    /// HuggingFace model repository ID
+    pub model: String,
+
+    /// Minimum contradiction probability to trigger a challenge (0.0-1.0)
+    pub contradiction_threshold: f64,
+
+    /// Maximum number of similar memories to compare against
+    pub max_comparisons: usize,
+
+    /// Minimum cosine similarity to consider a memory as a candidate for NLI check
+    pub similarity_threshold: f64,
+}
+
+impl NliConfig {
+    /// Validate that NLI configuration values are within acceptable ranges.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if !(0.0..=1.0).contains(&self.contradiction_threshold) {
+            anyhow::bail!(
+                "nli.contradiction_threshold ({}) must be in [0.0, 1.0]",
+                self.contradiction_threshold
+            );
+        }
+        if !(0.0..=1.0).contains(&self.similarity_threshold) {
+            anyhow::bail!(
+                "nli.similarity_threshold ({}) must be in [0.0, 1.0]",
+                self.similarity_threshold
+            );
+        }
+        if self.max_comparisons == 0 {
+            anyhow::bail!("nli.max_comparisons must be > 0");
+        }
+        Ok(())
+    }
+}
+
+impl Default for NliConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: "cross-encoder/nli-deberta-v3-xsmall".to_string(),
+            contradiction_threshold: 0.7,
+            max_comparisons: 10,
+            similarity_threshold: 0.3,
+        }
+    }
+}
+
+/// Configuration for cross-encoder reranking.
+///
+/// When enabled, a cross-encoder model jointly scores query+document pairs
+/// to refine the initial bi-encoder retrieval ranking. This is slower but
+/// more accurate for nuanced relevance judgments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RerankConfig {
+    /// Whether reranking is enabled (default: false)
+    pub enabled: bool,
+
+    /// Reranker model name (default: "bge-reranker-base").
+    /// Supported: "bge-reranker-base", "bge-reranker-v2-m3",
+    /// "jina-reranker-v1-turbo-en", "jina-reranker-v2-base-multilingual".
+    pub model: String,
+
+    /// Number of top candidates to rerank (default: 50).
+    /// Only the top N results from initial retrieval are passed to the
+    /// cross-encoder. Higher values improve quality but are slower.
+    pub top_n: usize,
+
+    /// Blend weight for rerank score vs original score (default: 0.5).
+    /// 0.0 = ignore rerank (original scores only),
+    /// 1.0 = use only rerank score.
+    /// Formula: blended = (1 - weight) * original + weight * rerank
+    pub weight: f64,
+}
+
+impl RerankConfig {
+    /// Validate that rerank configuration values are within acceptable ranges.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if !(0.0..=1.0).contains(&self.weight) {
+            anyhow::bail!("rerank.weight ({}) must be in [0.0, 1.0]", self.weight);
+        }
+        if self.top_n == 0 {
+            anyhow::bail!("rerank.top_n must be > 0");
+        }
+        Ok(())
+    }
+}
+
+impl Default for RerankConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: "bge-reranker-base".to_string(),
+            top_n: 50,
+            weight: 0.5,
         }
     }
 }
@@ -272,15 +421,31 @@ pub struct EngramConfig {
     /// Various thresholds
     #[serde(default)]
     pub thresholds: ThresholdsConfig,
+
+    /// NLI contradiction detection settings
+    #[serde(default)]
+    pub nli: NliConfig,
+
+    /// Cross-encoder reranking settings
+    #[serde(default)]
+    pub rerank: RerankConfig,
 }
 
 impl EngramConfig {
+    /// Validate all configuration subsections.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        self.nli.validate()?;
+        self.rerank.validate()?;
+        Ok(())
+    }
+
     /// Load configuration from a TOML file
     pub fn from_toml_file(
         path: impl AsRef<std::path::Path>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = std::fs::read_to_string(path)?;
-        let config = toml::from_str(&contents)?;
+        let config: Self = toml::from_str(&contents)?;
+        config.validate()?;
         Ok(config)
     }
 
@@ -353,6 +518,13 @@ mod tests {
         assert_eq!(config.embeddings.provider, "onnx");
         assert_eq!(config.embeddings.dimensions, 384);
         assert_eq!(config.embeddings.max_tokens, 256);
+
+        // NLI config
+        assert!(!config.nli.enabled);
+        assert_eq!(config.nli.model, "cross-encoder/nli-deberta-v3-xsmall");
+        assert_eq!(config.nli.contradiction_threshold, 0.7);
+        assert_eq!(config.nli.max_comparisons, 10);
+        assert_eq!(config.nli.similarity_threshold, 0.3);
     }
 
     #[test]
@@ -490,5 +662,188 @@ threshold = 0.25
 
         assert_eq!(loaded.search.semantic_weight, 7.5);
         assert_eq!(loaded.search.threshold, 0.1);
+    }
+
+    #[test]
+    fn test_nli_config_defaults() {
+        let config = NliConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.model, "cross-encoder/nli-deberta-v3-xsmall");
+        assert_eq!(config.contradiction_threshold, 0.7);
+        assert_eq!(config.max_comparisons, 10);
+        assert_eq!(config.similarity_threshold, 0.3);
+    }
+
+    #[test]
+    fn test_nli_config_toml_roundtrip() {
+        let mut config = EngramConfig::default();
+        config.nli.enabled = true;
+        config.nli.contradiction_threshold = 0.85;
+        config.nli.max_comparisons = 20;
+        config.nli.similarity_threshold = 0.5;
+
+        let temp_path = std::env::temp_dir().join("test_nli_config_roundtrip.toml");
+        config.to_toml_file(&temp_path).unwrap();
+        let loaded = EngramConfig::from_toml_file(&temp_path).unwrap();
+        std::fs::remove_file(&temp_path).ok();
+
+        assert!(loaded.nli.enabled);
+        assert_eq!(loaded.nli.contradiction_threshold, 0.85);
+        assert_eq!(loaded.nli.max_comparisons, 20);
+        assert_eq!(loaded.nli.similarity_threshold, 0.5);
+        assert_eq!(loaded.nli.model, "cross-encoder/nli-deberta-v3-xsmall");
+    }
+
+    #[test]
+    fn test_nli_config_omitted_uses_defaults() {
+        let config: EngramConfig = toml::from_str("").unwrap();
+        assert!(!config.nli.enabled);
+        assert_eq!(config.nli.contradiction_threshold, 0.7);
+        assert_eq!(config.nli.max_comparisons, 10);
+    }
+
+    #[test]
+    fn test_nli_config_custom_toml() {
+        let toml = r#"
+[nli]
+enabled = true
+model = "custom-model/nli-v1"
+contradiction_threshold = 0.9
+max_comparisons = 5
+similarity_threshold = 0.4
+"#;
+        let config: EngramConfig = toml::from_str(toml).unwrap();
+        assert!(config.nli.enabled);
+        assert_eq!(config.nli.model, "custom-model/nli-v1");
+        assert_eq!(config.nli.contradiction_threshold, 0.9);
+        assert_eq!(config.nli.max_comparisons, 5);
+        assert_eq!(config.nli.similarity_threshold, 0.4);
+    }
+
+    #[test]
+    fn test_rerank_config_defaults() {
+        let config = RerankConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.model, "bge-reranker-base");
+        assert_eq!(config.top_n, 50);
+        assert_eq!(config.weight, 0.5);
+    }
+
+    #[test]
+    fn test_rerank_config_disabled_by_default() {
+        let config = EngramConfig::default();
+        assert!(!config.rerank.enabled);
+        assert_eq!(config.rerank.model, "bge-reranker-base");
+        assert_eq!(config.rerank.top_n, 50);
+        assert_eq!(config.rerank.weight, 0.5);
+    }
+
+    #[test]
+    fn test_rerank_config_custom_toml() {
+        let toml = r#"
+[rerank]
+enabled = true
+model = "bge-reranker-v2-m3"
+top_n = 20
+weight = 0.7
+"#;
+        let config: EngramConfig = toml::from_str(toml).unwrap();
+        assert!(config.rerank.enabled);
+        assert_eq!(config.rerank.model, "bge-reranker-v2-m3");
+        assert_eq!(config.rerank.top_n, 20);
+        assert_eq!(config.rerank.weight, 0.7);
+    }
+
+    #[test]
+    fn test_rerank_config_defaults_when_omitted() {
+        let config: EngramConfig = toml::from_str("").unwrap();
+        assert!(!config.rerank.enabled);
+        assert_eq!(config.rerank.model, "bge-reranker-base");
+        assert_eq!(config.rerank.top_n, 50);
+        assert_eq!(config.rerank.weight, 0.5);
+    }
+
+    #[test]
+    fn test_rerank_config_toml_roundtrip() {
+        let mut config = EngramConfig::default();
+        config.rerank.enabled = true;
+        config.rerank.model = "jina-reranker-v1-turbo-en".to_string();
+        config.rerank.top_n = 30;
+        config.rerank.weight = 0.8;
+
+        let temp_path = std::env::temp_dir().join("test_rerank_config_roundtrip.toml");
+        config.to_toml_file(&temp_path).unwrap();
+        let loaded = EngramConfig::from_toml_file(&temp_path).unwrap();
+        std::fs::remove_file(&temp_path).ok();
+
+        assert!(loaded.rerank.enabled);
+        assert_eq!(loaded.rerank.model, "jina-reranker-v1-turbo-en");
+        assert_eq!(loaded.rerank.top_n, 30);
+        assert_eq!(loaded.rerank.weight, 0.8);
+    }
+
+    #[test]
+    fn test_nli_config_validate_rejects_invalid() {
+        // contradiction_threshold out of range
+        let nli = NliConfig {
+            contradiction_threshold: 1.5,
+            ..Default::default()
+        };
+        assert!(nli.validate().is_err());
+
+        let nli = NliConfig {
+            contradiction_threshold: -0.1,
+            ..Default::default()
+        };
+        assert!(nli.validate().is_err());
+
+        // similarity_threshold out of range
+        let nli = NliConfig {
+            similarity_threshold: 2.0,
+            ..Default::default()
+        };
+        assert!(nli.validate().is_err());
+
+        let nli = NliConfig {
+            similarity_threshold: -1.0,
+            ..Default::default()
+        };
+        assert!(nli.validate().is_err());
+
+        // max_comparisons zero
+        let nli = NliConfig {
+            max_comparisons: 0,
+            ..Default::default()
+        };
+        assert!(nli.validate().is_err());
+
+        // valid config passes
+        assert!(NliConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_rerank_config_validate_rejects_invalid() {
+        // weight out of range
+        let rerank = RerankConfig {
+            weight: 1.5,
+            ..Default::default()
+        };
+        assert!(rerank.validate().is_err());
+
+        let rerank = RerankConfig {
+            weight: -0.1,
+            ..Default::default()
+        };
+        assert!(rerank.validate().is_err());
+
+        // top_n zero
+        let rerank = RerankConfig {
+            top_n: 0,
+            ..Default::default()
+        };
+        assert!(rerank.validate().is_err());
+
+        // valid config passes
+        assert!(RerankConfig::default().validate().is_ok());
     }
 }

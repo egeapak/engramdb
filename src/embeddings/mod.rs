@@ -4,14 +4,16 @@
 //! along with an ONNX-based implementation using the fastembed crate.
 
 mod chunking;
+#[cfg(feature = "ollama")]
 mod ollama;
 mod onnx;
 
 pub use chunking::chunk_text;
+#[cfg(feature = "ollama")]
 pub use ollama::{
     OllamaModelSpec, OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT,
 };
-pub use onnx::OnnxProvider;
+pub use onnx::{OnnxModelSpec, OnnxProvider, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT};
 
 use anyhow::Result;
 use async_trait::async_trait;

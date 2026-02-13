@@ -70,6 +70,10 @@ pub struct Cli {
     /// Working directory (default: current directory)
     #[arg(long, global = true)]
     pub dir: Option<PathBuf>,
+
+    /// Embedding backend: auto, onnx, or ollama
+    #[arg(long = "embedding-backend", global = true)]
+    pub embedding_backend: Option<crate::types::EmbeddingBackend>,
 }
 
 /// Available CLI commands.
@@ -565,6 +569,595 @@ mod tests {
                 assert_eq!(port, None);
             }
             _ => panic!("Expected Serve command"),
+        }
+    }
+
+    // List command parsing (6 tests)
+    #[test]
+    fn test_list_multiple_type_filters() {
+        let cli =
+            Cli::try_parse_from(["engramdb", "list", "-t", "decision", "-t", "hazard"]).unwrap();
+        match cli.command {
+            Command::List { type_, .. } => {
+                assert_eq!(type_, vec!["decision", "hazard"]);
+            }
+            _ => panic!("Expected List command"),
+        }
+    }
+
+    #[test]
+    fn test_list_tags_comma_delimiter() {
+        let cli = Cli::try_parse_from(["engramdb", "list", "--tags", "a,b,c"]).unwrap();
+        match cli.command {
+            Command::List { tags, .. } => {
+                assert_eq!(tags, vec!["a", "b", "c"]);
+            }
+            _ => panic!("Expected List command"),
+        }
+    }
+
+    #[test]
+    fn test_list_tags_repeated() {
+        let cli = Cli::try_parse_from(["engramdb", "list", "--tags", "a", "--tags", "b"]).unwrap();
+        match cli.command {
+            Command::List { tags, .. } => {
+                assert_eq!(tags, vec!["a", "b"]);
+            }
+            _ => panic!("Expected List command"),
+        }
+    }
+
+    #[test]
+    fn test_list_sort_values() {
+        for sort_val in &["criticality", "created", "updated", "type"] {
+            let cli = Cli::try_parse_from(["engramdb", "list", "--sort", sort_val]).unwrap();
+            match cli.command {
+                Command::List { sort, .. } => {
+                    assert_eq!(sort, *sort_val);
+                }
+                _ => panic!("Expected List command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_list_limit_parsing() {
+        let cli = Cli::try_parse_from(["engramdb", "list", "--limit", "5"]).unwrap();
+        match cli.command {
+            Command::List { limit, .. } => {
+                assert_eq!(limit, Some(5));
+            }
+            _ => panic!("Expected List command"),
+        }
+    }
+
+    #[test]
+    fn test_list_combined_sort_reverse_limit() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "list",
+            "--sort",
+            "created",
+            "--reverse",
+            "--limit",
+            "3",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::List {
+                sort,
+                reverse,
+                limit,
+                ..
+            } => {
+                assert_eq!(sort, "created");
+                assert!(reverse);
+                assert_eq!(limit, Some(3));
+            }
+            _ => panic!("Expected List command"),
+        }
+    }
+
+    // Search command parsing (5 tests)
+    #[test]
+    fn test_search_multiple_type_filters() {
+        let cli = Cli::try_parse_from([
+            "engramdb", "search", "foo", "-t", "decision", "-t", "hazard",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Search { type_, .. } => {
+                assert_eq!(type_, vec!["decision", "hazard"]);
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    #[test]
+    fn test_search_physical_scope() {
+        let cli = Cli::try_parse_from(["engramdb", "search", "foo", "-p", "src/main.rs"]).unwrap();
+        match cli.command {
+            Command::Search { physical, .. } => {
+                assert_eq!(physical, Some("src/main.rs".to_string()));
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    #[test]
+    fn test_search_multiple_logical_scopes() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "search",
+            "foo",
+            "-l",
+            "db.schema",
+            "-l",
+            "app.core",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Search { logical, .. } => {
+                assert_eq!(logical, vec!["db.schema", "app.core"]);
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    #[test]
+    fn test_search_min_criticality() {
+        let cli =
+            Cli::try_parse_from(["engramdb", "search", "foo", "--min-criticality", "0.5"]).unwrap();
+        match cli.command {
+            Command::Search {
+                min_criticality, ..
+            } => {
+                assert_eq!(min_criticality, Some(0.5));
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    #[test]
+    fn test_search_max_results() {
+        let cli = Cli::try_parse_from(["engramdb", "search", "foo", "-n", "5"]).unwrap();
+        match cli.command {
+            Command::Search { max_results, .. } => {
+                assert_eq!(max_results, 5);
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    // Retrieve command parsing (6 tests)
+    #[test]
+    fn test_retrieve_multiple_type_filters() {
+        let cli = Cli::try_parse_from([
+            "engramdb", "retrieve", "--path", "x", "-t", "decision", "-t", "hazard",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Retrieve { type_, .. } => {
+                assert_eq!(type_, vec!["decision", "hazard"]);
+            }
+            _ => panic!("Expected Retrieve command"),
+        }
+    }
+
+    #[test]
+    fn test_retrieve_tags_filter() {
+        let cli =
+            Cli::try_parse_from(["engramdb", "retrieve", "--path", "x", "--tags", "a,b"]).unwrap();
+        match cli.command {
+            Command::Retrieve { tags, .. } => {
+                assert_eq!(tags, vec!["a", "b"]);
+            }
+            _ => panic!("Expected Retrieve command"),
+        }
+    }
+
+    #[test]
+    fn test_retrieve_min_criticality() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "retrieve",
+            "--path",
+            "x",
+            "--min-criticality",
+            "0.5",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Retrieve {
+                min_criticality, ..
+            } => {
+                assert_eq!(min_criticality, Some(0.5));
+            }
+            _ => panic!("Expected Retrieve command"),
+        }
+    }
+
+    #[test]
+    fn test_retrieve_include_expired() {
+        let cli = Cli::try_parse_from(["engramdb", "retrieve", "--path", "x", "--include-expired"])
+            .unwrap();
+        match cli.command {
+            Command::Retrieve {
+                include_expired, ..
+            } => {
+                assert!(include_expired);
+            }
+            _ => panic!("Expected Retrieve command"),
+        }
+    }
+
+    #[test]
+    fn test_retrieve_detail_levels() {
+        for level in &["summary", "content", "full"] {
+            let cli = Cli::try_parse_from([
+                "engramdb",
+                "retrieve",
+                "--path",
+                "x",
+                "--detail-level",
+                level,
+            ])
+            .unwrap();
+            match cli.command {
+                Command::Retrieve { detail_level, .. } => {
+                    assert_eq!(detail_level, Some(level.to_string()));
+                }
+                _ => panic!("Expected Retrieve command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_retrieve_multiple_logical_scopes() {
+        let cli = Cli::try_parse_from(["engramdb", "retrieve", "-l", "a", "-l", "b"]).unwrap();
+        match cli.command {
+            Command::Retrieve { logical, .. } => {
+                assert_eq!(logical, vec!["a", "b"]);
+            }
+            _ => panic!("Expected Retrieve command"),
+        }
+    }
+
+    // Add command parsing (4 tests)
+    #[test]
+    fn test_add_multiple_physical_scopes() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "add",
+            "-t",
+            "decision",
+            "-c",
+            "test",
+            "-s",
+            "test",
+            "-p",
+            "src/*.rs",
+            "-p",
+            "tests/*.rs",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add { physical, .. } => {
+                assert_eq!(physical, vec!["src/*.rs", "tests/*.rs"]);
+            }
+            _ => panic!("Expected Add command"),
+        }
+    }
+
+    #[test]
+    fn test_add_multiple_logical_scopes() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "add",
+            "-t",
+            "decision",
+            "-c",
+            "test",
+            "-s",
+            "test",
+            "-l",
+            "app.core",
+            "-l",
+            "db.schema",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add { logical, .. } => {
+                assert_eq!(logical, vec!["app.core", "db.schema"]);
+            }
+            _ => panic!("Expected Add command"),
+        }
+    }
+
+    #[test]
+    fn test_add_confidence_default() {
+        let cli = Cli::try_parse_from([
+            "engramdb", "add", "-t", "decision", "-c", "test", "-s", "test",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add { confidence, .. } => {
+                assert!((confidence - 0.8).abs() < f64::EPSILON);
+            }
+            _ => panic!("Expected Add command"),
+        }
+    }
+
+    #[test]
+    fn test_add_all_optional_flags() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "add",
+            "-t",
+            "decision",
+            "-c",
+            "content",
+            "-s",
+            "summary",
+            "--tags",
+            "a,b",
+            "-p",
+            "src/main.rs",
+            "-l",
+            "app.core",
+            "--criticality",
+            "0.9",
+            "--confidence",
+            "0.7",
+            "--details",
+            "extra info",
+            "--visibility",
+            "personal",
+            "--details-file",
+            "/tmp/test.txt",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add {
+                type_,
+                content,
+                summary,
+                tags,
+                physical,
+                logical,
+                criticality,
+                confidence,
+                details,
+                visibility,
+                details_file,
+                ..
+            } => {
+                assert_eq!(type_, Some("decision".to_string()));
+                assert_eq!(content, Some("content".to_string()));
+                assert_eq!(summary, Some("summary".to_string()));
+                assert_eq!(tags, vec!["a", "b"]);
+                assert_eq!(physical, vec!["src/main.rs"]);
+                assert_eq!(logical, vec!["app.core"]);
+                assert_eq!(criticality, Some(0.9));
+                assert!((confidence - 0.7).abs() < f64::EPSILON);
+                assert_eq!(details, Some("extra info".to_string()));
+                assert_eq!(visibility, Some("personal".to_string()));
+                assert_eq!(
+                    details_file,
+                    Some(std::path::PathBuf::from("/tmp/test.txt"))
+                );
+            }
+            _ => panic!("Expected Add command"),
+        }
+    }
+
+    // Update command parsing (4 tests)
+    #[test]
+    fn test_update_all_fields() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "update",
+            "abc123",
+            "-t",
+            "convention",
+            "-c",
+            "new content",
+            "-s",
+            "new summary",
+            "-p",
+            "src/lib.rs",
+            "-l",
+            "app.core",
+            "--tags",
+            "x,y",
+            "--criticality",
+            "0.5",
+            "--confidence",
+            "0.6",
+            "--details",
+            "detail text",
+            "--visibility",
+            "personal",
+            "--status",
+            "needsreview",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Update {
+                id,
+                type_,
+                content,
+                summary,
+                physical,
+                logical,
+                tags,
+                criticality,
+                confidence,
+                details,
+                visibility,
+                status,
+                ..
+            } => {
+                assert_eq!(id, "abc123");
+                assert_eq!(type_, Some("convention".to_string()));
+                assert_eq!(content, Some("new content".to_string()));
+                assert_eq!(summary, Some("new summary".to_string()));
+                assert_eq!(physical, vec!["src/lib.rs"]);
+                assert_eq!(logical, vec!["app.core"]);
+                assert_eq!(tags, vec!["x", "y"]);
+                assert_eq!(criticality, Some(0.5));
+                assert_eq!(confidence, Some(0.6));
+                assert_eq!(details, Some("detail text".to_string()));
+                assert_eq!(visibility, Some("personal".to_string()));
+                assert_eq!(status, Some("needsreview".to_string()));
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_update_tags_add_and_remove() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "update",
+            "abc123",
+            "--tags-add",
+            "a",
+            "--tags-remove",
+            "b",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Update {
+                tags_add,
+                tags_remove,
+                ..
+            } => {
+                assert_eq!(tags_add, Some("a".to_string()));
+                assert_eq!(tags_remove, Some("b".to_string()));
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_update_details_file() {
+        let cli =
+            Cli::try_parse_from(["engramdb", "update", "abc123", "--details-file", "path.txt"])
+                .unwrap();
+        match cli.command {
+            Command::Update { details_file, .. } => {
+                assert_eq!(details_file, Some(std::path::PathBuf::from("path.txt")));
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_update_confidence() {
+        let cli =
+            Cli::try_parse_from(["engramdb", "update", "abc123", "--confidence", "0.9"]).unwrap();
+        match cli.command {
+            Command::Update { confidence, .. } => {
+                assert_eq!(confidence, Some(0.9));
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    // Global flags / conflicts (3 tests)
+    #[test]
+    fn test_json_flag_and_format_json_both_set() {
+        let cli = Cli::try_parse_from(["engramdb", "--json", "--format", "json", "list"]).unwrap();
+        assert!(cli.json);
+        match cli.format {
+            Some(OutputFormat::Json) => {}
+            other => panic!("Expected Json format, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_verbose_and_quiet_both_parse() {
+        let cli = Cli::try_parse_from(["engramdb", "-v", "-q", "list"]).unwrap();
+        assert!(cli.verbose);
+        assert!(cli.quiet);
+    }
+
+    #[test]
+    fn test_embedding_backend_values() {
+        for backend in &["onnx", "ollama", "auto"] {
+            let result = Cli::try_parse_from(["engramdb", "--embedding-backend", backend, "list"]);
+            assert!(
+                result.is_ok(),
+                "Failed to parse --embedding-backend {}: {:?}",
+                backend,
+                result.err()
+            );
+        }
+    }
+
+    // Miscellaneous commands (3 tests)
+    #[test]
+    fn test_compress_with_scope() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "compress",
+            "--scope",
+            "app.core",
+            "--threshold",
+            "0.3",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Compress { scope, threshold } => {
+                assert_eq!(scope, Some("app.core".to_string()));
+                assert_eq!(threshold, Some(0.3));
+            }
+            _ => panic!("Expected Compress command"),
+        }
+    }
+
+    #[test]
+    fn test_review_all_flags() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "review",
+            "--scope",
+            "x",
+            "--type",
+            "decision",
+            "--challenged-only",
+            "--stale-only",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Review {
+                scope,
+                type_,
+                challenged_only,
+                stale_only,
+            } => {
+                assert_eq!(scope, Some("x".to_string()));
+                assert_eq!(type_, Some("decision".to_string()));
+                assert!(challenged_only);
+                assert!(stale_only);
+            }
+            _ => panic!("Expected Review command"),
+        }
+    }
+
+    #[test]
+    fn test_projects_delete_parsing() {
+        let cli =
+            Cli::try_parse_from(["engramdb", "projects", "delete", "some-id", "--force"]).unwrap();
+        match cli.command {
+            Command::Projects {
+                command: Some(ProjectsCommand::Delete { project_id, force }),
+            } => {
+                assert_eq!(project_id, "some-id");
+                assert!(force);
+            }
+            _ => panic!("Expected Projects Delete command"),
         }
     }
 }

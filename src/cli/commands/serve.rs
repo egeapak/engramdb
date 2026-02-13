@@ -2,6 +2,7 @@
 
 use crate::cli::output::OutputFormatter;
 use crate::mcp::server;
+use crate::types::EmbeddingBackend;
 use anyhow::Result;
 use std::path::Path;
 
@@ -10,13 +11,14 @@ pub async fn run_serve(
     dir: &Path,
     transport: &str,
     port: Option<u16>,
+    embedding_backend: Option<EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
     let dir = dir.to_path_buf();
 
     match transport {
         "stdio" => {
-            server::run_stdio(dir).await?;
+            server::run_stdio(dir, embedding_backend).await?;
         }
         "sse" => {
             let port = port.unwrap_or(3100);
@@ -24,7 +26,7 @@ pub async fn run_serve(
                 "Starting EngramDB MCP server (SSE) on port {}...",
                 port
             ));
-            server::run_sse(dir, port).await?;
+            server::run_sse(dir, port, embedding_backend).await?;
         }
         other => {
             anyhow::bail!("Unknown transport: {}. Use 'stdio' or 'sse'.", other);
