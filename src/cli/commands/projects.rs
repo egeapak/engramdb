@@ -4,6 +4,7 @@ use crate::cli::app::ProjectsCommand;
 use crate::cli::output::{
     AggregateStatsOutput, OutputFormatter, ProjectInfoOutput, ProjectListOutput,
 };
+use crate::cli::prompter::Prompter;
 use crate::ops::projects;
 use crate::storage::RegistryBackend;
 use anyhow::Result;
@@ -15,6 +16,7 @@ pub async fn run_projects(
     registry: &dyn RegistryBackend,
     command: Option<ProjectsCommand>,
     formatter: &OutputFormatter,
+    prompter: &dyn Prompter,
 ) -> Result<()> {
     let command = command.unwrap_or(ProjectsCommand::Info);
 
@@ -49,11 +51,7 @@ pub async fn run_projects(
                     "This will remove project '{}' from the registry and delete its global data.",
                     project_id
                 ));
-                // Use inquire for confirmation
-                let confirm = inquire::Confirm::new("Continue?")
-                    .with_default(false)
-                    .prompt()
-                    .unwrap_or(false);
+                let confirm = prompter.confirm("Continue?", false).unwrap_or(false);
                 if !confirm {
                     formatter.print_message("Aborted.");
                     return Ok(());
@@ -81,4 +79,73 @@ pub async fn run_projects(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::prompter::MockPrompter;
+    use crate::storage::registry::{InMemoryRegistry, Registry, RegistryEntry};
+
+    #[tokio::test]
+    async fn test_projects_delete_confirmed() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let mut data = Registry::default();
+        data.projects.push(RegistryEntry {
+            project_id: "test-proj".to_string(),
+            project_path: temp_dir.path().to_string_lossy().to_string(),
+            last_opened: chrono::Utc::now(),
+        });
+        let registry = InMemoryRegistry::with(data);
+        let formatter = OutputFormatter::new(None, false, true);
+        let prompter = MockPrompter::new(vec!["true"]);
+
+        let result = run_projects(
+            temp_dir.path(),
+            &registry,
+            Some(ProjectsCommand::Delete {
+                project_id: "test-proj".to_string(),
+                force: false,
+            }),
+            &formatter,
+            &prompter,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        // Verify project was removed from registry
+        let loaded = registry.load().await.unwrap();
+        assert!(loaded.projects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_projects_delete_cancelled() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let mut data = Registry::default();
+        data.projects.push(RegistryEntry {
+            project_id: "test-proj".to_string(),
+            project_path: temp_dir.path().to_string_lossy().to_string(),
+            last_opened: chrono::Utc::now(),
+        });
+        let registry = InMemoryRegistry::with(data);
+        let formatter = OutputFormatter::new(None, false, true);
+        let prompter = MockPrompter::new(vec!["false"]);
+
+        let result = run_projects(
+            temp_dir.path(),
+            &registry,
+            Some(ProjectsCommand::Delete {
+                project_id: "test-proj".to_string(),
+                force: false,
+            }),
+            &formatter,
+            &prompter,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        // Verify project is still in registry (not deleted)
+        let loaded = registry.load().await.unwrap();
+        assert_eq!(loaded.projects.len(), 1);
+    }
 }

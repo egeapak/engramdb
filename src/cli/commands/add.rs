@@ -1,12 +1,12 @@
 //! Add a new memory to the store.
 
 use crate::cli::output::OutputFormatter;
+use crate::cli::prompter::Prompter;
 use crate::cli::validation::validate_score;
 use crate::ops::{self, create_memory, parse_memory_type, parse_visibility, CreateParams};
 use crate::storage::{MemoryStore, RegistryBackend};
 use crate::types::{MemoryType, Provenance, Visibility};
 use anyhow::{anyhow, bail, Context, Result};
-use inquire::{CustomType, Select, Text};
 use std::env;
 use std::fs;
 use std::io::IsTerminal;
@@ -46,6 +46,7 @@ pub async fn run_add(
     params: AddParams,
     embedding_backend: Option<crate::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
+    prompter: &dyn Prompter,
 ) -> Result<()> {
     // Open or initialize store
     let store = match MemoryStore::open(dir, registry).await {
@@ -96,7 +97,7 @@ pub async fn run_add(
             );
         }
         // Interactive mode: if --interactive is set OR if required fields are missing
-        run_interactive_mode(&store, params, final_details, formatter, &engine).await
+        run_interactive_mode(&store, params, final_details, formatter, &engine, prompter).await
     } else {
         // Direct CLI mode: all required fields provided
         run_direct_mode(&store, params, final_details, formatter, &engine).await
@@ -160,6 +161,7 @@ async fn run_interactive_mode(
     final_details: Option<String>,
     formatter: &OutputFormatter,
     engine: &crate::retrieval::engine::RetrievalEngine,
+    prompter: &dyn Prompter,
 ) -> Result<()> {
     // Prompt for memory type
     let type_ = if let Some(type_str) = params.type_str {
@@ -175,31 +177,30 @@ async fn run_interactive_mode(
             "debug",
             "preference",
         ];
-        let selected = Select::new("Memory type:", options).prompt()?;
-        parse_memory_type(selected)?
+        let selected = prompter.select("Memory type:", &options)?;
+        parse_memory_type(&selected)?
     };
 
     // Prompt for summary
     let summary = if let Some(s) = params.summary {
         s
     } else {
-        Text::new("Summary (required):").prompt()?
+        prompter.text("Summary (required):", None)?
     };
 
     // Prompt for content
     let content = if let Some(c) = params.content {
         c
     } else {
-        Text::new("Content (required):").prompt()?
+        prompter.text("Content (required):", None)?
     };
 
     // Prompt for physical scope
     let physical = if !params.physical.is_empty() {
         params.physical
     } else {
-        let physical_input = Text::new("Physical scope (optional, e.g., src/**/*.rs):")
-            .with_default("")
-            .prompt()?;
+        let physical_input =
+            prompter.text("Physical scope (optional, e.g., src/**/*.rs):", Some(""))?;
         if physical_input.is_empty() {
             vec![]
         } else {
@@ -211,9 +212,8 @@ async fn run_interactive_mode(
     let logical = if !params.logical.is_empty() {
         params.logical
     } else {
-        let logical_input = Text::new("Logical scopes (optional, comma-separated):")
-            .with_default("")
-            .prompt()?;
+        let logical_input =
+            prompter.text("Logical scopes (optional, comma-separated):", Some(""))?;
         if logical_input.is_empty() {
             vec![]
         } else {
@@ -229,9 +229,7 @@ async fn run_interactive_mode(
     let tags = if !params.tags.is_empty() {
         params.tags
     } else {
-        let tags_input = Text::new("Tags (optional, comma-separated):")
-            .with_default("")
-            .prompt()?;
+        let tags_input = prompter.text("Tags (optional, comma-separated):", Some(""))?;
         if tags_input.is_empty() {
             vec![]
         } else {
@@ -248,19 +246,7 @@ async fn run_interactive_mode(
         c
     } else {
         let default_criticality = default_criticality_for_type(type_);
-        CustomType::<f64>::new("Criticality (0.0-1.0):")
-            .with_default(default_criticality)
-            .with_error_message("Please enter a number between 0.0 and 1.0")
-            .with_validator(|val: &f64| {
-                if *val >= 0.0 && *val <= 1.0 {
-                    Ok(inquire::validator::Validation::Valid)
-                } else {
-                    Ok(inquire::validator::Validation::Invalid(
-                        "Value must be between 0.0 and 1.0".into(),
-                    ))
-                }
-            })
-            .prompt()?
+        prompter.float_validated("Criticality (0.0-1.0):", default_criticality)?
     };
 
     // Prompt for visibility
@@ -268,8 +254,8 @@ async fn run_interactive_mode(
         parse_visibility(&vis_str)?
     } else {
         let options = vec!["shared", "personal"];
-        let selected = Select::new("Visibility:", options).prompt()?;
-        parse_visibility(selected)?
+        let selected = prompter.select("Visibility:", &options)?;
+        parse_visibility(&selected)?
     };
 
     let result = create_memory(
@@ -520,6 +506,206 @@ fn default_criticality_for_type(type_: MemoryType) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::prompter::MockPrompter;
+    use crate::retrieval::engine::RetrievalEngine;
+    use crate::storage::InMemoryRegistry;
+    use crate::types::EngramConfig;
+    use tempfile::TempDir;
+
+    /// Helper: create a store + engine pair for testing (no embeddings).
+    async fn test_store_and_engine(
+        dir: &std::path::Path,
+        registry: &dyn RegistryBackend,
+    ) -> (MemoryStore, RetrievalEngine) {
+        let store = MemoryStore::init(dir, registry).await.unwrap();
+        let engine_store = MemoryStore::open(dir, registry).await.unwrap();
+        let engine = RetrievalEngine::new(engine_store, EngramConfig::default());
+        (store, engine)
+    }
+
+    #[tokio::test]
+    async fn test_interactive_add_all_prompted() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let (store, engine) = test_store_and_engine(temp_dir.path(), &registry).await;
+        let formatter = crate::cli::output::OutputFormatter::new(None, false, true);
+
+        // Mock responses: type, summary, content, physical, logical, tags, criticality, visibility
+        let prompter = MockPrompter::new(vec![
+            "decision",
+            "Test summary",
+            "Test content",
+            "", // physical (empty => default)
+            "", // logical (empty => default)
+            "", // tags (empty => default)
+            "0.7",
+            "shared",
+        ]);
+
+        let params = AddParams {
+            type_str: None,
+            content: None,
+            summary: None,
+            physical: vec![],
+            logical: vec![],
+            tags: vec![],
+            criticality: None,
+            confidence: 0.8,
+            details: None,
+            visibility_str: None,
+            interactive: true,
+            editor: false,
+            details_file: None,
+        };
+
+        run_interactive_mode(&store, params, None, &formatter, &engine, &prompter)
+            .await
+            .unwrap();
+
+        // Verify memory was created
+        let memories = store.list().await.unwrap();
+        assert_eq!(memories.len(), 1);
+        let memory = store.get(&memories[0].id).await.unwrap();
+        assert_eq!(memory.type_, MemoryType::Decision);
+        assert_eq!(memory.summary, "Test summary");
+        assert_eq!(memory.content, "Test content");
+        assert_eq!(memory.visibility, Visibility::Shared);
+    }
+
+    #[tokio::test]
+    async fn test_interactive_add_with_presets() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let (store, engine) = test_store_and_engine(temp_dir.path(), &registry).await;
+        let formatter = crate::cli::output::OutputFormatter::new(None, false, true);
+
+        // Only prompts for fields not provided: physical, logical, tags, criticality, visibility
+        let prompter = MockPrompter::new(vec![
+            "",    // physical
+            "",    // logical
+            "",    // tags
+            "0.9", // criticality
+            "personal",
+        ]);
+
+        let params = AddParams {
+            type_str: Some("hazard".to_string()),
+            content: Some("Preset content".to_string()),
+            summary: Some("Preset summary".to_string()),
+            physical: vec![],
+            logical: vec![],
+            tags: vec![],
+            criticality: None,
+            confidence: 0.8,
+            details: None,
+            visibility_str: None,
+            interactive: true,
+            editor: false,
+            details_file: None,
+        };
+
+        run_interactive_mode(&store, params, None, &formatter, &engine, &prompter)
+            .await
+            .unwrap();
+
+        let memories = store.list().await.unwrap();
+        assert_eq!(memories.len(), 1);
+        let memory = store.get(&memories[0].id).await.unwrap();
+        assert_eq!(memory.type_, MemoryType::Hazard);
+        assert_eq!(memory.summary, "Preset summary");
+        assert_eq!(memory.content, "Preset content");
+        assert_eq!(memory.visibility, Visibility::Personal);
+    }
+
+    #[tokio::test]
+    async fn test_interactive_add_with_tags_and_scopes() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let (store, engine) = test_store_and_engine(temp_dir.path(), &registry).await;
+        let formatter = crate::cli::output::OutputFormatter::new(None, false, true);
+
+        let prompter = MockPrompter::new(vec![
+            "convention",
+            "Scoped memory",
+            "Content here",
+            "src/**/*.rs",       // physical
+            "auth, database",    // logical (comma-separated)
+            "rust, testing, ci", // tags (comma-separated)
+            "0.8",
+            "shared",
+        ]);
+
+        let params = AddParams {
+            type_str: None,
+            content: None,
+            summary: None,
+            physical: vec![],
+            logical: vec![],
+            tags: vec![],
+            criticality: None,
+            confidence: 0.8,
+            details: None,
+            visibility_str: None,
+            interactive: true,
+            editor: false,
+            details_file: None,
+        };
+
+        run_interactive_mode(&store, params, None, &formatter, &engine, &prompter)
+            .await
+            .unwrap();
+
+        let memories = store.list().await.unwrap();
+        assert_eq!(memories.len(), 1);
+        let memory = store.get(&memories[0].id).await.unwrap();
+        assert_eq!(memory.physical, vec!["src/**/*.rs"]);
+        assert_eq!(memory.logical, vec!["auth", "database"]);
+        assert_eq!(memory.tags, vec!["rust", "testing", "ci"]);
+    }
+
+    #[tokio::test]
+    async fn test_interactive_add_criticality_defaults() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let (store, engine) = test_store_and_engine(temp_dir.path(), &registry).await;
+        let formatter = crate::cli::output::OutputFormatter::new(None, false, true);
+
+        // For criticality, pass empty string => use default for hazard type (0.95)
+        let prompter = MockPrompter::new(vec![
+            "hazard",
+            "Critical hazard",
+            "Don't do this",
+            "", // physical
+            "", // logical
+            "", // tags
+            "", // criticality (empty => default for hazard = 0.95)
+            "shared",
+        ]);
+
+        let params = AddParams {
+            type_str: None,
+            content: None,
+            summary: None,
+            physical: vec![],
+            logical: vec![],
+            tags: vec![],
+            criticality: None,
+            confidence: 0.8,
+            details: None,
+            visibility_str: None,
+            interactive: true,
+            editor: false,
+            details_file: None,
+        };
+
+        run_interactive_mode(&store, params, None, &formatter, &engine, &prompter)
+            .await
+            .unwrap();
+
+        let memories = store.list().await.unwrap();
+        let memory = store.get(&memories[0].id).await.unwrap();
+        assert_eq!(memory.criticality, 0.95);
+    }
 
     #[test]
     fn test_parse_editor_template_full() {

@@ -20,6 +20,7 @@
 pub mod app;
 pub mod commands;
 pub mod output;
+pub mod prompter;
 pub mod validation;
 
 use anyhow::Result;
@@ -31,6 +32,7 @@ use commands::{AddParams, ChallengeParams, RetrieveParams, SearchParams, UpdateP
 use output::OutputFormatter;
 
 use crate::storage::FileRegistry;
+use prompter::InquirePrompter;
 
 /// Run the CLI application with parsed arguments.
 ///
@@ -56,6 +58,9 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     // Create global file-backed registry for all commands
     let registry = FileRegistry::global()?;
+
+    // Create production prompter for interactive commands
+    let prompter = InquirePrompter;
 
     // Dispatch to command handlers
     match cli.command {
@@ -108,6 +113,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 },
                 backend,
                 &formatter,
+                &prompter,
             )
             .await
         }
@@ -307,11 +313,12 @@ pub async fn run(cli: Cli) -> Result<()> {
                 challenged_only,
                 stale_only,
                 &formatter,
+                &prompter,
             )
             .await
         }
         Command::Projects { command } => {
-            commands::run_projects(&dir, &registry, command, &formatter).await
+            commands::run_projects(&dir, &registry, command, &formatter, &prompter).await
         }
     }
 }
