@@ -8,7 +8,7 @@ use super::trust::trust_weight_from_config;
 /// Breakdown of composite score components.
 ///
 /// All values are raw (unweighted) scores for transparency.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ScoreBreakdown {
     /// The final composite score
     pub final_score: f64,

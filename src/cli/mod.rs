@@ -27,7 +27,7 @@ use anyhow::Result;
 use std::env;
 use std::path::PathBuf;
 
-use app::{Cli, Command};
+use app::{Cli, Command, HookCommand};
 use commands::{AddParams, ChallengeParams, RetrieveParams, SearchParams, UpdateParams};
 use output::OutputFormatter;
 
@@ -336,6 +336,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
+        Command::Hook { command } => match command {
+            HookCommand::PreToolUse => {
+                commands::run_hook_pre_tool_use(&dir, &registry, backend).await
+            }
+        },
         Command::Projects { command } => {
             commands::run_projects(&dir, &registry, command, &formatter, &prompter).await
         }

@@ -1,0 +1,25 @@
+{
+  "name": "engramdb",
+  "version": "0.1.0",
+  "description": "Project-scoped persistent memory store for coding agents. Stores decisions, hazards, conventions, and context about the codebase.",
+  "mcpServers": {
+    "engramdb": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/target/release/engramdb",
+      "args": ["serve", "--dir", "."],
+      "env": {}
+    }
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/target/release/engramdb hook pre-tool-use --dir ."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -6,6 +6,13 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+/// Subcommands for `engramdb hook`.
+#[derive(Subcommand)]
+pub enum HookCommand {
+    /// Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)
+    PreToolUse,
+}
+
 /// Subcommands for `engramdb projects`.
 #[derive(Subcommand)]
 pub enum ProjectsCommand {
@@ -458,6 +465,12 @@ pub enum Command {
         /// Only rebuild index, don't re-embed
         #[arg(long)]
         index_only: bool,
+    },
+
+    /// Claude Code plugin hook handler
+    Hook {
+        #[command(subcommand)]
+        command: HookCommand,
     },
 
     /// Interactive review of challenged/stale memories
