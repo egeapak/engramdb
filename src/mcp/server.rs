@@ -5,6 +5,7 @@
 //! per request so it always sees the latest on-disk state.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
@@ -18,7 +19,7 @@ use crate::ops;
 use crate::retrieval::engine::{RetrievalEngine, RetrievalQuery};
 use crate::retrieval::filters::SearchFilters;
 use crate::storage::config::load_config;
-use crate::storage::{FileRegistry, MemoryStore};
+use crate::storage::{FileRegistry, MemoryStore, RegistryBackend};
 use crate::types::{EmbeddingBackend, Provenance, Status, Visibility};
 
 // ---------------------------------------------------------------------------
@@ -397,39 +398,59 @@ struct ScoredMemoryOutput {
 // ---------------------------------------------------------------------------
 
 /// The EngramDB MCP server.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EngramDbServer {
     dir: PathBuf,
     embedding_backend: Option<EmbeddingBackend>,
+    registry: Arc<dyn RegistryBackend>,
     #[allow(dead_code)]
     tool_router: rmcp::handler::server::tool::ToolRouter<Self>,
 }
 
+impl std::fmt::Debug for EngramDbServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngramDbServer")
+            .field("dir", &self.dir)
+            .field("embedding_backend", &self.embedding_backend)
+            .finish()
+    }
+}
+
 impl EngramDbServer {
     pub fn new(dir: PathBuf, embedding_backend: Option<EmbeddingBackend>) -> Self {
+        let registry: Arc<dyn RegistryBackend> =
+            Arc::new(FileRegistry::global().expect("Failed to initialize registry"));
         Self {
             dir,
             embedding_backend,
+            registry,
             tool_router: Self::tool_router(),
         }
     }
 
-    /// Get the global file-backed registry.
-    fn get_registry(&self) -> Result<FileRegistry, String> {
-        FileRegistry::global()
-            .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()))
+    #[cfg(test)]
+    pub fn new_with_registry(
+        dir: PathBuf,
+        embedding_backend: Option<EmbeddingBackend>,
+        registry: Arc<dyn RegistryBackend>,
+    ) -> Self {
+        Self {
+            dir,
+            embedding_backend,
+            registry,
+            tool_router: Self::tool_router(),
+        }
     }
 
     /// Open a MemoryStore, auto-initializing if needed.
     async fn open_store(&self) -> Result<MemoryStore, String> {
-        let registry = self.get_registry()?;
         let engramdb_dir = self.dir.join(".engramdb");
         if !engramdb_dir.exists() {
-            MemoryStore::init(&self.dir, &registry)
+            MemoryStore::init(&self.dir, self.registry.as_ref())
                 .await
                 .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()))?;
         }
-        MemoryStore::open(&self.dir, &registry)
+        MemoryStore::open(&self.dir, self.registry.as_ref())
             .await
             .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()))
     }
@@ -1403,4 +1424,1073 @@ pub async fn run_sse(
         .with_graceful_shutdown(async move { ct.cancelled().await })
         .await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::InMemoryRegistry;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    async fn setup() -> (TempDir, EngramDbServer) {
+        let temp_dir = TempDir::new().unwrap();
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server =
+            EngramDbServer::new_with_registry(temp_dir.path().to_path_buf(), None, registry);
+        (temp_dir, server)
+    }
+
+    fn parse_ok(result: &Result<String, String>) -> serde_json::Value {
+        let json_str = result.as_ref().expect("tool should succeed");
+        serde_json::from_str(json_str).expect("should be valid JSON")
+    }
+
+    fn parse_err(result: &Result<String, String>) -> serde_json::Value {
+        let json_str = result.as_ref().unwrap_err();
+        serde_json::from_str(json_str).unwrap_or_else(|_| json!({"error": {"message": json_str}}))
+    }
+
+    fn create_input(type_: &str, summary: &str, content: &str) -> CreateInput {
+        CreateInput {
+            type_: type_.to_string(),
+            content: content.to_string(),
+            summary: summary.to_string(),
+            details: None,
+            physical: None,
+            logical: None,
+            tags: None,
+            criticality: None,
+            confidence: None,
+            visibility: None,
+            supersedes: None,
+            decay_strategy: None,
+            decay_half_life: None,
+            decay_ttl: None,
+            decay_floor: None,
+        }
+    }
+
+    /// Helper: create a memory and return its ID.
+    async fn create_and_get_id(
+        server: &EngramDbServer,
+        type_: &str,
+        summary: &str,
+        content: &str,
+    ) -> String {
+        let result = server
+            .memory_create(Parameters(create_input(type_, summary, content)))
+            .await;
+        let val = parse_ok(&result);
+        val["id"].as_str().unwrap().to_string()
+    }
+
+    // -----------------------------------------------------------------------
+    // memory_create
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn create_basic() {
+        let (_dir, server) = setup().await;
+        let result = server
+            .memory_create(Parameters(create_input(
+                "decision",
+                "Use Rust",
+                "We chose Rust for performance",
+            )))
+            .await;
+        let val = parse_ok(&result);
+        assert!(val["id"].is_string());
+        assert_eq!(val["created"], true);
+        assert_eq!(val["summary"], "Use Rust");
+    }
+
+    #[tokio::test]
+    async fn create_with_all_fields() {
+        let (_dir, server) = setup().await;
+        let input = CreateInput {
+            type_: "hazard".to_string(),
+            content: "Race condition in cache".to_string(),
+            summary: "Cache race".to_string(),
+            details: Some("Detailed explanation".to_string()),
+            physical: Some(vec!["src/cache.rs".to_string()]),
+            logical: Some(vec!["caching.invalidation".to_string()]),
+            tags: Some(vec!["perf".to_string(), "critical".to_string()]),
+            criticality: Some(0.9),
+            confidence: Some(0.7),
+            visibility: Some("personal".to_string()),
+            supersedes: Some(vec![]),
+            decay_strategy: Some("exponential".to_string()),
+            decay_half_life: Some(86400),
+            decay_ttl: None,
+            decay_floor: Some(0.1),
+        };
+        let result = server.memory_create(Parameters(input)).await;
+        let val = parse_ok(&result);
+        assert!(val["id"].is_string());
+        assert_eq!(val["created"], true);
+    }
+
+    #[tokio::test]
+    async fn create_invalid_type() {
+        let (_dir, server) = setup().await;
+        let result = server
+            .memory_create(Parameters(create_input("nonsense", "Bad", "Content")))
+            .await;
+        let val = parse_err(&result);
+        assert_eq!(val["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn create_criticality_out_of_range() {
+        let (_dir, server) = setup().await;
+        let mut input = create_input("decision", "Test", "Content");
+        input.criticality = Some(2.0);
+        let result = server.memory_create(Parameters(input)).await;
+        let val = parse_err(&result);
+        assert_eq!(val["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn create_confidence_out_of_range() {
+        let (_dir, server) = setup().await;
+        let mut input = create_input("decision", "Test", "Content");
+        input.confidence = Some(-0.1);
+        let result = server.memory_create(Parameters(input)).await;
+        let val = parse_err(&result);
+        assert_eq!(val["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn create_decay_floor_out_of_range() {
+        let (_dir, server) = setup().await;
+        let mut input = create_input("decision", "Test", "Content");
+        input.decay_floor = Some(1.5);
+        let result = server.memory_create(Parameters(input)).await;
+        let val = parse_err(&result);
+        assert_eq!(val["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    // -----------------------------------------------------------------------
+    // memory_get
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_existing() {
+        let (_dir, server) = setup().await;
+        let id = create_and_get_id(
+            &server,
+            "convention",
+            "Use snake_case",
+            "All names use snake_case",
+        )
+        .await;
+        let result = server.memory_get(Parameters(GetInput { id })).await;
+        let val = parse_ok(&result);
+        assert_eq!(val["summary"], "Use snake_case");
+        assert_eq!(val["content"], "All names use snake_case");
+        assert_eq!(val["type"], "convention");
+    }
+
+    #[tokio::test]
+    async fn get_nonexistent() {
+        let (_dir, server) = setup().await;
+        // Need a store to exist first
+        let _ = create_and_get_id(&server, "decision", "Setup", "Content").await;
+        let result = server
+            .memory_get(Parameters(GetInput {
+                id: "nonexistent-id-1234".to_string(),
+            }))
+            .await;
+        let val = parse_err(&result);
+        assert_eq!(val["error"]["code"], "MEMORY_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn get_by_prefix() {
+        let (_dir, server) = setup().await;
+        let id = create_and_get_id(&server, "decision", "Prefix test", "Content").await;
+        let prefix = &id[..8];
+        let result = server
+            .memory_get(Parameters(GetInput {
+                id: prefix.to_string(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["summary"], "Prefix test");
+    }
+
+    // -----------------------------------------------------------------------
+    // memory_update
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn update_summary() {
+        let (_dir, server) = setup().await;
+        let id = create_and_get_id(&server, "decision", "Old summary", "Content").await;
+        let result = server
+            .memory_update(Parameters(UpdateInput {
+                id: id.clone(),
+                summary: Some("New summary".to_string()),
+                type_: None,
+                content: None,
+                details: None,
+                physical: None,
+                logical: None,
+                tags: None,
+                tags_add: None,
+                tags_remove: None,
+                criticality: None,
+                confidence: None,
+                visibility: None,
+                status: None,
+                supersedes: None,
+                decay_strategy: None,
+                decay_half_life: None,
+                decay_ttl: None,
+                decay_floor: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["updated"], true);
+
+        let get_result = server.memory_get(Parameters(GetInput { id })).await;
+        let get_val = parse_ok(&get_result);
+        assert_eq!(get_val["summary"], "New summary");
+    }
+
+    #[tokio::test]
+    async fn update_type() {
+        let (_dir, server) = setup().await;
+        let id = create_and_get_id(&server, "decision", "Summary", "Content").await;
+        let result = server
+            .memory_update(Parameters(UpdateInput {
+                id: id.clone(),
+                type_: Some("hazard".to_string()),
+                summary: None,
+                content: None,
+                details: None,
+                physical: None,
+                logical: None,
+                tags: None,
+                tags_add: None,
+                tags_remove: None,
+                criticality: None,
+                confidence: None,
+                visibility: None,
+                status: None,
+                supersedes: None,
+                decay_strategy: None,
+                decay_half_life: None,
+                decay_ttl: None,
+                decay_floor: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["updated"], true);
+
+        let get_result = server.memory_get(Parameters(GetInput { id })).await;
+        let get_val = parse_ok(&get_result);
+        assert_eq!(get_val["type"], "hazard");
+    }
+
+    #[tokio::test]
+    async fn update_status() {
+        let (_dir, server) = setup().await;
+        let id = create_and_get_id(&server, "decision", "Summary", "Content").await;
+        let result = server
+            .memory_update(Parameters(UpdateInput {
+                id: id.clone(),
+                status: Some("challenged".to_string()),
+                type_: None,
+                summary: None,
+                content: None,
+                details: None,
+                physical: None,
+                logical: None,
+                tags: None,
+                tags_add: None,
+                tags_remove: None,
+                criticality: None,
+                confidence: None,
+                visibility: None,
+                supersedes: None,
+                decay_strategy: None,
+                decay_half_life: None,
+                decay_ttl: None,
+                decay_floor: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["updated"], true);
+
+        let get_result = server.memory_get(Parameters(GetInput { id })).await;
+        let get_val = parse_ok(&get_result);
+        assert_eq!(get_val["status"], "challenged");
+    }
+
+    #[tokio::test]
+    async fn update_tags_add_remove() {
+        let (_dir, server) = setup().await;
+        let input = CreateInput {
+            tags: Some(vec!["alpha".to_string(), "beta".to_string()]),
+            ..create_input("decision", "Tagged", "Content")
+        };
+        let result = server.memory_create(Parameters(input)).await;
+        let id = parse_ok(&result)["id"].as_str().unwrap().to_string();
+
+        let result = server
+            .memory_update(Parameters(UpdateInput {
+                id: id.clone(),
+                tags_add: Some(vec!["gamma".to_string()]),
+                tags_remove: Some(vec!["alpha".to_string()]),
+                type_: None,
+                summary: None,
+                content: None,
+                details: None,
+                physical: None,
+                logical: None,
+                tags: None,
+                criticality: None,
+                confidence: None,
+                visibility: None,
+                status: None,
+                supersedes: None,
+                decay_strategy: None,
+                decay_half_life: None,
+                decay_ttl: None,
+                decay_floor: None,
+            }))
+            .await;
+        parse_ok(&result);
+
+        let get_result = server.memory_get(Parameters(GetInput { id })).await;
+        let get_val = parse_ok(&get_result);
+        let tags: Vec<String> = get_val["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(tags.contains(&"beta".to_string()));
+        assert!(tags.contains(&"gamma".to_string()));
+        assert!(!tags.contains(&"alpha".to_string()));
+    }
+
+    #[tokio::test]
+    async fn update_criticality_validation() {
+        let (_dir, server) = setup().await;
+        let id = create_and_get_id(&server, "decision", "Summary", "Content").await;
+        let result = server
+            .memory_update(Parameters(UpdateInput {
+                id,
+                criticality: Some(2.0),
+                type_: None,
+                summary: None,
+                content: None,
+                details: None,
+                physical: None,
+                logical: None,
+                tags: None,
+                tags_add: None,
+                tags_remove: None,
+                confidence: None,
+                visibility: None,
+                status: None,
+                supersedes: None,
+                decay_strategy: None,
+                decay_half_life: None,
+                decay_ttl: None,
+                decay_floor: None,
+            }))
+            .await;
+        let val = parse_err(&result);
+        assert_eq!(val["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn update_decay_params() {
+        let (_dir, server) = setup().await;
+        let id = create_and_get_id(&server, "decision", "Summary", "Content").await;
+        let result = server
+            .memory_update(Parameters(UpdateInput {
+                id: id.clone(),
+                decay_strategy: Some("exponential".to_string()),
+                decay_half_life: Some(3600),
+                decay_floor: Some(0.2),
+                type_: None,
+                summary: None,
+                content: None,
+                details: None,
+                physical: None,
+                logical: None,
+                tags: None,
+                tags_add: None,
+                tags_remove: None,
+                criticality: None,
+                confidence: None,
+                visibility: None,
+                status: None,
+                supersedes: None,
+                decay_ttl: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["updated"], true);
+    }
+
+    // -----------------------------------------------------------------------
+    // memory_delete
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn delete_existing() {
+        let (_dir, server) = setup().await;
+        let id = create_and_get_id(&server, "decision", "To delete", "Content").await;
+        let result = server
+            .memory_delete(Parameters(DeleteInput { id: id.clone() }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["deleted"], true);
+
+        let get_result = server.memory_get(Parameters(GetInput { id })).await;
+        let err_val = parse_err(&get_result);
+        assert_eq!(err_val["error"]["code"], "MEMORY_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_nonexistent() {
+        let (_dir, server) = setup().await;
+        // Ensure store exists
+        let _ = create_and_get_id(&server, "decision", "Setup", "Content").await;
+        let result = server
+            .memory_delete(Parameters(DeleteInput {
+                id: "nonexistent-id-5678".to_string(),
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // memory_search
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn search_basic() {
+        let (_dir, server) = setup().await;
+        let _ = create_and_get_id(
+            &server,
+            "decision",
+            "Use Rust for speed",
+            "Rust is fast and safe",
+        )
+        .await;
+        let _ = create_and_get_id(
+            &server,
+            "convention",
+            "snake_case naming",
+            "Use snake_case everywhere",
+        )
+        .await;
+
+        let result = server
+            .memory_search(Parameters(SearchInput {
+                query: "Rust fast".to_string(),
+                types: None,
+                tags: None,
+                physical: None,
+                logical: None,
+                min_criticality: None,
+                max_results: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(!val["memories"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_with_type_filter() {
+        let (_dir, server) = setup().await;
+        let _ = create_and_get_id(&server, "decision", "Decision mem", "Decision content").await;
+        let _ = create_and_get_id(&server, "hazard", "Hazard mem", "Hazard content").await;
+
+        let result = server
+            .memory_search(Parameters(SearchInput {
+                query: "content".to_string(),
+                types: Some(vec!["hazard".to_string()]),
+                tags: None,
+                physical: None,
+                logical: None,
+                min_criticality: None,
+                max_results: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        let memories = val["memories"].as_array().unwrap();
+        for m in memories {
+            assert_eq!(m["type"], "hazard");
+        }
+    }
+
+    #[tokio::test]
+    async fn search_max_results() {
+        let (_dir, server) = setup().await;
+        for i in 0..5 {
+            let _ = create_and_get_id(
+                &server,
+                "decision",
+                &format!("Memory {}", i),
+                &format!("Content about topic {}", i),
+            )
+            .await;
+        }
+
+        let result = server
+            .memory_search(Parameters(SearchInput {
+                query: "topic".to_string(),
+                types: None,
+                tags: None,
+                physical: None,
+                logical: None,
+                min_criticality: None,
+                max_results: Some(1),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(val["memories"].as_array().unwrap().len() <= 1);
+    }
+
+    #[tokio::test]
+    async fn search_no_match() {
+        let (_dir, server) = setup().await;
+        let _ = create_and_get_id(&server, "decision", "About Rust", "Rust content").await;
+
+        let result = server
+            .memory_search(Parameters(SearchInput {
+                query: "xyzzy_nonexistent_term_9999".to_string(),
+                types: None,
+                tags: None,
+                physical: None,
+                logical: None,
+                min_criticality: None,
+                max_results: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["memories"].as_array().unwrap().len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // memory_retrieve
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn retrieve_by_path() {
+        let (_dir, server) = setup().await;
+        let input = CreateInput {
+            physical: Some(vec!["src/main.rs".to_string()]),
+            ..create_input("decision", "Main entry", "The main function starts here")
+        };
+        server.memory_create(Parameters(input)).await.unwrap();
+
+        let result = server
+            .memory_retrieve(Parameters(RetrieveInput {
+                path: Some("src/main.rs".to_string()),
+                logical: None,
+                query: None,
+                types: None,
+                tags: None,
+                min_criticality: None,
+                max_results: None,
+                detail_level: None,
+                include_expired: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(!val["memories"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn retrieve_by_logical() {
+        let (_dir, server) = setup().await;
+        let input = CreateInput {
+            logical: Some(vec!["auth.login".to_string()]),
+            ..create_input("convention", "Login convention", "Always use OAuth2")
+        };
+        server.memory_create(Parameters(input)).await.unwrap();
+
+        let result = server
+            .memory_retrieve(Parameters(RetrieveInput {
+                path: None,
+                logical: Some(vec!["auth.login".to_string()]),
+                query: None,
+                types: None,
+                tags: None,
+                min_criticality: None,
+                max_results: None,
+                detail_level: None,
+                include_expired: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(!val["memories"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn retrieve_detail_level_summary() {
+        let (_dir, server) = setup().await;
+        let _ = create_and_get_id(
+            &server,
+            "decision",
+            "Summary test",
+            "Content for detail test",
+        )
+        .await;
+
+        let result = server
+            .memory_retrieve(Parameters(RetrieveInput {
+                path: Some("/".to_string()),
+                logical: None,
+                query: None,
+                types: None,
+                tags: None,
+                min_criticality: None,
+                max_results: None,
+                detail_level: Some("summary".to_string()),
+                include_expired: None,
+            }))
+            .await;
+        // Should succeed without error
+        parse_ok(&result);
+    }
+
+    #[tokio::test]
+    async fn retrieve_detail_level_invalid() {
+        let (_dir, server) = setup().await;
+        let _ = create_and_get_id(&server, "decision", "Setup", "Content").await;
+
+        let result = server
+            .memory_retrieve(Parameters(RetrieveInput {
+                path: None,
+                logical: None,
+                query: None,
+                types: None,
+                tags: None,
+                min_criticality: None,
+                max_results: None,
+                detail_level: Some("bogus".to_string()),
+                include_expired: None,
+            }))
+            .await;
+        let val = parse_err(&result);
+        assert_eq!(val["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    // -----------------------------------------------------------------------
+    // memory_list
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_empty() {
+        let (_dir, server) = setup().await;
+        // Init the store by creating and immediately deleting a memory
+        let id = create_and_get_id(&server, "decision", "Temp", "Temp").await;
+        server
+            .memory_delete(Parameters(DeleteInput { id }))
+            .await
+            .unwrap();
+
+        let result = server
+            .memory_list(Parameters(ListInput {
+                types: None,
+                tags: None,
+                status: None,
+                scope: None,
+                sort_field: None,
+                reverse: None,
+                limit: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["total"], 0);
+        assert_eq!(val["memories"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn list_all() {
+        let (_dir, server) = setup().await;
+        let _ = create_and_get_id(&server, "decision", "First", "Content 1").await;
+        let _ = create_and_get_id(&server, "hazard", "Second", "Content 2").await;
+        let _ = create_and_get_id(&server, "convention", "Third", "Content 3").await;
+
+        let result = server
+            .memory_list(Parameters(ListInput {
+                types: None,
+                tags: None,
+                status: None,
+                scope: None,
+                sort_field: None,
+                reverse: None,
+                limit: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["total"], 3);
+    }
+
+    #[tokio::test]
+    async fn list_filter_by_type() {
+        let (_dir, server) = setup().await;
+        let _ = create_and_get_id(&server, "decision", "Dec1", "Content").await;
+        let _ = create_and_get_id(&server, "hazard", "Haz1", "Content").await;
+        let _ = create_and_get_id(&server, "decision", "Dec2", "Content").await;
+
+        let result = server
+            .memory_list(Parameters(ListInput {
+                types: Some(vec!["decision".to_string()]),
+                tags: None,
+                status: None,
+                scope: None,
+                sort_field: None,
+                reverse: None,
+                limit: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["total"], 2);
+        for m in val["memories"].as_array().unwrap() {
+            assert_eq!(m["type"], "decision");
+        }
+    }
+
+    #[tokio::test]
+    async fn list_sort_and_limit() {
+        let (_dir, server) = setup().await;
+        for i in 0..5 {
+            let mut input = create_input("decision", &format!("Mem {}", i), "Content");
+            input.criticality = Some(i as f64 * 0.2);
+            server.memory_create(Parameters(input)).await.unwrap();
+        }
+
+        let result = server
+            .memory_list(Parameters(ListInput {
+                types: None,
+                tags: None,
+                status: None,
+                scope: None,
+                sort_field: Some("criticality".to_string()),
+                reverse: None,
+                limit: Some(2),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["total"], 2);
+    }
+
+    #[tokio::test]
+    async fn list_invalid_sort() {
+        let (_dir, server) = setup().await;
+        let _ = create_and_get_id(&server, "decision", "Setup", "Content").await;
+
+        let result = server
+            .memory_list(Parameters(ListInput {
+                types: None,
+                tags: None,
+                status: None,
+                scope: None,
+                sort_field: Some("bogus".to_string()),
+                reverse: None,
+                limit: None,
+            }))
+            .await;
+        let val = parse_err(&result);
+        assert_eq!(val["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    // -----------------------------------------------------------------------
+    // memory_challenge + memory_review + memory_resolve
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn challenge_memory() {
+        let (_dir, server) = setup().await;
+        let id = create_and_get_id(&server, "decision", "Old decision", "Maybe wrong").await;
+        let result = server
+            .memory_challenge(Parameters(ChallengeInput {
+                id: id.clone(),
+                evidence: "Found contradicting evidence".to_string(),
+                source_file: Some("src/test.rs".to_string()),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["challenged"], true);
+
+        let get_result = server.memory_get(Parameters(GetInput { id })).await;
+        let get_val = parse_ok(&get_result);
+        assert_eq!(get_val["status"], "challenged");
+    }
+
+    #[tokio::test]
+    async fn review_shows_challenged() {
+        let (_dir, server) = setup().await;
+        let id = create_and_get_id(&server, "decision", "Reviewed decision", "Content").await;
+        server
+            .memory_challenge(Parameters(ChallengeInput {
+                id,
+                evidence: "Evidence".to_string(),
+                source_file: None,
+            }))
+            .await
+            .unwrap();
+
+        let result = server
+            .memory_review(Parameters(ReviewInput {
+                scope: None,
+                max_results: None,
+                type_: None,
+                challenged_only: Some(true),
+                stale_only: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(val["total"].as_u64().unwrap() > 0);
+        for m in val["memories"].as_array().unwrap() {
+            assert_eq!(m["status"], "challenged");
+        }
+    }
+
+    #[tokio::test]
+    async fn review_with_type_filter() {
+        let (_dir, server) = setup().await;
+        let id1 = create_and_get_id(&server, "decision", "Dec challenged", "Content").await;
+        let id2 = create_and_get_id(&server, "hazard", "Haz challenged", "Content").await;
+        for id in [&id1, &id2] {
+            server
+                .memory_challenge(Parameters(ChallengeInput {
+                    id: id.clone(),
+                    evidence: "Evidence".to_string(),
+                    source_file: None,
+                }))
+                .await
+                .unwrap();
+        }
+
+        let result = server
+            .memory_review(Parameters(ReviewInput {
+                scope: None,
+                max_results: None,
+                type_: Some("decision".to_string()),
+                challenged_only: Some(true),
+                stale_only: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        for m in val["memories"].as_array().unwrap() {
+            assert_eq!(m["type"], "decision");
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_keep() {
+        let (_dir, server) = setup().await;
+        let id = create_and_get_id(&server, "decision", "Keep me", "Content").await;
+        server
+            .memory_challenge(Parameters(ChallengeInput {
+                id: id.clone(),
+                evidence: "Maybe wrong".to_string(),
+                source_file: None,
+            }))
+            .await
+            .unwrap();
+
+        let result = server
+            .memory_resolve(Parameters(ResolveInput {
+                id: id.clone(),
+                action: "keep".to_string(),
+                updated_content: None,
+                updated_summary: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["resolved"], true);
+        assert_eq!(val["action"], "keep");
+
+        let get_result = server.memory_get(Parameters(GetInput { id })).await;
+        let get_val = parse_ok(&get_result);
+        assert_eq!(get_val["status"], "active");
+    }
+
+    #[tokio::test]
+    async fn resolve_delete() {
+        let (_dir, server) = setup().await;
+        let id = create_and_get_id(&server, "decision", "Delete me", "Content").await;
+        server
+            .memory_challenge(Parameters(ChallengeInput {
+                id: id.clone(),
+                evidence: "Definitely wrong".to_string(),
+                source_file: None,
+            }))
+            .await
+            .unwrap();
+
+        let result = server
+            .memory_resolve(Parameters(ResolveInput {
+                id: id.clone(),
+                action: "delete".to_string(),
+                updated_content: None,
+                updated_summary: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["resolved"], true);
+        assert_eq!(val["action"], "delete");
+
+        let get_result = server.memory_get(Parameters(GetInput { id })).await;
+        assert!(get_result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // memory_stats
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn stats_empty() {
+        let (_dir, server) = setup().await;
+        // Init store
+        let id = create_and_get_id(&server, "decision", "Temp", "Temp").await;
+        server
+            .memory_delete(Parameters(DeleteInput { id }))
+            .await
+            .unwrap();
+
+        let result = server.memory_stats().await;
+        let val = parse_ok(&result);
+        assert_eq!(val["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn stats_populated() {
+        let (_dir, server) = setup().await;
+        let _ = create_and_get_id(&server, "decision", "Dec1", "Content").await;
+        let _ = create_and_get_id(&server, "decision", "Dec2", "Content").await;
+        let _ = create_and_get_id(&server, "hazard", "Haz1", "Content").await;
+
+        let result = server.memory_stats().await;
+        let val = parse_ok(&result);
+        assert_eq!(val["total"], 3);
+        assert_eq!(val["by_type"]["decision"], 2);
+        assert_eq!(val["by_type"]["hazard"], 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // memory_gc
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn gc_dry_run() {
+        let (_dir, server) = setup().await;
+        let _ = create_and_get_id(&server, "decision", "Keep me", "Content").await;
+
+        let result = server
+            .memory_gc(Parameters(GcInput {
+                dry_run: Some(true),
+                threshold: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["dry_run"], true);
+
+        // Memory should still be there
+        let list_result = server
+            .memory_list(Parameters(ListInput {
+                types: None,
+                tags: None,
+                status: None,
+                scope: None,
+                sort_field: None,
+                reverse: None,
+                limit: None,
+            }))
+            .await;
+        let list_val = parse_ok(&list_result);
+        assert_eq!(list_val["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn gc_confirm() {
+        let (_dir, server) = setup().await;
+        // Create a memory with very low criticality
+        let mut input = create_input("debug", "Low priority debug", "Ephemeral content");
+        input.criticality = Some(0.01);
+        input.confidence = Some(0.01);
+        server.memory_create(Parameters(input)).await.unwrap();
+
+        // GC with a high threshold to ensure it catches the low-criticality memory
+        let result = server
+            .memory_gc(Parameters(GcInput {
+                dry_run: Some(false),
+                threshold: Some(0.99),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["dry_run"], false);
+    }
+
+    // -----------------------------------------------------------------------
+    // memory_reindex
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn reindex_basic() {
+        let (_dir, server) = setup().await;
+        let _ = create_and_get_id(&server, "decision", "To reindex", "Content").await;
+
+        let result = server
+            .memory_reindex(Parameters(ReindexInput {
+                embeddings_only: None,
+                index_only: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(val["indexed"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn reindex_index_only() {
+        let (_dir, server) = setup().await;
+        let _ = create_and_get_id(&server, "decision", "To reindex", "Content").await;
+
+        let result = server
+            .memory_reindex(Parameters(ReindexInput {
+                embeddings_only: None,
+                index_only: Some(true),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(val["indexed"].as_u64().unwrap() >= 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // memory_compress_candidates
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn compress_candidates_basic() {
+        let (_dir, server) = setup().await;
+        let _ = create_and_get_id(&server, "decision", "Candidate", "Content").await;
+
+        let result = server
+            .memory_compress_candidates(Parameters(CompressCandidatesInput {
+                scope: None,
+                threshold: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(val["candidates"].is_array());
+        assert!(val["total"].is_number());
+    }
 }
