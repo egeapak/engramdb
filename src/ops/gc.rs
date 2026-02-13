@@ -10,12 +10,15 @@ use chrono::Utc;
 pub struct GcResult {
     pub removed: Vec<String>,
     pub count: usize,
+    /// IDs found in index but missing from data store. Suggests reindex is needed.
+    pub stale_entries: Vec<String>,
 }
 
 /// Run garbage collection on memories below threshold.
 ///
 /// Identifies memories with effective relevance below the threshold
-/// and optionally deletes them.
+/// and optionally deletes them. Reports stale index entries (IDs in
+/// the index with no backing data) so callers can trigger a reindex.
 pub async fn gc_memories(
     store: &MemoryStore,
     config: &EngramConfig,
@@ -27,9 +30,16 @@ pub async fn gc_memories(
     let now = Utc::now();
 
     let mut candidates = Vec::new();
+    let mut stale_entries = Vec::new();
 
     for entry in &entries {
-        let memory = store.get(&entry.id).await?;
+        let memory = match store.get(&entry.id).await {
+            Ok(m) => m,
+            Err(_) => {
+                stale_entries.push(entry.id.clone());
+                continue;
+            }
+        };
         let context = ScoringContext::scope_only(None, vec![]);
         let breakdown = composite_score(&memory, &context, config, now);
 
@@ -48,5 +58,6 @@ pub async fn gc_memories(
     Ok(GcResult {
         removed: candidates,
         count,
+        stale_entries,
     })
 }

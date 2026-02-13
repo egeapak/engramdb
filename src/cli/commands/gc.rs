@@ -24,6 +24,13 @@ pub async fn run_gc(
     let dry_run = !confirm;
     let result = gc_memories(&store, &config, dry_run, threshold).await?;
 
+    if !result.stale_entries.is_empty() {
+        formatter.print_warning(&format!(
+            "Found {} stale index entries (missing data). Run `engramdb reindex` to fix.",
+            result.stale_entries.len()
+        ));
+    }
+
     if result.count == 0 {
         formatter.print_message("No memories eligible for garbage collection.");
     } else if dry_run {

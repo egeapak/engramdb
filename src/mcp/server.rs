@@ -43,7 +43,7 @@ struct CreateInput {
     #[schemars(description = "Extended details (lazy-loaded)")]
     details: Option<String>,
 
-    #[schemars(description = "File paths this memory applies to (default: [\"/\"])")]
+    #[schemars(description = "File paths this applies to (default [\"/\"])")]
     physical: Option<Vec<String>>,
 
     #[schemars(description = "Logical scopes in dot notation")]
@@ -58,19 +58,19 @@ struct CreateInput {
     #[schemars(description = "Confidence 0.0-1.0 (default 0.8)")]
     confidence: Option<f64>,
 
-    #[schemars(description = "Visibility: shared or personal (default shared)")]
+    #[schemars(description = "Visibility: shared|personal (default shared)")]
     visibility: Option<String>,
 
     #[schemars(description = "IDs of memories this supersedes")]
     supersedes: Option<Vec<String>>,
 
-    #[schemars(description = "Decay strategy: none, linear, exponential, or step")]
+    #[schemars(description = "Decay: none|linear|exponential|step")]
     decay_strategy: Option<String>,
 
-    #[schemars(description = "Half-life in seconds for decay")]
+    #[schemars(description = "Half-life in seconds")]
     decay_half_life: Option<u64>,
 
-    #[schemars(description = "TTL in seconds for decay")]
+    #[schemars(description = "TTL in seconds")]
     decay_ttl: Option<u64>,
 
     #[schemars(description = "Minimum decay factor (0.0-1.0)")]
@@ -79,13 +79,13 @@ struct CreateInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct RetrieveInput {
-    #[schemars(description = "Current file path relative to project root")]
+    #[schemars(description = "File path relative to project root")]
     path: Option<String>,
 
-    #[schemars(description = "Current logical scopes")]
+    #[schemars(description = "Logical scopes")]
     logical: Option<Vec<String>>,
 
-    #[schemars(description = "Optional text query for semantic search")]
+    #[schemars(description = "Text query for semantic search")]
     query: Option<String>,
 
     #[schemars(description = "Filter by memory types")]
@@ -100,16 +100,16 @@ struct RetrieveInput {
     #[schemars(description = "Maximum results (default 10)")]
     max_results: Option<usize>,
 
-    #[schemars(description = "Detail level: summary, content, or full (default content)")]
+    #[schemars(description = "Detail: summary|content|full (default content)")]
     detail_level: Option<String>,
 
-    #[schemars(description = "Include fully decayed/expired memories")]
+    #[schemars(description = "Include expired/decayed memories")]
     include_expired: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SearchInput {
-    #[schemars(description = "Search query matched against summary, content, and tags")]
+    #[schemars(description = "Search query against summary, content, and tags")]
     query: String,
 
     #[schemars(description = "Filter by memory types")]
@@ -127,7 +127,7 @@ struct SearchInput {
     #[schemars(description = "Minimum criticality")]
     min_criticality: Option<f64>,
 
-    #[schemars(description = "Maximum results (default 10)")]
+    #[schemars(description = "Max results (default 10)")]
     max_results: Option<usize>,
 }
 
@@ -143,25 +143,25 @@ struct UpdateInput {
     id: String,
 
     #[serde(rename = "type")]
-    #[schemars(description = "New memory type")]
+    #[schemars(description = "Memory type")]
     type_: Option<String>,
 
-    #[schemars(description = "New content")]
+    #[schemars(description = "Content")]
     content: Option<String>,
 
-    #[schemars(description = "New summary")]
+    #[schemars(description = "Summary")]
     summary: Option<String>,
 
-    #[schemars(description = "New details")]
+    #[schemars(description = "Details")]
     details: Option<String>,
 
-    #[schemars(description = "New physical scopes")]
+    #[schemars(description = "Physical scopes")]
     physical: Option<Vec<String>>,
 
-    #[schemars(description = "New logical scopes")]
+    #[schemars(description = "Logical scopes")]
     logical: Option<Vec<String>>,
 
-    #[schemars(description = "New tags")]
+    #[schemars(description = "Replace all tags")]
     tags: Option<Vec<String>>,
 
     #[schemars(description = "Tags to add (merged with existing)")]
@@ -170,28 +170,28 @@ struct UpdateInput {
     #[schemars(description = "Tags to remove")]
     tags_remove: Option<Vec<String>>,
 
-    #[schemars(description = "New criticality")]
+    #[schemars(description = "Criticality")]
     criticality: Option<f64>,
 
-    #[schemars(description = "New confidence")]
+    #[schemars(description = "Confidence")]
     confidence: Option<f64>,
 
-    #[schemars(description = "New visibility")]
+    #[schemars(description = "Visibility")]
     visibility: Option<String>,
 
-    #[schemars(description = "New status: active, needsreview, or challenged")]
+    #[schemars(description = "Status: active|needsreview|challenged")]
     status: Option<String>,
 
     #[schemars(description = "IDs of memories this supersedes")]
     supersedes: Option<Vec<String>>,
 
-    #[schemars(description = "Decay strategy: none, linear, exponential, or step")]
+    #[schemars(description = "Decay: none|linear|exponential|step")]
     decay_strategy: Option<String>,
 
-    #[schemars(description = "Half-life in seconds for decay")]
+    #[schemars(description = "Half-life in seconds")]
     decay_half_life: Option<u64>,
 
-    #[schemars(description = "TTL in seconds for decay")]
+    #[schemars(description = "TTL in seconds")]
     decay_ttl: Option<u64>,
 
     #[schemars(description = "Minimum decay factor (0.0-1.0)")]
@@ -209,19 +209,19 @@ struct ChallengeInput {
     #[schemars(description = "Memory ID")]
     id: String,
 
-    #[schemars(description = "Evidence that contradicts this memory")]
+    #[schemars(description = "Evidence contradicting this memory")]
     evidence: String,
 
-    #[schemars(description = "File where contradicting evidence was found")]
+    #[schemars(description = "File where evidence was found")]
     source_file: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ReviewInput {
-    #[schemars(description = "Filter to a logical or physical scope")]
+    #[schemars(description = "Filter to a scope")]
     scope: Option<String>,
 
-    #[schemars(description = "Maximum results (default 10)")]
+    #[schemars(description = "Max results (default 10)")]
     max_results: Option<usize>,
 
     #[serde(rename = "type")]
@@ -231,7 +231,7 @@ struct ReviewInput {
     #[schemars(description = "Only show challenged memories")]
     challenged_only: Option<bool>,
 
-    #[schemars(description = "Only show stale/needs-review memories")]
+    #[schemars(description = "Only show needs-review memories")]
     stale_only: Option<bool>,
 }
 
@@ -243,57 +243,55 @@ struct ResolveInput {
     #[schemars(description = "Action: keep, update, or delete")]
     action: String,
 
-    #[schemars(description = "New content (required when action is 'update')")]
+    #[schemars(description = "New content (required for update)")]
     updated_content: Option<String>,
 
-    #[schemars(description = "New summary (optional when action is 'update')")]
+    #[schemars(description = "New summary (optional for update)")]
     updated_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CompressCandidatesInput {
-    #[schemars(description = "Logical or physical scope to filter candidates")]
+    #[schemars(description = "Scope to filter candidates")]
     scope: Option<String>,
 
-    #[schemars(
-        description = "Criticality threshold — memories at or below this are candidates (default 0.4)"
-    )]
+    #[schemars(description = "Criticality threshold (default 0.4)")]
     threshold: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CompressApplyInput {
-    #[schemars(description = "IDs of memories to compress into a single summary")]
+    #[schemars(description = "IDs of memories to compress")]
     source_ids: Vec<String>,
 
-    #[schemars(description = "One-line summary of the compressed memory")]
+    #[schemars(description = "Summary for compressed memory")]
     summary: String,
 
-    #[schemars(description = "Full content of the compressed memory")]
+    #[schemars(description = "Content for compressed memory")]
     content: String,
 
-    #[schemars(description = "Logical scopes for the new memory")]
+    #[schemars(description = "Logical scopes")]
     scope: Option<Vec<String>>,
 
-    #[schemars(description = "Tags for the new memory")]
+    #[schemars(description = "Tags")]
     tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GcInput {
-    #[schemars(description = "If true, list only (default true). Set false to delete.")]
+    #[schemars(description = "List only, no delete (default true)")]
     dry_run: Option<bool>,
 
-    #[schemars(description = "Override the GC score threshold")]
+    #[schemars(description = "Override GC score threshold")]
     threshold: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ReindexInput {
-    #[schemars(description = "Only re-embed, don't rebuild index")]
+    #[schemars(description = "Only re-embed, skip index rebuild")]
     embeddings_only: Option<bool>,
 
-    #[schemars(description = "Only rebuild index, don't re-embed")]
+    #[schemars(description = "Only rebuild index, skip embedding")]
     index_only: Option<bool>,
 }
 
@@ -305,21 +303,19 @@ struct ListInput {
     #[schemars(description = "Filter by tags (OR logic)")]
     tags: Option<Vec<String>>,
 
-    #[schemars(description = "Filter by status: active, needsreview, or challenged")]
+    #[schemars(description = "Filter: active|needsreview|challenged")]
     status: Option<String>,
 
-    #[schemars(description = "Filter by scope (matches physical or logical scopes)")]
+    #[schemars(description = "Filter by scope (physical or logical)")]
     scope: Option<String>,
 
-    #[schemars(
-        description = "Sort field: criticality, created, updated, or type (default criticality)"
-    )]
+    #[schemars(description = "Sort: criticality|created|updated|type (default criticality)")]
     sort_field: Option<String>,
 
     #[schemars(description = "Reverse sort order")]
     reverse: Option<bool>,
 
-    #[schemars(description = "Maximum number of results")]
+    #[schemars(description = "Maximum results")]
     limit: Option<usize>,
 }
 
@@ -475,7 +471,7 @@ impl EngramDbServer {
 #[tool_router]
 impl EngramDbServer {
     #[tool(
-        description = "Store a new memory about the project. Use after discovering important patterns, making architectural decisions, encountering hazards, or learning conventions."
+        description = "Store a new memory about the project. Use after discovering patterns, decisions, or hazards."
     )]
     async fn memory_create(
         &self,
@@ -537,7 +533,7 @@ impl EngramDbServer {
     }
 
     #[tool(
-        description = "Get memories relevant to your current working context. Call before modifying files to surface decisions, hazards, and conventions."
+        description = "Get memories relevant to your current working context. Call before modifying files."
     )]
     async fn memory_retrieve(
         &self,
@@ -609,9 +605,7 @@ impl EngramDbServer {
         .map_err(|e| e.to_string())
     }
 
-    #[tool(
-        description = "Search across all memories by text content. Use when you need specific knowledge regardless of file context."
-    )]
+    #[tool(description = "Search all memories by text, regardless of file context.")]
     async fn memory_search(
         &self,
         Parameters(input): Parameters<SearchInput>,
@@ -669,9 +663,7 @@ impl EngramDbServer {
         .map_err(|e| e.to_string())
     }
 
-    #[tool(
-        description = "Get the full content of a specific memory, including the 'details' field."
-    )]
+    #[tool(description = "Get full content of a specific memory, including details.")]
     async fn memory_get(&self, Parameters(input): Parameters<GetInput>) -> Result<String, String> {
         let store = self.open_store().await?;
         let memory = ops::get_memory(&store, &input.id)
@@ -681,9 +673,7 @@ impl EngramDbServer {
         serde_json::to_string(&memory_to_output(&memory, true)).map_err(|e| e.to_string())
     }
 
-    #[tool(
-        description = "Update an existing memory. Any field can be updated except 'id' and 'created_at'."
-    )]
+    #[tool(description = "Update an existing memory. Cannot change id or created_at.")]
     async fn memory_update(
         &self,
         Parameters(input): Parameters<UpdateInput>,
@@ -761,9 +751,7 @@ impl EngramDbServer {
         .map_err(|e| e.to_string())
     }
 
-    #[tool(
-        description = "Permanently delete a memory. Prefer memory_update with supersedes for corrections."
-    )]
+    #[tool(description = "Permanently delete a memory. Prefer supersedes for corrections.")]
     async fn memory_delete(
         &self,
         Parameters(input): Parameters<DeleteInput>,
@@ -780,9 +768,7 @@ impl EngramDbServer {
         .map_err(|e| e.to_string())
     }
 
-    #[tool(
-        description = "Flag a memory as potentially incorrect. Reduces retrieval score by 30% and marks for human review."
-    )]
+    #[tool(description = "Flag a memory as potentially incorrect and mark for review.")]
     async fn memory_challenge(
         &self,
         Parameters(input): Parameters<ChallengeInput>,
@@ -804,9 +790,7 @@ impl EngramDbServer {
         .map_err(|e| e.to_string())
     }
 
-    #[tool(
-        description = "List memories that need human attention - either stale (needs_review) or challenged."
-    )]
+    #[tool(description = "List memories needing review (stale or challenged).")]
     async fn memory_review(
         &self,
         Parameters(input): Parameters<ReviewInput>,
@@ -844,9 +828,7 @@ impl EngramDbServer {
         .map_err(|e| e.to_string())
     }
 
-    #[tool(
-        description = "Resolve a challenged or needs_review memory. Use 'keep' to confirm, 'update' to correct, or 'delete' to remove."
-    )]
+    #[tool(description = "Resolve a challenged or needs_review memory: keep, update, or delete.")]
     async fn memory_resolve(
         &self,
         Parameters(input): Parameters<ResolveInput>,
@@ -889,7 +871,7 @@ impl EngramDbServer {
     }
 
     #[tool(
-        description = "List memories eligible for compression. Returns candidates with criticality at or below the threshold. Review candidates before calling memory_compress_apply."
+        description = "List low-criticality memories eligible for compression. Review before compress_apply."
     )]
     async fn memory_compress_candidates(
         &self,
@@ -909,7 +891,7 @@ impl EngramDbServer {
     }
 
     #[tool(
-        description = "Compress multiple memories into a single summary memory. You provide the summary and content; the system creates the new memory and marks source memories as superseded. Always call memory_compress_candidates first."
+        description = "Compress multiple memories into one summary. Call compress_candidates first."
     )]
     async fn memory_compress_apply(
         &self,
@@ -935,7 +917,7 @@ impl EngramDbServer {
         .map_err(|e| e.to_string())
     }
 
-    #[tool(description = "Get an overview of the memory store - counts by type, scope, status.")]
+    #[tool(description = "Overview of memory store — counts by type, scope, status.")]
     async fn memory_stats(&self) -> Result<String, String> {
         let store = self.open_store().await?;
         let stats = ops::compute_stats(&store)
@@ -983,9 +965,7 @@ impl EngramDbServer {
         .map_err(|e| e.to_string())
     }
 
-    #[tool(
-        description = "Garbage collect memories that have decayed below the GC threshold. Always dry_run first."
-    )]
+    #[tool(description = "Garbage collect decayed memories. Always dry_run first.")]
     async fn memory_gc(&self, Parameters(input): Parameters<GcInput>) -> Result<String, String> {
         let store = self.open_store().await?;
         let config = self.load_config().await;
@@ -995,15 +975,20 @@ impl EngramDbServer {
             .await
             .map_err(|e| e.to_string())?;
 
-        serde_json::to_string(&serde_json::json!({
+        let mut response = serde_json::json!({
             "removed": result.removed,
             "count": result.count,
             "dry_run": dry_run
-        }))
-        .map_err(|e| e.to_string())
+        });
+        if !result.stale_entries.is_empty() {
+            response["stale_entries"] = serde_json::json!(result.stale_entries);
+            response["warning"] =
+                serde_json::json!("Stale index entries found. Run memory_reindex to fix.");
+        }
+        serde_json::to_string(&response).map_err(|e| e.to_string())
     }
 
-    #[tool(description = "Rebuild the search index and regenerate embedding vectors.")]
+    #[tool(description = "Rebuild the search index and embedding vectors.")]
     async fn memory_reindex(
         &self,
         Parameters(input): Parameters<ReindexInput>,
@@ -1031,9 +1016,7 @@ impl EngramDbServer {
         .map_err(|e| e.to_string())
     }
 
-    #[tool(
-        description = "List all memories with optional filtering, sorting, and limiting. Returns lightweight index entries."
-    )]
+    #[tool(description = "List memories with optional filtering, sorting, and limiting.")]
     async fn memory_list(
         &self,
         Parameters(input): Parameters<ListInput>,
