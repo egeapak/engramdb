@@ -185,13 +185,6 @@ pub async fn build_engine(
 
     // Initialize cross-encoder reranker if enabled
     if config.rerank.enabled {
-        if !(0.0..=1.0).contains(&config.rerank.weight) {
-            eprintln!(
-                "Warning: rerank.weight ({}) is outside [0.0, 1.0], clamping",
-                config.rerank.weight
-            );
-        }
-
         let cache_dir = dirs::cache_dir()
             .unwrap_or_else(|| PathBuf::from(".cache"))
             .join("engramdb")

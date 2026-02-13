@@ -154,7 +154,10 @@ fn classify_one(
         .context("Expected 2D logits output")?;
 
     let row = logits.row(0);
-    let probs = softmax(row.as_slice().unwrap());
+    let slice = row
+        .as_slice()
+        .ok_or_else(|| anyhow::anyhow!("Expected contiguous logits array from NLI model"))?;
+    let probs = softmax(slice);
 
     Ok(NliResult::from_probs(
         probs[IDX_ENTAILMENT],

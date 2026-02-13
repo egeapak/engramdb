@@ -306,6 +306,28 @@ pub struct NliConfig {
     pub similarity_threshold: f64,
 }
 
+impl NliConfig {
+    /// Validate that NLI configuration values are within acceptable ranges.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if !(0.0..=1.0).contains(&self.contradiction_threshold) {
+            anyhow::bail!(
+                "nli.contradiction_threshold ({}) must be in [0.0, 1.0]",
+                self.contradiction_threshold
+            );
+        }
+        if !(0.0..=1.0).contains(&self.similarity_threshold) {
+            anyhow::bail!(
+                "nli.similarity_threshold ({}) must be in [0.0, 1.0]",
+                self.similarity_threshold
+            );
+        }
+        if self.max_comparisons == 0 {
+            anyhow::bail!("nli.max_comparisons must be > 0");
+        }
+        Ok(())
+    }
+}
+
 impl Default for NliConfig {
     fn default() -> Self {
         Self {
@@ -343,6 +365,19 @@ pub struct RerankConfig {
     /// 1.0 = use only rerank score.
     /// Formula: blended = (1 - weight) * original + weight * rerank
     pub weight: f64,
+}
+
+impl RerankConfig {
+    /// Validate that rerank configuration values are within acceptable ranges.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if !(0.0..=1.0).contains(&self.weight) {
+            anyhow::bail!("rerank.weight ({}) must be in [0.0, 1.0]", self.weight);
+        }
+        if self.top_n == 0 {
+            anyhow::bail!("rerank.top_n must be > 0");
+        }
+        Ok(())
+    }
 }
 
 impl Default for RerankConfig {
@@ -397,12 +432,20 @@ pub struct EngramConfig {
 }
 
 impl EngramConfig {
+    /// Validate all configuration subsections.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        self.nli.validate()?;
+        self.rerank.validate()?;
+        Ok(())
+    }
+
     /// Load configuration from a TOML file
     pub fn from_toml_file(
         path: impl AsRef<std::path::Path>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = std::fs::read_to_string(path)?;
-        let config = toml::from_str(&contents)?;
+        let config: Self = toml::from_str(&contents)?;
+        config.validate()?;
         Ok(config)
     }
 
@@ -737,5 +780,70 @@ weight = 0.7
         assert_eq!(loaded.rerank.model, "jina-reranker-v1-turbo-en");
         assert_eq!(loaded.rerank.top_n, 30);
         assert_eq!(loaded.rerank.weight, 0.8);
+    }
+
+    #[test]
+    fn test_nli_config_validate_rejects_invalid() {
+        // contradiction_threshold out of range
+        let nli = NliConfig {
+            contradiction_threshold: 1.5,
+            ..Default::default()
+        };
+        assert!(nli.validate().is_err());
+
+        let nli = NliConfig {
+            contradiction_threshold: -0.1,
+            ..Default::default()
+        };
+        assert!(nli.validate().is_err());
+
+        // similarity_threshold out of range
+        let nli = NliConfig {
+            similarity_threshold: 2.0,
+            ..Default::default()
+        };
+        assert!(nli.validate().is_err());
+
+        let nli = NliConfig {
+            similarity_threshold: -1.0,
+            ..Default::default()
+        };
+        assert!(nli.validate().is_err());
+
+        // max_comparisons zero
+        let nli = NliConfig {
+            max_comparisons: 0,
+            ..Default::default()
+        };
+        assert!(nli.validate().is_err());
+
+        // valid config passes
+        assert!(NliConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_rerank_config_validate_rejects_invalid() {
+        // weight out of range
+        let rerank = RerankConfig {
+            weight: 1.5,
+            ..Default::default()
+        };
+        assert!(rerank.validate().is_err());
+
+        let rerank = RerankConfig {
+            weight: -0.1,
+            ..Default::default()
+        };
+        assert!(rerank.validate().is_err());
+
+        // top_n zero
+        let rerank = RerankConfig {
+            top_n: 0,
+            ..Default::default()
+        };
+        assert!(rerank.validate().is_err());
+
+        // valid config passes
+        assert!(RerankConfig::default().validate().is_ok());
     }
 }

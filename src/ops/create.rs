@@ -130,9 +130,11 @@ pub async fn create_memory(
             // the resulting challenge writes are spawned so create_memory returns
             // without waiting for them.
             //
-            // Safety: the spawned task only writes to *other* memory IDs (the
-            // contradicting existing ones), never to the newly created ID, so
-            // there is no concurrent-write race with the caller's store handle.
+            // Note: challenge writes are best-effort. If two memories are created
+            // concurrently and both contradict the same existing memory, one
+            // challenge may be lost due to a read-modify-write race on the
+            // challenges vec. This is acceptable since NLI contradiction detection
+            // is advisory, not transactional.
             if engine.nli_available() {
                 if let Ok(contradictions) = engine.detect_contradictions(&saved).await {
                     if !contradictions.is_empty() {
@@ -143,13 +145,20 @@ pub async fn create_memory(
                                     "NLI contradiction detected (score: {:.2}): new memory '{}' contradicts this memory",
                                     nli_result.contradiction, saved.summary
                                 );
-                                let _ = crate::ops::challenge::challenge_memory(
+                                if let Err(e) = crate::ops::challenge::challenge_memory(
                                     &store_clone,
                                     existing_id,
                                     &evidence,
                                     None,
                                 )
-                                .await;
+                                .await
+                                {
+                                    tracing::warn!(
+                                        "Failed to challenge memory {} for NLI contradiction: {}",
+                                        existing_id,
+                                        e
+                                    );
+                                }
                             }
                         });
                     }
