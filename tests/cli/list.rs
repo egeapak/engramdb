@@ -350,3 +350,110 @@ fn list_scope_filter_no_match() {
         stdout
     );
 }
+
+#[test]
+fn list_invalid_sort_field_fails() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    helpers::seed_store(dir.path());
+
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "list",
+            "--sort",
+            "nonexistent",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Invalid sort field"),
+        "Expected invalid sort field error: {}",
+        stderr
+    );
+}
+
+#[test]
+fn list_verbose_output() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    helpers::seed_store(dir.path());
+
+    // --verbose should produce output (more detail than default)
+    helpers::cmd()
+        .args(["--dir", dir.path().to_str().unwrap(), "--verbose", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Use Rust"));
+}
+
+#[test]
+fn list_combined_type_scope_limit() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+
+    helpers::add_memory_with_args(
+        dir.path(),
+        &[
+            "-t",
+            "decision",
+            "-s",
+            "Scoped decision",
+            "-c",
+            "Content",
+            "-l",
+            "app.auth",
+        ],
+    );
+    helpers::add_memory_with_args(
+        dir.path(),
+        &[
+            "-t",
+            "hazard",
+            "-s",
+            "Scoped hazard",
+            "-c",
+            "Content",
+            "-l",
+            "app.auth",
+        ],
+    );
+    helpers::add_memory_with_args(
+        dir.path(),
+        &["-t", "decision", "-s", "Unscoped decision", "-c", "Content"],
+    );
+
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--json",
+            "list",
+            "-t",
+            "decision",
+            "--scope",
+            "app.auth",
+            "--limit",
+            "10",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("Invalid JSON: {} — output: {}", e, stdout);
+    });
+    let arr = parsed.as_array().expect("Expected JSON array");
+    // Only the scoped decision should match (not the hazard, not the unscoped)
+    assert_eq!(
+        arr.len(),
+        1,
+        "Expected 1 result for decision+scope filter, got {}",
+        arr.len()
+    );
+}

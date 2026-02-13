@@ -1196,4 +1196,277 @@ mod tests {
             _ => panic!("Expected Projects Delete command"),
         }
     }
+
+    // Add: supersedes and decay param parsing (7 tests)
+    #[test]
+    fn test_add_supersedes_flag() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "add",
+            "-t",
+            "decision",
+            "-c",
+            "content",
+            "-s",
+            "summary",
+            "--supersedes",
+            "id1,id2,id3",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add { supersedes, .. } => {
+                assert_eq!(supersedes, Some("id1,id2,id3".to_string()));
+            }
+            _ => panic!("Expected Add command"),
+        }
+    }
+
+    #[test]
+    fn test_add_decay_strategy() {
+        for strategy in &["none", "linear", "exponential", "step"] {
+            let cli = Cli::try_parse_from([
+                "engramdb",
+                "add",
+                "-t",
+                "decision",
+                "-c",
+                "content",
+                "-s",
+                "summary",
+                "--decay-strategy",
+                strategy,
+            ])
+            .unwrap();
+            match cli.command {
+                Command::Add { decay_strategy, .. } => {
+                    assert_eq!(decay_strategy, Some(strategy.to_string()));
+                }
+                _ => panic!("Expected Add command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_add_decay_half_life() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "add",
+            "-t",
+            "decision",
+            "-c",
+            "content",
+            "-s",
+            "summary",
+            "--decay-half-life",
+            "3600",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add {
+                decay_half_life, ..
+            } => {
+                assert_eq!(decay_half_life, Some(3600));
+            }
+            _ => panic!("Expected Add command"),
+        }
+    }
+
+    #[test]
+    fn test_add_decay_ttl() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "add",
+            "-t",
+            "decision",
+            "-c",
+            "content",
+            "-s",
+            "summary",
+            "--decay-ttl",
+            "7200",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add { decay_ttl, .. } => {
+                assert_eq!(decay_ttl, Some(7200));
+            }
+            _ => panic!("Expected Add command"),
+        }
+    }
+
+    #[test]
+    fn test_add_decay_floor() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "add",
+            "-t",
+            "decision",
+            "-c",
+            "content",
+            "-s",
+            "summary",
+            "--decay-floor",
+            "0.1",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add { decay_floor, .. } => {
+                assert_eq!(decay_floor, Some(0.1));
+            }
+            _ => panic!("Expected Add command"),
+        }
+    }
+
+    #[test]
+    fn test_add_all_decay_params_combined() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "add",
+            "-t",
+            "decision",
+            "-c",
+            "content",
+            "-s",
+            "summary",
+            "--supersedes",
+            "old-id",
+            "--decay-strategy",
+            "exponential",
+            "--decay-half-life",
+            "3600",
+            "--decay-ttl",
+            "86400",
+            "--decay-floor",
+            "0.05",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add {
+                supersedes,
+                decay_strategy,
+                decay_half_life,
+                decay_ttl,
+                decay_floor,
+                ..
+            } => {
+                assert_eq!(supersedes, Some("old-id".to_string()));
+                assert_eq!(decay_strategy, Some("exponential".to_string()));
+                assert_eq!(decay_half_life, Some(3600));
+                assert_eq!(decay_ttl, Some(86400));
+                assert_eq!(decay_floor, Some(0.05));
+            }
+            _ => panic!("Expected Add command"),
+        }
+    }
+
+    #[test]
+    fn test_add_decay_defaults_to_none() {
+        let cli = Cli::try_parse_from([
+            "engramdb", "add", "-t", "decision", "-c", "content", "-s", "summary",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add {
+                supersedes,
+                decay_strategy,
+                decay_half_life,
+                decay_ttl,
+                decay_floor,
+                ..
+            } => {
+                assert_eq!(supersedes, None);
+                assert_eq!(decay_strategy, None);
+                assert_eq!(decay_half_life, None);
+                assert_eq!(decay_ttl, None);
+                assert_eq!(decay_floor, None);
+            }
+            _ => panic!("Expected Add command"),
+        }
+    }
+
+    // Update: decay param parsing (5 tests)
+    #[test]
+    fn test_update_decay_strategy() {
+        let cli =
+            Cli::try_parse_from(["engramdb", "update", "abc123", "--decay-strategy", "linear"])
+                .unwrap();
+        match cli.command {
+            Command::Update { decay_strategy, .. } => {
+                assert_eq!(decay_strategy, Some("linear".to_string()));
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_update_decay_half_life() {
+        let cli =
+            Cli::try_parse_from(["engramdb", "update", "abc123", "--decay-half-life", "1800"])
+                .unwrap();
+        match cli.command {
+            Command::Update {
+                decay_half_life, ..
+            } => {
+                assert_eq!(decay_half_life, Some(1800));
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_update_decay_ttl() {
+        let cli =
+            Cli::try_parse_from(["engramdb", "update", "abc123", "--decay-ttl", "3600"]).unwrap();
+        match cli.command {
+            Command::Update { decay_ttl, .. } => {
+                assert_eq!(decay_ttl, Some(3600));
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_update_decay_floor() {
+        let cli =
+            Cli::try_parse_from(["engramdb", "update", "abc123", "--decay-floor", "0.2"]).unwrap();
+        match cli.command {
+            Command::Update { decay_floor, .. } => {
+                assert_eq!(decay_floor, Some(0.2));
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_update_all_decay_params_combined() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "update",
+            "abc123",
+            "--decay-strategy",
+            "step",
+            "--decay-half-life",
+            "7200",
+            "--decay-ttl",
+            "14400",
+            "--decay-floor",
+            "0.15",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Update {
+                decay_strategy,
+                decay_half_life,
+                decay_ttl,
+                decay_floor,
+                ..
+            } => {
+                assert_eq!(decay_strategy, Some("step".to_string()));
+                assert_eq!(decay_half_life, Some(7200));
+                assert_eq!(decay_ttl, Some(14400));
+                assert_eq!(decay_floor, Some(0.15));
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
 }

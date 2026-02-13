@@ -306,3 +306,165 @@ fn update_details() {
         .success()
         .stdout(predicate::str::contains("Updated memory"));
 }
+
+#[test]
+fn update_decay_strategy() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    let id = helpers::add_memory(dir.path(), "decision", "Decay strategy test", "Content");
+
+    for strategy in &["none", "linear", "exponential", "step"] {
+        helpers::cmd()
+            .args([
+                "--dir",
+                dir.path().to_str().unwrap(),
+                "update",
+                &id,
+                "--decay-strategy",
+                strategy,
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Updated memory"));
+    }
+}
+
+#[test]
+fn update_decay_half_life() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    let id = helpers::add_memory(dir.path(), "decision", "Decay half-life test", "Content");
+
+    helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "update",
+            &id,
+            "--decay-half-life",
+            "3600",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Updated memory"));
+}
+
+#[test]
+fn update_decay_ttl() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    let id = helpers::add_memory(dir.path(), "decision", "Decay TTL test", "Content");
+
+    helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "update",
+            &id,
+            "--decay-ttl",
+            "7200",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Updated memory"));
+}
+
+#[test]
+fn update_decay_floor() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    let id = helpers::add_memory(dir.path(), "decision", "Decay floor test", "Content");
+
+    helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "update",
+            &id,
+            "--decay-floor",
+            "0.1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Updated memory"));
+}
+
+#[test]
+fn update_all_decay_params() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    let id = helpers::add_memory(dir.path(), "decision", "Full decay update", "Content");
+
+    helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "update",
+            &id,
+            "--decay-strategy",
+            "exponential",
+            "--decay-half-life",
+            "3600",
+            "--decay-ttl",
+            "86400",
+            "--decay-floor",
+            "0.05",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Updated memory"));
+}
+
+#[test]
+fn update_decay_floor_validates_range() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    let id = helpers::add_memory(dir.path(), "decision", "Bad floor test", "Content");
+
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "update",
+            &id,
+            "--decay-floor",
+            "2.0",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("decay-floor") || stderr.contains("between 0.0 and 1.0"),
+        "Expected decay-floor validation error: {}",
+        stderr
+    );
+}
+
+#[test]
+fn update_invalid_decay_strategy_fails() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    let id = helpers::add_memory(dir.path(), "decision", "Bad strategy test", "Content");
+
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "update",
+            &id,
+            "--decay-strategy",
+            "invalid_strategy",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("decay") || stderr.contains("Invalid"),
+        "Expected decay strategy validation error: {}",
+        stderr
+    );
+}

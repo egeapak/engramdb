@@ -380,3 +380,203 @@ fn get_nonexistent_memory_fails() {
         .assert()
         .failure();
 }
+
+#[test]
+fn add_with_supersedes() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    let old_id = helpers::add_memory(dir.path(), "decision", "Old decision", "Old content");
+
+    helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "add",
+            "-t",
+            "decision",
+            "-s",
+            "New decision",
+            "-c",
+            "Supersedes old one",
+            "--supersedes",
+            &old_id,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created memory"));
+}
+
+#[test]
+fn add_with_multiple_supersedes() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    let id1 = helpers::add_memory(dir.path(), "decision", "Old 1", "Old content 1");
+    let id2 = helpers::add_memory(dir.path(), "decision", "Old 2", "Old content 2");
+
+    let supersedes_val = format!("{},{}", id1, id2);
+    helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "add",
+            "-t",
+            "decision",
+            "-s",
+            "Replaces both",
+            "-c",
+            "Supersedes two",
+            "--supersedes",
+            &supersedes_val,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created memory"));
+}
+
+#[test]
+fn add_with_decay_strategy() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+
+    for strategy in &["none", "linear", "exponential", "step"] {
+        helpers::cmd()
+            .args([
+                "--dir",
+                dir.path().to_str().unwrap(),
+                "add",
+                "-t",
+                "decision",
+                "-s",
+                &format!("Decay {} test", strategy),
+                "-c",
+                "Content with decay",
+                "--decay-strategy",
+                strategy,
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Created memory"));
+    }
+}
+
+#[test]
+fn add_with_all_decay_params() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+
+    helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "add",
+            "-t",
+            "context",
+            "-s",
+            "Full decay config",
+            "-c",
+            "Memory with full decay settings",
+            "--decay-strategy",
+            "exponential",
+            "--decay-half-life",
+            "3600",
+            "--decay-ttl",
+            "86400",
+            "--decay-floor",
+            "0.1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created memory"));
+}
+
+#[test]
+fn add_with_decay_floor_validates_range() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+
+    // decay-floor > 1.0 should fail validation
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "add",
+            "-t",
+            "decision",
+            "-s",
+            "Bad floor",
+            "-c",
+            "Invalid decay floor",
+            "--decay-floor",
+            "1.5",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("decay-floor") || stderr.contains("between 0.0 and 1.0"),
+        "Expected decay-floor validation error: {}",
+        stderr
+    );
+}
+
+#[test]
+fn add_with_supersedes_and_decay() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    let old_id = helpers::add_memory(dir.path(), "decision", "Predecessor", "Old content");
+
+    helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "add",
+            "-t",
+            "decision",
+            "-s",
+            "Successor with decay",
+            "-c",
+            "Replaces predecessor with decay",
+            "--supersedes",
+            &old_id,
+            "--decay-strategy",
+            "linear",
+            "--decay-half-life",
+            "7200",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created memory"));
+}
+
+#[test]
+fn add_with_invalid_decay_strategy_fails() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "add",
+            "-t",
+            "decision",
+            "-s",
+            "Bad strategy",
+            "-c",
+            "Invalid decay strategy",
+            "--decay-strategy",
+            "foobar",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("decay") || stderr.contains("Invalid"),
+        "Expected decay strategy validation error: {}",
+        stderr
+    );
+}
