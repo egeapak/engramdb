@@ -8,10 +8,12 @@ fn reindex_full() {
     helpers::init_store(dir.path());
     helpers::seed_store(dir.path());
 
+    // Full reindex should rebuild the index
     helpers::cmd()
         .args(["--dir", dir.path().to_str().unwrap(), "reindex"])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("Rebuilt index").or(predicate::str::contains("Reindex")));
 }
 
 #[test]
@@ -38,7 +40,8 @@ fn reindex_embeddings_only() {
     helpers::init_store(dir.path());
     helpers::seed_store(dir.path());
 
-    // With --no-embeddings init, this should still succeed (just skip embedding)
+    // With --no-embeddings init, embeddings-only should succeed (skip embedding)
+    // and report either "Embedded" or "Nothing to reindex"
     helpers::cmd()
         .args([
             "--dir",
@@ -47,5 +50,8 @@ fn reindex_embeddings_only() {
             "--embeddings-only",
         ])
         .assert()
-        .success();
+        .success()
+        .stdout(
+            predicate::str::contains("Embedded").or(predicate::str::contains("Nothing to reindex")),
+        );
 }

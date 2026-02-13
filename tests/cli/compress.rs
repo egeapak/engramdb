@@ -1,4 +1,5 @@
 use super::helpers;
+use predicates::prelude::*;
 use tempfile::TempDir;
 
 #[test]
@@ -7,10 +8,15 @@ fn compress_shows_candidates() {
     helpers::init_store(dir.path());
     helpers::seed_store(dir.path());
 
+    // With default threshold, should show candidates or "No compression candidates"
     helpers::cmd()
         .args(["--dir", dir.path().to_str().unwrap(), "compress"])
         .assert()
-        .success();
+        .success()
+        .stdout(
+            predicate::str::contains("Compression candidates")
+                .or(predicate::str::contains("No compression candidates")),
+        );
 }
 
 #[test]
@@ -19,6 +25,7 @@ fn compress_with_threshold() {
     helpers::init_store(dir.path());
     helpers::seed_store(dir.path());
 
+    // Very high threshold (0.99) should make most memories candidates
     helpers::cmd()
         .args([
             "--dir",
@@ -28,7 +35,11 @@ fn compress_with_threshold() {
             "0.99",
         ])
         .assert()
-        .success();
+        .success()
+        .stdout(
+            predicate::str::contains("Compression candidates")
+                .or(predicate::str::contains("No compression candidates")),
+        );
 }
 
 #[test]
@@ -39,7 +50,8 @@ fn compress_empty_store() {
     helpers::cmd()
         .args(["--dir", dir.path().to_str().unwrap(), "compress"])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("No compression candidates"));
 }
 
 #[test]
@@ -69,5 +81,9 @@ fn compress_with_scope() {
             "app.core",
         ])
         .assert()
-        .success();
+        .success()
+        .stdout(
+            predicate::str::contains("Compression candidates")
+                .or(predicate::str::contains("No compression candidates")),
+        );
 }

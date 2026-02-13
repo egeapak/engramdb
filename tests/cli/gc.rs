@@ -8,11 +8,22 @@ fn gc_dry_run_default() {
     helpers::init_store(dir.path());
     helpers::seed_store(dir.path());
 
-    // Default GC is dry-run mode
-    helpers::cmd()
+    // Default GC is dry-run mode — should report eligibility or no memories
+    let output = helpers::cmd()
         .args(["--dir", dir.path().to_str().unwrap(), "gc"])
-        .assert()
-        .success();
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+    assert!(
+        stdout.contains("eligible")
+            || stdout.contains("dry run")
+            || stdout.contains("no memor")
+            || stdout.contains("gc"),
+        "gc should report eligibility status: {}",
+        stdout
+    );
 }
 
 #[test]

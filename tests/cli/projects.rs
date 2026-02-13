@@ -7,6 +7,7 @@ fn projects_info() {
     let dir = TempDir::new().unwrap();
     helpers::init_store(dir.path());
 
+    // Project info should contain the word "project" and show path/id
     helpers::cmd()
         .args(["--dir", dir.path().to_str().unwrap(), "projects", "info"])
         .assert()
@@ -19,21 +20,41 @@ fn projects_list() {
     let dir = TempDir::new().unwrap();
     helpers::init_store(dir.path());
 
-    helpers::cmd()
+    // After init, project list should show at least the current project path
+    let output = helpers::cmd()
         .args(["--dir", dir.path().to_str().unwrap(), "projects", "list"])
-        .assert()
-        .success();
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The directory path should appear in the list
+    assert!(
+        stdout.contains(dir.path().to_str().unwrap()) || stdout.contains("project"),
+        "Projects list should reference the project: {}",
+        stdout
+    );
 }
 
 #[test]
 fn projects_stats() {
     let dir = TempDir::new().unwrap();
     helpers::init_store(dir.path());
+    helpers::seed_store(dir.path());
 
-    helpers::cmd()
+    // Stats should show counts
+    let output = helpers::cmd()
         .args(["--dir", dir.path().to_str().unwrap(), "projects", "stats"])
-        .assert()
-        .success();
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("total") || stdout.contains("3") || stdout.contains("memor"),
+        "Stats should show memory counts: {}",
+        stdout
+    );
 }
 
 #[test]

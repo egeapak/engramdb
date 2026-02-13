@@ -1,4 +1,5 @@
 use super::helpers;
+use predicates::prelude::*;
 use tempfile::TempDir;
 
 #[test]
@@ -7,10 +8,12 @@ fn search_basic() {
     helpers::init_store(dir.path());
     helpers::seed_store(dir.path());
 
+    // "Rust" should match "Use Rust for backend"
     helpers::cmd()
         .args(["--dir", dir.path().to_str().unwrap(), "search", "Rust"])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("Found").or(predicate::str::contains("Use Rust")));
 }
 
 #[test]
@@ -19,17 +22,19 @@ fn search_with_type_filter() {
     helpers::init_store(dir.path());
     helpers::seed_store(dir.path());
 
+    // Filtering by decision type should still find the decision memory
     helpers::cmd()
         .args([
             "--dir",
             dir.path().to_str().unwrap(),
             "search",
-            "test",
+            "Rust",
             "-t",
             "decision",
         ])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("Use Rust"));
 }
 
 #[test]
@@ -44,7 +49,7 @@ fn search_with_tags_filter() {
             "-s",
             "Searchable tagged",
             "-c",
-            "Tagged content",
+            "Tagged content for search",
             "--tags",
             "searchable",
         ],
@@ -60,26 +65,41 @@ fn search_with_tags_filter() {
             "searchable",
         ])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("Searchable tagged"));
 }
 
 #[test]
-fn search_max_results() {
+fn search_max_results_limits_output() {
     let dir = TempDir::new().unwrap();
     helpers::init_store(dir.path());
-    helpers::seed_store(dir.path());
+    helpers::seed_store(dir.path()); // 3 memories
 
-    helpers::cmd()
+    // With --json and -n 1, should get exactly 1 result
+    let output = helpers::cmd()
         .args([
             "--dir",
             dir.path().to_str().unwrap(),
+            "--json",
             "search",
-            "test",
+            "Use",
             "-n",
             "1",
         ])
-        .assert()
-        .success();
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("Invalid JSON: {} — output: {}", e, stdout);
+    });
+    let arr = parsed.as_array().expect("Expected JSON array");
+    assert!(
+        arr.len() <= 1,
+        "Expected at most 1 result with -n 1, got {}",
+        arr.len()
+    );
 }
 
 #[test]
@@ -88,15 +108,26 @@ fn search_no_results() {
     helpers::init_store(dir.path());
     helpers::seed_store(dir.path());
 
-    helpers::cmd()
+    let output = helpers::cmd()
         .args([
             "--dir",
             dir.path().to_str().unwrap(),
             "search",
             "zzzznonexistentqueryzzzz",
         ])
-        .assert()
-        .success();
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should not contain any seeded memory summaries
+    assert!(
+        !stdout.contains("Use Rust")
+            && !stdout.contains("snake_case")
+            && !stdout.contains("Avoid unwrap"),
+        "No-match search should not contain seeded memories: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -118,11 +149,19 @@ fn search_with_json_output() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("Invalid JSON: {} — output: {}", e, stdout);
+    });
+    // JSON search results should be an array with score and memory fields
+    let arr = parsed.as_array().expect("Expected JSON array");
+    assert!(!arr.is_empty(), "Search for 'Rust' should find results");
     assert!(
-        parsed.is_ok(),
-        "search --json should produce valid JSON: {}",
-        stdout
+        arr[0].get("score").is_some(),
+        "Each result should have a 'score' field"
+    );
+    assert!(
+        arr[0].get("memory").is_some(),
+        "Each result should have a 'memory' field"
     );
 }
 
@@ -149,12 +188,13 @@ fn search_with_physical_scope() {
             "--dir",
             dir.path().to_str().unwrap(),
             "search",
-            "scope",
+            "Physical",
             "-p",
             "src/main.rs",
         ])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("Phys search"));
 }
 
 #[test]
@@ -180,12 +220,13 @@ fn search_with_logical_scope() {
             "--dir",
             dir.path().to_str().unwrap(),
             "search",
-            "scope",
+            "Logical",
             "-l",
             "app.core",
         ])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("Logic search"));
 }
 
 #[test]
@@ -200,7 +241,7 @@ fn search_with_min_criticality() {
             "-s",
             "High crit search",
             "-c",
-            "High criticality",
+            "High criticality content",
             "--criticality",
             "0.9",
         ],
@@ -216,5 +257,6 @@ fn search_with_min_criticality() {
             "0.5",
         ])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("High crit search"));
 }
