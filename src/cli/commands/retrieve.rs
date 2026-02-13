@@ -1,8 +1,8 @@
 //! Retrieve memories by context.
 
 use crate::cli::output::OutputFormatter;
-use crate::ops::parse_memory_type;
-use crate::retrieval::engine::{DetailLevel, RetrievalQuery};
+use crate::ops::{parse_detail_level, parse_memory_type};
+use crate::retrieval::engine::RetrievalQuery;
 use crate::storage::{MemoryStore, RegistryBackend};
 use anyhow::Result;
 use std::path::Path;
@@ -63,19 +63,9 @@ pub async fn run_retrieve(
 
     // Parse detail_level
     let detail_level = if let Some(ref level_str) = params.detail_level {
-        match level_str.to_lowercase().as_str() {
-            "summary" => DetailLevel::Summary,
-            "content" => DetailLevel::Content,
-            "full" => DetailLevel::Full,
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "Invalid detail level: {}. Must be summary, content, or full",
-                    level_str
-                ))
-            }
-        }
+        parse_detail_level(level_str)?
     } else {
-        DetailLevel::Content
+        crate::retrieval::engine::DetailLevel::Content
     };
 
     // Build retrieval query

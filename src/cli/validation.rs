@@ -1,14 +1,8 @@
 //! Input validation utilities for CLI commands.
+//!
+//! Re-exports shared validation from the ops layer.
 
-use anyhow::{bail, Result};
-
-/// Validate that a score value is within the valid range [0.0, 1.0].
-pub fn validate_score(value: f64, field_name: &str) -> Result<f64> {
-    if !(0.0..=1.0).contains(&value) {
-        bail!("{} must be between 0.0 and 1.0, got {}", field_name, value);
-    }
-    Ok(value)
-}
+pub use crate::ops::parsing::validate_score;
 
 #[cfg(test)]
 mod tests {

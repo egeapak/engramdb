@@ -1,10 +1,9 @@
 //! List all memories with optional filtering.
 
 use crate::cli::output::OutputFormatter;
-use crate::ops::{parse_memory_type, parse_status};
+use crate::ops::{self, ListParams};
 use crate::storage::{MemoryStore, RegistryBackend};
-use crate::types::MemoryType;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::path::Path;
 
 /// List all memories, optionally filtered by type, tags, status, and scope.
@@ -40,66 +39,28 @@ pub async fn run_list(
     if let Ok(Some(warning)) = store.check_staleness().await {
         formatter.print_warning(&warning);
     }
-    let mut entries = store.list().await?;
 
-    // Apply filters
-    if !type_filter.is_empty() {
-        let types: Vec<MemoryType> = type_filter
-            .iter()
-            .map(|s| parse_memory_type(s))
-            .collect::<Result<Vec<_>>>()?;
-        entries.retain(|e| types.contains(&e.type_));
-    }
+    let parsed_sort = ops::parse_sort_field(sort_field)?;
 
-    if !tags_filter.is_empty() {
-        entries.retain(|e| tags_filter.iter().any(|tag| e.tags.contains(tag)));
-    }
+    let params = ListParams {
+        types: if type_filter.is_empty() {
+            None
+        } else {
+            Some(type_filter)
+        },
+        tags: if tags_filter.is_empty() {
+            None
+        } else {
+            Some(tags_filter)
+        },
+        status: status_filter,
+        scope: scope_filter,
+        sort_field: parsed_sort,
+        reverse,
+        limit,
+    };
 
-    if let Some(status_str) = status_filter {
-        let status = parse_status(&status_str)?;
-        entries.retain(|e| e.status == status);
-    }
-
-    // Apply scope filter
-    if let Some(scope) = scope_filter {
-        entries.retain(|e| {
-            e.physical.iter().any(|p| p.contains(&scope))
-                || e.logical.iter().any(|l| l.contains(&scope))
-        });
-    }
-
-    // Apply sorting
-    match sort_field {
-        "criticality" | "relevance" => {
-            entries.sort_by(|a, b| b.criticality.partial_cmp(&a.criticality).unwrap());
-        }
-        "created" => {
-            entries.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-        }
-        "updated" => {
-            entries.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
-        }
-        "type" => {
-            entries.sort_by(|a, b| format!("{:?}", a.type_).cmp(&format!("{:?}", b.type_)));
-        }
-        _ => {
-            return Err(anyhow!(
-                "Invalid sort field: {}. Valid options are: criticality, relevance, created, updated, type",
-                sort_field
-            ));
-        }
-    }
-
-    // Apply reverse if requested
-    if reverse {
-        entries.reverse();
-    }
-
-    // Apply limit
-    if let Some(max) = limit {
-        entries.truncate(max);
-    }
-
+    let entries = ops::list_memories(&store, &params).await?;
     formatter.print_memory_list(&entries, verbose);
     Ok(())
 }
@@ -107,6 +68,8 @@ pub async fn run_list(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ops::list::list_memories;
+    use crate::ops::SortField;
     use crate::storage::{InMemoryRegistry, MemoryStore};
     use crate::types::{Memory, MemoryType, Provenance, Status, Visibility};
     use tempfile::TempDir;
@@ -427,5 +390,41 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_ops_list_memories_directly() {
+        let (_temp_dir, store, _registry) = setup_test_store().await;
+
+        let params = ListParams {
+            types: None,
+            tags: None,
+            status: None,
+            scope: Some("app.core".to_string()),
+            sort_field: SortField::Criticality,
+            reverse: false,
+            limit: None,
+        };
+
+        let entries = list_memories(&store, &params).await.unwrap();
+        assert_eq!(entries.len(), 2); // mem1 and mem3 have app.core
+    }
+
+    #[tokio::test]
+    async fn test_ops_list_memories_with_limit() {
+        let (_temp_dir, store, _registry) = setup_test_store().await;
+
+        let params = ListParams {
+            types: None,
+            tags: None,
+            status: None,
+            scope: None,
+            sort_field: SortField::Criticality,
+            reverse: false,
+            limit: Some(1),
+        };
+
+        let entries = list_memories(&store, &params).await.unwrap();
+        assert_eq!(entries.len(), 1);
     }
 }

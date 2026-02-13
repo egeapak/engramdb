@@ -9,7 +9,11 @@ pub async fn search_memories(
     engine: &RetrievalEngine,
     query: &str,
     filters: &SearchFilters,
+    max_results: Option<usize>,
 ) -> Result<Vec<ScoredMemory>> {
-    let results = engine.search(query, filters).await?;
+    let mut results = engine.search(query, filters).await?;
+    if let Some(max) = max_results {
+        results.truncate(max);
+    }
     Ok(results)
 }

@@ -10,6 +10,7 @@ pub mod create;
 pub mod delete;
 pub mod gc;
 pub mod get;
+pub mod list;
 pub mod parsing;
 pub mod projects;
 pub mod reindex;
@@ -29,11 +30,15 @@ pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
 pub use delete::delete_memory;
 pub use gc::{gc_memories, GcResult};
 pub use get::get_memory;
-pub use parsing::{parse_decay_strategy, parse_memory_type, parse_status, parse_visibility};
+pub use list::{list_memories, parse_sort_field, ListParams, SortField};
+pub use parsing::{
+    parse_decay_strategy, parse_detail_level, parse_memory_type, parse_status, parse_visibility,
+    validate_score,
+};
 pub use reindex::{reindex, ReindexResult};
 pub use resolve::{resolve_memory, ResolveAction, ResolveParams, ResolveResult};
 pub use retrieve::retrieve_memories;
-pub use review::review_memories;
+pub use review::{review_memories, ReviewParams};
 pub use search::search_memories;
 pub use stats::{compute_stats, StoreStats};
 pub use update::{update_memory, UpdateParams};

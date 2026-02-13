@@ -68,10 +68,9 @@ pub async fn run_search(
     };
 
     // Perform search
-    let mut results = crate::ops::search_memories(&engine, &params.query, &filters).await?;
-
-    // Apply max_results limit
-    results.truncate(params.max_results);
+    let results =
+        crate::ops::search_memories(&engine, &params.query, &filters, Some(params.max_results))
+            .await?;
 
     // Display results
     formatter.print_search_results(&results);

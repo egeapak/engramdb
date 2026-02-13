@@ -178,6 +178,9 @@ struct UpdateInput {
     #[schemars(description = "New visibility")]
     visibility: Option<String>,
 
+    #[schemars(description = "New status: active, needsreview, or challenged")]
+    status: Option<String>,
+
     #[schemars(description = "IDs of memories this supersedes")]
     supersedes: Option<Vec<String>>,
 
@@ -219,6 +222,16 @@ struct ReviewInput {
 
     #[schemars(description = "Maximum results (default 10)")]
     max_results: Option<usize>,
+
+    #[serde(rename = "type")]
+    #[schemars(description = "Filter by memory type")]
+    type_: Option<String>,
+
+    #[schemars(description = "Only show challenged memories")]
+    challenged_only: Option<bool>,
+
+    #[schemars(description = "Only show stale/needs-review memories")]
+    stale_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -278,6 +291,35 @@ struct GcInput {
 struct ReindexInput {
     #[schemars(description = "Only re-embed, don't rebuild index")]
     embeddings_only: Option<bool>,
+
+    #[schemars(description = "Only rebuild index, don't re-embed")]
+    index_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ListInput {
+    #[schemars(description = "Filter by memory types")]
+    types: Option<Vec<String>>,
+
+    #[schemars(description = "Filter by tags (OR logic)")]
+    tags: Option<Vec<String>>,
+
+    #[schemars(description = "Filter by status: active, needsreview, or challenged")]
+    status: Option<String>,
+
+    #[schemars(description = "Filter by scope (matches physical or logical scopes)")]
+    scope: Option<String>,
+
+    #[schemars(
+        description = "Sort field: criticality, created, updated, or type (default criticality)"
+    )]
+    sort_field: Option<String>,
+
+    #[schemars(description = "Reverse sort order")]
+    reverse: Option<bool>,
+
+    #[schemars(description = "Maximum number of results")]
+    limit: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +470,18 @@ impl EngramDbServer {
             _ => Visibility::Shared,
         };
 
+        // Validate score fields
+        let criticality = input.criticality.unwrap_or(0.5);
+        ops::validate_score(criticality, "criticality")
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        let confidence = input.confidence.unwrap_or(0.8);
+        ops::validate_score(confidence, "confidence")
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        if let Some(floor) = input.decay_floor {
+            ops::validate_score(floor, "decay_floor")
+                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        }
+
         let result = ops::create_memory(
             &store,
             ops::CreateParams {
@@ -437,8 +491,8 @@ impl EngramDbServer {
                 physical: input.physical.unwrap_or_default(),
                 logical: input.logical.unwrap_or_default(),
                 tags: input.tags.unwrap_or_default(),
-                criticality: input.criticality.unwrap_or(0.5),
-                confidence: input.confidence.unwrap_or(0.8),
+                criticality,
+                confidence,
                 details: input.details,
                 visibility,
                 provenance: Provenance::agent("mcp"),
@@ -483,6 +537,13 @@ impl EngramDbServer {
             None
         };
 
+        let detail_level = if let Some(ref level_str) = input.detail_level {
+            ops::parse_detail_level(level_str)
+                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?
+        } else {
+            crate::retrieval::engine::DetailLevel::Content
+        };
+
         let query = RetrievalQuery {
             path: input.path,
             logical: input.logical.unwrap_or_default(),
@@ -492,7 +553,7 @@ impl EngramDbServer {
             min_criticality: input.min_criticality,
             max_results: Some(input.max_results.unwrap_or(10)),
             include_expired: Some(input.include_expired.unwrap_or(false)),
-            ..RetrievalQuery::default()
+            detail_level,
         };
 
         let result = ops::retrieve_memories(&engine, &query)
@@ -557,14 +618,13 @@ impl EngramDbServer {
             min_criticality: input.min_criticality,
         };
 
-        let results = ops::search_memories(&engine, &input.query, &filters)
+        let max = input.max_results.unwrap_or(10);
+        let results = ops::search_memories(&engine, &input.query, &filters, Some(max))
             .await
             .map_err(|e| e.to_string())?;
 
-        let max = input.max_results.unwrap_or(10);
         let memories: Vec<ScoredMemoryOutput> = results
             .iter()
-            .take(max)
             .map(|sm| ScoredMemoryOutput {
                 memory: memory_to_output(&sm.memory, false),
                 score: sm.score,
@@ -624,6 +684,27 @@ impl EngramDbServer {
             .transpose()
             .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
+        let status = input
+            .status
+            .as_deref()
+            .map(ops::parse_status)
+            .transpose()
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+
+        // Validate score fields
+        if let Some(c) = input.criticality {
+            ops::validate_score(c, "criticality")
+                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        }
+        if let Some(c) = input.confidence {
+            ops::validate_score(c, "confidence")
+                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        }
+        if let Some(floor) = input.decay_floor {
+            ops::validate_score(floor, "decay_floor")
+                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        }
+
         ops::update_memory(
             &store,
             &input.id,
@@ -640,7 +721,7 @@ impl EngramDbServer {
                 criticality: input.criticality,
                 confidence: input.confidence,
                 visibility,
-                status: None,
+                status,
                 supersedes: input.supersedes,
                 decay_strategy: input.decay_strategy,
                 decay_half_life: input.decay_half_life,
@@ -710,7 +791,23 @@ impl EngramDbServer {
         Parameters(input): Parameters<ReviewInput>,
     ) -> Result<String, String> {
         let store = self.open_store().await?;
-        let memories = ops::review_memories(&store, input.scope.as_deref(), input.max_results)
+
+        let type_filter = input
+            .type_
+            .as_deref()
+            .map(ops::parse_memory_type)
+            .transpose()
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+
+        let params = ops::ReviewParams {
+            scope: input.scope,
+            max_results: input.max_results,
+            type_filter,
+            challenged_only: input.challenged_only.unwrap_or(false),
+            stale_only: input.stale_only.unwrap_or(false),
+        };
+
+        let memories = ops::review_memories(&store, &params)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -892,28 +989,16 @@ impl EngramDbServer {
     ) -> Result<String, String> {
         let store = self.open_store().await?;
         let embeddings_only = input.embeddings_only.unwrap_or(false);
+        let index_only = input.index_only.unwrap_or(false);
 
-        let engine = if !embeddings_only {
-            None
-        } else {
+        // Build engine outside conditional so it stays alive for the reference
+        let engine = if !index_only {
             self.build_engine().await.ok()
-        };
-
-        // For full reindex, also try to build engine for embeddings
-        let engine_ref = if engine.is_some() {
-            engine.as_ref()
-        } else if !embeddings_only {
-            // Build engine for embedding during full reindex
-            let e = self.build_engine().await.ok();
-            // We can't return a reference to a local, so we skip embeddings here
-            // and do index-only
-            drop(e);
-            None
         } else {
             None
         };
 
-        let result = ops::reindex(&store, engine_ref, embeddings_only)
+        let result = ops::reindex(&store, engine.as_ref(), embeddings_only)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -921,6 +1006,59 @@ impl EngramDbServer {
             "indexed": result.indexed,
             "embedded": result.embedded,
             "errors": result.errors
+        }))
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "List all memories with optional filtering, sorting, and limiting. Returns lightweight index entries."
+    )]
+    async fn memory_list(
+        &self,
+        Parameters(input): Parameters<ListInput>,
+    ) -> Result<String, String> {
+        let store = self.open_store().await?;
+
+        let sort_field =
+            ops::parse_sort_field(input.sort_field.as_deref().unwrap_or("criticality"))
+                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+
+        let params = ops::ListParams {
+            types: input.types,
+            tags: input.tags,
+            status: input.status,
+            scope: input.scope,
+            sort_field,
+            reverse: input.reverse.unwrap_or(false),
+            limit: input.limit,
+        };
+
+        let entries = ops::list_memories(&store, &params)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let output: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "id": e.id,
+                    "type": format!("{:?}", e.type_).to_lowercase(),
+                    "summary": e.summary,
+                    "tags": e.tags,
+                    "logical": e.logical,
+                    "physical": e.physical,
+                    "status": format!("{:?}", e.status).to_lowercase(),
+                    "criticality": e.criticality,
+                    "confidence": e.confidence,
+                    "created_at": e.created_at.to_rfc3339(),
+                    "updated_at": e.updated_at.to_rfc3339(),
+                })
+            })
+            .collect();
+
+        serde_json::to_string(&serde_json::json!({
+            "memories": output,
+            "total": output.len()
         }))
         .map_err(|e| e.to_string())
     }

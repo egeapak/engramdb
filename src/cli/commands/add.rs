@@ -25,6 +25,11 @@ pub struct AddParams {
     pub confidence: f64,
     pub details: Option<String>,
     pub visibility_str: Option<String>,
+    pub supersedes: Option<String>,
+    pub decay_strategy: Option<String>,
+    pub decay_half_life: Option<u64>,
+    pub decay_ttl: Option<u64>,
+    pub decay_floor: Option<f64>,
     pub interactive: bool,
     pub editor: bool,
     pub details_file: Option<PathBuf>,
@@ -124,6 +129,22 @@ async fn run_direct_mode(
         anyhow!("Summary is required. Use --summary or -s flag, or use interactive mode.")
     })?;
 
+    // Parse comma-separated supersedes
+    let supersedes = params
+        .supersedes
+        .map(|s| {
+            s.split(',')
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty())
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
+
+    // Validate decay_floor if provided
+    if let Some(floor) = params.decay_floor {
+        validate_score(floor, "decay-floor")?;
+    }
+
     let result = create_memory(
         store,
         CreateParams {
@@ -140,11 +161,11 @@ async fn run_direct_mode(
             details: final_details,
             visibility,
             provenance: Provenance::human(),
-            supersedes: vec![],
-            decay_strategy: None,
-            decay_half_life: None,
-            decay_ttl: None,
-            decay_floor: None,
+            supersedes,
+            decay_strategy: params.decay_strategy,
+            decay_half_life: params.decay_half_life,
+            decay_ttl: params.decay_ttl,
+            decay_floor: params.decay_floor,
         },
         Some(engine),
     )
@@ -553,6 +574,11 @@ mod tests {
             confidence: 0.8,
             details: None,
             visibility_str: None,
+            supersedes: None,
+            decay_strategy: None,
+            decay_half_life: None,
+            decay_ttl: None,
+            decay_floor: None,
             interactive: true,
             editor: false,
             details_file: None,
@@ -599,6 +625,11 @@ mod tests {
             confidence: 0.8,
             details: None,
             visibility_str: None,
+            supersedes: None,
+            decay_strategy: None,
+            decay_half_life: None,
+            decay_ttl: None,
+            decay_floor: None,
             interactive: true,
             editor: false,
             details_file: None,
@@ -646,6 +677,11 @@ mod tests {
             confidence: 0.8,
             details: None,
             visibility_str: None,
+            supersedes: None,
+            decay_strategy: None,
+            decay_half_life: None,
+            decay_ttl: None,
+            decay_floor: None,
             interactive: true,
             editor: false,
             details_file: None,
@@ -693,6 +729,11 @@ mod tests {
             confidence: 0.8,
             details: None,
             visibility_str: None,
+            supersedes: None,
+            decay_strategy: None,
+            decay_half_life: None,
+            decay_ttl: None,
+            decay_floor: None,
             interactive: true,
             editor: false,
             details_file: None,

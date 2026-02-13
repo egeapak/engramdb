@@ -27,6 +27,10 @@ pub struct UpdateParams {
     pub visibility: Option<String>,
     pub status: Option<String>,
     pub supersedes: Option<String>,
+    pub decay_strategy: Option<String>,
+    pub decay_half_life: Option<u64>,
+    pub decay_ttl: Option<u64>,
+    pub decay_floor: Option<f64>,
     pub editor: bool,
 }
 
@@ -82,6 +86,10 @@ pub async fn run_update(
             && params.visibility.is_none()
             && params.status.is_none()
             && params.supersedes.is_none()
+            && params.decay_strategy.is_none()
+            && params.decay_half_life.is_none()
+            && params.decay_ttl.is_none()
+            && params.decay_floor.is_none()
         {
             return Ok(());
         }
@@ -153,6 +161,11 @@ pub async fn run_update(
         params.details
     };
 
+    // Validate decay_floor if provided
+    if let Some(floor) = params.decay_floor {
+        validate_score(floor, "decay-floor")?;
+    }
+
     update_memory(
         &store,
         &params.id,
@@ -177,10 +190,10 @@ pub async fn run_update(
             visibility,
             status,
             supersedes,
-            decay_strategy: None,
-            decay_half_life: None,
-            decay_ttl: None,
-            decay_floor: None,
+            decay_strategy: params.decay_strategy,
+            decay_half_life: params.decay_half_life,
+            decay_ttl: params.decay_ttl,
+            decay_floor: params.decay_floor,
         },
         Some(&engine),
     )

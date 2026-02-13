@@ -2,9 +2,8 @@
 
 use crate::cli::output::OutputFormatter;
 use crate::cli::prompter::Prompter;
-use crate::ops::{self, review_memories};
+use crate::ops::{self, parse_memory_type, review_memories, ReviewParams};
 use crate::storage::{MemoryStore, RegistryBackend};
-use crate::types::Status;
 use anyhow::Result;
 use std::path::Path;
 
@@ -33,20 +32,17 @@ pub async fn run_review(
 ) -> Result<()> {
     let store = MemoryStore::open(dir, registry).await?;
 
-    let mut memories = review_memories(&store, scope.as_deref(), None).await?;
+    let type_filter = type_str.as_deref().map(parse_memory_type).transpose()?;
 
-    // Apply type filter if provided
-    if let Some(ref t) = type_str {
-        let type_filter = crate::ops::parse_memory_type(t)?;
-        memories.retain(|m| m.type_ == type_filter);
-    }
+    let params = ReviewParams {
+        scope,
+        max_results: None,
+        type_filter,
+        challenged_only,
+        stale_only,
+    };
 
-    // Apply status filters
-    if challenged_only {
-        memories.retain(|m| matches!(m.status, Status::Challenged));
-    } else if stale_only {
-        memories.retain(|m| matches!(m.status, Status::NeedsReview));
-    }
+    let memories = review_memories(&store, &params).await?;
 
     if memories.is_empty() {
         formatter.print_message("No memories need review.");
@@ -159,7 +155,7 @@ mod tests {
     use super::*;
     use crate::cli::prompter::MockPrompter;
     use crate::storage::InMemoryRegistry;
-    use crate::types::{Challenge, Memory, MemoryType, Provenance};
+    use crate::types::{Challenge, Memory, MemoryType, Provenance, Status};
     use tempfile::TempDir;
 
     /// Helper to create a store with a challenged memory ready for review.

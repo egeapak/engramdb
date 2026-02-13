@@ -3,6 +3,7 @@
 //! These functions are used by both CLI and MCP boundaries to convert
 //! user-provided strings into typed enums.
 
+use crate::retrieval::engine::DetailLevel;
 use crate::types::{DecayStrategy, MemoryType, Status, Visibility};
 use anyhow::{bail, Result};
 
@@ -55,6 +56,27 @@ pub fn parse_decay_strategy(s: &str) -> Result<DecayStrategy> {
         "step" => Ok(DecayStrategy::Step),
         _ => bail!(
             "Invalid decay strategy: {}. Valid values: none, linear, exponential, step",
+            s
+        ),
+    }
+}
+
+/// Validate that a score value is within the valid range [0.0, 1.0].
+pub fn validate_score(value: f64, field_name: &str) -> Result<f64> {
+    if !(0.0..=1.0).contains(&value) {
+        bail!("{} must be between 0.0 and 1.0, got {}", field_name, value);
+    }
+    Ok(value)
+}
+
+/// Parse a string into a DetailLevel enum.
+pub fn parse_detail_level(s: &str) -> Result<DetailLevel> {
+    match s.to_lowercase().as_str() {
+        "summary" => Ok(DetailLevel::Summary),
+        "content" => Ok(DetailLevel::Content),
+        "full" => Ok(DetailLevel::Full),
+        _ => bail!(
+            "Invalid detail level: {}. Must be summary, content, or full",
             s
         ),
     }
@@ -159,5 +181,39 @@ mod tests {
     fn test_parse_decay_strategy_invalid() {
         assert!(parse_decay_strategy("invalid").is_err());
         assert!(parse_decay_strategy("").is_err());
+    }
+
+    #[test]
+    fn test_validate_score_valid() {
+        assert_eq!(validate_score(0.0, "test").unwrap(), 0.0);
+        assert_eq!(validate_score(0.5, "test").unwrap(), 0.5);
+        assert_eq!(validate_score(1.0, "test").unwrap(), 1.0);
+    }
+
+    #[test]
+    fn test_validate_score_invalid() {
+        assert!(validate_score(1.5, "criticality").is_err());
+        assert!(validate_score(-0.1, "confidence").is_err());
+        assert!(validate_score(f64::NAN, "x").is_err());
+        assert!(validate_score(f64::INFINITY, "x").is_err());
+    }
+
+    #[test]
+    fn test_parse_detail_level_valid() {
+        assert_eq!(parse_detail_level("summary").unwrap(), DetailLevel::Summary);
+        assert_eq!(parse_detail_level("content").unwrap(), DetailLevel::Content);
+        assert_eq!(parse_detail_level("full").unwrap(), DetailLevel::Full);
+    }
+
+    #[test]
+    fn test_parse_detail_level_case_insensitive() {
+        assert_eq!(parse_detail_level("Summary").unwrap(), DetailLevel::Summary);
+        assert_eq!(parse_detail_level("FULL").unwrap(), DetailLevel::Full);
+    }
+
+    #[test]
+    fn test_parse_detail_level_invalid() {
+        assert!(parse_detail_level("invalid").is_err());
+        assert!(parse_detail_level("").is_err());
     }
 }

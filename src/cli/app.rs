@@ -132,6 +132,26 @@ pub enum Command {
         #[arg(long)]
         visibility: Option<String>,
 
+        /// IDs of memories this one supersedes (comma-separated)
+        #[arg(long)]
+        supersedes: Option<String>,
+
+        /// Decay strategy: none, linear, exponential, or step
+        #[arg(long)]
+        decay_strategy: Option<String>,
+
+        /// Half-life in seconds for decay
+        #[arg(long)]
+        decay_half_life: Option<u64>,
+
+        /// TTL in seconds for decay
+        #[arg(long)]
+        decay_ttl: Option<u64>,
+
+        /// Minimum decay factor (0.0-1.0)
+        #[arg(long)]
+        decay_floor: Option<f64>,
+
         /// Launch interactive TUI prompts
         #[arg(long, short = 'i')]
         interactive: bool,
@@ -331,6 +351,22 @@ pub enum Command {
         /// IDs of memories this one supersedes (comma-separated)
         #[arg(long)]
         supersedes: Option<String>,
+
+        /// Decay strategy: none, linear, exponential, or step
+        #[arg(long)]
+        decay_strategy: Option<String>,
+
+        /// Half-life in seconds for decay
+        #[arg(long)]
+        decay_half_life: Option<u64>,
+
+        /// TTL in seconds for decay
+        #[arg(long)]
+        decay_ttl: Option<u64>,
+
+        /// Minimum decay factor (0.0-1.0)
+        #[arg(long)]
+        decay_floor: Option<f64>,
 
         /// Open memory file in $EDITOR
         #[arg(long, short = 'e')]
