@@ -675,6 +675,25 @@ impl RetrievalEngine {
 mod tests {
     use super::*;
     use crate::storage::InMemoryRegistry;
+    use std::sync::LazyLock;
+
+    /// Shared reranker across all tests in this module to avoid loading the
+    /// ~100MB ONNX model once per test (which causes OOM when parallel).
+    static SHARED_RERANKER: LazyLock<Option<Arc<Mutex<fastembed::TextRerank>>>> =
+        LazyLock::new(|| {
+            let cache_dir = dirs::cache_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
+                .join("engramdb")
+                .join("models");
+            let options = fastembed::RerankInitOptions::default().with_cache_dir(cache_dir);
+            fastembed::TextRerank::try_new(options)
+                .ok()
+                .map(|r| Arc::new(Mutex::new(r)))
+        });
+
+    fn try_reranker() -> Option<Arc<Mutex<fastembed::TextRerank>>> {
+        SHARED_RERANKER.as_ref().cloned()
+    }
 
     // Note: These tests would require a real MemoryStore instance,
     // which would need a temp directory setup. For now, we provide
@@ -1622,18 +1641,11 @@ mod tests {
     #[tokio::test]
     async fn test_rerank_with_real_reranker() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
-        use fastembed::{RerankInitOptions, TextRerank};
         use tempfile::TempDir;
 
-        // Try to create a real reranker — skip test if model download fails
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
-            .join("engramdb")
-            .join("models");
-        let options = RerankInitOptions::default().with_cache_dir(cache_dir);
-        let reranker = match TextRerank::try_new(options) {
-            Ok(r) => r,
-            Err(_) => return, // Skip if reranker unavailable
+        let reranker = match try_reranker() {
+            Some(r) => r,
+            None => return,
         };
 
         let temp_dir = TempDir::new().unwrap();
@@ -1668,8 +1680,7 @@ mod tests {
         mem2.criticality = 0.8;
         store.create(&mem2).await.unwrap();
 
-        let engine =
-            RetrievalEngine::new(store, config).with_reranker(Arc::new(Mutex::new(reranker)));
+        let engine = RetrievalEngine::new(store, config).with_reranker(reranker);
 
         assert!(engine.reranking_available());
 
@@ -1694,18 +1705,11 @@ mod tests {
     #[tokio::test]
     async fn test_rerank_blend_weight_zero_preserves_original_order() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
-        use fastembed::{RerankInitOptions, TextRerank};
         use tempfile::TempDir;
 
-        // Try to create a real reranker — skip test if model download fails
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
-            .join("engramdb")
-            .join("models");
-        let options = RerankInitOptions::default().with_cache_dir(cache_dir);
-        let reranker = match TextRerank::try_new(options) {
-            Ok(r) => r,
-            Err(_) => return, // Skip if reranker unavailable
+        let reranker = match try_reranker() {
+            Some(r) => r,
+            None => return,
         };
 
         let temp_dir = TempDir::new().unwrap();
@@ -1761,7 +1765,7 @@ mod tests {
                 .unwrap(),
             config,
         )
-        .with_reranker(Arc::new(Mutex::new(reranker)));
+        .with_reranker(reranker);
 
         let result_rerank = engine_rerank.retrieve(&query).await.unwrap();
 
@@ -1788,18 +1792,11 @@ mod tests {
     #[tokio::test]
     async fn test_search_with_real_reranker() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
-        use fastembed::{RerankInitOptions, TextRerank};
         use tempfile::TempDir;
 
-        // Try to create a real reranker — skip test if model download fails
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
-            .join("engramdb")
-            .join("models");
-        let options = RerankInitOptions::default().with_cache_dir(cache_dir);
-        let reranker = match TextRerank::try_new(options) {
-            Ok(r) => r,
-            Err(_) => return, // Skip if reranker unavailable
+        let reranker = match try_reranker() {
+            Some(r) => r,
+            None => return,
         };
 
         let temp_dir = TempDir::new().unwrap();
@@ -1822,8 +1819,7 @@ mod tests {
         memory.visibility = Visibility::Shared;
         store.create(&memory).await.unwrap();
 
-        let engine =
-            RetrievalEngine::new(store, config).with_reranker(Arc::new(Mutex::new(reranker)));
+        let engine = RetrievalEngine::new(store, config).with_reranker(reranker);
 
         let filters = SearchFilters::default();
         let results = engine.search("authentication", &filters).await.unwrap();
@@ -1845,17 +1841,11 @@ mod tests {
     #[tokio::test]
     async fn test_rerank_flips_retrieve_order_criticality_bias() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
-        use fastembed::{RerankInitOptions, TextRerank};
         use tempfile::TempDir;
 
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
-            .join("engramdb")
-            .join("models");
-        let options = RerankInitOptions::default().with_cache_dir(cache_dir);
-        let reranker = match TextRerank::try_new(options) {
-            Ok(r) => r,
-            Err(_) => return,
+        let reranker = match try_reranker() {
+            Some(r) => r,
+            None => return,
         };
 
         let temp_dir = TempDir::new().unwrap();
@@ -1916,8 +1906,7 @@ mod tests {
         let store2 = MemoryStore::open(temp_dir.path(), &InMemoryRegistry::new())
             .await
             .unwrap();
-        let engine_rerank =
-            RetrievalEngine::new(store2, config).with_reranker(Arc::new(Mutex::new(reranker)));
+        let engine_rerank = RetrievalEngine::new(store2, config).with_reranker(reranker);
 
         let result_rerank = engine_rerank.retrieve(&query).await.unwrap();
 
@@ -1957,17 +1946,11 @@ mod tests {
     #[tokio::test]
     async fn test_rerank_flips_search_order_keyword_bias() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
-        use fastembed::{RerankInitOptions, TextRerank};
         use tempfile::TempDir;
 
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
-            .join("engramdb")
-            .join("models");
-        let options = RerankInitOptions::default().with_cache_dir(cache_dir);
-        let reranker = match TextRerank::try_new(options) {
-            Ok(r) => r,
-            Err(_) => return,
+        let reranker = match try_reranker() {
+            Some(r) => r,
+            None => return,
         };
 
         let temp_dir = TempDir::new().unwrap();
@@ -2029,8 +2012,7 @@ mod tests {
         let store2 = MemoryStore::open(temp_dir.path(), &InMemoryRegistry::new())
             .await
             .unwrap();
-        let engine_rerank =
-            RetrievalEngine::new(store2, config).with_reranker(Arc::new(Mutex::new(reranker)));
+        let engine_rerank = RetrievalEngine::new(store2, config).with_reranker(reranker);
 
         let results_rerank = engine_rerank
             .search("database migration strategy", &filters)

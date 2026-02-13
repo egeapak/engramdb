@@ -1,0 +1,6 @@
+[test-groups.ml-models]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = "test(nli::onnx::tests::) | test(embeddings::onnx::tests::) | test(retrieval::engine::tests::test_rerank) | test(retrieval::engine::tests::test_search_with_real)"
+test-group = "ml-models"

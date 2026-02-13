@@ -139,35 +139,44 @@ impl EmbeddingProvider for OnnxProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::LazyLock;
+
+    /// Shared embedding provider across all tests to avoid loading the ONNX
+    /// model once per test (which causes OOM when parallel).
+    static SHARED_PROVIDER: LazyLock<Option<OnnxProvider>> = LazyLock::new(OnnxProvider::try_new);
+
+    fn try_provider() -> Option<&'static OnnxProvider> {
+        let provider = SHARED_PROVIDER.as_ref();
+        if provider.is_none() {
+            eprintln!("Skipping: embedding model not available");
+        }
+        provider
+    }
 
     #[test]
     fn test_provider_creation() {
-        // This test requires the model to be downloaded, so we use try_new.
-        // Gracefully skip if unavailable (e.g., model not cached, resource limits).
-        if let Some(provider) = OnnxProvider::try_new() {
+        if let Some(provider) = try_provider() {
             assert_eq!(provider.dimensions(), 384);
-        } else {
-            eprintln!("Skipping: embedding model not available");
         }
     }
 
     #[test]
     fn test_dimensions() {
-        if let Some(provider) = OnnxProvider::try_new() {
+        if let Some(provider) = try_provider() {
             assert_eq!(provider.dimensions(), 384);
         }
     }
 
     #[test]
     fn test_max_tokens() {
-        if let Some(provider) = OnnxProvider::try_new() {
+        if let Some(provider) = try_provider() {
             assert_eq!(provider.max_tokens(), 256);
         }
     }
 
     #[tokio::test]
     async fn test_embed_single() {
-        if let Some(provider) = OnnxProvider::try_new() {
+        if let Some(provider) = try_provider() {
             let result = provider.embed("Hello, world!").await;
             assert!(result.is_ok(), "Embedding should succeed");
 
@@ -181,7 +190,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_embed_batch() {
-        if let Some(provider) = OnnxProvider::try_new() {
+        if let Some(provider) = try_provider() {
             let texts = vec!["First text", "Second text", "Third text"];
             let result = provider.embed_batch(&texts).await;
             assert!(result.is_ok(), "Batch embedding should succeed");
@@ -197,19 +206,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_embed_empty_string() {
-        if let Some(provider) = OnnxProvider::try_new() {
+        if let Some(provider) = try_provider() {
             let result = provider.embed("").await;
             assert!(result.is_ok(), "Empty string embedding should succeed");
 
             let embedding = result.unwrap();
             assert_eq!(embedding.len(), 384);
-            // Should return a valid 384-dim vector (no panic/error)
         }
     }
 
     #[tokio::test]
     async fn test_embed_batch_empty_slice() {
-        if let Some(provider) = OnnxProvider::try_new() {
+        if let Some(provider) = try_provider() {
             let empty: Vec<&str> = vec![];
             let result = provider.embed_batch(&empty).await;
             assert!(result.is_ok(), "Empty batch should succeed");
@@ -221,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_embed_consistency() {
-        if let Some(provider) = OnnxProvider::try_new() {
+        if let Some(provider) = try_provider() {
             let text = "hello";
             let embedding1 = provider.embed(text).await.unwrap();
             let embedding2 = provider.embed(text).await.unwrap();
@@ -236,7 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_embed_batch_single_matches_embed() {
-        if let Some(provider) = OnnxProvider::try_new() {
+        if let Some(provider) = try_provider() {
             let text = "test text";
             let single_embedding = provider.embed(text).await.unwrap();
             let batch_embeddings = provider.embed_batch(&[text]).await.unwrap();

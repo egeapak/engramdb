@@ -240,6 +240,21 @@ impl NliProvider for OnnxNliProvider {
 mod tests {
     use super::*;
     use crate::nli::NliLabel;
+    use std::sync::LazyLock;
+
+    /// Shared NLI provider across all tests in this module to avoid loading
+    /// the ~400MB ONNX model once per test (which causes OOM when parallel).
+    static SHARED_PROVIDER: LazyLock<Option<OnnxNliProvider>> =
+        LazyLock::new(|| OnnxNliProvider::try_new(DEFAULT_MODEL_REPO));
+
+    /// Returns the shared provider, or None if unavailable (for graceful skip).
+    fn try_provider() -> Option<&'static OnnxNliProvider> {
+        let provider = SHARED_PROVIDER.as_ref();
+        if provider.is_none() {
+            eprintln!("Skipping: NLI model not available");
+        }
+        provider
+    }
 
     #[test]
     fn test_softmax() {
@@ -269,22 +284,14 @@ mod tests {
     #[test]
     fn test_provider_creation() {
         // This test requires model download; skip gracefully if unavailable
-        let provider = OnnxNliProvider::try_new(DEFAULT_MODEL_REPO);
-        if provider.is_none() {
-            eprintln!("Skipping: NLI model not available");
-            return;
-        }
-        assert!(provider.is_some());
+        let _ = try_provider();
     }
 
     #[tokio::test]
     async fn test_classify_contradiction() {
-        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+        let provider = match try_provider() {
             Some(p) => p,
-            None => {
-                eprintln!("Skipping: NLI model not available");
-                return;
-            }
+            None => return,
         };
 
         let result = provider
@@ -305,12 +312,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_classify_batch() {
-        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+        let provider = match try_provider() {
             Some(p) => p,
-            None => {
-                eprintln!("Skipping: NLI model not available");
-                return;
-            }
+            None => return,
         };
 
         let pairs = vec![
@@ -329,12 +333,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_softmax_sums_to_one() {
-        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+        let provider = match try_provider() {
             Some(p) => p,
-            None => {
-                eprintln!("Skipping: NLI model not available");
-                return;
-            }
+            None => return,
         };
 
         let result = provider
@@ -352,12 +353,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_label_entailment() {
-        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+        let provider = match try_provider() {
             Some(p) => p,
-            None => {
-                eprintln!("Skipping: NLI model not available");
-                return;
-            }
+            None => return,
         };
 
         let result = provider
@@ -383,12 +381,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_label_contradiction() {
-        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+        let provider = match try_provider() {
             Some(p) => p,
-            None => {
-                eprintln!("Skipping: NLI model not available");
-                return;
-            }
+            None => return,
         };
 
         let result = provider
@@ -414,12 +409,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_label_neutral() {
-        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+        let provider = match try_provider() {
             Some(p) => p,
-            None => {
-                eprintln!("Skipping: NLI model not available");
-                return;
-            }
+            None => return,
         };
 
         let result = provider
@@ -445,12 +437,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_entailment_is_asymmetric() {
-        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+        let provider = match try_provider() {
             Some(p) => p,
-            None => {
-                eprintln!("Skipping: NLI model not available");
-                return;
-            }
+            None => return,
         };
 
         // Forward: "A dog is running" entails "An animal is moving"
@@ -486,12 +475,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_identical_sentences_entail() {
-        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+        let provider = match try_provider() {
             Some(p) => p,
-            None => {
-                eprintln!("Skipping: NLI model not available");
-                return;
-            }
+            None => return,
         };
 
         let result = provider
@@ -520,12 +506,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_antonym_contradiction() {
-        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+        let provider = match try_provider() {
             Some(p) => p,
-            None => {
-                eprintln!("Skipping: NLI model not available");
-                return;
-            }
+            None => return,
         };
 
         let result = provider
@@ -551,12 +534,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_matches_individual() {
-        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+        let provider = match try_provider() {
             Some(p) => p,
-            None => {
-                eprintln!("Skipping: NLI model not available");
-                return;
-            }
+            None => return,
         };
 
         let pairs: Vec<(&str, &str)> = vec![
@@ -607,12 +587,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_empty() {
-        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+        let provider = match try_provider() {
             Some(p) => p,
-            None => {
-                eprintln!("Skipping: NLI model not available");
-                return;
-            }
+            None => return,
         };
 
         let pairs: Vec<(&str, &str)> = vec![];
@@ -626,12 +603,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_strings_do_not_panic() {
-        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+        let provider = match try_provider() {
             Some(p) => p,
-            None => {
-                eprintln!("Skipping: NLI model not available");
-                return;
-            }
+            None => return,
         };
 
         // Empty premise and hypothesis should not panic
