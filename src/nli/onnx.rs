@@ -45,8 +45,8 @@ impl OnnxNliProvider {
     /// Create a new ONNX NLI provider with the specified model repository.
     ///
     /// Downloads the model and tokenizer from HuggingFace Hub if not cached.
-    /// The files are cached in the default HuggingFace cache directory
-    /// (`~/.cache/huggingface/hub/`).
+    /// The files are cached in the unified EngramDB model cache directory
+    /// (`<cache_dir>/engramdb/models/`).
     pub fn new(model_repo: &str) -> Result<Self> {
         let (model_path, tokenizer_path) = download_model_files(model_repo)?;
 
@@ -81,10 +81,19 @@ impl OnnxNliProvider {
 
 /// Download model and tokenizer files from HuggingFace Hub.
 ///
-/// Returns `(model_path, tokenizer_path)`. Files are cached and reused
+/// Returns `(model_path, tokenizer_path)`. Files are cached in the unified
+/// EngramDB model cache directory (`<cache_dir>/engramdb/models/`) and reused
 /// on subsequent calls.
 fn download_model_files(model_repo: &str) -> Result<(PathBuf, PathBuf)> {
-    let api = hf_hub::api::sync::Api::new().context("Failed to initialize HuggingFace API")?;
+    let cache_dir = dirs::cache_dir()
+        .context("Could not determine cache directory")?
+        .join("engramdb")
+        .join("models");
+
+    let api = hf_hub::api::sync::ApiBuilder::new()
+        .with_cache_dir(cache_dir)
+        .build()
+        .context("Failed to initialize HuggingFace API")?;
     let repo = api.model(model_repo.to_string());
 
     let model_path = repo
@@ -124,11 +133,20 @@ fn classify_one(
     let type_tensor =
         ort::value::TensorRef::from_array_view(([1usize, length], token_type_ids.as_slice()))?;
 
-    let outputs = session.run(ort::inputs![
-        "input_ids" => ids_tensor,
-        "attention_mask" => mask_tensor,
-        "token_type_ids" => type_tensor
-    ])?;
+    let mut inputs: Vec<(std::borrow::Cow<str>, ort::session::SessionInputValue)> = vec![
+        ("input_ids".into(), ids_tensor.into()),
+        ("attention_mask".into(), mask_tensor.into()),
+    ];
+
+    let has_token_type_ids = session
+        .inputs()
+        .iter()
+        .any(|i| i.name() == "token_type_ids");
+    if has_token_type_ids {
+        inputs.push(("token_type_ids".into(), type_tensor.into()));
+    }
+
+    let outputs = session.run(inputs)?;
 
     let logits = outputs[0]
         .try_extract_array::<f32>()?
@@ -218,6 +236,7 @@ impl NliProvider for OnnxNliProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nli::NliLabel;
 
     #[test]
     fn test_softmax() {
@@ -282,50 +301,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_classify_entailment() {
-        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
-            Some(p) => p,
-            None => {
-                eprintln!("Skipping: NLI model not available");
-                return;
-            }
-        };
-
-        let result = provider
-            .classify("A person is eating pizza", "A person is having a meal")
-            .await
-            .unwrap();
-
-        assert!(
-            result.entailment > 0.3,
-            "Expected high entailment score, got {}",
-            result.entailment
-        );
-    }
-
-    #[tokio::test]
-    async fn test_classify_neutral() {
-        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
-            Some(p) => p,
-            None => {
-                eprintln!("Skipping: NLI model not available");
-                return;
-            }
-        };
-
-        let result = provider
-            .classify("A cat sits on a mat", "The weather is sunny today")
-            .await
-            .unwrap();
-
-        assert!(
-            result.neutral > 0.3,
-            "Expected high neutral score, got {}",
-            result.neutral
-        );
-    }
-
-    #[tokio::test]
     async fn test_classify_batch() {
         let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
             Some(p) => p,
@@ -368,6 +343,309 @@ mod tests {
         assert!(
             (sum - 1.0).abs() < 1e-4,
             "Probabilities should sum to 1.0, got {}",
+            sum
+        );
+    }
+
+    #[tokio::test]
+    async fn test_label_entailment() {
+        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping: NLI model not available");
+                return;
+            }
+        };
+
+        let result = provider
+            .classify("A person is eating pizza", "A person is having a meal")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.label,
+            NliLabel::Entailment,
+            "Expected Entailment label, got {:?} (e={}, n={}, c={})",
+            result.label,
+            result.entailment,
+            result.neutral,
+            result.contradiction
+        );
+        assert!(
+            result.entailment > 0.5,
+            "Expected entailment > 0.5, got {}",
+            result.entailment
+        );
+    }
+
+    #[tokio::test]
+    async fn test_label_contradiction() {
+        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping: NLI model not available");
+                return;
+            }
+        };
+
+        let result = provider
+            .classify("The sky is blue", "The sky is not blue")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.label,
+            NliLabel::Contradiction,
+            "Expected Contradiction label, got {:?} (e={}, n={}, c={})",
+            result.label,
+            result.entailment,
+            result.neutral,
+            result.contradiction
+        );
+        assert!(
+            result.contradiction > 0.5,
+            "Expected contradiction > 0.5, got {}",
+            result.contradiction
+        );
+    }
+
+    #[tokio::test]
+    async fn test_label_neutral() {
+        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping: NLI model not available");
+                return;
+            }
+        };
+
+        let result = provider
+            .classify("A cat sits on a mat", "The weather is sunny today")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.label,
+            NliLabel::Neutral,
+            "Expected Neutral label, got {:?} (e={}, n={}, c={})",
+            result.label,
+            result.entailment,
+            result.neutral,
+            result.contradiction
+        );
+        assert!(
+            result.neutral > 0.5,
+            "Expected neutral > 0.5, got {}",
+            result.neutral
+        );
+    }
+
+    #[tokio::test]
+    async fn test_entailment_is_asymmetric() {
+        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping: NLI model not available");
+                return;
+            }
+        };
+
+        // Forward: "A dog is running" entails "An animal is moving"
+        let forward = provider
+            .classify("A dog is running", "An animal is moving")
+            .await
+            .unwrap();
+        assert_eq!(
+            forward.label,
+            NliLabel::Entailment,
+            "Forward should be Entailment, got {:?} (e={}, n={}, c={})",
+            forward.label,
+            forward.entailment,
+            forward.neutral,
+            forward.contradiction
+        );
+
+        // Reverse: "An animal is moving" does NOT entail "A dog is running"
+        let reverse = provider
+            .classify("An animal is moving", "A dog is running")
+            .await
+            .unwrap();
+        assert_ne!(
+            reverse.label,
+            NliLabel::Entailment,
+            "Reverse should NOT be Entailment, got {:?} (e={}, n={}, c={})",
+            reverse.label,
+            reverse.entailment,
+            reverse.neutral,
+            reverse.contradiction
+        );
+    }
+
+    #[tokio::test]
+    async fn test_identical_sentences_entail() {
+        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping: NLI model not available");
+                return;
+            }
+        };
+
+        let result = provider
+            .classify(
+                "The server crashed at midnight",
+                "The server crashed at midnight",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.label,
+            NliLabel::Entailment,
+            "Identical sentences should be Entailment, got {:?} (e={}, n={}, c={})",
+            result.label,
+            result.entailment,
+            result.neutral,
+            result.contradiction
+        );
+        assert!(
+            result.entailment > 0.8,
+            "Identical sentences should have entailment > 0.8, got {}",
+            result.entailment
+        );
+    }
+
+    #[tokio::test]
+    async fn test_antonym_contradiction() {
+        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping: NLI model not available");
+                return;
+            }
+        };
+
+        let result = provider
+            .classify("The restaurant is open", "The restaurant is closed")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.label,
+            NliLabel::Contradiction,
+            "Antonym pair should be Contradiction, got {:?} (e={}, n={}, c={})",
+            result.label,
+            result.entailment,
+            result.neutral,
+            result.contradiction
+        );
+        assert!(
+            result.contradiction > 0.5,
+            "Expected contradiction > 0.5 for antonym pair, got {}",
+            result.contradiction
+        );
+    }
+
+    #[tokio::test]
+    async fn test_batch_matches_individual() {
+        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping: NLI model not available");
+                return;
+            }
+        };
+
+        let pairs: Vec<(&str, &str)> = vec![
+            ("A person is eating pizza", "A person is having a meal"),
+            ("The sky is blue", "The sky is not blue"),
+            ("A cat sits on a mat", "The weather is sunny today"),
+        ];
+
+        // Classify individually
+        let mut individual_results = Vec::new();
+        for (premise, hypothesis) in &pairs {
+            let result = provider.classify(premise, hypothesis).await.unwrap();
+            individual_results.push(result);
+        }
+
+        // Classify as batch
+        let batch_results = provider.classify_batch(&pairs).await.unwrap();
+
+        for (i, (ind, batch)) in individual_results.iter().zip(&batch_results).enumerate() {
+            assert_eq!(
+                ind.label, batch.label,
+                "Pair {}: individual label {:?} != batch label {:?}",
+                i, ind.label, batch.label
+            );
+            assert!(
+                (ind.entailment - batch.entailment).abs() < 1e-6,
+                "Pair {}: entailment mismatch: {} vs {}",
+                i,
+                ind.entailment,
+                batch.entailment
+            );
+            assert!(
+                (ind.neutral - batch.neutral).abs() < 1e-6,
+                "Pair {}: neutral mismatch: {} vs {}",
+                i,
+                ind.neutral,
+                batch.neutral
+            );
+            assert!(
+                (ind.contradiction - batch.contradiction).abs() < 1e-6,
+                "Pair {}: contradiction mismatch: {} vs {}",
+                i,
+                ind.contradiction,
+                batch.contradiction
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_empty() {
+        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping: NLI model not available");
+                return;
+            }
+        };
+
+        let pairs: Vec<(&str, &str)> = vec![];
+        let results = provider.classify_batch(&pairs).await.unwrap();
+        assert!(
+            results.is_empty(),
+            "Empty batch should return empty results, got {} results",
+            results.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_empty_strings_do_not_panic() {
+        let provider = match OnnxNliProvider::try_new(DEFAULT_MODEL_REPO) {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping: NLI model not available");
+                return;
+            }
+        };
+
+        // Empty premise and hypothesis should not panic
+        let result = provider.classify("", "").await.unwrap();
+        let sum = result.entailment + result.neutral + result.contradiction;
+        assert!(
+            (sum - 1.0).abs() < 1e-4,
+            "Probabilities should still sum to 1.0, got {}",
+            sum
+        );
+
+        // One empty, one non-empty
+        let result = provider.classify("", "A person is eating").await.unwrap();
+        let sum = result.entailment + result.neutral + result.contradiction;
+        assert!(
+            (sum - 1.0).abs() < 1e-4,
+            "Probabilities should still sum to 1.0, got {}",
             sum
         );
     }
