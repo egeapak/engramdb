@@ -386,6 +386,9 @@ pub enum Command {
     /// Show statistics
     Stats,
 
+    /// Check store health (stale entries, orphaned files)
+    Doctor,
+
     /// Manage registered EngramDB projects
     Projects {
         #[command(subcommand)]

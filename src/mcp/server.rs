@@ -1,6 +1,6 @@
 //! EngramDB MCP server implementation.
 //!
-//! Defines the server struct, all MCP tools (14), resources (2), and prompts (2).
+//! Defines the server struct, all MCP tools (16), resources (2), and prompts (2).
 //! Tools delegate to the `ops` layer; the server opens a fresh `MemoryStore`
 //! per request so it always sees the latest on-disk state.
 
@@ -1065,6 +1065,30 @@ impl EngramDbServer {
             "total": output.len()
         }))
         .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Check store health. Run once at session start to detect stale index entries or orphaned files."
+    )]
+    async fn memory_doctor(&self) -> Result<String, String> {
+        let store = self.open_store().await?;
+        let result = ops::doctor(&store).await.map_err(|e| e.to_string())?;
+
+        let mut response = serde_json::json!({
+            "healthy": result.healthy,
+            "indexed": result.indexed,
+            "on_disk": result.on_disk,
+        });
+        if !result.stale_entries.is_empty() {
+            response["stale_entries"] = serde_json::json!(result.stale_entries);
+        }
+        if !result.orphaned_files.is_empty() {
+            response["orphaned_files"] = serde_json::json!(result.orphaned_files);
+        }
+        if !result.healthy {
+            response["fix"] = serde_json::json!("Run memory_reindex to repair.");
+        }
+        serde_json::to_string(&response).map_err(|e| e.to_string())
     }
 }
 

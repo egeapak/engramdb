@@ -8,6 +8,7 @@ pub mod challenge;
 pub mod compress;
 pub mod create;
 pub mod delete;
+pub mod doctor;
 pub mod gc;
 pub mod get;
 pub mod list;
@@ -28,6 +29,7 @@ pub use compress::{
 };
 pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
 pub use delete::delete_memory;
+pub use doctor::{doctor, DoctorResult};
 pub use gc::{gc_memories, GcResult};
 pub use get::get_memory;
 pub use list::{list_memories, parse_sort_field, ListParams, SortField};
