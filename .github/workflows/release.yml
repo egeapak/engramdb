@@ -10,14 +10,7 @@ permissions:
 
 jobs:
   build:
-    strategy:
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            runner: macos-15
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -26,52 +19,33 @@ jobs:
         with:
           path: |
             ~/Library/Caches/Homebrew
-            /usr/local/Cellar/protobuf
             /opt/homebrew/Cellar/protobuf
-          key: brew-protobuf-${{ matrix.runner }}
+          key: brew-protobuf-macos-15
 
       - name: Install protobuf compiler
         run: brew install protobuf
 
-      - name: Install ONNX Runtime build deps (Intel only)
-        if: matrix.target == 'x86_64-apple-darwin'
-        run: brew install cmake
-
       - name: Install Rust toolchain
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup target add ${{ matrix.target }}
-
-      - name: Cache ONNX Runtime build (Intel only)
-        if: matrix.target == 'x86_64-apple-darwin'
-        uses: actions/cache@v4
-        with:
-          path: target/ort_build
-          key: ort-build-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ort-build-${{ matrix.target }}-
+        run: rustup toolchain install stable --profile minimal
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
-        env:
-          ORT_STRATEGY: ${{ matrix.target == 'x86_64-apple-darwin' && 'compile' || '' }}
+        run: cargo build --release
 
       - name: Package binary
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../engramdb-${{ matrix.target }}.tar.gz engramdb
-          cd ../../..
-          shasum -a 256 engramdb-${{ matrix.target }}.tar.gz > engramdb-${{ matrix.target }}.tar.gz.sha256
+          cd target/release
+          tar czf ../../engramdb-aarch64-apple-darwin.tar.gz engramdb
+          cd ../..
+          shasum -a 256 engramdb-aarch64-apple-darwin.tar.gz > engramdb-aarch64-apple-darwin.tar.gz.sha256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: engramdb-${{ matrix.target }}
+          name: engramdb-aarch64-apple-darwin
           path: |
-            engramdb-${{ matrix.target }}.tar.gz
-            engramdb-${{ matrix.target }}.tar.gz.sha256
+            engramdb-aarch64-apple-darwin.tar.gz
+            engramdb-aarch64-apple-darwin.tar.gz.sha256
 
   release:
     needs: build
