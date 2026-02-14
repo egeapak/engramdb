@@ -33,10 +33,22 @@ jobs:
       - name: Install protobuf compiler
         run: brew install protobuf
 
+      - name: Install ONNX Runtime build deps (Intel only)
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: brew install cmake
+
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
           rustup target add ${{ matrix.target }}
+
+      - name: Cache ONNX Runtime build (Intel only)
+        if: matrix.target == 'x86_64-apple-darwin'
+        uses: actions/cache@v4
+        with:
+          path: target/ort_build
+          key: ort-build-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ort-build-${{ matrix.target }}-
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -44,6 +56,8 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
+        env:
+          ORT_STRATEGY: ${{ matrix.target == 'x86_64-apple-darwin' && 'compile' || '' }}
 
       - name: Package binary
         run: |
