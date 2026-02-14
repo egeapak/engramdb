@@ -273,7 +273,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             commands::run_delete(&dir, &registry, &id, force, &formatter).await
         }
         Command::Stats => commands::run_stats(&dir, &registry, backend, &formatter).await,
-        Command::Doctor => commands::run_doctor(&dir, &registry, &formatter).await,
+        Command::Doctor { command } => {
+            commands::run_doctor(&dir, &registry, command, &formatter).await
+        }
         Command::Challenge {
             id,
             evidence,

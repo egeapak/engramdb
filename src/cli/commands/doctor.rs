@@ -1,13 +1,30 @@
 //! Doctor (health check) command.
 
+use crate::cli::app::DoctorCommand;
 use crate::cli::output::OutputFormatter;
-use crate::ops::doctor;
+use crate::ops::{doctor, doctor_environment};
 use crate::storage::{MemoryStore, RegistryBackend};
 use anyhow::Result;
 use std::path::Path;
 
-/// Run a store health check.
+/// Run doctor with optional subcommand dispatch.
+///
+/// - `None` → full environment diagnostics
+/// - `Some(DoctorCommand::Store)` → fast store-only health check
 pub async fn run_doctor(
+    dir: &Path,
+    registry: &dyn RegistryBackend,
+    command: Option<DoctorCommand>,
+    formatter: &OutputFormatter,
+) -> Result<()> {
+    match command {
+        Some(DoctorCommand::Store) => run_store_check(dir, registry, formatter).await,
+        None => run_environment_check(dir, registry, formatter).await,
+    }
+}
+
+/// Fast store-only health check (what MCP calls on session start).
+async fn run_store_check(
     dir: &Path,
     registry: &dyn RegistryBackend,
     formatter: &OutputFormatter,
@@ -45,6 +62,18 @@ pub async fn run_doctor(
     Ok(())
 }
 
+/// Full environment diagnostics with actionable suggestions.
+async fn run_environment_check(
+    dir: &Path,
+    registry: &dyn RegistryBackend,
+    formatter: &OutputFormatter,
+) -> Result<()> {
+    let store = MemoryStore::open(dir, registry).await.ok();
+    let result = doctor_environment(dir, store.as_ref()).await;
+    formatter.print_environment_doctor(&result);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54,7 +83,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
-    async fn test_doctor_healthy() {
+    async fn test_doctor_store_healthy() {
         let temp_dir = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
@@ -63,12 +92,18 @@ mod tests {
         store.create(&mem).await.unwrap();
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_doctor(temp_dir.path(), &registry, &formatter).await;
+        let result = run_doctor(
+            temp_dir.path(),
+            &registry,
+            Some(DoctorCommand::Store),
+            &formatter,
+        )
+        .await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
-    async fn test_doctor_with_orphan() {
+    async fn test_doctor_store_with_orphan() {
         let temp_dir = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();
         MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
@@ -84,7 +119,34 @@ mod tests {
             .unwrap();
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_doctor(temp_dir.path(), &registry, &formatter).await;
+        let result = run_doctor(
+            temp_dir.path(),
+            &registry,
+            Some(DoctorCommand::Store),
+            &formatter,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_doctor_environment_no_store() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+
+        let formatter = OutputFormatter::new(None, false, true);
+        let result = run_doctor(temp_dir.path(), &registry, None, &formatter).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_doctor_environment_with_store() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        let formatter = OutputFormatter::new(None, false, true);
+        let result = run_doctor(temp_dir.path(), &registry, None, &formatter).await;
         assert!(result.is_ok());
     }
 }

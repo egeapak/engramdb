@@ -1068,7 +1068,7 @@ impl EngramDbServer {
     }
 
     #[tool(
-        description = "Check store health. Run once at session start to detect stale index entries or orphaned files."
+        description = "Check store health (index vs disk consistency). Fast, project-scoped check. For full environment diagnostics, use the CLI: `engramdb doctor`."
     )]
     async fn memory_doctor(&self) -> Result<String, String> {
         let store = self.open_store().await?;

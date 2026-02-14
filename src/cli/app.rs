@@ -13,6 +13,13 @@ pub enum HookCommand {
     PreToolUse,
 }
 
+/// Subcommands for `engramdb doctor`.
+#[derive(Subcommand)]
+pub enum DoctorCommand {
+    /// Fast store health check (index consistency only)
+    Store,
+}
+
 /// Subcommands for `engramdb projects`.
 #[derive(Subcommand)]
 pub enum ProjectsCommand {
@@ -393,8 +400,11 @@ pub enum Command {
     /// Show statistics
     Stats,
 
-    /// Check store health (stale entries, orphaned files)
-    Doctor,
+    /// Check environment and store health
+    Doctor {
+        #[command(subcommand)]
+        command: Option<DoctorCommand>,
+    },
 
     /// Manage registered EngramDB projects
     Projects {

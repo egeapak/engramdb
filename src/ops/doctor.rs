@@ -6,6 +6,7 @@ use std::path::Path;
 use tokio::fs as async_fs;
 
 /// Result of a doctor/health check operation.
+#[derive(Debug, serde::Serialize)]
 pub struct DoctorResult {
     /// Total memories in the index.
     pub indexed: usize,
@@ -97,6 +98,192 @@ async fn collect_orphans(
                 }
             }
         }
+    }
+}
+
+/// A single environment check result.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EnvironmentCheck {
+    pub name: String,
+    pub passed: bool,
+    pub message: String,
+    pub suggestion: Option<String>,
+}
+
+/// Full environment doctor result including all checks.
+#[derive(Debug, serde::Serialize)]
+pub struct EnvironmentDoctorResult {
+    pub checks: Vec<EnvironmentCheck>,
+    pub all_passed: bool,
+    pub store_check: Option<DoctorResult>,
+}
+
+/// Run a full environment diagnostic.
+///
+/// Checks binary availability, Claude Code plugin installation, store initialization,
+/// embedding model cache, and (if a store exists) store health.
+pub async fn doctor_environment(
+    dir: &Path,
+    store: Option<&MemoryStore>,
+) -> EnvironmentDoctorResult {
+    let mut checks = Vec::new();
+
+    // 1. Binary on PATH
+    checks.push(check_binary_on_path());
+
+    // 2. Claude Code plugin installed
+    checks.push(check_claude_plugin());
+
+    // 3. Store initialized
+    let store_initialized = dir.join(".engramdb").exists();
+    checks.push(EnvironmentCheck {
+        name: "Store initialized".to_string(),
+        passed: store_initialized,
+        message: if store_initialized {
+            ".engramdb/ exists".to_string()
+        } else {
+            "not found".to_string()
+        },
+        suggestion: if store_initialized {
+            None
+        } else {
+            Some("Run `engramdb init` to initialize a store".to_string())
+        },
+    });
+
+    // 4. Embedding model cached
+    checks.push(check_embedding_model_cached(dir).await);
+
+    // 5. Store health (only if store is available)
+    let store_check = if let Some(s) = store {
+        match doctor(s).await {
+            Ok(result) => {
+                checks.push(EnvironmentCheck {
+                    name: "Store health".to_string(),
+                    passed: result.healthy,
+                    message: format!(
+                        "{} memories indexed, {} on disk",
+                        result.indexed, result.on_disk
+                    ),
+                    suggestion: if result.healthy {
+                        None
+                    } else {
+                        Some("Run `engramdb reindex` to repair".to_string())
+                    },
+                });
+                Some(result)
+            }
+            Err(e) => {
+                checks.push(EnvironmentCheck {
+                    name: "Store health".to_string(),
+                    passed: false,
+                    message: format!("check failed: {}", e),
+                    suggestion: Some("Run `engramdb reindex` to repair".to_string()),
+                });
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let all_passed = checks.iter().all(|c| c.passed);
+
+    EnvironmentDoctorResult {
+        checks,
+        all_passed,
+        store_check,
+    }
+}
+
+/// Check if `engramdb` binary is on PATH.
+fn check_binary_on_path() -> EnvironmentCheck {
+    match std::process::Command::new("engramdb")
+        .arg("--version")
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            EnvironmentCheck {
+                name: "Binary on PATH".to_string(),
+                passed: true,
+                message: version,
+                suggestion: None,
+            }
+        }
+        _ => EnvironmentCheck {
+            name: "Binary on PATH".to_string(),
+            passed: false,
+            message: "not found".to_string(),
+            suggestion: Some("Install with `brew install engramdb`".to_string()),
+        },
+    }
+}
+
+/// Check if the Claude Code plugin is installed.
+fn check_claude_plugin() -> EnvironmentCheck {
+    let plugin_file = dirs::home_dir().map(|h| {
+        h.join(".claude")
+            .join("plugins")
+            .join("installed_plugins.json")
+    });
+
+    let found = plugin_file
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|contents| contents.contains("engramdb"))
+        .unwrap_or(false);
+
+    EnvironmentCheck {
+        name: "Claude Code plugin".to_string(),
+        passed: found,
+        message: if found {
+            "installed".to_string()
+        } else {
+            "not found".to_string()
+        },
+        suggestion: if found {
+            None
+        } else {
+            Some("Install with `claude plugin add https://github.com/egeapak/engramdb`".to_string())
+        },
+    }
+}
+
+/// Check if the embedding model is cached on disk.
+async fn check_embedding_model_cached(dir: &Path) -> EnvironmentCheck {
+    let cache_dir = dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
+        .join("engramdb")
+        .join("models");
+
+    // Try to read the configured model name from the project config
+    let model_name = if let Ok(config) =
+        crate::storage::config::load_config(&dir.join(".engramdb").join("config.toml")).await
+    {
+        config.embeddings.provider
+    } else {
+        "all-MiniLM-L6-v2".to_string()
+    };
+
+    // Check if the cache dir exists and has at least one subdirectory (model files)
+    let has_models = cache_dir.exists()
+        && std::fs::read_dir(&cache_dir)
+            .map(|entries| entries.filter_map(|e| e.ok()).count() > 0)
+            .unwrap_or(false);
+
+    EnvironmentCheck {
+        name: "Embedding model".to_string(),
+        passed: has_models,
+        message: if has_models {
+            format!("{} cached", model_name)
+        } else {
+            "not cached".to_string()
+        },
+        suggestion: if has_models {
+            None
+        } else {
+            Some("Run `engramdb init` to download the embedding model".to_string())
+        },
     }
 }
 

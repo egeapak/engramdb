@@ -119,6 +119,77 @@ impl OutputFormatter {
         }
     }
 
+    /// Print a hint/suggestion message (with blue color in pretty mode).
+    pub fn print_hint(&self, message: &str) {
+        match self.format {
+            OutputFormat::Pretty => {
+                if self.use_color {
+                    println!(
+                        "  {} {}",
+                        "ℹ".if_supports_color(Stream::Stdout, |text| text.blue()),
+                        message.if_supports_color(Stream::Stdout, |text| text.blue())
+                    );
+                } else {
+                    println!("  ℹ {}", message);
+                }
+            }
+            OutputFormat::Plain => {
+                println!("  Hint: {}", message);
+            }
+            OutputFormat::Json => {} // hints are embedded in structured output
+        }
+    }
+
+    /// Print full environment doctor results.
+    pub fn print_environment_doctor(&self, result: &crate::ops::EnvironmentDoctorResult) {
+        match self.format {
+            OutputFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(result).unwrap());
+            }
+            OutputFormat::Pretty | OutputFormat::Plain => {
+                let header = "EngramDB Environment Check";
+                if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                    println!(
+                        "\n{}",
+                        header.if_supports_color(Stream::Stdout, |text| text.bold())
+                    );
+                } else {
+                    println!("\n{}", header);
+                }
+                println!();
+
+                for check in &result.checks {
+                    if check.passed {
+                        if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                            println!(
+                                "{} {}: {}",
+                                "✓".if_supports_color(Stream::Stdout, |text| text.green()),
+                                check.name,
+                                check.message
+                            );
+                        } else {
+                            println!("✓ {}: {}", check.name, check.message);
+                        }
+                    } else {
+                        if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                            println!(
+                                "{} {}: {}",
+                                "✗".if_supports_color(Stream::Stdout, |text| text.red()),
+                                check.name,
+                                check.message
+                            );
+                        } else {
+                            println!("✗ {}: {}", check.name, check.message);
+                        }
+                        if let Some(ref suggestion) = check.suggestion {
+                            self.print_hint(suggestion);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Print a warning message (with yellow color in pretty mode).
     pub fn print_warning(&self, message: &str) {
         match self.format {
