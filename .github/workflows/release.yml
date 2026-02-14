@@ -8,8 +8,11 @@ on:
 permissions:
   contents: write
 
+env:
+  ORT_VERSION: "1.23.2"
+
 jobs:
-  build:
+  build-arm:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -47,8 +50,59 @@ jobs:
             engramdb-aarch64-apple-darwin.tar.gz
             engramdb-aarch64-apple-darwin.tar.gz.sha256
 
+  build-intel:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Homebrew packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            /usr/local/Cellar/protobuf
+          key: brew-protobuf-macos-15-intel
+
+      - name: Install protobuf compiler
+        run: brew install protobuf
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Download ONNX Runtime
+        run: |
+          curl -L -o /tmp/onnxruntime.tgz \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-x86_64-${ORT_VERSION}.tgz"
+          tar xzf /tmp/onnxruntime.tgz -C /tmp
+
+      - name: Build release binary
+        env:
+          ORT_LIB_LOCATION: /tmp/onnxruntime-osx-x86_64-1.23.2/lib
+          ORT_PREFER_DYNAMIC_LINK: "1"
+          RUSTFLAGS: "-C link-arg=-Wl,-rpath,@executable_path"
+        run: cargo build --release
+
+      - name: Package binary with ONNX Runtime
+        run: |
+          mkdir -p staging
+          cp target/release/engramdb staging/
+          cp /tmp/onnxruntime-osx-x86_64-${ORT_VERSION}/lib/libonnxruntime.${ORT_VERSION}.dylib staging/
+          cd staging
+          tar czf ../engramdb-x86_64-apple-darwin.tar.gz engramdb libonnxruntime.${ORT_VERSION}.dylib
+          cd ..
+          shasum -a 256 engramdb-x86_64-apple-darwin.tar.gz > engramdb-x86_64-apple-darwin.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engramdb-x86_64-apple-darwin
+          path: |
+            engramdb-x86_64-apple-darwin.tar.gz
+            engramdb-x86_64-apple-darwin.tar.gz.sha256
+
   release:
-    needs: build
+    needs: [build-arm, build-intel]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
