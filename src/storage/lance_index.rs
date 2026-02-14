@@ -660,6 +660,7 @@ fn parse_provenance_source(s: &str) -> Result<ProvenanceSource> {
         "human" => Ok(ProvenanceSource::Human),
         "agent" => Ok(ProvenanceSource::Agent),
         "inferred" => Ok(ProvenanceSource::Inferred),
+        "imported" => Ok(ProvenanceSource::Imported),
         _ => anyhow::bail!("Unknown provenance source: {}", s),
     }
 }

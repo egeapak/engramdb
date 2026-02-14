@@ -514,12 +514,7 @@ mod tests {
         for i in 0..count {
             let summary = format!("Summary {}", i);
             let content = format!("Content {}", i);
-            let mem = Memory::new(
-                MemoryType::Context,
-                &summary,
-                &content,
-                Provenance::human(),
-            );
+            let mem = Memory::new(MemoryType::Context, &summary, &content, Provenance::human());
             store.create(&mem).await.unwrap();
         }
 
