@@ -149,4 +149,93 @@ mod tests {
         let result = run_doctor(temp_dir.path(), &registry, None, &formatter).await;
         assert!(result.is_ok());
     }
+
+    #[tokio::test]
+    async fn test_run_doctor_store_subcommand_fails_no_store() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        // No init — store does not exist
+
+        let formatter = OutputFormatter::new(None, false, true);
+        let result = run_doctor(
+            temp_dir.path(),
+            &registry,
+            Some(DoctorCommand::Store),
+            &formatter,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_doctor_environment_succeeds_no_store() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        // No init — but environment check should still succeed gracefully
+
+        let formatter = OutputFormatter::new(None, false, true);
+        let result = run_doctor(temp_dir.path(), &registry, None, &formatter).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_doctor_store_healthy_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        let mem = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
+        store.create(&mem).await.unwrap();
+
+        // JSON formatter — exercises the json output path
+        let formatter = OutputFormatter::new(None, true, true);
+        let result = run_doctor(
+            temp_dir.path(),
+            &registry,
+            Some(DoctorCommand::Store),
+            &formatter,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_doctor_store_with_stale_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        let mem = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
+        let id = store.create(&mem).await.unwrap();
+
+        // Delete the file behind the store's back to create a stale entry
+        let file_path = temp_dir
+            .path()
+            .join(".engramdb")
+            .join("memories")
+            .join(format!("{}.md", id));
+        tokio::fs::remove_file(&file_path).await.unwrap();
+
+        let formatter = OutputFormatter::new(None, false, true);
+        let result = run_doctor(
+            temp_dir.path(),
+            &registry,
+            Some(DoctorCommand::Store),
+            &formatter,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_doctor_environment_with_store_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        // JSON formatter + environment (None subcommand)
+        let formatter = OutputFormatter::new(None, true, true);
+        let result = run_doctor(temp_dir.path(), &registry, None, &formatter).await;
+        assert!(result.is_ok());
+    }
 }

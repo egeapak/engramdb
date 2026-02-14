@@ -1463,6 +1463,29 @@ mod tests {
         }
     }
 
+    // Doctor command parsing
+    #[test]
+    fn test_doctor_no_subcommand() {
+        let cli = Cli::try_parse_from(["engramdb", "doctor"]).unwrap();
+        match cli.command {
+            Command::Doctor { command } => {
+                assert!(command.is_none());
+            }
+            _ => panic!("Expected Doctor command"),
+        }
+    }
+
+    #[test]
+    fn test_doctor_store_subcommand() {
+        let cli = Cli::try_parse_from(["engramdb", "doctor", "store"]).unwrap();
+        match cli.command {
+            Command::Doctor {
+                command: Some(DoctorCommand::Store),
+            } => {} // expected
+            _ => panic!("Expected Doctor Store subcommand"),
+        }
+    }
+
     #[test]
     fn test_update_all_decay_params_combined() {
         let cli = Cli::try_parse_from([
