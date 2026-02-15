@@ -1,5 +1,7 @@
 mod helpers;
 
+use std::time::Duration;
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use engramdb::retrieval::{
@@ -187,7 +189,7 @@ fn scoring_benchmarks(c: &mut Criterion) {
 
     // --- Batch scoring ---
 
-    for count in [100, 500] {
+    for count in [100, 200] {
         group.bench_with_input(
             BenchmarkId::new("batch_scoring", count),
             &count,
@@ -215,6 +217,9 @@ fn scoring_benchmarks(c: &mut Criterion) {
 
 fn storage_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("storage");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
     let rt = runtime();
 
     // --- Store open (cold open) ---
@@ -254,7 +259,7 @@ fn storage_benchmarks(c: &mut Criterion) {
 
     // --- Store list ---
 
-    for count in [10, 100, 500] {
+    for count in [10, 100] {
         group.bench_with_input(
             BenchmarkId::new("store_list", count),
             &count,
@@ -297,11 +302,14 @@ fn storage_benchmarks(c: &mut Criterion) {
 
 fn retrieval_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("retrieval");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
     let rt = runtime();
 
     // --- Retrieve scope_only ---
 
-    for count in [10, 100, 500] {
+    for count in [10, 100] {
         group.bench_with_input(
             BenchmarkId::new("retrieve_scope_only", count),
             &count,
@@ -330,7 +338,7 @@ fn retrieval_benchmarks(c: &mut Criterion) {
 
     // --- Index filters ---
 
-    for count in [100, 500] {
+    for count in [50, 100] {
         group.bench_with_input(
             BenchmarkId::new("index_filters", count),
             &count,
@@ -366,11 +374,14 @@ fn retrieval_benchmarks(c: &mut Criterion) {
 
 fn hook_path_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("hook_path");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
     let rt = runtime();
 
     // --- 5a. In-process hook simulation ---
 
-    for count in [10, 100, 500] {
+    for count in [10, 100] {
         group.bench_with_input(
             BenchmarkId::new("hook_inprocess", count),
             &count,
