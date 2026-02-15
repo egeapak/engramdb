@@ -246,8 +246,8 @@ fn storage_benchmarks(c: &mut Criterion) {
     group.bench_function("store_get", |b| {
         let (temp_dir, store, target_id) = {
             let (td, s) = rt.block_on(setup_store(100));
-            let entries = rt.block_on(s.list()).unwrap();
-            let id = entries[50].id.clone();
+            let ids = rt.block_on(s.list_ids()).unwrap();
+            let id = ids[50].clone();
             (td, s, id)
         };
 
@@ -267,7 +267,7 @@ fn storage_benchmarks(c: &mut Criterion) {
                 let (temp_dir, store) = rt.block_on(setup_store(count));
 
                 b.to_async(&rt)
-                    .iter(|| async { store.list().await.unwrap() });
+                    .iter(|| async { store.list_filterable().await.unwrap() });
 
                 drop(temp_dir);
             },

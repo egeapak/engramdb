@@ -589,9 +589,9 @@ mod tests {
             .unwrap();
 
         // Verify memory was created
-        let memories = store.list().await.unwrap();
-        assert_eq!(memories.len(), 1);
-        let memory = store.get(&memories[0].id).await.unwrap();
+        let ids = store.list_ids().await.unwrap();
+        assert_eq!(ids.len(), 1);
+        let memory = store.get(&ids[0]).await.unwrap();
         assert_eq!(memory.type_, MemoryType::Decision);
         assert_eq!(memory.summary, "Test summary");
         assert_eq!(memory.content, "Test content");
@@ -639,9 +639,9 @@ mod tests {
             .await
             .unwrap();
 
-        let memories = store.list().await.unwrap();
-        assert_eq!(memories.len(), 1);
-        let memory = store.get(&memories[0].id).await.unwrap();
+        let ids = store.list_ids().await.unwrap();
+        assert_eq!(ids.len(), 1);
+        let memory = store.get(&ids[0]).await.unwrap();
         assert_eq!(memory.type_, MemoryType::Hazard);
         assert_eq!(memory.summary, "Preset summary");
         assert_eq!(memory.content, "Preset content");
@@ -691,9 +691,9 @@ mod tests {
             .await
             .unwrap();
 
-        let memories = store.list().await.unwrap();
-        assert_eq!(memories.len(), 1);
-        let memory = store.get(&memories[0].id).await.unwrap();
+        let ids = store.list_ids().await.unwrap();
+        assert_eq!(ids.len(), 1);
+        let memory = store.get(&ids[0]).await.unwrap();
         assert_eq!(memory.physical, vec!["src/**/*.rs"]);
         assert_eq!(memory.logical, vec!["auth", "database"]);
         assert_eq!(memory.tags, vec!["rust", "testing", "ci"]);
@@ -743,8 +743,8 @@ mod tests {
             .await
             .unwrap();
 
-        let memories = store.list().await.unwrap();
-        let memory = store.get(&memories[0].id).await.unwrap();
+        let ids = store.list_ids().await.unwrap();
+        let memory = store.get(&ids[0]).await.unwrap();
         assert_eq!(memory.criticality, 0.95);
     }
 

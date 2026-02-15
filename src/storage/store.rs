@@ -293,17 +293,6 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// List all memories (returns full index entries from LanceDB).
-    ///
-    /// Prefer [`list_filterable`], [`list_summary`], or [`list_ids`] when you
-    /// don't need every column.
-    pub async fn list(&self) -> Result<Vec<IndexEntry>> {
-        self.lance_index
-            .list()
-            .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB list failed: {}", e)))
-    }
-
     /// List all memories with filterable/displayable columns (12 of 14).
     ///
     /// Omits `provenance_source` and `confidence` which no caller reads.
@@ -753,13 +742,12 @@ mod tests {
         store.create(&memory2).await.unwrap();
         store.create(&memory3).await.unwrap();
 
-        let entries = store.list().await.unwrap();
-        assert_eq!(entries.len(), 3);
+        let ids = store.list_ids().await.unwrap();
+        assert_eq!(ids.len(), 3);
 
-        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
-        assert!(ids.contains(&"list-test-1"));
-        assert!(ids.contains(&"list-test-2"));
-        assert!(ids.contains(&"list-test-3"));
+        assert!(ids.contains(&"list-test-1".to_string()));
+        assert!(ids.contains(&"list-test-2".to_string()));
+        assert!(ids.contains(&"list-test-3".to_string()));
     }
 
     #[tokio::test]
@@ -777,22 +765,21 @@ mod tests {
         store.create(&memory1).await.unwrap();
         store.create(&memory2).await.unwrap();
 
-        assert_eq!(store.list().await.unwrap().len(), 2);
+        assert_eq!(store.count().await.unwrap(), 2);
 
         // Clear LanceDB to simulate corruption
         store.lance_index.clear().await.unwrap();
-        assert_eq!(store.list().await.unwrap().len(), 0);
+        assert_eq!(store.count().await.unwrap(), 0);
 
         // Reindex
         let count = store.reindex().await.unwrap();
         assert_eq!(count, 2);
 
-        let entries = store.list().await.unwrap();
-        assert_eq!(entries.len(), 2);
+        let ids = store.list_ids().await.unwrap();
+        assert_eq!(ids.len(), 2);
 
-        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
-        assert!(ids.contains(&"reindex-test-1"));
-        assert!(ids.contains(&"reindex-test-2"));
+        assert!(ids.contains(&"reindex-test-1".to_string()));
+        assert!(ids.contains(&"reindex-test-2".to_string()));
     }
 
     #[tokio::test]
@@ -810,7 +797,7 @@ mod tests {
         store.create(&shared).await.unwrap();
         store.create(&personal).await.unwrap();
 
-        let entries = store.list().await.unwrap();
+        let entries = store.list_filterable().await.unwrap();
         let shared_entry = entries.iter().find(|e| e.id == "vis-shared").unwrap();
         let personal_entry = entries.iter().find(|e| e.id == "vis-personal").unwrap();
 

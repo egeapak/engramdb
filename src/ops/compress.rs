@@ -448,7 +448,7 @@ mod tests {
         let (_temp, store) = setup_store().await;
 
         let valid_id = add_memory(&store, MemoryType::Debug, "valid source", 0.1, vec![]).await;
-        let count_before = store.list().await.unwrap().len();
+        let count_before = store.count().await.unwrap();
 
         let result = compress_apply(
             &store,
@@ -462,7 +462,7 @@ mod tests {
 
         assert!(result.is_err());
         // Verify no new memory was created
-        let count_after = store.list().await.unwrap().len();
+        let count_after = store.count().await.unwrap();
         assert_eq!(count_before, count_after);
     }
 }

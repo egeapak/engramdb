@@ -282,40 +282,6 @@ impl LanceIndex {
         Ok(())
     }
 
-    /// List all entries in the memories table.
-    pub async fn list(&self) -> Result<Vec<IndexEntry>> {
-        let table = self.open_table().await?;
-
-        let mut stream = table
-            .query()
-            .select(lancedb::query::Select::Columns(vec![
-                "id".into(),
-                "summary".into(),
-                "type".into(),
-                "status".into(),
-                "provenance_source".into(),
-                "visibility".into(),
-                "criticality".into(),
-                "confidence".into(),
-                "physical".into(),
-                "logical".into(),
-                "tags".into(),
-                "created_at".into(),
-                "updated_at".into(),
-                "expires_at".into(),
-            ]))
-            .execute()
-            .await
-            .context("Failed to query LanceDB table")?;
-
-        let mut entries = Vec::new();
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.context("Failed to read batch")?;
-            entries.extend(batch_to_entries(&batch)?);
-        }
-        Ok(entries)
-    }
-
     /// Return the number of entries in the memories table.
     ///
     /// Selects only the `id` column and counts rows without deserialization.
@@ -678,141 +644,6 @@ impl LanceIndex {
     }
 }
 
-/// Convert a RecordBatch to a Vec of IndexEntry.
-fn batch_to_entries(batch: &RecordBatch) -> Result<Vec<IndexEntry>> {
-    let ids = batch
-        .column_by_name("id")
-        .context("Missing 'id' column")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("Failed to cast 'id'")?;
-    let summaries = batch
-        .column_by_name("summary")
-        .context("Missing 'summary' column")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("Failed to cast 'summary'")?;
-    let types = batch
-        .column_by_name("type")
-        .context("Missing 'type' column")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("Failed to cast 'type'")?;
-    let statuses = batch
-        .column_by_name("status")
-        .context("Missing 'status' column")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("Failed to cast 'status'")?;
-    let provenance_sources = batch
-        .column_by_name("provenance_source")
-        .context("Missing 'provenance_source' column")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("Failed to cast 'provenance_source'")?;
-    let visibilities = batch
-        .column_by_name("visibility")
-        .context("Missing 'visibility' column")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("Failed to cast 'visibility'")?;
-    let criticalities = batch
-        .column_by_name("criticality")
-        .context("Missing 'criticality' column")?
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .context("Failed to cast 'criticality'")?;
-    let confidences = batch
-        .column_by_name("confidence")
-        .context("Missing 'confidence' column")?
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .context("Failed to cast 'confidence'")?;
-    let physicals = batch
-        .column_by_name("physical")
-        .context("Missing 'physical' column")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("Failed to cast 'physical'")?;
-    let logicals = batch
-        .column_by_name("logical")
-        .context("Missing 'logical' column")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("Failed to cast 'logical'")?;
-    let tags_col = batch
-        .column_by_name("tags")
-        .context("Missing 'tags' column")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("Failed to cast 'tags'")?;
-    let created_ats = batch
-        .column_by_name("created_at")
-        .context("Missing 'created_at' column")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("Failed to cast 'created_at'")?;
-    let updated_ats = batch
-        .column_by_name("updated_at")
-        .context("Missing 'updated_at' column")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("Failed to cast 'updated_at'")?;
-    let expires_ats = batch
-        .column_by_name("expires_at")
-        .context("Missing 'expires_at' column")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("Failed to cast 'expires_at'")?;
-
-    let mut entries = Vec::with_capacity(batch.num_rows());
-    for i in 0..batch.num_rows() {
-        let type_ = parse_memory_type(types.value(i))?;
-        let status = parse_status(statuses.value(i))?;
-        let provenance_source = parse_provenance_source(provenance_sources.value(i))?;
-        let visibility = parse_visibility(visibilities.value(i))?;
-        let physical: Vec<String> = serde_json::from_str(physicals.value(i))
-            .context("Failed to parse physical scope JSON")?;
-        let logical: Vec<String> = serde_json::from_str(logicals.value(i))
-            .context("Failed to parse logical scope JSON")?;
-        let tags: Vec<String> =
-            serde_json::from_str(tags_col.value(i)).context("Failed to parse tags JSON")?;
-        let created_at: DateTime<Utc> = chrono::DateTime::parse_from_rfc3339(created_ats.value(i))
-            .context("Failed to parse created_at")?
-            .with_timezone(&Utc);
-        let updated_at: DateTime<Utc> = chrono::DateTime::parse_from_rfc3339(updated_ats.value(i))
-            .context("Failed to parse updated_at")?
-            .with_timezone(&Utc);
-        let expires_at: Option<DateTime<Utc>> = if expires_ats.is_null(i) {
-            None
-        } else {
-            Some(
-                chrono::DateTime::parse_from_rfc3339(expires_ats.value(i))
-                    .context("Failed to parse expires_at")?
-                    .with_timezone(&Utc),
-            )
-        };
-
-        entries.push(IndexEntry {
-            id: ids.value(i).to_string(),
-            type_,
-            summary: summaries.value(i).to_string(),
-            physical,
-            logical,
-            tags,
-            criticality: criticalities.value(i),
-            confidence: confidences.value(i),
-            provenance_source,
-            status,
-            visibility,
-            created_at,
-            updated_at,
-            expires_at,
-        });
-    }
-    Ok(entries)
-}
-
 /// Convert a RecordBatch to a Vec of IndexSummary (7 columns).
 fn batch_to_summaries(batch: &RecordBatch) -> Result<Vec<IndexSummary>> {
     let ids = batch
@@ -1030,16 +861,6 @@ fn parse_status(s: &str) -> Result<Status> {
     }
 }
 
-fn parse_provenance_source(s: &str) -> Result<ProvenanceSource> {
-    match s {
-        "human" => Ok(ProvenanceSource::Human),
-        "agent" => Ok(ProvenanceSource::Agent),
-        "inferred" => Ok(ProvenanceSource::Inferred),
-        "imported" => Ok(ProvenanceSource::Imported),
-        _ => anyhow::bail!("Unknown provenance source: {}", s),
-    }
-}
-
 fn parse_visibility(s: &str) -> Result<Visibility> {
     match s {
         "shared" => Ok(Visibility::Shared),
@@ -1096,7 +917,7 @@ mod tests {
         let entry = create_test_entry("test-1");
         lance.upsert(&entry).await.unwrap();
 
-        let entries = lance.list().await.unwrap();
+        let entries = lance.list_filterable().await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, "test-1");
         assert_eq!(entries[0].summary, "Test summary");
@@ -1114,7 +935,7 @@ mod tests {
         entry.summary = "Updated summary".to_string();
         lance.upsert(&entry).await.unwrap();
 
-        let entries = lance.list().await.unwrap();
+        let entries = lance.list_filterable().await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].summary, "Updated summary");
     }
@@ -1128,8 +949,7 @@ mod tests {
         lance.upsert(&entry).await.unwrap();
         lance.delete("test-1").await.unwrap();
 
-        let entries = lance.list().await.unwrap();
-        assert!(entries.is_empty());
+        assert_eq!(lance.count().await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -1146,8 +966,7 @@ mod tests {
 
         lance.clear().await.unwrap();
 
-        let entries = lance.list().await.unwrap();
-        assert!(entries.is_empty());
+        assert_eq!(lance.count().await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -1262,7 +1081,7 @@ mod tests {
         entry.visibility = Visibility::Personal;
         lance.upsert(&entry).await.unwrap();
 
-        let entries = lance.list().await.unwrap();
+        let entries = lance.list_filterable().await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].visibility, Visibility::Personal);
     }

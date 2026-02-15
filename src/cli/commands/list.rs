@@ -217,7 +217,7 @@ mod tests {
     #[tokio::test]
     async fn test_sort_by_criticality() {
         let (_temp_dir, store, _registry) = setup_test_store().await;
-        let entries = store.list().await.unwrap();
+        let entries = store.list_summary().await.unwrap();
 
         // Verify test data has different criticality scores
         assert_eq!(entries.len(), 3);
