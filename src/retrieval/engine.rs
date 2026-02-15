@@ -491,7 +491,7 @@ impl RetrievalEngine {
         // Step 6.5: Apply reranking if configured and query is present
         if let Some(ref q) = query.query {
             if let Err(e) = self.apply_rerank(q, &mut scored_memories).await {
-                eprintln!("Warning: reranking failed, using original scores: {}", e);
+                tracing::warn!("Reranking failed, using original scores: {}", e);
             }
         }
 
@@ -664,7 +664,7 @@ impl RetrievalEngine {
 
         // Apply reranking if configured
         if let Err(e) = self.apply_rerank(query_text, &mut scored_memories).await {
-            eprintln!("Warning: reranking failed, using original scores: {}", e);
+            tracing::warn!("Reranking failed, using original scores: {}", e);
         }
 
         Ok(scored_memories)

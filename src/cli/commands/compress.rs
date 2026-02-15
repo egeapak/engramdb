@@ -1,6 +1,6 @@
 //! Compress command — lists candidates, directs users to MCP mode for actual compression.
 
-use crate::cli::output::OutputFormatter;
+use crate::cli::output::{short_id, OutputFormatter};
 use crate::ops;
 use crate::storage::{MemoryStore, RegistryBackend};
 use anyhow::Result;
@@ -28,7 +28,7 @@ pub async fn run_compress(
     ));
 
     for candidate in &result.candidates {
-        let id_short = &candidate.id[..13.min(candidate.id.len())];
+        let id_short = short_id(&candidate.id);
         println!(
             "  {} {:8}  {} (criticality: {:.2})",
             id_short, candidate.type_, candidate.summary, candidate.criticality

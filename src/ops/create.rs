@@ -138,6 +138,11 @@ pub async fn create_memory(
             if engine.nli_available() {
                 if let Ok(contradictions) = engine.detect_contradictions(&saved).await {
                     if !contradictions.is_empty() {
+                        tracing::debug!(
+                            memory_id = %saved.id,
+                            count = contradictions.len(),
+                            "NLI detected contradictions with existing memories"
+                        );
                         let store_clone = store.clone();
                         tokio::spawn(async move {
                             for (existing_id, nli_result) in &contradictions {

@@ -1,6 +1,6 @@
 //! Garbage collection command.
 
-use crate::cli::output::OutputFormatter;
+use crate::cli::output::{short_id, OutputFormatter};
 use crate::ops::gc_memories;
 use crate::storage::{MemoryStore, RegistryBackend};
 use anyhow::Result;
@@ -39,7 +39,7 @@ pub async fn run_gc(
             result.count
         ));
         for id in &result.removed {
-            let id_short = &id[..13.min(id.len())];
+            let id_short = short_id(id);
             match store.get(id).await {
                 Ok(memory) => {
                     println!(

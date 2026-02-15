@@ -88,7 +88,10 @@ async fn process_hook_input(
 
     let result = match crate::ops::retrieve_memories(&engine, &query).await {
         Ok(r) => r,
-        Err(_) => return Ok(None),
+        Err(e) => {
+            tracing::debug!("Hook retrieval failed (non-fatal): {}", e);
+            return Ok(None);
+        }
     };
 
     if result.memories.is_empty() {
@@ -116,7 +119,10 @@ pub async fn run_hook_pre_tool_use(
     // Open store — if it fails, exit silently (store may not be initialized)
     let store = match MemoryStore::open(dir, registry).await {
         Ok(s) => s,
-        Err(_) => return Ok(()),
+        Err(e) => {
+            tracing::debug!("Hook store open failed (non-fatal): {}", e);
+            return Ok(());
+        }
     };
 
     if let Some(json) = process_hook_input(&input, dir, store, embedding_backend).await? {

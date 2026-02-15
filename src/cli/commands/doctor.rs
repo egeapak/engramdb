@@ -1,7 +1,7 @@
 //! Doctor (health check) command.
 
 use crate::cli::app::DoctorCommand;
-use crate::cli::output::OutputFormatter;
+use crate::cli::output::{short_id, OutputFormatter};
 use crate::ops::{doctor, doctor_environment};
 use crate::storage::{MemoryStore, RegistryBackend};
 use anyhow::Result;
@@ -44,7 +44,7 @@ async fn run_store_check(
                 result.stale_entries.len()
             ));
             for id in &result.stale_entries {
-                println!("  {}", &id[..13.min(id.len())]);
+                println!("  {}", short_id(id));
             }
         }
         if !result.orphaned_files.is_empty() {
@@ -53,7 +53,7 @@ async fn run_store_check(
                 result.orphaned_files.len()
             ));
             for id in &result.orphaned_files {
-                println!("  {}", &id[..13.min(id.len())]);
+                println!("  {}", short_id(id));
             }
         }
         formatter.print_message("\nRun `engramdb reindex` to repair.");

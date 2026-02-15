@@ -6,6 +6,7 @@ use std::path::Path;
 use tokio::fs as async_fs;
 
 /// Result of a doctor/health check operation.
+#[must_use]
 #[derive(Debug, serde::Serialize)]
 pub struct DoctorResult {
     /// Total memories in the index.
@@ -86,7 +87,10 @@ async fn collect_orphans(
     }
     let mut read_dir = match async_fs::read_dir(dir).await {
         Ok(rd) => rd,
-        Err(_) => return,
+        Err(e) => {
+            tracing::warn!("Failed to read directory {}: {}", dir.display(), e);
+            return;
+        }
     };
     while let Ok(Some(entry)) = read_dir.next_entry().await {
         let path = entry.path();
@@ -111,6 +115,7 @@ pub struct EnvironmentCheck {
 }
 
 /// Full environment doctor result including all checks.
+#[must_use]
 #[derive(Debug, serde::Serialize)]
 pub struct EnvironmentDoctorResult {
     pub checks: Vec<EnvironmentCheck>,
@@ -129,7 +134,7 @@ pub async fn doctor_environment(
     let mut checks = Vec::new();
 
     // 1. Binary on PATH
-    checks.push(check_binary_on_path());
+    checks.push(check_binary_on_path().await);
 
     // 2. Claude Code plugin installed
     checks.push(check_claude_plugin());
@@ -197,10 +202,11 @@ pub async fn doctor_environment(
 }
 
 /// Check if `engramdb` binary is on PATH.
-fn check_binary_on_path() -> EnvironmentCheck {
-    match std::process::Command::new("engramdb")
+async fn check_binary_on_path() -> EnvironmentCheck {
+    match tokio::process::Command::new("engramdb")
         .arg("--version")
         .output()
+        .await
     {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -266,10 +272,14 @@ async fn check_embedding_model_cached(dir: &Path) -> EnvironmentCheck {
     };
 
     // Check if the cache dir exists and has at least one subdirectory (model files)
-    let has_models = cache_dir.exists()
-        && std::fs::read_dir(&cache_dir)
-            .map(|entries| entries.filter_map(|e| e.ok()).count() > 0)
-            .unwrap_or(false);
+    let has_models = if cache_dir.exists() {
+        match async_fs::read_dir(&cache_dir).await {
+            Ok(mut entries) => entries.next_entry().await.ok().flatten().is_some(),
+            Err(_) => false,
+        }
+    } else {
+        false
+    };
 
     EnvironmentCheck {
         name: "Embedding model".to_string(),
@@ -728,5 +738,25 @@ mod tests {
         assert!(json.contains("\"all_passed\""));
         assert!(json.contains("\"store_check\""));
         assert!(json.contains("\"Store initialized\""));
+    }
+
+    #[tokio::test]
+    async fn test_check_binary_on_path_returns_result() {
+        // check_binary_on_path is async and should always return an EnvironmentCheck
+        // (whether or not the binary is installed)
+        let result = check_binary_on_path().await;
+        assert_eq!(result.name, "Binary on PATH");
+        // We can't guarantee the binary is installed in CI, but it should not panic
+        assert!(!result.message.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_check_embedding_model_cached_missing_dir() {
+        // Point at a dir with no .engramdb/config.toml — should gracefully return false
+        let temp_dir = TempDir::new().unwrap();
+        let result = check_embedding_model_cached(temp_dir.path()).await;
+        assert_eq!(result.name, "Embedding model");
+        assert!(!result.passed);
+        assert_eq!(result.message, "not cached");
     }
 }
