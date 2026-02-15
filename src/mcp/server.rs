@@ -1441,14 +1441,18 @@ pub async fn run_sse(
 mod tests {
     use super::*;
     use crate::storage::InMemoryRegistry;
+    use crate::types::EmbeddingBackend;
     use serde_json::json;
     use tempfile::TempDir;
 
     async fn setup() -> (TempDir, EngramDbServer) {
         let temp_dir = TempDir::new().unwrap();
         let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
-        let server =
-            EngramDbServer::new_with_registry(temp_dir.path().to_path_buf(), None, registry);
+        let server = EngramDbServer::new_with_registry(
+            temp_dir.path().to_path_buf(),
+            Some(EmbeddingBackend::Onnx),
+            registry,
+        );
         (temp_dir, server)
     }
 
