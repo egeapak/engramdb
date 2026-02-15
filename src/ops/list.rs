@@ -1,7 +1,7 @@
 //! List memories with filtering, sorting, and limiting.
 
 use crate::ops::parsing::{parse_memory_type, parse_status};
-use crate::storage::lance_index::IndexEntry;
+use crate::storage::lance_index::IndexFilterable;
 use crate::storage::MemoryStore;
 use crate::types::MemoryType;
 use anyhow::{anyhow, Result};
@@ -43,8 +43,11 @@ pub struct ListParams {
 /// List memories with optional filtering, sorting, and limiting.
 ///
 /// Returns index entries (lightweight summaries) rather than full memory data.
-pub async fn list_memories(store: &MemoryStore, params: &ListParams) -> Result<Vec<IndexEntry>> {
-    let mut entries = store.list().await?;
+pub async fn list_memories(
+    store: &MemoryStore,
+    params: &ListParams,
+) -> Result<Vec<IndexFilterable>> {
+    let mut entries = store.list_filterable().await?;
 
     // Apply type filter
     if let Some(ref type_strs) = params.types {

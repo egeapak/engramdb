@@ -18,7 +18,7 @@
 //! "abcd1234-5678-..."), with ambiguity detection.
 
 use super::error::{Result, StorageError};
-use super::lance_index::{IndexEntry, LanceIndex, VectorMatch};
+use super::lance_index::{IndexEntry, IndexFilterable, IndexSummary, LanceIndex, VectorMatch};
 use super::registry::RegistryBackend;
 use super::{manifest, memory_file, paths, project_id};
 use crate::storage::config::load_config;
@@ -293,12 +293,49 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// List all memories (returns index entries from LanceDB).
+    /// List all memories (returns full index entries from LanceDB).
+    ///
+    /// Prefer [`list_filterable`], [`list_summary`], or [`list_ids`] when you
+    /// don't need every column.
     pub async fn list(&self) -> Result<Vec<IndexEntry>> {
         self.lance_index
             .list()
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB list failed: {}", e)))
+    }
+
+    /// List all memories with filterable/displayable columns (12 of 14).
+    ///
+    /// Omits `provenance_source` and `confidence` which no caller reads.
+    pub async fn list_filterable(&self) -> Result<Vec<IndexFilterable>> {
+        self.lance_index
+            .list_filterable()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB list_filterable failed: {}", e)))
+    }
+
+    /// List lightweight metadata summaries for all memories (7 columns).
+    pub async fn list_summary(&self) -> Result<Vec<IndexSummary>> {
+        self.lance_index
+            .list_summary()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB list_summary failed: {}", e)))
+    }
+
+    /// List all memory IDs.
+    pub async fn list_ids(&self) -> Result<Vec<String>> {
+        self.lance_index
+            .list_ids()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB list_ids failed: {}", e)))
+    }
+
+    /// Return the count of memories without loading data.
+    pub async fn count(&self) -> Result<usize> {
+        self.lance_index
+            .count()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB count failed: {}", e)))
     }
 
     /// Rebuild LanceDB index from memory files on disk.
@@ -395,14 +432,15 @@ impl MemoryStore {
         }
     }
 
-    /// Resolve a prefix ID to a full ID using the LanceDB index.
+    /// Resolve a prefix ID to a full ID using a LanceDB WHERE filter.
     async fn resolve_full_id(&self, id: &str) -> Result<String> {
-        let entries = self.list().await?;
-        let matches: Vec<&IndexEntry> = entries.iter().filter(|e| e.id.starts_with(id)).collect();
+        let matches = self.lance_index.find_ids_by_prefix(id).await.map_err(|e| {
+            StorageError::Validation(format!("LanceDB prefix search failed: {}", e))
+        })?;
 
         match matches.len() {
             0 => Err(StorageError::NotFound(id.to_string())),
-            1 => Ok(matches[0].id.clone()),
+            1 => Ok(matches.into_iter().next().unwrap()),
             _ => Err(StorageError::Validation(format!(
                 "Ambiguous ID prefix '{}': matches {} memories",
                 id,
@@ -457,9 +495,9 @@ impl MemoryStore {
         let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
         let mut manifest = manifest::load_manifest(&manifest_path).await?;
 
-        let entries = self.list().await?;
-        let memory_count = entries.len();
-        let logical_scopes: Vec<String> = entries
+        let summaries = self.list_summary().await?;
+        let memory_count = summaries.len();
+        let logical_scopes: Vec<String> = summaries
             .iter()
             .flat_map(|e| e.logical.iter().cloned())
             .collect::<HashSet<_>>()

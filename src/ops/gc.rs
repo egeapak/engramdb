@@ -26,17 +26,17 @@ pub async fn gc_memories(
     threshold: Option<f64>,
 ) -> Result<GcResult> {
     let threshold = threshold.unwrap_or(config.thresholds.gc);
-    let entries = store.list().await?;
+    let ids = store.list_ids().await?;
     let now = Utc::now();
 
     let mut candidates = Vec::new();
     let mut stale_entries = Vec::new();
 
-    for entry in &entries {
-        let memory = match store.get(&entry.id).await {
+    for id in &ids {
+        let memory = match store.get(id).await {
             Ok(m) => m,
             Err(_) => {
-                stale_entries.push(entry.id.clone());
+                stale_entries.push(id.clone());
                 continue;
             }
         };

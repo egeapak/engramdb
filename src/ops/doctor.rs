@@ -26,19 +26,18 @@ pub struct DoctorResult {
 /// - Stale index entries: IDs in LanceDB with no backing `.md` file
 /// - Orphaned files: `.md` files not tracked in the LanceDB index
 pub async fn doctor(store: &MemoryStore) -> Result<DoctorResult> {
-    let entries = store.list().await?;
-    let indexed = entries.len();
+    let ids = store.list_ids().await?;
+    let indexed = ids.len();
 
     let mut stale_entries = Vec::new();
-    for entry in &entries {
-        if store.get(&entry.id).await.is_err() {
-            stale_entries.push(entry.id.clone());
+    for id in &ids {
+        if store.get(id).await.is_err() {
+            stale_entries.push(id.clone());
         }
     }
 
     // Scan disk for .md files not in the index
-    let indexed_ids: std::collections::HashSet<&str> =
-        entries.iter().map(|e| e.id.as_str()).collect();
+    let indexed_ids: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
 
     let mut on_disk = 0;
     let mut orphaned_files = Vec::new();

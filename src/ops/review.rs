@@ -17,7 +17,7 @@ pub struct ReviewParams {
 ///
 /// Returns memories sorted by criticality descending.
 pub async fn review_memories(store: &MemoryStore, params: &ReviewParams) -> Result<Vec<Memory>> {
-    let entries = store.list().await?;
+    let entries = store.list_summary().await?;
 
     let mut memories: Vec<Memory> = Vec::new();
     for e in entries.iter() {

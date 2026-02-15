@@ -20,7 +20,7 @@ pub struct StoreStats {
 
 /// Compute statistics for the memory store.
 pub async fn compute_stats(store: &MemoryStore) -> Result<StoreStats> {
-    let entries = store.list().await?;
+    let entries = store.list_summary().await?;
     let total = entries.len();
 
     let mut type_counts: HashMap<MemoryType, usize> = HashMap::new();

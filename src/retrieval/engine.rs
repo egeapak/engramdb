@@ -372,7 +372,7 @@ impl RetrievalEngine {
     /// 9. Return RetrievalResult with total count before limit
     pub async fn retrieve(&self, query: &RetrievalQuery) -> Result<RetrievalResult> {
         // Step 1: Load all index entries
-        let all_entries = self.store.list().await?;
+        let all_entries = self.store.list_filterable().await?;
 
         // Step 2: Apply filters
         let filters = SearchFilters {
@@ -559,7 +559,7 @@ impl RetrievalEngine {
         let threshold = self.config.search.threshold;
 
         // Step 1: Load all index entries
-        let all_entries = self.store.list().await?;
+        let all_entries = self.store.list_filterable().await?;
 
         // Step 2: Apply filters
         let filtered_entries = apply_index_filters(all_entries, filters);

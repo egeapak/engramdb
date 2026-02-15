@@ -5,7 +5,7 @@
 //! and improve retrieval performance.
 
 use crate::scope::physical;
-use crate::storage::IndexEntry;
+use crate::storage::IndexFilterable;
 use crate::types::MemoryType;
 
 /// Search filters for restricting retrieval results.
@@ -35,7 +35,10 @@ pub struct SearchFilters {
 ///
 /// # Returns
 /// Filtered list of index entries
-pub fn apply_index_filters(entries: Vec<IndexEntry>, filters: &SearchFilters) -> Vec<IndexEntry> {
+pub fn apply_index_filters(
+    entries: Vec<IndexFilterable>,
+    filters: &SearchFilters,
+) -> Vec<IndexFilterable> {
     entries
         .into_iter()
         .filter(|entry| {
@@ -82,7 +85,7 @@ pub fn apply_index_filters(entries: Vec<IndexEntry>, filters: &SearchFilters) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ProvenanceSource, Status, Visibility};
+    use crate::types::{Status, Visibility};
     use chrono::Utc;
 
     fn create_test_entry(
@@ -92,8 +95,8 @@ mod tests {
         physical: Vec<String>,
         logical: Vec<String>,
         criticality: f64,
-    ) -> IndexEntry {
-        IndexEntry {
+    ) -> IndexFilterable {
+        IndexFilterable {
             id: id.to_string(),
             type_,
             summary: "Test summary".to_string(),
@@ -101,8 +104,6 @@ mod tests {
             logical,
             tags,
             criticality,
-            confidence: 0.8,
-            provenance_source: ProvenanceSource::Human,
             status: Status::Active,
             visibility: Visibility::Shared,
             created_at: Utc::now(),

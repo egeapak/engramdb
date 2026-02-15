@@ -41,7 +41,7 @@ pub async fn compress_candidates(
     scope: Option<&str>,
     threshold: Option<f64>,
 ) -> Result<CompressCandidatesResult> {
-    let entries = store.list().await?;
+    let entries = store.list_filterable().await?;
     let threshold = threshold.unwrap_or(0.4);
 
     let candidates: Vec<CompressCandidate> = entries

@@ -345,7 +345,7 @@ fn retrieval_benchmarks(c: &mut Criterion) {
             |b, &count| {
                 let (temp_dir, entries) = {
                     let (td, store) = rt.block_on(setup_store(count));
-                    let e = rt.block_on(store.list()).unwrap();
+                    let e = rt.block_on(store.list_filterable()).unwrap();
                     (td, e)
                 };
                 let filters = SearchFilters {

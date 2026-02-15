@@ -29,14 +29,14 @@ pub async fn reindex(
     // Re-embed all memories if engine has embeddings
     if let Some(engine) = engine {
         if engine.embeddings_available() {
-            let entries = store.list().await?;
-            for entry in &entries {
-                match store.get(&entry.id).await {
+            let ids = store.list_ids().await?;
+            for id in &ids {
+                match store.get(id).await {
                     Ok(memory) => match engine.embed_memory(&memory).await {
                         Ok(()) => embedded += 1,
-                        Err(e) => errors.push(format!("{}: {}", entry.id, e)),
+                        Err(e) => errors.push(format!("{}: {}", id, e)),
                     },
-                    Err(e) => errors.push(format!("{}: {}", entry.id, e)),
+                    Err(e) => errors.push(format!("{}: {}", id, e)),
                 }
             }
         }
