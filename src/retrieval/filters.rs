@@ -5,8 +5,64 @@
 //! and improve retrieval performance.
 
 use crate::scope::physical;
-use crate::storage::IndexFilterable;
+use crate::storage::{IndexFilterable, IndexForFiltering};
 use crate::types::MemoryType;
+
+/// Trait for index entries that can be filtered by `apply_index_filters`.
+///
+/// Implemented by both [`IndexFilterable`] (12 columns) and
+/// [`IndexForFiltering`] (6 columns), allowing the retrieval pipeline
+/// to use a lighter projection without changing filter logic.
+pub trait Filterable {
+    fn id(&self) -> &str;
+    fn type_(&self) -> MemoryType;
+    fn tags(&self) -> &[String];
+    fn physical(&self) -> &[String];
+    fn logical(&self) -> &[String];
+    fn criticality(&self) -> f64;
+}
+
+impl Filterable for IndexFilterable {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn type_(&self) -> MemoryType {
+        self.type_
+    }
+    fn tags(&self) -> &[String] {
+        &self.tags
+    }
+    fn physical(&self) -> &[String] {
+        &self.physical
+    }
+    fn logical(&self) -> &[String] {
+        &self.logical
+    }
+    fn criticality(&self) -> f64 {
+        self.criticality
+    }
+}
+
+impl Filterable for IndexForFiltering {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn type_(&self) -> MemoryType {
+        self.type_
+    }
+    fn tags(&self) -> &[String] {
+        &self.tags
+    }
+    fn physical(&self) -> &[String] {
+        &self.physical
+    }
+    fn logical(&self) -> &[String] {
+        &self.logical
+    }
+    fn criticality(&self) -> f64 {
+        self.criticality
+    }
+}
 
 /// Search filters for restricting retrieval results.
 #[derive(Debug, Clone, Default)]
@@ -27,7 +83,11 @@ pub struct SearchFilters {
     pub min_criticality: Option<f64>,
 }
 
-/// Apply filters to a list of index entries
+/// Apply filters to a list of index entries.
+///
+/// Generic over any type implementing [`Filterable`], so it works with both
+/// the full `IndexFilterable` (12 columns) and the lightweight
+/// `IndexForFiltering` (6 columns).
 ///
 /// # Arguments
 /// * `entries` - The index entries to filter
@@ -35,44 +95,41 @@ pub struct SearchFilters {
 ///
 /// # Returns
 /// Filtered list of index entries
-pub fn apply_index_filters(
-    entries: Vec<IndexFilterable>,
-    filters: &SearchFilters,
-) -> Vec<IndexFilterable> {
+pub fn apply_index_filters<T: Filterable>(entries: Vec<T>, filters: &SearchFilters) -> Vec<T> {
     entries
         .into_iter()
         .filter(|entry| {
             // Filter by type
             if let Some(ref types) = filters.types {
-                if !types.contains(&entry.type_) {
+                if !types.contains(&entry.type_()) {
                     return false;
                 }
             }
 
             // Filter by tags (OR logic - at least one tag must match)
             if let Some(ref filter_tags) = filters.tags {
-                if !filter_tags.iter().any(|tag| entry.tags.contains(tag)) {
+                if !filter_tags.iter().any(|tag| entry.tags().contains(tag)) {
                     return false;
                 }
             }
 
             // Filter by physical scope
             if let Some(ref physical_path) = filters.physical {
-                if !physical::matches(&entry.physical, physical_path) {
+                if !physical::matches(entry.physical(), physical_path) {
                     return false;
                 }
             }
 
             // Filter by logical scope (check if any entry logical scope matches)
             if let Some(ref logical_scope) = filters.logical {
-                if !entry.logical.iter().any(|scope| scope == logical_scope) {
+                if !entry.logical().iter().any(|scope| scope == logical_scope) {
                     return false;
                 }
             }
 
             // Filter by minimum criticality
             if let Some(min_crit) = filters.min_criticality {
-                if entry.criticality < min_crit {
+                if entry.criticality() < min_crit {
                     return false;
                 }
             }

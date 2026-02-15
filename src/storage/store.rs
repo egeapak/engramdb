@@ -18,7 +18,9 @@
 //! "abcd1234-5678-..."), with ambiguity detection.
 
 use super::error::{Result, StorageError};
-use super::lance_index::{IndexEntry, IndexFilterable, IndexSummary, LanceIndex, VectorMatch};
+use super::lance_index::{
+    IndexEntry, IndexFilterable, IndexForFiltering, IndexSummary, LanceIndex, VectorMatch,
+};
 use super::registry::RegistryBackend;
 use super::{manifest, memory_file, paths, project_id};
 use crate::storage::config::load_config;
@@ -301,6 +303,17 @@ impl MemoryStore {
             .list_filterable()
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB list_filterable failed: {}", e)))
+    }
+
+    /// List minimal columns for index-level filtering (6 of 14).
+    ///
+    /// Returns only the fields needed by `apply_index_filters` plus `id`.
+    /// Use this for the retrieval pipeline where full metadata is loaded
+    /// later via `get()` for surviving entries only.
+    pub async fn list_for_filtering(&self) -> Result<Vec<IndexForFiltering>> {
+        self.lance_index.list_for_filtering().await.map_err(|e| {
+            StorageError::Validation(format!("LanceDB list_for_filtering failed: {}", e))
+        })
     }
 
     /// List lightweight metadata summaries for all memories (7 columns).

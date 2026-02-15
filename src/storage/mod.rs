@@ -19,7 +19,7 @@ pub mod registry;
 pub mod store;
 
 pub use error::{Result, StorageError};
-pub use lance_index::{IndexFilterable, IndexSummary, VectorMatch};
+pub use lance_index::{IndexFilterable, IndexForFiltering, IndexSummary, VectorMatch};
 pub use manifest::Manifest;
 pub use registry::{FileRegistry, InMemoryRegistry, Registry, RegistryBackend, RegistryEntry};
 pub use store::MemoryStore;

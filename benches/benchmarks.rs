@@ -257,7 +257,7 @@ fn storage_benchmarks(c: &mut Criterion) {
         drop(temp_dir);
     });
 
-    // --- Store list ---
+    // --- Store list (12 columns — list_filterable) ---
 
     for count in [10, 100] {
         group.bench_with_input(
@@ -268,6 +268,23 @@ fn storage_benchmarks(c: &mut Criterion) {
 
                 b.to_async(&rt)
                     .iter(|| async { store.list_filterable().await.unwrap() });
+
+                drop(temp_dir);
+            },
+        );
+    }
+
+    // --- Store list_for_filtering (6 columns — lightweight) ---
+
+    for count in [10, 100] {
+        group.bench_with_input(
+            BenchmarkId::new("store_list_for_filtering", count),
+            &count,
+            |b, &count| {
+                let (temp_dir, store) = rt.block_on(setup_store(count));
+
+                b.to_async(&rt)
+                    .iter(|| async { store.list_for_filtering().await.unwrap() });
 
                 drop(temp_dir);
             },

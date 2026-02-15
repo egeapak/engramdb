@@ -65,6 +65,21 @@ pub struct IndexSummary {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+/// Minimal projection for index-level filtering (6 columns).
+///
+/// Contains only the fields that [`apply_index_filters`] reads plus `id`
+/// for tracking.  No summary, no dates, no status — just enough to decide
+/// which entries survive the filter pass.
+#[derive(Debug, Clone)]
+pub struct IndexForFiltering {
+    pub id: String,
+    pub type_: MemoryType,
+    pub physical: Vec<String>,
+    pub logical: Vec<String>,
+    pub tags: Vec<String>,
+    pub criticality: f64,
+}
+
 /// Filterable/displayable entry (12 columns).
 ///
 /// Contains every field needed for filtering, sorting, and display.
@@ -425,6 +440,36 @@ impl LanceIndex {
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result.context("Failed to read batch")?;
             entries.extend(batch_to_filterable(&batch)?);
+        }
+        Ok(entries)
+    }
+
+    /// List entries with minimal columns for filtering (6 columns).
+    ///
+    /// Returns [`IndexForFiltering`] entries containing only the fields needed
+    /// by `apply_index_filters`: id, type, physical, logical, tags, criticality.
+    /// Skips summary, status, visibility, dates — saving disk I/O and parsing.
+    pub async fn list_for_filtering(&self) -> Result<Vec<IndexForFiltering>> {
+        let table = self.open_table().await?;
+
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec![
+                "id".into(),
+                "type".into(),
+                "physical".into(),
+                "logical".into(),
+                "tags".into(),
+                "criticality".into(),
+            ]))
+            .execute()
+            .await
+            .context("Failed to query LanceDB table for filtering entries")?;
+
+        let mut entries = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read batch")?;
+            entries.extend(batch_to_for_filtering(&batch)?);
         }
         Ok(entries)
     }
@@ -831,6 +876,66 @@ fn batch_to_filterable(batch: &RecordBatch) -> Result<Vec<IndexFilterable>> {
             created_at,
             updated_at,
             expires_at,
+        });
+    }
+    Ok(entries)
+}
+
+/// Convert a RecordBatch to a Vec of IndexForFiltering (6 columns).
+fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>> {
+    let ids = batch
+        .column_by_name("id")
+        .context("Missing 'id' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'id'")?;
+    let types = batch
+        .column_by_name("type")
+        .context("Missing 'type' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'type'")?;
+    let physicals = batch
+        .column_by_name("physical")
+        .context("Missing 'physical' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'physical'")?;
+    let logicals = batch
+        .column_by_name("logical")
+        .context("Missing 'logical' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'logical'")?;
+    let tags_col = batch
+        .column_by_name("tags")
+        .context("Missing 'tags' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'tags'")?;
+    let criticalities = batch
+        .column_by_name("criticality")
+        .context("Missing 'criticality' column")?
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .context("Failed to cast 'criticality'")?;
+
+    let mut entries = Vec::with_capacity(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        let physical: Vec<String> = serde_json::from_str(physicals.value(i))
+            .context("Failed to parse physical scope JSON")?;
+        let logical: Vec<String> = serde_json::from_str(logicals.value(i))
+            .context("Failed to parse logical scope JSON")?;
+        let tags: Vec<String> =
+            serde_json::from_str(tags_col.value(i)).context("Failed to parse tags JSON")?;
+
+        entries.push(IndexForFiltering {
+            id: ids.value(i).to_string(),
+            type_: parse_memory_type(types.value(i))?,
+            physical,
+            logical,
+            tags,
+            criticality: criticalities.value(i),
         });
     }
     Ok(entries)
