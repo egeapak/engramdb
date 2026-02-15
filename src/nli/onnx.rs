@@ -173,7 +173,9 @@ fn classify_sync(
     premise: &str,
     hypothesis: &str,
 ) -> Result<NliResult> {
-    let mut session = session.lock().expect("NLI session mutex poisoned");
+    let mut session = session
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Failed to acquire NLI session lock: {}", e))?;
     classify_one(&mut session, tokenizer, premise, hypothesis)
 }
 
@@ -186,7 +188,9 @@ fn classify_batch_sync(
     tokenizer: &Tokenizer,
     pairs: &[(&str, &str)],
 ) -> Result<Vec<NliResult>> {
-    let mut session = session.lock().expect("NLI session mutex poisoned");
+    let mut session = session
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Failed to acquire NLI session lock: {}", e))?;
     pairs
         .iter()
         .map(|(premise, hypothesis)| classify_one(&mut session, tokenizer, premise, hypothesis))
@@ -625,5 +629,37 @@ mod tests {
             "Probabilities should still sum to 1.0, got {}",
             sum
         );
+    }
+
+    /// Verify that a poisoned mutex returns Err instead of panicking.
+    ///
+    /// This tests the pattern change from `.expect()` to `.map_err()` — we poison
+    /// a plain `Mutex<u32>` to prove `map_err` catches poisoning gracefully.
+    #[test]
+    fn test_poisoned_mutex_returns_error_not_panic() {
+        use std::sync::Mutex;
+
+        let mutex = Mutex::new(42u32);
+
+        // Poison the mutex by panicking while holding the lock
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mutex.lock().unwrap();
+            panic!("intentional panic to poison mutex");
+        }));
+
+        // Verify that `.lock()` on a poisoned mutex returns Err
+        assert!(mutex.lock().is_err(), "mutex should be poisoned");
+
+        // Verify our pattern converts it to an anyhow::Error instead of panicking
+        let result: anyhow::Result<u32> = mutex
+            .lock()
+            .map(|guard| *guard)
+            .map_err(|e| anyhow::anyhow!("Failed to acquire lock: {}", e));
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to acquire lock"));
     }
 }

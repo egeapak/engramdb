@@ -18,7 +18,7 @@ use std::io::{self, IsTerminal};
 use super::app::OutputFormat;
 
 /// Helper function to truncate IDs to 13 characters
-fn short_id(id: &str) -> &str {
+pub fn short_id(id: &str) -> &str {
     &id[..13.min(id.len())]
 }
 
