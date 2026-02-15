@@ -385,7 +385,21 @@ impl RetrievalEngine {
 
         let filtered_entries = apply_index_filters(all_entries, &filters);
 
-        // Step 2.5: If query text provided and embeddings available, get semantic scores
+        // Step 2.5: Pre-filter expired entries at the index level (before any disk I/O)
+        let include_expired = query
+            .include_expired
+            .unwrap_or(self.config.retrieval.include_expired);
+        let filtered_entries = if include_expired {
+            filtered_entries
+        } else {
+            let now = Utc::now();
+            filtered_entries
+                .into_iter()
+                .filter(|e| e.expires_at.is_none_or(|exp| exp > now))
+                .collect()
+        };
+
+        // Step 2.6: If query text provided and embeddings available, get semantic scores
         let semantic_scores_map: Option<HashMap<String, f64>> = if let Some(ref q) = query.query {
             if let Some(provider) = &self.embedding_provider {
                 if let Ok(query_vector) = provider.embed(q).await {
@@ -419,22 +433,17 @@ impl RetrievalEngine {
             "scope_only"
         };
 
-        // Step 3 & 4: Load memories and calculate scores
+        // Step 3 & 4: Batch-load all surviving memories (single dir scan) and calculate scores
+        let ids: Vec<String> = filtered_entries.iter().map(|e| e.id.clone()).collect();
+        let loaded = self.store.get_batch(&ids).await?;
+        let memory_map: HashMap<String, Memory> = loaded.into_iter().collect();
+
         let mut scored_memories: Vec<ScoredMemory> = Vec::new();
         for entry in filtered_entries.iter() {
-            // Load full memory
-            let memory = match self.store.get(&entry.id).await {
-                Ok(m) => m,
-                Err(_) => continue,
+            let memory = match memory_map.get(&entry.id) {
+                Some(m) => m,
+                None => continue,
             };
-
-            // Skip expired memories unless include_expired is true
-            let include_expired = query
-                .include_expired
-                .unwrap_or(self.config.retrieval.include_expired);
-            if memory.is_expired() && !include_expired {
-                continue;
-            }
 
             // Calculate composite score
             let context = if let Some(ref q) = query.query {
@@ -468,10 +477,10 @@ impl RetrievalEngine {
                 ScoringContext::scope_only(query.path.clone(), query.logical.clone())
             };
 
-            let breakdown = composite_score(&memory, &context, &self.config, Utc::now());
+            let breakdown = composite_score(memory, &context, &self.config, Utc::now());
 
             scored_memories.push(ScoredMemory {
-                memory,
+                memory: memory.clone(),
                 score: breakdown.final_score,
                 score_breakdown: breakdown,
             });
@@ -564,13 +573,10 @@ impl RetrievalEngine {
         // Step 2: Apply filters
         let filtered_entries = apply_index_filters(all_entries, filters);
 
-        // Load full memories
-        let mut memories: Vec<Memory> = Vec::new();
-        for entry in filtered_entries.iter() {
-            if let Ok(memory) = self.store.get(&entry.id).await {
-                memories.push(memory);
-            }
-        }
+        // Batch-load all surviving memories (single dir scan)
+        let ids: Vec<String> = filtered_entries.iter().map(|e| e.id.clone()).collect();
+        let loaded = self.store.get_batch(&ids).await?;
+        let memories: Vec<Memory> = loaded.into_iter().map(|(_, m)| m).collect();
 
         // Step 3: Run keyword search (raw unbounded scores)
         let keyword_results = crate::search::keyword_search(query_text, &memories);

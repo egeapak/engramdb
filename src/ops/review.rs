@@ -19,19 +19,21 @@ pub struct ReviewParams {
 pub async fn review_memories(store: &MemoryStore, params: &ReviewParams) -> Result<Vec<Memory>> {
     let entries = store.list_summary().await?;
 
-    let mut memories: Vec<Memory> = Vec::new();
-    for e in entries.iter() {
-        if e.status == Status::NeedsReview || e.status == Status::Challenged {
-            if let Some(ref scope) = params.scope {
-                if !e.logical.iter().any(|s| s == scope) {
-                    continue;
-                }
-            }
-            if let Ok(memory) = store.get(&e.id).await {
-                memories.push(memory);
-            }
-        }
-    }
+    // Filter candidates at the index level, then batch-load
+    let candidate_ids: Vec<String> = entries
+        .iter()
+        .filter(|e| e.status == Status::NeedsReview || e.status == Status::Challenged)
+        .filter(|e| {
+            params
+                .scope
+                .as_ref()
+                .is_none_or(|s| e.logical.iter().any(|l| l == s))
+        })
+        .map(|e| e.id.clone())
+        .collect();
+
+    let loaded = store.get_batch(&candidate_ids).await?;
+    let mut memories: Vec<Memory> = loaded.into_iter().map(|(_, m)| m).collect();
 
     // Apply type filter
     if let Some(type_filter) = params.type_filter {

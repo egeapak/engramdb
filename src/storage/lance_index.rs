@@ -65,11 +65,11 @@ pub struct IndexSummary {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-/// Minimal projection for index-level filtering (6 columns).
+/// Minimal projection for index-level filtering (7 columns).
 ///
 /// Contains only the fields that [`apply_index_filters`] reads plus `id`
-/// for tracking.  No summary, no dates, no status — just enough to decide
-/// which entries survive the filter pass.
+/// for tracking and `expires_at` for pre-filtering expired entries before
+/// any disk I/O.
 #[derive(Debug, Clone)]
 pub struct IndexForFiltering {
     pub id: String,
@@ -78,6 +78,7 @@ pub struct IndexForFiltering {
     pub logical: Vec<String>,
     pub tags: Vec<String>,
     pub criticality: f64,
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 /// Filterable/displayable entry (12 columns).
@@ -461,6 +462,7 @@ impl LanceIndex {
                 "logical".into(),
                 "tags".into(),
                 "criticality".into(),
+                "expires_at".into(),
             ]))
             .execute()
             .await
@@ -881,7 +883,7 @@ fn batch_to_filterable(batch: &RecordBatch) -> Result<Vec<IndexFilterable>> {
     Ok(entries)
 }
 
-/// Convert a RecordBatch to a Vec of IndexForFiltering (6 columns).
+/// Convert a RecordBatch to a Vec of IndexForFiltering (7 columns).
 fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>> {
     let ids = batch
         .column_by_name("id")
@@ -919,6 +921,12 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
         .as_any()
         .downcast_ref::<Float64Array>()
         .context("Failed to cast 'criticality'")?;
+    let expires_ats = batch
+        .column_by_name("expires_at")
+        .context("Missing 'expires_at' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'expires_at'")?;
 
     let mut entries = Vec::with_capacity(batch.num_rows());
     for i in 0..batch.num_rows() {
@@ -928,6 +936,15 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
             .context("Failed to parse logical scope JSON")?;
         let tags: Vec<String> =
             serde_json::from_str(tags_col.value(i)).context("Failed to parse tags JSON")?;
+        let expires_at: Option<DateTime<Utc>> = if expires_ats.is_null(i) {
+            None
+        } else {
+            Some(
+                chrono::DateTime::parse_from_rfc3339(expires_ats.value(i))
+                    .context("Failed to parse expires_at")?
+                    .with_timezone(&Utc),
+            )
+        };
 
         entries.push(IndexForFiltering {
             id: ids.value(i).to_string(),
@@ -936,6 +953,7 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
             logical,
             tags,
             criticality: criticalities.value(i),
+            expires_at,
         });
     }
     Ok(entries)

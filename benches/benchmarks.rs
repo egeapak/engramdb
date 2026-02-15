@@ -310,6 +310,42 @@ fn storage_benchmarks(c: &mut Criterion) {
         );
     });
 
+    // --- Store get_batch (batch get all items from 100-memory store) ---
+
+    group.bench_function("store_get_batch/100", |b| {
+        let (temp_dir, store, ids) = {
+            let (td, s) = rt.block_on(setup_store(100));
+            let ids = rt.block_on(s.list_ids()).unwrap();
+            (td, s, ids)
+        };
+
+        b.to_async(&rt).iter(|| {
+            let store = store.clone();
+            let ids = ids.clone();
+            async move { store.get_batch(&ids).await.unwrap() }
+        });
+
+        drop(temp_dir);
+    });
+
+    // --- Store batch_exists (existence check all items from 100-memory store) ---
+
+    group.bench_function("store_batch_exists/100", |b| {
+        let (temp_dir, store, ids) = {
+            let (td, s) = rt.block_on(setup_store(100));
+            let ids = rt.block_on(s.list_ids()).unwrap();
+            (td, s, ids)
+        };
+
+        b.to_async(&rt).iter(|| {
+            let store = store.clone();
+            let ids = ids.clone();
+            async move { store.batch_exists(&ids).await.unwrap() }
+        });
+
+        drop(temp_dir);
+    });
+
     group.finish();
 }
 
@@ -528,6 +564,45 @@ mod budget_tests {
 }
 
 // ===========================================================================
+// Group 6: Ops Benchmarks — doctor, compress
+// ===========================================================================
+
+fn ops_benchmarks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ops");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+    let rt = runtime();
+
+    // --- Doctor health check on 100 memories ---
+
+    group.bench_function("doctor/100", |b| {
+        let (temp_dir, store) = rt.block_on(setup_store(100));
+
+        b.to_async(&rt)
+            .iter(|| async { engramdb::ops::doctor(&store).await.unwrap() });
+
+        drop(temp_dir);
+    });
+
+    // --- Compress candidates listing on 100 memories ---
+
+    group.bench_function("compress_candidates/100", |b| {
+        let (temp_dir, store) = rt.block_on(setup_store(100));
+
+        b.to_async(&rt).iter(|| async {
+            engramdb::ops::compress_candidates(&store, None, Some(0.4))
+                .await
+                .unwrap()
+        });
+
+        drop(temp_dir);
+    });
+
+    group.finish();
+}
+
+// ===========================================================================
 // Criterion registration
 // ===========================================================================
 
@@ -538,5 +613,6 @@ criterion_group!(
     storage_benchmarks,
     retrieval_benchmarks,
     hook_path_benchmarks,
+    ops_benchmarks,
 );
 criterion_main!(benches);

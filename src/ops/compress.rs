@@ -86,12 +86,15 @@ pub async fn compress_apply(
         bail!("source_ids must not be empty");
     }
 
-    // Validate all source IDs exist
+    // Validate all source IDs exist (single dir scan, no file reads)
+    let existing = store
+        .batch_exists(&source_ids)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to check source IDs: {}", e))?;
     for id in &source_ids {
-        store
-            .get(id)
-            .await
-            .map_err(|_| anyhow::anyhow!("Source memory not found: {}", id))?;
+        if !existing.contains(id.as_str()) {
+            bail!("Source memory not found: {}", id);
+        }
     }
 
     let superseded_count = source_ids.len();

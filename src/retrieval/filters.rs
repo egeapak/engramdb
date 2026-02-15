@@ -7,11 +7,12 @@
 use crate::scope::physical;
 use crate::storage::{IndexFilterable, IndexForFiltering};
 use crate::types::MemoryType;
+use chrono::{DateTime, Utc};
 
 /// Trait for index entries that can be filtered by `apply_index_filters`.
 ///
 /// Implemented by both [`IndexFilterable`] (12 columns) and
-/// [`IndexForFiltering`] (6 columns), allowing the retrieval pipeline
+/// [`IndexForFiltering`] (7 columns), allowing the retrieval pipeline
 /// to use a lighter projection without changing filter logic.
 pub trait Filterable {
     fn id(&self) -> &str;
@@ -20,6 +21,7 @@ pub trait Filterable {
     fn physical(&self) -> &[String];
     fn logical(&self) -> &[String];
     fn criticality(&self) -> f64;
+    fn expires_at(&self) -> Option<DateTime<Utc>>;
 }
 
 impl Filterable for IndexFilterable {
@@ -41,6 +43,9 @@ impl Filterable for IndexFilterable {
     fn criticality(&self) -> f64 {
         self.criticality
     }
+    fn expires_at(&self) -> Option<DateTime<Utc>> {
+        self.expires_at
+    }
 }
 
 impl Filterable for IndexForFiltering {
@@ -61,6 +66,9 @@ impl Filterable for IndexForFiltering {
     }
     fn criticality(&self) -> f64 {
         self.criticality
+    }
+    fn expires_at(&self) -> Option<DateTime<Utc>> {
+        self.expires_at
     }
 }
 

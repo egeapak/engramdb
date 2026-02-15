@@ -29,12 +29,15 @@ pub async fn doctor(store: &MemoryStore) -> Result<DoctorResult> {
     let ids = store.list_ids().await?;
     let indexed = ids.len();
 
-    let mut stale_entries = Vec::new();
-    for id in &ids {
-        if store.get(id).await.is_err() {
-            stale_entries.push(id.clone());
-        }
-    }
+    let existing = store
+        .batch_exists(&ids)
+        .await
+        .map_err(|e| anyhow::anyhow!("batch existence check failed: {}", e))?;
+    let stale_entries: Vec<String> = ids
+        .iter()
+        .filter(|id| !existing.contains(id.as_str()))
+        .cloned()
+        .collect();
 
     // Scan disk for .md files not in the index
     let indexed_ids: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
