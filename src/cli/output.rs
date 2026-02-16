@@ -9,7 +9,7 @@
 //! accordingly.
 
 use crate::retrieval::engine::{RetrievalResult, ScoredMemory};
-use crate::storage::IndexEntry;
+use crate::storage::IndexFilterable;
 use crate::types::{Memory, MemoryType, Status};
 use owo_colors::{OwoColorize, Stream};
 use serde_json;
@@ -481,7 +481,7 @@ impl OutputFormatter {
     }
 
     /// Print a list of memory index entries in the configured format.
-    pub fn print_memory_list(&self, entries: &[IndexEntry], verbose: bool) {
+    pub fn print_memory_list(&self, entries: &[IndexFilterable], verbose: bool) {
         match self.format {
             OutputFormat::Json => {
                 println!("{}", serde_json::to_string_pretty(entries).unwrap());
@@ -495,7 +495,7 @@ impl OutputFormatter {
         }
     }
 
-    fn print_list_pretty(&self, entries: &[IndexEntry], verbose: bool) {
+    fn print_list_pretty(&self, entries: &[IndexFilterable], verbose: bool) {
         if entries.is_empty() {
             println!("No memories found.");
             return;
@@ -533,7 +533,7 @@ impl OutputFormatter {
         }
     }
 
-    fn print_list_plain(&self, entries: &[IndexEntry], verbose: bool) {
+    fn print_list_plain(&self, entries: &[IndexFilterable], verbose: bool) {
         if entries.is_empty() {
             println!("No memories found.");
             return;
@@ -824,8 +824,8 @@ mod tests {
         }
     }
 
-    fn test_index_entry() -> IndexEntry {
-        IndexEntry {
+    fn test_index_entry() -> IndexFilterable {
+        IndexFilterable {
             id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             type_: MemoryType::Decision,
             summary: "Test index entry".to_string(),
@@ -833,8 +833,6 @@ mod tests {
             logical: vec![],
             tags: vec![],
             criticality: 0.8,
-            confidence: 0.9,
-            provenance_source: crate::types::ProvenanceSource::Human,
             status: Status::Active,
             visibility: Visibility::Shared,
             created_at: chrono::Utc::now(),
@@ -980,7 +978,7 @@ mod tests {
         let formatter_pretty = OutputFormatter::new(Some(OutputFormat::Pretty), false, false);
         let formatter_plain = OutputFormatter::new(Some(OutputFormat::Plain), false, false);
 
-        let empty: Vec<IndexEntry> = vec![];
+        let empty: Vec<IndexFilterable> = vec![];
 
         // Verify none panic with empty entries
         formatter_json.print_memory_list(&empty, false);

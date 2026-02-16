@@ -1,5 +1,7 @@
 mod helpers;
 
+use std::time::Duration;
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use engramdb::retrieval::{
@@ -187,7 +189,7 @@ fn scoring_benchmarks(c: &mut Criterion) {
 
     // --- Batch scoring ---
 
-    for count in [100, 500] {
+    for count in [100, 200] {
         group.bench_with_input(
             BenchmarkId::new("batch_scoring", count),
             &count,
@@ -215,6 +217,9 @@ fn scoring_benchmarks(c: &mut Criterion) {
 
 fn storage_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("storage");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
     let rt = runtime();
 
     // --- Store open (cold open) ---
@@ -241,8 +246,8 @@ fn storage_benchmarks(c: &mut Criterion) {
     group.bench_function("store_get", |b| {
         let (temp_dir, store, target_id) = {
             let (td, s) = rt.block_on(setup_store(100));
-            let entries = rt.block_on(s.list()).unwrap();
-            let id = entries[50].id.clone();
+            let ids = rt.block_on(s.list_ids()).unwrap();
+            let id = ids[50].clone();
             (td, s, id)
         };
 
@@ -252,9 +257,9 @@ fn storage_benchmarks(c: &mut Criterion) {
         drop(temp_dir);
     });
 
-    // --- Store list ---
+    // --- Store list (12 columns — list_filterable) ---
 
-    for count in [10, 100, 500] {
+    for count in [10, 100] {
         group.bench_with_input(
             BenchmarkId::new("store_list", count),
             &count,
@@ -262,7 +267,24 @@ fn storage_benchmarks(c: &mut Criterion) {
                 let (temp_dir, store) = rt.block_on(setup_store(count));
 
                 b.to_async(&rt)
-                    .iter(|| async { store.list().await.unwrap() });
+                    .iter(|| async { store.list_filterable().await.unwrap() });
+
+                drop(temp_dir);
+            },
+        );
+    }
+
+    // --- Store list_for_filtering (6 columns — lightweight) ---
+
+    for count in [10, 100] {
+        group.bench_with_input(
+            BenchmarkId::new("store_list_for_filtering", count),
+            &count,
+            |b, &count| {
+                let (temp_dir, store) = rt.block_on(setup_store(count));
+
+                b.to_async(&rt)
+                    .iter(|| async { store.list_for_filtering().await.unwrap() });
 
                 drop(temp_dir);
             },
@@ -288,6 +310,42 @@ fn storage_benchmarks(c: &mut Criterion) {
         );
     });
 
+    // --- Store get_batch (batch get all items from 100-memory store) ---
+
+    group.bench_function("store_get_batch/100", |b| {
+        let (temp_dir, store, ids) = {
+            let (td, s) = rt.block_on(setup_store(100));
+            let ids = rt.block_on(s.list_ids()).unwrap();
+            (td, s, ids)
+        };
+
+        b.to_async(&rt).iter(|| {
+            let store = store.clone();
+            let ids = ids.clone();
+            async move { store.get_batch(&ids).await.unwrap() }
+        });
+
+        drop(temp_dir);
+    });
+
+    // --- Store batch_exists (existence check all items from 100-memory store) ---
+
+    group.bench_function("store_batch_exists/100", |b| {
+        let (temp_dir, store, ids) = {
+            let (td, s) = rt.block_on(setup_store(100));
+            let ids = rt.block_on(s.list_ids()).unwrap();
+            (td, s, ids)
+        };
+
+        b.to_async(&rt).iter(|| {
+            let store = store.clone();
+            let ids = ids.clone();
+            async move { store.batch_exists(&ids).await.unwrap() }
+        });
+
+        drop(temp_dir);
+    });
+
     group.finish();
 }
 
@@ -297,11 +355,14 @@ fn storage_benchmarks(c: &mut Criterion) {
 
 fn retrieval_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("retrieval");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
     let rt = runtime();
 
     // --- Retrieve scope_only ---
 
-    for count in [10, 100, 500] {
+    for count in [10, 100] {
         group.bench_with_input(
             BenchmarkId::new("retrieve_scope_only", count),
             &count,
@@ -330,14 +391,14 @@ fn retrieval_benchmarks(c: &mut Criterion) {
 
     // --- Index filters ---
 
-    for count in [100, 500] {
+    for count in [50, 100] {
         group.bench_with_input(
             BenchmarkId::new("index_filters", count),
             &count,
             |b, &count| {
                 let (temp_dir, entries) = {
                     let (td, store) = rt.block_on(setup_store(count));
-                    let e = rt.block_on(store.list()).unwrap();
+                    let e = rt.block_on(store.list_filterable()).unwrap();
                     (td, e)
                 };
                 let filters = SearchFilters {
@@ -366,11 +427,14 @@ fn retrieval_benchmarks(c: &mut Criterion) {
 
 fn hook_path_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("hook_path");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
     let rt = runtime();
 
     // --- 5a. In-process hook simulation ---
 
-    for count in [10, 100, 500] {
+    for count in [10, 100] {
         group.bench_with_input(
             BenchmarkId::new("hook_inprocess", count),
             &count,
@@ -500,6 +564,45 @@ mod budget_tests {
 }
 
 // ===========================================================================
+// Group 6: Ops Benchmarks — doctor, compress
+// ===========================================================================
+
+fn ops_benchmarks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ops");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+    let rt = runtime();
+
+    // --- Doctor health check on 100 memories ---
+
+    group.bench_function("doctor/100", |b| {
+        let (temp_dir, store) = rt.block_on(setup_store(100));
+
+        b.to_async(&rt)
+            .iter(|| async { engramdb::ops::doctor(&store).await.unwrap() });
+
+        drop(temp_dir);
+    });
+
+    // --- Compress candidates listing on 100 memories ---
+
+    group.bench_function("compress_candidates/100", |b| {
+        let (temp_dir, store) = rt.block_on(setup_store(100));
+
+        b.to_async(&rt).iter(|| async {
+            engramdb::ops::compress_candidates(&store, None, Some(0.4))
+                .await
+                .unwrap()
+        });
+
+        drop(temp_dir);
+    });
+
+    group.finish();
+}
+
+// ===========================================================================
 // Criterion registration
 // ===========================================================================
 
@@ -510,5 +613,6 @@ criterion_group!(
     storage_benchmarks,
     retrieval_benchmarks,
     hook_path_benchmarks,
+    ops_benchmarks,
 );
 criterion_main!(benches);

@@ -41,7 +41,7 @@ pub async fn compress_candidates(
     scope: Option<&str>,
     threshold: Option<f64>,
 ) -> Result<CompressCandidatesResult> {
-    let entries = store.list().await?;
+    let entries = store.list_filterable().await?;
     let threshold = threshold.unwrap_or(0.4);
 
     let candidates: Vec<CompressCandidate> = entries
@@ -86,12 +86,15 @@ pub async fn compress_apply(
         bail!("source_ids must not be empty");
     }
 
-    // Validate all source IDs exist
+    // Validate all source IDs exist (single dir scan, no file reads)
+    let existing = store
+        .batch_exists(&source_ids)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to check source IDs: {}", e))?;
     for id in &source_ids {
-        store
-            .get(id)
-            .await
-            .map_err(|_| anyhow::anyhow!("Source memory not found: {}", id))?;
+        if !existing.contains(id.as_str()) {
+            bail!("Source memory not found: {}", id);
+        }
     }
 
     let superseded_count = source_ids.len();
@@ -448,7 +451,7 @@ mod tests {
         let (_temp, store) = setup_store().await;
 
         let valid_id = add_memory(&store, MemoryType::Debug, "valid source", 0.1, vec![]).await;
-        let count_before = store.list().await.unwrap().len();
+        let count_before = store.count().await.unwrap();
 
         let result = compress_apply(
             &store,
@@ -462,7 +465,7 @@ mod tests {
 
         assert!(result.is_err());
         // Verify no new memory was created
-        let count_after = store.list().await.unwrap().len();
+        let count_after = store.count().await.unwrap();
         assert_eq!(count_before, count_after);
     }
 }

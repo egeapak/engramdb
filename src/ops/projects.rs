@@ -49,11 +49,11 @@ pub async fn get_project_info(dir: &Path, registry: &dyn RegistryBackend) -> Res
     let manifest_path = paths::project_dir(dir).join("manifest.toml");
     let manifest = manifest::load_manifest(&manifest_path).await?;
 
-    let entries = store.list().await?;
-    let memory_count = entries.len();
+    let summaries = store.list_summary().await?;
+    let memory_count = summaries.len();
 
     let mut scope_set = std::collections::HashSet::new();
-    for entry in &entries {
+    for entry in &summaries {
         for scope in &entry.logical {
             scope_set.insert(scope.clone());
         }
@@ -150,13 +150,13 @@ pub async fn aggregate_stats(registry: &dyn RegistryBackend) -> Result<Aggregate
 
         reachable_projects += 1;
 
-        let entries = match store.list().await {
+        let summaries = match store.list_summary().await {
             Ok(e) => e,
             Err(_) => continue,
         };
 
-        total_memories += entries.len();
-        for e in &entries {
+        total_memories += summaries.len();
+        for e in &summaries {
             *type_counts.entry(e.type_).or_insert(0) += 1;
         }
     }

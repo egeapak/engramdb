@@ -18,12 +18,14 @@
 //! "abcd1234-5678-..."), with ambiguity detection.
 
 use super::error::{Result, StorageError};
-use super::lance_index::{IndexEntry, LanceIndex, VectorMatch};
+use super::lance_index::{
+    IndexEntry, IndexFilterable, IndexForFiltering, IndexSummary, LanceIndex, VectorMatch,
+};
 use super::registry::RegistryBackend;
 use super::{manifest, memory_file, paths, project_id};
 use crate::storage::config::load_config;
 use crate::types::{Memory, MemoryUpdate, Visibility};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::fs as async_fs;
 
@@ -185,6 +187,57 @@ impl MemoryStore {
             .await
     }
 
+    /// Get multiple memories by their full IDs in a single batch.
+    ///
+    /// Performs one directory scan of shared and personal memory dirs,
+    /// then reads only the requested files.  This is O(dir_size + N)
+    /// instead of O(dir_size × N) for N individual [`get`] calls.
+    ///
+    /// Returns a Vec of `(id, Memory)` pairs.  IDs that cannot be loaded
+    /// (missing file, parse error) are silently skipped.
+    pub async fn get_batch(&self, ids: &[String]) -> Result<Vec<(String, Memory)>> {
+        let shared_dir = paths::memories_dir(&self.project_dir);
+        let personal_dir = paths::personal_memories_dir(&self.project_id)?;
+
+        let shared_map = scan_dir_to_map(&shared_dir).await;
+        let personal_map = scan_dir_to_map(&personal_dir).await;
+
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            let path = shared_map
+                .get(id.as_str())
+                .or_else(|| personal_map.get(id.as_str()));
+            if let Some(path) = path {
+                if let Ok(content) = async_fs::read_to_string(path).await {
+                    if let Ok(memory) = memory_file::parse_memory_file(&content) {
+                        results.push((id.clone(), memory));
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    /// Check which of the given IDs have `.md` files on disk.
+    ///
+    /// Scans shared and personal directories once each, returning only
+    /// those IDs that have a corresponding file.  Much cheaper than
+    /// [`get_batch`] because no files are read or parsed.
+    pub async fn batch_exists(&self, ids: &[String]) -> Result<HashSet<String>> {
+        let shared_dir = paths::memories_dir(&self.project_dir);
+        let personal_dir = paths::personal_memories_dir(&self.project_id)?;
+
+        let mut on_disk = HashSet::new();
+        collect_stems(&shared_dir, &mut on_disk).await;
+        collect_stems(&personal_dir, &mut on_disk).await;
+
+        Ok(ids
+            .iter()
+            .filter(|id| on_disk.contains(id.as_str()))
+            .cloned()
+            .collect())
+    }
+
     async fn get_from_dir(&self, id: &str, dir: &Path) -> Result<Memory> {
         if !dir.exists() {
             return Err(StorageError::NotFound(id.to_string()));
@@ -293,12 +346,49 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// List all memories (returns index entries from LanceDB).
-    pub async fn list(&self) -> Result<Vec<IndexEntry>> {
+    /// List all memories with filterable/displayable columns (12 of 14).
+    ///
+    /// Omits `provenance_source` and `confidence` which no caller reads.
+    pub async fn list_filterable(&self) -> Result<Vec<IndexFilterable>> {
         self.lance_index
-            .list()
+            .list_filterable()
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB list failed: {}", e)))
+            .map_err(|e| StorageError::Validation(format!("LanceDB list_filterable failed: {}", e)))
+    }
+
+    /// List minimal columns for index-level filtering (6 of 14).
+    ///
+    /// Returns only the fields needed by `apply_index_filters` plus `id`.
+    /// Use this for the retrieval pipeline where full metadata is loaded
+    /// later via `get()` for surviving entries only.
+    pub async fn list_for_filtering(&self) -> Result<Vec<IndexForFiltering>> {
+        self.lance_index.list_for_filtering().await.map_err(|e| {
+            StorageError::Validation(format!("LanceDB list_for_filtering failed: {}", e))
+        })
+    }
+
+    /// List lightweight metadata summaries for all memories (7 columns).
+    pub async fn list_summary(&self) -> Result<Vec<IndexSummary>> {
+        self.lance_index
+            .list_summary()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB list_summary failed: {}", e)))
+    }
+
+    /// List all memory IDs.
+    pub async fn list_ids(&self) -> Result<Vec<String>> {
+        self.lance_index
+            .list_ids()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB list_ids failed: {}", e)))
+    }
+
+    /// Return the count of memories without loading data.
+    pub async fn count(&self) -> Result<usize> {
+        self.lance_index
+            .count()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB count failed: {}", e)))
     }
 
     /// Rebuild LanceDB index from memory files on disk.
@@ -395,14 +485,15 @@ impl MemoryStore {
         }
     }
 
-    /// Resolve a prefix ID to a full ID using the LanceDB index.
+    /// Resolve a prefix ID to a full ID using a LanceDB WHERE filter.
     async fn resolve_full_id(&self, id: &str) -> Result<String> {
-        let entries = self.list().await?;
-        let matches: Vec<&IndexEntry> = entries.iter().filter(|e| e.id.starts_with(id)).collect();
+        let matches = self.lance_index.find_ids_by_prefix(id).await.map_err(|e| {
+            StorageError::Validation(format!("LanceDB prefix search failed: {}", e))
+        })?;
 
         match matches.len() {
             0 => Err(StorageError::NotFound(id.to_string())),
-            1 => Ok(matches[0].id.clone()),
+            1 => Ok(matches.into_iter().next().unwrap()),
             _ => Err(StorageError::Validation(format!(
                 "Ambiguous ID prefix '{}': matches {} memories",
                 id,
@@ -457,9 +548,9 @@ impl MemoryStore {
         let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
         let mut manifest = manifest::load_manifest(&manifest_path).await?;
 
-        let entries = self.list().await?;
-        let memory_count = entries.len();
-        let logical_scopes: Vec<String> = entries
+        let summaries = self.list_summary().await?;
+        let memory_count = summaries.len();
+        let logical_scopes: Vec<String> = summaries
             .iter()
             .flat_map(|e| e.logical.iter().cloned())
             .collect::<HashSet<_>>()
@@ -488,6 +579,45 @@ async fn count_md_files(dir: &Path) -> usize {
         }
     }
     count
+}
+
+/// Scan a directory and build a `HashMap` mapping file stem → path
+/// for all `.md` files.  Returns an empty map if the directory does not exist.
+async fn scan_dir_to_map(dir: &Path) -> HashMap<String, PathBuf> {
+    let mut map = HashMap::new();
+    if !dir.exists() {
+        return map;
+    }
+    let Ok(mut entries) = async_fs::read_dir(dir).await else {
+        return map;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("md") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                map.insert(stem.to_string(), path);
+            }
+        }
+    }
+    map
+}
+
+/// Collect file stems (without `.md` extension) from a directory into a `HashSet`.
+async fn collect_stems(dir: &Path, stems: &mut HashSet<String>) {
+    if !dir.exists() {
+        return;
+    }
+    let Ok(mut entries) = async_fs::read_dir(dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("md") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                stems.insert(stem.to_string());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -715,13 +845,12 @@ mod tests {
         store.create(&memory2).await.unwrap();
         store.create(&memory3).await.unwrap();
 
-        let entries = store.list().await.unwrap();
-        assert_eq!(entries.len(), 3);
+        let ids = store.list_ids().await.unwrap();
+        assert_eq!(ids.len(), 3);
 
-        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
-        assert!(ids.contains(&"list-test-1"));
-        assert!(ids.contains(&"list-test-2"));
-        assert!(ids.contains(&"list-test-3"));
+        assert!(ids.contains(&"list-test-1".to_string()));
+        assert!(ids.contains(&"list-test-2".to_string()));
+        assert!(ids.contains(&"list-test-3".to_string()));
     }
 
     #[tokio::test]
@@ -739,22 +868,21 @@ mod tests {
         store.create(&memory1).await.unwrap();
         store.create(&memory2).await.unwrap();
 
-        assert_eq!(store.list().await.unwrap().len(), 2);
+        assert_eq!(store.count().await.unwrap(), 2);
 
         // Clear LanceDB to simulate corruption
         store.lance_index.clear().await.unwrap();
-        assert_eq!(store.list().await.unwrap().len(), 0);
+        assert_eq!(store.count().await.unwrap(), 0);
 
         // Reindex
         let count = store.reindex().await.unwrap();
         assert_eq!(count, 2);
 
-        let entries = store.list().await.unwrap();
-        assert_eq!(entries.len(), 2);
+        let ids = store.list_ids().await.unwrap();
+        assert_eq!(ids.len(), 2);
 
-        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
-        assert!(ids.contains(&"reindex-test-1"));
-        assert!(ids.contains(&"reindex-test-2"));
+        assert!(ids.contains(&"reindex-test-1".to_string()));
+        assert!(ids.contains(&"reindex-test-2".to_string()));
     }
 
     #[tokio::test]
@@ -772,7 +900,7 @@ mod tests {
         store.create(&shared).await.unwrap();
         store.create(&personal).await.unwrap();
 
-        let entries = store.list().await.unwrap();
+        let entries = store.list_filterable().await.unwrap();
         let shared_entry = entries.iter().find(|e| e.id == "vis-shared").unwrap();
         let personal_entry = entries.iter().find(|e| e.id == "vis-personal").unwrap();
 
@@ -820,5 +948,109 @@ mod tests {
         let warning = result.unwrap();
         assert!(warning.contains("1 memories on disk"));
         assert!(warning.contains("0 indexed"));
+    }
+
+    // --- get_batch tests ---
+
+    #[tokio::test]
+    async fn test_get_batch_returns_all() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            let mem = Memory::new(
+                MemoryType::Decision,
+                format!("Summary {}", i),
+                format!("Content {}", i),
+                Provenance::human(),
+            );
+            ids.push(store.create(&mem).await.unwrap());
+        }
+
+        let results = store.get_batch(&ids).await.unwrap();
+        assert_eq!(results.len(), 5);
+        for (id, _mem) in &results {
+            assert!(ids.contains(id));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_batch_skips_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            let mem = Memory::new(
+                MemoryType::Decision,
+                format!("Summary {}", i),
+                format!("Content {}", i),
+                Provenance::human(),
+            );
+            ids.push(store.create(&mem).await.unwrap());
+        }
+        ids.push("fake-id-1".to_string());
+        ids.push("fake-id-2".to_string());
+
+        let results = store.get_batch(&ids).await.unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    // --- batch_exists tests ---
+
+    #[tokio::test]
+    async fn test_batch_exists_all_present() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            let mem = Memory::new(
+                MemoryType::Decision,
+                format!("Summary {}", i),
+                format!("Content {}", i),
+                Provenance::human(),
+            );
+            ids.push(store.create(&mem).await.unwrap());
+        }
+
+        let existing = store.batch_exists(&ids).await.unwrap();
+        assert_eq!(existing.len(), 5);
+        for id in &ids {
+            assert!(existing.contains(id));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_exists_some_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            let mem = Memory::new(
+                MemoryType::Decision,
+                format!("Summary {}", i),
+                format!("Content {}", i),
+                Provenance::human(),
+            );
+            ids.push(store.create(&mem).await.unwrap());
+        }
+        ids.push("fake-id-1".to_string());
+        ids.push("fake-id-2".to_string());
+
+        let existing = store.batch_exists(&ids).await.unwrap();
+        assert_eq!(existing.len(), 3);
+        assert!(!existing.contains("fake-id-1"));
+        assert!(!existing.contains("fake-id-2"));
     }
 }

@@ -23,10 +23,10 @@ use crate::types::{Memory, MemoryType, ProvenanceSource, Status, Visibility};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Lightweight metadata entry for a single memory.
+/// Full metadata entry stored in LanceDB (all 14 columns).
 ///
-/// Contains a subset of Memory fields sufficient for filtering and sorting
-/// without loading full memory files from disk.
+/// Used only for writing to LanceDB. For reads, prefer the narrower
+/// [`IndexSummary`] or [`IndexFilterable`] projections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
     pub id: String,
@@ -42,6 +42,63 @@ pub struct IndexEntry {
     pub criticality: f64,
     pub confidence: f64,
     pub provenance_source: ProvenanceSource,
+    pub status: Status,
+    pub visibility: Visibility,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Lightweight metadata for aggregation/stats queries (7 columns).
+///
+/// Omits summary, physical, tags, confidence, provenance_source, visibility,
+/// and updated_at — the fields rarely needed for counting and scope collection.
+#[derive(Debug, Clone)]
+pub struct IndexSummary {
+    pub id: String,
+    pub type_: MemoryType,
+    pub status: Status,
+    pub logical: Vec<String>,
+    pub criticality: f64,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Minimal projection for index-level filtering (7 columns).
+///
+/// Contains only the fields that [`apply_index_filters`] reads plus `id`
+/// for tracking and `expires_at` for pre-filtering expired entries before
+/// any disk I/O.
+#[derive(Debug, Clone)]
+pub struct IndexForFiltering {
+    pub id: String,
+    pub type_: MemoryType,
+    pub physical: Vec<String>,
+    pub logical: Vec<String>,
+    pub tags: Vec<String>,
+    pub criticality: f64,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Filterable/displayable entry (12 columns).
+///
+/// Contains every field needed for filtering, sorting, and display.
+/// Omits only `provenance_source` and `confidence` which no caller reads
+/// after listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexFilterable {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub type_: MemoryType,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub physical: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logical: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    pub criticality: f64,
     pub status: Status,
     pub visibility: Visibility,
     pub created_at: DateTime<Utc>,
@@ -241,8 +298,123 @@ impl LanceIndex {
         Ok(())
     }
 
-    /// List all entries in the memories table.
-    pub async fn list(&self) -> Result<Vec<IndexEntry>> {
+    /// Return the number of entries in the memories table.
+    ///
+    /// Selects only the `id` column and counts rows without deserialization.
+    pub async fn count(&self) -> Result<usize> {
+        let table = self.open_table().await?;
+
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec!["id".into()]))
+            .execute()
+            .await
+            .context("Failed to query LanceDB table for count")?;
+
+        let mut count = 0usize;
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read batch")?;
+            count += batch.num_rows();
+        }
+        Ok(count)
+    }
+
+    /// List all memory IDs in the memories table.
+    pub async fn list_ids(&self) -> Result<Vec<String>> {
+        let table = self.open_table().await?;
+
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec!["id".into()]))
+            .execute()
+            .await
+            .context("Failed to query LanceDB table for IDs")?;
+
+        let mut ids = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read batch")?;
+            let id_col = batch
+                .column_by_name("id")
+                .context("Missing 'id' column")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("Failed to cast 'id'")?;
+            for i in 0..batch.num_rows() {
+                ids.push(id_col.value(i).to_string());
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Find IDs matching a given prefix via a LanceDB WHERE clause.
+    ///
+    /// Returns all matching IDs; callers handle 0/1/many disambiguation.
+    pub async fn find_ids_by_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        let table = self.open_table().await?;
+        // Escape SQL special chars for LIKE pattern and single-quote for string literal
+        let escaped = prefix
+            .replace('\'', "''")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let filter = format!("id LIKE '{}%'", escaped);
+
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec!["id".into()]))
+            .only_if(filter)
+            .execute()
+            .await
+            .context("Failed to query LanceDB table for prefix match")?;
+
+        let mut ids = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read batch")?;
+            let id_col = batch
+                .column_by_name("id")
+                .context("Missing 'id' column")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("Failed to cast 'id'")?;
+            for i in 0..batch.num_rows() {
+                ids.push(id_col.value(i).to_string());
+            }
+        }
+        Ok(ids)
+    }
+
+    /// List entries with lightweight metadata (7 columns).
+    ///
+    /// Returns [`IndexSummary`] entries suitable for aggregation and stats.
+    pub async fn list_summary(&self) -> Result<Vec<IndexSummary>> {
+        let table = self.open_table().await?;
+
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec![
+                "id".into(),
+                "type".into(),
+                "status".into(),
+                "logical".into(),
+                "criticality".into(),
+                "created_at".into(),
+                "expires_at".into(),
+            ]))
+            .execute()
+            .await
+            .context("Failed to query LanceDB table for summaries")?;
+
+        let mut entries = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read batch")?;
+            entries.extend(batch_to_summaries(&batch)?);
+        }
+        Ok(entries)
+    }
+
+    /// List entries with all filterable/displayable columns (12 columns).
+    ///
+    /// Omits only `provenance_source` and `confidence` which no caller reads.
+    pub async fn list_filterable(&self) -> Result<Vec<IndexFilterable>> {
         let table = self.open_table().await?;
 
         let mut stream = table
@@ -252,10 +424,8 @@ impl LanceIndex {
                 "summary".into(),
                 "type".into(),
                 "status".into(),
-                "provenance_source".into(),
                 "visibility".into(),
                 "criticality".into(),
-                "confidence".into(),
                 "physical".into(),
                 "logical".into(),
                 "tags".into(),
@@ -265,19 +435,45 @@ impl LanceIndex {
             ]))
             .execute()
             .await
-            .context("Failed to query LanceDB table")?;
+            .context("Failed to query LanceDB table for filterable entries")?;
 
         let mut entries = Vec::new();
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result.context("Failed to read batch")?;
-            entries.extend(batch_to_entries(&batch)?);
+            entries.extend(batch_to_filterable(&batch)?);
         }
         Ok(entries)
     }
 
-    /// Return the number of entries in the memories table.
-    pub async fn count(&self) -> Result<usize> {
-        Ok(self.list().await?.len())
+    /// List entries with minimal columns for filtering (6 columns).
+    ///
+    /// Returns [`IndexForFiltering`] entries containing only the fields needed
+    /// by `apply_index_filters`: id, type, physical, logical, tags, criticality.
+    /// Skips summary, status, visibility, dates — saving disk I/O and parsing.
+    pub async fn list_for_filtering(&self) -> Result<Vec<IndexForFiltering>> {
+        let table = self.open_table().await?;
+
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec![
+                "id".into(),
+                "type".into(),
+                "physical".into(),
+                "logical".into(),
+                "tags".into(),
+                "criticality".into(),
+                "expires_at".into(),
+            ]))
+            .execute()
+            .await
+            .context("Failed to query LanceDB table for filtering entries")?;
+
+        let mut entries = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read batch")?;
+            entries.extend(batch_to_for_filtering(&batch)?);
+        }
+        Ok(entries)
     }
 
     /// Upsert embedding chunks for a memory.
@@ -495,8 +691,83 @@ impl LanceIndex {
     }
 }
 
-/// Convert a RecordBatch to a Vec of IndexEntry.
-fn batch_to_entries(batch: &RecordBatch) -> Result<Vec<IndexEntry>> {
+/// Convert a RecordBatch to a Vec of IndexSummary (7 columns).
+fn batch_to_summaries(batch: &RecordBatch) -> Result<Vec<IndexSummary>> {
+    let ids = batch
+        .column_by_name("id")
+        .context("Missing 'id' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'id'")?;
+    let types = batch
+        .column_by_name("type")
+        .context("Missing 'type' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'type'")?;
+    let statuses = batch
+        .column_by_name("status")
+        .context("Missing 'status' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'status'")?;
+    let logicals = batch
+        .column_by_name("logical")
+        .context("Missing 'logical' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'logical'")?;
+    let criticalities = batch
+        .column_by_name("criticality")
+        .context("Missing 'criticality' column")?
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .context("Failed to cast 'criticality'")?;
+    let created_ats = batch
+        .column_by_name("created_at")
+        .context("Missing 'created_at' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'created_at'")?;
+    let expires_ats = batch
+        .column_by_name("expires_at")
+        .context("Missing 'expires_at' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'expires_at'")?;
+
+    let mut entries = Vec::with_capacity(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        let logical: Vec<String> = serde_json::from_str(logicals.value(i))
+            .context("Failed to parse logical scope JSON")?;
+        let created_at: DateTime<Utc> = chrono::DateTime::parse_from_rfc3339(created_ats.value(i))
+            .context("Failed to parse created_at")?
+            .with_timezone(&Utc);
+        let expires_at: Option<DateTime<Utc>> = if expires_ats.is_null(i) {
+            None
+        } else {
+            Some(
+                chrono::DateTime::parse_from_rfc3339(expires_ats.value(i))
+                    .context("Failed to parse expires_at")?
+                    .with_timezone(&Utc),
+            )
+        };
+
+        entries.push(IndexSummary {
+            id: ids.value(i).to_string(),
+            type_: parse_memory_type(types.value(i))?,
+            status: parse_status(statuses.value(i))?,
+            logical,
+            criticality: criticalities.value(i),
+            created_at,
+            expires_at,
+        });
+    }
+    Ok(entries)
+}
+
+/// Convert a RecordBatch to a Vec of IndexFilterable (12 columns).
+fn batch_to_filterable(batch: &RecordBatch) -> Result<Vec<IndexFilterable>> {
     let ids = batch
         .column_by_name("id")
         .context("Missing 'id' column")?
@@ -521,12 +792,6 @@ fn batch_to_entries(batch: &RecordBatch) -> Result<Vec<IndexEntry>> {
         .as_any()
         .downcast_ref::<StringArray>()
         .context("Failed to cast 'status'")?;
-    let provenance_sources = batch
-        .column_by_name("provenance_source")
-        .context("Missing 'provenance_source' column")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("Failed to cast 'provenance_source'")?;
     let visibilities = batch
         .column_by_name("visibility")
         .context("Missing 'visibility' column")?
@@ -539,12 +804,6 @@ fn batch_to_entries(batch: &RecordBatch) -> Result<Vec<IndexEntry>> {
         .as_any()
         .downcast_ref::<Float64Array>()
         .context("Failed to cast 'criticality'")?;
-    let confidences = batch
-        .column_by_name("confidence")
-        .context("Missing 'confidence' column")?
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .context("Failed to cast 'confidence'")?;
     let physicals = batch
         .column_by_name("physical")
         .context("Missing 'physical' column")?
@@ -584,10 +843,6 @@ fn batch_to_entries(batch: &RecordBatch) -> Result<Vec<IndexEntry>> {
 
     let mut entries = Vec::with_capacity(batch.num_rows());
     for i in 0..batch.num_rows() {
-        let type_ = parse_memory_type(types.value(i))?;
-        let status = parse_status(statuses.value(i))?;
-        let provenance_source = parse_provenance_source(provenance_sources.value(i))?;
-        let visibility = parse_visibility(visibilities.value(i))?;
         let physical: Vec<String> = serde_json::from_str(physicals.value(i))
             .context("Failed to parse physical scope JSON")?;
         let logical: Vec<String> = serde_json::from_str(logicals.value(i))
@@ -610,20 +865,94 @@ fn batch_to_entries(batch: &RecordBatch) -> Result<Vec<IndexEntry>> {
             )
         };
 
-        entries.push(IndexEntry {
+        entries.push(IndexFilterable {
             id: ids.value(i).to_string(),
-            type_,
+            type_: parse_memory_type(types.value(i))?,
             summary: summaries.value(i).to_string(),
             physical,
             logical,
             tags,
             criticality: criticalities.value(i),
-            confidence: confidences.value(i),
-            provenance_source,
-            status,
-            visibility,
+            status: parse_status(statuses.value(i))?,
+            visibility: parse_visibility(visibilities.value(i))?,
             created_at,
             updated_at,
+            expires_at,
+        });
+    }
+    Ok(entries)
+}
+
+/// Convert a RecordBatch to a Vec of IndexForFiltering (7 columns).
+fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>> {
+    let ids = batch
+        .column_by_name("id")
+        .context("Missing 'id' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'id'")?;
+    let types = batch
+        .column_by_name("type")
+        .context("Missing 'type' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'type'")?;
+    let physicals = batch
+        .column_by_name("physical")
+        .context("Missing 'physical' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'physical'")?;
+    let logicals = batch
+        .column_by_name("logical")
+        .context("Missing 'logical' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'logical'")?;
+    let tags_col = batch
+        .column_by_name("tags")
+        .context("Missing 'tags' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'tags'")?;
+    let criticalities = batch
+        .column_by_name("criticality")
+        .context("Missing 'criticality' column")?
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .context("Failed to cast 'criticality'")?;
+    let expires_ats = batch
+        .column_by_name("expires_at")
+        .context("Missing 'expires_at' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'expires_at'")?;
+
+    let mut entries = Vec::with_capacity(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        let physical: Vec<String> = serde_json::from_str(physicals.value(i))
+            .context("Failed to parse physical scope JSON")?;
+        let logical: Vec<String> = serde_json::from_str(logicals.value(i))
+            .context("Failed to parse logical scope JSON")?;
+        let tags: Vec<String> =
+            serde_json::from_str(tags_col.value(i)).context("Failed to parse tags JSON")?;
+        let expires_at: Option<DateTime<Utc>> = if expires_ats.is_null(i) {
+            None
+        } else {
+            Some(
+                chrono::DateTime::parse_from_rfc3339(expires_ats.value(i))
+                    .context("Failed to parse expires_at")?
+                    .with_timezone(&Utc),
+            )
+        };
+
+        entries.push(IndexForFiltering {
+            id: ids.value(i).to_string(),
+            type_: parse_memory_type(types.value(i))?,
+            physical,
+            logical,
+            tags,
+            criticality: criticalities.value(i),
             expires_at,
         });
     }
@@ -652,16 +981,6 @@ fn parse_status(s: &str) -> Result<Status> {
         "challenged" => Ok(Status::Challenged),
         "needsreview" | "needs_review" => Ok(Status::NeedsReview),
         _ => anyhow::bail!("Unknown status: {}", s),
-    }
-}
-
-fn parse_provenance_source(s: &str) -> Result<ProvenanceSource> {
-    match s {
-        "human" => Ok(ProvenanceSource::Human),
-        "agent" => Ok(ProvenanceSource::Agent),
-        "inferred" => Ok(ProvenanceSource::Inferred),
-        "imported" => Ok(ProvenanceSource::Imported),
-        _ => anyhow::bail!("Unknown provenance source: {}", s),
     }
 }
 
@@ -721,7 +1040,7 @@ mod tests {
         let entry = create_test_entry("test-1");
         lance.upsert(&entry).await.unwrap();
 
-        let entries = lance.list().await.unwrap();
+        let entries = lance.list_filterable().await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, "test-1");
         assert_eq!(entries[0].summary, "Test summary");
@@ -739,7 +1058,7 @@ mod tests {
         entry.summary = "Updated summary".to_string();
         lance.upsert(&entry).await.unwrap();
 
-        let entries = lance.list().await.unwrap();
+        let entries = lance.list_filterable().await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].summary, "Updated summary");
     }
@@ -753,8 +1072,7 @@ mod tests {
         lance.upsert(&entry).await.unwrap();
         lance.delete("test-1").await.unwrap();
 
-        let entries = lance.list().await.unwrap();
-        assert!(entries.is_empty());
+        assert_eq!(lance.count().await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -771,8 +1089,7 @@ mod tests {
 
         lance.clear().await.unwrap();
 
-        let entries = lance.list().await.unwrap();
-        assert!(entries.is_empty());
+        assert_eq!(lance.count().await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -887,7 +1204,7 @@ mod tests {
         entry.visibility = Visibility::Personal;
         lance.upsert(&entry).await.unwrap();
 
-        let entries = lance.list().await.unwrap();
+        let entries = lance.list_filterable().await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].visibility, Visibility::Personal);
     }

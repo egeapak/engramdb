@@ -1053,7 +1053,6 @@ impl EngramDbServer {
                     "physical": e.physical,
                     "status": format!("{:?}", e.status).to_lowercase(),
                     "criticality": e.criticality,
-                    "confidence": e.confidence,
                     "created_at": e.created_at.to_rfc3339(),
                     "updated_at": e.updated_at.to_rfc3339(),
                 })
@@ -1187,7 +1186,7 @@ impl ServerHandler for EngramDbServer {
                     .await
                     .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
                 let entries = store
-                    .list()
+                    .list_filterable()
                     .await
                     .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
