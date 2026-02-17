@@ -49,6 +49,13 @@ pub fn matches(patterns: &[String], path: &str) -> bool {
         return true;
     }
 
+    // Check for parent directory prefixes (e.g. "src/cli/" matches "src/cli/commands/add.rs")
+    for pattern in patterns {
+        if is_parent_directory(pattern, path) {
+            return true;
+        }
+    }
+
     // Build a GlobSet from all patterns
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
@@ -216,6 +223,52 @@ mod tests {
     fn test_matches_glob() {
         assert!(matches(&["src/**/*.rs".to_string()], "src/api/handlers.rs"));
         assert!(matches(&["src/api/*".to_string()], "src/api/handlers.rs"));
+    }
+
+    #[test]
+    fn test_matches_parent_directory() {
+        assert!(matches(
+            &["src/cli/".to_string()],
+            "src/cli/commands/add.rs"
+        ));
+        assert!(matches(&["src/".to_string()], "src/cli/commands/add.rs"));
+        assert!(!matches(
+            &["src/vector/".to_string()],
+            "src/cli/commands/add.rs"
+        ));
+    }
+
+    #[test]
+    fn test_matches_parent_directory_without_trailing_slash() {
+        // Directory pattern without trailing slash should still match nested files
+        assert!(matches(&["src/cli".to_string()], "src/cli/commands/add.rs"));
+        assert!(matches(&["src".to_string()], "src/cli/commands/add.rs"));
+    }
+
+    #[test]
+    fn test_matches_directory_prefix_not_substring() {
+        // "src/cl" should NOT match "src/cli/add.rs" — must be a proper path component
+        assert!(!matches(&["src/cl".to_string()], "src/cli/add.rs"));
+        assert!(!matches(&["src/cl/".to_string()], "src/cli/add.rs"));
+        // "src/cli_old" should NOT match "src/cli/add.rs"
+        assert!(!matches(&["src/cli_old".to_string()], "src/cli/add.rs"));
+    }
+
+    #[test]
+    fn test_matches_deeply_nested_parent() {
+        // A shallow scope should match deeply nested files
+        assert!(matches(&["src/".to_string()], "src/a/b/c/d/e/deep.rs"));
+    }
+
+    #[test]
+    fn test_matches_mixed_patterns_with_directory() {
+        // When one pattern is a directory prefix and others don't match,
+        // the directory prefix should still cause a match
+        let patterns = vec![
+            "tests/unit/".to_string(), // won't match
+            "src/cli/".to_string(),    // will match
+        ];
+        assert!(matches(&patterns, "src/cli/commands/add.rs"));
     }
 
     #[test]

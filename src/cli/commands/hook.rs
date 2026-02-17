@@ -23,9 +23,18 @@ fn extract_file_path(input: &str) -> Option<String> {
 }
 
 /// Make a file path relative to the project directory if possible.
+///
+/// Canonicalizes both paths before stripping so that `--dir .` works
+/// when tool input contains an absolute file path.
 fn relativize_path(file_path: &str, project_dir: &Path) -> String {
-    Path::new(file_path)
-        .strip_prefix(project_dir)
+    let canonical_dir = project_dir
+        .canonicalize()
+        .unwrap_or(project_dir.to_path_buf());
+    let canonical_file = Path::new(file_path)
+        .canonicalize()
+        .unwrap_or(Path::new(file_path).to_path_buf());
+    canonical_file
+        .strip_prefix(&canonical_dir)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| file_path.to_string())
 }
@@ -229,6 +238,60 @@ mod tests {
         assert_eq!(relativize_path("src/main.rs", dir), "src/main.rs");
     }
 
+    #[test]
+    fn test_relativize_path_dot_dir_with_absolute_file() {
+        // Simulates `--dir .` with an absolute file path from tool input.
+        // Uses a real temp directory so canonicalize succeeds.
+        let temp_dir = TempDir::new().unwrap();
+        let sub = temp_dir.path().join("src").join("cli");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("add.rs"), "").unwrap();
+
+        let canonical = temp_dir.path().canonicalize().unwrap();
+        let abs_file = canonical.join("src/cli/add.rs");
+
+        let result = relativize_path(abs_file.to_str().unwrap(), temp_dir.path());
+        assert_eq!(result, "src/cli/add.rs");
+    }
+
+    #[test]
+    fn test_relativize_path_nonexistent_file_falls_back() {
+        // When the file doesn't exist on disk, canonicalize fails and
+        // we fall back to raw strip_prefix. If that also fails, the
+        // original path is returned unchanged.
+        let result = relativize_path(
+            "/nonexistent/project/src/main.rs",
+            Path::new("/nonexistent/project"),
+        );
+        assert_eq!(result, "src/main.rs");
+    }
+
+    #[test]
+    fn test_relativize_path_file_at_project_root() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join("Cargo.toml"), "").unwrap();
+
+        let canonical = temp_dir.path().canonicalize().unwrap();
+        let abs_file = canonical.join("Cargo.toml");
+
+        let result = relativize_path(abs_file.to_str().unwrap(), temp_dir.path());
+        assert_eq!(result, "Cargo.toml");
+    }
+
+    #[test]
+    fn test_relativize_path_deeply_nested() {
+        let temp_dir = TempDir::new().unwrap();
+        let deep = temp_dir.path().join("a").join("b").join("c").join("d");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("file.rs"), "").unwrap();
+
+        let canonical = temp_dir.path().canonicalize().unwrap();
+        let abs_file = canonical.join("a/b/c/d/file.rs");
+
+        let result = relativize_path(abs_file.to_str().unwrap(), temp_dir.path());
+        assert_eq!(result, "a/b/c/d/file.rs");
+    }
+
     // --- Unit tests for format_additional_context ---
 
     #[test]
@@ -319,6 +382,11 @@ mod tests {
 
     async fn setup_store_with_memories() -> (TempDir, MemoryStore) {
         let temp_dir = TempDir::new().unwrap();
+        // Create the file on disk so canonicalize works in relativize_path
+        let src_dir = temp_dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("main.rs"), "").unwrap();
+
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
