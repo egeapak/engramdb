@@ -53,7 +53,7 @@ pub fn parse_memory_file(content: &str) -> Result<Memory> {
         .ok_or_else(|| StorageError::InvalidFormat("Missing body after frontmatter".to_string()))?;
 
     // Parse frontmatter as YAML
-    let mut memory: Memory = serde_yaml::from_str(frontmatter)?;
+    let mut memory: Memory = serde_yml::from_str(frontmatter)?;
 
     // Parse body sections
     let sections = parse_body_sections(body);
@@ -104,7 +104,7 @@ pub fn write_memory_file(memory: &Memory) -> Result<String> {
 
     // Write frontmatter
     output.push_str("---\n");
-    let yaml = serde_yaml::to_string(memory)?;
+    let yaml = serde_yml::to_string(memory)?;
     output.push_str(&yaml);
     output.push_str("---\n\n");
 
