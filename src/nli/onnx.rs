@@ -85,10 +85,8 @@ impl OnnxNliProvider {
 /// EngramDB model cache directory (`<cache_dir>/engramdb/models/`) and reused
 /// on subsequent calls.
 fn download_model_files(model_repo: &str) -> Result<(PathBuf, PathBuf)> {
-    let cache_dir = dirs::cache_dir()
-        .context("Could not determine cache directory")?
-        .join("engramdb")
-        .join("models");
+    let cache_dir =
+        crate::storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let api = hf_hub::api::sync::ApiBuilder::new()
         .with_cache_dir(cache_dir)

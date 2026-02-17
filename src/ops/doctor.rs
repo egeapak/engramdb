@@ -159,7 +159,9 @@ pub async fn doctor_environment(
     });
 
     // 4. Embedding model cached
-    checks.push(check_embedding_model_cached(dir).await);
+    let cache_dir = crate::storage::paths::model_cache_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from(".cache/engramdb/models"));
+    checks.push(check_embedding_model_cached(dir, &cache_dir).await);
 
     // 5. Store health (only if store is available)
     let store_check = if let Some(s) = store {
@@ -258,12 +260,7 @@ fn check_claude_plugin() -> EnvironmentCheck {
 }
 
 /// Check if the embedding model is cached on disk.
-async fn check_embedding_model_cached(dir: &Path) -> EnvironmentCheck {
-    let cache_dir = dirs::cache_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
-        .join("engramdb")
-        .join("models");
-
+async fn check_embedding_model_cached(dir: &Path, cache_dir: &Path) -> EnvironmentCheck {
     // Try to read the configured model name from the project config
     let model_name = if let Ok(config) =
         crate::storage::config::load_config(&dir.join(".engramdb").join("config.toml")).await
@@ -754,11 +751,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_embedding_model_cached_missing_dir() {
-        // Point at a dir with no .engramdb/config.toml — should gracefully return false
+        // Both project dir and cache dir point at empty temp dirs,
+        // so there's no config.toml and no cached models.
         let temp_dir = TempDir::new().unwrap();
-        let result = check_embedding_model_cached(temp_dir.path()).await;
+        let cache_dir = TempDir::new().unwrap();
+        let result = check_embedding_model_cached(temp_dir.path(), cache_dir.path()).await;
         assert_eq!(result.name, "Embedding model");
         assert!(!result.passed);
         assert_eq!(result.message, "not cached");
+        assert!(result.suggestion.is_some());
     }
 }

@@ -7,7 +7,9 @@
 use super::filters::{apply_index_filters, SearchFilters};
 use crate::embeddings::EmbeddingProvider;
 use crate::nli::{NliProvider, NliResult};
-use crate::scoring::{composite_score, ScoreBreakdown, ScoringContext};
+use crate::scoring::{
+    composite_score, composite_score_ignore_decay, ScoreBreakdown, ScoringContext,
+};
 use crate::storage::{MemoryStore, Result};
 use crate::types::{EngramConfig, Memory, MemoryType};
 use chrono::Utc;
@@ -477,7 +479,11 @@ impl RetrievalEngine {
                 ScoringContext::scope_only(query.path.clone(), query.logical.clone())
             };
 
-            let breakdown = composite_score(memory, &context, &self.config, Utc::now());
+            let breakdown = if include_expired {
+                composite_score_ignore_decay(memory, &context, &self.config, Utc::now())
+            } else {
+                composite_score(memory, &context, &self.config, Utc::now())
+            };
 
             scored_memories.push(ScoredMemory {
                 memory: memory.clone(),
@@ -645,7 +651,7 @@ impl RetrievalEngine {
                 relevance,
                 scope: 0.0,
                 trust,
-                decay,
+                decay: 1.0 - decay,
                 criticality: memory.criticality,
             };
 
@@ -687,10 +693,8 @@ mod tests {
     /// ~100MB ONNX model once per test (which causes OOM when parallel).
     static SHARED_RERANKER: LazyLock<Option<Arc<Mutex<fastembed::TextRerank>>>> =
         LazyLock::new(|| {
-            let cache_dir = dirs::cache_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
-                .join("engramdb")
-                .join("models");
+            let cache_dir = crate::storage::paths::model_cache_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from(".cache/engramdb/models"));
             let options = fastembed::RerankInitOptions::default().with_cache_dir(cache_dir);
             fastembed::TextRerank::try_new(options)
                 .ok()
@@ -957,6 +961,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_retrieve_include_expired_scores_without_decay() {
+        use crate::types::{Decay, EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use chrono::{Duration, Utc};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let config = EngramConfig::default(); // relevance_threshold = 0.3
+
+        // Expired memory with high criticality and root scope → score without decay
+        // should exceed threshold: (0.50 * 0.8 + 0.50 * 0.4) * 0.85 = 0.51
+        let mut expired = Memory::new(
+            MemoryType::Debug,
+            "Decayed memory",
+            "This has fully decayed",
+            Provenance::human(),
+        );
+        expired.expires_at = Some(Utc::now() - Duration::seconds(1));
+        expired.visibility = Visibility::Shared;
+        expired.criticality = 0.8;
+        expired.decay = Some(Decay::linear(Duration::seconds(1)).with_floor(0.0));
+        expired.created_at = Utc::now() - Duration::seconds(10);
+
+        // Active memory
+        let mut active = Memory::new(
+            MemoryType::Decision,
+            "Active memory",
+            "This is active",
+            Provenance::human(),
+        );
+        active.visibility = Visibility::Shared;
+        active.criticality = 0.8;
+
+        store.create(&expired).await.unwrap();
+        store.create(&active).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+
+        // include_expired=false: expired memory filtered by expires_at
+        let query_exclude = RetrievalQuery {
+            include_expired: Some(false),
+            ..Default::default()
+        };
+        let result = engine.retrieve(&query_exclude).await.unwrap();
+        assert_eq!(result.memories.len(), 1);
+        assert_eq!(result.memories[0].memory.summary, "Active memory");
+
+        // include_expired=true: expired memory scored ignoring decay,
+        // so its score is based on criticality + scope (not zeroed by decay)
+        let query_include = RetrievalQuery {
+            include_expired: Some(true),
+            ..Default::default()
+        };
+        let result = engine.retrieve(&query_include).await.unwrap();
+        assert_eq!(
+            result.memories.len(),
+            2,
+            "include_expired=true should score expired memories without decay, allowing them to pass threshold"
+        );
+
+        // Verify the expired memory's decay is recorded but didn't kill the score
+        let expired_result = result
+            .memories
+            .iter()
+            .find(|sm| sm.memory.summary == "Decayed memory")
+            .expect("expired memory should be in results");
+        assert!(
+            expired_result.score_breakdown.decay > 0.99,
+            "decay should be near 1.0 (fully decayed, recorded for transparency)"
+        );
+        assert!(
+            expired_result.score > 0.3,
+            "score should exceed threshold because decay was ignored for scoring"
+        );
+    }
+
+    #[tokio::test]
     async fn test_retrieve_detail_level_summary() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
@@ -1040,7 +1124,7 @@ mod tests {
         assert!(sm.score_breakdown.relevance > 0.0);
         assert!(sm.score_breakdown.scope > 0.0);
         assert!(sm.score_breakdown.trust > 0.0);
-        assert_eq!(sm.score_breakdown.decay, 1.0); // No decay
+        assert_eq!(sm.score_breakdown.decay, 0.0); // Fresh, no decay
         assert!(sm.score_breakdown.semantic.is_none()); // No query
     }
 
@@ -1160,8 +1244,8 @@ mod tests {
         assert!(results[0].score_breakdown.keyword.is_some());
         // Trust should be the real trust weight
         assert_eq!(results[0].score_breakdown.trust, 1.0);
-        // Decay should be real
-        assert_eq!(results[0].score_breakdown.decay, 1.0);
+        // Decay should be 0.0 (fresh, no decay)
+        assert_eq!(results[0].score_breakdown.decay, 0.0);
     }
 
     #[tokio::test]
@@ -1263,14 +1347,13 @@ mod tests {
         let fresh_result = results.iter().find(|r| r.memory.id == fresh.id).unwrap();
         let old_result = results.iter().find(|r| r.memory.id == old.id).unwrap();
 
-        // Fresh has decay=1.0, old has decay~=0.5
-        assert_eq!(fresh_result.score_breakdown.decay, 1.0);
+        // Fresh has decay=0.0 (no decay), old has decay~=0.5 (half decayed)
+        assert_eq!(fresh_result.score_breakdown.decay, 0.0);
         assert!((old_result.score_breakdown.decay - 0.5).abs() < 0.1);
-        // Old should score roughly half of fresh
+        // Old should score roughly half of fresh (decay_factor = 1.0 - 0.5 = 0.5)
         assert!(old_result.score < fresh_result.score);
-        assert!(
-            (old_result.score - fresh_result.score * old_result.score_breakdown.decay).abs() < 0.01
-        );
+        let decay_factor = 1.0 - old_result.score_breakdown.decay;
+        assert!((old_result.score - fresh_result.score * decay_factor).abs() < 0.01);
     }
 
     #[tokio::test]
@@ -1418,8 +1501,8 @@ mod tests {
         assert_eq!(bd.keyword.unwrap(), 4.0);
         // criticality should be the raw value
         assert_eq!(bd.criticality, 0.7);
-        // relevance should be criticality * decay
-        assert_eq!(bd.relevance, 0.7 * bd.decay);
+        // relevance should be criticality * (1 - decay), since decay=0 means fresh
+        assert_eq!(bd.relevance, 0.7 * (1.0 - bd.decay));
         // scope should be 0.0 for search
         assert_eq!(bd.scope, 0.0);
         // semantic should be None (no embeddings)

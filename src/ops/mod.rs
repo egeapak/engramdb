@@ -194,10 +194,8 @@ pub async fn build_engine(
 
     // Initialize cross-encoder reranker if enabled
     if config.rerank.enabled {
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from(".cache"))
-            .join("engramdb")
-            .join("models");
+        let cache_dir = crate::storage::paths::model_cache_dir()
+            .unwrap_or_else(|_| PathBuf::from(".cache/engramdb/models"));
 
         let model = resolve_reranker_model(&config.rerank.model);
         let options = RerankInitOptions::new(model)

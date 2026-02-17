@@ -24,7 +24,7 @@ pub struct ScoreBreakdown {
     pub scope: f64,
     /// Trust weight based on provenance (used as multiplier)
     pub trust: f64,
-    /// Decay factor (1.0 = no decay)
+    /// Decay amount (0.0 = fresh, 1.0 = fully decayed)
     pub decay: f64,
     /// Raw criticality value
     pub criticality: f64,
@@ -123,8 +123,40 @@ pub fn composite_score(
     config: &EngramConfig,
     now: DateTime<Utc>,
 ) -> ScoreBreakdown {
-    // Calculate component scores
-    let relevance = effective_relevance(memory, now);
+    composite_score_inner(memory, context, config, now, false)
+}
+
+/// Like [`composite_score`] but ignores time-based decay when scoring.
+///
+/// The real decay factor is still recorded in the breakdown for transparency,
+/// but `relevance` uses `criticality` directly (as if decay = 1.0).
+/// This allows expired memories to be scored by scope and criticality alone,
+/// so the relevance threshold still filters out irrelevant results.
+pub fn composite_score_ignore_decay(
+    memory: &Memory,
+    context: &ScoringContext,
+    config: &EngramConfig,
+    now: DateTime<Utc>,
+) -> ScoreBreakdown {
+    composite_score_inner(memory, context, config, now, true)
+}
+
+fn composite_score_inner(
+    memory: &Memory,
+    context: &ScoringContext,
+    config: &EngramConfig,
+    now: DateTime<Utc>,
+    ignore_decay: bool,
+) -> ScoreBreakdown {
+    // Calculate decay factor (always computed for the breakdown)
+    let decay_factor_value = super::decay::decay_factor(memory.created_at, now, &memory.decay);
+
+    // Calculate relevance: when ignoring decay, use criticality directly
+    let relevance = if ignore_decay {
+        memory.criticality
+    } else {
+        effective_relevance(memory, now)
+    };
 
     let scope_score = crate::scope::scope_proximity(
         &memory.physical,
@@ -134,9 +166,6 @@ pub fn composite_score(
     );
 
     let trust = trust_weight_from_config(memory.provenance.source, &config.trust_weights);
-
-    // Calculate decay factor
-    let decay_factor_value = super::decay::decay_factor(memory.created_at, now, &memory.decay);
 
     // Determine which weights to use based on context
     let weights = if context.semantic_score.is_some() {
@@ -179,7 +208,7 @@ pub fn composite_score(
         relevance,
         scope: scope_score,
         trust,
-        decay: decay_factor_value,
+        decay: 1.0 - decay_factor_value,
         criticality: memory.criticality,
     }
 }
@@ -328,7 +357,7 @@ mod tests {
         // * trust(1.0) = 0.70
         assert!(breakdown.final_score < 0.9);
         assert!(breakdown.final_score > 0.0);
-        assert!((breakdown.decay - 0.5).abs() < 0.1);
+        assert!((breakdown.decay - 0.5).abs() < 0.1); // 0.5 = half decayed
     }
 
     #[test]
@@ -413,7 +442,7 @@ mod tests {
         // * trust(1.0) = 1.0
         assert!((breakdown.final_score - 1.0).abs() < 0.05);
         assert!(breakdown.final_score <= 1.1);
-        assert_eq!(breakdown.decay, 1.0);
+        assert_eq!(breakdown.decay, 0.0); // 0.0 = fresh, no decay
         assert_eq!(breakdown.semantic, Some(1.0));
     }
 
@@ -568,8 +597,8 @@ mod tests {
         assert!(breakdown.keyword.is_none());
         // criticality should be the raw value
         assert_eq!(breakdown.criticality, 0.8);
-        // relevance should be criticality * decay
-        assert_eq!(breakdown.relevance, 0.8 * breakdown.decay);
+        // relevance should be criticality * (1 - decay), since decay=0 means fresh
+        assert_eq!(breakdown.relevance, 0.8 * (1.0 - breakdown.decay));
     }
 
     #[test]
@@ -605,6 +634,192 @@ mod tests {
         // In scope-only mode, semantic should be None
         assert!(breakdown.semantic.is_none());
         assert!(breakdown.final_score > 0.0);
+    }
+
+    #[test]
+    fn test_ignore_decay_fresh_memory_same_as_normal() {
+        // When decay=1.0 (fresh), both functions should produce identical scores
+        let memory = create_test_memory(); // decay=None → factor=1.0
+        let context = ScoringContext::scope_only(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+        );
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let normal = composite_score(&memory, &context, &config, now);
+        let ignore = composite_score_ignore_decay(&memory, &context, &config, now);
+
+        assert!(
+            (normal.final_score - ignore.final_score).abs() < 0.001,
+            "fresh memory: normal={} ignore={}",
+            normal.final_score,
+            ignore.final_score,
+        );
+        assert_eq!(normal.decay, ignore.decay);
+        assert_eq!(normal.relevance, ignore.relevance);
+    }
+
+    #[test]
+    fn test_ignore_decay_expired_memory_scores_higher() {
+        // Fully expired memory: ignore_decay should score much higher
+        let mut memory = create_test_memory();
+        memory.criticality = 0.8;
+        memory.created_at = Utc::now() - Duration::days(15);
+        memory.decay = Some(Decay::linear(Duration::days(10))); // expired, floor=0.0
+
+        let context = ScoringContext::scope_only(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+        );
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let normal = composite_score(&memory, &context, &config, now);
+        let ignore = composite_score_ignore_decay(&memory, &context, &config, now);
+
+        // normal: relevance = 0.8 * 0.0 = 0.0, score = 0.50*0.0 + 0.50*1.0 = 0.50
+        assert!((normal.relevance - 0.0).abs() < 0.01);
+        assert!((normal.final_score - 0.50).abs() < 0.05);
+
+        // ignore: relevance = 0.8, score = 0.50*0.8 + 0.50*1.0 = 0.90
+        assert!((ignore.relevance - 0.8).abs() < 0.01);
+        assert!((ignore.final_score - 0.90).abs() < 0.05);
+
+        assert!(ignore.final_score > normal.final_score);
+    }
+
+    #[test]
+    fn test_ignore_decay_records_real_decay_in_breakdown() {
+        // The breakdown should still record the real decay value
+        let mut memory = create_test_memory();
+        memory.created_at = Utc::now() - Duration::days(7);
+        memory.decay = Some(Decay::exponential(Duration::days(7))); // ~0.5 decay
+
+        let context = ScoringContext::scope_only(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+        );
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let ignore = composite_score_ignore_decay(&memory, &context, &config, now);
+
+        // Real decay should be ~0.5 in the breakdown
+        assert!(
+            (ignore.decay - 0.5).abs() < 0.1,
+            "breakdown decay should be ~0.5, got {}",
+            ignore.decay,
+        );
+        // But relevance should use criticality directly (0.8)
+        assert!(
+            (ignore.relevance - 0.8).abs() < 0.01,
+            "relevance should be 0.8 (ignoring decay), got {}",
+            ignore.relevance,
+        );
+    }
+
+    #[test]
+    fn test_ignore_decay_half_decayed_comparison() {
+        // Half-decayed: normal uses 0.8*0.5=0.4, ignore uses 0.8
+        let mut memory = create_test_memory();
+        memory.criticality = 0.8;
+        memory.created_at = Utc::now() - Duration::days(7);
+        memory.decay = Some(Decay::exponential(Duration::days(7)));
+
+        let context = ScoringContext::scope_only(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+        );
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let normal = composite_score(&memory, &context, &config, now);
+        let ignore = composite_score_ignore_decay(&memory, &context, &config, now);
+
+        // normal: relevance ≈ 0.8 * 0.5 = 0.4 → score ≈ 0.50*0.4 + 0.50*1.0 = 0.70
+        assert!((normal.relevance - 0.4).abs() < 0.1);
+        assert!((normal.final_score - 0.70).abs() < 0.05);
+
+        // ignore: relevance = 0.8 → score = 0.50*0.8 + 0.50*1.0 = 0.90
+        assert!((ignore.relevance - 0.8).abs() < 0.01);
+        assert!((ignore.final_score - 0.90).abs() < 0.05);
+    }
+
+    #[test]
+    fn test_ignore_decay_challenge_penalty_still_applies() {
+        let mut memory = create_test_memory();
+        memory.status = Status::Challenged;
+        memory.created_at = Utc::now() - Duration::days(15);
+        memory.decay = Some(Decay::linear(Duration::days(10)));
+
+        let context = ScoringContext::scope_only(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+        );
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let ignore = composite_score_ignore_decay(&memory, &context, &config, now);
+
+        // base = 0.50*0.8 + 0.50*1.0 = 0.90
+        // challenged penalty: 0.90 * 0.7 = 0.63
+        assert!(
+            (ignore.final_score - 0.63).abs() < 0.05,
+            "challenged ignore_decay: expected ~0.63, got {}",
+            ignore.final_score,
+        );
+    }
+
+    #[test]
+    fn test_ignore_decay_low_criticality_low_scope_below_threshold() {
+        // Even with ignore_decay, low crit + no scope match → low score
+        let mut memory = create_test_memory();
+        memory.criticality = 0.3;
+        memory.physical = vec!["src/api/auth.rs".to_string()];
+        memory.created_at = Utc::now() - Duration::days(30);
+        memory.decay = Some(Decay::linear(Duration::days(10)));
+
+        let context =
+            ScoringContext::scope_only(Some("completely/different/path.rs".to_string()), vec![]);
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let ignore = composite_score_ignore_decay(&memory, &context, &config, now);
+
+        // relevance = 0.3, scope ≈ 0.0 → score = 0.50*0.3 + 0.50*0.0 = 0.15
+        // Below default threshold of 0.3
+        assert!(
+            ignore.final_score < 0.3,
+            "low crit+no scope should still be below threshold: {}",
+            ignore.final_score,
+        );
+    }
+
+    #[test]
+    fn test_ignore_decay_with_semantic_mode() {
+        // Verify ignore_decay works correctly in semantic (with_query) mode too
+        let mut memory = create_test_memory();
+        memory.criticality = 0.8;
+        memory.created_at = Utc::now() - Duration::days(15);
+        memory.decay = Some(Decay::linear(Duration::days(10)));
+
+        let context = ScoringContext::with_semantic(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+            "test query".to_string(),
+            0.9,
+        );
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let normal = composite_score(&memory, &context, &config, now);
+        let ignore = composite_score_ignore_decay(&memory, &context, &config, now);
+
+        // Normal: relevance=0.0 → score = 0.35*0.9 + 0.45*0.0 + 0.20*1.0 = 0.515
+        // Ignore: relevance=0.8 → score = 0.35*0.9 + 0.45*0.8 + 0.20*1.0 = 0.875
+        assert!(ignore.final_score > normal.final_score);
+        assert!((ignore.final_score - 0.875).abs() < 0.05);
     }
 
     #[test]
