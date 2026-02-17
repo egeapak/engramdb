@@ -2,7 +2,7 @@
 
 use crate::cli::output::OutputFormatter;
 use crate::ops::get_memory;
-use crate::storage::{paths, MemoryStore, RegistryBackend};
+use crate::storage::{paths, MemoryStore};
 use crate::types::Visibility;
 use anyhow::Result;
 use std::path::Path;
@@ -14,7 +14,6 @@ use tokio::fs;
 ///
 /// # Arguments
 /// * `dir` - The directory containing the EngramDB store
-/// * `registry` - The registry backend to use for project registration
 /// * `id` - The memory ID or prefix
 /// * `full` - Show complete details without truncation
 /// * `raw` - Output the raw markdown file contents
@@ -22,14 +21,13 @@ use tokio::fs;
 /// * `formatter` - Output formatter for displaying the memory
 pub async fn run_get(
     dir: &Path,
-    registry: &dyn RegistryBackend,
     id: &str,
     full: bool,
     raw: bool,
     path_only: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir, registry).await?;
+    let store = MemoryStore::open(dir).await?;
     if let Ok(Some(warning)) = store.check_staleness().await {
         formatter.print_warning(&warning);
     }
@@ -104,7 +102,7 @@ mod tests {
         }
     }
 
-    async fn setup_test_store() -> (TempDir, MemoryStore, InMemoryRegistry) {
+    async fn setup_test_store() -> (TempDir, MemoryStore) {
         let temp_dir = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
@@ -117,17 +115,16 @@ mod tests {
         store.create(&mem2).await.unwrap();
         store.create(&mem3).await.unwrap();
 
-        (temp_dir, store, registry)
+        (temp_dir, store)
     }
 
     #[tokio::test]
     async fn test_get_existing_memory() {
-        let (temp_dir, _store, registry) = setup_test_store().await;
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let result = run_get(
             temp_dir.path(),
-            &registry,
             "mem-test-001-aaa",
             false,
             false,
@@ -141,13 +138,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_prefix_match() {
-        let (temp_dir, _store, registry) = setup_test_store().await;
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         // Use a unique prefix that matches only one memory
         let result = run_get(
             temp_dir.path(),
-            &registry,
             "mem-test-001",
             false,
             false,
@@ -161,12 +157,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_nonexistent() {
-        let (temp_dir, _store, registry) = setup_test_store().await;
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let result = run_get(
             temp_dir.path(),
-            &registry,
             "nonexistent-id",
             false,
             false,

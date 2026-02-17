@@ -22,7 +22,7 @@ use super::lance_index::{
     IndexEntry, IndexFilterable, IndexForFiltering, IndexSummary, LanceIndex, VectorMatch,
 };
 use super::registry::RegistryBackend;
-use super::{manifest, memory_file, paths, project_id};
+use super::{manifest, memory_file, paths, project_id, write_lock};
 use crate::storage::config::load_config;
 use crate::types::{Memory, MemoryUpdate, Visibility};
 use std::collections::{HashMap, HashSet};
@@ -34,11 +34,14 @@ use tokio::fs as async_fs;
 /// Manages memory files, a unified LanceDB index, manifest, and coordinates
 /// between shared (project-level) and personal (user-level) storage locations.
 ///
-/// # Cloning
-/// Cloning is cheap (Arc'd LanceDB connection, paths). However, `update()`
-/// does a non-atomic read-modify-write on the filesystem, so concurrent
-/// updates to the **same** memory ID from different clones can race.
-/// Callers must ensure cloned handles don't write to overlapping IDs.
+/// # Concurrency
+/// Mutating operations (`create`, `update`, `delete`, `reindex`,
+/// `upsert_chunks`, `delete_chunks`) acquire an advisory file lock
+/// (`flock(2)`) per project, serializing concurrent writes across processes.
+/// Read operations (`get`, `list_*`, `count`, `get_batch`, `batch_exists`)
+/// are lock-free — LanceDB MVCC handles concurrent readers.
+///
+/// File writes use atomic temp-then-rename to prevent partial reads.
 #[derive(Clone)]
 pub struct MemoryStore {
     /// Root directory of the project (contains .engramdb/)
@@ -110,7 +113,7 @@ impl MemoryStore {
     }
 
     /// Open an existing EngramDB store.
-    pub async fn open(dir: &Path, registry: &dyn RegistryBackend) -> Result<Self> {
+    pub async fn open(dir: &Path) -> Result<Self> {
         let engramdb_dir = paths::project_dir(dir);
 
         if !engramdb_dir.exists() {
@@ -132,27 +135,24 @@ impl MemoryStore {
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB open failed: {}", e)))?;
 
-        let store = Self {
+        Ok(Self {
             project_dir: dir.to_path_buf(),
             project_id,
             lance_index,
-        };
-
-        // Update registry
-        registry.update(dir, &store.project_id).await?;
-
-        Ok(store)
+        })
     }
 
     /// Create a new memory.
     pub async fn create(&self, memory: &Memory) -> Result<String> {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
         let memories_dir = self.get_memories_dir(&memory.visibility)?;
         async_fs::create_dir_all(&memories_dir).await?;
 
-        // Write memory file
+        // Write memory file atomically
         let file_path = memories_dir.join(format!("{}.md", memory.id));
         let content = memory_file::write_memory_file(memory)?;
-        async_fs::write(&file_path, content).await?;
+        atomic_write(&file_path, &content).await?;
 
         // Upsert metadata to LanceDB (vectors stored separately in chunks table)
         let entry = IndexEntry::from(memory);
@@ -272,6 +272,8 @@ impl MemoryStore {
 
     /// Update a memory.
     pub async fn update(&self, id: &str, updates: MemoryUpdate) -> Result<()> {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
         // Get existing memory
         let mut memory = self.get(id).await?;
         let old_visibility = memory.visibility;
@@ -285,18 +287,18 @@ impl MemoryStore {
             self.delete_file_from_dir(id, &self.get_memories_dir(&old_visibility)?)
                 .await?;
 
-            // Write to new location
+            // Write to new location atomically
             let memories_dir = self.get_memories_dir(&memory.visibility)?;
             async_fs::create_dir_all(&memories_dir).await?;
             let file_path = memories_dir.join(format!("{}.md", memory.id));
             let content = memory_file::write_memory_file(&memory)?;
-            async_fs::write(&file_path, content).await?;
+            atomic_write(&file_path, &content).await?;
         } else {
-            // Write updated memory
+            // Write updated memory atomically
             let memories_dir = self.get_memories_dir(&memory.visibility)?;
             let file_path = memories_dir.join(format!("{}.md", memory.id));
             let content = memory_file::write_memory_file(&memory)?;
-            async_fs::write(&file_path, content).await?;
+            atomic_write(&file_path, &content).await?;
         }
 
         // Upsert metadata to LanceDB (chunks are managed separately)
@@ -314,6 +316,8 @@ impl MemoryStore {
 
     /// Delete a memory.
     pub async fn delete(&self, id: &str) -> Result<()> {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
         // Resolve full ID first via the index
         let full_id = self.resolve_full_id(id).await?;
 
@@ -393,6 +397,8 @@ impl MemoryStore {
 
     /// Rebuild LanceDB index from memory files on disk.
     pub async fn reindex(&self) -> Result<usize> {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
         // Clear LanceDB
         self.lance_index
             .clear()
@@ -423,6 +429,7 @@ impl MemoryStore {
 
     /// Upsert embedding chunks for a memory.
     pub async fn upsert_chunks(&self, memory_id: &str, chunks: Vec<Vec<f32>>) -> Result<()> {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
         self.lance_index
             .upsert_chunks(memory_id, chunks)
             .await
@@ -431,6 +438,7 @@ impl MemoryStore {
 
     /// Delete all embedding chunks for a memory.
     pub async fn delete_chunks(&self, memory_id: &str) -> Result<()> {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
         self.lance_index
             .delete_chunks(memory_id)
             .await
@@ -564,6 +572,19 @@ impl MemoryStore {
     }
 }
 
+/// Write content atomically using write-to-temp-then-rename.
+///
+/// Writes to a `.tmp` sibling file then renames to the target path.
+/// `rename(2)` is atomic on APFS/ext4, eliminating partial-read windows.
+async fn atomic_write(path: &Path, content: &str) -> Result<()> {
+    let mut tmp_name = path.as_os_str().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp_path = PathBuf::from(tmp_name);
+    async_fs::write(&tmp_path, content).await?;
+    async_fs::rename(&tmp_path, path).await?;
+    Ok(())
+}
+
 /// Count `.md` files in a directory. Returns 0 if the directory doesn't exist.
 async fn count_md_files(dir: &Path) -> usize {
     if !dir.exists() {
@@ -676,7 +697,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
 
-        let result = MemoryStore::open(project_dir, &InMemoryRegistry::new()).await;
+        let result = MemoryStore::open(project_dir).await;
         assert!(result.is_err());
         match result {
             Err(StorageError::NotInitialized) => {}

@@ -20,8 +20,6 @@ pub struct RegistryEntry {
     pub project_id: String,
     /// Absolute path to the project directory
     pub project_path: String,
-    /// Last time this project was opened
-    pub last_opened: chrono::DateTime<chrono::Utc>,
 }
 
 /// Global registry of all EngramDB projects on this machine.
@@ -52,13 +50,11 @@ pub trait RegistryBackend: Send + Sync {
             .iter_mut()
             .find(|e| e.project_id == project_id)
         {
-            entry.last_opened = chrono::Utc::now();
             entry.project_path = path_str;
         } else {
             registry.projects.push(RegistryEntry {
                 project_id: project_id.to_string(),
                 project_path: path_str,
-                last_opened: chrono::Utc::now(),
             });
         }
 
@@ -105,7 +101,13 @@ impl RegistryBackend for FileRegistry {
             async_fs::create_dir_all(parent).await?;
         }
         let content = serde_json::to_string_pretty(registry)?;
-        async_fs::write(&self.path, content).await?;
+        // Use a PID-unique temp file to avoid races between concurrent processes
+        // all targeting the same global registry.json
+        let tmp_path = self
+            .path
+            .with_extension(format!("{}.json.tmp", std::process::id()));
+        async_fs::write(&tmp_path, &content).await?;
+        async_fs::rename(&tmp_path, &self.path).await?;
         Ok(())
     }
 }
@@ -178,7 +180,6 @@ mod tests {
         registry.projects.push(RegistryEntry {
             project_id: "test-id".to_string(),
             project_path: "/tmp/test".to_string(),
-            last_opened: chrono::Utc::now(),
         });
 
         file_registry.save(&registry).await.unwrap();
@@ -238,7 +239,6 @@ mod tests {
         data.projects.push(RegistryEntry {
             project_id: "mem-id".to_string(),
             project_path: "/tmp/mem".to_string(),
-            last_opened: chrono::Utc::now(),
         });
 
         registry.save(&data).await.unwrap();
@@ -278,12 +278,10 @@ mod tests {
         data.projects.push(RegistryEntry {
             project_id: "pre-1".to_string(),
             project_path: "/tmp/pre".to_string(),
-            last_opened: chrono::Utc::now(),
         });
         data.projects.push(RegistryEntry {
             project_id: "pre-2".to_string(),
             project_path: "/tmp/pre2".to_string(),
-            last_opened: chrono::Utc::now(),
         });
 
         let registry = InMemoryRegistry::with(data);

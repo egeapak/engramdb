@@ -51,6 +51,7 @@ chrono = { version = "0.4", features = ["serde"] }
 globset = "0.4"
 sha2 = "0.10"
 dirs = "6"
+fs4 = { version = "0.12", features = ["sync"] }
 
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net", "process"] }

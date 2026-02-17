@@ -270,18 +270,18 @@ impl LanceIndex {
     }
 
     /// Upsert a metadata entry (no vector — vectors go in the chunks table).
+    ///
+    /// Uses `merge_insert` for atomic upsert — no gap where the entry is missing.
     pub async fn upsert(&self, entry: &IndexEntry) -> Result<()> {
         let batch = self.entry_to_batch(entry)?;
         let table = self.open_table().await?;
-        let id = entry.id.clone();
-
-        let _ = table.delete(&format!("id = '{}'", id)).await;
 
         let schema_ref = batch.schema();
         let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema_ref);
-        table
-            .add(batches)
-            .execute()
+        let mut op = table.merge_insert(&["id"]);
+        op.when_matched_update_all(None);
+        op.when_not_matched_insert_all();
+        op.execute(Box::new(batches))
             .await
             .context("Failed to upsert entry")?;
         Ok(())
@@ -478,13 +478,12 @@ impl LanceIndex {
 
     /// Upsert embedding chunks for a memory.
     ///
-    /// Deletes any existing chunks for this memory_id, then inserts new rows
-    /// (one per chunk vector with ascending chunk_index).
+    /// Uses `merge_insert` for atomic upsert. The `when_not_matched_by_source_delete`
+    /// filter scoped to the specific `memory_id` removes stale chunks when chunk
+    /// count changes. Empty chunks case uses `delete_chunks` as a fast path.
     pub async fn upsert_chunks(&self, memory_id: &str, chunks: Vec<Vec<f32>>) -> Result<()> {
-        // Delete existing chunks for this memory
-        self.delete_chunks(memory_id).await?;
-
         if chunks.is_empty() {
+            self.delete_chunks(memory_id).await?;
             return Ok(());
         }
 
@@ -520,11 +519,13 @@ impl LanceIndex {
         .context("Failed to create chunks RecordBatch")?;
 
         let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
-        table
-            .add(batches)
-            .execute()
+        let mut op = table.merge_insert(&["memory_id", "chunk_index"]);
+        op.when_matched_update_all(None);
+        op.when_not_matched_insert_all();
+        op.when_not_matched_by_source_delete(Some(format!("memory_id = '{}'", memory_id)));
+        op.execute(Box::new(batches))
             .await
-            .context("Failed to insert chunks")?;
+            .context("Failed to upsert chunks")?;
 
         Ok(())
     }

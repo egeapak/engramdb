@@ -446,7 +446,7 @@ impl EngramDbServer {
                 .await
                 .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()))?;
         }
-        MemoryStore::open(&self.dir, self.registry.as_ref())
+        MemoryStore::open(&self.dir)
             .await
             .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()))
     }

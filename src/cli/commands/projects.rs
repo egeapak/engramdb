@@ -22,7 +22,7 @@ pub async fn run_projects(
 
     match command {
         ProjectsCommand::Info => {
-            let info = projects::get_project_info(dir, registry).await?;
+            let info = projects::get_project_info(dir).await?;
             formatter.print_project_info(&ProjectInfoOutput {
                 project_id: info.project_id,
                 project_name: info.project_name,
@@ -39,7 +39,6 @@ pub async fn run_projects(
                 .map(|e| ProjectListOutput {
                     project_id: e.project_id,
                     project_path: e.project_path,
-                    last_opened: e.last_opened,
                     exists: e.exists,
                 })
                 .collect();
@@ -94,7 +93,6 @@ mod tests {
         data.projects.push(RegistryEntry {
             project_id: "test-proj".to_string(),
             project_path: temp_dir.path().to_string_lossy().to_string(),
-            last_opened: chrono::Utc::now(),
         });
         let registry = InMemoryRegistry::with(data);
         let formatter = OutputFormatter::new(None, false, true);
@@ -125,7 +123,6 @@ mod tests {
         data.projects.push(RegistryEntry {
             project_id: "test-proj".to_string(),
             project_path: temp_dir.path().to_string_lossy().to_string(),
-            last_opened: chrono::Utc::now(),
         });
         let registry = InMemoryRegistry::with(data);
         let formatter = OutputFormatter::new(None, false, true);

@@ -25,7 +25,6 @@ pub struct ProjectInfo {
 pub struct ProjectListEntry {
     pub project_id: String,
     pub project_path: String,
-    pub last_opened: DateTime<Utc>,
     pub exists: bool,
 }
 
@@ -44,8 +43,8 @@ pub struct AggregateStats {
 }
 
 /// Get info about the project in the given directory.
-pub async fn get_project_info(dir: &Path, registry: &dyn RegistryBackend) -> Result<ProjectInfo> {
-    let store = MemoryStore::open(dir, registry).await?;
+pub async fn get_project_info(dir: &Path) -> Result<ProjectInfo> {
+    let store = MemoryStore::open(dir).await?;
     let manifest_path = paths::project_dir(dir).join("manifest.toml");
     let manifest = manifest::load_manifest(&manifest_path).await?;
 
@@ -88,7 +87,6 @@ pub async fn list_projects(registry: &dyn RegistryBackend) -> Result<Vec<Project
             ProjectListEntry {
                 project_id: e.project_id,
                 project_path: e.project_path,
-                last_opened: e.last_opened,
                 exists,
             }
         })
@@ -143,7 +141,7 @@ pub async fn aggregate_stats(registry: &dyn RegistryBackend) -> Result<Aggregate
             continue;
         }
 
-        let store = match MemoryStore::open(dir, registry).await {
+        let store = match MemoryStore::open(dir).await {
             Ok(s) => s,
             Err(_) => continue,
         };
@@ -186,7 +184,7 @@ mod tests {
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(dir, &registry).await.unwrap();
 
-        let info = get_project_info(dir, &registry).await.unwrap();
+        let info = get_project_info(dir).await.unwrap();
         assert_eq!(info.project_id, store.project_id);
         assert_eq!(info.memory_count, 0);
         assert!(!info.project_name.is_empty());
@@ -215,15 +213,14 @@ mod tests {
         store.create(&mem1).await.unwrap();
         store.create(&mem2).await.unwrap();
 
-        let info = get_project_info(dir, &registry).await.unwrap();
+        let info = get_project_info(dir).await.unwrap();
         assert_eq!(info.memory_count, 2);
     }
 
     #[tokio::test]
     async fn test_get_project_info_not_initialized() {
         let temp_dir = TempDir::new().unwrap();
-        let registry = InMemoryRegistry::new();
-        let result = get_project_info(temp_dir.path(), &registry).await;
+        let result = get_project_info(temp_dir.path()).await;
         assert!(result.is_err());
     }
 

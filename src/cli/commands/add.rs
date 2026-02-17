@@ -54,7 +54,7 @@ pub async fn run_add(
     prompter: &dyn Prompter,
 ) -> Result<()> {
     // Open or initialize store
-    let store = match MemoryStore::open(dir, registry).await {
+    let store = match MemoryStore::open(dir).await {
         Ok(s) => s,
         Err(_) => MemoryStore::init(dir, registry).await?,
     };
@@ -62,7 +62,7 @@ pub async fn run_add(
     // Build engine for auto-embedding on create
     let config_path = dir.join(".engramdb").join("config.toml");
     // Reuse the already-opened store for the engine
-    let engine_store = MemoryStore::open(dir, registry).await.unwrap_or_else(|_| {
+    let engine_store = MemoryStore::open(dir).await.unwrap_or_else(|_| {
         // This shouldn't happen since we already opened it above, but handle it anyway
         panic!("Failed to open store for engine after successful open")
     });
@@ -539,7 +539,7 @@ mod tests {
         registry: &dyn RegistryBackend,
     ) -> (MemoryStore, RetrievalEngine) {
         let store = MemoryStore::init(dir, registry).await.unwrap();
-        let engine_store = MemoryStore::open(dir, registry).await.unwrap();
+        let engine_store = MemoryStore::open(dir).await.unwrap();
         let engine = RetrievalEngine::new(engine_store, EngramConfig::default());
         (store, engine)
     }

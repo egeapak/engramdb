@@ -326,7 +326,7 @@ mod tests {
         let registry = InMemoryRegistry::new();
         let _store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let store = MemoryStore::open(temp_dir.path(), &registry).await.unwrap();
+        let store = MemoryStore::open(temp_dir.path()).await.unwrap();
         let result = doctor(&store).await.unwrap();
         assert!(result.healthy);
         assert_eq!(result.indexed, 0);

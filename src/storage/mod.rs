@@ -17,6 +17,7 @@ pub mod paths;
 pub mod project_id;
 pub mod registry;
 pub mod store;
+pub mod write_lock;
 
 pub use error::{Result, StorageError};
 pub use lance_index::{IndexFilterable, IndexForFiltering, IndexSummary, VectorMatch};
