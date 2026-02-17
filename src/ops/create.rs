@@ -117,6 +117,13 @@ pub async fn create_memory(
         memory.decay = Some(decay);
     }
 
+    // Compute expires_at from decay TTL if applicable
+    if let Some(ref decay) = memory.decay {
+        if let Some(ttl) = decay.ttl {
+            memory.expires_at = Some(memory.created_at + ttl);
+        }
+    }
+
     let id = store.create(&memory).await?;
 
     // Embed the newly created memory if an engine with embeddings is available
@@ -333,6 +340,46 @@ mod tests {
         assert_eq!(decay.strategy, DecayStrategy::Linear);
         assert_eq!(decay.ttl, Some(Duration::seconds(86400)));
         assert_eq!(decay.half_life, None); // Should be None for linear
+    }
+
+    #[tokio::test]
+    async fn test_create_memory_sets_expires_at_from_ttl() {
+        let (_temp, store) = setup_test_store().await;
+
+        let mut params = minimal_create_params();
+        params.decay_strategy = Some("linear".to_string());
+        params.decay_ttl = Some(3600); // 1 hour
+
+        let result = create_memory(&store, params, None).await.unwrap();
+        let memory = store.get(&result.id).await.unwrap();
+
+        assert!(
+            memory.expires_at.is_some(),
+            "expires_at should be set when decay has a TTL"
+        );
+        let expires_at = memory.expires_at.unwrap();
+        let expected = memory.created_at + Duration::seconds(3600);
+        assert!(
+            (expires_at - expected).num_seconds().abs() <= 1,
+            "expires_at should be created_at + TTL"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_memory_no_expires_at_without_ttl() {
+        let (_temp, store) = setup_test_store().await;
+
+        let mut params = minimal_create_params();
+        params.decay_strategy = Some("exponential".to_string());
+        params.decay_half_life = Some(604800); // 7 days, no TTL
+
+        let result = create_memory(&store, params, None).await.unwrap();
+        let memory = store.get(&result.id).await.unwrap();
+
+        assert!(
+            memory.expires_at.is_none(),
+            "expires_at should be None when decay has no TTL"
+        );
     }
 
     #[test]

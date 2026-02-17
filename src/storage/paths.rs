@@ -54,6 +54,18 @@ pub fn global_data_dir() -> Result<PathBuf> {
         .map(|p| p.join("engramdb"))
 }
 
+/// Returns the model cache directory (platform-specific).
+///
+/// - macOS: `~/Library/Caches/engramdb/models/`
+/// - Linux: `$XDG_CACHE_HOME/engramdb/models/` (default `~/.cache/engramdb/models/`)
+///
+/// Used for embedding models, reranker models, and NLI models.
+pub fn model_cache_dir() -> Result<PathBuf> {
+    dirs::cache_dir()
+        .ok_or_else(|| StorageError::Validation("Could not determine cache directory".to_string()))
+        .map(|p| p.join("engramdb").join("models"))
+}
+
 /// Returns the personal project directory for a given project ID
 pub fn personal_dir(project_id: &str) -> Result<PathBuf> {
     Ok(global_data_dir()?

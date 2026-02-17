@@ -33,6 +33,8 @@ mod decay;
 mod trust;
 
 // Re-export public API
-pub use composite::{composite_score, ScoreBreakdown, ScoringContext};
+pub use composite::{
+    composite_score, composite_score_ignore_decay, ScoreBreakdown, ScoringContext,
+};
 pub use decay::{decay_factor, effective_relevance};
 pub use trust::{trust_weight, trust_weight_from_config};

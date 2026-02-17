@@ -54,10 +54,8 @@ impl OnnxProvider {
     /// The model is cached in the platform cache directory so it only
     /// downloads once per machine.
     pub fn with_model(spec: OnnxModelSpec) -> Result<Self> {
-        let cache_dir = dirs::cache_dir()
-            .context("Could not determine cache directory")?
-            .join("engramdb")
-            .join("models");
+        let cache_dir =
+            crate::storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let options = InitOptions::new(spec.fastembed_model).with_cache_dir(cache_dir);
         let model =
