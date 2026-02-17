@@ -1586,9 +1586,7 @@ mod tests {
         );
 
         // Config enabled + provider attached → nli_available should be true
-        let store2 = MemoryStore::open(temp_dir.path(), &InMemoryRegistry::new())
-            .await
-            .unwrap();
+        let store2 = MemoryStore::open(temp_dir.path()).await.unwrap();
         let mut config2 = EngramConfig::default();
         config2.nli.enabled = true;
         let engine2 = RetrievalEngine::new(store2, config2).with_nli_provider(Box::new(DummyNli));
@@ -1834,9 +1832,7 @@ mod tests {
 
         // First, get scores without reranker
         let engine_no_rerank = RetrievalEngine::new(
-            MemoryStore::open(temp_dir.path(), &InMemoryRegistry::new())
-                .await
-                .unwrap(),
+            MemoryStore::open(temp_dir.path()).await.unwrap(),
             config.clone(),
         );
 
@@ -1848,13 +1844,9 @@ mod tests {
         let result_no_rerank = engine_no_rerank.retrieve(&query).await.unwrap();
 
         // Now with reranker but weight=0.0
-        let engine_rerank = RetrievalEngine::new(
-            MemoryStore::open(temp_dir.path(), &InMemoryRegistry::new())
-                .await
-                .unwrap(),
-            config,
-        )
-        .with_reranker(reranker);
+        let engine_rerank =
+            RetrievalEngine::new(MemoryStore::open(temp_dir.path()).await.unwrap(), config)
+                .with_reranker(reranker);
 
         let result_rerank = engine_rerank.retrieve(&query).await.unwrap();
 
@@ -1992,9 +1984,7 @@ mod tests {
         config.rerank.weight = 0.7;
         config.rerank.top_n = 10;
 
-        let store2 = MemoryStore::open(temp_dir.path(), &InMemoryRegistry::new())
-            .await
-            .unwrap();
+        let store2 = MemoryStore::open(temp_dir.path()).await.unwrap();
         let engine_rerank = RetrievalEngine::new(store2, config).with_reranker(reranker);
 
         let result_rerank = engine_rerank.retrieve(&query).await.unwrap();
@@ -2098,9 +2088,7 @@ mod tests {
         config.rerank.weight = 0.8;
         config.rerank.top_n = 10;
 
-        let store2 = MemoryStore::open(temp_dir.path(), &InMemoryRegistry::new())
-            .await
-            .unwrap();
+        let store2 = MemoryStore::open(temp_dir.path()).await.unwrap();
         let engine_rerank = RetrievalEngine::new(store2, config).with_reranker(reranker);
 
         let results_rerank = engine_rerank

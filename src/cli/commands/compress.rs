@@ -2,19 +2,18 @@
 
 use crate::cli::output::{short_id, OutputFormatter};
 use crate::ops;
-use crate::storage::{MemoryStore, RegistryBackend};
+use crate::storage::MemoryStore;
 use anyhow::Result;
 use std::path::Path;
 
 /// List compression candidates and direct users to MCP mode.
 pub async fn run_compress(
     dir: &Path,
-    registry: &dyn RegistryBackend,
     scope: Option<String>,
     threshold: Option<f64>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir, registry).await?;
+    let store = MemoryStore::open(dir).await?;
     let result = ops::compress_candidates(&store, scope.as_deref(), threshold).await?;
 
     if result.candidates.is_empty() {
@@ -76,7 +75,7 @@ mod tests {
         }
     }
 
-    async fn setup_test_store() -> (TempDir, MemoryStore, InMemoryRegistry) {
+    async fn setup_test_store() -> (TempDir, MemoryStore) {
         let temp_dir = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
@@ -89,7 +88,7 @@ mod tests {
         store.create(&mem2).await.unwrap();
         store.create(&mem3).await.unwrap();
 
-        (temp_dir, store, registry)
+        (temp_dir, store)
     }
 
     #[tokio::test]
@@ -100,17 +99,17 @@ mod tests {
 
         let formatter = OutputFormatter::new(None, false, true);
 
-        let result = run_compress(temp_dir.path(), &registry, None, None, &formatter).await;
+        let result = run_compress(temp_dir.path(), None, None, &formatter).await;
 
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_compress_with_low_criticality_memories() {
-        let (temp_dir, _store, registry) = setup_test_store().await;
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
-        let result = run_compress(temp_dir.path(), &registry, None, None, &formatter).await;
+        let result = run_compress(temp_dir.path(), None, None, &formatter).await;
         assert!(result.is_ok());
     }
 }

@@ -2,7 +2,7 @@
 
 use crate::cli::output::{short_id, OutputFormatter};
 use crate::ops::gc_memories;
-use crate::storage::{MemoryStore, RegistryBackend};
+use crate::storage::MemoryStore;
 use anyhow::Result;
 use std::path::Path;
 
@@ -12,12 +12,11 @@ use std::path::Path;
 /// Use --confirm to actually delete.
 pub async fn run_gc(
     dir: &Path,
-    registry: &dyn RegistryBackend,
     confirm: bool,
     threshold: Option<f64>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir, registry).await?;
+    let store = MemoryStore::open(dir).await?;
     let config_path = dir.join(".engramdb").join("config.toml");
     let config = crate::storage::config::load_config(&config_path).await?;
 
@@ -97,7 +96,7 @@ mod tests {
         }
     }
 
-    async fn setup_test_store() -> (TempDir, MemoryStore, InMemoryRegistry) {
+    async fn setup_test_store() -> (TempDir, MemoryStore) {
         let temp_dir = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
@@ -110,7 +109,7 @@ mod tests {
         store.create(&mem2).await.unwrap();
         store.create(&mem3).await.unwrap();
 
-        (temp_dir, store, registry)
+        (temp_dir, store)
     }
 
     #[tokio::test]
@@ -121,17 +120,17 @@ mod tests {
 
         let formatter = OutputFormatter::new(None, false, true);
 
-        let result = run_gc(temp_dir.path(), &registry, false, None, &formatter).await;
+        let result = run_gc(temp_dir.path(), false, None, &formatter).await;
 
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_gc_dry_run_with_memories() {
-        let (temp_dir, _store, registry) = setup_test_store().await;
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
-        let result = run_gc(temp_dir.path(), &registry, false, None, &formatter).await;
+        let result = run_gc(temp_dir.path(), false, None, &formatter).await;
         assert!(result.is_ok());
     }
 }

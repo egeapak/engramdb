@@ -3,7 +3,7 @@
 use crate::cli::output::OutputFormatter;
 use crate::ops::{parse_detail_level, parse_memory_type};
 use crate::retrieval::engine::RetrievalQuery;
-use crate::storage::{MemoryStore, RegistryBackend};
+use crate::storage::MemoryStore;
 use anyhow::Result;
 use std::path::Path;
 
@@ -25,17 +25,15 @@ pub struct RetrieveParams {
 ///
 /// # Arguments
 /// * `dir` - The directory containing the EngramDB store
-/// * `registry` - The registry backend to use for project registration
 /// * `params` - Retrieval query parameters
 /// * `formatter` - Output formatter for displaying results
 pub async fn run_retrieve(
     dir: &Path,
-    registry: &dyn RegistryBackend,
     params: RetrieveParams,
     embedding_backend: Option<crate::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir, registry).await?;
+    let store = MemoryStore::open(dir).await?;
     if let Ok(Some(warning)) = store.check_staleness().await {
         formatter.print_warning(&warning);
     }
@@ -124,7 +122,7 @@ mod tests {
         }
     }
 
-    async fn setup_test_store() -> (TempDir, MemoryStore, InMemoryRegistry) {
+    async fn setup_test_store() -> (TempDir, MemoryStore) {
         let temp_dir = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
@@ -137,12 +135,12 @@ mod tests {
         store.create(&mem2).await.unwrap();
         store.create(&mem3).await.unwrap();
 
-        (temp_dir, store, registry)
+        (temp_dir, store)
     }
 
     #[tokio::test]
     async fn test_retrieve_returns_ok() {
-        let (temp_dir, _store, registry) = setup_test_store().await;
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let params = RetrieveParams {
@@ -158,13 +156,13 @@ mod tests {
             show_scores: false,
         };
 
-        let result = run_retrieve(temp_dir.path(), &registry, params, None, &formatter).await;
+        let result = run_retrieve(temp_dir.path(), params, None, &formatter).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_retrieve_invalid_detail_level() {
-        let (temp_dir, _store, registry) = setup_test_store().await;
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let params = RetrieveParams {
@@ -180,7 +178,7 @@ mod tests {
             show_scores: false,
         };
 
-        let result = run_retrieve(temp_dir.path(), &registry, params, None, &formatter).await;
+        let result = run_retrieve(temp_dir.path(), params, None, &formatter).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -190,7 +188,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_retrieve_with_type_filter() {
-        let (temp_dir, _store, registry) = setup_test_store().await;
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let params = RetrieveParams {
@@ -206,7 +204,7 @@ mod tests {
             show_scores: false,
         };
 
-        let result = run_retrieve(temp_dir.path(), &registry, params, None, &formatter).await;
+        let result = run_retrieve(temp_dir.path(), params, None, &formatter).await;
         assert!(result.is_ok());
     }
 }

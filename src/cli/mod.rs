@@ -132,7 +132,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             full,
             raw,
             path,
-        } => commands::run_get(&dir, &registry, &id, full, raw, path, &formatter).await,
+        } => commands::run_get(&dir, &id, full, raw, path, &formatter).await,
         Command::Retrieve {
             path,
             logical,
@@ -147,7 +147,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         } => {
             commands::run_retrieve(
                 &dir,
-                &registry,
                 RetrieveParams {
                     path,
                     logical,
@@ -176,7 +175,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         } => {
             commands::run_search(
                 &dir,
-                &registry,
                 SearchParams {
                     query,
                     type_filter: type_,
@@ -202,7 +200,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         } => {
             commands::run_list(
                 &dir,
-                &registry,
                 type_,
                 tags,
                 status,
@@ -240,7 +237,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         } => {
             commands::run_update(
                 &dir,
-                &registry,
                 UpdateParams {
                     id,
                     type_,
@@ -269,13 +265,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Command::Delete { id, force } => {
-            commands::run_delete(&dir, &registry, &id, force, &formatter).await
-        }
-        Command::Stats => commands::run_stats(&dir, &registry, backend, &formatter).await,
-        Command::Doctor { command } => {
-            commands::run_doctor(&dir, &registry, command, &formatter).await
-        }
+        Command::Delete { id, force } => commands::run_delete(&dir, &id, force, &formatter).await,
+        Command::Stats => commands::run_stats(&dir, backend, &formatter).await,
+        Command::Doctor { command } => commands::run_doctor(&dir, command, &formatter).await,
         Command::Challenge {
             id,
             evidence,
@@ -283,7 +275,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         } => {
             commands::run_challenge(
                 &dir,
-                &registry,
                 ChallengeParams {
                     id,
                     evidence,
@@ -294,10 +285,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Gc { confirm, threshold } => {
-            commands::run_gc(&dir, &registry, confirm, threshold, &formatter).await
+            commands::run_gc(&dir, confirm, threshold, &formatter).await
         }
         Command::Compress { scope, threshold } => {
-            commands::run_compress(&dir, &registry, scope, threshold, &formatter).await
+            commands::run_compress(&dir, scope, threshold, &formatter).await
         }
         Command::Serve { transport, port } => {
             commands::run_serve(&dir, &transport, port, backend, &formatter).await
@@ -309,17 +300,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Reindex {
             embeddings_only,
             index_only,
-        } => {
-            commands::run_reindex(
-                &dir,
-                &registry,
-                embeddings_only,
-                index_only,
-                backend,
-                &formatter,
-            )
-            .await
-        }
+        } => commands::run_reindex(&dir, embeddings_only, index_only, backend, &formatter).await,
         Command::Review {
             scope,
             type_,
@@ -328,7 +309,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         } => {
             commands::run_review(
                 &dir,
-                &registry,
                 scope,
                 type_,
                 challenged_only,
@@ -339,9 +319,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Hook { command } => match command {
-            HookCommand::PreToolUse => {
-                commands::run_hook_pre_tool_use(&dir, &registry, backend).await
-            }
+            HookCommand::PreToolUse => commands::run_hook_pre_tool_use(&dir, backend).await,
         },
         Command::Projects { command } => {
             commands::run_projects(&dir, &registry, command, &formatter, &prompter).await

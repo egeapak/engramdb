@@ -3,7 +3,7 @@
 use crate::cli::app::DoctorCommand;
 use crate::cli::output::{short_id, OutputFormatter};
 use crate::ops::{doctor, doctor_environment};
-use crate::storage::{MemoryStore, RegistryBackend};
+use crate::storage::MemoryStore;
 use anyhow::Result;
 use std::path::Path;
 
@@ -13,23 +13,18 @@ use std::path::Path;
 /// - `Some(DoctorCommand::Store)` → fast store-only health check
 pub async fn run_doctor(
     dir: &Path,
-    registry: &dyn RegistryBackend,
     command: Option<DoctorCommand>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
     match command {
-        Some(DoctorCommand::Store) => run_store_check(dir, registry, formatter).await,
-        None => run_environment_check(dir, registry, formatter).await,
+        Some(DoctorCommand::Store) => run_store_check(dir, formatter).await,
+        None => run_environment_check(dir, formatter).await,
     }
 }
 
 /// Fast store-only health check (what MCP calls on session start).
-async fn run_store_check(
-    dir: &Path,
-    registry: &dyn RegistryBackend,
-    formatter: &OutputFormatter,
-) -> Result<()> {
-    let store = MemoryStore::open(dir, registry).await?;
+async fn run_store_check(dir: &Path, formatter: &OutputFormatter) -> Result<()> {
+    let store = MemoryStore::open(dir).await?;
     let result = doctor(&store).await?;
 
     if result.healthy {
@@ -63,12 +58,8 @@ async fn run_store_check(
 }
 
 /// Full environment diagnostics with actionable suggestions.
-async fn run_environment_check(
-    dir: &Path,
-    registry: &dyn RegistryBackend,
-    formatter: &OutputFormatter,
-) -> Result<()> {
-    let store = MemoryStore::open(dir, registry).await.ok();
+async fn run_environment_check(dir: &Path, formatter: &OutputFormatter) -> Result<()> {
+    let store = MemoryStore::open(dir).await.ok();
     let result = doctor_environment(dir, store.as_ref()).await;
     formatter.print_environment_doctor(&result);
     Ok(())
@@ -92,13 +83,7 @@ mod tests {
         store.create(&mem).await.unwrap();
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_doctor(
-            temp_dir.path(),
-            &registry,
-            Some(DoctorCommand::Store),
-            &formatter,
-        )
-        .await;
+        let result = run_doctor(temp_dir.path(), Some(DoctorCommand::Store), &formatter).await;
         assert!(result.is_ok());
     }
 
@@ -119,23 +104,16 @@ mod tests {
             .unwrap();
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_doctor(
-            temp_dir.path(),
-            &registry,
-            Some(DoctorCommand::Store),
-            &formatter,
-        )
-        .await;
+        let result = run_doctor(temp_dir.path(), Some(DoctorCommand::Store), &formatter).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_doctor_environment_no_store() {
         let temp_dir = TempDir::new().unwrap();
-        let registry = InMemoryRegistry::new();
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_doctor(temp_dir.path(), &registry, None, &formatter).await;
+        let result = run_doctor(temp_dir.path(), None, &formatter).await;
         assert!(result.is_ok());
     }
 
@@ -146,35 +124,27 @@ mod tests {
         MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_doctor(temp_dir.path(), &registry, None, &formatter).await;
+        let result = run_doctor(temp_dir.path(), None, &formatter).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_run_doctor_store_subcommand_fails_no_store() {
         let temp_dir = TempDir::new().unwrap();
-        let registry = InMemoryRegistry::new();
         // No init — store does not exist
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_doctor(
-            temp_dir.path(),
-            &registry,
-            Some(DoctorCommand::Store),
-            &formatter,
-        )
-        .await;
+        let result = run_doctor(temp_dir.path(), Some(DoctorCommand::Store), &formatter).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_run_doctor_environment_succeeds_no_store() {
         let temp_dir = TempDir::new().unwrap();
-        let registry = InMemoryRegistry::new();
         // No init — but environment check should still succeed gracefully
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_doctor(temp_dir.path(), &registry, None, &formatter).await;
+        let result = run_doctor(temp_dir.path(), None, &formatter).await;
         assert!(result.is_ok());
     }
 
@@ -189,13 +159,7 @@ mod tests {
 
         // JSON formatter — exercises the json output path
         let formatter = OutputFormatter::new(None, true, true);
-        let result = run_doctor(
-            temp_dir.path(),
-            &registry,
-            Some(DoctorCommand::Store),
-            &formatter,
-        )
-        .await;
+        let result = run_doctor(temp_dir.path(), Some(DoctorCommand::Store), &formatter).await;
         assert!(result.is_ok());
     }
 
@@ -217,13 +181,7 @@ mod tests {
         tokio::fs::remove_file(&file_path).await.unwrap();
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_doctor(
-            temp_dir.path(),
-            &registry,
-            Some(DoctorCommand::Store),
-            &formatter,
-        )
-        .await;
+        let result = run_doctor(temp_dir.path(), Some(DoctorCommand::Store), &formatter).await;
         assert!(result.is_ok());
     }
 
@@ -235,7 +193,7 @@ mod tests {
 
         // JSON formatter + environment (None subcommand)
         let formatter = OutputFormatter::new(None, true, true);
-        let result = run_doctor(temp_dir.path(), &registry, None, &formatter).await;
+        let result = run_doctor(temp_dir.path(), None, &formatter).await;
         assert!(result.is_ok());
     }
 }

@@ -3,7 +3,7 @@
 use crate::cli::output::OutputFormatter;
 use crate::cli::prompter::Prompter;
 use crate::ops::{self, parse_memory_type, review_memories, ReviewParams};
-use crate::storage::{MemoryStore, RegistryBackend};
+use crate::storage::MemoryStore;
 use anyhow::Result;
 use std::path::Path;
 
@@ -13,7 +13,6 @@ use std::path::Path;
 ///
 /// # Arguments
 /// * `dir` - The directory containing the EngramDB store
-/// * `registry` - The registry backend to use for project registration
 /// * `scope` - Optional logical scope filter
 /// * `type_str` - Optional memory type filter
 /// * `challenged_only` - Only show Status::Challenged memories
@@ -22,7 +21,6 @@ use std::path::Path;
 #[allow(clippy::too_many_arguments)]
 pub async fn run_review(
     dir: &Path,
-    registry: &dyn RegistryBackend,
     scope: Option<String>,
     type_str: Option<String>,
     challenged_only: bool,
@@ -30,7 +28,7 @@ pub async fn run_review(
     formatter: &OutputFormatter,
     prompter: &dyn Prompter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir, registry).await?;
+    let store = MemoryStore::open(dir).await?;
 
     let type_filter = type_str.as_deref().map(parse_memory_type).transpose()?;
 
@@ -154,7 +152,7 @@ pub async fn run_review(
 mod tests {
     use super::*;
     use crate::cli::prompter::MockPrompter;
-    use crate::storage::InMemoryRegistry;
+    use crate::storage::{InMemoryRegistry, RegistryBackend};
     use crate::types::{Challenge, Memory, MemoryType, Provenance, Status};
     use tempfile::TempDir;
 
@@ -188,7 +186,6 @@ mod tests {
 
         run_review(
             temp_dir.path(),
-            &registry,
             None,
             None,
             false,
@@ -216,7 +213,6 @@ mod tests {
 
         run_review(
             temp_dir.path(),
-            &registry,
             None,
             None,
             false,
@@ -244,7 +240,6 @@ mod tests {
 
         run_review(
             temp_dir.path(),
-            &registry,
             None,
             None,
             false,
@@ -294,7 +289,6 @@ mod tests {
 
         run_review(
             temp_dir.path(),
-            &registry,
             None,
             None,
             false,
@@ -324,7 +318,6 @@ mod tests {
 
         let result = run_review(
             temp_dir.path(),
-            &registry,
             None,
             None,
             false,

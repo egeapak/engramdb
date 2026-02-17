@@ -218,7 +218,6 @@ mod tests {
     use super::*;
     use crate::cli::output::OutputFormatter;
     use crate::storage::{paths, project_id, InMemoryRegistry, Registry, RegistryEntry};
-    use chrono::Utc;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -316,7 +315,6 @@ mod tests {
         registry.projects.push(RegistryEntry {
             project_path: "/path/to/project".to_string(),
             project_id: "test-id".to_string(),
-            last_opened: Utc::now(),
         });
         let content = serde_json::to_string_pretty(&registry).unwrap();
         fs::write(&test_registry_path, content).unwrap();
@@ -343,12 +341,10 @@ mod tests {
         registry.projects.push(RegistryEntry {
             project_path: "/path/to/project1".to_string(),
             project_id: "id1".to_string(),
-            last_opened: Utc::now(),
         });
         registry.projects.push(RegistryEntry {
             project_path: "/path/to/project2".to_string(),
             project_id: "id2".to_string(),
-            last_opened: Utc::now(),
         });
 
         let content = serde_json::to_string_pretty(&registry).unwrap();

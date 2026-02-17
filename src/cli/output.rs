@@ -669,13 +669,7 @@ impl OutputFormatter {
                     } else {
                         "missing".to_string()
                     };
-                    println!(
-                        "{} {} [{}] ({})",
-                        id_display,
-                        entry.project_path,
-                        entry.last_opened.format("%Y-%m-%d"),
-                        status,
-                    );
+                    println!("{} {} ({})", id_display, entry.project_path, status,);
                 }
             }
             OutputFormat::Plain => {
@@ -686,13 +680,7 @@ impl OutputFormatter {
                 for entry in entries {
                     let id_short = short_id(&entry.project_id);
                     let status = if entry.exists { "ok" } else { "missing" };
-                    println!(
-                        "{} {} {} {}",
-                        id_short,
-                        entry.project_path,
-                        entry.last_opened.format("%Y-%m-%d"),
-                        status,
-                    );
+                    println!("{} {} {}", id_short, entry.project_path, status,);
                 }
             }
         }
@@ -743,7 +731,6 @@ pub struct ProjectInfoOutput {
 pub struct ProjectListOutput {
     pub project_id: String,
     pub project_path: String,
-    pub last_opened: chrono::DateTime<chrono::Utc>,
     pub exists: bool,
 }
 

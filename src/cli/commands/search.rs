@@ -3,7 +3,7 @@
 use crate::cli::output::OutputFormatter;
 use crate::ops::parse_memory_type;
 use crate::retrieval::filters::SearchFilters;
-use crate::storage::{MemoryStore, RegistryBackend};
+use crate::storage::MemoryStore;
 use anyhow::Result;
 use std::path::Path;
 
@@ -22,17 +22,15 @@ pub struct SearchParams {
 ///
 /// # Arguments
 /// * `dir` - The directory containing the EngramDB store
-/// * `registry` - The registry backend to use for project registration
 /// * `params` - Search query parameters
 /// * `formatter` - Output formatter for displaying results
 pub async fn run_search(
     dir: &Path,
-    registry: &dyn RegistryBackend,
     params: SearchParams,
     embedding_backend: Option<crate::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir, registry).await?;
+    let store = MemoryStore::open(dir).await?;
     if let Ok(Some(warning)) = store.check_staleness().await {
         formatter.print_warning(&warning);
     }
@@ -112,7 +110,7 @@ mod tests {
         }
     }
 
-    async fn setup_test_store() -> (TempDir, MemoryStore, InMemoryRegistry) {
+    async fn setup_test_store() -> (TempDir, MemoryStore) {
         let temp_dir = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
@@ -125,12 +123,12 @@ mod tests {
         store.create(&mem2).await.unwrap();
         store.create(&mem3).await.unwrap();
 
-        (temp_dir, store, registry)
+        (temp_dir, store)
     }
 
     #[tokio::test]
     async fn test_search_returns_ok() {
-        let (temp_dir, _store, registry) = setup_test_store().await;
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let params = SearchParams {
@@ -143,13 +141,13 @@ mod tests {
             max_results: 10,
         };
 
-        let result = run_search(temp_dir.path(), &registry, params, None, &formatter).await;
+        let result = run_search(temp_dir.path(), params, None, &formatter).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_search_with_type_filter() {
-        let (temp_dir, _store, registry) = setup_test_store().await;
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let params = SearchParams {
@@ -162,13 +160,13 @@ mod tests {
             max_results: 10,
         };
 
-        let result = run_search(temp_dir.path(), &registry, params, None, &formatter).await;
+        let result = run_search(temp_dir.path(), params, None, &formatter).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_search_max_results() {
-        let (temp_dir, _store, registry) = setup_test_store().await;
+        let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
         let params = SearchParams {
@@ -181,7 +179,7 @@ mod tests {
             max_results: 1,
         };
 
-        let result = run_search(temp_dir.path(), &registry, params, None, &formatter).await;
+        let result = run_search(temp_dir.path(), params, None, &formatter).await;
         assert!(result.is_ok());
     }
 }

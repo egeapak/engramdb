@@ -4,7 +4,7 @@
 //! and outputs additionalContext JSON to stdout.
 
 use crate::retrieval::engine::{DetailLevel, RetrievalQuery, ScoredMemory};
-use crate::storage::{MemoryStore, RegistryBackend};
+use crate::storage::MemoryStore;
 use crate::types::EmbeddingBackend;
 use anyhow::Result;
 use std::io::Read;
@@ -119,14 +119,13 @@ async fn process_hook_input(
 /// JSON with `additionalContext` to stdout.
 pub async fn run_hook_pre_tool_use(
     dir: &Path,
-    registry: &dyn RegistryBackend,
     embedding_backend: Option<EmbeddingBackend>,
 ) -> Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
 
     // Open store — if it fails, exit silently (store may not be initialized)
-    let store = match MemoryStore::open(dir, registry).await {
+    let store = match MemoryStore::open(dir).await {
         Ok(s) => s,
         Err(e) => {
             tracing::debug!("Hook store open failed (non-fatal): {}", e);
@@ -411,7 +410,7 @@ mod tests {
         store.create(&mem2).await.unwrap();
 
         // Re-open store (simulates real hook usage)
-        let store = MemoryStore::open(temp_dir.path(), &registry).await.unwrap();
+        let store = MemoryStore::open(temp_dir.path()).await.unwrap();
         (temp_dir, store)
     }
 
@@ -488,7 +487,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();
         let _store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
-        let store = MemoryStore::open(temp_dir.path(), &registry).await.unwrap();
+        let store = MemoryStore::open(temp_dir.path()).await.unwrap();
 
         let input = serde_json::json!({
             "tool_name": "Read",

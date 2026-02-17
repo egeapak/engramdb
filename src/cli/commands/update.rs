@@ -5,7 +5,7 @@ use crate::cli::validation::validate_score;
 use crate::ops::{self, parse_memory_type, parse_status, parse_visibility};
 use crate::ops::{update_memory, UpdateParams as OpsUpdateParams};
 use crate::storage::paths::memory_path;
-use crate::storage::{MemoryStore, RegistryBackend};
+use crate::storage::MemoryStore;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -41,12 +41,10 @@ pub struct UpdateParams {
 ///
 /// # Arguments
 /// * `dir` - The directory containing the EngramDB store
-/// * `registry` - The registry backend to use for project registration
 /// * `params` - Update parameters (only non-None fields are updated)
 /// * `formatter` - Output formatter for success/error messages
 pub async fn run_update(
     dir: &Path,
-    registry: &dyn RegistryBackend,
     params: UpdateParams,
     embedding_backend: Option<crate::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
@@ -95,11 +93,11 @@ pub async fn run_update(
         }
     }
 
-    let store = MemoryStore::open(dir, registry).await?;
+    let store = MemoryStore::open(dir).await?;
 
     // Build engine for auto-embedding on update
     let config_path = dir.join(".engramdb").join("config.toml");
-    let engine_store = MemoryStore::open(dir, registry).await?;
+    let engine_store = MemoryStore::open(dir).await?;
     let engine = ops::build_engine(engine_store, &config_path, embedding_backend).await;
 
     let type_ = params.type_.map(|s| parse_memory_type(&s)).transpose()?;

@@ -10,7 +10,7 @@ use engramdb::retrieval::{
 use engramdb::scope::{logical, physical};
 use engramdb::scoring::trust_weight_from_config;
 use engramdb::scoring::{composite_score, decay_factor, effective_relevance, ScoringContext};
-use engramdb::storage::{InMemoryRegistry, MemoryStore};
+use engramdb::storage::MemoryStore;
 use engramdb::types::{Decay, DecayStrategy, EngramConfig, Memory, MemoryType, ProvenanceSource};
 
 use chrono::Utc;
@@ -232,9 +232,7 @@ fn storage_benchmarks(c: &mut Criterion) {
             },
             |temp_dir| {
                 rt.block_on(async {
-                    let _store = MemoryStore::open(temp_dir.path(), &InMemoryRegistry::new())
-                        .await
-                        .unwrap();
+                    let _store = MemoryStore::open(temp_dir.path()).await.unwrap();
                 });
             },
             criterion::BatchSize::SmallInput,
@@ -447,9 +445,7 @@ fn hook_path_benchmarks(c: &mut Criterion) {
                 b.to_async(&rt).iter(|| {
                     let path = temp_dir.path().to_path_buf();
                     async move {
-                        let store = MemoryStore::open(&path, &InMemoryRegistry::new())
-                            .await
-                            .unwrap();
+                        let store = MemoryStore::open(&path).await.unwrap();
                         let config = default_config();
                         let engine = RetrievalEngine::new(store, config);
                         let query = RetrievalQuery {
@@ -539,9 +535,7 @@ mod budget_tests {
         let start = std::time::Instant::now();
 
         // Full hook path: open → build engine → retrieve
-        let store = MemoryStore::open(temp_dir.path(), &InMemoryRegistry::new())
-            .await
-            .unwrap();
+        let store = MemoryStore::open(temp_dir.path()).await.unwrap();
         let config = default_config();
         let engine = RetrievalEngine::new(store, config);
         let query = RetrievalQuery {

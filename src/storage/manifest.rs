@@ -61,11 +61,13 @@ pub async fn load_manifest(path: &Path) -> Result<Manifest> {
     Ok(manifest)
 }
 
-/// Save manifest to manifest.toml
+/// Save manifest to manifest.toml atomically via write-to-temp-then-rename.
 pub async fn save_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
     let content = toml::to_string_pretty(manifest)
         .map_err(|e| super::error::StorageError::Validation(e.to_string()))?;
-    tokio::fs::write(path, content).await?;
+    let tmp_path = path.with_extension(format!("{}.toml.tmp", std::process::id()));
+    tokio::fs::write(&tmp_path, &content).await?;
+    tokio::fs::rename(&tmp_path, path).await?;
     Ok(())
 }
 
