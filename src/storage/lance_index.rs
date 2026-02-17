@@ -15,7 +15,7 @@ use arrow_array::{
     RecordBatchIterator, StringArray, UInt32Array,
 };
 use arrow_schema::{DataType, Field, Schema};
-use futures::stream::StreamExt;
+use futures_util::stream::StreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::{connect, Connection, Table};
 
