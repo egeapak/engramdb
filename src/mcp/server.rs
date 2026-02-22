@@ -413,15 +413,17 @@ impl std::fmt::Debug for EngramDbServer {
 }
 
 impl EngramDbServer {
-    pub fn new(dir: PathBuf, embedding_backend: Option<EmbeddingBackend>) -> Self {
-        let registry: Arc<dyn RegistryBackend> =
-            Arc::new(FileRegistry::global().expect("Failed to initialize registry"));
-        Self {
+    pub fn new(dir: PathBuf, embedding_backend: Option<EmbeddingBackend>) -> anyhow::Result<Self> {
+        let registry: Arc<dyn RegistryBackend> = Arc::new(
+            FileRegistry::global()
+                .map_err(|e| anyhow::anyhow!("Failed to initialize registry: {}", e))?,
+        );
+        Ok(Self {
             dir,
             embedding_backend,
             registry,
             tool_router: Self::tool_router(),
-        }
+        })
     }
 
     #[cfg(test)]
@@ -1396,7 +1398,7 @@ pub async fn run_stdio(
     dir: PathBuf,
     embedding_backend: Option<EmbeddingBackend>,
 ) -> anyhow::Result<()> {
-    let server = EngramDbServer::new(dir, embedding_backend);
+    let server = EngramDbServer::new(dir, embedding_backend)?;
     let service = server.serve(rmcp::transport::io::stdio()).await?;
     service.waiting().await?;
     Ok(())
@@ -1416,7 +1418,10 @@ pub async fn run_sse(
     let config = StreamableHttpServerConfig::default();
     let ct = config.cancellation_token.clone();
     let service = StreamableHttpService::new(
-        move || Ok(EngramDbServer::new(dir.clone(), embedding_backend)),
+        move || {
+            EngramDbServer::new(dir.clone(), embedding_backend)
+                .map_err(|e| std::io::Error::other(e.to_string()))
+        },
         Arc::new(LocalSessionManager::default()),
         config,
     );

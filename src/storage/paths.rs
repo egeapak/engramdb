@@ -113,7 +113,14 @@ pub async fn memory_path(dir: &Path, id: &str) -> Option<PathBuf> {
     None
 }
 
-/// Helper function to find a memory file by ID prefix in a directory
+/// Helper function to find a memory file by ID prefix in a directory.
+///
+/// Matching strategy:
+/// 1. If an exact filename match exists (id == file stem), return it immediately.
+/// 2. Otherwise, collect all prefix matches.
+///    - If exactly one prefix match is found, return it.
+///    - If multiple prefix matches are found, return `None` (ambiguous).
+///    - If no matches are found, return `None`.
 pub async fn find_memory_in_dir(dir: &Path, id: &str) -> Option<PathBuf> {
     if !dir.exists() {
         return None;
@@ -123,13 +130,24 @@ pub async fn find_memory_in_dir(dir: &Path, id: &str) -> Option<PathBuf> {
         return None;
     };
 
+    let mut prefix_matches: Vec<PathBuf> = Vec::new();
+
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
         if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
-            if filename.starts_with(id) {
+            if filename == id {
+                // Exact match — return immediately, no ambiguity.
                 return Some(path);
             }
+            if filename.starts_with(id) {
+                prefix_matches.push(path);
+            }
         }
+    }
+
+    // Only return a prefix match if it's unambiguous (exactly one match).
+    if prefix_matches.len() == 1 {
+        return prefix_matches.into_iter().next();
     }
 
     None
@@ -225,5 +243,41 @@ mod tests {
         let nonexistent_path = Path::new("/nonexistent/directory");
         let result = find_memory_in_dir(nonexistent_path, "test").await;
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_find_memory_in_dir_ambiguous_prefix_returns_none() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        // Create two files that share the prefix "abc"
+        let file1 = temp_dir.path().join("abc-111.md");
+        let file2 = temp_dir.path().join("abc-222.md");
+        tokio::fs::write(&file1, "content 1").await.unwrap();
+        tokio::fs::write(&file2, "content 2").await.unwrap();
+
+        // Searching for "abc" should return None because of ambiguity
+        let result = find_memory_in_dir(temp_dir.path(), "abc").await;
+        assert!(
+            result.is_none(),
+            "Ambiguous prefix should return None, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_memory_in_dir_exact_match_over_prefix() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        // Create files: "abc.md" (exact) and "abc-extra.md" (prefix)
+        let exact_file = temp_dir.path().join("abc.md");
+        let prefix_file = temp_dir.path().join("abc-extra.md");
+        tokio::fs::write(&exact_file, "exact").await.unwrap();
+        tokio::fs::write(&prefix_file, "prefix").await.unwrap();
+
+        // Should return the exact match despite prefix matches existing
+        let result = find_memory_in_dir(temp_dir.path(), "abc").await;
+        assert_eq!(result, Some(exact_file));
     }
 }
