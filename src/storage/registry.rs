@@ -90,7 +90,7 @@ impl RegistryBackend for FileRegistry {
     async fn load(&self) -> Result<Registry> {
         if self.path.exists() {
             let content = async_fs::read_to_string(&self.path).await?;
-            Ok(serde_json::from_str(&content).unwrap_or_default())
+            Ok(serde_json::from_str(&content)?)
         } else {
             Ok(Registry::default())
         }
@@ -101,11 +101,13 @@ impl RegistryBackend for FileRegistry {
             async_fs::create_dir_all(parent).await?;
         }
         let content = serde_json::to_string_pretty(registry)?;
-        // Use a PID-unique temp file to avoid races between concurrent processes
-        // all targeting the same global registry.json
-        let tmp_path = self
-            .path
-            .with_extension(format!("{}.json.tmp", std::process::id()));
+        // Use a PID+UUID temp file to avoid races between concurrent processes
+        // and concurrent async tasks within the same process.
+        let tmp_path = self.path.with_extension(format!(
+            "{}.{}.json.tmp",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         async_fs::write(&tmp_path, &content).await?;
         async_fs::rename(&tmp_path, &self.path).await?;
         Ok(())
@@ -289,5 +291,23 @@ mod tests {
         assert_eq!(loaded.projects.len(), 2);
         assert_eq!(loaded.projects[0].project_id, "pre-1");
         assert_eq!(loaded.projects[1].project_id, "pre-2");
+    }
+
+    #[tokio::test]
+    async fn test_file_registry_load_corrupted_json_returns_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry_path = temp_dir.path().join("registry.json");
+
+        // Write corrupted JSON
+        async_fs::write(&registry_path, "{ not valid json !!!")
+            .await
+            .unwrap();
+
+        let file_registry = FileRegistry::new(registry_path);
+        let result = file_registry.load().await;
+        assert!(
+            result.is_err(),
+            "Corrupted registry JSON should return an error, not silently discard data"
+        );
     }
 }
