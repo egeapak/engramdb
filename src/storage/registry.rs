@@ -101,13 +101,9 @@ impl RegistryBackend for FileRegistry {
             async_fs::create_dir_all(parent).await?;
         }
         let content = serde_json::to_string_pretty(registry)?;
-        // Use a PID-unique temp file to avoid races between concurrent processes
-        // all targeting the same global registry.json
-        let tmp_path = self
-            .path
-            .with_extension(format!("{}.json.tmp", std::process::id()));
-        async_fs::write(&tmp_path, &content).await?;
-        async_fs::rename(&tmp_path, &self.path).await?;
+        let tmp = tempfile::NamedTempFile::new_in(self.path.parent().unwrap_or(&self.path))?;
+        async_fs::write(tmp.path(), &content).await?;
+        tmp.persist(&self.path)?;
         Ok(())
     }
 }

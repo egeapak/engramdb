@@ -35,6 +35,9 @@ pub enum StorageError {
     #[error("Validation error: {0}")]
     Validation(String),
 
+    #[error("Atomic write failed: {0}")]
+    Persist(#[from] tempfile::PersistError),
+
     #[error("Project not initialized")]
     NotInitialized,
 }

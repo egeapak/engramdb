@@ -574,14 +574,16 @@ impl MemoryStore {
 
 /// Write content atomically using write-to-temp-then-rename.
 ///
-/// Writes to a `.tmp` sibling file then renames to the target path.
-/// `rename(2)` is atomic on APFS/ext4, eliminating partial-read windows.
+/// Creates a temp file in the same directory then persists (renames) to the
+/// target path.  `rename(2)` is atomic on APFS/ext4, eliminating partial-read
+/// windows.  The temp file is auto-cleaned on error.
 async fn atomic_write(path: &Path, content: &str) -> Result<()> {
-    let mut tmp_name = path.as_os_str().to_os_string();
-    tmp_name.push(".tmp");
-    let tmp_path = PathBuf::from(tmp_name);
-    async_fs::write(&tmp_path, content).await?;
-    async_fs::rename(&tmp_path, path).await?;
+    let parent = path.parent().ok_or_else(|| {
+        StorageError::Validation("atomic_write target has no parent directory".into())
+    })?;
+    let tmp = tempfile::NamedTempFile::new_in(parent)?;
+    async_fs::write(tmp.path(), content).await?;
+    tmp.persist(path)?;
     Ok(())
 }
 
