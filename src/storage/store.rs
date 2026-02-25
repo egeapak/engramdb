@@ -577,7 +577,7 @@ impl MemoryStore {
 /// Creates a temp file in the same directory then persists (renames) to the
 /// target path.  `rename(2)` is atomic on APFS/ext4, eliminating partial-read
 /// windows.  The temp file is auto-cleaned on error.
-async fn atomic_write(path: &Path, content: &str) -> Result<()> {
+pub(crate) async fn atomic_write(path: &Path, content: &str) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
         StorageError::Validation("atomic_write target has no parent directory".into())
     })?;

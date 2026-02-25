@@ -101,9 +101,7 @@ impl RegistryBackend for FileRegistry {
             async_fs::create_dir_all(parent).await?;
         }
         let content = serde_json::to_string_pretty(registry)?;
-        let tmp = tempfile::NamedTempFile::new_in(self.path.parent().unwrap_or(&self.path))?;
-        async_fs::write(tmp.path(), &content).await?;
-        tmp.persist(&self.path)?;
+        super::store::atomic_write(&self.path, &content).await?;
         Ok(())
     }
 }
