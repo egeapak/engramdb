@@ -890,6 +890,10 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<CompressCandidatesInput>,
     ) -> Result<String, String> {
+        if let Some(t) = input.threshold {
+            ops::validate_score(t, "threshold")
+                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        }
         let store = self.open_store().await?;
         let result = ops::compress_candidates(&store, input.scope.as_deref(), input.threshold)
             .await
@@ -980,6 +984,10 @@ impl EngramDbServer {
 
     #[tool(description = "Garbage collect decayed memories. Always dry_run first.")]
     async fn memory_gc(&self, Parameters(input): Parameters<GcInput>) -> Result<String, String> {
+        if let Some(t) = input.threshold {
+            ops::validate_score(t, "threshold")
+                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        }
         let store = self.open_store().await?;
         let config = self.load_config().await;
         let dry_run = input.dry_run.unwrap_or(true);

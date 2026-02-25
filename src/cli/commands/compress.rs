@@ -1,6 +1,7 @@
 //! Compress command — lists candidates, directs users to MCP mode for actual compression.
 
 use crate::cli::output::{short_id, OutputFormatter};
+use crate::cli::validation::validate_score;
 use crate::ops;
 use crate::storage::MemoryStore;
 use anyhow::Result;
@@ -13,6 +14,10 @@ pub async fn run_compress(
     threshold: Option<f64>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
+    if let Some(t) = threshold {
+        validate_score(t, "threshold")?;
+    }
+
     let store = MemoryStore::open(dir).await?;
     let result = ops::compress_candidates(&store, scope.as_deref(), threshold).await?;
 

@@ -537,7 +537,10 @@ impl LanceIndex {
         let table = self.open_chunks_table().await?;
         let escaped_id = memory_id.replace('\'', "''");
 
-        let _ = table.delete(&format!("memory_id = '{}'", escaped_id)).await;
+        table
+            .delete(&format!("memory_id = '{}'", escaped_id))
+            .await
+            .context("Failed to delete chunks")?;
         Ok(())
     }
 
