@@ -563,6 +563,11 @@ impl EngramDbServer {
             crate::retrieval::engine::DetailLevel::Content
         };
 
+        if let Some(mc) = input.min_criticality {
+            ops::validate_score(mc, "min_criticality")
+                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        }
+
         let query = RetrievalQuery {
             path: input.path,
             logical: input.logical.unwrap_or_default(),
@@ -626,6 +631,11 @@ impl EngramDbServer {
         } else {
             None
         };
+
+        if let Some(mc) = input.min_criticality {
+            ops::validate_score(mc, "min_criticality")
+                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        }
 
         let filters = SearchFilters {
             types: type_filter,

@@ -1,7 +1,7 @@
 //! Retrieve memories by context.
 
 use crate::cli::output::OutputFormatter;
-use crate::ops::{parse_detail_level, parse_memory_type};
+use crate::ops::{parse_detail_level, parse_memory_type, validate_score};
 use crate::retrieval::engine::RetrievalQuery;
 use crate::storage::MemoryStore;
 use anyhow::Result;
@@ -65,6 +65,11 @@ pub async fn run_retrieve(
     } else {
         crate::retrieval::engine::DetailLevel::Content
     };
+
+    // Validate min_criticality
+    if let Some(mc) = params.min_criticality {
+        validate_score(mc, "min_criticality")?;
+    }
 
     // Build retrieval query
     let query = RetrievalQuery {

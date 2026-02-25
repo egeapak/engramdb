@@ -290,9 +290,10 @@ impl LanceIndex {
     /// Delete an entry by ID from the memories table.
     pub async fn delete(&self, id: &str) -> Result<()> {
         let table = self.open_table().await?;
+        let escaped_id = id.replace('\'', "''");
 
         table
-            .delete(&format!("id = '{}'", id))
+            .delete(&format!("id = '{}'", escaped_id))
             .await
             .context("Failed to delete entry")?;
         Ok(())
@@ -522,7 +523,8 @@ impl LanceIndex {
         let mut op = table.merge_insert(&["memory_id", "chunk_index"]);
         op.when_matched_update_all(None);
         op.when_not_matched_insert_all();
-        op.when_not_matched_by_source_delete(Some(format!("memory_id = '{}'", memory_id)));
+        let escaped_id = memory_id.replace('\'', "''");
+        op.when_not_matched_by_source_delete(Some(format!("memory_id = '{}'", escaped_id)));
         op.execute(Box::new(batches))
             .await
             .context("Failed to upsert chunks")?;
@@ -533,8 +535,9 @@ impl LanceIndex {
     /// Delete all chunks for a given memory_id.
     pub async fn delete_chunks(&self, memory_id: &str) -> Result<()> {
         let table = self.open_chunks_table().await?;
+        let escaped_id = memory_id.replace('\'', "''");
 
-        let _ = table.delete(&format!("memory_id = '{}'", memory_id)).await;
+        let _ = table.delete(&format!("memory_id = '{}'", escaped_id)).await;
         Ok(())
     }
 

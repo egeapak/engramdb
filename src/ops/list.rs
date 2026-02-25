@@ -84,7 +84,11 @@ pub async fn list_memories(
     // Apply sorting
     match params.sort_field {
         SortField::Criticality => {
-            entries.sort_by(|a, b| b.criticality.partial_cmp(&a.criticality).unwrap());
+            entries.sort_by(|a, b| {
+                b.criticality
+                    .partial_cmp(&a.criticality)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         }
         SortField::Created => {
             entries.sort_by(|a, b| a.created_at.cmp(&b.created_at));
