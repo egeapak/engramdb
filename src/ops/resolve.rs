@@ -1,7 +1,7 @@
 //! Resolve challenged or needs-review memories.
 
 use crate::storage::MemoryStore;
-use crate::types::Status;
+use crate::types::{MemoryUpdate, Status};
 use anyhow::Result;
 use chrono::Utc;
 
@@ -34,16 +34,12 @@ pub struct ResolveResult {
 pub async fn resolve_memory(store: &MemoryStore, params: ResolveParams) -> Result<ResolveResult> {
     match params.action {
         ResolveAction::Keep => {
-            // Get memory, modify it directly, then save it back
-            let mut memory = store.get(&params.id).await?;
-            memory.status = Status::Active;
-            memory.challenges.clear();
-            memory.verified_at = Some(Utc::now());
-            memory.mark_updated();
-
-            // Delete and recreate to ensure challenges are cleared
-            store.delete(&params.id).await?;
-            store.create(&memory).await?;
+            // Atomic update: set status, clear challenges, set verified_at
+            let mut update = MemoryUpdate::new();
+            update.status = Some(Status::Active);
+            update.challenges = Some(vec![]);
+            update.verified_at = Some(Utc::now());
+            store.update(&params.id, update).await?;
 
             Ok(ResolveResult {
                 resolved: true,
@@ -51,24 +47,14 @@ pub async fn resolve_memory(store: &MemoryStore, params: ResolveParams) -> Resul
             })
         }
         ResolveAction::Update => {
-            // Get memory, modify it directly, then save it back
-            let mut memory = store.get(&params.id).await?;
-
-            if let Some(content) = params.updated_content {
-                memory.content = content;
-            }
-            if let Some(summary) = params.updated_summary {
-                memory.summary = summary;
-            }
-
-            memory.status = Status::Active;
-            memory.challenges.clear();
-            memory.verified_at = Some(Utc::now());
-            memory.mark_updated();
-
-            // Delete and recreate to ensure challenges are cleared
-            store.delete(&params.id).await?;
-            store.create(&memory).await?;
+            // Atomic update: set content/summary, status, clear challenges, set verified_at
+            let mut update = MemoryUpdate::new();
+            update.content = params.updated_content;
+            update.summary = params.updated_summary;
+            update.status = Some(Status::Active);
+            update.challenges = Some(vec![]);
+            update.verified_at = Some(Utc::now());
+            store.update(&params.id, update).await?;
 
             Ok(ResolveResult {
                 resolved: true,

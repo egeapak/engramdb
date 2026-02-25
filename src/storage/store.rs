@@ -92,7 +92,17 @@ impl MemoryStore {
 
         // Load config to get embedding dimensions
         let config_path = engramdb_dir.join("config.toml");
-        let config = load_config(&config_path).await.unwrap_or_default();
+        let config = match load_config(&config_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load config from {}, using defaults: {}",
+                    config_path.display(),
+                    e
+                );
+                crate::types::EngramConfig::default()
+            }
+        };
 
         // Initialize LanceIndex with configured dimensions
         let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
@@ -125,7 +135,17 @@ impl MemoryStore {
 
         // Load config to get embedding dimensions
         let config_path = engramdb_dir.join("config.toml");
-        let config = load_config(&config_path).await.unwrap_or_default();
+        let config = match load_config(&config_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load config from {}, using defaults: {}",
+                    config_path.display(),
+                    e
+                );
+                crate::types::EngramConfig::default()
+            }
+        };
 
         // Open (or create) global LanceDB
         let lance_path = paths::lancedb_dir(&project_id)?;

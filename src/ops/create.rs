@@ -151,7 +151,7 @@ pub async fn create_memory(
                             "NLI detected contradictions with existing memories"
                         );
                         let store_clone = store.clone();
-                        tokio::spawn(async move {
+                        let handle = tokio::spawn(async move {
                             for (existing_id, nli_result) in &contradictions {
                                 let evidence = format!(
                                     "NLI contradiction detected (score: {:.2}): new memory '{}' contradicts this memory",
@@ -171,6 +171,13 @@ pub async fn create_memory(
                                         e
                                     );
                                 }
+                            }
+                        });
+                        // Monitor the background task so panics are logged
+                        // instead of silently swallowed
+                        tokio::spawn(async move {
+                            if let Err(e) = handle.await {
+                                tracing::error!("NLI contradiction challenge task failed: {}", e);
                             }
                         });
                     }
