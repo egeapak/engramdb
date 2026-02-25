@@ -61,12 +61,7 @@ pub async fn run_add(
 
     // Build engine for auto-embedding on create
     let config_path = dir.join(".engramdb").join("config.toml");
-    // Reuse the already-opened store for the engine
-    let engine_store = MemoryStore::open(dir).await.unwrap_or_else(|_| {
-        // This shouldn't happen since we already opened it above, but handle it anyway
-        panic!("Failed to open store for engine after successful open")
-    });
-    let engine = ops::build_engine(engine_store, &config_path, embedding_backend).await;
+    let engine = ops::build_engine(store.clone(), &config_path, embedding_backend).await;
 
     // Handle details file
     let details_from_file = if let Some(ref details_file) = params.details_file {
