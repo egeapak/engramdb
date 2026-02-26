@@ -55,18 +55,24 @@ pub async fn run_update(
             .await
             .with_context(|| format!("Memory {} not found", params.id))?;
 
-        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+        let editor_raw = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+        let editor_parts = shell_words::split(&editor_raw)
+            .map_err(|e| anyhow::anyhow!("Invalid EDITOR value '{}': {}", editor_raw, e))?;
+        let (editor_cmd, editor_args) = editor_parts
+            .split_first()
+            .ok_or_else(|| anyhow::anyhow!("EDITOR environment variable is empty"))?;
 
-        let status = std::process::Command::new(&editor)
+        let status = std::process::Command::new(editor_cmd)
+            .args(editor_args)
             .arg(&memory_file_path)
             .status()
-            .with_context(|| format!("Failed to launch editor '{}'", editor))?;
+            .with_context(|| format!("Failed to launch editor '{}'", editor_cmd))?;
 
         if !status.success() {
             anyhow::bail!("Editor exited with non-zero status");
         }
 
-        formatter.print_success(&format!("Edited memory {} with {}", params.id, editor));
+        formatter.print_success(&format!("Edited memory {} with {}", params.id, editor_cmd));
 
         // If only editor flag was provided, return early
         if params.type_.is_none()
@@ -302,5 +308,19 @@ mod tests {
         assert_eq!(tags_vec.len(), 2);
         assert_eq!(tags_vec[0], "tag1");
         assert_eq!(tags_vec[1], "tag2");
+    }
+
+    #[test]
+    fn test_editor_splitting_with_args() {
+        let parts = shell_words::split("code --wait").unwrap();
+        let (cmd, args) = parts.split_first().unwrap();
+        assert_eq!(*cmd, "code");
+        assert_eq!(args, &["--wait"]);
+    }
+
+    #[test]
+    fn test_editor_splitting_empty_returns_none() {
+        let parts = shell_words::split("").unwrap();
+        assert!(parts.split_first().is_none());
     }
 }

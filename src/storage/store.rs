@@ -92,7 +92,17 @@ impl MemoryStore {
 
         // Load config to get embedding dimensions
         let config_path = engramdb_dir.join("config.toml");
-        let config = load_config(&config_path).await.unwrap_or_default();
+        let config = match load_config(&config_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load config from {}, using defaults: {}",
+                    config_path.display(),
+                    e
+                );
+                crate::types::EngramConfig::default()
+            }
+        };
 
         // Initialize LanceIndex with configured dimensions
         let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
@@ -125,7 +135,17 @@ impl MemoryStore {
 
         // Load config to get embedding dimensions
         let config_path = engramdb_dir.join("config.toml");
-        let config = load_config(&config_path).await.unwrap_or_default();
+        let config = match load_config(&config_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load config from {}, using defaults: {}",
+                    config_path.display(),
+                    e
+                );
+                crate::types::EngramConfig::default()
+            }
+        };
 
         // Open (or create) global LanceDB
         let lance_path = paths::lancedb_dir(&project_id)?;
@@ -511,14 +531,29 @@ impl MemoryStore {
     }
 
     /// Reindex all .md files in a directory with a given visibility.
+    ///
+    /// Skips files that cannot be read or parsed, logging a warning for each,
+    /// so that a single corrupted file does not abort the entire reindex.
     async fn reindex_dir(&self, dir: &Path, visibility: Visibility) -> Result<usize> {
         let mut count = 0;
         let mut entries = async_fs::read_dir(dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("md") {
-                let content = async_fs::read_to_string(&path).await?;
-                let memory = memory_file::parse_memory_file(&content)?;
+                let content = match async_fs::read_to_string(&path).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("Skipping {}: failed to read: {}", path.display(), e);
+                        continue;
+                    }
+                };
+                let memory = match memory_file::parse_memory_file(&content) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!("Skipping {}: failed to parse: {}", path.display(), e);
+                        continue;
+                    }
+                };
                 let mut index_entry = IndexEntry::from(&memory);
                 index_entry.visibility = visibility;
                 self.lance_index.upsert(&index_entry).await.map_err(|e| {

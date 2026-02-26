@@ -45,6 +45,18 @@ use prompter::InquirePrompter;
 /// # Returns
 /// Ok(()) on success, or an error if the command fails
 pub async fn run(cli: Cli) -> Result<()> {
+    // Initialize tracing so warnings (e.g. from reindex) are visible.
+    // Defaults to WARN level; override with RUST_LOG env var.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .without_time()
+        .with_target(false)
+        .init();
+
     // Determine working directory
     let dir = cli
         .dir

@@ -1,6 +1,7 @@
 //! Garbage collection command.
 
 use crate::cli::output::{short_id, OutputFormatter};
+use crate::cli::validation::validate_score;
 use crate::ops::gc_memories;
 use crate::storage::MemoryStore;
 use anyhow::Result;
@@ -16,6 +17,10 @@ pub async fn run_gc(
     threshold: Option<f64>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
+    if let Some(t) = threshold {
+        validate_score(t, "threshold")?;
+    }
+
     let store = MemoryStore::open(dir).await?;
     let config_path = dir.join(".engramdb").join("config.toml");
     let config = crate::storage::config::load_config(&config_path).await?;

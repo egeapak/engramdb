@@ -1,7 +1,7 @@
 //! Search memories by keyword.
 
 use crate::cli::output::OutputFormatter;
-use crate::ops::parse_memory_type;
+use crate::ops::{parse_memory_type, validate_score};
 use crate::retrieval::filters::SearchFilters;
 use crate::storage::MemoryStore;
 use anyhow::Result;
@@ -55,6 +55,11 @@ pub async fn run_search(
     } else {
         None
     };
+
+    // Validate min_criticality
+    if let Some(mc) = params.min_criticality {
+        validate_score(mc, "min_criticality")?;
+    }
 
     // Build search filters
     let filters = SearchFilters {

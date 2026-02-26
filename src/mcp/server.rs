@@ -413,15 +413,17 @@ impl std::fmt::Debug for EngramDbServer {
 }
 
 impl EngramDbServer {
-    pub fn new(dir: PathBuf, embedding_backend: Option<EmbeddingBackend>) -> Self {
-        let registry: Arc<dyn RegistryBackend> =
-            Arc::new(FileRegistry::global().expect("Failed to initialize registry"));
-        Self {
+    pub fn new(dir: PathBuf, embedding_backend: Option<EmbeddingBackend>) -> anyhow::Result<Self> {
+        let registry: Arc<dyn RegistryBackend> = Arc::new(
+            FileRegistry::global()
+                .map_err(|e| anyhow::anyhow!("Failed to initialize registry: {}", e))?,
+        );
+        Ok(Self {
             dir,
             embedding_backend,
             registry,
             tool_router: Self::tool_router(),
-        }
+        })
     }
 
     #[cfg(test)]
@@ -529,7 +531,7 @@ impl EngramDbServer {
             created: true,
             summary: result.summary,
         })
-        .map_err(|e| e.to_string())
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
     #[tool(
@@ -561,6 +563,11 @@ impl EngramDbServer {
             crate::retrieval::engine::DetailLevel::Content
         };
 
+        if let Some(mc) = input.min_criticality {
+            ops::validate_score(mc, "min_criticality")
+                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        }
+
         let query = RetrievalQuery {
             path: input.path,
             logical: input.logical.unwrap_or_default(),
@@ -575,7 +582,7 @@ impl EngramDbServer {
 
         let result = ops::retrieve_memories(&engine, &query)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
         let include_details = input.detail_level.as_deref() == Some("full");
         let memories: Vec<ScoredMemoryOutput> = result
@@ -602,7 +609,7 @@ impl EngramDbServer {
             "total": result.total,
             "query_mode": result.query_mode,
         }))
-        .map_err(|e| e.to_string())
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
     #[tool(description = "Search all memories by text, regardless of file context.")]
@@ -625,6 +632,11 @@ impl EngramDbServer {
             None
         };
 
+        if let Some(mc) = input.min_criticality {
+            ops::validate_score(mc, "min_criticality")
+                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        }
+
         let filters = SearchFilters {
             types: type_filter,
             tags: input.tags,
@@ -636,7 +648,7 @@ impl EngramDbServer {
         let max = input.max_results.unwrap_or(10);
         let results = ops::search_memories(&engine, &input.query, &filters, Some(max))
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
         let memories: Vec<ScoredMemoryOutput> = results
             .iter()
@@ -660,7 +672,7 @@ impl EngramDbServer {
             "memories": memories,
             "total": results.len(),
         }))
-        .map_err(|e| e.to_string())
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
     #[tool(description = "Get full content of a specific memory, including details.")]
@@ -670,7 +682,8 @@ impl EngramDbServer {
             .await
             .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
-        serde_json::to_string(&memory_to_output(&memory, true)).map_err(|e| e.to_string())
+        serde_json::to_string(&memory_to_output(&memory, true))
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
     #[tool(description = "Update an existing memory. Cannot change id or created_at.")]
@@ -748,7 +761,7 @@ impl EngramDbServer {
             "id": input.id,
             "updated": true
         }))
-        .map_err(|e| e.to_string())
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
     #[tool(description = "Permanently delete a memory. Prefer supersedes for corrections.")]
@@ -765,7 +778,7 @@ impl EngramDbServer {
             "id": input.id,
             "deleted": true
         }))
-        .map_err(|e| e.to_string())
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
     #[tool(description = "Flag a memory as potentially incorrect and mark for review.")]
@@ -787,7 +800,7 @@ impl EngramDbServer {
             "challenged": result.challenged,
             "memory": memory_to_output(&result.memory, true)
         }))
-        .map_err(|e| e.to_string())
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
     #[tool(description = "List memories needing review (stale or challenged).")]
@@ -814,7 +827,7 @@ impl EngramDbServer {
 
         let memories = ops::review_memories(&store, &params)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
         let outputs: Vec<MemoryOutput> = memories
             .iter()
@@ -825,7 +838,7 @@ impl EngramDbServer {
             "memories": outputs,
             "total": memories.len()
         }))
-        .map_err(|e| e.to_string())
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
     #[tool(description = "Resolve a challenged or needs_review memory: keep, update, or delete.")]
@@ -867,7 +880,7 @@ impl EngramDbServer {
             "action": result.action,
             "resolved": result.resolved
         }))
-        .map_err(|e| e.to_string())
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
     #[tool(
@@ -877,17 +890,21 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<CompressCandidatesInput>,
     ) -> Result<String, String> {
+        if let Some(t) = input.threshold {
+            ops::validate_score(t, "threshold")
+                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        }
         let store = self.open_store().await?;
         let result = ops::compress_candidates(&store, input.scope.as_deref(), input.threshold)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
         serde_json::to_string(&serde_json::json!({
             "candidates": result.candidates,
             "total": result.total,
             "threshold": result.threshold,
         }))
-        .map_err(|e| e.to_string())
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
     #[tool(
@@ -914,7 +931,7 @@ impl EngramDbServer {
             "superseded_count": result.superseded_count,
             "applied": true,
         }))
-        .map_err(|e| e.to_string())
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
     #[tool(description = "Overview of memory store — counts by type, scope, status.")]
@@ -922,7 +939,7 @@ impl EngramDbServer {
         let store = self.open_store().await?;
         let stats = ops::compute_stats(&store)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
         let by_type: serde_json::Map<String, serde_json::Value> = stats
             .by_type
@@ -962,18 +979,22 @@ impl EngramDbServer {
             "newest": stats.newest,
             "avg_criticality": stats.avg_criticality
         }))
-        .map_err(|e| e.to_string())
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
     #[tool(description = "Garbage collect decayed memories. Always dry_run first.")]
     async fn memory_gc(&self, Parameters(input): Parameters<GcInput>) -> Result<String, String> {
+        if let Some(t) = input.threshold {
+            ops::validate_score(t, "threshold")
+                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        }
         let store = self.open_store().await?;
         let config = self.load_config().await;
         let dry_run = input.dry_run.unwrap_or(true);
 
         let result = ops::gc_memories(&store, &config, dry_run, input.threshold)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
         let mut response = serde_json::json!({
             "removed": result.removed,
@@ -985,7 +1006,8 @@ impl EngramDbServer {
             response["warning"] =
                 serde_json::json!("Stale index entries found. Run memory_reindex to fix.");
         }
-        serde_json::to_string(&response).map_err(|e| e.to_string())
+        serde_json::to_string(&response)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
     #[tool(description = "Rebuild the search index and embedding vectors.")]
@@ -1006,14 +1028,14 @@ impl EngramDbServer {
 
         let result = ops::reindex(&store, engine.as_ref(), embeddings_only)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
         serde_json::to_string(&serde_json::json!({
             "indexed": result.indexed,
             "embedded": result.embedded,
             "errors": result.errors
         }))
-        .map_err(|e| e.to_string())
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
     #[tool(description = "List memories with optional filtering, sorting, and limiting.")]
@@ -1039,7 +1061,7 @@ impl EngramDbServer {
 
         let entries = ops::list_memories(&store, &params)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
         let output: Vec<serde_json::Value> = entries
             .iter()
@@ -1063,7 +1085,7 @@ impl EngramDbServer {
             "memories": output,
             "total": output.len()
         }))
-        .map_err(|e| e.to_string())
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
     #[tool(
@@ -1071,7 +1093,9 @@ impl EngramDbServer {
     )]
     async fn memory_doctor(&self) -> Result<String, String> {
         let store = self.open_store().await?;
-        let result = ops::doctor(&store).await.map_err(|e| e.to_string())?;
+        let result = ops::doctor(&store)
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
         let mut response = serde_json::json!({
             "healthy": result.healthy,
@@ -1087,7 +1111,8 @@ impl EngramDbServer {
         if !result.healthy {
             response["fix"] = serde_json::json!("Run memory_reindex to repair.");
         }
-        serde_json::to_string(&response).map_err(|e| e.to_string())
+        serde_json::to_string(&response)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 }
 
@@ -1396,7 +1421,7 @@ pub async fn run_stdio(
     dir: PathBuf,
     embedding_backend: Option<EmbeddingBackend>,
 ) -> anyhow::Result<()> {
-    let server = EngramDbServer::new(dir, embedding_backend);
+    let server = EngramDbServer::new(dir, embedding_backend)?;
     let service = server.serve(rmcp::transport::io::stdio()).await?;
     service.waiting().await?;
     Ok(())
@@ -1416,7 +1441,10 @@ pub async fn run_sse(
     let config = StreamableHttpServerConfig::default();
     let ct = config.cancellation_token.clone();
     let service = StreamableHttpService::new(
-        move || Ok(EngramDbServer::new(dir.clone(), embedding_backend)),
+        move || {
+            EngramDbServer::new(dir.clone(), embedding_backend)
+                .map_err(|e| std::io::Error::other(e.to_string()))
+        },
         Arc::new(LocalSessionManager::default()),
         config,
     );

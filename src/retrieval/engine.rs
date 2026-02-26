@@ -321,24 +321,17 @@ impl RetrievalEngine {
         .await
         .map_err(|e| anyhow::anyhow!("Rerank task panicked: {}", e))??;
 
-        // Find min/max for normalization
-        let scores: Vec<f64> = rerank_results.iter().map(|r| r.score as f64).collect();
-        let min_score = scores.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max_score = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let score_range = max_score - min_score;
-
-        // Map rerank results back to candidates by original index
+        // Map rerank results back to candidates by original index.
+        // Use sigmoid normalization instead of min-max: sigmoid maps raw
+        // cross-encoder logits to [0, 1] based on absolute quality, not
+        // relative to the batch. This avoids degenerate cases where a single
+        // result always gets 1.0 or where all-poor matches still normalize
+        // such that the "least bad" gets 1.0.
         for result in &rerank_results {
             let idx = result.index;
             if idx < top_n {
                 let raw_rerank = result.score as f64;
-
-                // Normalize to [0, 1]
-                let normalized = if score_range > f64::EPSILON {
-                    (raw_rerank - min_score) / score_range
-                } else {
-                    1.0 // All scores equal — treat as maximum
-                };
+                let normalized = 1.0 / (1.0 + (-raw_rerank).exp());
 
                 // Blend: (1 - weight) * original + weight * normalized_rerank
                 let original = candidates[idx].score;

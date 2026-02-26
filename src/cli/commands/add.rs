@@ -339,14 +339,20 @@ async fn run_editor_mode(
 
     fs::write(&temp_file, template).context("Failed to write template file")?;
 
-    // Get editor from environment
-    let editor = env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    // Get editor from environment and split into command + args
+    let editor_raw = env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    let editor_parts = shell_words::split(&editor_raw)
+        .map_err(|e| anyhow!("Invalid EDITOR value '{}': {}", editor_raw, e))?;
+    let (editor_cmd, editor_args) = editor_parts
+        .split_first()
+        .ok_or_else(|| anyhow!("EDITOR environment variable is empty"))?;
 
     // Open editor
-    let status = Command::new(&editor)
+    let status = Command::new(editor_cmd)
+        .args(editor_args)
         .arg(&temp_file)
         .status()
-        .context("Failed to open editor")?;
+        .with_context(|| format!("Failed to launch editor '{}'", editor_cmd))?;
 
     if !status.success() {
         bail!("Editor exited with non-zero status");
@@ -846,5 +852,41 @@ Line 3"#;
         assert_eq!(default_criticality_for_type(MemoryType::Relationship), 0.6);
         assert_eq!(default_criticality_for_type(MemoryType::Debug), 0.4);
         assert_eq!(default_criticality_for_type(MemoryType::Preference), 0.5);
+    }
+
+    #[test]
+    fn test_editor_splitting_simple_command() {
+        let parts = shell_words::split("vim").unwrap();
+        assert_eq!(parts, vec!["vim"]);
+    }
+
+    #[test]
+    fn test_editor_splitting_with_args() {
+        let parts = shell_words::split("code --wait").unwrap();
+        assert_eq!(parts, vec!["code", "--wait"]);
+        let (cmd, args) = parts.split_first().unwrap();
+        assert_eq!(*cmd, "code");
+        assert_eq!(args, &["--wait"]);
+    }
+
+    #[test]
+    fn test_editor_splitting_with_quoted_args() {
+        let parts = shell_words::split(r#"nano "-w""#).unwrap();
+        assert_eq!(parts, vec!["nano", "-w"]);
+    }
+
+    #[test]
+    fn test_editor_splitting_empty_is_err() {
+        // Empty string splits to empty vec — our code checks for this
+        let parts = shell_words::split("").unwrap();
+        assert!(parts.is_empty());
+        assert!(parts.split_first().is_none());
+    }
+
+    #[test]
+    fn test_editor_splitting_unmatched_quote() {
+        // Unmatched quotes should be an error
+        let result = shell_words::split("vim 'unterminated");
+        assert!(result.is_err());
     }
 }

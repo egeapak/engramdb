@@ -11,6 +11,7 @@ pub enum ErrorCode {
     EmbeddingUnavailable,
     CompressFailed,
     ConcurrentWrite,
+    InternalError,
 }
 
 impl ErrorCode {
@@ -23,6 +24,7 @@ impl ErrorCode {
             Self::EmbeddingUnavailable => "EMBEDDING_UNAVAILABLE",
             Self::CompressFailed => "COMPRESS_FAILED",
             Self::ConcurrentWrite => "CONCURRENT_WRITE",
+            Self::InternalError => "INTERNAL_ERROR",
         }
     }
 }
