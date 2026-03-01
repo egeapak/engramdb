@@ -10,6 +10,13 @@
 //! - **Imported**: 0.7 - Moderate trust for imported data
 //! - **Inferred**: 0.6 - Lower trust for inferred/derived information
 //!
+//! # Effective Threshold
+//!
+//! Because trust is applied as a multiplier on the entire composite score,
+//! it creates an effective threshold for lower-trust sources. For example,
+//! with a relevance threshold of 0.3 and inferred trust of 0.6, an inferred
+//! memory needs a base score of at least `0.3 / 0.6 = 0.5` to surface.
+//!
 //! # Usage
 //!
 //! Trust weights can be customized via configuration using [`trust_weight_from_config`],

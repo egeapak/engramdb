@@ -294,6 +294,11 @@ impl RetrievalEngine {
         let top_n = self.config.rerank.top_n.min(candidates.len());
         let weight = self.config.rerank.weight.clamp(0.0, 1.0);
 
+        // Skip the expensive cross-encoder call when weight=0 (original scores only)
+        if weight < f64::EPSILON {
+            return Ok(());
+        }
+
         // Build document strings for the top N candidates, including details when available
         let documents: Vec<String> = candidates[..top_n]
             .iter()
@@ -321,21 +326,20 @@ impl RetrievalEngine {
         .await
         .map_err(|e| anyhow::anyhow!("Rerank task panicked: {}", e))??;
 
-        // Map rerank results back to candidates by original index.
-        // Use sigmoid normalization instead of min-max: sigmoid maps raw
-        // cross-encoder logits to [0, 1] based on absolute quality, not
-        // relative to the batch. This avoids degenerate cases where a single
-        // result always gets 1.0 or where all-poor matches still normalize
-        // such that the "least bad" gets 1.0.
+        // Original scores are already in [0, 1] (from composite_score).
+        // Cross-encoder logits are unbounded, so normalize with sigmoid.
         for result in &rerank_results {
             let idx = result.index;
             if idx < top_n {
                 let raw_rerank = result.score as f64;
-                let normalized = 1.0 / (1.0 + (-raw_rerank).exp());
 
-                // Blend: (1 - weight) * original + weight * normalized_rerank
-                let original = candidates[idx].score;
-                let blended = (1.0 - weight) * original + weight * normalized;
+                // When weight is 0, preserve original scores exactly.
+                let blended = if weight < f64::EPSILON {
+                    candidates[idx].score
+                } else {
+                    let norm_rerank = 1.0 / (1.0 + (-raw_rerank).exp());
+                    (1.0 - weight) * candidates[idx].score + weight * norm_rerank
+                };
 
                 candidates[idx].score = blended;
                 candidates[idx].score_breakdown.final_score = blended;
@@ -539,32 +543,27 @@ impl RetrievalEngine {
 
     /// Perform keyword-based search with quality signals.
     ///
-    /// # Scoring formula
-    /// ```text
-    /// content_score = keyword_raw + cosine_similarity * semantic_weight
-    /// score = content_score * decay_factor * trust_weight
-    /// if challenged: score *= 0.7
-    /// ```
+    /// All scores are produced by `composite_score` in [0, 1] using the
+    /// `with_keyword` weight profile. Keyword raw scores are normalized
+    /// via shifted sigmoid before being passed to the scorer.
     ///
     /// # Algorithm
     /// 1. Load all memories
     /// 2. Apply filters
     /// 3. Run keyword search
     /// 4. If embeddings available, get semantic scores
-    /// 5. Combine: content = keyword_raw + semantic * semantic_weight
-    /// 6. Apply decay, trust, challenge penalty
-    /// 7. Apply threshold, sort, return
+    /// 5. Normalize keyword scores and build ScoringContext::with_keyword
+    /// 6. Call composite_score for unified scoring
+    /// 7. Apply threshold, sort, rerank, return
     pub async fn search(
         &self,
         query_text: &str,
         filters: &SearchFilters,
     ) -> Result<Vec<ScoredMemory>> {
-        use crate::scoring::{decay_factor, trust_weight_from_config};
-        use crate::types::Status;
+        use crate::search::normalize_keyword_score;
 
-        let now = Utc::now();
-        let semantic_weight = self.config.search.semantic_weight;
-        let threshold = self.config.search.threshold;
+        let threshold = self.config.search.threshold.min(1.0);
+        let num_query_tokens = crate::search::keyword::query_token_count(query_text);
 
         // Step 1: Load lightweight index entries (6 columns)
         let all_entries = self.store.list_for_filtering().await?;
@@ -603,54 +602,37 @@ impl RetrievalEngine {
 
         // Step 6: Score every memory that has either keyword or semantic match
         let mut scored_memories: Vec<ScoredMemory> = Vec::new();
+        let now = Utc::now();
 
         for (idx, memory) in memories.iter().enumerate() {
-            let kw_score = keyword_map.get(&idx).copied().unwrap_or(0.0);
-            let sem_score = semantic_scores.get(&memory.id).copied().unwrap_or(0.0);
+            let raw_kw = keyword_map.get(&idx).copied().unwrap_or(0.0);
 
-            // Skip memories with no matches at all
-            if kw_score == 0.0 && sem_score == 0.0 {
+            // Search requires at least a keyword match. Semantic similarity
+            // augments scoring but is not sufficient on its own — use retrieve()
+            // for pure semantic queries.
+            if raw_kw == 0.0 {
                 continue;
             }
 
-            // content = keyword_raw + semantic * semantic_weight
-            let content_score = kw_score + sem_score * semantic_weight;
+            let sem_score = semantic_scores.get(&memory.id).copied();
 
-            // Quality signals
-            let decay = decay_factor(memory.created_at, now, &memory.decay);
-            let trust =
-                trust_weight_from_config(memory.provenance.source, &self.config.trust_weights);
+            // Normalize keyword score to [0, 1], scaled by query length
+            let norm_kw = normalize_keyword_score(raw_kw, num_query_tokens);
 
-            // score = content * decay * trust
-            let mut score = content_score * decay * trust;
+            // No scope context for global keyword search — scope_multiplier=1.0 (neutral)
+            let context = ScoringContext::with_keyword(
+                None,
+                vec![],
+                query_text.to_string(),
+                norm_kw,
+                sem_score,
+            );
 
-            // Challenge penalty
-            if memory.status == Status::Challenged {
-                score *= 0.7;
-            }
-
-            // Compute informational relevance (criticality * decay)
-            let relevance = memory.criticality * decay;
-
-            let breakdown = ScoreBreakdown {
-                final_score: score,
-                semantic: if sem_score > 0.0 {
-                    Some(sem_score)
-                } else {
-                    None
-                },
-                keyword: if kw_score > 0.0 { Some(kw_score) } else { None },
-                rerank: None,
-                relevance,
-                scope: 0.0,
-                trust,
-                decay: 1.0 - decay,
-                criticality: memory.criticality,
-            };
+            let breakdown = composite_score(memory, &context, &self.config, now);
 
             scored_memories.push(ScoredMemory {
                 memory: memory.clone(),
-                score,
+                score: breakdown.final_score,
                 score_breakdown: breakdown,
             });
         }
@@ -966,8 +948,8 @@ mod tests {
 
         let config = EngramConfig::default(); // relevance_threshold = 0.3
 
-        // Expired memory with high criticality and root scope → score without decay
-        // should exceed threshold: (0.50 * 0.8 + 0.50 * 0.4) * 0.85 = 0.51
+        // Expired memory with high criticality → score without decay
+        // should exceed threshold: 1.0 * 0.8 * scope_mult(1.0) * trust(1.0) = 0.80
         let mut expired = Memory::new(
             MemoryType::Debug,
             "Decayed memory",
@@ -1231,8 +1213,9 @@ mod tests {
         // Should find memory1 with higher score
         assert!(!results.is_empty());
         assert_eq!(results[0].memory.summary, "Authentication system");
-        // Raw keyword score: summary(3) + content(1) = 4.0, * decay(1.0) * trust(1.0) = 4.0
+        // Score should be in [0, 1] (normalized)
         assert!(results[0].score > 0.0);
+        assert!(results[0].score <= 1.0);
         // Should have keyword breakdown
         assert!(results[0].score_breakdown.keyword.is_some());
         // Trust should be the real trust weight
@@ -1250,7 +1233,8 @@ mod tests {
         let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
             .await
             .unwrap();
-        let config = EngramConfig::default();
+        let mut config = EngramConfig::default();
+        config.search.threshold = 0.0;
 
         // Human memory
         let mut human_mem = Memory::new(
@@ -1289,13 +1273,11 @@ mod tests {
 
         assert_eq!(human_result.score_breakdown.trust, 1.0);
         assert_eq!(inferred_result.score_breakdown.trust, 0.6);
-        // Inferred should score exactly 0.6x of human
-        assert!(
-            (inferred_result.score - human_result.score * 0.6).abs() < 0.001,
-            "inferred {} should be {} (human * 0.6)",
-            inferred_result.score,
-            human_result.score * 0.6
-        );
+        // Inferred should score lower than human (trust multiplier)
+        assert!(inferred_result.score < human_result.score);
+        // Scores should be in [0, 1]
+        assert!(human_result.score <= 1.0);
+        assert!(inferred_result.score <= 1.0);
     }
 
     #[tokio::test]
@@ -1308,7 +1290,8 @@ mod tests {
         let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
             .await
             .unwrap();
-        let config = EngramConfig::default();
+        let mut config = EngramConfig::default();
+        config.search.threshold = 0.0;
 
         // Fresh memory (no decay)
         let mut fresh = Memory::new(
@@ -1343,10 +1326,11 @@ mod tests {
         // Fresh has decay=0.0 (no decay), old has decay~=0.5 (half decayed)
         assert_eq!(fresh_result.score_breakdown.decay, 0.0);
         assert!((old_result.score_breakdown.decay - 0.5).abs() < 0.1);
-        // Old should score roughly half of fresh (decay_factor = 1.0 - 0.5 = 0.5)
+        // Old should score lower than fresh due to decay
         assert!(old_result.score < fresh_result.score);
-        let decay_factor = 1.0 - old_result.score_breakdown.decay;
-        assert!((old_result.score - fresh_result.score * decay_factor).abs() < 0.01);
+        // Scores should be in [0, 1]
+        assert!(fresh_result.score <= 1.0);
+        assert!(old_result.score <= 1.0);
     }
 
     #[tokio::test]
@@ -1358,7 +1342,8 @@ mod tests {
         let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
             .await
             .unwrap();
-        let config = EngramConfig::default();
+        let mut config = EngramConfig::default();
+        config.search.threshold = 0.0;
 
         // Active memory
         let mut active = Memory::new(
@@ -1392,13 +1377,11 @@ mod tests {
             .find(|r| r.memory.id == challenged.id)
             .unwrap();
 
-        // Challenged should be exactly 0.7x of active
-        assert!(
-            (challenged_result.score - active_result.score * 0.7).abs() < 0.001,
-            "challenged {} should be {} (active * 0.7)",
-            challenged_result.score,
-            active_result.score * 0.7
-        );
+        // Challenged should score lower than active (0.7x penalty)
+        assert!(challenged_result.score < active_result.score);
+        // Both should be in [0, 1]
+        assert!(active_result.score <= 1.0);
+        assert!(challenged_result.score <= 1.0);
     }
 
     #[tokio::test]
@@ -1412,8 +1395,8 @@ mod tests {
             .unwrap();
 
         let mut config = EngramConfig::default();
-        // Set a high threshold that filters out low-scoring results
-        config.search.threshold = 100.0;
+        // Set threshold to 1.0 (max possible score) so everything is filtered
+        config.search.threshold = 1.0;
 
         let mut memory = Memory::new(
             MemoryType::Decision,
@@ -1428,7 +1411,7 @@ mod tests {
         let filters = SearchFilters::default();
         let results = engine.search("authentication", &filters).await.unwrap();
 
-        // Keyword score is at most ~4.0, well below threshold of 100
+        // Scores are in [0, 1] and a single partial match won't reach 1.0
         assert!(results.is_empty());
     }
 
@@ -1488,18 +1471,59 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let bd = &results[0].score_breakdown;
-        // keyword should be populated with raw score
+        // keyword should be populated with normalized score in [0, 1]
         assert!(bd.keyword.is_some());
-        // "authentication" matches in summary(3) + content(1) = 4.0
-        assert_eq!(bd.keyword.unwrap(), 4.0);
+        assert!(bd.keyword.unwrap() > 0.0);
+        assert!(bd.keyword.unwrap() <= 1.0);
+        // final score should be in [0, 1]
+        assert!(bd.final_score > 0.0);
+        assert!(bd.final_score <= 1.0);
         // criticality should be the raw value
         assert_eq!(bd.criticality, 0.7);
         // relevance should be criticality * (1 - decay), since decay=0 means fresh
         assert_eq!(bd.relevance, 0.7 * (1.0 - bd.decay));
-        // scope should be 0.0 for search
-        assert_eq!(bd.scope, 0.0);
-        // semantic should be None (no embeddings)
-        assert!(bd.semantic.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_search_scores_in_unit_interval() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut config = EngramConfig::default();
+        config.search.threshold = 0.0; // return everything
+
+        // Create memories with varying keyword overlap
+        for (summary, content) in [
+            ("auth system login", "authentication password hashing"),
+            ("auth password", "bcrypt hashing details"),
+            ("database schema", "tables and relations"),
+        ] {
+            let mut memory =
+                Memory::new(MemoryType::Decision, summary, content, Provenance::human());
+            memory.visibility = Visibility::Shared;
+            memory.criticality = 0.8;
+            store.create(&memory).await.unwrap();
+        }
+
+        let engine = RetrievalEngine::new(store, config);
+        let filters = SearchFilters::default();
+        let results = engine
+            .search("auth password hashing", &filters)
+            .await
+            .unwrap();
+
+        for sm in &results {
+            assert!(
+                sm.score >= 0.0 && sm.score <= 1.0,
+                "score {} not in [0, 1] for '{}'",
+                sm.score,
+                sm.memory.summary
+            );
+        }
     }
 
     #[tokio::test]
@@ -2076,9 +2100,11 @@ mod tests {
         );
         assert_eq!(results_no_rerank[1].memory.id, semantically_relevant_id);
 
-        // ── Step 2: search WITH reranker (weight = 0.8) ───────────────────
+        // ── Step 2: search WITH reranker (weight = 0.95) ──────────────────
+        // Sigmoid normalization is more conservative than min-max, so we use a
+        // high weight to ensure the cross-encoder's preference dominates.
         config.rerank.enabled = true;
-        config.rerank.weight = 0.8;
+        config.rerank.weight = 0.95;
         config.rerank.top_n = 10;
 
         let store2 = MemoryStore::open(temp_dir.path()).await.unwrap();

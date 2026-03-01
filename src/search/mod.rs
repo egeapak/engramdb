@@ -25,4 +25,4 @@
 pub mod keyword;
 
 // Re-export main functions
-pub use keyword::keyword_search;
+pub use keyword::{keyword_search, normalize_keyword_score, query_token_count};

@@ -20,8 +20,11 @@ pub struct ScoreBreakdown {
     pub rerank: Option<f64>,
     /// Effective relevance score (criticality * decay)
     pub relevance: f64,
-    /// Scope proximity score
+    /// Raw scope proximity score (before multiplier transform)
     pub scope: f64,
+    /// Computed scope multiplier: `floor + (1 - floor) * scope_score` when
+    /// scope context is present, or 1.0 when no context is provided.
+    pub scope_multiplier: f64,
     /// Trust weight based on provenance (used as multiplier)
     pub trust: f64,
     /// Decay amount (0.0 = fresh, 1.0 = fully decayed)
@@ -42,6 +45,9 @@ pub struct ScoringContext {
     /// Search query (if any)
     pub query: Option<String>,
 
+    /// Normalized keyword match score (if keyword search was used)
+    pub keyword_score: Option<f64>,
+
     /// Semantic similarity score from vector search (if available)
     pub semantic_score: Option<f64>,
 
@@ -56,6 +62,7 @@ impl ScoringContext {
             path,
             logical,
             query: None,
+            keyword_score: None,
             semantic_score: None,
             embeddings_available: false,
         }
@@ -67,6 +74,7 @@ impl ScoringContext {
             path,
             logical,
             query: Some(query),
+            keyword_score: None,
             semantic_score: None,
             embeddings_available: false,
         }
@@ -83,29 +91,66 @@ impl ScoringContext {
             path,
             logical,
             query: Some(query),
+            keyword_score: None,
             semantic_score: Some(semantic_score),
             embeddings_available: true,
+        }
+    }
+
+    /// Create a new ScoringContext for keyword search (with optional semantic score).
+    pub fn with_keyword(
+        path: Option<String>,
+        logical: Vec<String>,
+        query: String,
+        keyword_score: f64,
+        semantic_score: Option<f64>,
+    ) -> Self {
+        Self {
+            path,
+            logical,
+            query: Some(query),
+            keyword_score: Some(keyword_score),
+            semantic_score,
+            embeddings_available: semantic_score.is_some(),
         }
     }
 }
 
 /// Calculate the composite score for a memory in a given context.
 ///
-/// The scoring operates in three modes:
+/// # Embedding availability note
 ///
-/// 1. **With query + embeddings** (semantic_score is Some):
+/// When the semantic component is absent (no embedding provider), the
+/// remaining weights are renormalized so they sum to 1.0. This means
+/// the same keyword match can produce different composite scores
+/// depending on whether the embedding backend is available. This is
+/// intentional — semantic similarity adds a signal that other components
+/// cannot replace — but be aware that benchmarks run without ONNX may
+/// not predict production ranking exactly.
+///
+/// The scoring operates in four modes:
+///
+/// 1. **With keyword** (keyword_score is Some):
+///    - Uses `config.retrieval.scoring.with_keyword` weights
+///    - base = 0.45*keyword + 0.30*semantic + 0.25*(criticality*decay)
+///
+/// 2. **With query + embeddings** (semantic_score is Some):
 ///    - Uses `config.retrieval.scoring.with_query` weights
-///    - base = 0.35*semantic + 0.45*(criticality*decay) + 0.20*scope
+///    - base = 0.45*semantic + 0.55*(criticality*decay)
 ///
-/// 2. **With query, no embeddings** (query is Some, semantic_score is None):
+/// 3. **With query, no embeddings** (query is Some, semantic_score is None):
 ///    - Uses `config.retrieval.scoring.degraded` weights
-///    - base = 0.70*(criticality*decay) + 0.30*scope
+///    - base = 1.0*(criticality*decay)
 ///
-/// 3. **Scope-only** (no query):
+/// 4. **Scope-only** (no query):
 ///    - Uses `config.retrieval.scoring.scope_only` weights
-///    - base = 0.50*(criticality*decay) + 0.50*scope
+///    - base = 1.0*(criticality*decay)
 ///
-/// Then: `score = base * trust_weight`
+/// Then: `score = base * scope_multiplier * trust_weight`
+///
+/// Scope multiplier: when scope context is provided,
+/// `scope_multiplier = floor + (1 - floor) * scope_score` (default floor=0.5).
+/// When no context is provided, scope_multiplier = 1.0 (neutral).
 ///
 /// Challenge penalty: if memory.status == Status::Challenged, `score *= 0.7`
 ///
@@ -167,30 +212,68 @@ fn composite_score_inner(
 
     let trust = trust_weight_from_config(memory.provenance.source, &config.trust_weights);
 
-    // Determine which weights to use based on context
-    let weights = if context.semantic_score.is_some() {
-        // Mode 1: With query + embeddings
+    // Determine which weights to use based on context.
+    // Priority: keyword > semantic (any value) > degraded (query but no signals) > scope_only
+    let weights = if context.keyword_score.is_some() {
+        &config.retrieval.scoring.with_keyword
+    } else if context.semantic_score.is_some() {
+        // With query + embeddings (semantic=0.0 is valid: "checked, found nothing")
         &config.retrieval.scoring.with_query
     } else if context.query.is_some() {
-        // Mode 2: With query, no embeddings (degraded)
+        // With query, no embeddings (degraded)
         &config.retrieval.scoring.degraded
     } else {
-        // Mode 3: Scope-only
+        // Scope-only
         &config.retrieval.scoring.scope_only
     };
 
-    // Calculate base score (trust is a multiplier, not a weighted component)
-    let mut score = weights.relevance * relevance + weights.scope * scope_score;
+    // Dynamic weight accumulation: only add components when both weight and
+    // value are present. Track active weight sum for renormalization.
+    let mut score = 0.0;
+    let mut active_weight_sum = 0.0;
 
-    // Add semantic component if available (store raw score in breakdown)
-    let raw_semantic = if let (Some(semantic_weight), Some(semantic_score)) =
-        (weights.semantic, context.semantic_score)
-    {
-        score += semantic_weight * semantic_score;
-        Some(semantic_score)
+    // Keyword component
+    let raw_keyword =
+        if let (Some(kw_weight), Some(kw_score)) = (weights.keyword, context.keyword_score) {
+            score += kw_weight * kw_score;
+            active_weight_sum += kw_weight;
+            Some(kw_score)
+        } else {
+            None
+        };
+
+    // Semantic component — always include when Some, even at 0.0.
+    // sem=Some(0.0) means "checked, found nothing" and should consume its
+    // weight budget at zero, producing a lower score than sem=None (degraded).
+    let raw_semantic =
+        if let (Some(sem_weight), Some(sem_score)) = (weights.semantic, context.semantic_score) {
+            score += sem_weight * sem_score;
+            active_weight_sum += sem_weight;
+            Some(sem_score)
+        } else {
+            None
+        };
+
+    // Relevance is always active
+    score += weights.relevance * relevance;
+    active_weight_sum += weights.relevance;
+
+    // Renormalize if active weights don't sum to 1.0
+    if (active_weight_sum - 1.0).abs() > f64::EPSILON && active_weight_sum > f64::EPSILON {
+        score /= active_weight_sum;
+    }
+
+    // Apply scope as a post-multiplier (like trust).
+    // When scope context is provided: multiplier = floor + (1 - floor) * scope_score
+    // When no context: multiplier = 1.0 (neutral, doesn't penalize global searches)
+    let has_scope_context = context.path.is_some() || !context.logical.is_empty();
+    let scope_multiplier = if has_scope_context {
+        let floor = config.retrieval.scoring.scope_multiplier_floor;
+        floor + (1.0 - floor) * scope_score
     } else {
-        None
+        1.0
     };
+    score *= scope_multiplier;
 
     // Apply trust as a multiplier on the entire base score
     score *= trust;
@@ -200,13 +283,17 @@ fn composite_score_inner(
         score *= 0.7;
     }
 
+    // Safety clamp to [0, 1]
+    score = score.clamp(0.0, 1.0);
+
     ScoreBreakdown {
         final_score: score,
         semantic: raw_semantic,
-        keyword: None,
+        keyword: raw_keyword,
         rerank: None,
         relevance,
         scope: scope_score,
+        scope_multiplier,
         trust,
         decay: 1.0 - decay_factor_value,
         criticality: memory.criticality,
@@ -267,9 +354,9 @@ mod tests {
         assert!(breakdown.keyword.is_none());
         // criticality should be raw value
         assert_eq!(breakdown.criticality, 0.8);
-        // base = 0.35*0.9 + 0.45*0.8 + 0.20*1.0 = 0.315 + 0.36 + 0.20 = 0.875
-        // * trust(1.0) = 0.875
-        assert!((breakdown.final_score - 0.875).abs() < 0.05);
+        // base = 0.45*0.9 + 0.55*0.8 = 0.405 + 0.44 = 0.845
+        // * scope_mult(1.0) * trust(1.0) = 0.845
+        assert!((breakdown.final_score - 0.845).abs() < 0.01);
     }
 
     #[test]
@@ -289,9 +376,9 @@ mod tests {
         assert!(breakdown.final_score > 0.0);
         // No semantic component
         assert!(breakdown.semantic.is_none());
-        // base = 0.70*0.8 + 0.30*1.0 = 0.56 + 0.30 = 0.86
-        // * trust(1.0) = 0.86
-        assert!((breakdown.final_score - 0.86).abs() < 0.05);
+        // base = 1.0*0.8 = 0.80
+        // * scope_mult(1.0) * trust(1.0) = 0.80
+        assert!((breakdown.final_score - 0.80).abs() < 0.01);
     }
 
     #[test]
@@ -310,9 +397,9 @@ mod tests {
         assert!(breakdown.final_score > 0.0);
         // No semantic component
         assert!(breakdown.semantic.is_none());
-        // base = 0.50*0.8 + 0.50*1.0 = 0.40 + 0.50 = 0.90
-        // * trust(1.0) = 0.90
-        assert!((breakdown.final_score - 0.90).abs() < 0.05);
+        // base = 1.0*0.8 = 0.80
+        // * scope_mult(1.0) * trust(1.0) = 0.80
+        assert!((breakdown.final_score - 0.80).abs() < 0.01);
     }
 
     #[test]
@@ -353,8 +440,7 @@ mod tests {
         let breakdown = composite_score(&memory, &context, &config, now);
 
         // relevance = criticality(0.8) * decay(~0.5) = ~0.4
-        // base = 0.50*0.4 + 0.50*1.0 = 0.70
-        // * trust(1.0) = 0.70
+        // base = 1.0*0.4 = 0.4, scope_mult=1.0, trust=1.0 → ~0.4
         assert!(breakdown.final_score < 0.9);
         assert!(breakdown.final_score > 0.0);
         assert!((breakdown.decay - 0.5).abs() < 0.1); // 0.5 = half decayed
@@ -394,9 +480,9 @@ mod tests {
         let breakdown = composite_score(&memory, &context, &config, now);
 
         // With criticality=0.0, relevance component is 0.0
-        // base = 0.50*0.0 + 0.50*1.0 = 0.50
-        // * trust(1.0) = 0.50
-        assert!((breakdown.final_score - 0.50).abs() < 0.05);
+        // base = 1.0*0.0 = 0.0
+        // * scope_mult(1.0) * trust(1.0) = 0.0
+        assert!((breakdown.final_score - 0.0).abs() < 0.01);
         assert!((breakdown.relevance - 0.0).abs() < 0.01);
         assert_eq!(breakdown.criticality, 0.0);
     }
@@ -415,9 +501,9 @@ mod tests {
 
         let breakdown = composite_score(&memory, &context, &config, now);
 
-        // base = 0.50*0.8 + 0.50*0.0 = 0.40
-        // * trust(1.0) = 0.40
-        assert!((breakdown.final_score - 0.40).abs() < 0.05);
+        // base = 1.0*0.8 = 0.80
+        // * scope_mult(0.5 + 0.5*0.0 = 0.5) * trust(1.0) = 0.40
+        assert!((breakdown.final_score - 0.40).abs() < 0.01);
         assert!((breakdown.scope - 0.0).abs() < 0.01);
     }
 
@@ -438,9 +524,9 @@ mod tests {
 
         let breakdown = composite_score(&memory, &context, &config, now);
 
-        // base = 0.35*1.0 + 0.45*1.0 + 0.20*1.0 = 1.0
-        // * trust(1.0) = 1.0
-        assert!((breakdown.final_score - 1.0).abs() < 0.05);
+        // base = 0.45*1.0 + 0.55*1.0 = 1.0
+        // * scope_mult(1.0) * trust(1.0) = 1.0
+        assert!((breakdown.final_score - 1.0).abs() < 0.01);
         assert!(breakdown.final_score <= 1.1);
         assert_eq!(breakdown.decay, 0.0); // 0.0 = fresh, no decay
         assert_eq!(breakdown.semantic, Some(1.0));
@@ -678,13 +764,15 @@ mod tests {
         let normal = composite_score(&memory, &context, &config, now);
         let ignore = composite_score_ignore_decay(&memory, &context, &config, now);
 
-        // normal: relevance = 0.8 * 0.0 = 0.0, score = 0.50*0.0 + 0.50*1.0 = 0.50
+        // normal: relevance = 0.8 * 0.0 = 0.0, base = 1.0*0.0 = 0.0
+        // scope_mult=1.0, trust=1.0 → 0.0
         assert!((normal.relevance - 0.0).abs() < 0.01);
-        assert!((normal.final_score - 0.50).abs() < 0.05);
+        assert!((normal.final_score - 0.0).abs() < 0.01);
 
-        // ignore: relevance = 0.8, score = 0.50*0.8 + 0.50*1.0 = 0.90
+        // ignore: relevance = 0.8, base = 1.0*0.8 = 0.8
+        // scope_mult=1.0, trust=1.0 → 0.8
         assert!((ignore.relevance - 0.8).abs() < 0.01);
-        assert!((ignore.final_score - 0.90).abs() < 0.05);
+        assert!((ignore.final_score - 0.80).abs() < 0.01);
 
         assert!(ignore.final_score > normal.final_score);
     }
@@ -737,13 +825,15 @@ mod tests {
         let normal = composite_score(&memory, &context, &config, now);
         let ignore = composite_score_ignore_decay(&memory, &context, &config, now);
 
-        // normal: relevance ≈ 0.8 * 0.5 = 0.4 → score ≈ 0.50*0.4 + 0.50*1.0 = 0.70
+        // normal: relevance ≈ 0.8 * 0.5 = 0.4 → base = 1.0*0.4 = 0.4
+        // scope_mult=1.0, trust=1.0 → ~0.4
         assert!((normal.relevance - 0.4).abs() < 0.1);
-        assert!((normal.final_score - 0.70).abs() < 0.05);
+        assert!((normal.final_score - 0.40).abs() < 0.05);
 
-        // ignore: relevance = 0.8 → score = 0.50*0.8 + 0.50*1.0 = 0.90
+        // ignore: relevance = 0.8 → base = 1.0*0.8 = 0.8
+        // scope_mult=1.0, trust=1.0 → 0.8
         assert!((ignore.relevance - 0.8).abs() < 0.01);
-        assert!((ignore.final_score - 0.90).abs() < 0.05);
+        assert!((ignore.final_score - 0.80).abs() < 0.01);
     }
 
     #[test]
@@ -762,10 +852,10 @@ mod tests {
 
         let ignore = composite_score_ignore_decay(&memory, &context, &config, now);
 
-        // base = 0.50*0.8 + 0.50*1.0 = 0.90
-        // challenged penalty: 0.90 * 0.7 = 0.63
+        // base = 1.0*0.8 = 0.80, scope_mult=1.0, trust=1.0
+        // challenged penalty: 0.80 * 0.7 = 0.56
         assert!(
-            (ignore.final_score - 0.63).abs() < 0.05,
+            (ignore.final_score - 0.56).abs() < 0.01,
             "challenged ignore_decay: expected ~0.63, got {}",
             ignore.final_score,
         );
@@ -787,7 +877,8 @@ mod tests {
 
         let ignore = composite_score_ignore_decay(&memory, &context, &config, now);
 
-        // relevance = 0.3, scope ≈ 0.0 → score = 0.50*0.3 + 0.50*0.0 = 0.15
+        // relevance = 0.3, base = 1.0*0.3 = 0.3
+        // scope_mult = 0.5 + 0.5*0.0 = 0.5 → 0.3*0.5 = 0.15
         // Below default threshold of 0.3
         assert!(
             ignore.final_score < 0.3,
@@ -816,10 +907,62 @@ mod tests {
         let normal = composite_score(&memory, &context, &config, now);
         let ignore = composite_score_ignore_decay(&memory, &context, &config, now);
 
-        // Normal: relevance=0.0 → score = 0.35*0.9 + 0.45*0.0 + 0.20*1.0 = 0.515
-        // Ignore: relevance=0.8 → score = 0.35*0.9 + 0.45*0.8 + 0.20*1.0 = 0.875
+        // Normal: relevance=0.0 → base = 0.45*0.9 + 0.55*0.0 = 0.405
+        // * scope_mult(1.0) * trust(1.0) = 0.405
+        // Ignore: relevance=0.8 → base = 0.45*0.9 + 0.55*0.8 = 0.845
+        // * scope_mult(1.0) * trust(1.0) = 0.845
         assert!(ignore.final_score > normal.final_score);
-        assert!((ignore.final_score - 0.875).abs() < 0.05);
+        assert!((ignore.final_score - 0.845).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_composite_score_with_keyword() {
+        let memory = create_test_memory();
+        let context = ScoringContext::with_keyword(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+            "authentication".to_string(),
+            0.7,       // normalized keyword score
+            Some(0.9), // semantic score
+        );
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let breakdown = composite_score(&memory, &context, &config, now);
+
+        // Should use with_keyword weights: kw=0.45, sem=0.30, rel=0.25
+        // base = 0.45*0.7 + 0.30*0.9 + 0.25*0.8 = 0.315 + 0.27 + 0.20 = 0.785
+        // * scope_mult(1.0) * trust(1.0) = 0.785
+        assert!((breakdown.final_score - 0.785).abs() < 0.01);
+        assert_eq!(breakdown.keyword, Some(0.7));
+        assert_eq!(breakdown.semantic, Some(0.9));
+    }
+
+    #[test]
+    fn test_composite_score_semantic_zero_stays_in_with_query() {
+        let memory = create_test_memory();
+        // semantic_score = Some(0.0) should stay in with_query mode (not fall to degraded).
+        // sem=Some(0.0) means "checked, found nothing" — it consumes its weight at zero.
+        let context = ScoringContext::with_semantic(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+            "test query".to_string(),
+            0.0,
+        );
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let breakdown = composite_score(&memory, &context, &config, now);
+
+        // with_query weights: 0.45*0.0 + 0.55*0.8 = 0.44
+        // * scope_mult(1.0) * trust(1.0) = 0.44
+        assert!(
+            (breakdown.final_score - 0.44).abs() < 0.01,
+            "semantic=0.0 should use with_query weights, got {}",
+            breakdown.final_score,
+        );
+        // Semantic is recorded as Some(0.0) in the breakdown
+        assert_eq!(breakdown.semantic, Some(0.0));
     }
 
     #[test]
@@ -838,5 +981,131 @@ mod tests {
 
         // composite_score never sets rerank — it's populated later by the engine
         assert!(breakdown.rerank.is_none());
+    }
+
+    #[test]
+    fn test_scope_multiplier_distinguishes_levels() {
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let score_for_scope = |path: &str| {
+            let memory = create_test_memory();
+            let context = ScoringContext::scope_only(Some(path.to_string()), vec![]);
+            composite_score(&memory, &context, &config, now).final_score
+        };
+
+        let exact = score_for_scope("src/api/auth.rs"); // scope=1.0 → mult=1.0
+        let same_dir = score_for_scope("src/api/other.rs"); // scope=0.85 → mult=0.925
+        let no_match = score_for_scope("completely/different.rs"); // scope=0.0 → mult=0.5
+
+        assert!(exact > same_dir, "exact {} > same_dir {}", exact, same_dir);
+        assert!(
+            same_dir > no_match,
+            "same_dir {} > no_match {}",
+            same_dir,
+            no_match
+        );
+
+        // Verify the multiplier values
+        assert!((exact / 0.8 - 1.0).abs() < 0.01); // base=0.8, mult=1.0
+        assert!((no_match / 0.8 - 0.5).abs() < 0.01); // base=0.8, mult=0.5
+    }
+
+    #[test]
+    fn test_semantic_none_vs_zero_differ() {
+        let memory = create_test_memory();
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        // sem=None → degraded mode, base = 1.0*0.8 = 0.8
+        let ctx_none = ScoringContext::with_query_degraded(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+            "test query".to_string(),
+        );
+        let score_none = composite_score(&memory, &ctx_none, &config, now).final_score;
+
+        // sem=Some(0.0) → with_query mode, base = 0.45*0.0 + 0.55*0.8 = 0.44
+        let ctx_zero = ScoringContext::with_semantic(
+            Some("src/api/auth.rs".to_string()),
+            vec!["auth.oauth".to_string()],
+            "test query".to_string(),
+            0.0,
+        );
+        let score_zero = composite_score(&memory, &ctx_zero, &config, now).final_score;
+
+        // sem=None should score higher than sem=Some(0.0)
+        assert!(
+            score_none > score_zero,
+            "sem=None ({}) should score higher than sem=Some(0.0) ({})",
+            score_none,
+            score_zero,
+        );
+    }
+
+    #[test]
+    fn test_no_semantic_discontinuity() {
+        let memory = create_test_memory();
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let score_at = |sem: f64| {
+            let ctx = ScoringContext::with_semantic(
+                Some("src/api/auth.rs".to_string()),
+                vec!["auth.oauth".to_string()],
+                "test query".to_string(),
+                sem,
+            );
+            composite_score(&memory, &ctx, &config, now).final_score
+        };
+
+        let at_zero = score_at(0.0);
+        let at_tiny = score_at(0.001);
+        let at_small = score_at(0.01);
+
+        // No cliff: scores should be very close and monotonically increasing
+        let diff_tiny = (at_tiny - at_zero).abs();
+        let diff_small = (at_small - at_zero).abs();
+        assert!(
+            diff_tiny < 0.01,
+            "sem=0.001 ({}) vs sem=0.0 ({}) differ by {} (should be < 0.01)",
+            at_tiny,
+            at_zero,
+            diff_tiny,
+        );
+        assert!(
+            diff_small < 0.01,
+            "sem=0.01 ({}) vs sem=0.0 ({}) differ by {} (should be < 0.01)",
+            at_small,
+            at_zero,
+            diff_small,
+        );
+        assert!(
+            at_tiny >= at_zero,
+            "scores should be monotonically increasing"
+        );
+        assert!(
+            at_small >= at_tiny,
+            "scores should be monotonically increasing"
+        );
+    }
+
+    #[test]
+    fn test_scope_multiplier_neutral_without_context() {
+        let memory = create_test_memory();
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        // No scope context at all (like a global search)
+        let context =
+            ScoringContext::with_keyword(None, vec![], "auth".to_string(), 0.8, Some(0.9));
+        let breakdown = composite_score(&memory, &context, &config, now);
+
+        // scope_multiplier should be 1.0 (neutral)
+        assert!(
+            (breakdown.scope_multiplier - 1.0).abs() < f64::EPSILON,
+            "scope_multiplier should be 1.0 without context, got {}",
+            breakdown.scope_multiplier,
+        );
     }
 }

@@ -374,8 +374,11 @@ struct ScoreBreakdownOutput {
     semantic: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     keyword: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rerank: Option<f64>,
     relevance: f64,
     scope: f64,
+    scope_multiplier: f64,
     trust: f64,
     decay: f64,
     criticality: f64,
@@ -595,8 +598,10 @@ impl EngramDbServer {
                     final_score: sm.score_breakdown.final_score,
                     semantic: sm.score_breakdown.semantic,
                     keyword: sm.score_breakdown.keyword,
+                    rerank: sm.score_breakdown.rerank,
                     relevance: sm.score_breakdown.relevance,
                     scope: sm.score_breakdown.scope,
+                    scope_multiplier: sm.score_breakdown.scope_multiplier,
                     trust: sm.score_breakdown.trust,
                     decay: sm.score_breakdown.decay,
                     criticality: sm.score_breakdown.criticality,
@@ -659,8 +664,10 @@ impl EngramDbServer {
                     final_score: sm.score_breakdown.final_score,
                     semantic: sm.score_breakdown.semantic,
                     keyword: sm.score_breakdown.keyword,
+                    rerank: sm.score_breakdown.rerank,
                     relevance: sm.score_breakdown.relevance,
                     scope: sm.score_breakdown.scope,
+                    scope_multiplier: sm.score_breakdown.scope_multiplier,
                     trust: sm.score_breakdown.trust,
                     decay: sm.score_breakdown.decay,
                     criticality: sm.score_breakdown.criticality,
@@ -2057,6 +2064,7 @@ mod tests {
         let (_dir, server) = setup().await;
         let input = CreateInput {
             logical: Some(vec!["auth.login".to_string()]),
+            criticality: Some(0.8),
             ..create_input("convention", "Login convention", "Always use OAuth2")
         };
         server.memory_create(Parameters(input)).await.unwrap();
