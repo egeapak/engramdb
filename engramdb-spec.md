@@ -424,20 +424,23 @@ max_results = 10
 include_expired = false
 
 [retrieval.scoring.with_query]
-semantic = 0.3
-relevance = 0.4
-scope = 0.2
-trust = 0.1
+semantic = 0.55
+relevance = 0.45
+
+[retrieval.scoring.with_keyword]
+keyword = 0.45
+semantic = 0.30
+relevance = 0.25
 
 [retrieval.scoring.scope_only]
-relevance = 0.4
-scope = 0.4
-trust = 0.2
+relevance = 1.0
 
-[retrieval.scoring.degraded]  # When embeddings unavailable
-relevance = 0.6
-scope = 0.25
-trust = 0.15
+[retrieval.scoring.degraded]
+relevance = 1.0
+
+scope_multiplier_floor = 0.5
+trust_multiplier_floor = 0.5
+challenge_penalty = 0.10
 
 [scope_proximity]
 exact_file = 1.0
@@ -463,9 +466,6 @@ human = 1.0
 agent = 0.85
 inferred = 0.6
 imported = 0.7
-
-[challenge]
-relevance_penalty = 0.3
 
 [thresholds]
 needs_review = 0.3
@@ -982,19 +982,9 @@ When embeddings are **not available** (ONNX model missing, LanceDB initializatio
    ⚠ Semantic search unavailable — using keyword matching.
    Run 'engramdb setup-embeddings' to enable semantic search for better retrieval quality.
    ```
-3. The scoring formula adapts: when `semantic_score` is unavailable, the remaining weights are renormalized:
+3. The scoring formula adapts: when `semantic_score` is unavailable, the remaining weights are renormalized to the active components only.
 
-   **With text query (no embeddings):**
-   ```
-   score = (0.6 × relevance + 0.25 × scope_proximity + 0.15 × trust_weight)
-   ```
-
-   **Without text query (unchanged):**
-   ```
-   score = (0.4 × relevance + 0.4 × scope_proximity + 0.2 × trust_weight)
-   ```
-
-**Retrieval pipeline (full, with embeddings):**
+**Retrieval pipeline:**
 ```
 1. Query comes in (path, logical scope, optional text query)
 2. Candidate filtering:
@@ -1002,26 +992,23 @@ When embeddings are **not available** (ONNX model missing, LanceDB initializatio
    - Logical scope match
    - Type/tag filters
    - Expiration check
-   - Status check (challenged memories get 30% penalty applied to final score)
 3. Scoring (for each candidate):
-   a. scope_proximity  (physical + logical distance, see §9.8)
-   b. relevance        (criticality × decay_factor)
-   c. trust_weight     (provenance-based)
-   d. semantic_score   (cosine similarity from LanceDB, if text query provided and embeddings enabled)
-4. Final score depends on query mode:
+   a. base_score    = weighted sum of active signals (semantic, keyword, relevance)
+   b. scope_mult    = floor + (1 - floor) * scope_score  (or 1.0 if no scope context)
+   c. trust_mult    = floor + (1 - floor) * trust_weight
+   d. score         = base_score * scope_mult * trust_mult
+   e. If challenged: score -= challenge_penalty (default 0.10)
+   f. score = clamp(score, 0, 1)
 
-   WITH text query + embeddings:
-   score = (0.3 × semantic_score + 0.4 × relevance + 0.2 × scope_proximity + 0.1 × trust_weight)
+4. Modes (determine which weights for base_score):
+   WITH keyword search:         0.45*keyword + 0.30*semantic + 0.25*relevance
+   WITH query + embeddings:     0.55*semantic + 0.45*relevance
+   WITH query, NO embeddings:   keyword search on loaded memories (degraded_keyword),
+                                or 1.0*relevance if no keyword matches (degraded)
+   WITHOUT query (scope-only):  1.0*relevance
 
-   WITH text query, NO embeddings:
-   score = (0.6 × relevance + 0.25 × scope_proximity + 0.15 × trust_weight)
-
-   WITHOUT text query (scope-only, e.g. agent opens a file):
-   score = (0.4 × relevance + 0.4 × scope_proximity + 0.2 × trust_weight)
-
-5. If status == "challenged": score *= 0.7
-6. Filter out scores below relevance_threshold (default: 0.3)
-7. Sort by score descending, return top N (default: 10)
+5. Filter out scores below relevance_threshold (default: 0.3)
+6. Sort by score descending, return top N (default: 10)
 ```
 
 All weights and thresholds are configurable in `config.toml`.
@@ -1067,7 +1054,7 @@ When an agent encounters evidence that contradicts an existing memory, it **must
      ]
    }
    ```
-3. The memory's status is set to `"challenged"` and its effective relevance is reduced by 30% until resolved.
+3. The memory's status is set to `"challenged"` and its effective relevance is reduced by a flat penalty (default 0.10 subtracted from final score) until resolved.
 4. **The agent surfaces the conflict to the user** rather than making a unilateral decision. The agent should present both the existing memory and the contradicting evidence, and ask the user how to resolve it.
 
 #### C. Interactive Review Command (Human-in-the-Loop)
@@ -2208,7 +2195,7 @@ engramdb review
   "Never call sync() outside a transaction"
 
   Status: CHALLENGED
-  Relevance: 0.67 (0.95 × 0.70 challenge penalty)
+  Relevance: 0.85 (0.95 - 0.10 challenge penalty)
 
   ⚡ Challenge from agent (2026-02-10):
   │ "sync() now uses row-level locks as of PR #891,

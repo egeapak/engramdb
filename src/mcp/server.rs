@@ -380,6 +380,7 @@ struct ScoreBreakdownOutput {
     scope: f64,
     scope_multiplier: f64,
     trust: f64,
+    trust_multiplier: f64,
     decay: f64,
     criticality: f64,
 }
@@ -603,6 +604,7 @@ impl EngramDbServer {
                     scope: sm.score_breakdown.scope,
                     scope_multiplier: sm.score_breakdown.scope_multiplier,
                     trust: sm.score_breakdown.trust,
+                    trust_multiplier: sm.score_breakdown.trust_multiplier,
                     decay: sm.score_breakdown.decay,
                     criticality: sm.score_breakdown.criticality,
                 },
@@ -669,6 +671,7 @@ impl EngramDbServer {
                     scope: sm.score_breakdown.scope,
                     scope_multiplier: sm.score_breakdown.scope_multiplier,
                     trust: sm.score_breakdown.trust,
+                    trust_multiplier: sm.score_breakdown.trust_multiplier,
                     decay: sm.score_breakdown.decay,
                     criticality: sm.score_breakdown.criticality,
                 },
