@@ -1,5 +1,6 @@
 //! Keyword-based search for memories
 
+use std::borrow::Borrow;
 use std::collections::HashSet;
 
 use crate::types::Memory;
@@ -22,11 +23,11 @@ use crate::types::Memory;
 ///
 /// # Arguments
 /// * `query` - The search query string
-/// * `memories` - Slice of memories to search
+/// * `memories` - Slice of memories (or references) to search
 ///
 /// # Returns
 /// Vector of (index, relevance_score) tuples, sorted by score descending
-pub fn keyword_search(query: &str, memories: &[Memory]) -> Vec<(usize, f64)> {
+pub fn keyword_search<M: Borrow<Memory>>(query: &str, memories: &[M]) -> Vec<(usize, f64)> {
     // Tokenize query into lowercase words
     let query_tokens: Vec<String> = tokenize(query);
 
@@ -38,7 +39,7 @@ pub fn keyword_search(query: &str, memories: &[Memory]) -> Vec<(usize, f64)> {
         .iter()
         .enumerate()
         .filter_map(|(idx, memory)| {
-            let score = calculate_keyword_score(&query_tokens, memory);
+            let score = calculate_keyword_score(&query_tokens, memory.borrow());
             if score > 0.0 {
                 Some((idx, score))
             } else {
@@ -83,23 +84,30 @@ pub fn normalize_keyword_score(raw: f64, num_query_tokens: usize) -> f64 {
 /// - Content match: 1x
 ///
 /// Returns raw weighted matches (unbounded). No normalization is applied.
+///
+/// Optimized to avoid per-token `String` allocations: lowercases the full
+/// text once, then splits into `&str` slices of the lowered buffer.
 fn calculate_keyword_score(query_tokens: &[String], memory: &Memory) -> f64 {
-    let summary_tokens: HashSet<String> = tokenize(&memory.summary).into_iter().collect();
-    let content_tokens: HashSet<String> = tokenize(&memory.content).into_iter().collect();
-    let tag_tokens: HashSet<String> = memory.tags.iter().flat_map(|tag| tokenize(tag)).collect();
+    let summary_lower = memory.summary.to_lowercase();
+    let content_lower = memory.content.to_lowercase();
+
+    let summary_tokens: HashSet<&str> = split_tokens(&summary_lower).collect();
+    let content_tokens: HashSet<&str> = split_tokens(&content_lower).collect();
+    let tag_lowers: Vec<String> = memory.tags.iter().map(|t| t.to_lowercase()).collect();
+    let tag_tokens: HashSet<&str> = tag_lowers.iter().flat_map(|t| split_tokens(t)).collect();
 
     let mut weighted_matches = 0.0;
 
     for token in query_tokens {
-        if summary_tokens.contains(token) {
+        if summary_tokens.contains(token.as_str()) {
             weighted_matches += 3.0;
         }
 
-        if tag_tokens.contains(token) {
+        if tag_tokens.contains(token.as_str()) {
             weighted_matches += 2.0;
         }
 
-        if content_tokens.contains(token) {
+        if content_tokens.contains(token.as_str()) {
             weighted_matches += 1.0;
         }
     }
@@ -107,12 +115,19 @@ fn calculate_keyword_score(query_tokens: &[String], memory: &Memory) -> f64 {
     weighted_matches
 }
 
+/// Split lowercased text into non-empty alphanumeric token slices.
+fn split_tokens(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+}
+
 /// Count the number of tokens in a query string.
 ///
 /// Uses the same tokenization logic as `keyword_search` so that
 /// `num_query_tokens` is consistent with the actual tokens scored.
 pub fn query_token_count(query: &str) -> usize {
-    tokenize(query).len()
+    let lower = query.to_lowercase();
+    split_tokens(&lower).count()
 }
 
 /// Tokenize a string into lowercase words.

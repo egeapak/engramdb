@@ -8,6 +8,11 @@ use super::trust::trust_weight_from_config;
 /// Breakdown of composite score components.
 ///
 /// All values are raw (unweighted) scores for transparency.
+///
+/// After reranking, `final_score` reflects the blended value while other
+/// fields retain their pre-rerank values. The presence of `rerank: Some(...)`
+/// signals that `final_score` is blended and not directly reproducible from
+/// the breakdown components.
 #[derive(Debug, Clone, Default)]
 pub struct ScoreBreakdown {
     /// The final composite score
@@ -25,8 +30,11 @@ pub struct ScoreBreakdown {
     /// Computed scope multiplier: `floor + (1 - floor) * scope_score` when
     /// scope context is present, or 1.0 when no context is provided.
     pub scope_multiplier: f64,
-    /// Trust weight based on provenance (used as multiplier)
+    /// Raw trust weight based on provenance
     pub trust: f64,
+    /// Effective trust multiplier after floor transform:
+    /// `floor + (1 - floor) * trust_weight`
+    pub trust_multiplier: f64,
     /// Decay amount (0.0 = fresh, 1.0 = fully decayed)
     pub decay: f64,
     /// Raw criticality value
@@ -34,16 +42,19 @@ pub struct ScoreBreakdown {
 }
 
 /// Context for scoring a memory during retrieval.
+///
+/// All string fields borrow from the caller to avoid per-memory heap
+/// allocations in the scoring hot path.
 #[derive(Debug, Clone)]
-pub struct ScoringContext {
+pub struct ScoringContext<'a> {
     /// Current file path (if any)
-    pub path: Option<String>,
+    pub path: Option<&'a str>,
 
     /// Current logical scope tags
-    pub logical: Vec<String>,
+    pub logical: &'a [String],
 
     /// Search query (if any)
-    pub query: Option<String>,
+    pub query: Option<&'a str>,
 
     /// Normalized keyword match score (if keyword search was used)
     pub keyword_score: Option<f64>,
@@ -55,9 +66,9 @@ pub struct ScoringContext {
     pub embeddings_available: bool,
 }
 
-impl ScoringContext {
+impl<'a> ScoringContext<'a> {
     /// Create a new ScoringContext for scope-only retrieval
-    pub fn scope_only(path: Option<String>, logical: Vec<String>) -> Self {
+    pub fn scope_only(path: Option<&'a str>, logical: &'a [String]) -> Self {
         Self {
             path,
             logical,
@@ -69,7 +80,11 @@ impl ScoringContext {
     }
 
     /// Create a new ScoringContext with a query (degraded mode, no embeddings)
-    pub fn with_query_degraded(path: Option<String>, logical: Vec<String>, query: String) -> Self {
+    pub fn with_query_degraded(
+        path: Option<&'a str>,
+        logical: &'a [String],
+        query: &'a str,
+    ) -> Self {
         Self {
             path,
             logical,
@@ -82,9 +97,9 @@ impl ScoringContext {
 
     /// Create a new ScoringContext with a query and semantic score (full mode)
     pub fn with_semantic(
-        path: Option<String>,
-        logical: Vec<String>,
-        query: String,
+        path: Option<&'a str>,
+        logical: &'a [String],
+        query: &'a str,
         semantic_score: f64,
     ) -> Self {
         Self {
@@ -99,9 +114,9 @@ impl ScoringContext {
 
     /// Create a new ScoringContext for keyword search (with optional semantic score).
     pub fn with_keyword(
-        path: Option<String>,
-        logical: Vec<String>,
-        query: String,
+        path: Option<&'a str>,
+        logical: &'a [String],
+        query: &'a str,
         keyword_score: f64,
         semantic_score: Option<f64>,
     ) -> Self {
@@ -136,7 +151,7 @@ impl ScoringContext {
 ///
 /// 2. **With query + embeddings** (semantic_score is Some):
 ///    - Uses `config.retrieval.scoring.with_query` weights
-///    - base = 0.45*semantic + 0.55*(criticality*decay)
+///    - base = 0.55*semantic + 0.45*(criticality*decay)
 ///
 /// 3. **With query, no embeddings** (query is Some, semantic_score is None):
 ///    - Uses `config.retrieval.scoring.degraded` weights
@@ -146,13 +161,15 @@ impl ScoringContext {
 ///    - Uses `config.retrieval.scoring.scope_only` weights
 ///    - base = 1.0*(criticality*decay)
 ///
-/// Then: `score = base * scope_multiplier * trust_weight`
+/// Then: `score = base * scope_multiplier * trust_multiplier`
 ///
 /// Scope multiplier: when scope context is provided,
 /// `scope_multiplier = floor + (1 - floor) * scope_score` (default floor=0.5).
 /// When no context is provided, scope_multiplier = 1.0 (neutral).
 ///
-/// Challenge penalty: if memory.status == Status::Challenged, `score *= 0.7`
+/// Trust multiplier: `trust_floor + (1 - trust_floor) * trust_weight` (default floor=0.5).
+///
+/// Challenge penalty: if memory.status == Status::Challenged, `score -= challenge_penalty` (default 0.10)
 ///
 /// # Arguments
 /// * `memory` - The memory to score
@@ -164,7 +181,7 @@ impl ScoringContext {
 /// ScoreBreakdown with component scores and final composite score
 pub fn composite_score(
     memory: &Memory,
-    context: &ScoringContext,
+    context: &ScoringContext<'_>,
     config: &EngramConfig,
     now: DateTime<Utc>,
 ) -> ScoreBreakdown {
@@ -179,7 +196,7 @@ pub fn composite_score(
 /// so the relevance threshold still filters out irrelevant results.
 pub fn composite_score_ignore_decay(
     memory: &Memory,
-    context: &ScoringContext,
+    context: &ScoringContext<'_>,
     config: &EngramConfig,
     now: DateTime<Utc>,
 ) -> ScoreBreakdown {
@@ -188,7 +205,7 @@ pub fn composite_score_ignore_decay(
 
 fn composite_score_inner(
     memory: &Memory,
-    context: &ScoringContext,
+    context: &ScoringContext<'_>,
     config: &EngramConfig,
     now: DateTime<Utc>,
     ignore_decay: bool,
@@ -206,8 +223,8 @@ fn composite_score_inner(
     let scope_score = crate::scope::scope_proximity(
         &memory.physical,
         &memory.logical,
-        context.path.as_deref(),
-        &context.logical,
+        context.path,
+        context.logical,
     );
 
     let trust = trust_weight_from_config(memory.provenance.source, &config.trust_weights);
@@ -275,12 +292,14 @@ fn composite_score_inner(
     };
     score *= scope_multiplier;
 
-    // Apply trust as a multiplier on the entire base score
-    score *= trust;
+    // Apply trust as a floor-transformed multiplier on the entire base score
+    let trust_floor = config.retrieval.scoring.trust_multiplier_floor;
+    let trust_multiplier = trust_floor + (1.0 - trust_floor) * trust;
+    score *= trust_multiplier;
 
-    // Apply challenge penalty if memory is challenged
+    // Apply challenge penalty as flat subtraction
     if memory.status == Status::Challenged {
-        score *= 0.7;
+        score -= config.retrieval.scoring.challenge_penalty;
     }
 
     // Safety clamp to [0, 1]
@@ -295,6 +314,7 @@ fn composite_score_inner(
         scope: scope_score,
         scope_multiplier,
         trust,
+        trust_multiplier,
         decay: 1.0 - decay_factor_value,
         criticality: memory.criticality,
     }
@@ -335,10 +355,11 @@ mod tests {
     #[test]
     fn test_composite_score_with_semantic() {
         let memory = create_test_memory();
+        let logical = vec!["auth.oauth".to_string()];
         let context = ScoringContext::with_semantic(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-            "oauth authentication".to_string(),
+            Some("src/api/auth.rs"),
+            &logical,
+            "oauth authentication",
             0.9,
         );
         let config = EngramConfig::default();
@@ -354,18 +375,19 @@ mod tests {
         assert!(breakdown.keyword.is_none());
         // criticality should be raw value
         assert_eq!(breakdown.criticality, 0.8);
-        // base = 0.45*0.9 + 0.55*0.8 = 0.405 + 0.44 = 0.845
-        // * scope_mult(1.0) * trust(1.0) = 0.845
-        assert!((breakdown.final_score - 0.845).abs() < 0.01);
+        // base = 0.55*0.9 + 0.45*0.8 = 0.495 + 0.36 = 0.855
+        // * scope_mult(1.0) * trust_mult(1.0) = 0.855
+        assert!((breakdown.final_score - 0.855).abs() < 0.01);
     }
 
     #[test]
     fn test_composite_score_degraded() {
         let memory = create_test_memory();
+        let logical = vec!["auth.oauth".to_string()];
         let context = ScoringContext::with_query_degraded(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-            "oauth authentication".to_string(),
+            Some("src/api/auth.rs"),
+            &logical,
+            "oauth authentication",
         );
         let config = EngramConfig::default();
         let now = Utc::now();
@@ -384,10 +406,8 @@ mod tests {
     #[test]
     fn test_composite_score_scope_only() {
         let memory = create_test_memory();
-        let context = ScoringContext::scope_only(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical);
         let config = EngramConfig::default();
         let now = Utc::now();
 
@@ -407,10 +427,8 @@ mod tests {
         let mut memory = create_test_memory();
         memory.status = Status::Challenged;
 
-        let context = ScoringContext::scope_only(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical);
         let config = EngramConfig::default();
         let now = Utc::now();
 
@@ -418,9 +436,9 @@ mod tests {
         let breakdown_without_challenge =
             composite_score(&create_test_memory(), &context, &config, now);
 
-        // Should be 70% of non-challenged score (30% penalty)
+        // Should be non-challenged score minus flat 0.10 penalty
         assert!(
-            (breakdown.final_score - breakdown_without_challenge.final_score * 0.7).abs() < 0.01
+            (breakdown.final_score - (breakdown_without_challenge.final_score - 0.10)).abs() < 0.01
         );
     }
 
@@ -430,10 +448,8 @@ mod tests {
         memory.created_at = Utc::now() - Duration::days(7);
         memory.decay = Some(Decay::exponential(Duration::days(7)));
 
-        let context = ScoringContext::scope_only(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical);
         let config = EngramConfig::default();
         let now = Utc::now();
 
@@ -451,10 +467,8 @@ mod tests {
         let mut memory = create_test_memory();
         memory.status = Status::NeedsReview;
 
-        let context = ScoringContext::scope_only(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical);
         let config = EngramConfig::default();
         let now = Utc::now();
 
@@ -470,10 +484,8 @@ mod tests {
         let mut memory = create_test_memory();
         memory.criticality = 0.0;
 
-        let context = ScoringContext::scope_only(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical);
         let config = EngramConfig::default();
         let now = Utc::now();
 
@@ -492,10 +504,8 @@ mod tests {
         let memory = create_test_memory();
 
         // No scope match -> scope component is 0.0
-        let context = ScoringContext::scope_only(
-            Some("completely/different/path.rs".to_string()),
-            vec!["completely.different.scope".to_string()],
-        );
+        let logical = vec!["completely.different.scope".to_string()];
+        let context = ScoringContext::scope_only(Some("completely/different/path.rs"), &logical);
         let config = EngramConfig::default();
         let now = Utc::now();
 
@@ -513,10 +523,11 @@ mod tests {
         memory.criticality = 1.0;
         memory.confidence = 1.0;
 
+        let logical = vec!["auth.oauth".to_string()];
         let context = ScoringContext::with_semantic(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-            "oauth authentication".to_string(),
+            Some("src/api/auth.rs"),
+            &logical,
+            "oauth authentication",
             1.0,
         );
         let config = EngramConfig::default();
@@ -524,8 +535,8 @@ mod tests {
 
         let breakdown = composite_score(&memory, &context, &config, now);
 
-        // base = 0.45*1.0 + 0.55*1.0 = 1.0
-        // * scope_mult(1.0) * trust(1.0) = 1.0
+        // base = 0.55*1.0 + 0.45*1.0 = 1.0
+        // * scope_mult(1.0) * trust_mult(1.0) = 1.0
         assert!((breakdown.final_score - 1.0).abs() < 0.01);
         assert!(breakdown.final_score <= 1.1);
         assert_eq!(breakdown.decay, 0.0); // 0.0 = fresh, no decay
@@ -535,12 +546,9 @@ mod tests {
     #[test]
     fn test_score_breakdown_structure() {
         let memory = create_test_memory();
-        let context = ScoringContext::with_semantic(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-            "test query".to_string(),
-            0.8,
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context =
+            ScoringContext::with_semantic(Some("src/api/auth.rs"), &logical, "test query", 0.8);
         let config = EngramConfig::default();
         let now = Utc::now();
 
@@ -559,10 +567,8 @@ mod tests {
     #[test]
     fn test_trust_multiplier_reduces_score_proportionally() {
         let config = EngramConfig::default();
-        let context = ScoringContext::scope_only(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical);
         let now = Utc::now();
 
         // Human provenance (trust = 1.0)
@@ -584,25 +590,32 @@ mod tests {
         imported_memory.provenance = Provenance::imported();
         let imported_breakdown = composite_score(&imported_memory, &context, &config, now);
 
-        // Trust is a multiplier, so scores should be exactly proportional
+        // Trust is floor-transformed: effective = 0.5 + 0.5 * raw_trust
+        // human: 0.5 + 0.5*1.0 = 1.0, agent: 0.5 + 0.5*0.85 = 0.925
+        // imported: 0.5 + 0.5*0.7 = 0.85, inferred: 0.5 + 0.5*0.6 = 0.80
         let human_score = human_breakdown.final_score;
+        // base score = 0.80 (criticality), scope_mult = 1.0
+        // human: 0.80 * 1.0 = 0.80, agent: 0.80 * 0.925 = 0.74
+        let expected_agent = human_score * 0.925;
+        let expected_imported = human_score * 0.85;
+        let expected_inferred = human_score * 0.80;
         assert!(
-            (agent_breakdown.final_score - human_score * 0.85).abs() < 0.001,
-            "agent score {} should be {} (human * 0.85)",
+            (agent_breakdown.final_score - expected_agent).abs() < 0.001,
+            "agent score {} should be {} (human * 0.925)",
             agent_breakdown.final_score,
-            human_score * 0.85
+            expected_agent
         );
         assert!(
-            (imported_breakdown.final_score - human_score * 0.7).abs() < 0.001,
-            "imported score {} should be {} (human * 0.7)",
+            (imported_breakdown.final_score - expected_imported).abs() < 0.001,
+            "imported score {} should be {} (human * 0.85)",
             imported_breakdown.final_score,
-            human_score * 0.7
+            expected_imported
         );
         assert!(
-            (inferred_breakdown.final_score - human_score * 0.6).abs() < 0.001,
-            "inferred score {} should be {} (human * 0.6)",
+            (inferred_breakdown.final_score - expected_inferred).abs() < 0.001,
+            "inferred score {} should be {} (human * 0.80)",
             inferred_breakdown.final_score,
-            human_score * 0.6
+            expected_inferred
         );
 
         // Verify ordering: human > agent > imported > inferred
@@ -614,10 +627,11 @@ mod tests {
     #[test]
     fn test_trust_multiplier_with_semantic() {
         let config = EngramConfig::default();
+        let logical = vec!["auth.oauth".to_string()];
         let context = ScoringContext::with_semantic(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-            "oauth authentication".to_string(),
+            Some("src/api/auth.rs"),
+            &logical,
+            "oauth authentication",
             0.9,
         );
         let now = Utc::now();
@@ -629,51 +643,48 @@ mod tests {
         inferred_memory.provenance = Provenance::inferred();
         let inferred_score = composite_score(&inferred_memory, &context, &config, now).final_score;
 
-        // Inferred should be exactly 0.6x of human (trust multiplier applies to full base)
+        // Inferred trust_mult = 0.5 + 0.5*0.6 = 0.80, human = 1.0
+        // So inferred should be 0.80x of human
         assert!(
-            (inferred_score - human_score * 0.6).abs() < 0.001,
-            "with semantic: inferred {} should be {} (human * 0.6)",
+            (inferred_score - human_score * 0.80).abs() < 0.001,
+            "with semantic: inferred {} should be {} (human * 0.80)",
             inferred_score,
-            human_score * 0.6
+            human_score * 0.80
         );
     }
 
     #[test]
     fn test_trust_multiplier_combined_with_challenge() {
         let config = EngramConfig::default();
-        let context = ScoringContext::scope_only(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical);
         let now = Utc::now();
 
         // Human, active
         let human_score =
             composite_score(&create_test_memory(), &context, &config, now).final_score;
 
-        // Inferred + challenged: score = base * 0.6 * 0.7
+        // Inferred + challenged: score = base * trust_mult(0.80) - 0.10
         let mut challenged_inferred = create_test_memory();
         challenged_inferred.provenance = Provenance::inferred();
         challenged_inferred.status = Status::Challenged;
         let ci_score = composite_score(&challenged_inferred, &context, &config, now).final_score;
 
+        let expected = human_score * 0.80 - 0.10;
         assert!(
-            (ci_score - human_score * 0.6 * 0.7).abs() < 0.001,
-            "challenged inferred {} should be {} (human * 0.6 * 0.7)",
+            (ci_score - expected).abs() < 0.001,
+            "challenged inferred {} should be {} (human * 0.80 - 0.10)",
             ci_score,
-            human_score * 0.6 * 0.7
+            expected
         );
     }
 
     #[test]
     fn test_breakdown_keyword_none_for_retrieve() {
         let memory = create_test_memory();
-        let context = ScoringContext::with_semantic(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-            "test query".to_string(),
-            0.8,
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context =
+            ScoringContext::with_semantic(Some("src/api/auth.rs"), &logical, "test query", 0.8);
         let config = EngramConfig::default();
         let now = Utc::now();
 
@@ -690,11 +701,9 @@ mod tests {
     #[test]
     fn test_score_breakdown_degraded_mode() {
         let memory = create_test_memory();
-        let context = ScoringContext::with_query_degraded(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-            "test query".to_string(),
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context =
+            ScoringContext::with_query_degraded(Some("src/api/auth.rs"), &logical, "test query");
         let config = EngramConfig::default();
         let now = Utc::now();
 
@@ -708,10 +717,8 @@ mod tests {
     #[test]
     fn test_score_breakdown_scope_only_mode() {
         let memory = create_test_memory();
-        let context = ScoringContext::scope_only(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical);
         let config = EngramConfig::default();
         let now = Utc::now();
 
@@ -726,10 +733,8 @@ mod tests {
     fn test_ignore_decay_fresh_memory_same_as_normal() {
         // When decay=1.0 (fresh), both functions should produce identical scores
         let memory = create_test_memory(); // decay=None → factor=1.0
-        let context = ScoringContext::scope_only(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical);
         let config = EngramConfig::default();
         let now = Utc::now();
 
@@ -754,10 +759,8 @@ mod tests {
         memory.created_at = Utc::now() - Duration::days(15);
         memory.decay = Some(Decay::linear(Duration::days(10))); // expired, floor=0.0
 
-        let context = ScoringContext::scope_only(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical);
         let config = EngramConfig::default();
         let now = Utc::now();
 
@@ -784,10 +787,8 @@ mod tests {
         memory.created_at = Utc::now() - Duration::days(7);
         memory.decay = Some(Decay::exponential(Duration::days(7))); // ~0.5 decay
 
-        let context = ScoringContext::scope_only(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical);
         let config = EngramConfig::default();
         let now = Utc::now();
 
@@ -815,10 +816,8 @@ mod tests {
         memory.created_at = Utc::now() - Duration::days(7);
         memory.decay = Some(Decay::exponential(Duration::days(7)));
 
-        let context = ScoringContext::scope_only(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical);
         let config = EngramConfig::default();
         let now = Utc::now();
 
@@ -843,20 +842,18 @@ mod tests {
         memory.created_at = Utc::now() - Duration::days(15);
         memory.decay = Some(Decay::linear(Duration::days(10)));
 
-        let context = ScoringContext::scope_only(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical);
         let config = EngramConfig::default();
         let now = Utc::now();
 
         let ignore = composite_score_ignore_decay(&memory, &context, &config, now);
 
-        // base = 1.0*0.8 = 0.80, scope_mult=1.0, trust=1.0
-        // challenged penalty: 0.80 * 0.7 = 0.56
+        // base = 1.0*0.8 = 0.80, scope_mult=1.0, trust_mult=1.0
+        // challenged penalty: 0.80 - 0.10 = 0.70
         assert!(
-            (ignore.final_score - 0.56).abs() < 0.01,
-            "challenged ignore_decay: expected ~0.63, got {}",
+            (ignore.final_score - 0.70).abs() < 0.01,
+            "challenged ignore_decay: expected ~0.70, got {}",
             ignore.final_score,
         );
     }
@@ -870,8 +867,7 @@ mod tests {
         memory.created_at = Utc::now() - Duration::days(30);
         memory.decay = Some(Decay::linear(Duration::days(10)));
 
-        let context =
-            ScoringContext::scope_only(Some("completely/different/path.rs".to_string()), vec![]);
+        let context = ScoringContext::scope_only(Some("completely/different/path.rs"), &[]);
         let config = EngramConfig::default();
         let now = Utc::now();
 
@@ -895,33 +891,31 @@ mod tests {
         memory.created_at = Utc::now() - Duration::days(15);
         memory.decay = Some(Decay::linear(Duration::days(10)));
 
-        let context = ScoringContext::with_semantic(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-            "test query".to_string(),
-            0.9,
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context =
+            ScoringContext::with_semantic(Some("src/api/auth.rs"), &logical, "test query", 0.9);
         let config = EngramConfig::default();
         let now = Utc::now();
 
         let normal = composite_score(&memory, &context, &config, now);
         let ignore = composite_score_ignore_decay(&memory, &context, &config, now);
 
-        // Normal: relevance=0.0 → base = 0.45*0.9 + 0.55*0.0 = 0.405
-        // * scope_mult(1.0) * trust(1.0) = 0.405
-        // Ignore: relevance=0.8 → base = 0.45*0.9 + 0.55*0.8 = 0.845
-        // * scope_mult(1.0) * trust(1.0) = 0.845
+        // Normal: relevance=0.0 → base = 0.55*0.9 + 0.45*0.0 = 0.495
+        // * scope_mult(1.0) * trust_mult(1.0) = 0.495
+        // Ignore: relevance=0.8 → base = 0.55*0.9 + 0.45*0.8 = 0.855
+        // * scope_mult(1.0) * trust_mult(1.0) = 0.855
         assert!(ignore.final_score > normal.final_score);
-        assert!((ignore.final_score - 0.845).abs() < 0.01);
+        assert!((ignore.final_score - 0.855).abs() < 0.01);
     }
 
     #[test]
     fn test_composite_score_with_keyword() {
         let memory = create_test_memory();
+        let logical = vec!["auth.oauth".to_string()];
         let context = ScoringContext::with_keyword(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-            "authentication".to_string(),
+            Some("src/api/auth.rs"),
+            &logical,
+            "authentication",
             0.7,       // normalized keyword score
             Some(0.9), // semantic score
         );
@@ -943,21 +937,18 @@ mod tests {
         let memory = create_test_memory();
         // semantic_score = Some(0.0) should stay in with_query mode (not fall to degraded).
         // sem=Some(0.0) means "checked, found nothing" — it consumes its weight at zero.
-        let context = ScoringContext::with_semantic(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-            "test query".to_string(),
-            0.0,
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context =
+            ScoringContext::with_semantic(Some("src/api/auth.rs"), &logical, "test query", 0.0);
         let config = EngramConfig::default();
         let now = Utc::now();
 
         let breakdown = composite_score(&memory, &context, &config, now);
 
-        // with_query weights: 0.45*0.0 + 0.55*0.8 = 0.44
-        // * scope_mult(1.0) * trust(1.0) = 0.44
+        // with_query weights: 0.55*0.0 + 0.45*0.8 = 0.36
+        // * scope_mult(1.0) * trust_mult(1.0) = 0.36
         assert!(
-            (breakdown.final_score - 0.44).abs() < 0.01,
+            (breakdown.final_score - 0.36).abs() < 0.01,
             "semantic=0.0 should use with_query weights, got {}",
             breakdown.final_score,
         );
@@ -968,12 +959,9 @@ mod tests {
     #[test]
     fn test_composite_score_rerank_is_none() {
         let memory = create_test_memory();
-        let context = ScoringContext::with_semantic(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-            "test query".to_string(),
-            0.8,
-        );
+        let logical = vec!["auth.oauth".to_string()];
+        let context =
+            ScoringContext::with_semantic(Some("src/api/auth.rs"), &logical, "test query", 0.8);
         let config = EngramConfig::default();
         let now = Utc::now();
 
@@ -990,7 +978,7 @@ mod tests {
 
         let score_for_scope = |path: &str| {
             let memory = create_test_memory();
-            let context = ScoringContext::scope_only(Some(path.to_string()), vec![]);
+            let context = ScoringContext::scope_only(Some(path), &[]);
             composite_score(&memory, &context, &config, now).final_score
         };
 
@@ -1017,21 +1005,16 @@ mod tests {
         let config = EngramConfig::default();
         let now = Utc::now();
 
-        // sem=None → degraded mode, base = 1.0*0.8 = 0.8
-        let ctx_none = ScoringContext::with_query_degraded(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-            "test query".to_string(),
-        );
+        // sem=None → degraded mode, base = 1.0*0.8 = 0.80
+        let logical = vec!["auth.oauth".to_string()];
+        let ctx_none =
+            ScoringContext::with_query_degraded(Some("src/api/auth.rs"), &logical, "test query");
         let score_none = composite_score(&memory, &ctx_none, &config, now).final_score;
 
-        // sem=Some(0.0) → with_query mode, base = 0.45*0.0 + 0.55*0.8 = 0.44
-        let ctx_zero = ScoringContext::with_semantic(
-            Some("src/api/auth.rs".to_string()),
-            vec!["auth.oauth".to_string()],
-            "test query".to_string(),
-            0.0,
-        );
+        // sem=Some(0.0) → with_query mode, base = 0.55*0.0 + 0.45*0.8 = 0.36
+        let logical = vec!["auth.oauth".to_string()];
+        let ctx_zero =
+            ScoringContext::with_semantic(Some("src/api/auth.rs"), &logical, "test query", 0.0);
         let score_zero = composite_score(&memory, &ctx_zero, &config, now).final_score;
 
         // sem=None should score higher than sem=Some(0.0)
@@ -1044,18 +1027,86 @@ mod tests {
     }
 
     #[test]
+    fn test_challenge_is_flat_penalty() {
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        // Human with exact scope match — high base
+        let mut high_base = create_test_memory();
+        high_base.status = Status::Challenged;
+        let logical = vec!["auth.oauth".to_string()];
+        let ctx_high = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical);
+        let high_active = composite_score(&create_test_memory(), &ctx_high, &config, now);
+        let high_challenged = composite_score(&high_base, &ctx_high, &config, now);
+        let high_diff = high_active.final_score - high_challenged.final_score;
+
+        // Inferred with no scope match — low base
+        let mut low_base = create_test_memory();
+        low_base.provenance = Provenance::inferred();
+        low_base.status = Status::Challenged;
+        let logical_low = vec!["completely.different".to_string()];
+        let ctx_low =
+            ScoringContext::scope_only(Some("completely/different/path.rs"), &logical_low);
+        let mut low_active = create_test_memory();
+        low_active.provenance = Provenance::inferred();
+        let low_active_bd = composite_score(&low_active, &ctx_low, &config, now);
+        let low_challenged_bd = composite_score(&low_base, &ctx_low, &config, now);
+        let low_diff = low_active_bd.final_score - low_challenged_bd.final_score;
+
+        // Both should lose exactly 0.10
+        assert!(
+            (high_diff - 0.10).abs() < 0.001,
+            "high base challenge diff {} should be 0.10",
+            high_diff,
+        );
+        assert!(
+            (low_diff - 0.10).abs() < 0.001,
+            "low base challenge diff {} should be 0.10",
+            low_diff,
+        );
+    }
+
+    #[test]
+    fn test_trust_floor_prevents_extreme_compounding() {
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        // Worst case: inferred + no-scope + challenged, base=1.0
+        let mut memory = create_test_memory();
+        memory.criticality = 1.0;
+        memory.provenance = Provenance::inferred();
+        memory.status = Status::Challenged;
+
+        let logical_diff = vec!["completely.different".to_string()];
+        let context =
+            ScoringContext::scope_only(Some("completely/different/path.rs"), &logical_diff);
+
+        let breakdown = composite_score(&memory, &context, &config, now);
+
+        // base=1.0 * scope_mult(0.5) * trust_mult(0.80) - 0.10 = 0.30
+        assert!(
+            (breakdown.final_score - 0.30).abs() < 0.01,
+            "worst case should be ~0.30, got {}",
+            breakdown.final_score,
+        );
+        // Must stay above threshold (0.3 default)
+        assert!(
+            breakdown.final_score >= 0.29,
+            "worst case {} should be >= 0.29 (near threshold)",
+            breakdown.final_score,
+        );
+    }
+
+    #[test]
     fn test_no_semantic_discontinuity() {
         let memory = create_test_memory();
         let config = EngramConfig::default();
         let now = Utc::now();
 
         let score_at = |sem: f64| {
-            let ctx = ScoringContext::with_semantic(
-                Some("src/api/auth.rs".to_string()),
-                vec!["auth.oauth".to_string()],
-                "test query".to_string(),
-                sem,
-            );
+            let logical = vec!["auth.oauth".to_string()];
+            let ctx =
+                ScoringContext::with_semantic(Some("src/api/auth.rs"), &logical, "test query", sem);
             composite_score(&memory, &ctx, &config, now).final_score
         };
 
@@ -1097,8 +1148,7 @@ mod tests {
         let now = Utc::now();
 
         // No scope context at all (like a global search)
-        let context =
-            ScoringContext::with_keyword(None, vec![], "auth".to_string(), 0.8, Some(0.9));
+        let context = ScoringContext::with_keyword(None, &[], "auth", 0.8, Some(0.9));
         let breakdown = composite_score(&memory, &context, &config, now);
 
         // scope_multiplier should be 1.0 (neutral)
@@ -1107,5 +1157,118 @@ mod tests {
             "scope_multiplier should be 1.0 without context, got {}",
             breakdown.scope_multiplier,
         );
+    }
+
+    #[test]
+    fn test_challenge_with_keyword_mode() {
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::with_keyword(
+            Some("src/api/auth.rs"),
+            &logical,
+            "authentication",
+            0.7,
+            Some(0.9),
+        );
+
+        let active_memory = create_test_memory();
+        let active_score = composite_score(&active_memory, &context, &config, now).final_score;
+
+        let mut challenged_memory = create_test_memory();
+        challenged_memory.status = Status::Challenged;
+        let challenged_score =
+            composite_score(&challenged_memory, &context, &config, now).final_score;
+
+        // Penalty should be exactly 0.10
+        assert!(
+            (active_score - challenged_score - 0.10).abs() < 0.001,
+            "keyword mode challenge diff {} should be 0.10",
+            active_score - challenged_score,
+        );
+    }
+
+    #[test]
+    fn test_trust_zero_with_floor() {
+        let mut config = EngramConfig::default();
+        config.trust_weights.inferred = 0.0;
+
+        let mut memory = create_test_memory();
+        memory.provenance = Provenance::inferred();
+
+        let logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical);
+        let now = Utc::now();
+
+        let breakdown = composite_score(&memory, &context, &config, now);
+
+        // trust_multiplier = floor + (1 - floor) * 0.0 = 0.5
+        assert!(
+            (breakdown.trust_multiplier - 0.5).abs() < 0.001,
+            "trust_multiplier should be 0.5 (floor), got {}",
+            breakdown.trust_multiplier,
+        );
+        // base = 1.0*0.8 = 0.8, scope_mult=1.0, trust_mult=0.5 → 0.4
+        assert!(
+            (breakdown.final_score - 0.4).abs() < 0.01,
+            "score should be ~0.4, got {}",
+            breakdown.final_score,
+        );
+    }
+
+    #[test]
+    fn test_challenge_plus_zero_criticality_clamped() {
+        let mut memory = create_test_memory();
+        memory.criticality = 0.0;
+        memory.status = Status::Challenged;
+
+        let logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical);
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let breakdown = composite_score(&memory, &context, &config, now);
+
+        // base=0.0, after challenge penalty: 0.0 - 0.10 = -0.10 → clamped to 0.0
+        assert!(
+            (breakdown.final_score - 0.0).abs() < f64::EPSILON,
+            "zero crit + challenged should clamp to 0.0, got {}",
+            breakdown.final_score,
+        );
+    }
+
+    #[test]
+    fn test_custom_trust_floor_changes_scores() {
+        let now = Utc::now();
+
+        let mut memory = create_test_memory();
+        memory.provenance = Provenance::inferred(); // raw trust = 0.6
+
+        let logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical);
+
+        // floor=0.0: trust_multiplier = 0.0 + 1.0*0.6 = 0.6 (raw value)
+        let mut config_floor_zero = EngramConfig::default();
+        config_floor_zero.retrieval.scoring.trust_multiplier_floor = 0.0;
+        let bd_zero = composite_score(&memory, &context, &config_floor_zero, now);
+        assert!(
+            (bd_zero.trust_multiplier - 0.6).abs() < 0.001,
+            "floor=0.0: trust_mult should be 0.6, got {}",
+            bd_zero.trust_multiplier,
+        );
+
+        // floor=1.0: trust_multiplier = 1.0 + 0.0*0.6 = 1.0 (trust disabled)
+        let mut config_floor_one = EngramConfig::default();
+        config_floor_one.retrieval.scoring.trust_multiplier_floor = 1.0;
+        let bd_one = composite_score(&memory, &context, &config_floor_one, now);
+        assert!(
+            (bd_one.trust_multiplier - 1.0).abs() < 0.001,
+            "floor=1.0: trust_mult should be 1.0, got {}",
+            bd_one.trust_multiplier,
+        );
+
+        // With floor=1.0, trust is effectively disabled — scores should be higher
+        assert!(bd_one.final_score > bd_zero.final_score);
     }
 }

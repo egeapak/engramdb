@@ -80,7 +80,7 @@ pub struct RetrievalResult {
     /// Total number of memories before limit was applied
     pub total: usize,
 
-    /// Query mode used: "with_embeddings", "degraded", or "scope_only"
+    /// Query mode used: "with_embeddings", "degraded_keyword", "degraded", or "scope_only"
     pub query_mode: String,
 }
 
@@ -211,19 +211,14 @@ impl RetrievalEngine {
             }
         }
 
-        let nli_pairs: Vec<(String, String)> = candidate_memories
-            .iter()
-            .map(|m| (memory.summary.clone(), m.summary.clone()))
-            .collect();
-
-        if nli_pairs.is_empty() {
+        if candidate_memories.is_empty() {
             return Ok(vec![]);
         }
 
-        // Build refs for batch classification
-        let pair_refs: Vec<(&str, &str)> = nli_pairs
+        // Build refs for batch classification directly from source references
+        let pair_refs: Vec<(&str, &str)> = candidate_memories
             .iter()
-            .map(|(p, h)| (p.as_str(), h.as_str()))
+            .map(|m| (memory.summary.as_str(), m.summary.as_str()))
             .collect();
 
         let results = nli.classify_batch(&pair_refs).await?;
@@ -341,6 +336,9 @@ impl RetrievalEngine {
                     (1.0 - weight) * candidates[idx].score + weight * norm_rerank
                 };
 
+                // NOTE: Only final_score and rerank are updated here.
+                // Other ScoreBreakdown fields (semantic, relevance, trust, etc.)
+                // retain their pre-rerank values for diagnostic transparency.
                 candidates[idx].score = blended;
                 candidates[idx].score_breakdown.final_score = blended;
                 candidates[idx].score_breakdown.rerank = Some(raw_rerank);
@@ -421,10 +419,44 @@ impl RetrievalEngine {
             None
         };
 
+        // Step 3 & 4: Batch-load all surviving memories (single dir scan) and calculate scores
+        let ids: Vec<&str> = filtered_entries.iter().map(|e| e.id.as_str()).collect();
+        let loaded = self.store.get_batch(&ids).await?;
+        let memory_map: HashMap<String, Memory> = loaded.into_iter().collect();
+
+        // Step 3.5: Run keyword search in degraded mode (query present, no embeddings).
+        // INVARIANT: keyword_search returns indices into memories_vec.
+        // The index resolution in .map() below must use this same vec
+        // without any intermediate mutation or reordering.
+        let degraded_kw: Option<HashMap<String, f64>> =
+            if query.query.is_some() && semantic_scores_map.is_none() {
+                let query_text = query.query.as_deref().unwrap();
+                let memories_vec: Vec<&Memory> = memory_map.values().collect();
+                let kw_results = crate::search::keyword_search(query_text, &memories_vec);
+                let num_tokens = crate::search::query_token_count(query_text);
+                if kw_results.is_empty() {
+                    None
+                } else {
+                    Some(
+                        kw_results
+                            .into_iter()
+                            .map(|(idx, raw)| {
+                                let norm = crate::search::normalize_keyword_score(raw, num_tokens);
+                                (memories_vec[idx].id.clone(), norm)
+                            })
+                            .collect(),
+                    )
+                }
+            } else {
+                None
+            };
+
         // Determine query mode for the entire retrieval
         let query_mode = if query.query.is_some() {
             if semantic_scores_map.is_some() {
                 "with_embeddings"
+            } else if degraded_kw.is_some() {
+                "degraded_keyword"
             } else {
                 "degraded"
             }
@@ -432,12 +464,8 @@ impl RetrievalEngine {
             "scope_only"
         };
 
-        // Step 3 & 4: Batch-load all surviving memories (single dir scan) and calculate scores
-        let ids: Vec<String> = filtered_entries.iter().map(|e| e.id.clone()).collect();
-        let loaded = self.store.get_batch(&ids).await?;
-        let memory_map: HashMap<String, Memory> = loaded.into_iter().collect();
-
         let mut scored_memories: Vec<ScoredMemory> = Vec::new();
+        let query_path = query.path.as_deref();
         for entry in filtered_entries.iter() {
             let memory = match memory_map.get(&entry.id) {
                 Some(m) => m,
@@ -449,31 +477,22 @@ impl RetrievalEngine {
                 if let Some(ref semantic_scores) = semantic_scores_map {
                     if let Some(&sem_score) = semantic_scores.get(&memory.id) {
                         // Full mode: query + embeddings
-                        ScoringContext::with_semantic(
-                            query.path.clone(),
-                            query.logical.clone(),
-                            q.clone(),
-                            sem_score,
-                        )
+                        ScoringContext::with_semantic(query_path, &query.logical, q, sem_score)
                     } else {
                         // Memory not in vector results, degraded mode
-                        ScoringContext::with_query_degraded(
-                            query.path.clone(),
-                            query.logical.clone(),
-                            q.clone(),
-                        )
+                        ScoringContext::with_query_degraded(query_path, &query.logical, q)
                     }
+                } else if let Some(kw_score) = degraded_kw.as_ref().and_then(|m| m.get(&memory.id))
+                {
+                    // Degraded mode with keyword scoring
+                    ScoringContext::with_keyword(query_path, &query.logical, q, *kw_score, None)
                 } else {
-                    // No embeddings available, degraded mode
-                    ScoringContext::with_query_degraded(
-                        query.path.clone(),
-                        query.logical.clone(),
-                        q.clone(),
-                    )
+                    // No embeddings, no keyword match
+                    ScoringContext::with_query_degraded(query_path, &query.logical, q)
                 }
             } else {
                 // Scope-only retrieval
-                ScoringContext::scope_only(query.path.clone(), query.logical.clone())
+                ScoringContext::scope_only(query_path, &query.logical)
             };
 
             let breakdown = if include_expired {
@@ -572,7 +591,7 @@ impl RetrievalEngine {
         let filtered_entries = apply_index_filters(all_entries, filters);
 
         // Batch-load all surviving memories (single dir scan)
-        let ids: Vec<String> = filtered_entries.iter().map(|e| e.id.clone()).collect();
+        let ids: Vec<&str> = filtered_entries.iter().map(|e| e.id.as_str()).collect();
         let loaded = self.store.get_batch(&ids).await?;
         let memories: Vec<Memory> = loaded.into_iter().map(|(_, m)| m).collect();
 
@@ -620,13 +639,7 @@ impl RetrievalEngine {
             let norm_kw = normalize_keyword_score(raw_kw, num_query_tokens);
 
             // No scope context for global keyword search — scope_multiplier=1.0 (neutral)
-            let context = ScoringContext::with_keyword(
-                None,
-                vec![],
-                query_text.to_string(),
-                norm_kw,
-                sem_score,
-            );
+            let context = ScoringContext::with_keyword(None, &[], query_text, norm_kw, sem_score);
 
             let breakdown = composite_score(memory, &context, &self.config, now);
 
@@ -1169,8 +1182,9 @@ mod tests {
 
         let result = engine.retrieve(&query).await.unwrap();
 
-        // Without embeddings configured, should be degraded mode
-        assert_eq!(result.query_mode, "degraded");
+        // Without embeddings configured, should be degraded_keyword mode
+        // (keyword search finds "test" in the memory summary)
+        assert_eq!(result.query_mode, "degraded_keyword");
     }
 
     #[tokio::test]

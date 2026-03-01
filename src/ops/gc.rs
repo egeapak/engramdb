@@ -40,7 +40,7 @@ pub async fn gc_memories(
                 continue;
             }
         };
-        let context = ScoringContext::scope_only(None, vec![]);
+        let context = ScoringContext::scope_only(None, &[]);
         let breakdown = composite_score(&memory, &context, config, now);
 
         if breakdown.final_score < threshold {
