@@ -33,8 +33,13 @@ use crate::types::{Decay, DecayStrategy, Memory};
 ///
 /// # Strategy Details
 /// - None: Always returns 1.0
-/// - Linear: factor = 1.0 - (age / ttl), clamped to [floor, 1.0]
-/// - Exponential: factor = 0.5^(age / half_life), clamped to [floor, 1.0]
+/// - Linear: factor = 1.0 - (age / ttl), clamped to [floor, 1.0].
+///   Note: effective expiry time is `ttl * (1 - floor)`, not `ttl`, because
+///   the factor reaches `floor` before the full TTL when `floor > 0`.
+///   Setting `floor = 1.0` effectively disables decay.
+/// - Exponential: factor = 0.5^(age / half_life), clamped to [floor, 1.0].
+///   A zero or negative half-life returns floor immediately (avoids NaN).
+///   Setting `floor = 1.0` effectively disables decay.
 /// - Step: factor = if age < ttl { 1.0 } else { floor }
 pub fn decay_factor(created_at: DateTime<Utc>, now: DateTime<Utc>, decay: &Option<Decay>) -> f64 {
     let Some(decay_config) = decay else {
@@ -65,6 +70,11 @@ pub fn decay_factor(created_at: DateTime<Utc>, now: DateTime<Utc>, decay: &Optio
         DecayStrategy::Exponential => {
             if let Some(half_life) = decay_config.half_life {
                 let half_life_secs = half_life.num_seconds() as f64;
+                if half_life_secs <= 0.0 {
+                    // Zero or negative half-life would cause division by zero (NaN).
+                    // Treat as fully decayed → return floor.
+                    return decay_config.floor;
+                }
                 let exponent = age_secs / half_life_secs;
                 let factor = 0.5_f64.powf(exponent);
                 factor.max(decay_config.floor).min(1.0)
@@ -259,6 +269,23 @@ mod tests {
         let factor = decay_factor(created_at, now, &decay);
         // Step with ttl=None -> returns 1.0
         assert_eq!(factor, 1.0);
+    }
+
+    #[test]
+    fn test_decay_factor_exponential_zero_half_life() {
+        let now = Utc::now();
+        let created_at = now - Duration::days(1);
+        let decay = Some(Decay {
+            strategy: DecayStrategy::Exponential,
+            half_life: Some(Duration::zero()),
+            ttl: None,
+            floor: 0.1,
+        });
+
+        let factor = decay_factor(created_at, now, &decay);
+        // Zero half-life should return floor, not NaN
+        assert_eq!(factor, 0.1);
+        assert!(!factor.is_nan());
     }
 
     #[test]

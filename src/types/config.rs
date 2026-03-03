@@ -16,27 +16,47 @@ use serde::{Deserialize, Serialize};
 
 /// Weights for scoring components.
 ///
-/// Trust is applied as a multiplier on the entire score (from `TrustWeights`),
-/// not as a weighted component here.
+/// Trust and scope are applied as multipliers on the entire score,
+/// not as weighted components here. Scope uses `scope_multiplier_floor`
+/// from [`ScoringConfig`].
+///
+/// Active weights should sum to 1.0 (± 0.001). Use [`ScoringWeights::validate`]
+/// to check.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScoringWeights {
+    /// Keyword match weight (optional — only present in `with_keyword` mode)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub keyword: Option<f64>,
+
     /// Semantic similarity weight (optional - not available in degraded mode)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub semantic: Option<f64>,
 
     /// Relevance weight (criticality * decay)
     pub relevance: f64,
+}
 
-    /// Scope proximity weight
-    pub scope: f64,
+impl ScoringWeights {
+    /// Validate that active weights sum to 1.0 ± 0.001.
+    pub fn validate(&self, mode_name: &str) -> Result<(), anyhow::Error> {
+        let sum = self.keyword.unwrap_or(0.0) + self.semantic.unwrap_or(0.0) + self.relevance;
+        if (sum - 1.0).abs() > 0.001 {
+            anyhow::bail!(
+                "scoring.{} weights sum to {} (expected 1.0 ± 0.001)",
+                mode_name,
+                sum
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Default for ScoringWeights {
     fn default() -> Self {
         Self {
-            semantic: Some(0.35),
+            keyword: None,
+            semantic: Some(0.55),
             relevance: 0.45,
-            scope: 0.20,
         }
     }
 }
@@ -47,27 +67,79 @@ pub struct ScoringConfig {
     /// Weights when both query and scope are provided
     pub with_query: ScoringWeights,
 
+    /// Weights when keyword search is active (search path)
+    #[serde(default = "ScoringConfig::default_with_keyword")]
+    pub with_keyword: ScoringWeights,
+
     /// Weights for scope-only retrieval
     pub scope_only: ScoringWeights,
 
     /// Weights for degraded mode (no embeddings)
     pub degraded: ScoringWeights,
+
+    /// Floor for the scope multiplier (default 0.5).
+    ///
+    /// Scope is applied as a post-multiplier: `floor + (1 - floor) * scope_score`.
+    /// When no scope context is provided, the multiplier is 1.0 (neutral).
+    #[serde(default = "ScoringConfig::default_scope_multiplier_floor")]
+    pub scope_multiplier_floor: f64,
+
+    /// Floor for the trust multiplier (default 0.5).
+    ///
+    /// Trust is applied as a post-multiplier: `floor + (1 - floor) * trust_weight`.
+    /// This prevents low-trust memories from being suppressed too aggressively
+    /// when combined with other multipliers (scope, challenge).
+    #[serde(default = "ScoringConfig::default_trust_multiplier_floor")]
+    pub trust_multiplier_floor: f64,
+
+    /// Flat penalty subtracted from score when memory is challenged (default 0.10).
+    ///
+    /// Applied as `score -= penalty` instead of multiplicative, so the impact
+    /// is uniform regardless of trust/scope combination.
+    #[serde(default = "ScoringConfig::default_challenge_penalty")]
+    pub challenge_penalty: f64,
+}
+
+impl ScoringConfig {
+    fn default_with_keyword() -> ScoringWeights {
+        ScoringWeights {
+            keyword: Some(0.45),
+            semantic: Some(0.30),
+            relevance: 0.25,
+        }
+    }
+
+    fn default_scope_multiplier_floor() -> f64 {
+        0.5
+    }
+
+    fn default_trust_multiplier_floor() -> f64 {
+        0.5
+    }
+
+    fn default_challenge_penalty() -> f64 {
+        0.10
+    }
 }
 
 impl Default for ScoringConfig {
     fn default() -> Self {
         Self {
             with_query: ScoringWeights::default(),
+            with_keyword: Self::default_with_keyword(),
             scope_only: ScoringWeights {
+                keyword: None,
                 semantic: None,
-                relevance: 0.50,
-                scope: 0.50,
+                relevance: 1.0,
             },
             degraded: ScoringWeights {
+                keyword: None,
                 semantic: None,
-                relevance: 0.70,
-                scope: 0.30,
+                relevance: 1.0,
             },
+            scope_multiplier_floor: 0.5,
+            trust_multiplier_floor: 0.5,
+            challenge_penalty: 0.10,
         }
     }
 }
@@ -138,6 +210,23 @@ pub struct TrustWeights {
     pub imported: f64,
 }
 
+impl TrustWeights {
+    /// Validate that each trust weight is in [0.0, 1.0].
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        for (name, value) in [
+            ("human", self.human),
+            ("agent", self.agent),
+            ("inferred", self.inferred),
+            ("imported", self.imported),
+        ] {
+            if !(0.0..=1.0).contains(&value) {
+                anyhow::bail!("trust_weights.{} ({}) must be in [0.0, 1.0]", name, value);
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Default for TrustWeights {
     fn default() -> Self {
         Self {
@@ -164,7 +253,7 @@ impl Default for SearchConfig {
     fn default() -> Self {
         Self {
             semantic_weight: 3.0,
-            threshold: 2.0,
+            threshold: 0.2,
         }
     }
 }
@@ -434,8 +523,37 @@ pub struct EngramConfig {
 impl EngramConfig {
     /// Validate all configuration subsections.
     pub fn validate(&self) -> Result<(), anyhow::Error> {
+        self.retrieval.scoring.with_query.validate("with_query")?;
+        self.retrieval
+            .scoring
+            .with_keyword
+            .validate("with_keyword")?;
+        self.retrieval.scoring.scope_only.validate("scope_only")?;
+        self.retrieval.scoring.degraded.validate("degraded")?;
+        self.trust_weights.validate()?;
         self.nli.validate()?;
         self.rerank.validate()?;
+
+        if !(0.0..=1.0).contains(&self.retrieval.scoring.scope_multiplier_floor) {
+            anyhow::bail!("scoring.scope_multiplier_floor must be in [0.0, 1.0]");
+        }
+        if !(0.0..=1.0).contains(&self.retrieval.scoring.trust_multiplier_floor) {
+            anyhow::bail!("scoring.trust_multiplier_floor must be in [0.0, 1.0]");
+        }
+        if !(0.0..=1.0).contains(&self.retrieval.scoring.challenge_penalty) {
+            anyhow::bail!("scoring.challenge_penalty must be in [0.0, 1.0]");
+        }
+
+        // Config migration: if search threshold is > 1.0, it was set for the
+        // old unbounded scoring scale. Warn and treat as if it were 1.0.
+        if self.search.threshold > 1.0 {
+            tracing::warn!(
+                "search.threshold ({}) exceeds 1.0 — scores are now normalized to [0, 1]. \
+                 Clamping to 1.0. Please update your config.",
+                self.search.threshold
+            );
+        }
+
         Ok(())
     }
 
@@ -496,23 +614,34 @@ mod tests {
         assert_eq!(config.thresholds.compress, 0.4);
 
         // Scoring weights - with_query
-        assert_eq!(config.retrieval.scoring.with_query.semantic, Some(0.35));
+        assert_eq!(config.retrieval.scoring.with_query.semantic, Some(0.55));
         assert_eq!(config.retrieval.scoring.with_query.relevance, 0.45);
-        assert_eq!(config.retrieval.scoring.with_query.scope, 0.20);
 
         // Scoring weights - scope_only
         assert_eq!(config.retrieval.scoring.scope_only.semantic, None);
-        assert_eq!(config.retrieval.scoring.scope_only.relevance, 0.50);
-        assert_eq!(config.retrieval.scoring.scope_only.scope, 0.50);
+        assert_eq!(config.retrieval.scoring.scope_only.relevance, 1.0);
 
         // Scoring weights - degraded
         assert_eq!(config.retrieval.scoring.degraded.semantic, None);
-        assert_eq!(config.retrieval.scoring.degraded.relevance, 0.70);
-        assert_eq!(config.retrieval.scoring.degraded.scope, 0.30);
+        assert_eq!(config.retrieval.scoring.degraded.relevance, 1.0);
+
+        // Scope multiplier floor
+        assert_eq!(config.retrieval.scoring.scope_multiplier_floor, 0.5);
+
+        // Trust multiplier floor
+        assert_eq!(config.retrieval.scoring.trust_multiplier_floor, 0.5);
+
+        // Challenge penalty
+        assert_eq!(config.retrieval.scoring.challenge_penalty, 0.10);
 
         // Search config
         assert_eq!(config.search.semantic_weight, 3.0);
-        assert_eq!(config.search.threshold, 2.0);
+        assert_eq!(config.search.threshold, 0.2);
+
+        // Scoring weights - with_keyword
+        assert_eq!(config.retrieval.scoring.with_keyword.keyword, Some(0.45));
+        assert_eq!(config.retrieval.scoring.with_keyword.semantic, Some(0.30));
+        assert_eq!(config.retrieval.scoring.with_keyword.relevance, 0.25);
 
         // Embeddings config
         assert_eq!(config.embeddings.provider, "onnx");
@@ -556,6 +685,18 @@ mod tests {
             loaded.thresholds.needs_review,
             original.thresholds.needs_review
         );
+        assert_eq!(
+            loaded.retrieval.scoring.scope_multiplier_floor,
+            original.retrieval.scoring.scope_multiplier_floor
+        );
+        assert_eq!(
+            loaded.retrieval.scoring.trust_multiplier_floor,
+            original.retrieval.scoring.trust_multiplier_floor
+        );
+        assert_eq!(
+            loaded.retrieval.scoring.challenge_penalty,
+            original.retrieval.scoring.challenge_penalty
+        );
     }
 
     #[test]
@@ -569,17 +710,19 @@ relevance_threshold = 0.7
 include_expired = true
 
 [retrieval.scoring.with_query]
-semantic = 0.35
+semantic = 0.55
 relevance = 0.45
-scope = 0.20
+
+[retrieval.scoring.with_keyword]
+keyword = 0.45
+semantic = 0.30
+relevance = 0.25
 
 [retrieval.scoring.scope_only]
-relevance = 0.50
-scope = 0.50
+relevance = 1.0
 
 [retrieval.scoring.degraded]
-relevance = 0.70
-scope = 0.30
+relevance = 1.0
 "#;
 
         let config: EngramConfig = toml::from_str(partial_toml).unwrap();
@@ -600,28 +743,28 @@ scope = 0.30
     fn test_config_scoring_weights_sum_to_one() {
         let config = EngramConfig::default();
 
-        // with_query: semantic + relevance + scope sum to 1.0
-        // (trust is now a multiplier, not a weighted component)
+        // with_query: semantic + relevance sum to 1.0
+        // (trust and scope are multipliers, not weighted components)
         let wq = &config.retrieval.scoring.with_query;
-        let wq_sum = wq.semantic.unwrap_or(0.0) + wq.relevance + wq.scope;
+        let wq_sum = wq.semantic.unwrap_or(0.0) + wq.relevance;
         assert!(
             (wq_sum - 1.0).abs() < f64::EPSILON,
             "with_query weights sum to {}, expected 1.0",
             wq_sum
         );
 
-        // scope_only: relevance + scope sum to 1.0
+        // scope_only: relevance sums to 1.0
         let so = &config.retrieval.scoring.scope_only;
-        let so_sum = so.semantic.unwrap_or(0.0) + so.relevance + so.scope;
+        let so_sum = so.semantic.unwrap_or(0.0) + so.relevance;
         assert!(
             (so_sum - 1.0).abs() < f64::EPSILON,
             "scope_only weights sum to {}, expected 1.0",
             so_sum
         );
 
-        // degraded: relevance + scope sum to 1.0
+        // degraded: relevance sums to 1.0
         let dg = &config.retrieval.scoring.degraded;
-        let dg_sum = dg.semantic.unwrap_or(0.0) + dg.relevance + dg.scope;
+        let dg_sum = dg.semantic.unwrap_or(0.0) + dg.relevance;
         assert!(
             (dg_sum - 1.0).abs() < f64::EPSILON,
             "degraded weights sum to {}, expected 1.0",
@@ -646,7 +789,7 @@ threshold = 0.25
         // Empty TOML: all sections use #[serde(default)] on EngramConfig
         let config: EngramConfig = toml::from_str("").unwrap();
         assert_eq!(config.search.semantic_weight, 3.0);
-        assert_eq!(config.search.threshold, 2.0);
+        assert_eq!(config.search.threshold, 0.2);
     }
 
     #[test]
@@ -822,6 +965,48 @@ weight = 0.7
     }
 
     #[test]
+    fn test_trust_weights_validate() {
+        // Valid
+        assert!(TrustWeights::default().validate().is_ok());
+
+        // Invalid: > 1.0
+        let tw = TrustWeights {
+            human: 1.5,
+            ..Default::default()
+        };
+        assert!(tw.validate().is_err());
+
+        // Invalid: < 0.0
+        let tw = TrustWeights {
+            inferred: -0.1,
+            ..Default::default()
+        };
+        assert!(tw.validate().is_err());
+    }
+
+    #[test]
+    fn test_scoring_weights_validate() {
+        // Valid defaults
+        assert!(ScoringWeights::default().validate("test").is_ok());
+
+        // Invalid: doesn't sum to 1.0
+        let sw = ScoringWeights {
+            keyword: None,
+            semantic: Some(0.5),
+            relevance: 0.6,
+        };
+        assert!(sw.validate("test").is_err());
+
+        // Valid with keyword
+        let sw = ScoringWeights {
+            keyword: Some(0.45),
+            semantic: Some(0.30),
+            relevance: 0.25,
+        };
+        assert!(sw.validate("test").is_ok());
+    }
+
+    #[test]
     fn test_rerank_config_validate_rejects_invalid() {
         // weight out of range
         let rerank = RerankConfig {
@@ -845,5 +1030,41 @@ weight = 0.7
 
         // valid config passes
         assert!(RerankConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_scoring_config_validate_rejects_invalid_floors() {
+        // scope_multiplier_floor > 1.0
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.scope_multiplier_floor = 1.5;
+        assert!(config.validate().is_err());
+
+        // scope_multiplier_floor < 0.0
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.scope_multiplier_floor = -0.1;
+        assert!(config.validate().is_err());
+
+        // trust_multiplier_floor > 1.0
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.trust_multiplier_floor = 2.0;
+        assert!(config.validate().is_err());
+
+        // trust_multiplier_floor < 0.0
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.trust_multiplier_floor = -0.5;
+        assert!(config.validate().is_err());
+
+        // challenge_penalty > 1.0
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.challenge_penalty = 1.1;
+        assert!(config.validate().is_err());
+
+        // challenge_penalty < 0.0
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.challenge_penalty = -0.01;
+        assert!(config.validate().is_err());
+
+        // valid defaults pass
+        assert!(EngramConfig::default().validate().is_ok());
     }
 }

@@ -169,19 +169,18 @@ fn scoring_benchmarks(c: &mut Criterion) {
 
     group.bench_function("composite_score/scope_only", |b| {
         let memory = generate_memory(0);
-        let context = ScoringContext::scope_only(
-            Some("src/main.rs".to_string()),
-            vec!["api.auth".to_string()],
-        );
+        let logical = vec!["api.auth".to_string()];
+        let context = ScoringContext::scope_only(Some("src/main.rs"), &logical);
         b.iter(|| composite_score(&memory, &context, &config, now));
     });
 
     group.bench_function("composite_score/with_query", |b| {
         let memory = generate_memory(0);
+        let logical = vec!["api.auth".to_string()];
         let context = ScoringContext::with_semantic(
-            Some("src/main.rs".to_string()),
-            vec!["api.auth".to_string()],
-            "authentication handler".to_string(),
+            Some("src/main.rs"),
+            &logical,
+            "authentication handler",
             0.85,
         );
         b.iter(|| composite_score(&memory, &context, &config, now));
@@ -195,10 +194,8 @@ fn scoring_benchmarks(c: &mut Criterion) {
             &count,
             |b, &count| {
                 let memories: Vec<Memory> = (0..count).map(generate_memory).collect();
-                let context = ScoringContext::scope_only(
-                    Some("src/main.rs".to_string()),
-                    vec!["api.auth".to_string()],
-                );
+                let logical = vec!["api.auth".to_string()];
+                let context = ScoringContext::scope_only(Some("src/main.rs"), &logical);
                 b.iter(|| {
                     for memory in &memories {
                         composite_score(memory, &context, &config, now);

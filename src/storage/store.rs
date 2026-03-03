@@ -215,7 +215,7 @@ impl MemoryStore {
     ///
     /// Returns a Vec of `(id, Memory)` pairs.  IDs that cannot be loaded
     /// (missing file, parse error) are silently skipped.
-    pub async fn get_batch(&self, ids: &[String]) -> Result<Vec<(String, Memory)>> {
+    pub async fn get_batch<S: AsRef<str>>(&self, ids: &[S]) -> Result<Vec<(String, Memory)>> {
         let shared_dir = paths::memories_dir(&self.project_dir);
         let personal_dir = paths::personal_memories_dir(&self.project_id)?;
 
@@ -224,13 +224,12 @@ impl MemoryStore {
 
         let mut results = Vec::with_capacity(ids.len());
         for id in ids {
-            let path = shared_map
-                .get(id.as_str())
-                .or_else(|| personal_map.get(id.as_str()));
+            let id_str = id.as_ref();
+            let path = shared_map.get(id_str).or_else(|| personal_map.get(id_str));
             if let Some(path) = path {
                 if let Ok(content) = async_fs::read_to_string(path).await {
                     if let Ok(memory) = memory_file::parse_memory_file(&content) {
-                        results.push((id.clone(), memory));
+                        results.push((id_str.to_owned(), memory));
                     }
                 }
             }
@@ -243,7 +242,7 @@ impl MemoryStore {
     /// Scans shared and personal directories once each, returning only
     /// those IDs that have a corresponding file.  Much cheaper than
     /// [`get_batch`] because no files are read or parsed.
-    pub async fn batch_exists(&self, ids: &[String]) -> Result<HashSet<String>> {
+    pub async fn batch_exists<S: AsRef<str>>(&self, ids: &[S]) -> Result<HashSet<String>> {
         let shared_dir = paths::memories_dir(&self.project_dir);
         let personal_dir = paths::personal_memories_dir(&self.project_id)?;
 
@@ -253,8 +252,8 @@ impl MemoryStore {
 
         Ok(ids
             .iter()
-            .filter(|id| on_disk.contains(id.as_str()))
-            .cloned()
+            .filter(|id| on_disk.contains(id.as_ref()))
+            .map(|id| id.as_ref().to_owned())
             .collect())
     }
 

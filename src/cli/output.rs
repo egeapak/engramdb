@@ -805,7 +805,9 @@ mod tests {
             rerank: None,
             relevance: 0.7,
             scope: 0.6,
+            scope_multiplier: 0.8,
             trust: 1.0,
+            trust_multiplier: 1.0,
             decay: 1.0,
             criticality: 0.8,
         }

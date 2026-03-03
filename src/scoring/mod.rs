@@ -1,8 +1,8 @@
 //! Scoring engine for EngramDB
 //!
 //! This module provides functionality to calculate composite scores for memories
-//! based on multiple factors including semantic similarity, relevance (criticality * decay),
-//! scope proximity, and trust (as a multiplier).
+//! based on multiple factors including semantic similarity, keyword match,
+//! relevance (criticality * decay), scope proximity, and trust.
 //!
 //! # Key Components
 //!
@@ -14,20 +14,25 @@
 //!
 //! # Scoring Modes
 //!
-//! The composite scoring operates in three modes:
+//! The composite scoring operates in four modes:
 //!
-//! 1. **With query + embeddings**: `base = sem_w*semantic + rel_w*(criticality*decay) + scope_w*scope`
-//! 2. **With query, no embeddings** (degraded): `base = rel_w*(criticality*decay) + scope_w*scope`
-//! 3. **Scope-only**: `base = rel_w*(criticality*decay) + scope_w*scope`
+//! 1. **With keyword** (search path): `base = 0.45*keyword + 0.30*semantic + 0.25*relevance`
+//! 2. **With query + embeddings**: `base = 0.55*semantic + 0.45*relevance`
+//! 3. **Degraded / degraded_keyword** (query, no embeddings): `base = 1.0*relevance`
+//! 4. **Scope-only** (no query): `base = 1.0*relevance`
 //!
-//! Then: `score = base * trust_weight`, with `* 0.7` if challenged.
+//! Then: `score = base * scope_multiplier * trust_multiplier - challenge_penalty`
 //!
-//! # Design Decisions
+//! # Post-multipliers
 //!
-//! - Trust is a multiplier on the entire score, not a weighted component
-//! - Challenged memories receive a 30% penalty (`* 0.7`) to their final score
-//! - Decay strategies include None, Linear, Exponential, and Step functions
-//! - Trust weights vary by provenance source to reflect confidence in the information
+//! - **Scope**: `scope_multiplier = floor + (1 - floor) * scope_score` (default floor=0.5).
+//!   When no scope context is provided, the multiplier is 1.0 (neutral).
+//! - **Trust**: `trust_multiplier = floor + (1 - floor) * trust_weight` (default floor=0.5).
+//!   Prevents low-trust memories from being suppressed too aggressively.
+//! - **Challenge**: flat subtraction `score -= challenge_penalty` (default 0.10).
+//!   Applied uniformly regardless of trust/scope combination.
+//! - Decay strategies include None, Linear, Exponential, and Step functions.
+//! - Final score is clamped to [0.0, 1.0].
 mod composite;
 mod decay;
 mod trust;
