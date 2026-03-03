@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "engramdb",
-      "source": { "source": "github", "repo": "egeapak/engramdb" },
+      "source": "./",
       "description": "Project-scoped persistent memory store for coding agents. Stores decisions, hazards, conventions, and context about the codebase."
     }
   ]
