@@ -1,0 +1,14 @@
+{
+  "name": "engramdb",
+  "owner": {
+    "name": "Ege Apak",
+    "email": "egeapak@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "engramdb",
+      "source": ".",
+      "description": "Project-scoped persistent memory store for coding agents. Stores decisions, hazards, conventions, and context about the codebase."
+    }
+  ]
+}

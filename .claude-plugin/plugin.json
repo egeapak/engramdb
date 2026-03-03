@@ -1,6 +1,6 @@
 {
   "name": "engramdb",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Project-scoped persistent memory store for coding agents. Stores decisions, hazards, conventions, and context about the codebase.",
   "mcpServers": {
     "engramdb": {
