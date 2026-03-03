@@ -75,6 +75,38 @@ pub async fn run_projects(
                 by_type: stats.by_type,
             });
         }
+        ProjectsCommand::Prune { force } => {
+            // Preview what would be pruned
+            let entries = projects::list_projects(registry).await?;
+            let stale: Vec<_> = entries.iter().filter(|e| !e.exists).collect();
+
+            if stale.is_empty() {
+                formatter.print_success("No stale projects found.");
+                return Ok(());
+            }
+
+            formatter.print_message(&format!("Found {} stale project(s):", stale.len()));
+            for entry in &stale {
+                formatter
+                    .print_message(&format!("  {} ({})", entry.project_id, entry.project_path));
+            }
+
+            if !force {
+                let confirm = prompter
+                    .confirm("Remove all stale entries and their global data?", false)
+                    .unwrap_or(false);
+                if !confirm {
+                    formatter.print_message("Aborted.");
+                    return Ok(());
+                }
+            }
+
+            let result = projects::prune_stale_projects(registry).await?;
+            formatter.print_success(&format!(
+                "Pruned {} stale project(s) from registry.",
+                result.pruned
+            ));
+        }
     }
 
     Ok(())

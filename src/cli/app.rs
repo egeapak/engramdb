@@ -37,6 +37,12 @@ pub enum ProjectsCommand {
     },
     /// Show aggregate statistics across all projects
     Stats,
+    /// Remove all stale (unreachable) projects from the registry
+    Prune {
+        /// Skip confirmation prompt
+        #[arg(long, short = 'f')]
+        force: bool,
+    },
 }
 
 /// Output format for CLI commands.

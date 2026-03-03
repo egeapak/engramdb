@@ -87,8 +87,13 @@ pub fn lancedb_dir(project_id: &str) -> Result<PathBuf> {
         .join("lancedb"))
 }
 
-/// Returns the global registry path (`<global_config_dir>/registry.json`)
+/// Returns the global registry path (`<global_config_dir>/registry.json`).
+///
+/// Respects `ENGRAMDB_REGISTRY_PATH` env var for testing isolation.
 pub fn registry_path() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("ENGRAMDB_REGISTRY_PATH") {
+        return Ok(PathBuf::from(path));
+    }
     Ok(global_config_dir()?.join("registry.json"))
 }
 

@@ -116,34 +116,44 @@ pub struct EnvironmentCheck {
     pub suggestion: Option<String>,
 }
 
+/// A group of related environment checks under a section heading.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorSection {
+    pub name: String,
+    pub checks: Vec<EnvironmentCheck>,
+}
+
 /// Full environment doctor result including all checks.
 #[must_use]
 #[derive(Debug, serde::Serialize)]
 pub struct EnvironmentDoctorResult {
-    pub checks: Vec<EnvironmentCheck>,
+    pub sections: Vec<DoctorSection>,
     pub all_passed: bool,
     pub store_check: Option<DoctorResult>,
 }
 
-/// Run a full environment diagnostic.
+impl EnvironmentDoctorResult {
+    /// Flatten all checks from all sections into a single vec (useful for tests).
+    pub fn all_checks(&self) -> Vec<&EnvironmentCheck> {
+        self.sections.iter().flat_map(|s| &s.checks).collect()
+    }
+}
+
+/// Run a full environment diagnostic organized into sections.
 ///
-/// Checks binary availability, Claude Code plugin installation, store initialization,
-/// embedding model cache, and (if a store exists) store health.
+/// Sections: System, Project, Agent, Embeddings, Registry.
 pub async fn doctor_environment(
     dir: &Path,
     store: Option<&MemoryStore>,
 ) -> EnvironmentDoctorResult {
-    let mut checks = Vec::new();
+    let mut sections = Vec::new();
 
-    // 1. Binary on PATH
-    checks.push(check_binary_on_path().await);
+    // --- System section ---
+    let mut system_checks = Vec::new();
+    system_checks.push(check_binary_on_path().await);
 
-    // 2. Claude Code plugin installed
-    checks.push(check_claude_plugin());
-
-    // 3. Store initialized
     let store_initialized = dir.join(".engramdb").exists();
-    checks.push(EnvironmentCheck {
+    system_checks.push(EnvironmentCheck {
         name: "Store initialized".to_string(),
         passed: store_initialized,
         message: if store_initialized {
@@ -158,16 +168,10 @@ pub async fn doctor_environment(
         },
     });
 
-    // 4. Embedding model cached
-    let cache_dir = crate::storage::paths::model_cache_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from(".cache/engramdb/models"));
-    checks.push(check_embedding_model_cached(dir, &cache_dir).await);
-
-    // 5. Store health (only if store is available)
     let store_check = if let Some(s) = store {
         match doctor(s).await {
             Ok(result) => {
-                checks.push(EnvironmentCheck {
+                system_checks.push(EnvironmentCheck {
                     name: "Store health".to_string(),
                     passed: result.healthy,
                     message: format!(
@@ -183,7 +187,7 @@ pub async fn doctor_environment(
                 Some(result)
             }
             Err(e) => {
-                checks.push(EnvironmentCheck {
+                system_checks.push(EnvironmentCheck {
                     name: "Store health".to_string(),
                     passed: false,
                     message: format!("check failed: {}", e),
@@ -195,11 +199,71 @@ pub async fn doctor_environment(
     } else {
         None
     };
+    sections.push(DoctorSection {
+        name: "System".to_string(),
+        checks: system_checks,
+    });
 
-    let all_passed = checks.iter().all(|c| c.passed);
+    // --- Load registry once for Project gating + Registry section ---
+    let registry_info = load_registry_info(dir).await;
+
+    // --- Project section ---
+    if store_initialized && registry_info.in_registry {
+        let mut project_checks = Vec::new();
+        project_checks.push(check_config_file(dir).await);
+        project_checks.push(check_mcp_config(dir));
+        sections.push(DoctorSection {
+            name: "Project".to_string(),
+            checks: project_checks,
+        });
+    } else {
+        sections.push(DoctorSection {
+            name: "Project".to_string(),
+            checks: vec![EnvironmentCheck {
+                name: "Skipped".to_string(),
+                passed: true,
+                message: "project not initialized or not in registry".to_string(),
+                suggestion: Some("Run `engramdb init` to set up this project".to_string()),
+            }],
+        });
+    }
+
+    // --- Agent section ---
+    let agent_checks = vec![check_claude_plugin(), check_hook_config()];
+    sections.push(DoctorSection {
+        name: "Agent".to_string(),
+        checks: agent_checks,
+    });
+
+    // --- Embeddings section ---
+    let mut embeddings_checks = Vec::new();
+    embeddings_checks.push(check_embedding_backend(dir).await);
+    let cache_dir = crate::storage::paths::model_cache_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from(".cache/engramdb/models"));
+    embeddings_checks.push(check_embedding_model_cached(dir, &cache_dir).await);
+    #[cfg(feature = "ollama")]
+    embeddings_checks.push(check_ollama_connectivity(dir).await);
+    sections.push(DoctorSection {
+        name: "Embeddings".to_string(),
+        checks: embeddings_checks,
+    });
+
+    // --- Registry section ---
+    let memory_count = if let Some(s) = store {
+        s.list_ids().await.map(|ids| ids.len()).ok()
+    } else {
+        None
+    };
+    let registry_checks = build_registry_checks(&registry_info, memory_count);
+    sections.push(DoctorSection {
+        name: "Registry".to_string(),
+        checks: registry_checks,
+    });
+
+    let all_passed = sections.iter().flat_map(|s| &s.checks).all(|c| c.passed);
 
     EnvironmentDoctorResult {
-        checks,
+        sections,
         all_passed,
         store_check,
     }
@@ -257,6 +321,280 @@ fn check_claude_plugin() -> EnvironmentCheck {
             Some("Install with `claude plugin add https://github.com/egeapak/engramdb`".to_string())
         },
     }
+}
+
+/// Pre-loaded registry information shared between Project gating and Registry section.
+struct RegistryInfo {
+    in_registry: bool,
+    total_projects: usize,
+    reachable_projects: usize,
+    loaded: bool,
+}
+
+/// Load registry info once for reuse across sections.
+async fn load_registry_info(dir: &Path) -> RegistryInfo {
+    use crate::storage::{FileRegistry, RegistryBackend};
+    let project_id = crate::storage::project_id::compute_project_id(dir);
+    let registry = match FileRegistry::global() {
+        Ok(r) => r,
+        Err(_) => {
+            return RegistryInfo {
+                in_registry: false,
+                total_projects: 0,
+                reachable_projects: 0,
+                loaded: false,
+            };
+        }
+    };
+    match registry.load().await {
+        Ok(reg) => {
+            let in_registry = reg.projects.iter().any(|e| e.project_id == project_id);
+            let total_projects = reg.projects.len();
+            let reachable_projects = reg
+                .projects
+                .iter()
+                .filter(|e| {
+                    std::path::Path::new(&e.project_path)
+                        .join(".engramdb")
+                        .exists()
+                })
+                .count();
+            RegistryInfo {
+                in_registry,
+                total_projects,
+                reachable_projects,
+                loaded: true,
+            }
+        }
+        Err(_) => RegistryInfo {
+            in_registry: false,
+            total_projects: 0,
+            reachable_projects: 0,
+            loaded: false,
+        },
+    }
+}
+
+/// Check `.engramdb/config.toml` syntax and values.
+async fn check_config_file(dir: &Path) -> EnvironmentCheck {
+    let config_path = dir.join(".engramdb").join("config.toml");
+    if !config_path.exists() {
+        return EnvironmentCheck {
+            name: "Config file".to_string(),
+            passed: true,
+            message: "not present (using defaults)".to_string(),
+            suggestion: None,
+        };
+    }
+    match crate::storage::config::load_config(&config_path).await {
+        Ok(config) => match config.validate() {
+            Ok(()) => EnvironmentCheck {
+                name: "Config file".to_string(),
+                passed: true,
+                message: ".engramdb/config.toml valid".to_string(),
+                suggestion: None,
+            },
+            Err(e) => EnvironmentCheck {
+                name: "Config file".to_string(),
+                passed: false,
+                message: format!("invalid values: {}", e),
+                suggestion: Some("Fix the values in .engramdb/config.toml".to_string()),
+            },
+        },
+        Err(e) => EnvironmentCheck {
+            name: "Config file".to_string(),
+            passed: false,
+            message: format!("parse error: {}", e),
+            suggestion: Some("Fix the syntax in .engramdb/config.toml".to_string()),
+        },
+    }
+}
+
+/// Check if project `.mcp.json` exists and references engramdb.
+fn check_mcp_config(dir: &Path) -> EnvironmentCheck {
+    let mcp_path = dir.join(".mcp.json");
+    let found = std::fs::read_to_string(&mcp_path)
+        .ok()
+        .map(|contents| contents.contains("engramdb"))
+        .unwrap_or(false);
+
+    EnvironmentCheck {
+        name: "MCP server configuration".to_string(),
+        passed: found,
+        message: if found {
+            "configured".to_string()
+        } else {
+            "not configured".to_string()
+        },
+        suggestion: if found {
+            None
+        } else {
+            Some("Add engramdb to .mcp.json, or install the Claude Code plugin".to_string())
+        },
+    }
+}
+
+/// Check `~/.claude/settings.json` for engramdb hook configuration.
+fn check_hook_config() -> EnvironmentCheck {
+    let found = dirs::home_dir()
+        .map(|h| h.join(".claude").join("settings.json"))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|contents| contents.contains("engramdb"))
+        .unwrap_or(false);
+
+    EnvironmentCheck {
+        name: "Hook configuration".to_string(),
+        passed: found,
+        message: if found {
+            "configured".to_string()
+        } else {
+            "not configured".to_string()
+        },
+        suggestion: if found {
+            None
+        } else {
+            Some("Install the Claude Code plugin to configure hooks automatically".to_string())
+        },
+    }
+}
+
+/// Informational check showing the active embedding backend and model from config.
+async fn check_embedding_backend(dir: &Path) -> EnvironmentCheck {
+    let config_path = dir.join(".engramdb").join("config.toml");
+    let config = crate::storage::config::load_config(&config_path)
+        .await
+        .unwrap_or_default();
+
+    EnvironmentCheck {
+        name: "Embedding backend".to_string(),
+        passed: true,
+        message: format!(
+            "{} (model: {})",
+            config.embeddings.backend, config.embeddings.provider
+        ),
+        suggestion: None,
+    }
+}
+
+/// Check Ollama connectivity with a 3-second timeout.
+#[cfg(feature = "ollama")]
+async fn check_ollama_connectivity(dir: &Path) -> EnvironmentCheck {
+    let config_path = dir.join(".engramdb").join("config.toml");
+    let config = crate::storage::config::load_config(&config_path)
+        .await
+        .unwrap_or_default();
+    let ollama_is_backend = config.embeddings.backend == crate::types::EmbeddingBackend::Ollama;
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            return EnvironmentCheck {
+                name: "Ollama connectivity".to_string(),
+                passed: !ollama_is_backend,
+                message: "HTTP client error".to_string(),
+                suggestion: Some("Check reqwest/TLS configuration".to_string()),
+            };
+        }
+    };
+
+    match client.get("http://localhost:11434").send().await {
+        Ok(resp) if resp.status().is_success() => EnvironmentCheck {
+            name: "Ollama connectivity".to_string(),
+            passed: true,
+            message: "reachable at http://localhost:11434".to_string(),
+            suggestion: None,
+        },
+        _ => {
+            if ollama_is_backend {
+                EnvironmentCheck {
+                    name: "Ollama connectivity".to_string(),
+                    passed: false,
+                    message: "unreachable".to_string(),
+                    suggestion: Some(
+                        "Start Ollama with `ollama serve` or check connection".to_string(),
+                    ),
+                }
+            } else {
+                EnvironmentCheck {
+                    name: "Ollama connectivity".to_string(),
+                    passed: true,
+                    message: "unreachable (not configured as backend)".to_string(),
+                    suggestion: None,
+                }
+            }
+        }
+    }
+}
+
+/// Build registry checks from pre-loaded registry info.
+fn build_registry_checks(
+    info: &RegistryInfo,
+    memory_count: Option<usize>,
+) -> Vec<EnvironmentCheck> {
+    let mut checks = Vec::new();
+
+    if !info.loaded {
+        checks.push(EnvironmentCheck {
+            name: "Registered projects".to_string(),
+            passed: true,
+            message: "registry unavailable".to_string(),
+            suggestion: None,
+        });
+        checks.push(EnvironmentCheck {
+            name: "Current project in registry".to_string(),
+            passed: false,
+            message: "registry unavailable".to_string(),
+            suggestion: Some("Run `engramdb init` to register this project".to_string()),
+        });
+        return checks;
+    }
+
+    let stale = info.total_projects - info.reachable_projects;
+    let msg = if stale > 0 {
+        format!(
+            "{} registered, {} reachable, {} stale",
+            info.total_projects, info.reachable_projects, stale
+        )
+    } else {
+        format!(
+            "{} registered, {} reachable",
+            info.total_projects, info.reachable_projects
+        )
+    };
+    checks.push(EnvironmentCheck {
+        name: "Registered projects".to_string(),
+        passed: true,
+        message: msg,
+        suggestion: if stale > 0 {
+            Some("Run `engramdb projects prune` to remove stale entries".to_string())
+        } else {
+            None
+        },
+    });
+
+    let current_msg = if info.in_registry {
+        match memory_count {
+            Some(n) => format!("registered ({} memories)", n),
+            None => "registered".to_string(),
+        }
+    } else {
+        "not registered".to_string()
+    };
+    checks.push(EnvironmentCheck {
+        name: "Current project in registry".to_string(),
+        passed: info.in_registry,
+        message: current_msg,
+        suggestion: if info.in_registry {
+            None
+        } else {
+            Some("Run `engramdb init` to register this project".to_string())
+        },
+    });
+
+    checks
 }
 
 /// Check if the embedding model is cached on disk.
@@ -585,7 +923,11 @@ mod tests {
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let result = doctor_environment(temp_dir.path(), Some(&store)).await;
-        let names: Vec<&str> = result.checks.iter().map(|c| c.name.as_str()).collect();
+        let names: Vec<&str> = result
+            .all_checks()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
 
         assert!(names.contains(&"Binary on PATH"), "missing Binary on PATH");
         assert!(
@@ -597,21 +939,35 @@ mod tests {
             "missing Store initialized"
         );
         assert!(
-            names.contains(&"Embedding model"),
-            "missing Embedding model"
+            names.contains(&"Embedding backend"),
+            "missing Embedding backend"
         );
         assert!(names.contains(&"Store health"), "missing Store health");
     }
 
     #[tokio::test]
+    async fn test_environment_has_expected_sections() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        let result = doctor_environment(temp_dir.path(), Some(&store)).await;
+        let section_names: Vec<&str> = result.sections.iter().map(|s| s.name.as_str()).collect();
+
+        assert_eq!(
+            section_names,
+            vec!["System", "Project", "Agent", "Embeddings", "Registry"]
+        );
+    }
+
+    #[tokio::test]
     async fn test_environment_store_not_initialized() {
         let temp_dir = TempDir::new().unwrap();
-        // No init — .engramdb/ does not exist
 
         let result = doctor_environment(temp_dir.path(), None).await;
         let store_check = result
-            .checks
-            .iter()
+            .all_checks()
+            .into_iter()
             .find(|c| c.name == "Store initialized")
             .unwrap();
         assert!(!store_check.passed);
@@ -627,8 +983,8 @@ mod tests {
 
         let result = doctor_environment(temp_dir.path(), None).await;
         let store_check = result
-            .checks
-            .iter()
+            .all_checks()
+            .into_iter()
             .find(|c| c.name == "Store initialized")
             .unwrap();
         assert!(store_check.passed);
@@ -647,8 +1003,8 @@ mod tests {
 
         let result = doctor_environment(temp_dir.path(), Some(&store)).await;
         let health_check = result
-            .checks
-            .iter()
+            .all_checks()
+            .into_iter()
             .find(|c| c.name == "Store health")
             .unwrap();
         assert!(health_check.passed);
@@ -679,8 +1035,8 @@ mod tests {
 
         let result = doctor_environment(temp_dir.path(), Some(&store)).await;
         let health_check = result
-            .checks
-            .iter()
+            .all_checks()
+            .into_iter()
             .find(|c| c.name == "Store health")
             .unwrap();
         assert!(!health_check.passed);
@@ -696,7 +1052,10 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let result = doctor_environment(temp_dir.path(), None).await;
-        let health_check = result.checks.iter().find(|c| c.name == "Store health");
+        let health_check = result
+            .all_checks()
+            .into_iter()
+            .find(|c| c.name == "Store health");
         assert!(
             health_check.is_none(),
             "Store health should not appear when no store is given"
@@ -711,7 +1070,7 @@ mod tests {
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let result = doctor_environment(temp_dir.path(), Some(&store)).await;
-        let expected = result.checks.iter().all(|c| c.passed);
+        let expected = result.all_checks().iter().all(|c| c.passed);
         assert_eq!(result.all_passed, expected);
     }
 
@@ -733,7 +1092,7 @@ mod tests {
         let result = doctor_environment(temp_dir.path(), Some(&store)).await;
         let json = serde_json::to_string(&result).unwrap();
 
-        assert!(json.contains("\"checks\""));
+        assert!(json.contains("\"sections\""));
         assert!(json.contains("\"all_passed\""));
         assert!(json.contains("\"store_check\""));
         assert!(json.contains("\"Store initialized\""));
@@ -741,18 +1100,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_binary_on_path_returns_result() {
-        // check_binary_on_path is async and should always return an EnvironmentCheck
-        // (whether or not the binary is installed)
         let result = check_binary_on_path().await;
         assert_eq!(result.name, "Binary on PATH");
-        // We can't guarantee the binary is installed in CI, but it should not panic
         assert!(!result.message.is_empty());
     }
 
     #[tokio::test]
     async fn test_check_embedding_model_cached_missing_dir() {
-        // Both project dir and cache dir point at empty temp dirs,
-        // so there's no config.toml and no cached models.
         let temp_dir = TempDir::new().unwrap();
         let cache_dir = TempDir::new().unwrap();
         let result = check_embedding_model_cached(temp_dir.path(), cache_dir.path()).await;
@@ -760,5 +1114,157 @@ mod tests {
         assert!(!result.passed);
         assert_eq!(result.message, "not cached");
         assert!(result.suggestion.is_some());
+    }
+
+    // --- Group 4: new check functions ---
+
+    #[tokio::test]
+    async fn test_check_config_file_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = check_config_file(temp_dir.path()).await;
+        assert_eq!(result.name, "Config file");
+        assert!(result.passed);
+        assert!(result.message.contains("defaults"));
+    }
+
+    #[tokio::test]
+    async fn test_check_config_file_valid() {
+        let temp_dir = TempDir::new().unwrap();
+        let engramdb_dir = temp_dir.path().join(".engramdb");
+        async_fs::create_dir_all(&engramdb_dir).await.unwrap();
+        async_fs::write(engramdb_dir.join("config.toml"), "")
+            .await
+            .unwrap();
+
+        let result = check_config_file(temp_dir.path()).await;
+        assert_eq!(result.name, "Config file");
+        assert!(result.passed);
+        assert!(result.message.contains("valid"));
+    }
+
+    #[tokio::test]
+    async fn test_check_config_file_invalid_toml() {
+        let temp_dir = TempDir::new().unwrap();
+        let engramdb_dir = temp_dir.path().join(".engramdb");
+        async_fs::create_dir_all(&engramdb_dir).await.unwrap();
+        async_fs::write(engramdb_dir.join("config.toml"), "{{{{not toml")
+            .await
+            .unwrap();
+
+        let result = check_config_file(temp_dir.path()).await;
+        assert_eq!(result.name, "Config file");
+        assert!(!result.passed);
+        assert!(result.message.contains("parse error"));
+    }
+
+    #[test]
+    fn test_check_mcp_config_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = check_mcp_config(temp_dir.path());
+        assert_eq!(result.name, "MCP server configuration");
+        assert!(!result.passed);
+        assert_eq!(result.message, "not configured");
+    }
+
+    #[test]
+    fn test_check_mcp_config_present() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join(".mcp.json"),
+            r#"{"mcpServers": {"engramdb": {}}}"#,
+        )
+        .unwrap();
+
+        let result = check_mcp_config(temp_dir.path());
+        assert_eq!(result.name, "MCP server configuration");
+        assert!(result.passed);
+        assert_eq!(result.message, "configured");
+    }
+
+    #[test]
+    fn test_check_hook_config_returns_result() {
+        let result = check_hook_config();
+        assert_eq!(result.name, "Hook configuration");
+        // Can't guarantee state in CI, but it should not panic
+        assert!(!result.message.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_check_embedding_backend_defaults() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = check_embedding_backend(temp_dir.path()).await;
+        assert_eq!(result.name, "Embedding backend");
+        assert!(result.passed);
+        assert!(result.message.contains("auto"));
+    }
+
+    #[tokio::test]
+    async fn test_build_registry_checks_returns_two_checks() {
+        let temp_dir = TempDir::new().unwrap();
+        let info = load_registry_info(temp_dir.path()).await;
+        let checks = build_registry_checks(&info, None);
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].name, "Registered projects");
+        assert_eq!(checks[1].name, "Current project in registry");
+    }
+
+    #[tokio::test]
+    async fn test_build_registry_checks_shows_memory_count() {
+        let info = RegistryInfo {
+            in_registry: true,
+            total_projects: 1,
+            reachable_projects: 1,
+            loaded: true,
+        };
+        let checks = build_registry_checks(&info, Some(42));
+        let current = &checks[1];
+        assert!(current.passed);
+        assert!(current.message.contains("42 memories"));
+    }
+
+    #[tokio::test]
+    async fn test_build_registry_checks_shows_reachable_count() {
+        let info = RegistryInfo {
+            in_registry: true,
+            total_projects: 5,
+            reachable_projects: 3,
+            loaded: true,
+        };
+        let checks = build_registry_checks(&info, None);
+        assert!(checks[0].message.contains("5 registered"));
+        assert!(checks[0].message.contains("3 reachable"));
+        assert!(checks[0].message.contains("2 stale"));
+        assert!(checks[0].suggestion.as_ref().unwrap().contains("prune"));
+    }
+
+    #[tokio::test]
+    async fn test_build_registry_checks_no_stale_no_hint() {
+        let info = RegistryInfo {
+            in_registry: true,
+            total_projects: 2,
+            reachable_projects: 2,
+            loaded: true,
+        };
+        let checks = build_registry_checks(&info, None);
+        assert!(!checks[0].message.contains("stale"));
+        assert!(checks[0].suggestion.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_project_section_skipped_when_not_initialized() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let result = doctor_environment(temp_dir.path(), None).await;
+        let project_section = result
+            .sections
+            .iter()
+            .find(|s| s.name == "Project")
+            .unwrap();
+        assert_eq!(project_section.checks.len(), 1);
+        assert_eq!(project_section.checks[0].name, "Skipped");
+        assert!(project_section.checks[0].passed);
+        assert!(project_section.checks[0]
+            .message
+            .contains("not initialized"));
     }
 }

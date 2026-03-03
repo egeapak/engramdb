@@ -126,6 +126,44 @@ pub async fn delete_project(
     })
 }
 
+/// Result of pruning stale projects.
+pub struct PruneResult {
+    /// Number of stale entries removed.
+    pub pruned: usize,
+    /// Project IDs that were removed.
+    pub pruned_ids: Vec<String>,
+}
+
+/// Remove all stale (unreachable) projects from the registry and delete their global data.
+pub async fn prune_stale_projects(registry: &dyn RegistryBackend) -> Result<PruneResult> {
+    let mut reg = registry.load().await?;
+    let mut pruned_ids = Vec::new();
+
+    // Partition into reachable and stale
+    let (keep, stale): (Vec<_>, Vec<_>) = reg
+        .projects
+        .into_iter()
+        .partition(|e| Path::new(&e.project_path).join(".engramdb").exists());
+
+    for entry in &stale {
+        pruned_ids.push(entry.project_id.clone());
+
+        // Delete global data directory for this project
+        let global_project_dir = paths::global_data_dir()?
+            .join("projects")
+            .join(&entry.project_id);
+        if global_project_dir.exists() {
+            async_fs::remove_dir_all(&global_project_dir).await?;
+        }
+    }
+
+    let pruned = stale.len();
+    reg.projects = keep;
+    registry.save(&reg).await?;
+
+    Ok(PruneResult { pruned, pruned_ids })
+}
+
 /// Aggregate statistics across all registered projects.
 pub async fn aggregate_stats(registry: &dyn RegistryBackend) -> Result<AggregateStats> {
     let reg = registry.load().await?;
@@ -331,5 +369,55 @@ mod tests {
         // aggregate_stats should never count unreachable projects in reachable count
         let stats = aggregate_stats(&registry).await.unwrap();
         assert!(stats.reachable_projects <= stats.total_projects);
+    }
+
+    #[tokio::test]
+    async fn test_prune_stale_projects_removes_stale() {
+        let registry = InMemoryRegistry::new();
+
+        // Add a reachable project
+        let temp_dir = TempDir::new().unwrap();
+        let _store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        // Add a stale project (path doesn't exist)
+        let mut reg = registry.load().await.unwrap();
+        reg.projects.push(crate::storage::registry::RegistryEntry {
+            project_id: "stale-proj-001".to_string(),
+            project_path: "/nonexistent/path/to/project".to_string(),
+        });
+        registry.save(&reg).await.unwrap();
+
+        assert_eq!(registry.load().await.unwrap().projects.len(), 2);
+
+        let result = prune_stale_projects(&registry).await.unwrap();
+        assert_eq!(result.pruned, 1);
+        assert_eq!(result.pruned_ids, vec!["stale-proj-001"]);
+
+        let remaining = registry.load().await.unwrap();
+        assert_eq!(remaining.projects.len(), 1);
+        assert_ne!(remaining.projects[0].project_id, "stale-proj-001");
+    }
+
+    #[tokio::test]
+    async fn test_prune_stale_projects_nothing_to_prune() {
+        let registry = InMemoryRegistry::new();
+
+        let temp_dir = TempDir::new().unwrap();
+        let _store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        let result = prune_stale_projects(&registry).await.unwrap();
+        assert_eq!(result.pruned, 0);
+        assert!(result.pruned_ids.is_empty());
+
+        // Original entry should still be there
+        assert_eq!(registry.load().await.unwrap().projects.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_prune_stale_projects_empty_registry() {
+        let registry = InMemoryRegistry::new();
+        let result = prune_stale_projects(&registry).await.unwrap();
+        assert_eq!(result.pruned, 0);
+        assert!(result.pruned_ids.is_empty());
     }
 }
