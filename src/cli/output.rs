@@ -171,7 +171,26 @@ impl OutputFormatter {
                     }
 
                     for check in &section.checks {
-                        if check.passed {
+                        use crate::ops::CheckStatus;
+                        let is_info = check.status == Some(CheckStatus::Info);
+
+                        if is_info {
+                            // Informational: dimmed ○ icon
+                            if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                                println!(
+                                    "  {} {}: {}",
+                                    "○".if_supports_color(Stream::Stdout, |text| text.dimmed()),
+                                    check
+                                        .name
+                                        .if_supports_color(Stream::Stdout, |text| text.dimmed()),
+                                    check
+                                        .message
+                                        .if_supports_color(Stream::Stdout, |text| text.dimmed()),
+                                );
+                            } else {
+                                println!("  ○ {}: {}", check.name, check.message);
+                            }
+                        } else if check.passed {
                             if self.use_color && matches!(self.format, OutputFormat::Pretty) {
                                 println!(
                                     "  {} {}: {}",

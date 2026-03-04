@@ -107,6 +107,19 @@ async fn collect_orphans(
     }
 }
 
+/// Visual status for an environment check.
+///
+/// Most checks are binary pass/fail. `Info` is used for purely informational
+/// items that should render with an indicative icon instead of the usual
+/// pass/fail markers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    Pass,
+    Fail,
+    Info,
+}
+
 /// A single environment check result.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EnvironmentCheck {
@@ -114,6 +127,11 @@ pub struct EnvironmentCheck {
     pub passed: bool,
     pub message: String,
     pub suggestion: Option<String>,
+    /// Visual status override. When `None`, the formatter uses `passed` to
+    /// decide between pass and fail icons. Set to `Some(CheckStatus::Info)` for
+    /// informational items that should not appear as failures.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<CheckStatus>,
 }
 
 /// A group of related environment checks under a section heading.
@@ -166,6 +184,7 @@ pub async fn doctor_environment(
         } else {
             Some("Run `engramdb init` to initialize a store".to_string())
         },
+        status: None,
     });
 
     let store_check = if let Some(s) = store {
@@ -183,6 +202,7 @@ pub async fn doctor_environment(
                     } else {
                         Some("Run `engramdb reindex` to repair".to_string())
                     },
+                    status: None,
                 });
                 Some(result)
             }
@@ -192,6 +212,7 @@ pub async fn doctor_environment(
                     passed: false,
                     message: format!("check failed: {}", e),
                     suggestion: Some("Run `engramdb reindex` to repair".to_string()),
+                    status: None,
                 });
                 None
             }
@@ -241,6 +262,7 @@ pub async fn doctor_environment(
                 passed: true,
                 message: "project not initialized or not in registry".to_string(),
                 suggestion: Some("Run `engramdb init` to set up this project".to_string()),
+                status: None,
             }],
         });
     }
@@ -277,6 +299,16 @@ pub async fn doctor_environment(
         checks: registry_checks,
     });
 
+    // --- Gitignore section ---
+    let mut gitignore_checks = vec![check_global_gitignore()];
+    if store_initialized && registry_info.in_registry {
+        gitignore_checks.push(check_project_gitignore(dir));
+    }
+    sections.push(DoctorSection {
+        name: "Gitignore".to_string(),
+        checks: gitignore_checks,
+    });
+
     let all_passed = sections.iter().flat_map(|s| &s.checks).all(|c| c.passed);
 
     EnvironmentDoctorResult {
@@ -300,6 +332,7 @@ async fn check_binary_on_path() -> EnvironmentCheck {
                 passed: true,
                 message: version,
                 suggestion: None,
+                status: None,
             }
         }
         _ => EnvironmentCheck {
@@ -307,6 +340,7 @@ async fn check_binary_on_path() -> EnvironmentCheck {
             passed: false,
             message: "not found".to_string(),
             suggestion: Some("Install with `brew install engramdb`".to_string()),
+            status: None,
         },
     }
 }
@@ -337,6 +371,7 @@ fn check_claude_plugin() -> EnvironmentCheck {
         } else {
             Some("Install with `claude plugin add https://github.com/egeapak/engramdb`".to_string())
         },
+        status: None,
     }
 }
 
@@ -401,6 +436,7 @@ async fn check_config_file(dir: &Path) -> EnvironmentCheck {
             passed: true,
             message: "not present (using defaults)".to_string(),
             suggestion: None,
+            status: None,
         };
     }
     match crate::storage::config::load_config(&config_path).await {
@@ -410,12 +446,14 @@ async fn check_config_file(dir: &Path) -> EnvironmentCheck {
                 passed: true,
                 message: ".engramdb/config.toml valid".to_string(),
                 suggestion: None,
+                status: None,
             },
             Err(e) => EnvironmentCheck {
                 name: "Config file".to_string(),
                 passed: false,
                 message: format!("invalid values: {}", e),
                 suggestion: Some("Fix the values in .engramdb/config.toml".to_string()),
+                status: None,
             },
         },
         Err(e) => EnvironmentCheck {
@@ -423,6 +461,7 @@ async fn check_config_file(dir: &Path) -> EnvironmentCheck {
             passed: false,
             message: format!("parse error: {}", e),
             suggestion: Some("Fix the syntax in .engramdb/config.toml".to_string()),
+            status: None,
         },
     }
 }
@@ -448,6 +487,7 @@ fn check_hook_config() -> EnvironmentCheck {
         } else {
             Some("Install the Claude Code plugin to configure hooks automatically".to_string())
         },
+        status: None,
     }
 }
 
@@ -466,6 +506,7 @@ async fn check_embedding_backend(dir: &Path) -> EnvironmentCheck {
             config.embeddings.backend, config.embeddings.provider
         ),
         suggestion: None,
+        status: None,
     }
 }
 
@@ -489,6 +530,7 @@ async fn check_ollama_connectivity(dir: &Path) -> EnvironmentCheck {
                 passed: !ollama_is_backend,
                 message: "HTTP client error".to_string(),
                 suggestion: Some("Check reqwest/TLS configuration".to_string()),
+                status: None,
             };
         }
     };
@@ -499,6 +541,7 @@ async fn check_ollama_connectivity(dir: &Path) -> EnvironmentCheck {
             passed: true,
             message: "reachable at http://localhost:11434".to_string(),
             suggestion: None,
+            status: None,
         },
         _ => {
             if ollama_is_backend {
@@ -509,6 +552,7 @@ async fn check_ollama_connectivity(dir: &Path) -> EnvironmentCheck {
                     suggestion: Some(
                         "Start Ollama with `ollama serve` or check connection".to_string(),
                     ),
+                    status: None,
                 }
             } else {
                 EnvironmentCheck {
@@ -516,6 +560,7 @@ async fn check_ollama_connectivity(dir: &Path) -> EnvironmentCheck {
                     passed: true,
                     message: "unreachable (not configured as backend)".to_string(),
                     suggestion: None,
+                    status: None,
                 }
             }
         }
@@ -535,12 +580,14 @@ fn build_registry_checks(
             passed: true,
             message: "registry unavailable".to_string(),
             suggestion: None,
+            status: None,
         });
         checks.push(EnvironmentCheck {
             name: "Current project in registry".to_string(),
             passed: false,
             message: "registry unavailable".to_string(),
             suggestion: Some("Run `engramdb init` to register this project".to_string()),
+            status: None,
         });
         return checks;
     }
@@ -566,6 +613,7 @@ fn build_registry_checks(
         } else {
             None
         },
+        status: None,
     });
 
     let current_msg = if info.in_registry {
@@ -585,6 +633,7 @@ fn build_registry_checks(
         } else {
             Some("Run `engramdb init` to register this project".to_string())
         },
+        status: None,
     });
 
     checks
@@ -646,6 +695,7 @@ async fn check_manifest_stats(dir: &Path, store: &MemoryStore) -> EnvironmentChe
                 passed: false,
                 message: format!("failed to load manifest: {}", e),
                 suggestion: Some("Run `engramdb reindex` to regenerate manifest".to_string()),
+                status: None,
             };
         }
     };
@@ -658,6 +708,7 @@ async fn check_manifest_stats(dir: &Path, store: &MemoryStore) -> EnvironmentChe
                 passed: false,
                 message: format!("failed to count memories: {}", e),
                 suggestion: Some("Run `engramdb reindex` to repair".to_string()),
+                status: None,
             };
         }
     };
@@ -669,6 +720,7 @@ async fn check_manifest_stats(dir: &Path, store: &MemoryStore) -> EnvironmentChe
             passed: true,
             message: format!("memory_count {} matches index", manifest_count),
             suggestion: None,
+            status: None,
         }
     } else {
         EnvironmentCheck {
@@ -679,6 +731,7 @@ async fn check_manifest_stats(dir: &Path, store: &MemoryStore) -> EnvironmentChe
                 manifest_count, actual_count
             ),
             suggestion: Some("Run `engramdb reindex` to fix".to_string()),
+            status: None,
         }
     }
 }
@@ -693,6 +746,7 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
                 passed: true,
                 message: "could not determine data dir".to_string(),
                 suggestion: None,
+                status: None,
             };
         }
     };
@@ -703,6 +757,7 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
             passed: true,
             message: "no lock file".to_string(),
             suggestion: None,
+            status: None,
         };
     }
 
@@ -721,6 +776,7 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
                     passed: true,
                     message: "no active writer".to_string(),
                     suggestion: None,
+                    status: None,
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => EnvironmentCheck {
@@ -728,12 +784,14 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
                 passed: true,
                 message: "write lock held by active process".to_string(),
                 suggestion: None,
+                status: None,
             },
             Err(e) => EnvironmentCheck {
                 name: "Write lock".to_string(),
                 passed: false,
                 message: format!("lock check failed: {}", e),
                 suggestion: Some("Remove stale lock file or investigate the error".to_string()),
+                status: None,
             },
         },
         Err(e) => EnvironmentCheck {
@@ -741,6 +799,7 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
             passed: false,
             message: format!("could not open lock file: {}", e),
             suggestion: Some("Check file permissions on the lock file".to_string()),
+            status: None,
         },
     }
 }
@@ -755,6 +814,7 @@ async fn check_chunk_orphans(store: &MemoryStore) -> EnvironmentCheck {
                 passed: false,
                 message: format!("failed to list memory ids: {}", e),
                 suggestion: Some("Run `engramdb reindex` to repair".to_string()),
+                status: None,
             };
         }
     };
@@ -767,6 +827,7 @@ async fn check_chunk_orphans(store: &MemoryStore) -> EnvironmentCheck {
                 passed: false,
                 message: format!("failed to list chunk memory_ids: {}", e),
                 suggestion: Some("Run `engramdb reindex` to repair".to_string()),
+                status: None,
             };
         }
     };
@@ -785,6 +846,7 @@ async fn check_chunk_orphans(store: &MemoryStore) -> EnvironmentCheck {
             passed: true,
             message: format!("{} chunk memory_ids, no orphans", chunk_ids.len()),
             suggestion: None,
+            status: None,
         }
     } else {
         EnvironmentCheck {
@@ -795,6 +857,7 @@ async fn check_chunk_orphans(store: &MemoryStore) -> EnvironmentCheck {
                 orphans.len()
             ),
             suggestion: Some("Run `engramdb reindex` to clean up orphaned chunks".to_string()),
+            status: None,
         }
     }
 }
@@ -812,6 +875,7 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
                 suggestion: Some(
                     "Add engramdb to .mcp.json, or install the Claude Code plugin".to_string(),
                 ),
+                status: None,
             };
         }
     };
@@ -824,6 +888,7 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
                 passed: false,
                 message: format!("invalid JSON: {}", e),
                 suggestion: Some("Fix the JSON syntax in .mcp.json".to_string()),
+                status: None,
             };
         }
     };
@@ -838,6 +903,7 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
                 suggestion: Some(
                     "Add an 'mcpServers' object containing an 'engramdb' entry".to_string(),
                 ),
+                status: None,
             };
         }
     };
@@ -850,6 +916,7 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
                 passed: false,
                 message: "missing 'mcpServers.engramdb' key".to_string(),
                 suggestion: Some("Add an 'engramdb' entry under 'mcpServers'".to_string()),
+                status: None,
             };
         }
     };
@@ -876,6 +943,7 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
                     passed: false,
                     message: format!("command '{}' not found on disk or PATH", cmd),
                     suggestion: Some("Check the 'command' path in .mcp.json".to_string()),
+                    status: None,
                 };
             }
         }
@@ -887,6 +955,7 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
             suggestion: Some(
                 "Add a 'command' string to mcpServers.engramdb in .mcp.json".to_string(),
             ),
+            status: None,
         };
     }
 
@@ -898,6 +967,7 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
                 passed: false,
                 message: "'args' field is not an array".to_string(),
                 suggestion: Some("Set 'args' to an array of strings in .mcp.json".to_string()),
+                status: None,
             };
         }
     }
@@ -908,6 +978,7 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
         passed: true,
         message: "configured and valid".to_string(),
         suggestion: None,
+        status: None,
     }
 }
 
@@ -930,6 +1001,7 @@ async fn check_global_disk_usage() -> EnvironmentCheck {
             format_bytes(cache_size)
         ),
         suggestion: None,
+        status: None,
     }
 }
 
@@ -955,6 +1027,7 @@ async fn check_project_disk_usage(dir: &Path, project_id: &str) -> EnvironmentCh
             format_bytes(personal_size)
         ),
         suggestion: None,
+        status: None,
     }
 }
 
@@ -992,6 +1065,146 @@ async fn check_embedding_model_cached(dir: &Path, cache_dir: &Path) -> Environme
         } else {
             Some("Run `engramdb init` to download the embedding model".to_string())
         },
+        status: None,
+    }
+}
+
+/// Check if `.engramdb` is in the user's global git excludes file.
+///
+/// This is a notification (not a warning) — users can opt in by running
+/// `git config --global core.excludesFile` and adding `.engramdb` to that file.
+fn check_global_gitignore() -> EnvironmentCheck {
+    // 1. Determine the global excludes file path
+    let excludes_path = std::process::Command::new("git")
+        .args(["config", "--global", "core.excludesFile"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if p.is_empty() {
+                None
+            } else {
+                // Expand ~ to home directory
+                if p.starts_with("~/") {
+                    dirs::home_dir().map(|h| h.join(&p[2..]))
+                } else {
+                    Some(PathBuf::from(p))
+                }
+            }
+        })
+        .or_else(|| {
+            // Default location: $XDG_CONFIG_HOME/git/ignore or ~/.config/git/ignore
+            dirs::config_dir().map(|c| c.join("git").join("ignore"))
+        });
+
+    let Some(excludes_path) = excludes_path else {
+        return EnvironmentCheck {
+            name: "Global gitignore".to_string(),
+            passed: true,
+            message: "no global excludes file configured".to_string(),
+            suggestion: Some(
+                "Run `git config --global core.excludesFile ~/.config/git/ignore` \
+                 and add .engramdb to ignore it globally"
+                    .to_string(),
+            ),
+            status: Some(CheckStatus::Info),
+        };
+    };
+
+    let content = std::fs::read_to_string(&excludes_path).unwrap_or_default();
+    let has_engramdb = content
+        .lines()
+        .any(|line| line.trim() == ".engramdb" || line.trim() == ".engramdb/");
+
+    if has_engramdb {
+        EnvironmentCheck {
+            name: "Global gitignore".to_string(),
+            passed: true,
+            message: ".engramdb ignored globally".to_string(),
+            suggestion: None,
+            status: None,
+        }
+    } else {
+        EnvironmentCheck {
+            name: "Global gitignore".to_string(),
+            passed: true,
+            message: ".engramdb not in global excludes".to_string(),
+            suggestion: Some(format!(
+                "Add .engramdb to {} to ignore it in all repositories",
+                excludes_path.display()
+            )),
+            status: Some(CheckStatus::Info),
+        }
+    }
+}
+
+/// Check `.gitignore` status for `.engramdb` in the current project.
+///
+/// Reports whether `.engramdb` is ignored, explicitly allowed via `!.engramdb/`,
+/// or not mentioned. Always passes — this is informational, showing the current
+/// state with an indicative style.
+fn check_project_gitignore(dir: &Path) -> EnvironmentCheck {
+    let gitignore_path = dir.join(".gitignore");
+    if !gitignore_path.exists() {
+        return EnvironmentCheck {
+            name: "Project .gitignore".to_string(),
+            passed: true,
+            message: "no .gitignore file".to_string(),
+            suggestion: None,
+            status: Some(CheckStatus::Info),
+        };
+    }
+
+    let content = match std::fs::read_to_string(&gitignore_path) {
+        Ok(c) => c,
+        Err(_) => {
+            return EnvironmentCheck {
+                name: "Project .gitignore".to_string(),
+                passed: true,
+                message: "could not read .gitignore".to_string(),
+                suggestion: None,
+                status: Some(CheckStatus::Info),
+            };
+        }
+    };
+
+    let is_ignored = content.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed == ".engramdb" || trimmed == ".engramdb/" || trimmed == "/.engramdb"
+    });
+    let is_negated = content.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed == "!.engramdb" || trimmed == "!.engramdb/" || trimmed == "!/.engramdb"
+    });
+
+    if is_negated {
+        EnvironmentCheck {
+            name: "Project .gitignore".to_string(),
+            passed: true,
+            message: ".engramdb explicitly included (!.engramdb/)".to_string(),
+            suggestion: None,
+            status: Some(CheckStatus::Info),
+        }
+    } else if is_ignored {
+        EnvironmentCheck {
+            name: "Project .gitignore".to_string(),
+            passed: true,
+            message: ".engramdb ignored by project".to_string(),
+            suggestion: Some(
+                "Add !.engramdb/ to .gitignore to opt in to sharing memories via git".to_string(),
+            ),
+            status: Some(CheckStatus::Info),
+        }
+    } else {
+        // Not mentioned at all — might be caught by global ignore or not ignored
+        EnvironmentCheck {
+            name: "Project .gitignore".to_string(),
+            passed: true,
+            message: ".engramdb not mentioned in .gitignore".to_string(),
+            suggestion: None,
+            status: Some(CheckStatus::Info),
+        }
     }
 }
 
@@ -1902,5 +2115,66 @@ mod tests {
         );
         // Global disk usage is always present
         assert!(names.contains(&"Global disk usage"));
+    }
+
+    #[test]
+    fn test_check_project_gitignore_no_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = check_project_gitignore(temp_dir.path());
+        assert!(result.passed);
+        assert_eq!(result.status, Some(CheckStatus::Info));
+        assert!(result.message.contains("no .gitignore"));
+    }
+
+    #[test]
+    fn test_check_project_gitignore_ignored() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join(".gitignore"), ".engramdb\n").unwrap();
+        let result = check_project_gitignore(temp_dir.path());
+        assert!(result.passed);
+        assert_eq!(result.status, Some(CheckStatus::Info));
+        assert!(result.message.contains("ignored by project"));
+    }
+
+    #[test]
+    fn test_check_project_gitignore_negated() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join(".gitignore"),
+            ".engramdb\n!.engramdb/\n",
+        )
+        .unwrap();
+        let result = check_project_gitignore(temp_dir.path());
+        assert!(result.passed);
+        assert_eq!(result.status, Some(CheckStatus::Info));
+        assert!(result.message.contains("explicitly included"));
+    }
+
+    #[test]
+    fn test_check_project_gitignore_not_mentioned() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join(".gitignore"), "target/\n*.log\n").unwrap();
+        let result = check_project_gitignore(temp_dir.path());
+        assert!(result.passed);
+        assert_eq!(result.status, Some(CheckStatus::Info));
+        assert!(result.message.contains("not mentioned"));
+    }
+
+    #[test]
+    fn test_check_global_gitignore_runs() {
+        // Just verify it doesn't panic — actual global state varies
+        let result = check_global_gitignore();
+        assert!(result.passed);
+    }
+
+    #[tokio::test]
+    async fn test_environment_has_gitignore_section() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = doctor_environment(temp_dir.path(), None).await;
+        let section_names: Vec<&str> = result.sections.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            section_names.contains(&"Gitignore"),
+            "missing Gitignore section"
+        );
     }
 }
