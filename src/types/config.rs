@@ -544,6 +544,30 @@ impl EngramConfig {
             anyhow::bail!("scoring.challenge_penalty must be in [0.0, 1.0]");
         }
 
+        if self.embeddings.dimensions == 0 || self.embeddings.dimensions > 4096 {
+            anyhow::bail!(
+                "embeddings.dimensions ({}) must be in (0, 4096]",
+                self.embeddings.dimensions
+            );
+        }
+
+        if self.retrieval.max_results == 0 {
+            anyhow::bail!("retrieval.max_results must be > 0");
+        }
+
+        if !(0.0..=1.0).contains(&self.thresholds.gc) {
+            anyhow::bail!(
+                "thresholds.gc ({}) must be in [0.0, 1.0]",
+                self.thresholds.gc
+            );
+        }
+        if !(0.0..=1.0).contains(&self.thresholds.compress) {
+            anyhow::bail!(
+                "thresholds.compress ({}) must be in [0.0, 1.0]",
+                self.thresholds.compress
+            );
+        }
+
         // Config migration: if search threshold is > 1.0, it was set for the
         // old unbounded scoring scale. Warn and treat as if it were 1.0.
         if self.search.threshold > 1.0 {

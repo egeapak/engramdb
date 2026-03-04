@@ -532,6 +532,33 @@ impl LanceIndex {
         Ok(())
     }
 
+    /// List all distinct memory_ids present in the chunks table.
+    pub async fn list_chunk_memory_ids(&self) -> Result<Vec<String>> {
+        let table = self.open_chunks_table().await?;
+
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec!["memory_id".into()]))
+            .execute()
+            .await
+            .context("Failed to query chunks table for memory_ids")?;
+
+        let mut ids = std::collections::HashSet::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read chunk batch")?;
+            let id_col = batch
+                .column_by_name("memory_id")
+                .context("Missing 'memory_id' column in chunks")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("Failed to cast 'memory_id'")?;
+            for i in 0..batch.num_rows() {
+                ids.insert(id_col.value(i).to_string());
+            }
+        }
+        Ok(ids.into_iter().collect())
+    }
+
     /// Delete all chunks for a given memory_id.
     pub async fn delete_chunks(&self, memory_id: &str) -> Result<()> {
         let table = self.open_chunks_table().await?;

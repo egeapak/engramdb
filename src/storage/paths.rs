@@ -49,6 +49,9 @@ pub fn global_config_dir() -> Result<PathBuf> {
 ///
 /// Used for per-project personal memories and LanceDB indices.
 pub fn global_data_dir() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("ENGRAMDB_DATA_DIR") {
+        return Ok(PathBuf::from(path));
+    }
     dirs::data_dir()
         .ok_or_else(|| StorageError::Validation("Could not determine data directory".to_string()))
         .map(|p| p.join("engramdb"))

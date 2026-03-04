@@ -464,6 +464,13 @@ impl MemoryStore {
             .map_err(|e| StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e)))
     }
 
+    /// List all distinct memory_ids present in the chunks table.
+    pub async fn list_chunk_memory_ids(&self) -> Result<Vec<String>> {
+        self.lance_index.list_chunk_memory_ids().await.map_err(|e| {
+            StorageError::Validation(format!("LanceDB list_chunk_memory_ids failed: {}", e))
+        })
+    }
+
     /// Perform vector similarity search.
     pub async fn vector_search(&self, query: Vec<f32>, limit: usize) -> Result<Vec<VectorMatch>> {
         self.lance_index

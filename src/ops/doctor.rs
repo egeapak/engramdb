@@ -2,7 +2,7 @@
 
 use crate::storage::MemoryStore;
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::fs as async_fs;
 
 /// Result of a doctor/health check operation.
@@ -199,6 +199,20 @@ pub async fn doctor_environment(
     } else {
         None
     };
+
+    // Manifest stats check (gated on store)
+    if let Some(s) = store {
+        system_checks.push(check_manifest_stats(dir, s).await);
+    }
+
+    // Chunk orphans check (gated on store)
+    if let Some(s) = store {
+        system_checks.push(check_chunk_orphans(s).await);
+    }
+
+    // Global disk usage (informational)
+    system_checks.push(check_global_disk_usage().await);
+
     sections.push(DoctorSection {
         name: "System".to_string(),
         checks: system_checks,
@@ -209,9 +223,12 @@ pub async fn doctor_environment(
 
     // --- Project section ---
     if store_initialized && registry_info.in_registry {
+        let project_id = crate::storage::project_id::compute_project_id(dir);
         let mut project_checks = Vec::new();
         project_checks.push(check_config_file(dir).await);
-        project_checks.push(check_mcp_config(dir));
+        project_checks.push(check_mcp_config_deep(dir));
+        project_checks.push(check_write_lock(&project_id).await);
+        project_checks.push(check_project_disk_usage(dir, &project_id).await);
         sections.push(DoctorSection {
             name: "Project".to_string(),
             checks: project_checks,
@@ -410,30 +427,6 @@ async fn check_config_file(dir: &Path) -> EnvironmentCheck {
     }
 }
 
-/// Check if project `.mcp.json` exists and references engramdb.
-fn check_mcp_config(dir: &Path) -> EnvironmentCheck {
-    let mcp_path = dir.join(".mcp.json");
-    let found = std::fs::read_to_string(&mcp_path)
-        .ok()
-        .map(|contents| contents.contains("engramdb"))
-        .unwrap_or(false);
-
-    EnvironmentCheck {
-        name: "MCP server configuration".to_string(),
-        passed: found,
-        message: if found {
-            "configured".to_string()
-        } else {
-            "not configured".to_string()
-        },
-        suggestion: if found {
-            None
-        } else {
-            Some("Add engramdb to .mcp.json, or install the Claude Code plugin".to_string())
-        },
-    }
-}
-
 /// Check `~/.claude/settings.json` for engramdb hook configuration.
 fn check_hook_config() -> EnvironmentCheck {
     let found = dirs::home_dir()
@@ -595,6 +588,374 @@ fn build_registry_checks(
     });
 
     checks
+}
+
+/// Recursively compute the total size of a directory in bytes.
+///
+/// Walks all files (not following symlinks), summing `metadata().len()`.
+/// Returns 0 if the directory doesn't exist or is unreadable.
+async fn dir_size(path: &Path) -> u64 {
+    if !path.exists() {
+        return 0;
+    }
+    let mut total = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(mut entries) = async_fs::read_dir(&dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let Ok(meta) = entry.metadata().await else {
+                continue;
+            };
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else {
+                total += meta.len();
+            }
+        }
+    }
+    total
+}
+
+/// Format a byte count as a human-readable string (KB/MB/GB).
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+/// Check manifest stats against actual store count.
+async fn check_manifest_stats(dir: &Path, store: &MemoryStore) -> EnvironmentCheck {
+    let manifest_path = dir.join(".engramdb").join("manifest.toml");
+    let manifest = match crate::storage::manifest::load_manifest(&manifest_path).await {
+        Ok(m) => m,
+        Err(e) => {
+            return EnvironmentCheck {
+                name: "Manifest stats".to_string(),
+                passed: false,
+                message: format!("failed to load manifest: {}", e),
+                suggestion: Some("Run `engramdb reindex` to regenerate manifest".to_string()),
+            };
+        }
+    };
+
+    let actual_count = match store.count().await {
+        Ok(c) => c,
+        Err(e) => {
+            return EnvironmentCheck {
+                name: "Manifest stats".to_string(),
+                passed: false,
+                message: format!("failed to count memories: {}", e),
+                suggestion: Some("Run `engramdb reindex` to repair".to_string()),
+            };
+        }
+    };
+
+    let manifest_count = manifest.stats.memory_count;
+    if manifest_count == actual_count {
+        EnvironmentCheck {
+            name: "Manifest stats".to_string(),
+            passed: true,
+            message: format!("memory_count {} matches index", manifest_count),
+            suggestion: None,
+        }
+    } else {
+        EnvironmentCheck {
+            name: "Manifest stats".to_string(),
+            passed: false,
+            message: format!(
+                "manifest says {} memories, index has {}",
+                manifest_count, actual_count
+            ),
+            suggestion: Some("Run `engramdb reindex` to fix".to_string()),
+        }
+    }
+}
+
+/// Check for stale write locks.
+async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
+    let lock_path = match crate::storage::paths::global_data_dir() {
+        Ok(d) => d.join("projects").join(project_id).join("write.lock"),
+        Err(_) => {
+            return EnvironmentCheck {
+                name: "Write lock".to_string(),
+                passed: true,
+                message: "could not determine data dir".to_string(),
+                suggestion: None,
+            };
+        }
+    };
+
+    if !lock_path.exists() {
+        return EnvironmentCheck {
+            name: "Write lock".to_string(),
+            passed: true,
+            message: "no lock file".to_string(),
+            suggestion: None,
+        };
+    }
+
+    // Try to acquire an exclusive lock (non-blocking)
+    use fs4::fs_std::FileExt;
+    match std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+    {
+        Ok(file) => match file.try_lock_exclusive() {
+            Ok(()) => {
+                let _ = file.unlock();
+                EnvironmentCheck {
+                    name: "Write lock".to_string(),
+                    passed: true,
+                    message: "no active writer".to_string(),
+                    suggestion: None,
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => EnvironmentCheck {
+                name: "Write lock".to_string(),
+                passed: true,
+                message: "write lock held by active process".to_string(),
+                suggestion: None,
+            },
+            Err(e) => EnvironmentCheck {
+                name: "Write lock".to_string(),
+                passed: false,
+                message: format!("lock check failed: {}", e),
+                suggestion: Some("Remove stale lock file or investigate the error".to_string()),
+            },
+        },
+        Err(e) => EnvironmentCheck {
+            name: "Write lock".to_string(),
+            passed: false,
+            message: format!("could not open lock file: {}", e),
+            suggestion: Some("Check file permissions on the lock file".to_string()),
+        },
+    }
+}
+
+/// Check for orphaned chunks (chunk memory_ids not in the memories table).
+async fn check_chunk_orphans(store: &MemoryStore) -> EnvironmentCheck {
+    let memory_ids = match store.list_ids().await {
+        Ok(ids) => ids,
+        Err(e) => {
+            return EnvironmentCheck {
+                name: "Chunk index integrity".to_string(),
+                passed: false,
+                message: format!("failed to list memory ids: {}", e),
+                suggestion: Some("Run `engramdb reindex` to repair".to_string()),
+            };
+        }
+    };
+
+    let chunk_ids = match store.list_chunk_memory_ids().await {
+        Ok(ids) => ids,
+        Err(e) => {
+            return EnvironmentCheck {
+                name: "Chunk index integrity".to_string(),
+                passed: false,
+                message: format!("failed to list chunk memory_ids: {}", e),
+                suggestion: Some("Run `engramdb reindex` to repair".to_string()),
+            };
+        }
+    };
+
+    let memory_set: std::collections::HashSet<&str> =
+        memory_ids.iter().map(|s| s.as_str()).collect();
+    let orphans: Vec<&str> = chunk_ids
+        .iter()
+        .filter(|id| !memory_set.contains(id.as_str()))
+        .map(|s| s.as_str())
+        .collect();
+
+    if orphans.is_empty() {
+        EnvironmentCheck {
+            name: "Chunk index integrity".to_string(),
+            passed: true,
+            message: format!("{} chunk memory_ids, no orphans", chunk_ids.len()),
+            suggestion: None,
+        }
+    } else {
+        EnvironmentCheck {
+            name: "Chunk index integrity".to_string(),
+            passed: false,
+            message: format!(
+                "{} orphaned chunk memory_id(s) not in memories table",
+                orphans.len()
+            ),
+            suggestion: Some("Run `engramdb reindex` to clean up orphaned chunks".to_string()),
+        }
+    }
+}
+
+/// Deep validation of `.mcp.json` — parses JSON and checks structure.
+fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
+    let mcp_path = dir.join(".mcp.json");
+    let content = match std::fs::read_to_string(&mcp_path) {
+        Ok(c) => c,
+        Err(_) => {
+            return EnvironmentCheck {
+                name: "MCP server configuration".to_string(),
+                passed: false,
+                message: ".mcp.json not found".to_string(),
+                suggestion: Some(
+                    "Add engramdb to .mcp.json, or install the Claude Code plugin".to_string(),
+                ),
+            };
+        }
+    };
+
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            return EnvironmentCheck {
+                name: "MCP server configuration".to_string(),
+                passed: false,
+                message: format!("invalid JSON: {}", e),
+                suggestion: Some("Fix the JSON syntax in .mcp.json".to_string()),
+            };
+        }
+    };
+
+    let servers = match json.get("mcpServers") {
+        Some(s) => s,
+        None => {
+            return EnvironmentCheck {
+                name: "MCP server configuration".to_string(),
+                passed: false,
+                message: "missing 'mcpServers' key".to_string(),
+                suggestion: Some(
+                    "Add an 'mcpServers' object containing an 'engramdb' entry".to_string(),
+                ),
+            };
+        }
+    };
+
+    let engramdb = match servers.get("engramdb") {
+        Some(e) => e,
+        None => {
+            return EnvironmentCheck {
+                name: "MCP server configuration".to_string(),
+                passed: false,
+                message: "missing 'mcpServers.engramdb' key".to_string(),
+                suggestion: Some("Add an 'engramdb' entry under 'mcpServers'".to_string()),
+            };
+        }
+    };
+
+    // Check command field
+    if let Some(cmd) = engramdb.get("command").and_then(|v| v.as_str()) {
+        // Resolve the binary path — check if it exists
+        let cmd_path = PathBuf::from(cmd);
+        let resolved = if cmd_path.is_absolute() {
+            cmd_path
+        } else {
+            dir.join(&cmd_path)
+        };
+        if !resolved.exists() {
+            // It might be on PATH, check with which
+            let on_path = std::process::Command::new("which")
+                .arg(cmd)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !on_path {
+                return EnvironmentCheck {
+                    name: "MCP server configuration".to_string(),
+                    passed: false,
+                    message: format!("command '{}' not found on disk or PATH", cmd),
+                    suggestion: Some("Check the 'command' path in .mcp.json".to_string()),
+                };
+            }
+        }
+    } else {
+        return EnvironmentCheck {
+            name: "MCP server configuration".to_string(),
+            passed: false,
+            message: "missing or invalid 'command' field".to_string(),
+            suggestion: Some(
+                "Add a 'command' string to mcpServers.engramdb in .mcp.json".to_string(),
+            ),
+        };
+    }
+
+    // Check args field
+    if let Some(args) = engramdb.get("args") {
+        if !args.is_array() {
+            return EnvironmentCheck {
+                name: "MCP server configuration".to_string(),
+                passed: false,
+                message: "'args' field is not an array".to_string(),
+                suggestion: Some("Set 'args' to an array of strings in .mcp.json".to_string()),
+            };
+        }
+    }
+    // args is optional, so missing is fine
+
+    EnvironmentCheck {
+        name: "MCP server configuration".to_string(),
+        passed: true,
+        message: "configured and valid".to_string(),
+        suggestion: None,
+    }
+}
+
+/// Report global disk usage (all projects + model cache). Always passes (informational).
+async fn check_global_disk_usage() -> EnvironmentCheck {
+    let data_dir =
+        crate::storage::paths::global_data_dir().unwrap_or_else(|_| PathBuf::from("/nonexistent"));
+    let cache_dir =
+        crate::storage::paths::model_cache_dir().unwrap_or_else(|_| PathBuf::from("/nonexistent"));
+
+    let data_size = dir_size(&data_dir).await;
+    let cache_size = dir_size(&cache_dir).await;
+
+    EnvironmentCheck {
+        name: "Global disk usage".to_string(),
+        passed: true,
+        message: format!(
+            "data: {}, model cache: {}",
+            format_bytes(data_size),
+            format_bytes(cache_size)
+        ),
+        suggestion: None,
+    }
+}
+
+/// Report project-specific disk usage. Always passes (informational).
+async fn check_project_disk_usage(dir: &Path, project_id: &str) -> EnvironmentCheck {
+    let shared_dir = dir.join(".engramdb").join("memories");
+    let lancedb_dir = crate::storage::paths::lancedb_dir(project_id)
+        .unwrap_or_else(|_| PathBuf::from("/nonexistent"));
+    let personal_dir = crate::storage::paths::personal_memories_dir(project_id)
+        .unwrap_or_else(|_| PathBuf::from("/nonexistent"));
+
+    let shared_size = dir_size(&shared_dir).await;
+    let lance_size = dir_size(&lancedb_dir).await;
+    let personal_size = dir_size(&personal_dir).await;
+
+    EnvironmentCheck {
+        name: "Project disk usage".to_string(),
+        passed: true,
+        message: format!(
+            "shared: {}, index: {}, personal: {}",
+            format_bytes(shared_size),
+            format_bytes(lance_size),
+            format_bytes(personal_size)
+        ),
+        suggestion: None,
+    }
 }
 
 /// Check if the embedding model is cached on disk.
@@ -1158,27 +1519,101 @@ mod tests {
     }
 
     #[test]
-    fn test_check_mcp_config_missing() {
+    fn test_check_mcp_config_deep_missing() {
         let temp_dir = TempDir::new().unwrap();
-        let result = check_mcp_config(temp_dir.path());
+        let result = check_mcp_config_deep(temp_dir.path());
         assert_eq!(result.name, "MCP server configuration");
         assert!(!result.passed);
-        assert_eq!(result.message, "not configured");
+        assert!(result.message.contains("not found"));
     }
 
     #[test]
-    fn test_check_mcp_config_present() {
+    fn test_check_mcp_config_deep_invalid_json() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join(".mcp.json"), "not json {{{").unwrap();
+
+        let result = check_mcp_config_deep(temp_dir.path());
+        assert!(!result.passed);
+        assert!(result.message.contains("invalid JSON"));
+    }
+
+    #[test]
+    fn test_check_mcp_config_deep_missing_servers_key() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join(".mcp.json"), r#"{"other": {}}"#).unwrap();
+
+        let result = check_mcp_config_deep(temp_dir.path());
+        assert!(!result.passed);
+        assert!(result.message.contains("mcpServers"));
+    }
+
+    #[test]
+    fn test_check_mcp_config_deep_missing_engramdb_key() {
         let temp_dir = TempDir::new().unwrap();
         std::fs::write(
             temp_dir.path().join(".mcp.json"),
-            r#"{"mcpServers": {"engramdb": {}}}"#,
+            r#"{"mcpServers": {"other": {}}}"#,
         )
         .unwrap();
 
-        let result = check_mcp_config(temp_dir.path());
+        let result = check_mcp_config_deep(temp_dir.path());
+        assert!(!result.passed);
+        assert!(result.message.contains("engramdb"));
+    }
+
+    #[test]
+    fn test_check_mcp_config_deep_valid() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join(".mcp.json"),
+            r#"{"mcpServers": {"engramdb": {"command": "engramdb", "args": ["serve", "--stdio"]}}}"#,
+        )
+        .unwrap();
+
+        let result = check_mcp_config_deep(temp_dir.path());
         assert_eq!(result.name, "MCP server configuration");
-        assert!(result.passed);
-        assert_eq!(result.message, "configured");
+        // May not pass if engramdb isn't on PATH in CI, but validates structure
+        // Just check it got past the JSON validation
+        assert!(
+            result.passed || result.message.contains("not found"),
+            "unexpected: {}",
+            result.message
+        );
+    }
+
+    #[test]
+    fn test_check_mcp_config_deep_missing_command() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join(".mcp.json"),
+            r#"{"mcpServers": {"engramdb": {"args": ["serve"]}}}"#,
+        )
+        .unwrap();
+
+        let result = check_mcp_config_deep(temp_dir.path());
+        assert!(!result.passed);
+        assert!(result.message.contains("command"));
+    }
+
+    #[test]
+    fn test_check_mcp_config_deep_args_not_array() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join(".mcp.json"),
+            r#"{"mcpServers": {"engramdb": {"command": "engramdb", "args": "not-array"}}}"#,
+        )
+        .unwrap();
+
+        let result = check_mcp_config_deep(temp_dir.path());
+        // engramdb might not be on PATH, so check it either fails on args or on command
+        if result.passed {
+            panic!("should fail with non-array args");
+        }
+        assert!(
+            result.message.contains("args") || result.message.contains("not found"),
+            "unexpected: {}",
+            result.message
+        );
     }
 
     #[test]
@@ -1266,5 +1701,206 @@ mod tests {
         assert!(project_section.checks[0]
             .message
             .contains("not initialized"));
+    }
+
+    // --- Group 5: new health checks ---
+
+    #[test]
+    fn test_format_bytes() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(1024 * 1024), "1.0 MB");
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GB");
+        assert_eq!(
+            format_bytes(1024 * 1024 * 1024 + 512 * 1024 * 1024),
+            "1.5 GB"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dir_size_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let size = dir_size(temp_dir.path()).await;
+        assert_eq!(size, 0);
+    }
+
+    #[tokio::test]
+    async fn test_dir_size_with_files() {
+        let temp_dir = TempDir::new().unwrap();
+        async_fs::write(temp_dir.path().join("file1.txt"), "hello")
+            .await
+            .unwrap();
+        async_fs::write(temp_dir.path().join("file2.txt"), "world!")
+            .await
+            .unwrap();
+
+        let size = dir_size(temp_dir.path()).await;
+        assert_eq!(size, 11); // "hello" (5) + "world!" (6)
+    }
+
+    #[tokio::test]
+    async fn test_dir_size_nonexistent() {
+        let size = dir_size(Path::new("/nonexistent/path/abc123")).await;
+        assert_eq!(size, 0);
+    }
+
+    #[tokio::test]
+    async fn test_dir_size_nested() {
+        let temp_dir = TempDir::new().unwrap();
+        let sub = temp_dir.path().join("sub");
+        async_fs::create_dir_all(&sub).await.unwrap();
+        async_fs::write(temp_dir.path().join("a.txt"), "aaa")
+            .await
+            .unwrap();
+        async_fs::write(sub.join("b.txt"), "bbbbb").await.unwrap();
+
+        let size = dir_size(temp_dir.path()).await;
+        assert_eq!(size, 8); // 3 + 5
+    }
+
+    #[tokio::test]
+    async fn test_check_manifest_stats_in_sync() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        let mem = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
+        store.create(&mem).await.unwrap();
+
+        let result = check_manifest_stats(temp_dir.path(), &store).await;
+        assert_eq!(result.name, "Manifest stats");
+        assert!(result.passed);
+        assert!(result.message.contains("1"));
+    }
+
+    #[tokio::test]
+    async fn test_check_manifest_stats_drift() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        let mem = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
+        store.create(&mem).await.unwrap();
+
+        // Corrupt manifest stats
+        let manifest_path = temp_dir.path().join(".engramdb").join("manifest.toml");
+        let mut manifest = crate::storage::manifest::load_manifest(&manifest_path)
+            .await
+            .unwrap();
+        manifest.stats.memory_count = 99;
+        crate::storage::manifest::save_manifest(&manifest_path, &manifest)
+            .await
+            .unwrap();
+
+        let result = check_manifest_stats(temp_dir.path(), &store).await;
+        assert!(!result.passed);
+        assert!(result.message.contains("99"));
+        assert!(result.message.contains("1"));
+    }
+
+    #[tokio::test]
+    async fn test_check_write_lock_no_file() {
+        // Use a fake project_id that won't have a lock file
+        let result = check_write_lock("nonexistent-project-id-12345").await;
+        assert_eq!(result.name, "Write lock");
+        assert!(result.passed);
+    }
+
+    #[tokio::test]
+    async fn test_check_chunk_orphans_clean() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        let mem = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
+        store.create(&mem).await.unwrap();
+
+        let result = check_chunk_orphans(&store).await;
+        assert_eq!(result.name, "Chunk index integrity");
+        assert!(result.passed);
+    }
+
+    #[tokio::test]
+    async fn test_check_chunk_orphans_empty_store() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        let result = check_chunk_orphans(&store).await;
+        assert!(result.passed);
+        assert!(result.message.contains("0 chunk"));
+    }
+
+    #[tokio::test]
+    async fn test_check_global_disk_usage_always_passes() {
+        let result = check_global_disk_usage().await;
+        assert_eq!(result.name, "Global disk usage");
+        assert!(result.passed);
+        assert!(result.message.contains("data:"));
+        assert!(result.message.contains("model cache:"));
+    }
+
+    #[tokio::test]
+    async fn test_check_project_disk_usage_always_passes() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = check_project_disk_usage(temp_dir.path(), "fake-project-id").await;
+        assert_eq!(result.name, "Project disk usage");
+        assert!(result.passed);
+        assert!(result.message.contains("shared:"));
+        assert!(result.message.contains("index:"));
+        assert!(result.message.contains("personal:"));
+    }
+
+    #[tokio::test]
+    async fn test_environment_has_new_checks_with_store() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        let result = doctor_environment(temp_dir.path(), Some(&store)).await;
+        let names: Vec<&str> = result
+            .all_checks()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+
+        assert!(
+            names.contains(&"Manifest stats"),
+            "missing Manifest stats check"
+        );
+        assert!(
+            names.contains(&"Chunk index integrity"),
+            "missing Chunk index integrity check"
+        );
+        assert!(
+            names.contains(&"Global disk usage"),
+            "missing Global disk usage check"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_environment_no_store_skips_gated_checks() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let result = doctor_environment(temp_dir.path(), None).await;
+        let names: Vec<&str> = result
+            .all_checks()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+
+        // Gated checks should not appear without a store
+        assert!(
+            !names.contains(&"Manifest stats"),
+            "Manifest stats should not appear without store"
+        );
+        assert!(
+            !names.contains(&"Chunk index integrity"),
+            "Chunk index integrity should not appear without store"
+        );
+        // Global disk usage is always present
+        assert!(names.contains(&"Global disk usage"));
     }
 }
