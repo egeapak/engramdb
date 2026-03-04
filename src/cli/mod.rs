@@ -332,6 +332,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Hook { command } => match command {
             HookCommand::PreToolUse => commands::run_hook_pre_tool_use(&dir, backend).await,
+            HookCommand::SessionStart { min_criticality } => {
+                commands::run_hook_session_start(&dir, backend, min_criticality).await
+            }
         },
         Command::Projects { command } => {
             commands::run_projects(&dir, &registry, command, &formatter, &prompter).await

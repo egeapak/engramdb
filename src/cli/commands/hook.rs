@@ -40,8 +40,8 @@ fn relativize_path(file_path: &str, project_dir: &Path) -> String {
 }
 
 /// Format scored memories into an additionalContext string.
-fn format_additional_context(memories: &[ScoredMemory]) -> String {
-    let mut lines: Vec<String> = vec!["[EngramDB] Relevant memories for this file:".into()];
+fn format_additional_context(header: &str, memories: &[ScoredMemory]) -> String {
+    let mut lines: Vec<String> = vec![header.into()];
     for scored in memories {
         let m = &scored.memory;
         let type_str = format!("{:?}", m.type_).to_lowercase();
@@ -54,10 +54,10 @@ fn format_additional_context(memories: &[ScoredMemory]) -> String {
 }
 
 /// Build the hook response JSON string.
-fn build_hook_response(additional_context: &str) -> Result<String> {
+fn build_hook_response(event_name: &str, additional_context: &str) -> Result<String> {
     let response = serde_json::json!({
         "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
+            "hookEventName": event_name,
             "additionalContext": additional_context
         }
     });
@@ -107,8 +107,11 @@ async fn process_hook_input(
         return Ok(None);
     }
 
-    let context = format_additional_context(&result.memories);
-    let json = build_hook_response(&context)?;
+    let context = format_additional_context(
+        "[EngramDB] Relevant memories for this file:",
+        &result.memories,
+    );
+    let json = build_hook_response("PreToolUse", &context)?;
     Ok(Some(json))
 }
 
@@ -136,6 +139,57 @@ pub async fn run_hook_pre_tool_use(
     if let Some(json) = process_hook_input(&input, dir, store, embedding_backend).await? {
         println!("{}", json);
     }
+
+    Ok(())
+}
+
+/// Run the SessionStart hook handler.
+///
+/// Retrieves high-criticality active memories and prints them as
+/// additionalContext JSON to stdout so they are surfaced at session start.
+pub async fn run_hook_session_start(
+    dir: &Path,
+    embedding_backend: Option<EmbeddingBackend>,
+    min_criticality: f64,
+) -> Result<()> {
+    let store = match MemoryStore::open(dir).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!("Hook store open failed (non-fatal): {}", e);
+            return Ok(());
+        }
+    };
+
+    let config_path = dir.join(".engramdb").join("config.toml");
+    let engine = crate::ops::build_engine(store, &config_path, embedding_backend).await;
+
+    let query = RetrievalQuery {
+        path: None,
+        logical: vec![],
+        query: None,
+        types: None,
+        tags: None,
+        min_criticality: Some(min_criticality),
+        max_results: Some(10),
+        include_expired: Some(false),
+        detail_level: DetailLevel::Summary,
+    };
+
+    let result = match crate::ops::retrieve_memories(&engine, &query).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!("Hook retrieval failed (non-fatal): {}", e);
+            return Ok(());
+        }
+    };
+
+    if result.memories.is_empty() {
+        return Ok(());
+    }
+
+    let context = format_additional_context("[EngramDB] Key project memories:", &result.memories);
+    let json = build_hook_response("SessionStart", &context)?;
+    println!("{}", json);
 
     Ok(())
 }
@@ -306,7 +360,8 @@ mod tests {
             score: 0.85,
             score_breakdown: Default::default(),
         };
-        let ctx = format_additional_context(&[scored]);
+        let ctx =
+            format_additional_context("[EngramDB] Relevant memories for this file:", &[scored]);
         assert!(ctx.starts_with("[EngramDB] Relevant memories for this file:"));
         assert!(ctx.contains("[decision]"));
         assert!(ctx.contains("Use snake_case everywhere"));
@@ -339,7 +394,7 @@ mod tests {
                 score_breakdown: Default::default(),
             },
         ];
-        let ctx = format_additional_context(&scored);
+        let ctx = format_additional_context("[EngramDB] Relevant memories for this file:", &scored);
         let lines: Vec<&str> = ctx.lines().collect();
         assert_eq!(lines.len(), 3); // header + 2 memories
         assert!(lines[1].contains("[hazard]"));
@@ -348,15 +403,21 @@ mod tests {
 
     #[test]
     fn test_format_additional_context_empty() {
-        let ctx = format_additional_context(&[]);
+        let ctx = format_additional_context("[EngramDB] Relevant memories for this file:", &[]);
         assert_eq!(ctx, "[EngramDB] Relevant memories for this file:");
+    }
+
+    #[test]
+    fn test_format_additional_context_custom_header() {
+        let ctx = format_additional_context("[EngramDB] Key project memories:", &[]);
+        assert_eq!(ctx, "[EngramDB] Key project memories:");
     }
 
     // --- Unit tests for build_hook_response ---
 
     #[test]
     fn test_build_hook_response_structure() {
-        let json_str = build_hook_response("test context").unwrap();
+        let json_str = build_hook_response("PreToolUse", "test context").unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let hook_output = &parsed["hookSpecificOutput"];
@@ -365,9 +426,19 @@ mod tests {
     }
 
     #[test]
+    fn test_build_hook_response_session_start() {
+        let json_str = build_hook_response("SessionStart", "test context").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        let hook_output = &parsed["hookSpecificOutput"];
+        assert_eq!(hook_output["hookEventName"], "SessionStart");
+        assert_eq!(hook_output["additionalContext"], "test context");
+    }
+
+    #[test]
     fn test_build_hook_response_special_characters() {
         let ctx = "line1\nline2\ttab \"quotes\"";
-        let json_str = build_hook_response(ctx).unwrap();
+        let json_str = build_hook_response("PreToolUse", ctx).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         assert_eq!(
             parsed["hookSpecificOutput"]["additionalContext"]
@@ -542,6 +613,7 @@ mod tests {
         match cli.command {
             Command::Hook { command } => match command {
                 HookCommand::PreToolUse => {} // expected
+                _ => panic!("Expected PreToolUse"),
             },
             _ => panic!("Expected Hook command"),
         }
@@ -558,6 +630,48 @@ mod tests {
         match cli.command {
             Command::Hook { command } => match command {
                 HookCommand::PreToolUse => {}
+                _ => panic!("Expected PreToolUse"),
+            },
+            _ => panic!("Expected Hook command"),
+        }
+    }
+
+    #[test]
+    fn test_hook_session_start_command_parses() {
+        use crate::cli::app::{Cli, Command, HookCommand};
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from(["engramdb", "hook", "session-start"]).unwrap();
+        match cli.command {
+            Command::Hook { command } => match command {
+                HookCommand::SessionStart { min_criticality } => {
+                    assert!((min_criticality - 0.6).abs() < f64::EPSILON);
+                }
+                _ => panic!("Expected SessionStart"),
+            },
+            _ => panic!("Expected Hook command"),
+        }
+    }
+
+    #[test]
+    fn test_hook_session_start_with_custom_threshold() {
+        use crate::cli::app::{Cli, Command, HookCommand};
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "hook",
+            "session-start",
+            "--min-criticality",
+            "0.8",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Hook { command } => match command {
+                HookCommand::SessionStart { min_criticality } => {
+                    assert!((min_criticality - 0.8).abs() < f64::EPSILON);
+                }
+                _ => panic!("Expected SessionStart"),
             },
             _ => panic!("Expected Hook command"),
         }

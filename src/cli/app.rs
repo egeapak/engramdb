@@ -11,6 +11,12 @@ use std::path::PathBuf;
 pub enum HookCommand {
     /// Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)
     PreToolUse,
+    /// Handle SessionStart hook events (outputs high-criticality memories)
+    SessionStart {
+        /// Minimum criticality threshold for surfaced memories (0.0-1.0)
+        #[arg(long, default_value = "0.6")]
+        min_criticality: f64,
+    },
 }
 
 /// Subcommands for `engramdb doctor`.

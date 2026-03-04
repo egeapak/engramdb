@@ -20,6 +20,16 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "engramdb hook session-start --dir ."
+          }
+        ]
+      }
     ]
   }
 }
