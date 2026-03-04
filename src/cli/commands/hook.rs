@@ -39,7 +39,7 @@ fn relativize_path(file_path: &str, project_dir: &Path) -> String {
         .unwrap_or_else(|_| file_path.to_string())
 }
 
-/// Format scored memories into an additionalContext string.
+/// Format scored memories into a compact additionalContext string (for PreToolUse).
 fn format_additional_context(header: &str, memories: &[ScoredMemory]) -> String {
     let mut lines: Vec<String> = vec![header.into()];
     for scored in memories {
@@ -51,6 +51,48 @@ fn format_additional_context(header: &str, memories: &[ScoredMemory]) -> String 
         ));
     }
     lines.join("\n")
+}
+
+/// Format scored memories with full metadata (for SessionStart).
+///
+/// Includes tags, logical scope, and a content preview so the agent has
+/// enough context without needing a follow-up `memory_get` call.
+fn format_detailed_context(header: &str, memories: &[ScoredMemory]) -> String {
+    let mut lines: Vec<String> = vec![header.into()];
+    for scored in memories {
+        let m = &scored.memory;
+        let type_str = format!("{:?}", m.type_).to_lowercase();
+        let mut meta_parts: Vec<String> = vec![format!("criticality: {:.1}", m.criticality)];
+        if !m.tags.is_empty() {
+            meta_parts.push(format!("tags: {}", m.tags.join(", ")));
+        }
+        if !m.logical.is_empty() {
+            meta_parts.push(format!("scope: {}", m.logical.join(", ")));
+        }
+        lines.push(format!(
+            "- [{}] {} ({})",
+            type_str,
+            m.summary,
+            meta_parts.join(" | ")
+        ));
+        // Add truncated content preview
+        let preview = truncate_content(&m.content, 200);
+        if preview != m.summary {
+            lines.push(format!("  {}", preview));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Truncate content to a maximum character length, appending "..." if truncated.
+fn truncate_content(content: &str, max_chars: usize) -> String {
+    let single_line = content.replace('\n', " ");
+    if single_line.len() <= max_chars {
+        single_line
+    } else {
+        let truncated: String = single_line.chars().take(max_chars).collect();
+        format!("{}...", truncated.trim_end())
+    }
 }
 
 /// Build the hook response JSON string.
@@ -187,7 +229,7 @@ pub async fn run_hook_session_start(
         return Ok(());
     }
 
-    let context = format_additional_context("[EngramDB] Key project memories:", &result.memories);
+    let context = format_detailed_context("[EngramDB] Key project memories:", &result.memories);
     let json = build_hook_response("SessionStart", &context)?;
     println!("{}", json);
 
@@ -411,6 +453,116 @@ mod tests {
     fn test_format_additional_context_custom_header() {
         let ctx = format_additional_context("[EngramDB] Key project memories:", &[]);
         assert_eq!(ctx, "[EngramDB] Key project memories:");
+    }
+
+    // --- Unit tests for format_detailed_context ---
+
+    #[test]
+    fn test_format_detailed_context_with_tags_and_scope() {
+        let mut mem = Memory::new(
+            MemoryType::Convention,
+            "Azure DevOps PR conventions",
+            "PR templates are stored in .azuredevops/pull_request_template/",
+            Provenance::human(),
+        );
+        mem.tags = vec!["pr".into(), "azure-devops".into()];
+        mem.logical = vec!["workflow.pr".into()];
+        mem.criticality = 0.8;
+        let scored = ScoredMemory {
+            memory: mem,
+            score: 0.9,
+            score_breakdown: Default::default(),
+        };
+        let ctx = format_detailed_context("[EngramDB] Key project memories:", &[scored]);
+        assert!(ctx.contains("[convention]"));
+        assert!(ctx.contains("Azure DevOps PR conventions"));
+        assert!(ctx.contains("tags: pr, azure-devops"));
+        assert!(ctx.contains("scope: workflow.pr"));
+        assert!(ctx.contains("criticality: 0.8"));
+        assert!(ctx.contains("PR templates are stored in"));
+    }
+
+    #[test]
+    fn test_format_detailed_context_truncates_long_content() {
+        let long_content = "a".repeat(300);
+        let mem = Memory::new(
+            MemoryType::Decision,
+            "Short summary",
+            &long_content,
+            Provenance::human(),
+        );
+        let scored = ScoredMemory {
+            memory: mem,
+            score: 0.5,
+            score_breakdown: Default::default(),
+        };
+        let ctx = format_detailed_context("[EngramDB] Key project memories:", &[scored]);
+        assert!(ctx.contains("..."));
+        // Content preview should not exceed 200 chars + "..."
+        for line in ctx.lines().skip(1) {
+            if line.starts_with("  ") {
+                assert!(line.len() <= 205); // "  " + 200 chars + "..."
+            }
+        }
+    }
+
+    #[test]
+    fn test_format_detailed_context_skips_content_matching_summary() {
+        let mem = Memory::new(
+            MemoryType::Decision,
+            "Use async everywhere",
+            "Use async everywhere",
+            Provenance::human(),
+        );
+        let scored = ScoredMemory {
+            memory: mem,
+            score: 0.5,
+            score_breakdown: Default::default(),
+        };
+        let ctx = format_detailed_context("[EngramDB] Key project memories:", &[scored]);
+        let lines: Vec<&str> = ctx.lines().collect();
+        // Header + 1 memory line, no content line since it matches summary
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn test_format_detailed_context_no_tags_no_scope() {
+        let mem = Memory::new(
+            MemoryType::Hazard,
+            "Avoid blocking in async",
+            "Blocking calls in async context cause deadlocks",
+            Provenance::human(),
+        );
+        let scored = ScoredMemory {
+            memory: mem,
+            score: 0.7,
+            score_breakdown: Default::default(),
+        };
+        let ctx = format_detailed_context("[EngramDB] Key project memories:", &[scored]);
+        assert!(!ctx.contains("tags:"));
+        assert!(!ctx.contains("scope:"));
+        assert!(ctx.contains("criticality: 0.5"));
+    }
+
+    // --- Unit tests for truncate_content ---
+
+    #[test]
+    fn test_truncate_content_short() {
+        assert_eq!(truncate_content("hello world", 200), "hello world");
+    }
+
+    #[test]
+    fn test_truncate_content_long() {
+        let long = "a".repeat(300);
+        let result = truncate_content(&long, 200);
+        assert!(result.ends_with("..."));
+        assert!(result.len() <= 203); // 200 + "..."
+    }
+
+    #[test]
+    fn test_truncate_content_newlines_collapsed() {
+        let content = "line1\nline2\nline3";
+        assert_eq!(truncate_content(content, 200), "line1 line2 line3");
     }
 
     // --- Unit tests for build_hook_response ---

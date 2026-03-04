@@ -1,7 +1,7 @@
 {
   "name": "engramdb",
   "version": "0.3.0",
-  "description": "Project-scoped persistent memory store for coding agents. Stores decisions, hazards, conventions, and context about the codebase.",
+  "description": "Project-scoped persistent memory store for coding agents. Stores decisions, hazards, conventions, and context about the codebase. Always search memories (memory_search) before answering project questions or researching workflows — not only before modifying files.",
   "mcpServers": {
     "engramdb": {
       "command": "engramdb",
