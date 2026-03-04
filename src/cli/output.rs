@@ -140,7 +140,7 @@ impl OutputFormatter {
         }
     }
 
-    /// Print full environment doctor results.
+    /// Print full environment doctor results organized by section.
     pub fn print_environment_doctor(&self, result: &crate::ops::EnvironmentDoctorResult) {
         match self.format {
             OutputFormat::Json => {
@@ -156,30 +156,41 @@ impl OutputFormatter {
                 } else {
                     println!("\n{}", header);
                 }
-                println!();
 
-                for check in &result.checks {
-                    if check.passed {
-                        if self.use_color && matches!(self.format, OutputFormat::Pretty) {
-                            println!(
-                                "{} {}: {}",
-                                "✓".if_supports_color(Stream::Stdout, |text| text.green()),
-                                check.name,
-                                check.message
-                            );
-                        } else {
-                            println!("✓ {}: {}", check.name, check.message);
-                        }
+                for section in &result.sections {
+                    println!();
+                    if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                        println!(
+                            "{}",
+                            section
+                                .name
+                                .if_supports_color(Stream::Stdout, |text| text.bold())
+                        );
                     } else {
-                        if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                        println!("{}", section.name);
+                    }
+
+                    for check in &section.checks {
+                        if check.passed {
+                            if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                                println!(
+                                    "  {} {}: {}",
+                                    "✓".if_supports_color(Stream::Stdout, |text| text.green()),
+                                    check.name,
+                                    check.message
+                                );
+                            } else {
+                                println!("  ✓ {}: {}", check.name, check.message);
+                            }
+                        } else if self.use_color && matches!(self.format, OutputFormat::Pretty) {
                             println!(
-                                "{} {}: {}",
+                                "  {} {}: {}",
                                 "✗".if_supports_color(Stream::Stdout, |text| text.red()),
                                 check.name,
                                 check.message
                             );
                         } else {
-                            println!("✗ {}: {}", check.name, check.message);
+                            println!("  ✗ {}: {}", check.name, check.message);
                         }
                         if let Some(ref suggestion) = check.suggestion {
                             self.print_hint(suggestion);

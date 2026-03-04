@@ -1,10 +1,35 @@
 use regex::Regex;
 use std::path::Path;
+use std::sync::OnceLock;
+use tempfile::TempDir;
+
+struct TestDirs {
+    registry_dir: TempDir,
+    data_dir: TempDir,
+}
+
+fn test_dirs() -> &'static TestDirs {
+    static DIRS: OnceLock<TestDirs> = OnceLock::new();
+    DIRS.get_or_init(|| TestDirs {
+        registry_dir: TempDir::new().unwrap(),
+        data_dir: TempDir::new().unwrap(),
+    })
+}
 
 /// Create a new Command pointing to the `engramdb` binary.
+///
+/// Sets `ENGRAMDB_REGISTRY_PATH` and `ENGRAMDB_DATA_DIR` to shared temp dirs
+/// so integration tests never pollute the user's global state.
 #[allow(deprecated)]
 pub fn cmd() -> assert_cmd::Command {
-    assert_cmd::Command::cargo_bin("engramdb").expect("binary engramdb not found")
+    let dirs = test_dirs();
+    let mut c = assert_cmd::Command::cargo_bin("engramdb").expect("binary engramdb not found");
+    c.env(
+        "ENGRAMDB_REGISTRY_PATH",
+        dirs.registry_dir.path().join("registry.json"),
+    );
+    c.env("ENGRAMDB_DATA_DIR", dirs.data_dir.path());
+    c
 }
 
 /// Initialize a store at the given directory with `--no-embeddings`.
