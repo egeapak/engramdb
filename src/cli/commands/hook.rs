@@ -53,35 +53,103 @@ fn format_additional_context(header: &str, memories: &[ScoredMemory]) -> String 
     lines.join("\n")
 }
 
+/// Maximum character budget for the SessionStart additional context.
+const SESSION_CONTEXT_BUDGET: usize = 2000;
+
 /// Format scored memories with full metadata (for SessionStart).
 ///
-/// Includes tags, logical scope, and a content preview so the agent has
-/// enough context without needing a follow-up `memory_get` call.
+/// Groups memories by type, includes tags/scope/content preview, and
+/// respects a character budget. When the budget is exceeded, remaining
+/// memories are omitted with a notice telling the agent to use
+/// `memory_search` for more.
 fn format_detailed_context(header: &str, memories: &[ScoredMemory]) -> String {
+    format_detailed_context_with_budget(header, memories, SESSION_CONTEXT_BUDGET)
+}
+
+/// Budget-aware implementation (extracted for testability).
+fn format_detailed_context_with_budget(
+    header: &str,
+    memories: &[ScoredMemory],
+    budget: usize,
+) -> String {
+    // Group memories by type, preserving score-based ordering within each group.
+    let groups = group_by_type(memories);
+
     let mut lines: Vec<String> = vec![header.into()];
-    for scored in memories {
-        let m = &scored.memory;
-        let type_str = format!("{:?}", m.type_).to_lowercase();
-        let mut meta_parts: Vec<String> = vec![format!("criticality: {:.1}", m.criticality)];
-        if !m.tags.is_empty() {
-            meta_parts.push(format!("tags: {}", m.tags.join(", ")));
+    let mut used: usize = header.len();
+    let mut included = 0usize;
+    let total = memories.len();
+
+    for (type_str, group) in &groups {
+        let group_header = format!("\n## {} ({}):", type_str, group.len());
+        let group_header_len = group_header.len() + 1; // +1 for join newline
+
+        if used + group_header_len > budget {
+            break;
         }
-        if !m.logical.is_empty() {
-            meta_parts.push(format!("scope: {}", m.logical.join(", ")));
-        }
-        lines.push(format!(
-            "- [{}] {} ({})",
-            type_str,
-            m.summary,
-            meta_parts.join(" | ")
-        ));
-        // Add truncated content preview
-        let preview = truncate_content(&m.content, 200);
-        if preview != m.summary {
-            lines.push(format!("  {}", preview));
+        lines.push(group_header);
+        used += group_header_len;
+
+        for scored in group {
+            let entry = format_memory_entry(scored);
+            let entry_len: usize = entry.iter().map(|l| l.len() + 1).sum();
+
+            if used + entry_len > budget {
+                break;
+            }
+            lines.extend(entry);
+            used += entry_len;
+            included += 1;
         }
     }
+
+    if included < total {
+        let omitted = total - included;
+        lines.push(format!(
+            "\n({} more memories omitted — use memory_search to find them)",
+            omitted
+        ));
+    }
+
     lines.join("\n")
+}
+
+/// Group scored memories by type label, preserving input order within each group.
+///
+/// Returns groups in a deterministic order based on the first appearance of each type.
+fn group_by_type(memories: &[ScoredMemory]) -> Vec<(String, Vec<&ScoredMemory>)> {
+    let mut groups: Vec<(String, Vec<&ScoredMemory>)> = Vec::new();
+    let mut type_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    for scored in memories {
+        let type_str = format!("{:?}", scored.memory.type_);
+        if let Some(&idx) = type_index.get(&type_str) {
+            groups[idx].1.push(scored);
+        } else {
+            let idx = groups.len();
+            type_index.insert(type_str.clone(), idx);
+            groups.push((type_str, vec![scored]));
+        }
+    }
+    groups
+}
+
+/// Format a single memory entry as one or two lines (summary + optional preview).
+fn format_memory_entry(scored: &ScoredMemory) -> Vec<String> {
+    let m = &scored.memory;
+    let mut meta_parts: Vec<String> = vec![format!("criticality: {:.1}", m.criticality)];
+    if !m.tags.is_empty() {
+        meta_parts.push(format!("tags: {}", m.tags.join(", ")));
+    }
+    if !m.logical.is_empty() {
+        meta_parts.push(format!("scope: {}", m.logical.join(", ")));
+    }
+    let mut entry = vec![format!("- {} ({})", m.summary, meta_parts.join(" | "))];
+    let preview = truncate_content(&m.content, 200);
+    if preview != m.summary {
+        entry.push(format!("  {}", preview));
+    }
+    entry
 }
 
 /// Truncate content to a maximum character length, appending "..." if truncated.
@@ -455,7 +523,7 @@ mod tests {
         assert_eq!(ctx, "[EngramDB] Key project memories:");
     }
 
-    // --- Unit tests for format_detailed_context ---
+    // --- Unit tests for format_detailed_context (grouped + budget) ---
 
     #[test]
     fn test_format_detailed_context_with_tags_and_scope() {
@@ -474,7 +542,7 @@ mod tests {
             score_breakdown: Default::default(),
         };
         let ctx = format_detailed_context("[EngramDB] Key project memories:", &[scored]);
-        assert!(ctx.contains("[convention]"));
+        assert!(ctx.contains("Convention"));
         assert!(ctx.contains("Azure DevOps PR conventions"));
         assert!(ctx.contains("tags: pr, azure-devops"));
         assert!(ctx.contains("scope: workflow.pr"));
@@ -483,12 +551,90 @@ mod tests {
     }
 
     #[test]
-    fn test_format_detailed_context_truncates_long_content() {
-        let long_content = "a".repeat(300);
+    fn test_format_detailed_context_groups_by_type() {
+        let mem1 = Memory::new(
+            MemoryType::Hazard,
+            "Do not delete index",
+            "Index deletion causes data loss",
+            Provenance::human(),
+        );
+        let mem2 = Memory::new(
+            MemoryType::Convention,
+            "Always run clippy",
+            "Run clippy with -D warnings",
+            Provenance::human(),
+        );
+        let mem3 = Memory::new(
+            MemoryType::Hazard,
+            "Avoid force push",
+            "Force push destroys history",
+            Provenance::human(),
+        );
+        let scored = vec![
+            ScoredMemory {
+                memory: mem1,
+                score: 0.9,
+                score_breakdown: Default::default(),
+            },
+            ScoredMemory {
+                memory: mem2,
+                score: 0.8,
+                score_breakdown: Default::default(),
+            },
+            ScoredMemory {
+                memory: mem3,
+                score: 0.7,
+                score_breakdown: Default::default(),
+            },
+        ];
+        let ctx = format_detailed_context("[EngramDB] Key project memories:", &scored);
+        // Hazard group should appear first (first in input), Convention second
+        let hazard_pos = ctx.find("Hazard").unwrap();
+        let convention_pos = ctx.find("Convention").unwrap();
+        assert!(hazard_pos < convention_pos);
+        // Both hazard memories should be under the Hazard group
+        assert!(ctx.contains("Do not delete index"));
+        assert!(ctx.contains("Avoid force push"));
+    }
+
+    #[test]
+    fn test_format_detailed_context_budget_truncation() {
+        // Create enough memories to exceed a small budget
+        let memories: Vec<ScoredMemory> = (0..10)
+            .map(|i| {
+                let mem = Memory::new(
+                    MemoryType::Decision,
+                    format!("Decision number {}", i),
+                    format!("Detailed content for decision {}", i),
+                    Provenance::human(),
+                );
+                ScoredMemory {
+                    memory: mem,
+                    score: 0.9 - (i as f64 * 0.05),
+                    score_breakdown: Default::default(),
+                }
+            })
+            .collect();
+        // Use a small budget so not all fit
+        let ctx =
+            format_detailed_context_with_budget("[EngramDB] Key project memories:", &memories, 500);
+        assert!(ctx.contains("more memories omitted"));
+        assert!(ctx.contains("memory_search"));
+        // Should include at least 1 but not all 10
+        let included = memories
+            .iter()
+            .filter(|m| ctx.contains(&m.memory.summary))
+            .count();
+        assert!(included >= 1);
+        assert!(included < 10);
+    }
+
+    #[test]
+    fn test_format_detailed_context_no_truncation_notice_when_all_fit() {
         let mem = Memory::new(
             MemoryType::Decision,
-            "Short summary",
-            &long_content,
+            "Use async everywhere",
+            "All I/O should be async",
             Provenance::human(),
         );
         let scored = ScoredMemory {
@@ -497,13 +643,7 @@ mod tests {
             score_breakdown: Default::default(),
         };
         let ctx = format_detailed_context("[EngramDB] Key project memories:", &[scored]);
-        assert!(ctx.contains("..."));
-        // Content preview should not exceed 200 chars + "..."
-        for line in ctx.lines().skip(1) {
-            if line.starts_with("  ") {
-                assert!(line.len() <= 205); // "  " + 200 chars + "..."
-            }
-        }
+        assert!(!ctx.contains("omitted"));
     }
 
     #[test]
@@ -520,9 +660,9 @@ mod tests {
             score_breakdown: Default::default(),
         };
         let ctx = format_detailed_context("[EngramDB] Key project memories:", &[scored]);
-        let lines: Vec<&str> = ctx.lines().collect();
-        // Header + 1 memory line, no content line since it matches summary
-        assert_eq!(lines.len(), 2);
+        // Content line should not appear since it matches summary
+        let content_lines: Vec<&str> = ctx.lines().filter(|l| l.starts_with("  ")).collect();
+        assert!(content_lines.is_empty());
     }
 
     #[test]
@@ -542,6 +682,63 @@ mod tests {
         assert!(!ctx.contains("tags:"));
         assert!(!ctx.contains("scope:"));
         assert!(ctx.contains("criticality: 0.5"));
+    }
+
+    // --- Unit tests for group_by_type ---
+
+    #[test]
+    fn test_group_by_type_preserves_order() {
+        let mem1 = Memory::new(MemoryType::Convention, "Conv 1", "c1", Provenance::human());
+        let mem2 = Memory::new(MemoryType::Hazard, "Hazard 1", "h1", Provenance::human());
+        let mem3 = Memory::new(MemoryType::Convention, "Conv 2", "c2", Provenance::human());
+        let scored = vec![
+            ScoredMemory {
+                memory: mem1,
+                score: 0.9,
+                score_breakdown: Default::default(),
+            },
+            ScoredMemory {
+                memory: mem2,
+                score: 0.8,
+                score_breakdown: Default::default(),
+            },
+            ScoredMemory {
+                memory: mem3,
+                score: 0.7,
+                score_breakdown: Default::default(),
+            },
+        ];
+        let groups = group_by_type(&scored);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, "Convention");
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups[1].0, "Hazard");
+        assert_eq!(groups[1].1.len(), 1);
+    }
+
+    // --- Unit tests for format_memory_entry ---
+
+    #[test]
+    fn test_format_memory_entry_with_all_metadata() {
+        let mut mem = Memory::new(
+            MemoryType::Convention,
+            "Run clippy",
+            "Always run clippy before committing",
+            Provenance::human(),
+        );
+        mem.tags = vec!["ci".into()];
+        mem.logical = vec!["workflow.lint".into()];
+        mem.criticality = 0.9;
+        let scored = ScoredMemory {
+            memory: mem,
+            score: 0.8,
+            score_breakdown: Default::default(),
+        };
+        let lines = format_memory_entry(&scored);
+        assert_eq!(lines.len(), 2); // summary + content preview
+        assert!(lines[0].contains("tags: ci"));
+        assert!(lines[0].contains("scope: workflow.lint"));
+        assert!(lines[1].starts_with("  "));
     }
 
     // --- Unit tests for truncate_content ---
