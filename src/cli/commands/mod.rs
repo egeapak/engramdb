@@ -32,7 +32,7 @@ pub use delete::run_delete;
 pub use doctor::run_doctor;
 pub use gc::run_gc;
 pub use get::run_get;
-pub use hook::run_hook_pre_tool_use;
+pub use hook::{run_hook_pre_tool_use, run_hook_session_start};
 pub use init::run_init;
 pub use list::run_list;
 pub use projects::run_projects;

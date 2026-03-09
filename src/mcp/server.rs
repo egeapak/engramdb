@@ -539,7 +539,7 @@ impl EngramDbServer {
     }
 
     #[tool(
-        description = "Get memories relevant to your current working context. Call before modifying files."
+        description = "Get memories relevant to your current working context. Call before modifying files, researching project questions, or investigating how things work."
     )]
     async fn memory_retrieve(
         &self,
@@ -619,7 +619,9 @@ impl EngramDbServer {
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
-    #[tool(description = "Search all memories by text, regardless of file context.")]
+    #[tool(
+        description = "Search all memories by text. Use before answering questions about project conventions, workflows, architecture, or tooling."
+    )]
     async fn memory_search(
         &self,
         Parameters(input): Parameters<SearchInput>,
@@ -1151,7 +1153,9 @@ impl ServerHandler for EngramDbServer {
             instructions: Some(
                 "Project-scoped persistent memory store for coding agents. \
                  Stores decisions, hazards, conventions, and context about the codebase. \
-                 Retrieve before modifying files. Store after significant discoveries."
+                 IMPORTANT: Search memories (memory_search) before answering project questions, \
+                 investigating workflows, or researching how things work — not only before \
+                 modifying files. Store new knowledge after significant discoveries."
                     .to_string(),
             ),
         }
