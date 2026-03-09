@@ -1530,7 +1530,14 @@ mod tests {
 
         assert_eq!(
             section_names,
-            vec!["System", "Project", "Agent", "Embeddings", "Registry"]
+            vec![
+                "System",
+                "Project",
+                "Agent",
+                "Embeddings",
+                "Registry",
+                "Gitignore"
+            ]
         );
     }
 
