@@ -30,7 +30,7 @@ pub use compress::{
 pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
 pub use delete::delete_memory;
 pub use doctor::{
-    doctor, doctor_environment, DoctorResult, DoctorSection, EnvironmentCheck,
+    doctor, doctor_environment, CheckStatus, DoctorResult, DoctorSection, EnvironmentCheck,
     EnvironmentDoctorResult,
 };
 pub use gc::{gc_memories, GcResult};
