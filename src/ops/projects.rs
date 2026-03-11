@@ -128,40 +128,72 @@ pub async fn delete_project(
 
 /// Result of pruning stale projects.
 pub struct PruneResult {
-    /// Number of stale entries removed.
-    pub pruned: usize,
-    /// Project IDs that were removed.
-    pub pruned_ids: Vec<String>,
+    /// Number of stale registry entries removed.
+    pub stale_removed: usize,
+    /// Project IDs removed from registry.
+    pub stale_ids: Vec<String>,
+    /// Number of orphan data directories removed (on disk but not in registry).
+    pub orphans_removed: usize,
+    /// Orphan project IDs that were removed.
+    pub orphan_ids: Vec<String>,
 }
 
-/// Remove all stale (unreachable) projects from the registry and delete their global data.
+/// Remove stale registry entries and orphan data directories.
+///
+/// Stale: in registry but project path no longer exists on disk.
+/// Orphan: data directory exists under `projects/` but not in registry.
 pub async fn prune_stale_projects(registry: &dyn RegistryBackend) -> Result<PruneResult> {
     let mut reg = registry.load().await?;
-    let mut pruned_ids = Vec::new();
 
-    // Partition into reachable and stale
+    // --- Stale registry entries ---
+    let mut stale_ids = Vec::new();
     let (keep, stale): (Vec<_>, Vec<_>) = reg
         .projects
         .into_iter()
         .partition(|e| Path::new(&e.project_path).join(".engramdb").exists());
 
-    for entry in &stale {
-        pruned_ids.push(entry.project_id.clone());
+    let projects_dir = paths::global_data_dir()?.join("projects");
 
-        // Delete global data directory for this project
-        let global_project_dir = paths::global_data_dir()?
-            .join("projects")
-            .join(&entry.project_id);
+    for entry in &stale {
+        stale_ids.push(entry.project_id.clone());
+        let global_project_dir = projects_dir.join(&entry.project_id);
         if global_project_dir.exists() {
             async_fs::remove_dir_all(&global_project_dir).await?;
         }
     }
 
-    let pruned = stale.len();
+    let stale_removed = stale.len();
     reg.projects = keep;
     registry.save(&reg).await?;
 
-    Ok(PruneResult { pruned, pruned_ids })
+    // --- Orphan data directories ---
+    let registered_ids: std::collections::HashSet<String> =
+        reg.projects.iter().map(|e| e.project_id.clone()).collect();
+
+    let mut orphan_ids = Vec::new();
+    if projects_dir.exists() {
+        if let Ok(mut entries) = async_fs::read_dir(&projects_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if !entry.path().is_dir() {
+                    continue;
+                }
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                if !registered_ids.contains(&dir_name) {
+                    orphan_ids.push(dir_name);
+                    async_fs::remove_dir_all(entry.path()).await?;
+                }
+            }
+        }
+    }
+
+    let orphans_removed = orphan_ids.len();
+
+    Ok(PruneResult {
+        stale_removed,
+        stale_ids,
+        orphans_removed,
+        orphan_ids,
+    })
 }
 
 /// Aggregate statistics across all registered projects.
@@ -390,8 +422,8 @@ mod tests {
         assert_eq!(registry.load().await.unwrap().projects.len(), 2);
 
         let result = prune_stale_projects(&registry).await.unwrap();
-        assert_eq!(result.pruned, 1);
-        assert_eq!(result.pruned_ids, vec!["stale-proj-001"]);
+        assert_eq!(result.stale_removed, 1);
+        assert_eq!(result.stale_ids, vec!["stale-proj-001"]);
 
         let remaining = registry.load().await.unwrap();
         assert_eq!(remaining.projects.len(), 1);
@@ -406,8 +438,8 @@ mod tests {
         let _store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let result = prune_stale_projects(&registry).await.unwrap();
-        assert_eq!(result.pruned, 0);
-        assert!(result.pruned_ids.is_empty());
+        assert_eq!(result.stale_removed, 0);
+        assert!(result.stale_ids.is_empty());
 
         // Original entry should still be there
         assert_eq!(registry.load().await.unwrap().projects.len(), 1);
@@ -417,7 +449,7 @@ mod tests {
     async fn test_prune_stale_projects_empty_registry() {
         let registry = InMemoryRegistry::new();
         let result = prune_stale_projects(&registry).await.unwrap();
-        assert_eq!(result.pruned, 0);
-        assert!(result.pruned_ids.is_empty());
+        assert_eq!(result.stale_removed, 0);
+        assert!(result.stale_ids.is_empty());
     }
 }

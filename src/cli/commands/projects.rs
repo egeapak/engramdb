@@ -102,10 +102,21 @@ pub async fn run_projects(
             }
 
             let result = projects::prune_stale_projects(registry).await?;
-            formatter.print_success(&format!(
-                "Pruned {} stale project(s) from registry.",
-                result.pruned
-            ));
+            if result.stale_removed > 0 {
+                formatter.print_success(&format!(
+                    "Removed {} stale project(s) from registry.",
+                    result.stale_removed
+                ));
+            }
+            if result.orphans_removed > 0 {
+                formatter.print_success(&format!(
+                    "Removed {} orphan data directory(ies) not in registry.",
+                    result.orphans_removed
+                ));
+            }
+            if result.stale_removed == 0 && result.orphans_removed == 0 {
+                formatter.print_success("Nothing to prune.");
+            }
         }
     }
 
