@@ -144,6 +144,15 @@ pub struct EnvironmentCheck {
 pub struct DoctorSection {
     pub name: String,
     pub checks: Vec<EnvironmentCheck>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub subsections: Vec<DoctorSubSection>,
+}
+
+/// A named sub-group within a section.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorSubSection {
+    pub name: String,
+    pub checks: Vec<EnvironmentCheck>,
 }
 
 /// Full environment doctor result including all checks.
@@ -156,9 +165,16 @@ pub struct EnvironmentDoctorResult {
 }
 
 impl EnvironmentDoctorResult {
-    /// Flatten all checks from all sections into a single vec (useful for tests).
+    /// Flatten all checks from all sections and subsections into a single vec.
     pub fn all_checks(&self) -> Vec<&EnvironmentCheck> {
-        self.sections.iter().flat_map(|s| &s.checks).collect()
+        self.sections
+            .iter()
+            .flat_map(|s| {
+                s.checks
+                    .iter()
+                    .chain(s.subsections.iter().flat_map(|ss| &ss.checks))
+            })
+            .collect()
     }
 }
 
@@ -195,16 +211,35 @@ pub async fn doctor_environment(
         }
     }
 
+    // --- Load registry once for Project gating ---
+    let registry_info = load_registry_info(dir).await;
+
+    // Registry subsection (just "Registered projects", no per-project check)
+    let registry_checks = build_registry_checks(&registry_info);
+
+    // Gitignore subsection
+    let store_initialized = dir.join(".engramdb").exists();
+    let mut gitignore_checks = vec![check_global_gitignore()];
+    if store_initialized && registry_info.in_registry {
+        gitignore_checks.push(check_project_gitignore(dir));
+    }
+
     sections.push(DoctorSection {
         name: "System".to_string(),
         checks: system_checks,
+        subsections: vec![
+            DoctorSubSection {
+                name: "Registry".to_string(),
+                checks: registry_checks,
+            },
+            DoctorSubSection {
+                name: "Gitignore".to_string(),
+                checks: gitignore_checks,
+            },
+        ],
     });
 
-    // --- Load registry once for Project gating + Registry section ---
-    let registry_info = load_registry_info(dir).await;
-
     // --- Project section ---
-    let store_initialized = dir.join(".engramdb").exists();
     let store_path = dir
         .canonicalize()
         .unwrap_or_else(|_| dir.to_path_buf())
@@ -275,10 +310,20 @@ pub async fn doctor_environment(
             project_checks.push(check_mcp_config_deep(dir));
             project_checks.push(check_write_lock(&project_id).await);
             project_checks.push(check_project_disk_usage(dir, &project_id).await);
+        } else {
+            project_checks.push(EnvironmentCheck {
+                name: "Registry".to_string(),
+                passed: true,
+                message: "not registered".to_string(),
+                suggestion: Some("Run `engramdb init` to register this project".to_string()),
+                details: vec![],
+                status: Some(CheckStatus::Warn),
+            });
         }
         sections.push(DoctorSection {
             name: "Project".to_string(),
             checks: project_checks,
+            subsections: vec![],
         });
         sc
     } else {
@@ -292,6 +337,7 @@ pub async fn doctor_environment(
                 details: vec![],
                 status: None,
             }],
+            subsections: vec![],
         });
         None
     };
@@ -301,6 +347,7 @@ pub async fn doctor_environment(
     sections.push(DoctorSection {
         name: "Agent".to_string(),
         checks: agent_checks,
+        subsections: vec![],
     });
 
     // --- Embeddings section ---
@@ -314,31 +361,17 @@ pub async fn doctor_environment(
     sections.push(DoctorSection {
         name: "Embeddings".to_string(),
         checks: embeddings_checks,
+        subsections: vec![],
     });
 
-    // --- Registry section ---
-    let memory_count = if let Some(s) = store {
-        s.list_ids().await.map(|ids| ids.len()).ok()
-    } else {
-        None
-    };
-    let registry_checks = build_registry_checks(&registry_info, memory_count);
-    sections.push(DoctorSection {
-        name: "Registry".to_string(),
-        checks: registry_checks,
-    });
-
-    // --- Gitignore section ---
-    let mut gitignore_checks = vec![check_global_gitignore()];
-    if store_initialized && registry_info.in_registry {
-        gitignore_checks.push(check_project_gitignore(dir));
-    }
-    sections.push(DoctorSection {
-        name: "Gitignore".to_string(),
-        checks: gitignore_checks,
-    });
-
-    let all_passed = sections.iter().flat_map(|s| &s.checks).all(|c| c.passed);
+    let all_passed = sections
+        .iter()
+        .flat_map(|s| {
+            s.checks
+                .iter()
+                .chain(s.subsections.iter().flat_map(|ss| &ss.checks))
+        })
+        .all(|c| c.passed);
 
     EnvironmentDoctorResult {
         sections,
@@ -634,10 +667,7 @@ async fn check_ollama_connectivity(dir: &Path) -> EnvironmentCheck {
 }
 
 /// Build registry checks from pre-loaded registry info.
-fn build_registry_checks(
-    info: &RegistryInfo,
-    memory_count: Option<usize>,
-) -> Vec<EnvironmentCheck> {
+fn build_registry_checks(info: &RegistryInfo) -> Vec<EnvironmentCheck> {
     let mut checks = Vec::new();
 
     if !info.loaded {
@@ -647,15 +677,7 @@ fn build_registry_checks(
             message: "registry unavailable".to_string(),
             suggestion: None,
             details: vec![],
-            status: None,
-        });
-        checks.push(EnvironmentCheck {
-            name: "Current project in registry".to_string(),
-            passed: false,
-            message: "registry unavailable".to_string(),
-            suggestion: Some("Run `engramdb init` to register this project".to_string()),
-            details: vec![],
-            status: None,
+            status: Some(CheckStatus::Warn),
         });
         return checks;
     }
@@ -687,27 +709,6 @@ fn build_registry_checks(
         } else {
             None
         },
-    });
-
-    let current_msg = if info.in_registry {
-        match memory_count {
-            Some(n) => format!("registered ({} memories)", n),
-            None => "registered".to_string(),
-        }
-    } else {
-        "not registered".to_string()
-    };
-    checks.push(EnvironmentCheck {
-        name: "Current project in registry".to_string(),
-        passed: info.in_registry,
-        message: current_msg,
-        suggestion: if info.in_registry {
-            None
-        } else {
-            Some("Run `engramdb init` to register this project".to_string())
-        },
-        details: vec![],
-        status: None,
     });
 
     checks
@@ -1715,14 +1716,7 @@ mod tests {
 
         assert_eq!(
             section_names,
-            vec![
-                "System",
-                "Project",
-                "Agent",
-                "Embeddings",
-                "Registry",
-                "Gitignore"
-            ]
+            vec!["System", "Project", "Agent", "Embeddings"]
         );
     }
 
@@ -2060,28 +2054,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_registry_checks_returns_two_checks() {
+    async fn test_build_registry_checks_returns_one_check() {
         let temp_dir = TempDir::new().unwrap();
         let info = load_registry_info(temp_dir.path()).await;
-        let checks = build_registry_checks(&info, None);
-        assert_eq!(checks.len(), 2);
+        let checks = build_registry_checks(&info);
+        assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].name, "Registered projects");
-        assert_eq!(checks[1].name, "Current project in registry");
-    }
-
-    #[tokio::test]
-    async fn test_build_registry_checks_shows_memory_count() {
-        let info = RegistryInfo {
-            in_registry: true,
-            total_projects: 1,
-            reachable_projects: 1,
-            orphan_dirs: 0,
-            loaded: true,
-        };
-        let checks = build_registry_checks(&info, Some(42));
-        let current = &checks[1];
-        assert!(current.passed);
-        assert!(current.message.contains("42 memories"));
     }
 
     #[tokio::test]
@@ -2093,9 +2071,8 @@ mod tests {
             orphan_dirs: 0,
             loaded: true,
         };
-        let checks = build_registry_checks(&info, None);
+        let checks = build_registry_checks(&info);
         assert!(checks[0].message.contains("5 registered"));
-        // Details should show stale count
         let details_str = checks[0].details.join(" ");
         assert!(details_str.contains("stale: 2"));
         assert!(checks[0].suggestion.as_ref().unwrap().contains("prune"));
@@ -2111,7 +2088,7 @@ mod tests {
             orphan_dirs: 0,
             loaded: true,
         };
-        let checks = build_registry_checks(&info, None);
+        let checks = build_registry_checks(&info);
         let details_str = checks[0].details.join(" ");
         assert!(!details_str.contains("stale"));
         assert!(checks[0].suggestion.is_none());
@@ -2127,7 +2104,7 @@ mod tests {
             orphan_dirs: 10,
             loaded: true,
         };
-        let checks = build_registry_checks(&info, None);
+        let checks = build_registry_checks(&info);
         assert_eq!(checks[0].status, Some(CheckStatus::Warn));
         let details_str = checks[0].details.join(" ");
         assert!(details_str.contains("orphan data dirs: 10"));
@@ -2598,13 +2575,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_environment_has_gitignore_section() {
+    async fn test_environment_has_gitignore_subsection() {
         let temp_dir = TempDir::new().unwrap();
         let result = doctor_environment(temp_dir.path(), None).await;
-        let section_names: Vec<&str> = result.sections.iter().map(|s| s.name.as_str()).collect();
+        let system = result.sections.iter().find(|s| s.name == "System").unwrap();
+        let subsection_names: Vec<&str> =
+            system.subsections.iter().map(|s| s.name.as_str()).collect();
         assert!(
-            section_names.contains(&"Gitignore"),
-            "missing Gitignore section"
+            subsection_names.contains(&"Gitignore"),
+            "missing Gitignore subsection under System"
         );
     }
 }
