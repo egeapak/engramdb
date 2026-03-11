@@ -6,6 +6,7 @@ use tempfile::TempDir;
 struct TestDirs {
     registry_dir: TempDir,
     data_dir: TempDir,
+    config_dir: TempDir,
 }
 
 fn test_dirs() -> &'static TestDirs {
@@ -13,6 +14,7 @@ fn test_dirs() -> &'static TestDirs {
     DIRS.get_or_init(|| TestDirs {
         registry_dir: TempDir::new().unwrap(),
         data_dir: TempDir::new().unwrap(),
+        config_dir: TempDir::new().unwrap(),
     })
 }
 
@@ -29,6 +31,7 @@ pub fn cmd() -> assert_cmd::Command {
         dirs.registry_dir.path().join("registry.json"),
     );
     c.env("ENGRAMDB_DATA_DIR", dirs.data_dir.path());
+    c.env("ENGRAMDB_CONFIG_DIR", dirs.config_dir.path());
     c
 }
 
