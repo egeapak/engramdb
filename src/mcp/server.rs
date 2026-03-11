@@ -477,6 +477,7 @@ impl EngramDbServer {
 #[tool_router]
 impl EngramDbServer {
     #[tool(
+        name = "create",
         description = "Store a new memory about the project. Use after discovering patterns, decisions, or hazards."
     )]
     async fn memory_create(
@@ -539,6 +540,7 @@ impl EngramDbServer {
     }
 
     #[tool(
+        name = "retrieve",
         description = "Get memories relevant to your current working context. Call before modifying files, researching project questions, or investigating how things work."
     )]
     async fn memory_retrieve(
@@ -620,6 +622,7 @@ impl EngramDbServer {
     }
 
     #[tool(
+        name = "search",
         description = "Search all memories by text. Use before answering questions about project conventions, workflows, architecture, or tooling."
     )]
     async fn memory_search(
@@ -687,7 +690,10 @@ impl EngramDbServer {
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
-    #[tool(description = "Get full content of a specific memory, including details.")]
+    #[tool(
+        name = "get",
+        description = "Get full content of a specific memory, including details."
+    )]
     async fn memory_get(&self, Parameters(input): Parameters<GetInput>) -> Result<String, String> {
         let store = self.open_store().await?;
         let memory = ops::get_memory(&store, &input.id)
@@ -698,7 +704,10 @@ impl EngramDbServer {
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
-    #[tool(description = "Update an existing memory. Cannot change id or created_at.")]
+    #[tool(
+        name = "update",
+        description = "Update an existing memory. Cannot change id or created_at."
+    )]
     async fn memory_update(
         &self,
         Parameters(input): Parameters<UpdateInput>,
@@ -776,7 +785,10 @@ impl EngramDbServer {
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
-    #[tool(description = "Permanently delete a memory. Prefer supersedes for corrections.")]
+    #[tool(
+        name = "delete",
+        description = "Permanently delete a memory. Prefer supersedes for corrections."
+    )]
     async fn memory_delete(
         &self,
         Parameters(input): Parameters<DeleteInput>,
@@ -793,7 +805,10 @@ impl EngramDbServer {
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
-    #[tool(description = "Flag a memory as potentially incorrect and mark for review.")]
+    #[tool(
+        name = "challenge",
+        description = "Flag a memory as potentially incorrect and mark for review."
+    )]
     async fn memory_challenge(
         &self,
         Parameters(input): Parameters<ChallengeInput>,
@@ -815,7 +830,10 @@ impl EngramDbServer {
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
-    #[tool(description = "List memories needing review (stale or challenged).")]
+    #[tool(
+        name = "review",
+        description = "List memories needing review (stale or challenged)."
+    )]
     async fn memory_review(
         &self,
         Parameters(input): Parameters<ReviewInput>,
@@ -853,7 +871,10 @@ impl EngramDbServer {
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
-    #[tool(description = "Resolve a challenged or needs_review memory: keep, update, or delete.")]
+    #[tool(
+        name = "resolve",
+        description = "Resolve a challenged or needs_review memory: keep, update, or delete."
+    )]
     async fn memory_resolve(
         &self,
         Parameters(input): Parameters<ResolveInput>,
@@ -896,6 +917,7 @@ impl EngramDbServer {
     }
 
     #[tool(
+        name = "compress_candidates",
         description = "List low-criticality memories eligible for compression. Review before compress_apply."
     )]
     async fn memory_compress_candidates(
@@ -920,6 +942,7 @@ impl EngramDbServer {
     }
 
     #[tool(
+        name = "compress_apply",
         description = "Compress multiple memories into one summary. Call compress_candidates first."
     )]
     async fn memory_compress_apply(
@@ -946,7 +969,10 @@ impl EngramDbServer {
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
-    #[tool(description = "Overview of memory store — counts by type, scope, status.")]
+    #[tool(
+        name = "stats",
+        description = "Overview of memory store — counts by type, scope, status."
+    )]
     async fn memory_stats(&self) -> Result<String, String> {
         let store = self.open_store().await?;
         let stats = ops::compute_stats(&store)
@@ -994,7 +1020,10 @@ impl EngramDbServer {
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
-    #[tool(description = "Garbage collect decayed memories. Always dry_run first.")]
+    #[tool(
+        name = "gc",
+        description = "Garbage collect decayed memories. Always dry_run first."
+    )]
     async fn memory_gc(&self, Parameters(input): Parameters<GcInput>) -> Result<String, String> {
         if let Some(t) = input.threshold {
             ops::validate_score(t, "threshold")
@@ -1016,13 +1045,16 @@ impl EngramDbServer {
         if !result.stale_entries.is_empty() {
             response["stale_entries"] = serde_json::json!(result.stale_entries);
             response["warning"] =
-                serde_json::json!("Stale index entries found. Run memory_reindex to fix.");
+                serde_json::json!("Stale index entries found. Run reindex to fix.");
         }
         serde_json::to_string(&response)
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
-    #[tool(description = "Rebuild the search index and embedding vectors.")]
+    #[tool(
+        name = "reindex",
+        description = "Rebuild the search index and embedding vectors."
+    )]
     async fn memory_reindex(
         &self,
         Parameters(input): Parameters<ReindexInput>,
@@ -1050,7 +1082,10 @@ impl EngramDbServer {
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 
-    #[tool(description = "List memories with optional filtering, sorting, and limiting.")]
+    #[tool(
+        name = "list",
+        description = "List memories with optional filtering, sorting, and limiting."
+    )]
     async fn memory_list(
         &self,
         Parameters(input): Parameters<ListInput>,
@@ -1101,6 +1136,7 @@ impl EngramDbServer {
     }
 
     #[tool(
+        name = "doctor",
         description = "Check store health (index vs disk consistency). Fast, project-scoped check. For full environment diagnostics, use the CLI: `engramdb doctor`."
     )]
     async fn memory_doctor(&self) -> Result<String, String> {
@@ -1121,7 +1157,7 @@ impl EngramDbServer {
             response["orphaned_files"] = serde_json::json!(result.orphaned_files);
         }
         if !result.healthy {
-            response["fix"] = serde_json::json!("Run memory_reindex to repair.");
+            response["fix"] = serde_json::json!("Run reindex to repair.");
         }
         serde_json::to_string(&response)
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
