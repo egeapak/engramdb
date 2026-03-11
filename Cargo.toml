@@ -52,6 +52,7 @@ globset = "0.4"
 sha2 = "0.10"
 shell-words = "1"
 dirs = "6"
+jwalk = "0.8"
 fs4 = { version = "0.12", features = ["sync"] }
 
 # Async
@@ -72,7 +73,9 @@ tempfile = "3"
 
 [dev-dependencies]
 assert_cmd = "2"
+ctor = "0.4"
 predicates = "3"
+rand = "0.9"
 regex = "1"
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 

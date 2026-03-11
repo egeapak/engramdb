@@ -232,7 +232,23 @@ pub async fn doctor_environment(
     }
 
     // Global disk usage (informational)
-    system_checks.push(check_global_disk_usage().await);
+    match (
+        crate::storage::paths::global_data_dir(),
+        crate::storage::paths::model_cache_dir(),
+    ) {
+        (Ok(data_dir), Ok(cache_dir)) => {
+            system_checks.push(check_global_disk_usage(&data_dir, &cache_dir).await);
+        }
+        _ => {
+            system_checks.push(EnvironmentCheck {
+                name: "Global disk usage".to_string(),
+                passed: false,
+                message: "could not determine global data/cache directories".to_string(),
+                suggestion: Some("Check platform directory configuration".to_string()),
+                status: None,
+            });
+        }
+    }
 
     sections.push(DoctorSection {
         name: "System".to_string(),
@@ -639,32 +655,70 @@ fn build_registry_checks(
     checks
 }
 
-/// Recursively compute the total size of a directory in bytes.
+/// Directory statistics from a single jwalk pass.
+struct DirStats {
+    total_size: u64,
+    file_count: usize,
+}
+
+/// Compute directory stats (total size and file count) using jwalk.
 ///
-/// Walks all files (not following symlinks), summing `metadata().len()`.
-/// Returns 0 if the directory doesn't exist or is unreadable.
-async fn dir_size(path: &Path) -> u64 {
+/// Optionally filters by file extension (e.g. `Some("md")`).
+/// Returns zeros if the directory doesn't exist or is unreadable.
+fn dir_stats(path: &Path, extension: Option<&str>) -> DirStats {
     if !path.exists() {
-        return 0;
-    }
-    let mut total = 0u64;
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(mut entries) = async_fs::read_dir(&dir).await else {
-            continue;
+        return DirStats {
+            total_size: 0,
+            file_count: 0,
         };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let Ok(meta) = entry.metadata().await else {
+    }
+    let mut total_size = 0u64;
+    let mut file_count = 0usize;
+    for entry in jwalk::WalkDir::new(path)
+        .skip_hidden(false)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        if let Some(ext) = extension {
+            if entry.path().extension().and_then(|e| e.to_str()) != Some(ext) {
                 continue;
-            };
-            if meta.is_dir() {
-                stack.push(entry.path());
-            } else {
-                total += meta.len();
             }
         }
+        if let Ok(meta) = entry.metadata() {
+            total_size += meta.len();
+            file_count += 1;
+        }
     }
-    total
+    DirStats {
+        total_size,
+        file_count,
+    }
+}
+
+/// Compute total size of a directory. Convenience wrapper around `dir_stats`.
+fn dir_size(path: &Path) -> u64 {
+    dir_stats(path, None).total_size
+}
+
+/// List top-level subdirectories with their sizes.
+fn subdir_sizes(path: &Path) -> Vec<(String, u64)> {
+    let mut results = Vec::new();
+    if !path.exists() {
+        return results;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return results;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        if entry.path().is_dir() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let size = dir_size(&entry.path());
+            results.push((name, size));
+        }
+    }
+    results
 }
 
 /// Format a byte count as a human-readable string (KB/MB/GB).
@@ -982,49 +1036,78 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
     }
 }
 
-/// Report global disk usage (all projects + model cache). Always passes (informational).
-async fn check_global_disk_usage() -> EnvironmentCheck {
-    let data_dir =
-        crate::storage::paths::global_data_dir().unwrap_or_else(|_| PathBuf::from("/nonexistent"));
-    let cache_dir =
-        crate::storage::paths::model_cache_dir().unwrap_or_else(|_| PathBuf::from("/nonexistent"));
+/// Report global disk usage with per-model cache breakdown.
+async fn check_global_disk_usage(data_dir: &Path, cache_dir: &Path) -> EnvironmentCheck {
+    let projects_dir = data_dir.join("projects");
+    let project_subdirs = subdir_sizes(&projects_dir);
+    let project_count = project_subdirs.len();
+    let projects_size: u64 = project_subdirs.iter().map(|(_, s)| s).sum();
 
-    let data_size = dir_size(&data_dir).await;
-    let cache_size = dir_size(&cache_dir).await;
+    // Per-model breakdown in cache
+    let model_subdirs = subdir_sizes(cache_dir);
+    let cache_summary = if model_subdirs.is_empty() {
+        "no cached models".to_string()
+    } else {
+        model_subdirs
+            .iter()
+            .map(|(name, size)| {
+                let display_name = name.strip_prefix("models--").unwrap_or(name);
+                format!("{}: {}", display_name, format_bytes(*size))
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
 
     EnvironmentCheck {
         name: "Global disk usage".to_string(),
         passed: true,
         message: format!(
-            "data: {}, model cache: {}",
-            format_bytes(data_size),
-            format_bytes(cache_size)
+            "projects: {} ({} total), models: [{}]",
+            format_bytes(projects_size),
+            project_count,
+            cache_summary
         ),
         suggestion: None,
         status: None,
     }
 }
 
-/// Report project-specific disk usage. Always passes (informational).
+/// Report project-specific disk usage with memory count.
 async fn check_project_disk_usage(dir: &Path, project_id: &str) -> EnvironmentCheck {
     let shared_dir = dir.join(".engramdb").join("memories");
-    let lancedb_dir = crate::storage::paths::lancedb_dir(project_id)
-        .unwrap_or_else(|_| PathBuf::from("/nonexistent"));
-    let personal_dir = crate::storage::paths::personal_memories_dir(project_id)
-        .unwrap_or_else(|_| PathBuf::from("/nonexistent"));
+    let Ok(lancedb_dir) = crate::storage::paths::lancedb_dir(project_id) else {
+        return EnvironmentCheck {
+            name: "Project disk usage".to_string(),
+            passed: false,
+            message: "could not determine project data directories".to_string(),
+            suggestion: Some("Check platform directory configuration".to_string()),
+            status: None,
+        };
+    };
+    let Ok(personal_dir) = crate::storage::paths::personal_memories_dir(project_id) else {
+        return EnvironmentCheck {
+            name: "Project disk usage".to_string(),
+            passed: false,
+            message: "could not determine project data directories".to_string(),
+            suggestion: Some("Check platform directory configuration".to_string()),
+            status: None,
+        };
+    };
 
-    let shared_size = dir_size(&shared_dir).await;
-    let lance_size = dir_size(&lancedb_dir).await;
-    let personal_size = dir_size(&personal_dir).await;
+    let shared = dir_stats(&shared_dir, Some("md"));
+    let lance_size = dir_size(&lancedb_dir);
+    let personal = dir_stats(&personal_dir, Some("md"));
 
     EnvironmentCheck {
         name: "Project disk usage".to_string(),
         passed: true,
         message: format!(
-            "shared: {}, index: {}, personal: {}",
-            format_bytes(shared_size),
+            "shared: {} ({} memories), index: {}, personal: {} ({} memories)",
+            format_bytes(shared.total_size),
+            shared.file_count,
             format_bytes(lance_size),
-            format_bytes(personal_size)
+            format_bytes(personal.total_size),
+            personal.file_count,
         ),
         suggestion: None,
         status: None,
@@ -1942,7 +2025,7 @@ mod tests {
     #[tokio::test]
     async fn test_dir_size_empty() {
         let temp_dir = TempDir::new().unwrap();
-        let size = dir_size(temp_dir.path()).await;
+        let size = dir_size(temp_dir.path());
         assert_eq!(size, 0);
     }
 
@@ -1956,13 +2039,13 @@ mod tests {
             .await
             .unwrap();
 
-        let size = dir_size(temp_dir.path()).await;
+        let size = dir_size(temp_dir.path());
         assert_eq!(size, 11); // "hello" (5) + "world!" (6)
     }
 
     #[tokio::test]
     async fn test_dir_size_nonexistent() {
-        let size = dir_size(Path::new("/nonexistent/path/abc123")).await;
+        let size = dir_size(Path::new("/nonexistent/path/abc123"));
         assert_eq!(size, 0);
     }
 
@@ -1976,8 +2059,143 @@ mod tests {
             .unwrap();
         async_fs::write(sub.join("b.txt"), "bbbbb").await.unwrap();
 
-        let size = dir_size(temp_dir.path()).await;
+        let size = dir_size(temp_dir.path());
         assert_eq!(size, 8); // 3 + 5
+    }
+
+    #[tokio::test]
+    async fn test_dir_stats_counts_and_sizes_with_extension_filter() {
+        use rand::Rng;
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut rng = rand::rng();
+        let file_count: usize = rng.random_range(1..=100);
+        let mut expected_md_size = 0u64;
+        let mut expected_md_count = 0usize;
+        let mut expected_total_size = 0u64;
+
+        for i in 0..file_count {
+            let size: usize = rng.random_range(1024..=4096);
+            let data = vec![0u8; size];
+            let ext = if i % 3 == 0 { "txt" } else { "md" };
+            let path = temp_dir.path().join(format!("file_{}.{}", i, ext));
+            std::fs::write(&path, &data).unwrap();
+            expected_total_size += size as u64;
+            if ext == "md" {
+                expected_md_size += size as u64;
+                expected_md_count += 1;
+            }
+        }
+
+        let all = dir_stats(temp_dir.path(), None);
+        assert_eq!(all.total_size, expected_total_size);
+        assert_eq!(all.file_count, file_count);
+
+        let md_only = dir_stats(temp_dir.path(), Some("md"));
+        assert_eq!(md_only.total_size, expected_md_size);
+        assert_eq!(md_only.file_count, expected_md_count);
+
+        // dir_size should match unfiltered total
+        assert_eq!(dir_size(temp_dir.path()), expected_total_size);
+    }
+
+    #[tokio::test]
+    async fn test_dir_stats_nested_directories() {
+        use rand::Rng;
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut rng = rand::rng();
+        let mut expected_size = 0u64;
+        let mut expected_count = 0usize;
+
+        // Create nested structure: root/sub1/sub2/
+        let sub1 = temp_dir.path().join("sub1");
+        let sub2 = sub1.join("sub2");
+        std::fs::create_dir_all(&sub2).unwrap();
+
+        for (dir, prefix) in [
+            (temp_dir.path(), "root"),
+            (sub1.as_path(), "sub1"),
+            (sub2.as_path(), "sub2"),
+        ] {
+            let count: usize = rng.random_range(1..=10);
+            for i in 0..count {
+                let size: usize = rng.random_range(1024..=4096);
+                let data = vec![0u8; size];
+                std::fs::write(dir.join(format!("{}_{}.md", prefix, i)), &data).unwrap();
+                expected_size += size as u64;
+                expected_count += 1;
+            }
+        }
+
+        let stats = dir_stats(temp_dir.path(), Some("md"));
+        assert_eq!(stats.total_size, expected_size);
+        assert_eq!(stats.file_count, expected_count);
+    }
+
+    #[tokio::test]
+    async fn test_subdir_sizes_reports_per_directory() {
+        use rand::Rng;
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut rng = rand::rng();
+        let mut expected: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+
+        // Create 3-5 subdirectories with random files
+        let subdir_count: usize = rng.random_range(3..=5);
+        for d in 0..subdir_count {
+            let name = format!("dir_{}", d);
+            let subdir = temp_dir.path().join(&name);
+            std::fs::create_dir(&subdir).unwrap();
+
+            let file_count: usize = rng.random_range(1..=20);
+            let mut dir_total = 0u64;
+            for f in 0..file_count {
+                let size: usize = rng.random_range(1024..=4096);
+                let data = vec![0u8; size];
+                std::fs::write(subdir.join(format!("file_{}.bin", f)), &data).unwrap();
+                dir_total += size as u64;
+            }
+            expected.insert(name, dir_total);
+        }
+
+        let results = subdir_sizes(temp_dir.path());
+        assert_eq!(results.len(), subdir_count);
+
+        for (name, size) in &results {
+            let exp = expected
+                .get(name)
+                .unwrap_or_else(|| panic!("unexpected dir: {}", name));
+            assert_eq!(size, exp, "size mismatch for {}", name);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dir_stats_empty_returns_zeros() {
+        let temp_dir = TempDir::new().unwrap();
+        let stats = dir_stats(temp_dir.path(), None);
+        assert_eq!(stats.total_size, 0);
+        assert_eq!(stats.file_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_dir_stats_nonexistent_returns_zeros() {
+        let stats = dir_stats(Path::new("/nonexistent/dir/abc"), Some("md"));
+        assert_eq!(stats.total_size, 0);
+        assert_eq!(stats.file_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_subdir_sizes_empty_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let results = subdir_sizes(temp_dir.path());
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_subdir_sizes_nonexistent() {
+        let results = subdir_sizes(Path::new("/nonexistent/dir/abc"));
+        assert!(results.is_empty());
     }
 
     #[tokio::test]
@@ -2055,11 +2273,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_global_disk_usage_always_passes() {
-        let result = check_global_disk_usage().await;
+        let temp_dir = TempDir::new().unwrap();
+        let result = check_global_disk_usage(temp_dir.path(), temp_dir.path()).await;
         assert_eq!(result.name, "Global disk usage");
         assert!(result.passed);
-        assert!(result.message.contains("data:"));
-        assert!(result.message.contains("model cache:"));
+        assert!(result.message.contains("projects:"));
+        assert!(result.message.contains("models:"));
     }
 
     #[tokio::test]
@@ -2069,6 +2288,7 @@ mod tests {
         assert_eq!(result.name, "Project disk usage");
         assert!(result.passed);
         assert!(result.message.contains("shared:"));
+        assert!(result.message.contains("memories"));
         assert!(result.message.contains("index:"));
         assert!(result.message.contains("personal:"));
     }
