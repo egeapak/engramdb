@@ -211,6 +211,16 @@ impl OutputFormatter {
                         } else {
                             println!("  ✗ {}: {}", check.name, check.message);
                         }
+                        for detail in &check.details {
+                            if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                                println!(
+                                    "      {}",
+                                    detail.if_supports_color(Stream::Stdout, |text| text.dimmed())
+                                );
+                            } else {
+                                println!("      {}", detail);
+                            }
+                        }
                         if let Some(ref suggestion) = check.suggestion {
                             self.print_hint(suggestion);
                         }

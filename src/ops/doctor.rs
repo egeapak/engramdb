@@ -126,7 +126,11 @@ pub struct EnvironmentCheck {
     pub name: String,
     pub passed: bool,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub suggestion: Option<String>,
+    /// Sub-lines rendered below the check with extra indentation.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<String>,
     /// Visual status override. When `None`, the formatter uses `passed` to
     /// decide between pass and fail icons. Set to `Some(CheckStatus::Info)` for
     /// informational items that should not appear as failures.
@@ -171,6 +175,10 @@ pub async fn doctor_environment(
     system_checks.push(check_binary_on_path().await);
 
     let store_initialized = dir.join(".engramdb").exists();
+    let store_path = dir
+        .canonicalize()
+        .unwrap_or_else(|_| dir.to_path_buf())
+        .join(".engramdb");
     system_checks.push(EnvironmentCheck {
         name: "Store initialized".to_string(),
         passed: store_initialized,
@@ -184,6 +192,11 @@ pub async fn doctor_environment(
         } else {
             Some("Run `engramdb init` to initialize a store".to_string())
         },
+        details: if store_initialized {
+            vec![format!("path: {}", store_path.display())]
+        } else {
+            vec![]
+        },
         status: None,
     });
 
@@ -193,15 +206,20 @@ pub async fn doctor_environment(
                 system_checks.push(EnvironmentCheck {
                     name: "Store health".to_string(),
                     passed: result.healthy,
-                    message: format!(
-                        "{} memories indexed, {} on disk",
-                        result.indexed, result.on_disk
-                    ),
+                    message: if result.healthy {
+                        "healthy".to_string()
+                    } else {
+                        "mismatch detected".to_string()
+                    },
                     suggestion: if result.healthy {
                         None
                     } else {
                         Some("Run `engramdb reindex` to repair".to_string())
                     },
+                    details: vec![
+                        format!("indexed: {}", result.indexed),
+                        format!("on disk: {}", result.on_disk),
+                    ],
                     status: None,
                 });
                 Some(result)
@@ -212,6 +230,7 @@ pub async fn doctor_environment(
                     passed: false,
                     message: format!("check failed: {}", e),
                     suggestion: Some("Run `engramdb reindex` to repair".to_string()),
+                    details: vec![],
                     status: None,
                 });
                 None
@@ -245,6 +264,7 @@ pub async fn doctor_environment(
                 passed: false,
                 message: "could not determine global data/cache directories".to_string(),
                 suggestion: Some("Check platform directory configuration".to_string()),
+                details: vec![],
                 status: None,
             });
         }
@@ -278,6 +298,7 @@ pub async fn doctor_environment(
                 passed: true,
                 message: "project not initialized or not in registry".to_string(),
                 suggestion: Some("Run `engramdb init` to set up this project".to_string()),
+                details: vec![],
                 status: None,
             }],
         });
@@ -348,6 +369,7 @@ async fn check_binary_on_path() -> EnvironmentCheck {
                 passed: true,
                 message: version,
                 suggestion: None,
+                details: vec![],
                 status: None,
             }
         }
@@ -356,6 +378,7 @@ async fn check_binary_on_path() -> EnvironmentCheck {
             passed: false,
             message: "not found".to_string(),
             suggestion: Some("Install with `brew install engramdb`".to_string()),
+            details: vec![],
             status: None,
         },
     }
@@ -387,6 +410,7 @@ fn check_claude_plugin() -> EnvironmentCheck {
         } else {
             Some("Install with `claude plugin add https://github.com/egeapak/engramdb`".to_string())
         },
+        details: vec![],
         status: None,
     }
 }
@@ -396,6 +420,7 @@ struct RegistryInfo {
     in_registry: bool,
     total_projects: usize,
     reachable_projects: usize,
+    orphan_dirs: usize,
     loaded: bool,
 }
 
@@ -410,6 +435,7 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
                 in_registry: false,
                 total_projects: 0,
                 reachable_projects: 0,
+                orphan_dirs: 0,
                 loaded: false,
             };
         }
@@ -427,10 +453,31 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
                         .exists()
                 })
                 .count();
+
+            // Count orphan data directories (on disk but not in registry)
+            let registered_ids: std::collections::HashSet<&str> =
+                reg.projects.iter().map(|e| e.project_id.as_str()).collect();
+            let orphan_dirs = crate::storage::paths::global_data_dir()
+                .ok()
+                .map(|d| d.join("projects"))
+                .filter(|d| d.exists())
+                .and_then(|d| std::fs::read_dir(d).ok())
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.path().is_dir())
+                        .filter(|e| {
+                            !registered_ids.contains(e.file_name().to_string_lossy().as_ref())
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+
             RegistryInfo {
                 in_registry,
                 total_projects,
                 reachable_projects,
+                orphan_dirs,
                 loaded: true,
             }
         }
@@ -438,6 +485,7 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
             in_registry: false,
             total_projects: 0,
             reachable_projects: 0,
+            orphan_dirs: 0,
             loaded: false,
         },
     }
@@ -452,6 +500,7 @@ async fn check_config_file(dir: &Path) -> EnvironmentCheck {
             passed: true,
             message: "not present (using defaults)".to_string(),
             suggestion: None,
+            details: vec![],
             status: None,
         };
     }
@@ -462,6 +511,7 @@ async fn check_config_file(dir: &Path) -> EnvironmentCheck {
                 passed: true,
                 message: ".engramdb/config.toml valid".to_string(),
                 suggestion: None,
+                details: vec![],
                 status: None,
             },
             Err(e) => EnvironmentCheck {
@@ -469,6 +519,7 @@ async fn check_config_file(dir: &Path) -> EnvironmentCheck {
                 passed: false,
                 message: format!("invalid values: {}", e),
                 suggestion: Some("Fix the values in .engramdb/config.toml".to_string()),
+                details: vec![],
                 status: None,
             },
         },
@@ -477,6 +528,7 @@ async fn check_config_file(dir: &Path) -> EnvironmentCheck {
             passed: false,
             message: format!("parse error: {}", e),
             suggestion: Some("Fix the syntax in .engramdb/config.toml".to_string()),
+            details: vec![],
             status: None,
         },
     }
@@ -503,6 +555,7 @@ fn check_hook_config() -> EnvironmentCheck {
         } else {
             Some("Install the Claude Code plugin to configure hooks automatically".to_string())
         },
+        details: vec![],
         status: None,
     }
 }
@@ -522,6 +575,7 @@ async fn check_embedding_backend(dir: &Path) -> EnvironmentCheck {
             config.embeddings.backend, config.embeddings.provider
         ),
         suggestion: None,
+        details: vec![],
         status: None,
     }
 }
@@ -546,6 +600,7 @@ async fn check_ollama_connectivity(dir: &Path) -> EnvironmentCheck {
                 passed: !ollama_is_backend,
                 message: "HTTP client error".to_string(),
                 suggestion: Some("Check reqwest/TLS configuration".to_string()),
+                details: vec![],
                 status: None,
             };
         }
@@ -557,6 +612,7 @@ async fn check_ollama_connectivity(dir: &Path) -> EnvironmentCheck {
             passed: true,
             message: "reachable at http://localhost:11434".to_string(),
             suggestion: None,
+            details: vec![],
             status: None,
         },
         _ => {
@@ -568,6 +624,7 @@ async fn check_ollama_connectivity(dir: &Path) -> EnvironmentCheck {
                     suggestion: Some(
                         "Start Ollama with `ollama serve` or check connection".to_string(),
                     ),
+                    details: vec![],
                     status: None,
                 }
             } else {
@@ -576,6 +633,7 @@ async fn check_ollama_connectivity(dir: &Path) -> EnvironmentCheck {
                     passed: true,
                     message: "unreachable (not configured as backend)".to_string(),
                     suggestion: None,
+                    details: vec![],
                     status: None,
                 }
             }
@@ -596,6 +654,7 @@ fn build_registry_checks(
             passed: true,
             message: "registry unavailable".to_string(),
             suggestion: None,
+            details: vec![],
             status: None,
         });
         checks.push(EnvironmentCheck {
@@ -603,32 +662,34 @@ fn build_registry_checks(
             passed: false,
             message: "registry unavailable".to_string(),
             suggestion: Some("Run `engramdb init` to register this project".to_string()),
+            details: vec![],
             status: None,
         });
         return checks;
     }
 
     let stale = info.total_projects - info.reachable_projects;
-    let msg = if stale > 0 {
-        format!(
-            "{} registered, {} reachable, {} stale",
-            info.total_projects, info.reachable_projects, stale
-        )
-    } else {
-        format!(
-            "{} registered, {} reachable",
-            info.total_projects, info.reachable_projects
-        )
-    };
+    let mut details = vec![
+        format!("registered: {}", info.total_projects),
+        format!("reachable: {}", info.reachable_projects),
+    ];
+    if stale > 0 {
+        details.push(format!("stale: {}", stale));
+    }
+    if info.orphan_dirs > 0 {
+        details.push(format!("orphan data dirs: {}", info.orphan_dirs));
+    }
+    let needs_prune = stale > 0 || info.orphan_dirs > 0;
     checks.push(EnvironmentCheck {
         name: "Registered projects".to_string(),
         passed: true,
-        message: msg,
-        suggestion: if stale > 0 {
-            Some("Run `engramdb projects prune` to remove stale entries".to_string())
+        message: format!("{} registered", info.total_projects),
+        suggestion: if needs_prune {
+            Some("Run `engramdb projects prune` to clean up".to_string())
         } else {
             None
         },
+        details,
         status: None,
     });
 
@@ -649,6 +710,7 @@ fn build_registry_checks(
         } else {
             Some("Run `engramdb init` to register this project".to_string())
         },
+        details: vec![],
         status: None,
     });
 
@@ -749,6 +811,7 @@ async fn check_manifest_stats(dir: &Path, store: &MemoryStore) -> EnvironmentChe
                 passed: false,
                 message: format!("failed to load manifest: {}", e),
                 suggestion: Some("Run `engramdb reindex` to regenerate manifest".to_string()),
+                details: vec![],
                 status: None,
             };
         }
@@ -762,6 +825,7 @@ async fn check_manifest_stats(dir: &Path, store: &MemoryStore) -> EnvironmentChe
                 passed: false,
                 message: format!("failed to count memories: {}", e),
                 suggestion: Some("Run `engramdb reindex` to repair".to_string()),
+                details: vec![],
                 status: None,
             };
         }
@@ -774,6 +838,7 @@ async fn check_manifest_stats(dir: &Path, store: &MemoryStore) -> EnvironmentChe
             passed: true,
             message: format!("memory_count {} matches index", manifest_count),
             suggestion: None,
+            details: vec![],
             status: None,
         }
     } else {
@@ -785,6 +850,7 @@ async fn check_manifest_stats(dir: &Path, store: &MemoryStore) -> EnvironmentChe
                 manifest_count, actual_count
             ),
             suggestion: Some("Run `engramdb reindex` to fix".to_string()),
+            details: vec![],
             status: None,
         }
     }
@@ -800,6 +866,7 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
                 passed: true,
                 message: "could not determine data dir".to_string(),
                 suggestion: None,
+                details: vec![],
                 status: None,
             };
         }
@@ -811,6 +878,7 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
             passed: true,
             message: "no lock file".to_string(),
             suggestion: None,
+            details: vec![],
             status: None,
         };
     }
@@ -830,6 +898,7 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
                     passed: true,
                     message: "no active writer".to_string(),
                     suggestion: None,
+                    details: vec![],
                     status: None,
                 }
             }
@@ -838,6 +907,7 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
                 passed: true,
                 message: "write lock held by active process".to_string(),
                 suggestion: None,
+                details: vec![],
                 status: None,
             },
             Err(e) => EnvironmentCheck {
@@ -845,6 +915,7 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
                 passed: false,
                 message: format!("lock check failed: {}", e),
                 suggestion: Some("Remove stale lock file or investigate the error".to_string()),
+                details: vec![],
                 status: None,
             },
         },
@@ -853,6 +924,7 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
             passed: false,
             message: format!("could not open lock file: {}", e),
             suggestion: Some("Check file permissions on the lock file".to_string()),
+            details: vec![],
             status: None,
         },
     }
@@ -868,6 +940,7 @@ async fn check_chunk_orphans(store: &MemoryStore) -> EnvironmentCheck {
                 passed: false,
                 message: format!("failed to list memory ids: {}", e),
                 suggestion: Some("Run `engramdb reindex` to repair".to_string()),
+                details: vec![],
                 status: None,
             };
         }
@@ -881,6 +954,7 @@ async fn check_chunk_orphans(store: &MemoryStore) -> EnvironmentCheck {
                 passed: false,
                 message: format!("failed to list chunk memory_ids: {}", e),
                 suggestion: Some("Run `engramdb reindex` to repair".to_string()),
+                details: vec![],
                 status: None,
             };
         }
@@ -900,6 +974,7 @@ async fn check_chunk_orphans(store: &MemoryStore) -> EnvironmentCheck {
             passed: true,
             message: format!("{} chunk memory_ids, no orphans", chunk_ids.len()),
             suggestion: None,
+            details: vec![],
             status: None,
         }
     } else {
@@ -911,6 +986,7 @@ async fn check_chunk_orphans(store: &MemoryStore) -> EnvironmentCheck {
                 orphans.len()
             ),
             suggestion: Some("Run `engramdb reindex` to clean up orphaned chunks".to_string()),
+            details: vec![],
             status: None,
         }
     }
@@ -929,6 +1005,7 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
                 suggestion: Some(
                     "Add engramdb to .mcp.json, or install the Claude Code plugin".to_string(),
                 ),
+                details: vec![],
                 status: None,
             };
         }
@@ -942,6 +1019,7 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
                 passed: false,
                 message: format!("invalid JSON: {}", e),
                 suggestion: Some("Fix the JSON syntax in .mcp.json".to_string()),
+                details: vec![],
                 status: None,
             };
         }
@@ -957,6 +1035,7 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
                 suggestion: Some(
                     "Add an 'mcpServers' object containing an 'engramdb' entry".to_string(),
                 ),
+                details: vec![],
                 status: None,
             };
         }
@@ -970,6 +1049,7 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
                 passed: false,
                 message: "missing 'mcpServers.engramdb' key".to_string(),
                 suggestion: Some("Add an 'engramdb' entry under 'mcpServers'".to_string()),
+                details: vec![],
                 status: None,
             };
         }
@@ -997,6 +1077,7 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
                     passed: false,
                     message: format!("command '{}' not found on disk or PATH", cmd),
                     suggestion: Some("Check the 'command' path in .mcp.json".to_string()),
+                    details: vec![],
                     status: None,
                 };
             }
@@ -1009,6 +1090,7 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
             suggestion: Some(
                 "Add a 'command' string to mcpServers.engramdb in .mcp.json".to_string(),
             ),
+            details: vec![],
             status: None,
         };
     }
@@ -1021,6 +1103,7 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
                 passed: false,
                 message: "'args' field is not an array".to_string(),
                 suggestion: Some("Set 'args' to an array of strings in .mcp.json".to_string()),
+                details: vec![],
                 status: None,
             };
         }
@@ -1032,6 +1115,7 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
         passed: true,
         message: "configured and valid".to_string(),
         suggestion: None,
+        details: vec![],
         status: None,
     }
 }
@@ -1045,29 +1129,31 @@ async fn check_global_disk_usage(data_dir: &Path, cache_dir: &Path) -> Environme
 
     // Per-model breakdown in cache
     let model_subdirs = subdir_sizes(cache_dir);
-    let cache_summary = if model_subdirs.is_empty() {
-        "no cached models".to_string()
+    let cache_size: u64 = model_subdirs.iter().map(|(_, s)| s).sum();
+    let total = projects_size + cache_size;
+
+    let mut details = Vec::new();
+    details.push(format!(
+        "projects: {} ({} registered)",
+        format_bytes(projects_size),
+        project_count
+    ));
+    if model_subdirs.is_empty() {
+        details.push("models: no cached models".to_string());
     } else {
-        model_subdirs
-            .iter()
-            .map(|(name, size)| {
-                let display_name = name.strip_prefix("models--").unwrap_or(name);
-                format!("{}: {}", display_name, format_bytes(*size))
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
+        details.push(format!("models: {} total", format_bytes(cache_size)));
+        for (name, size) in &model_subdirs {
+            let display_name = name.strip_prefix("models--").unwrap_or(name);
+            details.push(format!("  {}: {}", display_name, format_bytes(*size)));
+        }
+    }
 
     EnvironmentCheck {
         name: "Global disk usage".to_string(),
         passed: true,
-        message: format!(
-            "projects: {} ({} total), models: [{}]",
-            format_bytes(projects_size),
-            project_count,
-            cache_summary
-        ),
+        message: format_bytes(total),
         suggestion: None,
+        details,
         status: None,
     }
 }
@@ -1081,6 +1167,7 @@ async fn check_project_disk_usage(dir: &Path, project_id: &str) -> EnvironmentCh
             passed: false,
             message: "could not determine project data directories".to_string(),
             suggestion: Some("Check platform directory configuration".to_string()),
+            details: vec![],
             status: None,
         };
     };
@@ -1090,6 +1177,7 @@ async fn check_project_disk_usage(dir: &Path, project_id: &str) -> EnvironmentCh
             passed: false,
             message: "could not determine project data directories".to_string(),
             suggestion: Some("Check platform directory configuration".to_string()),
+            details: vec![],
             status: None,
         };
     };
@@ -1097,19 +1185,26 @@ async fn check_project_disk_usage(dir: &Path, project_id: &str) -> EnvironmentCh
     let shared = dir_stats(&shared_dir, Some("md"));
     let lance_size = dir_size(&lancedb_dir);
     let personal = dir_stats(&personal_dir, Some("md"));
+    let total = shared.total_size + lance_size + personal.total_size;
 
     EnvironmentCheck {
         name: "Project disk usage".to_string(),
         passed: true,
-        message: format!(
-            "shared: {} ({} memories), index: {}, personal: {} ({} memories)",
-            format_bytes(shared.total_size),
-            shared.file_count,
-            format_bytes(lance_size),
-            format_bytes(personal.total_size),
-            personal.file_count,
-        ),
+        message: format_bytes(total),
         suggestion: None,
+        details: vec![
+            format!(
+                "shared: {} ({} memories)",
+                format_bytes(shared.total_size),
+                shared.file_count
+            ),
+            format!("index: {}", format_bytes(lance_size)),
+            format!(
+                "personal: {} ({} memories)",
+                format_bytes(personal.total_size),
+                personal.file_count
+            ),
+        ],
         status: None,
     }
 }
@@ -1148,6 +1243,7 @@ async fn check_embedding_model_cached(dir: &Path, cache_dir: &Path) -> Environme
         } else {
             Some("Run `engramdb init` to download the embedding model".to_string())
         },
+        details: vec![],
         status: None,
     }
 }
@@ -1191,6 +1287,7 @@ fn check_global_gitignore() -> EnvironmentCheck {
                  and add .engramdb to ignore it globally"
                     .to_string(),
             ),
+            details: vec![],
             status: Some(CheckStatus::Info),
         };
     };
@@ -1206,6 +1303,7 @@ fn check_global_gitignore() -> EnvironmentCheck {
             passed: true,
             message: ".engramdb ignored globally".to_string(),
             suggestion: None,
+            details: vec![],
             status: None,
         }
     } else {
@@ -1217,6 +1315,7 @@ fn check_global_gitignore() -> EnvironmentCheck {
                 "Add .engramdb to {} to ignore it in all repositories",
                 excludes_path.display()
             )),
+            details: vec![],
             status: Some(CheckStatus::Info),
         }
     }
@@ -1235,6 +1334,7 @@ fn check_project_gitignore(dir: &Path) -> EnvironmentCheck {
             passed: true,
             message: "no .gitignore file".to_string(),
             suggestion: None,
+            details: vec![],
             status: Some(CheckStatus::Info),
         };
     }
@@ -1247,6 +1347,7 @@ fn check_project_gitignore(dir: &Path) -> EnvironmentCheck {
                 passed: true,
                 message: "could not read .gitignore".to_string(),
                 suggestion: None,
+                details: vec![],
                 status: Some(CheckStatus::Info),
             };
         }
@@ -1267,6 +1368,7 @@ fn check_project_gitignore(dir: &Path) -> EnvironmentCheck {
             passed: true,
             message: ".engramdb explicitly included (!.engramdb/)".to_string(),
             suggestion: None,
+            details: vec![],
             status: Some(CheckStatus::Info),
         }
     } else if is_ignored {
@@ -1277,6 +1379,7 @@ fn check_project_gitignore(dir: &Path) -> EnvironmentCheck {
             suggestion: Some(
                 "Add !.engramdb/ to .gitignore to opt in to sharing memories via git".to_string(),
             ),
+            details: vec![],
             status: Some(CheckStatus::Info),
         }
     } else {
@@ -1286,6 +1389,7 @@ fn check_project_gitignore(dir: &Path) -> EnvironmentCheck {
             passed: true,
             message: ".engramdb not mentioned in .gitignore".to_string(),
             suggestion: None,
+            details: vec![],
             status: Some(CheckStatus::Info),
         }
     }
@@ -1672,8 +1776,10 @@ mod tests {
             .find(|c| c.name == "Store health")
             .unwrap();
         assert!(health_check.passed);
-        assert!(health_check.message.contains("1 memories indexed"));
-        assert!(health_check.message.contains("1 on disk"));
+        assert_eq!(health_check.message, "healthy");
+        let details_str = health_check.details.join(" ");
+        assert!(details_str.contains("indexed: 1"));
+        assert!(details_str.contains("on disk: 1"));
         assert!(health_check.suggestion.is_none());
 
         // store_check should also be populated
@@ -1952,6 +2058,7 @@ mod tests {
             in_registry: true,
             total_projects: 1,
             reachable_projects: 1,
+            orphan_dirs: 0,
             loaded: true,
         };
         let checks = build_registry_checks(&info, Some(42));
@@ -1966,12 +2073,14 @@ mod tests {
             in_registry: true,
             total_projects: 5,
             reachable_projects: 3,
+            orphan_dirs: 0,
             loaded: true,
         };
         let checks = build_registry_checks(&info, None);
         assert!(checks[0].message.contains("5 registered"));
-        assert!(checks[0].message.contains("3 reachable"));
-        assert!(checks[0].message.contains("2 stale"));
+        // Details should show stale count
+        let details_str = checks[0].details.join(" ");
+        assert!(details_str.contains("stale: 2"));
         assert!(checks[0].suggestion.as_ref().unwrap().contains("prune"));
     }
 
@@ -1981,10 +2090,12 @@ mod tests {
             in_registry: true,
             total_projects: 2,
             reachable_projects: 2,
+            orphan_dirs: 0,
             loaded: true,
         };
         let checks = build_registry_checks(&info, None);
-        assert!(!checks[0].message.contains("stale"));
+        let details_str = checks[0].details.join(" ");
+        assert!(!details_str.contains("stale"));
         assert!(checks[0].suggestion.is_none());
     }
 
@@ -2277,8 +2388,10 @@ mod tests {
         let result = check_global_disk_usage(temp_dir.path(), temp_dir.path()).await;
         assert_eq!(result.name, "Global disk usage");
         assert!(result.passed);
-        assert!(result.message.contains("projects:"));
-        assert!(result.message.contains("models:"));
+        // Message is now the total size; details have the breakdown
+        let details_str = result.details.join(" ");
+        assert!(details_str.contains("projects:"));
+        assert!(details_str.contains("models:"));
     }
 
     #[tokio::test]
@@ -2287,10 +2400,12 @@ mod tests {
         let result = check_project_disk_usage(temp_dir.path(), "fake-project-id").await;
         assert_eq!(result.name, "Project disk usage");
         assert!(result.passed);
-        assert!(result.message.contains("shared:"));
-        assert!(result.message.contains("memories"));
-        assert!(result.message.contains("index:"));
-        assert!(result.message.contains("personal:"));
+        // Message is now the total size; details have the breakdown
+        let details_str = result.details.join(" ");
+        assert!(details_str.contains("shared:"));
+        assert!(details_str.contains("memories"));
+        assert!(details_str.contains("index:"));
+        assert!(details_str.contains("personal:"));
     }
 
     #[tokio::test]
