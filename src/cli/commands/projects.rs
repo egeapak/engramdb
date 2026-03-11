@@ -8,6 +8,8 @@ use crate::cli::prompter::Prompter;
 use crate::ops::projects;
 use crate::storage::RegistryBackend;
 use anyhow::Result;
+use indicatif::{ProgressBar, ProgressStyle};
+use owo_colors::OwoColorize;
 use std::path::Path;
 
 /// Run the `projects` command with the given subcommand (defaults to `Info`).
@@ -79,43 +81,78 @@ pub async fn run_projects(
             // Preview what would be pruned
             let entries = projects::list_projects(registry).await?;
             let stale: Vec<_> = entries.iter().filter(|e| !e.exists).collect();
+            let orphan_count = projects::count_orphan_dirs(registry).await?;
 
-            if stale.is_empty() {
-                formatter.print_success("No stale projects found.");
+            if stale.is_empty() && orphan_count == 0 {
+                formatter.print_success("Nothing to prune.");
                 return Ok(());
             }
 
-            formatter.print_message(&format!("Found {} stale project(s):", stale.len()));
-            for entry in &stale {
-                formatter
-                    .print_message(&format!("  {} ({})", entry.project_id, entry.project_path));
+            if stale.is_empty() {
+                println!("  {} stale registry entries found.", "No".green());
+            } else {
+                println!(
+                    "  Found {} stale registry entry(ies).",
+                    stale.len().yellow()
+                );
+            }
+            if orphan_count == 0 {
+                println!("  {} orphan data directories found.", "No".green());
+            } else {
+                println!(
+                    "  Found {} orphan data directory(ies) not in registry.",
+                    orphan_count.yellow()
+                );
             }
 
             if !force {
-                let confirm = prompter
-                    .confirm("Remove all stale entries and their global data?", false)
-                    .unwrap_or(false);
+                let confirm = prompter.confirm("Remove all?", false).unwrap_or(false);
                 if !confirm {
                     formatter.print_message("Aborted.");
                     return Ok(());
                 }
             }
 
-            let result = projects::prune_stale_projects(registry).await?;
+            let style = ProgressStyle::default_bar()
+                .template("{prefix} [{bar:40.green/dim}] {pos}/{len} ({eta})")
+                .unwrap()
+                .progress_chars("=>-");
+
+            let stale_pb = ProgressBar::new(stale.len() as u64);
+            stale_pb.set_style(style.clone());
+            stale_pb.set_prefix("stale");
+            if stale.is_empty() {
+                stale_pb.finish_and_clear();
+            }
+
+            let orphan_pb = ProgressBar::new(orphan_count as u64);
+            orphan_pb.set_style(style);
+            orphan_pb.set_prefix("orphan");
+            if orphan_count == 0 {
+                orphan_pb.finish_and_clear();
+            }
+
+            let result = projects::prune_stale_projects(registry, |phase| match phase {
+                projects::PrunePhase::Stale => stale_pb.inc(1),
+                projects::PrunePhase::Orphan => orphan_pb.inc(1),
+            })
+            .await?;
+            stale_pb.finish_and_clear();
+            orphan_pb.finish_and_clear();
+
             if result.stale_removed > 0 {
-                formatter.print_success(&format!(
-                    "Removed {} stale project(s) from registry.",
-                    result.stale_removed
-                ));
+                println!(
+                    "  {} Removed {} stale project(s) from registry.",
+                    "✓".green(),
+                    result.stale_removed.green()
+                );
             }
             if result.orphans_removed > 0 {
-                formatter.print_success(&format!(
-                    "Removed {} orphan data directory(ies) not in registry.",
-                    result.orphans_removed
-                ));
-            }
-            if result.stale_removed == 0 && result.orphans_removed == 0 {
-                formatter.print_success("Nothing to prune.");
+                println!(
+                    "  {} Removed {} orphan data directory(ies).",
+                    "✓".green(),
+                    result.orphans_removed.green()
+                );
             }
         }
     }

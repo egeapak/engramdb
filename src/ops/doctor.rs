@@ -174,82 +174,6 @@ pub async fn doctor_environment(
     let mut system_checks = Vec::new();
     system_checks.push(check_binary_on_path().await);
 
-    let store_initialized = dir.join(".engramdb").exists();
-    let store_path = dir
-        .canonicalize()
-        .unwrap_or_else(|_| dir.to_path_buf())
-        .join(".engramdb");
-    system_checks.push(EnvironmentCheck {
-        name: "Store initialized".to_string(),
-        passed: store_initialized,
-        message: if store_initialized {
-            ".engramdb/ exists".to_string()
-        } else {
-            "not found".to_string()
-        },
-        suggestion: if store_initialized {
-            None
-        } else {
-            Some("Run `engramdb init` to initialize a store".to_string())
-        },
-        details: if store_initialized {
-            vec![format!("path: {}", store_path.display())]
-        } else {
-            vec![]
-        },
-        status: None,
-    });
-
-    let store_check = if let Some(s) = store {
-        match doctor(s).await {
-            Ok(result) => {
-                system_checks.push(EnvironmentCheck {
-                    name: "Store health".to_string(),
-                    passed: result.healthy,
-                    message: if result.healthy {
-                        "healthy".to_string()
-                    } else {
-                        "mismatch detected".to_string()
-                    },
-                    suggestion: if result.healthy {
-                        None
-                    } else {
-                        Some("Run `engramdb reindex` to repair".to_string())
-                    },
-                    details: vec![
-                        format!("indexed: {}", result.indexed),
-                        format!("on disk: {}", result.on_disk),
-                    ],
-                    status: None,
-                });
-                Some(result)
-            }
-            Err(e) => {
-                system_checks.push(EnvironmentCheck {
-                    name: "Store health".to_string(),
-                    passed: false,
-                    message: format!("check failed: {}", e),
-                    suggestion: Some("Run `engramdb reindex` to repair".to_string()),
-                    details: vec![],
-                    status: None,
-                });
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // Manifest stats check (gated on store)
-    if let Some(s) = store {
-        system_checks.push(check_manifest_stats(dir, s).await);
-    }
-
-    // Chunk orphans check (gated on store)
-    if let Some(s) = store {
-        system_checks.push(check_chunk_orphans(s).await);
-    }
-
     // Global disk usage (informational)
     match (
         crate::storage::paths::global_data_dir(),
@@ -279,30 +203,97 @@ pub async fn doctor_environment(
     let registry_info = load_registry_info(dir).await;
 
     // --- Project section ---
-    if store_initialized && registry_info.in_registry {
+    let store_initialized = dir.join(".engramdb").exists();
+    let store_path = dir
+        .canonicalize()
+        .unwrap_or_else(|_| dir.to_path_buf())
+        .join(".engramdb");
+
+    let store_check = if store_initialized {
         let project_id = crate::storage::project_id::compute_project_id(dir);
         let mut project_checks = Vec::new();
-        project_checks.push(check_config_file(dir).await);
-        project_checks.push(check_mcp_config_deep(dir));
-        project_checks.push(check_write_lock(&project_id).await);
-        project_checks.push(check_project_disk_usage(dir, &project_id).await);
+
+        project_checks.push(EnvironmentCheck {
+            name: "Store initialized".to_string(),
+            passed: true,
+            message: ".engramdb/ exists".to_string(),
+            suggestion: None,
+            details: vec![format!("path: {}", store_path.display())],
+            status: None,
+        });
+
+        let sc = if let Some(s) = store {
+            match doctor(s).await {
+                Ok(result) => {
+                    project_checks.push(EnvironmentCheck {
+                        name: "Store health".to_string(),
+                        passed: result.healthy,
+                        message: if result.healthy {
+                            "healthy".to_string()
+                        } else {
+                            "mismatch detected".to_string()
+                        },
+                        suggestion: if result.healthy {
+                            None
+                        } else {
+                            Some("Run `engramdb reindex` to repair".to_string())
+                        },
+                        details: vec![
+                            format!("indexed: {}", result.indexed),
+                            format!("on disk: {}", result.on_disk),
+                        ],
+                        status: None,
+                    });
+                    Some(result)
+                }
+                Err(e) => {
+                    project_checks.push(EnvironmentCheck {
+                        name: "Store health".to_string(),
+                        passed: false,
+                        message: format!("check failed: {}", e),
+                        suggestion: Some("Run `engramdb reindex` to repair".to_string()),
+                        details: vec![],
+                        status: None,
+                    });
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(s) = store {
+            project_checks.push(check_manifest_stats(dir, s).await);
+        }
+        if let Some(s) = store {
+            project_checks.push(check_chunk_orphans(s).await);
+        }
+
+        if registry_info.in_registry {
+            project_checks.push(check_config_file(dir).await);
+            project_checks.push(check_mcp_config_deep(dir));
+            project_checks.push(check_write_lock(&project_id).await);
+            project_checks.push(check_project_disk_usage(dir, &project_id).await);
+        }
         sections.push(DoctorSection {
             name: "Project".to_string(),
             checks: project_checks,
         });
+        sc
     } else {
         sections.push(DoctorSection {
             name: "Project".to_string(),
             checks: vec![EnvironmentCheck {
-                name: "Skipped".to_string(),
-                passed: true,
-                message: "project not initialized or not in registry".to_string(),
+                name: "Store initialized".to_string(),
+                passed: false,
+                message: "not found".to_string(),
                 suggestion: Some("Run `engramdb init` to set up this project".to_string()),
                 details: vec![],
                 status: None,
             }],
         });
-    }
+        None
+    };
 
     // --- Agent section ---
     let agent_checks = vec![check_claude_plugin(), check_hook_config()];
@@ -1198,12 +1189,12 @@ async fn check_project_disk_usage(dir: &Path, project_id: &str) -> EnvironmentCh
                 format_bytes(shared.total_size),
                 shared.file_count
             ),
-            format!("index: {}", format_bytes(lance_size)),
             format!(
                 "personal: {} ({} memories)",
                 format_bytes(personal.total_size),
                 personal.file_count
             ),
+            format!("index: {}", format_bytes(lance_size)),
         ],
         status: None,
     }
@@ -2110,11 +2101,9 @@ mod tests {
             .find(|s| s.name == "Project")
             .unwrap();
         assert_eq!(project_section.checks.len(), 1);
-        assert_eq!(project_section.checks[0].name, "Skipped");
-        assert!(project_section.checks[0].passed);
-        assert!(project_section.checks[0]
-            .message
-            .contains("not initialized"));
+        assert_eq!(project_section.checks[0].name, "Store initialized");
+        assert!(!project_section.checks[0].passed);
+        assert!(project_section.checks[0].message.contains("not found"));
     }
 
     // --- Group 5: new health checks ---

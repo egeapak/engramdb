@@ -44,6 +44,8 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 inquire = "0.7"
 owo-colors = { version = "4", features = ["supports-colors"] }
+indicatif = "0.18"
+rayon = "1"
 
 # Utilities
 uuid = { version = "1", features = ["v7", "serde"] }
