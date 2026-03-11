@@ -2029,6 +2029,25 @@ mod tests {
         assert_eq!(result.name, "Hook configuration");
         // Can't guarantee state in CI, but it should not panic
         assert!(!result.message.is_empty());
+        // When not configured, status should be Warn; when configured, None
+        if result.message == "not configured" {
+            assert_eq!(result.status, Some(CheckStatus::Warn));
+        } else {
+            assert_eq!(result.status, None);
+        }
+    }
+
+    #[test]
+    fn test_check_claude_plugin_warn_when_missing() {
+        let result = check_claude_plugin();
+        assert_eq!(result.name, "Claude Code plugin");
+        assert!(result.passed);
+        // When not found, status should be Warn; when found, None
+        if result.message == "not found" {
+            assert_eq!(result.status, Some(CheckStatus::Warn));
+        } else {
+            assert_eq!(result.status, None);
+        }
     }
 
     #[tokio::test]
@@ -2080,6 +2099,7 @@ mod tests {
         let details_str = checks[0].details.join(" ");
         assert!(details_str.contains("stale: 2"));
         assert!(checks[0].suggestion.as_ref().unwrap().contains("prune"));
+        assert_eq!(checks[0].status, Some(CheckStatus::Warn));
     }
 
     #[tokio::test]
@@ -2095,6 +2115,23 @@ mod tests {
         let details_str = checks[0].details.join(" ");
         assert!(!details_str.contains("stale"));
         assert!(checks[0].suggestion.is_none());
+        assert_eq!(checks[0].status, None);
+    }
+
+    #[tokio::test]
+    async fn test_build_registry_checks_orphans_warn() {
+        let info = RegistryInfo {
+            in_registry: true,
+            total_projects: 2,
+            reachable_projects: 2,
+            orphan_dirs: 10,
+            loaded: true,
+        };
+        let checks = build_registry_checks(&info, None);
+        assert_eq!(checks[0].status, Some(CheckStatus::Warn));
+        let details_str = checks[0].details.join(" ");
+        assert!(details_str.contains("orphan data dirs: 10"));
+        assert!(checks[0].suggestion.as_ref().unwrap().contains("prune"));
     }
 
     #[tokio::test]
