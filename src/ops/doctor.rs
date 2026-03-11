@@ -2391,6 +2391,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_check_write_lock_held_warns() {
+        use fs4::fs_std::FileExt;
+
+        let project_id = "lock-test-project";
+        let lock_dir = crate::storage::paths::global_data_dir()
+            .unwrap()
+            .join("projects")
+            .join(project_id);
+        std::fs::create_dir_all(&lock_dir).unwrap();
+        let lock_path = lock_dir.join("write.lock");
+
+        // Create and hold an exclusive lock
+        let lock_file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        lock_file.lock_exclusive().unwrap();
+
+        let result = check_write_lock(project_id).await;
+        assert_eq!(result.name, "Write lock");
+        assert_eq!(result.status, Some(CheckStatus::Warn));
+        assert!(result.message.contains("held by active process"));
+
+        // Clean up
+        lock_file.unlock().unwrap();
+        let _ = std::fs::remove_dir_all(&lock_dir);
+    }
+
+    #[tokio::test]
+    async fn test_check_write_lock_not_held() {
+        let project_id = "lock-test-not-held";
+        let lock_dir = crate::storage::paths::global_data_dir()
+            .unwrap()
+            .join("projects")
+            .join(project_id);
+        std::fs::create_dir_all(&lock_dir).unwrap();
+        let lock_path = lock_dir.join("write.lock");
+
+        // Create lock file but don't hold a lock
+        std::fs::File::create(&lock_path).unwrap();
+
+        let result = check_write_lock(project_id).await;
+        assert_eq!(result.name, "Write lock");
+        assert!(result.passed);
+        assert_eq!(result.status, None);
+        assert!(result.message.contains("no active writer"));
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&lock_dir);
+    }
+
+    #[tokio::test]
     async fn test_check_chunk_orphans_clean() {
         let temp_dir = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();
