@@ -117,6 +117,7 @@ async fn collect_orphans(
 pub enum CheckStatus {
     Pass,
     Fail,
+    Warn,
     Info,
 }
 
@@ -390,7 +391,7 @@ fn check_claude_plugin() -> EnvironmentCheck {
 
     EnvironmentCheck {
         name: "Claude Code plugin".to_string(),
-        passed: found,
+        passed: true,
         message: if found {
             "installed".to_string()
         } else {
@@ -402,7 +403,7 @@ fn check_claude_plugin() -> EnvironmentCheck {
             Some("Install with `claude plugin add https://github.com/egeapak/engramdb`".to_string())
         },
         details: vec![],
-        status: None,
+        status: if found { None } else { Some(CheckStatus::Warn) },
     }
 }
 
@@ -535,7 +536,7 @@ fn check_hook_config() -> EnvironmentCheck {
 
     EnvironmentCheck {
         name: "Hook configuration".to_string(),
-        passed: found,
+        passed: true,
         message: if found {
             "configured".to_string()
         } else {
@@ -547,7 +548,7 @@ fn check_hook_config() -> EnvironmentCheck {
             Some("Install the Claude Code plugin to configure hooks automatically".to_string())
         },
         details: vec![],
-        status: None,
+        status: if found { None } else { Some(CheckStatus::Warn) },
     }
 }
 
@@ -681,7 +682,11 @@ fn build_registry_checks(
             None
         },
         details,
-        status: None,
+        status: if needs_prune {
+            Some(CheckStatus::Warn)
+        } else {
+            None
+        },
     });
 
     let current_msg = if info.in_registry {
@@ -835,14 +840,14 @@ async fn check_manifest_stats(dir: &Path, store: &MemoryStore) -> EnvironmentChe
     } else {
         EnvironmentCheck {
             name: "Manifest stats".to_string(),
-            passed: false,
+            passed: true,
             message: format!(
                 "manifest says {} memories, index has {}",
                 manifest_count, actual_count
             ),
             suggestion: Some("Run `engramdb reindex` to fix".to_string()),
             details: vec![],
-            status: None,
+            status: Some(CheckStatus::Warn),
         }
     }
 }
@@ -897,9 +902,11 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
                 name: "Write lock".to_string(),
                 passed: true,
                 message: "write lock held by active process".to_string(),
-                suggestion: None,
+                suggestion: Some(
+                    "Another process is writing; concurrent access may cause issues".to_string(),
+                ),
                 details: vec![],
-                status: None,
+                status: Some(CheckStatus::Warn),
             },
             Err(e) => EnvironmentCheck {
                 name: "Write lock".to_string(),
@@ -2333,7 +2340,7 @@ mod tests {
             .unwrap();
 
         let result = check_manifest_stats(temp_dir.path(), &store).await;
-        assert!(!result.passed);
+        assert_eq!(result.status, Some(CheckStatus::Warn));
         assert!(result.message.contains("99"));
         assert!(result.message.contains("1"));
     }
