@@ -3066,4 +3066,267 @@ mod tests {
         let val = parse_ok(&result);
         assert_eq!(val["summary"], "Default project");
     }
+
+    #[tokio::test]
+    async fn cross_project_update() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let project_b = dir_b.path().to_string_lossy().to_string();
+
+        // Create in B
+        let mut input = create_input("decision", "Original summary", "Original content");
+        input.project = Some(project_b.clone());
+        let result = server.memory_create(Parameters(input)).await;
+        let id = parse_ok(&result)["id"].as_str().unwrap().to_string();
+
+        // Update in B from server A
+        let update_result = server
+            .memory_update(Parameters(UpdateInput {
+                id: id.clone(),
+                summary: Some("Updated summary".to_string()),
+                content: Some("Updated content".to_string()),
+                type_: None,
+                details: None,
+                physical: None,
+                logical: None,
+                tags: None,
+                tags_add: None,
+                tags_remove: None,
+                criticality: None,
+                confidence: None,
+                visibility: None,
+                status: None,
+                supersedes: None,
+                decay_strategy: None,
+                decay_half_life: None,
+                decay_ttl: None,
+                decay_floor: None,
+                project: Some(project_b.clone()),
+            }))
+            .await;
+        let update_val = parse_ok(&update_result);
+        assert!(update_val["updated"].as_bool().unwrap());
+
+        // Verify update landed in B
+        let get_result = server
+            .memory_get(Parameters(GetInput {
+                id,
+                project: Some(project_b),
+            }))
+            .await;
+        let get_val = parse_ok(&get_result);
+        assert_eq!(get_val["summary"], "Updated summary");
+        assert_eq!(get_val["content"], "Updated content");
+    }
+
+    #[tokio::test]
+    async fn cross_project_write_isolation() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let project_b = dir_b.path().to_string_lossy().to_string();
+
+        // Create memories in A
+        create_and_get_id(&server, "decision", "A memory 1", "Content A1").await;
+        create_and_get_id(&server, "convention", "A memory 2", "Content A2").await;
+
+        // Get A's count
+        let stats_a_before = server
+            .memory_stats(Parameters(StatsInput { project: None }))
+            .await;
+        let count_a_before = parse_ok(&stats_a_before)["total"].as_u64().unwrap();
+        assert_eq!(count_a_before, 2);
+
+        // Write to B
+        let mut input = create_input("hazard", "B hazard", "B content");
+        input.project = Some(project_b.clone());
+        server.memory_create(Parameters(input)).await.unwrap();
+
+        // Delete from B
+        let mut input2 = create_input("debug", "B debug to delete", "B temp");
+        input2.project = Some(project_b.clone());
+        let result = server.memory_create(Parameters(input2)).await;
+        let id_b = parse_ok(&result)["id"].as_str().unwrap().to_string();
+        server
+            .memory_delete(Parameters(DeleteInput {
+                id: id_b,
+                project: Some(project_b),
+            }))
+            .await
+            .unwrap();
+
+        // Verify A is completely unaffected
+        let stats_a_after = server
+            .memory_stats(Parameters(StatsInput { project: None }))
+            .await;
+        let count_a_after = parse_ok(&stats_a_after)["total"].as_u64().unwrap();
+        assert_eq!(count_a_after, count_a_before);
+    }
+
+    #[tokio::test]
+    async fn cross_project_via_project_id() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let project_id_b = crate::storage::project_id::compute_project_id(dir_b.path());
+
+        // Create using project ID instead of path
+        let mut input = create_input("convention", "Via project ID", "Created by ID");
+        input.project = Some(project_id_b.clone());
+        let result = server.memory_create(Parameters(input)).await;
+        let val = parse_ok(&result);
+        let id = val["id"].as_str().unwrap().to_string();
+        assert!(val["created"].as_bool().unwrap());
+
+        // Get back via project ID
+        let get_result = server
+            .memory_get(Parameters(GetInput {
+                id: id.clone(),
+                project: Some(project_id_b),
+            }))
+            .await;
+        let get_val = parse_ok(&get_result);
+        assert_eq!(get_val["summary"], "Via project ID");
+
+        // Verify not in A
+        let get_from_a = server
+            .memory_get(Parameters(GetInput { id, project: None }))
+            .await;
+        assert!(get_from_a.is_err());
+    }
+
+    #[tokio::test]
+    async fn cross_project_doctor() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let project_b = dir_b.path().to_string_lossy().to_string();
+
+        // Create a memory in B so the store has data
+        let mut input = create_input("context", "Doctor test", "Health check");
+        input.project = Some(project_b.clone());
+        server.memory_create(Parameters(input)).await.unwrap();
+
+        // Run doctor on B from server A
+        let result = server
+            .memory_doctor(Parameters(DoctorInput {
+                project: Some(project_b),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(val["healthy"].as_bool().unwrap());
+        assert_eq!(val["on_disk"], 1);
+    }
+
+    #[tokio::test]
+    async fn cross_project_list() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let project_b = dir_b.path().to_string_lossy().to_string();
+
+        // Create memories in B
+        let mut input1 = create_input("decision", "B decision", "Content");
+        input1.project = Some(project_b.clone());
+        server.memory_create(Parameters(input1)).await.unwrap();
+
+        let mut input2 = create_input("hazard", "B hazard", "Content");
+        input2.project = Some(project_b.clone());
+        server.memory_create(Parameters(input2)).await.unwrap();
+
+        // List from A targeting B
+        let result = server
+            .memory_list(Parameters(ListInput {
+                types: None,
+                tags: None,
+                status: None,
+                scope: None,
+                sort_field: None,
+                reverse: None,
+                limit: None,
+                project: Some(project_b),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["total"], 2);
+
+        // List A — should have nothing
+        let result_a = server
+            .memory_list(Parameters(ListInput {
+                types: None,
+                tags: None,
+                status: None,
+                scope: None,
+                sort_field: None,
+                reverse: None,
+                limit: None,
+                project: None,
+            }))
+            .await;
+        let val_a = parse_ok(&result_a);
+        assert_eq!(val_a["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn cross_project_challenge_and_review() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let project_b = dir_b.path().to_string_lossy().to_string();
+
+        // Create in B
+        let mut input = create_input("decision", "Questionable decision", "Maybe wrong");
+        input.project = Some(project_b.clone());
+        let result = server.memory_create(Parameters(input)).await;
+        let id = parse_ok(&result)["id"].as_str().unwrap().to_string();
+
+        // Challenge from A targeting B
+        let challenge_result = server
+            .memory_challenge(Parameters(ChallengeInput {
+                id: id.clone(),
+                evidence: "New evidence contradicts this".to_string(),
+                source_file: None,
+                project: Some(project_b.clone()),
+            }))
+            .await;
+        let challenge_val = parse_ok(&challenge_result);
+        assert!(challenge_val["challenged"].as_bool().unwrap());
+
+        // Review B from A — should show the challenged memory
+        let review_result = server
+            .memory_review(Parameters(ReviewInput {
+                scope: None,
+                max_results: None,
+                type_: None,
+                challenged_only: Some(true),
+                stale_only: None,
+                project: Some(project_b),
+            }))
+            .await;
+        let review_val = parse_ok(&review_result);
+        assert_eq!(review_val["total"], 1);
+        assert_eq!(review_val["memories"][0]["id"], id);
+    }
+
+    #[tokio::test]
+    async fn cross_project_create_on_uninitialized_errors() {
+        let dir_a = TempDir::new().unwrap();
+        let dir_b = TempDir::new().unwrap();
+
+        let project_id_b = crate::storage::project_id::compute_project_id(dir_b.path());
+        let registry = InMemoryRegistry::new();
+        registry.update(dir_b.path(), &project_id_b).await.unwrap();
+
+        let registry: Arc<dyn RegistryBackend> = Arc::new(registry);
+        let server = EngramDbServer::new_with_registry(
+            dir_a.path().to_path_buf(),
+            Some(EmbeddingBackend::Onnx),
+            registry,
+        );
+
+        // Try to create in uninitialized B — should fail, NOT auto-init
+        let project_b = dir_b.path().to_string_lossy().to_string();
+        let mut input = create_input("decision", "Should fail", "No auto-init");
+        input.project = Some(project_b);
+        let result = server.memory_create(Parameters(input)).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("STORE_NOT_INITIALIZED"),
+            "Expected STORE_NOT_INITIALIZED, got: {}",
+            err
+        );
+
+        // Verify B was NOT auto-initialized
+        assert!(!dir_b.path().join(".engramdb").exists());
+    }
 }
