@@ -1332,9 +1332,10 @@ impl ServerHandler for EngramDbServer {
             instructions: Some(
                 "Project-scoped persistent memory store for coding agents. \
                  Stores decisions, hazards, conventions, and context about the codebase. \
-                 IMPORTANT: Search memories (memory_search) before answering project questions, \
-                 investigating workflows, or researching how things work — not only before \
-                 modifying files. Store new knowledge after significant discoveries."
+                 Retrieve before modifying files. Store after significant discoveries. \
+                 All tools accept an optional `project` parameter (absolute path or 16-char \
+                 project ID from the registry) to operate on a different project's memories. \
+                 Omit `project` to use the current project."
                     .to_string(),
             ),
         }
