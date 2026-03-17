@@ -620,13 +620,13 @@ impl EngramDbServer {
         self.open_store_for(None).await
     }
 
-    async fn load_config_for(&self, project: Option<&str>) -> crate::types::EngramConfig {
-        let dir = match self.resolve_dir(project).await {
-            Ok(d) => d,
-            Err(_) => self.dir.clone(),
-        };
+    async fn load_config_for(
+        &self,
+        project: Option<&str>,
+    ) -> Result<crate::types::EngramConfig, String> {
+        let dir = self.resolve_dir(project).await?;
         let config_path = dir.join(".engramdb").join("config.toml");
-        load_config(&config_path).await.unwrap_or_default()
+        Ok(load_config(&config_path).await.unwrap_or_default())
     }
 
     /// Build a RetrievalEngine for the given project override.
@@ -1177,7 +1177,7 @@ impl EngramDbServer {
                 .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
         }
         let store = self.open_store_for(input.project.as_deref()).await?;
-        let config = self.load_config_for(input.project.as_deref()).await;
+        let config = self.load_config_for(input.project.as_deref()).await?;
         let dry_run = input.dry_run.unwrap_or(true);
 
         let result = ops::gc_memories(&store, &config, dry_run, input.threshold)
