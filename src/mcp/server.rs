@@ -567,10 +567,10 @@ impl EngramDbServer {
                     "Project path must be absolute, not relative.",
                 ));
             }
-            let canonical = path.canonicalize().map_err(|_| {
+            let canonical = path.canonicalize().map_err(|e| {
                 error_response(
                     ErrorCode::ProjectNotFound,
-                    &format!("Directory '{}' does not exist.", input),
+                    &format!("Cannot access directory '{}': {}.", input, e),
                 )
             })?;
             let project_id = crate::storage::project_id::compute_project_id(&canonical);
@@ -1332,7 +1332,9 @@ impl ServerHandler for EngramDbServer {
             instructions: Some(
                 "Project-scoped persistent memory store for coding agents. \
                  Stores decisions, hazards, conventions, and context about the codebase. \
-                 Retrieve before modifying files. Store after significant discoveries. \
+                 IMPORTANT: Search memories (memory_search) before answering project questions, \
+                 investigating workflows, or researching how things work — not only before \
+                 modifying files. Store new knowledge after significant discoveries. \
                  All tools accept an optional `project` parameter (absolute path or 16-char \
                  project ID from the registry) to operate on a different project's memories. \
                  Omit `project` to use the current project."
