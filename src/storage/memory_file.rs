@@ -12,8 +12,6 @@
 //!
 //! # <summary>
 //!
-//! > **Criticality:** 0.95 | **Confidence:** 1.0
-//!
 //! ## Content
 //!
 //! <main content text>
@@ -26,6 +24,8 @@
 //!
 //! - **Files:** `src/db/**`
 //! - **Tags:** database, transactions
+//! - **Criticality:** 0.95
+//! - **Confidence:** 1.0
 //!
 //! ## Provenance
 //!
@@ -104,17 +104,6 @@ pub fn write_memory_file(memory: &Memory) -> Result<String> {
     // -- H1: summary --
     out.push_str(&format!("# {}\n\n", memory.summary));
 
-    // -- Blockquote: scores --
-    {
-        let mut parts = Vec::new();
-        parts.push(format!("**Criticality:** {}", memory.criticality));
-        parts.push(format!("**Confidence:** {}", memory.confidence));
-        if memory.visibility == Visibility::Personal {
-            parts.push("**Visibility:** personal".to_string());
-        }
-        out.push_str(&format!("> {}\n\n", parts.join(" | ")));
-    }
-
     // -- ## Content --
     out.push_str("## Content\n\n");
     out.push_str(&memory.content);
@@ -127,22 +116,23 @@ pub fn write_memory_file(memory: &Memory) -> Result<String> {
         out.push('\n');
     }
 
-    // -- ## Scope (if any scope data present) --
-    let has_scope =
-        !memory.physical.is_empty() || !memory.logical.is_empty() || !memory.tags.is_empty();
-    if has_scope {
-        out.push_str("\n## Scope\n\n");
-        if !memory.physical.is_empty() {
-            let paths: Vec<String> = memory.physical.iter().map(|p| format!("`{p}`")).collect();
-            out.push_str(&format!("- **Files:** {}\n", paths.join(", ")));
-        }
-        if !memory.logical.is_empty() {
-            let scopes: Vec<String> = memory.logical.iter().map(|l| format!("`{l}`")).collect();
-            out.push_str(&format!("- **Logical:** {}\n", scopes.join(", ")));
-        }
-        if !memory.tags.is_empty() {
-            out.push_str(&format!("- **Tags:** {}\n", memory.tags.join(", ")));
-        }
+    // -- ## Scope --
+    out.push_str("\n## Scope\n\n");
+    if !memory.physical.is_empty() {
+        let paths: Vec<String> = memory.physical.iter().map(|p| format!("`{p}`")).collect();
+        out.push_str(&format!("- **Files:** {}\n", paths.join(", ")));
+    }
+    if !memory.logical.is_empty() {
+        let scopes: Vec<String> = memory.logical.iter().map(|l| format!("`{l}`")).collect();
+        out.push_str(&format!("- **Logical:** {}\n", scopes.join(", ")));
+    }
+    if !memory.tags.is_empty() {
+        out.push_str(&format!("- **Tags:** {}\n", memory.tags.join(", ")));
+    }
+    out.push_str(&format!("- **Criticality:** {}\n", memory.criticality));
+    out.push_str(&format!("- **Confidence:** {}\n", memory.confidence));
+    if memory.visibility == Visibility::Personal {
+        out.push_str("- **Visibility:** personal\n");
     }
 
     // -- ## Provenance --
@@ -242,24 +232,18 @@ fn parse_structured(frontmatter: &str, body: &str) -> Result<Memory> {
     let content = sections.get("Content").cloned().unwrap_or_default();
     let details = sections.get("Details").cloned().filter(|s| !s.is_empty());
 
-    // Parse scores from blockquote line
-    let blockquote = sections
-        .get("__blockquote__")
-        .map(String::as_str)
-        .unwrap_or("");
-    let criticality = parse_score_field(blockquote, "Criticality").unwrap_or(0.5);
-    let confidence = parse_score_field(blockquote, "Confidence").unwrap_or(0.8);
-    let visibility_from_bq = if blockquote.contains("personal") {
-        Visibility::Personal
-    } else {
-        Visibility::Shared
-    };
-
-    // Parse scope
+    // Parse scope (includes criticality, confidence, visibility)
     let scope_text = sections.get("Scope").map(String::as_str).unwrap_or("");
     let physical = parse_list_field(scope_text, "Files");
     let logical = parse_list_field(scope_text, "Logical");
     let tags = parse_list_field(scope_text, "Tags");
+    let criticality = parse_score_field(scope_text, "Criticality").unwrap_or(0.5);
+    let confidence = parse_score_field(scope_text, "Confidence").unwrap_or(0.8);
+    let visibility_from_scope = if scope_text.contains("**Visibility:** personal") {
+        Visibility::Personal
+    } else {
+        Visibility::Shared
+    };
 
     // Parse provenance
     let prov_text = sections.get("Provenance").map(String::as_str).unwrap_or("");
@@ -285,7 +269,7 @@ fn parse_structured(frontmatter: &str, body: &str) -> Result<Memory> {
         provenance,
         supersedes: hidden.supersedes,
         status: fm.status,
-        visibility: hidden.visibility.unwrap_or(visibility_from_bq),
+        visibility: hidden.visibility.unwrap_or(visibility_from_scope),
         challenges: hidden.challenges,
         verified_at: hidden.verified_at,
         created_at,
@@ -395,7 +379,7 @@ fn parse_hidden_meta(body: &str) -> HiddenMeta {
     HiddenMeta::default()
 }
 
-/// Parse a numeric score from a blockquote string like `**Criticality:** 0.95 | **Confidence:** 1.0`
+/// Parse a numeric score from text like `- **Criticality:** 0.95`
 fn parse_score_field(text: &str, field: &str) -> Option<f64> {
     let marker = format!("**{field}:**");
     let pos = text.find(&marker)?;
@@ -811,7 +795,8 @@ No frontmatter here.
 
         // Verify the structure is human-readable
         assert!(written.contains("# Never call sync() outside a transaction"));
-        assert!(written.contains("> **Criticality:** 0.95 | **Confidence:** 1"));
+        assert!(written.contains("- **Criticality:** 0.95"));
+        assert!(written.contains("- **Confidence:** 1"));
         assert!(written.contains("## Content"));
         assert!(written.contains("## Details"));
         assert!(written.contains("## Scope"));
@@ -828,7 +813,7 @@ No frontmatter here.
     }
 
     #[test]
-    fn test_personal_visibility_shown_in_blockquote() {
+    fn test_personal_visibility_shown_in_scope() {
         let memory = Memory {
             id: "test-vis".to_string(),
             type_: MemoryType::Preference,
