@@ -40,6 +40,11 @@ struct CreateInput {
     #[schemars(description = "One-line summary, max 100 chars (required)")]
     summary: String,
 
+    #[schemars(
+        description = "Short title (a few words) for human-readable filenames. Auto-generated if omitted."
+    )]
+    title: Option<String>,
+
     #[schemars(description = "Extended details (lazy-loaded)")]
     details: Option<String>,
 
@@ -75,6 +80,11 @@ struct CreateInput {
 
     #[schemars(description = "Minimum decay factor (0.0-1.0)")]
     decay_floor: Option<f64>,
+
+    #[schemars(
+        description = "Title generation strategy when title is omitted: keyword (default), t5, or none"
+    )]
+    title_strategy: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -151,6 +161,9 @@ struct UpdateInput {
 
     #[schemars(description = "Summary")]
     summary: Option<String>,
+
+    #[schemars(description = "Short title for human-readable filenames")]
+    title: Option<String>,
 
     #[schemars(description = "Details")]
     details: Option<String>,
@@ -336,6 +349,8 @@ struct MemoryOutput {
     #[serde(rename = "type")]
     type_: String,
     summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
     content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<String>,
@@ -352,6 +367,7 @@ fn memory_to_output(m: &crate::types::Memory, include_details: bool) -> MemoryOu
         id: m.id.clone(),
         type_: format!("{:?}", m.type_).to_lowercase(),
         summary: m.summary.clone(),
+        title: m.title.clone(),
         content: m.content.clone(),
         details: if include_details {
             m.details.clone()
@@ -511,6 +527,7 @@ impl EngramDbServer {
                 type_,
                 content: input.content,
                 summary: input.summary,
+                title: input.title,
                 physical: input.physical.unwrap_or_default(),
                 logical: input.logical.unwrap_or_default(),
                 tags: input.tags.unwrap_or_default(),
@@ -524,6 +541,11 @@ impl EngramDbServer {
                 decay_half_life: input.decay_half_life,
                 decay_ttl: input.decay_ttl,
                 decay_floor: input.decay_floor,
+                title_strategy: match input.title_strategy.as_deref() {
+                    Some(s) => crate::title::TitleStrategy::parse(s)
+                        .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?,
+                    None => crate::title::TitleStrategy::default(),
+                },
             },
             Some(&engine),
         )
@@ -748,6 +770,7 @@ impl EngramDbServer {
                 type_,
                 content: input.content,
                 summary: input.summary,
+                title: input.title,
                 details: input.details,
                 physical: input.physical,
                 logical: input.logical,
@@ -1512,6 +1535,7 @@ mod tests {
             type_: type_.to_string(),
             content: content.to_string(),
             summary: summary.to_string(),
+            title: None,
             details: None,
             physical: None,
             logical: None,
@@ -1524,6 +1548,7 @@ mod tests {
             decay_half_life: None,
             decay_ttl: None,
             decay_floor: None,
+            title_strategy: None,
         }
     }
 
@@ -1568,6 +1593,7 @@ mod tests {
             type_: "hazard".to_string(),
             content: "Race condition in cache".to_string(),
             summary: "Cache race".to_string(),
+            title: Some("cache-race-condition".to_string()),
             details: Some("Detailed explanation".to_string()),
             physical: Some(vec!["src/cache.rs".to_string()]),
             logical: Some(vec!["caching.invalidation".to_string()]),
@@ -1580,6 +1606,7 @@ mod tests {
             decay_half_life: Some(86400),
             decay_ttl: None,
             decay_floor: Some(0.1),
+            title_strategy: None,
         };
         let result = server.memory_create(Parameters(input)).await;
         let val = parse_ok(&result);
@@ -1688,6 +1715,7 @@ mod tests {
             .memory_update(Parameters(UpdateInput {
                 id: id.clone(),
                 summary: Some("New summary".to_string()),
+                title: None,
                 type_: None,
                 content: None,
                 details: None,
@@ -1724,6 +1752,7 @@ mod tests {
                 id: id.clone(),
                 type_: Some("hazard".to_string()),
                 summary: None,
+                title: None,
                 content: None,
                 details: None,
                 physical: None,
@@ -1760,6 +1789,7 @@ mod tests {
                 status: Some("challenged".to_string()),
                 type_: None,
                 summary: None,
+                title: None,
                 content: None,
                 details: None,
                 physical: None,
@@ -1802,6 +1832,7 @@ mod tests {
                 tags_remove: Some(vec!["alpha".to_string()]),
                 type_: None,
                 summary: None,
+                title: None,
                 content: None,
                 details: None,
                 physical: None,
@@ -1843,6 +1874,7 @@ mod tests {
                 criticality: Some(2.0),
                 type_: None,
                 summary: None,
+                title: None,
                 content: None,
                 details: None,
                 physical: None,
@@ -1876,6 +1908,7 @@ mod tests {
                 decay_floor: Some(0.2),
                 type_: None,
                 summary: None,
+                title: None,
                 content: None,
                 details: None,
                 physical: None,

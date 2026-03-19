@@ -169,8 +169,9 @@ impl MemoryStore {
         let memories_dir = self.get_memories_dir(&memory.visibility)?;
         async_fs::create_dir_all(&memories_dir).await?;
 
-        // Write memory file atomically
-        let file_path = memories_dir.join(format!("{}.md", memory.id));
+        // Write memory file atomically (filename includes title slug if present)
+        let filename = memory_file::memory_filename(memory);
+        let file_path = memories_dir.join(&filename);
         let content = memory_file::write_memory_file(memory)?;
         atomic_write(&file_path, &content).await?;
 
@@ -268,8 +269,8 @@ impl MemoryStore {
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
 
-            if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
-                if filename.starts_with(id) {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if memory_file::stem_matches_id_prefix(stem, id) {
                     matches.push(path);
                 }
             }
@@ -300,25 +301,17 @@ impl MemoryStore {
         // Apply updates
         updates.apply_to(&mut memory);
 
-        // Check if visibility changed
-        if memory.visibility != old_visibility {
-            // Delete from old location (file only)
-            self.delete_file_from_dir(id, &self.get_memories_dir(&old_visibility)?)
-                .await?;
+        // Always delete the old file first (filename may have changed due to title update)
+        let old_dir = self.get_memories_dir(&old_visibility)?;
+        self.delete_file_from_dir(id, &old_dir).await?;
 
-            // Write to new location atomically
-            let memories_dir = self.get_memories_dir(&memory.visibility)?;
-            async_fs::create_dir_all(&memories_dir).await?;
-            let file_path = memories_dir.join(format!("{}.md", memory.id));
-            let content = memory_file::write_memory_file(&memory)?;
-            atomic_write(&file_path, &content).await?;
-        } else {
-            // Write updated memory atomically
-            let memories_dir = self.get_memories_dir(&memory.visibility)?;
-            let file_path = memories_dir.join(format!("{}.md", memory.id));
-            let content = memory_file::write_memory_file(&memory)?;
-            atomic_write(&file_path, &content).await?;
-        }
+        // Write to (possibly new) location atomically
+        let memories_dir = self.get_memories_dir(&memory.visibility)?;
+        async_fs::create_dir_all(&memories_dir).await?;
+        let filename = memory_file::memory_filename(&memory);
+        let file_path = memories_dir.join(&filename);
+        let content = memory_file::write_memory_file(&memory)?;
+        atomic_write(&file_path, &content).await?;
 
         // Upsert metadata to LanceDB (chunks are managed separately)
         let entry = IndexEntry::from(&memory);
@@ -498,8 +491,8 @@ impl MemoryStore {
         let mut entries = async_fs::read_dir(dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
-                if filename.starts_with(id) {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if memory_file::stem_matches_id_prefix(stem, id) {
                     matches.push(path);
                 }
             }
@@ -645,8 +638,10 @@ async fn count_md_files(dir: &Path) -> usize {
     count
 }
 
-/// Scan a directory and build a `HashMap` mapping file stem → path
-/// for all `.md` files.  Returns an empty map if the directory does not exist.
+/// Scan a directory and build a `HashMap` mapping memory ID → path
+/// for all `.md` files.  Handles both old (`<uuid>.md`) and new
+/// (`<slug>_<uuid>.md`) filename formats.
+/// Returns an empty map if the directory does not exist.
 async fn scan_dir_to_map(dir: &Path) -> HashMap<String, PathBuf> {
     let mut map = HashMap::new();
     if !dir.exists() {
@@ -659,14 +654,16 @@ async fn scan_dir_to_map(dir: &Path) -> HashMap<String, PathBuf> {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("md") {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                map.insert(stem.to_string(), path);
+                let id = memory_file::extract_id_from_stem(stem);
+                map.insert(id.to_string(), path);
             }
         }
     }
     map
 }
 
-/// Collect file stems (without `.md` extension) from a directory into a `HashSet`.
+/// Collect memory IDs from `.md` filenames in a directory into a `HashSet`.
+/// Handles both old (`<uuid>.md`) and new (`<slug>_<uuid>.md`) formats.
 async fn collect_stems(dir: &Path, stems: &mut HashSet<String>) {
     if !dir.exists() {
         return;
@@ -678,7 +675,8 @@ async fn collect_stems(dir: &Path, stems: &mut HashSet<String>) {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("md") {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                stems.insert(stem.to_string());
+                let id = memory_file::extract_id_from_stem(stem);
+                stems.insert(id.to_string());
             }
         }
     }

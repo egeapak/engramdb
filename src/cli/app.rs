@@ -130,6 +130,10 @@ pub enum Command {
         #[arg(long, short = 's')]
         summary: Option<String>,
 
+        /// Short title (a few words) for human-readable filenames
+        #[arg(long, short = 'T')]
+        title: Option<String>,
+
         /// Physical scope (file paths or globs, can be repeated)
         #[arg(long, short = 'p')]
         physical: Vec<String>,
@@ -329,6 +333,10 @@ pub enum Command {
         /// New summary
         #[arg(long, short = 's')]
         summary: Option<String>,
+
+        /// New title (short, a few words, for human-readable filenames)
+        #[arg(long, short = 'T')]
+        title: Option<String>,
 
         /// New physical scope (replaces existing)
         #[arg(long, short = 'p')]

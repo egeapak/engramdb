@@ -89,6 +89,11 @@ pub struct Memory {
     /// Brief summary (≤100 chars)
     pub summary: String,
 
+    /// Optional short title (a few words) for human-readable filenames.
+    /// When present, the memory file is named `<slug>_<uuid>.md` instead of `<uuid>.md`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
     /// Main content (~500 tokens)
     pub content: String,
 
@@ -166,6 +171,7 @@ impl Memory {
             id,
             type_,
             summary: summary.into(),
+            title: None,
             content: content.into(),
             details: None,
             physical: vec!["/".to_string()],
@@ -230,6 +236,9 @@ pub struct MemoryUpdate {
     pub summary: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -288,6 +297,9 @@ impl MemoryUpdate {
         }
         if let Some(ref summary) = self.summary {
             memory.summary = summary.clone();
+        }
+        if let Some(ref title) = self.title {
+            memory.title = Some(title.clone());
         }
         if let Some(ref content) = self.content {
             memory.content = content.clone();
@@ -602,5 +614,49 @@ mod tests {
         // challenges should be untouched
         assert_eq!(memory.challenges.len(), 1);
         assert_eq!(memory.challenges[0].evidence, "Existing challenge");
+    }
+
+    #[test]
+    fn test_memory_new_title_is_none() {
+        let memory = Memory::new(
+            MemoryType::Decision,
+            "Test summary",
+            "Test content",
+            Provenance::human(),
+        );
+        assert_eq!(memory.title, None);
+    }
+
+    #[test]
+    fn test_memory_update_apply_title() {
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Original",
+            "Original",
+            Provenance::human(),
+        );
+        assert_eq!(memory.title, None);
+
+        let mut update = MemoryUpdate::new();
+        update.title = Some("My Title".to_string());
+        update.apply_to(&mut memory);
+
+        assert_eq!(memory.title, Some("My Title".to_string()));
+    }
+
+    #[test]
+    fn test_memory_update_none_title_preserves_existing() {
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Original",
+            "Original",
+            Provenance::human(),
+        );
+        memory.title = Some("Existing Title".to_string());
+
+        let update = MemoryUpdate::new(); // all fields None
+        update.apply_to(&mut memory);
+
+        assert_eq!(memory.title, Some("Existing Title".to_string()));
     }
 }

@@ -15,6 +15,7 @@ pub struct UpdateParams {
     pub type_: Option<String>,
     pub content: Option<String>,
     pub summary: Option<String>,
+    pub title: Option<String>,
     pub physical: Vec<String>,
     pub logical: Vec<String>,
     pub tags: Vec<String>,
@@ -78,6 +79,7 @@ pub async fn run_update(
         if params.type_.is_none()
             && params.content.is_none()
             && params.summary.is_none()
+            && params.title.is_none()
             && params.physical.is_empty()
             && params.logical.is_empty()
             && params.tags.is_empty()
@@ -177,6 +179,7 @@ pub async fn run_update(
             type_,
             content: params.content,
             summary: params.summary,
+            title: params.title,
             physical,
             logical,
             tags,
