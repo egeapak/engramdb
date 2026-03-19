@@ -478,6 +478,13 @@ pub enum Command {
         shell: clap_complete::Shell,
     },
 
+    /// Migrate memory files to the latest format version
+    Migrate {
+        /// Only report what would be migrated, don't change files
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Rebuild index and re-embed memories
     Reindex {
         /// Only re-embed, don't rebuild index

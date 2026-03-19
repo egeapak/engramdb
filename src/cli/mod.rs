@@ -309,6 +309,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             commands::run_completions(shell);
             Ok(())
         }
+        Command::Migrate { dry_run } => commands::run_migrate(&dir, dry_run, &formatter).await,
         Command::Reindex {
             embeddings_only,
             index_only,

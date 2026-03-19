@@ -5,6 +5,7 @@
 //!
 //! ```text
 //! ---
+//! version: 2
 //! id: <uuid>
 //! type: <memory_type>
 //! status: <status>
@@ -53,8 +54,13 @@ use crate::types::{
 // Minimal frontmatter (YAML between --- fences)
 // ---------------------------------------------------------------------------
 
+/// Current memory file format version. Bump this when the file layout changes.
+pub const CURRENT_FORMAT_VERSION: u32 = 2;
+
 #[derive(Serialize, Deserialize)]
 struct MinimalFrontmatter {
+    /// Format version for future-proof migration detection.
+    version: u32,
     id: String,
     #[serde(rename = "type")]
     type_: MemoryType,
@@ -93,6 +99,7 @@ pub fn write_memory_file(memory: &Memory) -> Result<String> {
     // -- Minimal YAML frontmatter --
     out.push_str("---\n");
     let fm = MinimalFrontmatter {
+        version: CURRENT_FORMAT_VERSION,
         id: memory.id.clone(),
         type_: memory.type_,
         status: memory.status,
@@ -178,6 +185,24 @@ pub fn write_memory_file(memory: &Memory) -> Result<String> {
     Ok(out)
 }
 
+/// Detect the format version of a memory file's raw content.
+///
+/// Returns `None` for legacy (v1) files that lack a version field,
+/// or `Some(n)` for files with an explicit `version: n`.
+pub fn detect_format_version(content: &str) -> Option<u32> {
+    let mut parts = content.splitn(3, "---");
+    parts.next(); // skip before first ---
+    let frontmatter = parts.next()?.trim();
+
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        if let Some(val) = line.strip_prefix("version:") {
+            return val.trim().parse().ok();
+        }
+    }
+    None
+}
+
 fn format_provenance_source(source: ProvenanceSource) -> &'static str {
     match source {
         ProvenanceSource::Human => "human",
@@ -208,16 +233,12 @@ pub fn parse_memory_file(content: &str) -> Result<Memory> {
         .next()
         .ok_or_else(|| StorageError::InvalidFormat("Missing body after frontmatter".to_string()))?;
 
-    // Detect format: if the frontmatter contains a "summary" key it's legacy
-    if frontmatter.contains("\nsummary:")
-        || frontmatter.starts_with("summary:")
-        || frontmatter.contains("\ncontent:")
-        || frontmatter.starts_with("content:")
-    {
-        return parse_legacy(frontmatter, body);
+    // Detect format: version field present → structured; otherwise legacy
+    if frontmatter.contains("\nversion:") || frontmatter.starts_with("version:") {
+        parse_structured(frontmatter, body)
+    } else {
+        parse_legacy(frontmatter, body)
     }
-
-    parse_structured(frontmatter, body)
 }
 
 /// Parse the new structured format.
@@ -870,5 +891,112 @@ No frontmatter here.
             vec!["database", "transactions"]
         );
         assert!(parse_list_field(text, "Logical").is_empty());
+    }
+
+    #[test]
+    fn test_detect_format_version_legacy() {
+        let legacy = r#"---
+id: test-123
+type: hazard
+summary: Test memory
+content: ""
+physical:
+  - "/"
+---
+
+## Content
+
+Hello.
+"#;
+        assert_eq!(detect_format_version(legacy), None);
+    }
+
+    #[test]
+    fn test_detect_format_version_v2() {
+        let v2 = r#"---
+version: 2
+id: test-123
+type: hazard
+status: Active
+---
+
+# Test memory
+"#;
+        assert_eq!(detect_format_version(v2), Some(2));
+    }
+
+    #[test]
+    fn test_written_file_has_version() {
+        let memory = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
+        let written = write_memory_file(&memory).unwrap();
+        assert!(written.contains("version: 2"));
+        assert_eq!(
+            detect_format_version(&written),
+            Some(CURRENT_FORMAT_VERSION)
+        );
+    }
+
+    #[test]
+    fn test_legacy_migration_roundtrip() {
+        // Simulate a legacy file being parsed then rewritten in new format
+        let legacy = r#"---
+id: migrate-me
+type: convention
+summary: Use snake_case
+content: ""
+physical:
+  - "src/**"
+logical:
+  - "code.style"
+tags:
+  - naming
+criticality: 0.7
+provenance:
+  source: human
+confidence: 0.9
+supersedes: []
+status: Active
+visibility: Shared
+challenges: []
+created_at: "2026-01-15T10:00:00Z"
+updated_at: "2026-01-15T10:00:00Z"
+accessed_at: "2026-01-15T10:00:00Z"
+---
+
+## Content
+
+Always use snake_case for function names.
+"#;
+
+        // Parse legacy
+        assert_eq!(detect_format_version(legacy), None);
+        let memory = parse_memory_file(legacy).unwrap();
+        assert_eq!(memory.id, "migrate-me");
+        assert_eq!(memory.summary, "Use snake_case");
+        assert_eq!(memory.content, "Always use snake_case for function names.");
+        assert_eq!(memory.criticality, 0.7);
+        assert_eq!(memory.confidence, 0.9);
+
+        // Rewrite in new format
+        let migrated = write_memory_file(&memory).unwrap();
+        assert_eq!(
+            detect_format_version(&migrated),
+            Some(CURRENT_FORMAT_VERSION)
+        );
+
+        // Parse the migrated version and verify all fields survived
+        let reparsed = parse_memory_file(&migrated).unwrap();
+        assert_eq!(reparsed.id, "migrate-me");
+        assert_eq!(reparsed.summary, "Use snake_case");
+        assert_eq!(
+            reparsed.content,
+            "Always use snake_case for function names."
+        );
+        assert_eq!(reparsed.criticality, 0.7);
+        assert_eq!(reparsed.confidence, 0.9);
+        assert_eq!(reparsed.physical, vec!["src/**"]);
+        assert_eq!(reparsed.logical, vec!["code.style"]);
+        assert_eq!(reparsed.tags, vec!["naming"]);
+        assert_eq!(reparsed.provenance.source, ProvenanceSource::Human);
     }
 }
