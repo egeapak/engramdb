@@ -2,7 +2,7 @@
 
 use crate::cli::output::OutputFormatter;
 use crate::storage::memory_file::{
-    detect_format_version, parse_memory_file, write_memory_file, CURRENT_FORMAT_VERSION,
+    detect_format_version, latest_writer, parser_for_version, CURRENT_FORMAT_VERSION,
 };
 use crate::storage::paths;
 use anyhow::Result;
@@ -144,9 +144,11 @@ async fn migrate_dir(
             continue;
         }
 
-        // Parse and rewrite
-        match parse_memory_file(&raw) {
-            Ok(memory) => match write_memory_file(&memory) {
+        // Parse with version-specific parser, rewrite with latest writer
+        let parser = parser_for_version(version);
+        let writer = latest_writer();
+        match parser.parse(&raw) {
+            Ok(memory) => match writer.write(&memory) {
                 Ok(new_content) => {
                     if let Err(e) = std::fs::write(&path, &new_content) {
                         errors.push(format!("{}: write error: {e}", path.display()));
