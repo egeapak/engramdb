@@ -1037,6 +1037,7 @@ mod tests {
             id: id.to_string(),
             type_: MemoryType::Decision,
             summary: "Test summary".to_string(),
+            title: None,
             content: "Test content".to_string(),
             details: None,
             physical: vec!["/".to_string()],

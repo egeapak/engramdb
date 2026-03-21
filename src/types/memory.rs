@@ -509,6 +509,7 @@ mod tests {
         let update = MemoryUpdate {
             type_: Some(MemoryType::Convention),
             summary: Some("New summary".to_string()),
+            title: None,
             content: Some("New content".to_string()),
             details: Some("New details".to_string()),
             physical: Some(vec!["/src/main.rs".to_string()]),

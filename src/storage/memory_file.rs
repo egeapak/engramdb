@@ -379,6 +379,7 @@ Third paragraph here.
             id: "test-write-1".to_string(),
             type_: MemoryType::Hazard,
             summary: "Test summary".to_string(),
+            title: None,
             content: "Test content".to_string(),
             details: None,
             physical: vec!["/".to_string()],

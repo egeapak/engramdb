@@ -145,14 +145,16 @@ fn encode(
     let ids_tensor = ort::value::TensorRef::from_array_view(([1usize, length], ids.as_slice()))?;
     let mask_tensor = ort::value::TensorRef::from_array_view(([1usize, length], mask.as_slice()))?;
 
-    let outputs = encoder.run(vec![
+    let inputs: Vec<(std::borrow::Cow<str>, ort::session::SessionInputValue)> = vec![
         ("input_ids".into(), ids_tensor.into()),
         ("attention_mask".into(), mask_tensor.into()),
-    ])?;
+    ];
+
+    let outputs = encoder.run(inputs)?;
 
     // Extract encoder hidden states (batch=1, seq_len, hidden_dim)
-    let hidden = outputs[0].try_extract_raw_tensor::<f32>()?;
-    let data = hidden.1.to_vec();
+    let (_shape, hidden_slice) = outputs[0].try_extract_tensor::<f32>()?;
+    let data = hidden_slice.to_vec();
 
     Ok((data, vec![1, length]))
 }
@@ -182,15 +184,16 @@ fn greedy_decode(
             enc_mask.as_slice(),
         ))?;
 
-        let outputs = decoder.run(vec![
+        let inputs: Vec<(std::borrow::Cow<str>, ort::session::SessionInputValue)> = vec![
             ("input_ids".into(), dec_tensor.into()),
             ("encoder_hidden_states".into(), enc_tensor.into()),
             ("encoder_attention_mask".into(), mask_tensor.into()),
-        ])?;
+        ];
+
+        let outputs = decoder.run(inputs)?;
 
         // Get logits: (batch=1, dec_len, vocab_size)
-        let logits_raw = outputs[0].try_extract_raw_tensor::<f32>()?;
-        let logits_data = logits_raw.1;
+        let (_logits_shape, logits_data) = outputs[0].try_extract_tensor::<f32>()?;
 
         // Get vocab size from the last dimension
         let total = logits_data.len();
@@ -203,7 +206,9 @@ fn greedy_decode(
         let next_id = last_token_logits
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|(_, a): &(usize, &f32), (_, b): &(usize, &f32)| {
+                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(idx, _)| idx as i64)
             .unwrap_or(eos_token_id);
 

@@ -30,10 +30,16 @@ pub struct KeywordTitleGenerator {
     max_words: usize,
 }
 
+impl Default for KeywordTitleGenerator {
+    fn default() -> Self {
+        Self { max_words: 4 }
+    }
+}
+
 impl KeywordTitleGenerator {
     /// Create a new keyword-based title generator.
     pub fn new() -> Self {
-        Self { max_words: 4 }
+        Self::default()
     }
 }
 

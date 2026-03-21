@@ -806,6 +806,7 @@ mod tests {
             id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             type_: MemoryType::Decision,
             summary: "Test summary".to_string(),
+            title: None,
             content: "Test content".to_string(),
             details: None,
             physical: vec![],
