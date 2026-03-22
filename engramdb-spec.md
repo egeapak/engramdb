@@ -1161,6 +1161,12 @@ The EngramDB's primary integration point is as an MCP (Model Context Protocol) s
 
 All tools follow the MCP tool schema. Input validation errors return structured error responses, not exceptions.
 
+**Cross-project access:** Every tool accepts an optional `project` parameter (string) that overrides the server's default project. The value can be:
+- A **16-character hex project ID** from the registry (e.g., `"a1b2c3d4e5f67890"`)
+- An **absolute path** to a registered project directory (e.g., `"/home/user/other-project"`)
+
+When omitted, the tool operates on the server's current project. The target project must be registered in the global registry (i.e., `engramdb init` has been run there). Cross-project access does **not** auto-initialize uninitialized stores — it returns `STORE_NOT_INITIALIZED` instead.
+
 ---
 
 #### `memory_create`
@@ -1796,6 +1802,7 @@ All tools return structured errors following MCP conventions.
 | `MEMORY_NOT_FOUND`      | The specified memory ID does not exist           |
 | `VALIDATION_ERROR`      | Input validation failed (details in message)     |
 | `STORE_NOT_INITIALIZED` | No .engramdb/ directory and auto-init is off |
+| `PROJECT_NOT_FOUND`     | Project ID or path not found in the global registry |
 | `INDEX_CORRUPT`         | Index is inconsistent — run memory_reindex       |
 | `EMBEDDING_UNAVAILABLE` | Embedding model not available, falling back to keyword search |
 | `COMPRESS_FAILED`       | Compression requires an LLM and none is configured |
