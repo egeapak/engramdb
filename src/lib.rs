@@ -8,4 +8,5 @@ pub mod scope;
 pub mod scoring;
 pub mod search;
 pub mod storage;
+pub mod title;
 pub mod types;

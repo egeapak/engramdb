@@ -2,7 +2,7 @@
 
 use crate::cli::output::OutputFormatter;
 use crate::ops::get_memory;
-use crate::storage::{paths, MemoryStore};
+use crate::storage::{memory_file, paths, MemoryStore};
 use crate::types::Visibility;
 use anyhow::Result;
 use std::path::Path;
@@ -35,10 +35,11 @@ pub async fn run_get(
 
     // Handle --path flag: print file path and exit
     if path_only {
+        let filename = memory_file::memory_filename(&memory);
         let file_path = match memory.visibility {
-            Visibility::Shared => paths::memories_dir(dir).join(format!("{}.md", memory.id)),
+            Visibility::Shared => paths::memories_dir(dir).join(&filename),
             Visibility::Personal => {
-                paths::personal_memories_dir(&store.project_id)?.join(format!("{}.md", memory.id))
+                paths::personal_memories_dir(&store.project_id)?.join(&filename)
             }
         };
         println!("{}", file_path.display());
@@ -47,10 +48,11 @@ pub async fn run_get(
 
     // Handle --raw flag: read and print raw markdown file
     if raw {
+        let filename = memory_file::memory_filename(&memory);
         let file_path = match memory.visibility {
-            Visibility::Shared => paths::memories_dir(dir).join(format!("{}.md", memory.id)),
+            Visibility::Shared => paths::memories_dir(dir).join(&filename),
             Visibility::Personal => {
-                paths::personal_memories_dir(&store.project_id)?.join(format!("{}.md", memory.id))
+                paths::personal_memories_dir(&store.project_id)?.join(&filename)
             }
         };
         let content = fs::read_to_string(&file_path).await?;
@@ -81,6 +83,7 @@ mod tests {
             id: id.to_string(),
             type_,
             summary: format!("Test summary for {}", id),
+            title: None,
             content: format!("Test content for {}", id),
             details: None,
             physical: vec!["src/main.rs".to_string()],

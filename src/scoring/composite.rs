@@ -331,6 +331,7 @@ mod tests {
             id: "test-id".to_string(),
             type_: MemoryType::Decision,
             summary: "Test memory".to_string(),
+            title: None,
             content: "Test content".to_string(),
             details: None,
             physical: vec!["src/api/auth.rs".to_string()],

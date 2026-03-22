@@ -20,6 +20,7 @@ use crate::retrieval::engine::{RetrievalEngine, RetrievalQuery};
 use crate::retrieval::filters::SearchFilters;
 use crate::storage::config::load_config;
 use crate::storage::{FileRegistry, MemoryStore, RegistryBackend};
+use crate::title::TitleStrategy;
 use crate::types::{EmbeddingBackend, Provenance, Status, Visibility};
 
 // ---------------------------------------------------------------------------
@@ -75,6 +76,12 @@ struct CreateInput {
 
     #[schemars(description = "Minimum decay factor (0.0-1.0)")]
     decay_floor: Option<f64>,
+
+    #[schemars(description = "Optional human-readable title for the memory file")]
+    title: Option<String>,
+
+    #[schemars(description = "Title generation strategy: keyword|t5|none (default keyword)")]
+    title_strategy: Option<String>,
 
     #[schemars(
         description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
@@ -198,6 +205,9 @@ struct UpdateInput {
 
     #[schemars(description = "Visibility")]
     visibility: Option<String>,
+
+    #[schemars(description = "Human-readable title for the memory file")]
+    title: Option<String>,
 
     #[schemars(description = "Status: active|needsreview|challenged")]
     status: Option<String>,
@@ -697,6 +707,13 @@ impl EngramDbServer {
                 decay_half_life: input.decay_half_life,
                 decay_ttl: input.decay_ttl,
                 decay_floor: input.decay_floor,
+                title: input.title,
+                title_strategy: input
+                    .title_strategy
+                    .map(|s| TitleStrategy::parse(&s))
+                    .transpose()
+                    .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?
+                    .unwrap_or_default(),
             },
             Some(&engine),
         )
@@ -930,6 +947,7 @@ impl EngramDbServer {
                 criticality: input.criticality,
                 confidence: input.confidence,
                 visibility,
+                title: input.title,
                 status,
                 supersedes: input.supersedes,
                 decay_strategy: input.decay_strategy,
@@ -1706,6 +1724,8 @@ mod tests {
             decay_half_life: None,
             decay_ttl: None,
             decay_floor: None,
+            title: None,
+            title_strategy: None,
             project: None,
         }
     }
@@ -1763,6 +1783,8 @@ mod tests {
             decay_half_life: Some(86400),
             decay_ttl: None,
             decay_floor: Some(0.1),
+            title: None,
+            title_strategy: None,
             project: None,
         };
         let result = server.memory_create(Parameters(input)).await;
@@ -1887,6 +1909,7 @@ mod tests {
                 criticality: None,
                 confidence: None,
                 visibility: None,
+                title: None,
                 status: None,
                 supersedes: None,
                 decay_strategy: None,
@@ -1925,6 +1948,7 @@ mod tests {
                 criticality: None,
                 confidence: None,
                 visibility: None,
+                title: None,
                 status: None,
                 supersedes: None,
                 decay_strategy: None,
@@ -1964,6 +1988,7 @@ mod tests {
                 criticality: None,
                 confidence: None,
                 visibility: None,
+                title: None,
                 supersedes: None,
                 decay_strategy: None,
                 decay_half_life: None,
@@ -2007,6 +2032,7 @@ mod tests {
                 criticality: None,
                 confidence: None,
                 visibility: None,
+                title: None,
                 status: None,
                 supersedes: None,
                 decay_strategy: None,
@@ -2052,6 +2078,7 @@ mod tests {
                 tags_remove: None,
                 confidence: None,
                 visibility: None,
+                title: None,
                 status: None,
                 supersedes: None,
                 decay_strategy: None,
@@ -2087,6 +2114,7 @@ mod tests {
                 criticality: None,
                 confidence: None,
                 visibility: None,
+                title: None,
                 status: None,
                 supersedes: None,
                 decay_ttl: None,
@@ -3094,6 +3122,7 @@ mod tests {
                 criticality: None,
                 confidence: None,
                 visibility: None,
+                title: None,
                 status: None,
                 supersedes: None,
                 decay_strategy: None,
