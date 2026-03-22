@@ -75,6 +75,11 @@ struct CreateInput {
 
     #[schemars(description = "Minimum decay factor (0.0-1.0)")]
     decay_floor: Option<f64>,
+
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+    )]
+    project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -105,6 +110,11 @@ struct RetrieveInput {
 
     #[schemars(description = "Include expired/decayed memories")]
     include_expired: Option<bool>,
+
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+    )]
+    project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -129,12 +139,22 @@ struct SearchInput {
 
     #[schemars(description = "Max results (default 10)")]
     max_results: Option<usize>,
+
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+    )]
+    project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GetInput {
     #[schemars(description = "Memory ID")]
     id: String,
+
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+    )]
+    project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -196,12 +216,22 @@ struct UpdateInput {
 
     #[schemars(description = "Minimum decay factor (0.0-1.0)")]
     decay_floor: Option<f64>,
+
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+    )]
+    project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct DeleteInput {
     #[schemars(description = "Memory ID")]
     id: String,
+
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+    )]
+    project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -214,6 +244,11 @@ struct ChallengeInput {
 
     #[schemars(description = "File where evidence was found")]
     source_file: Option<String>,
+
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+    )]
+    project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -233,6 +268,11 @@ struct ReviewInput {
 
     #[schemars(description = "Only show needs-review memories")]
     stale_only: Option<bool>,
+
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+    )]
+    project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -248,6 +288,11 @@ struct ResolveInput {
 
     #[schemars(description = "New summary (optional for update)")]
     updated_summary: Option<String>,
+
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+    )]
+    project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -257,6 +302,11 @@ struct CompressCandidatesInput {
 
     #[schemars(description = "Criticality threshold (default 0.4)")]
     threshold: Option<f64>,
+
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+    )]
+    project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -275,6 +325,11 @@ struct CompressApplyInput {
 
     #[schemars(description = "Tags")]
     tags: Option<Vec<String>>,
+
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+    )]
+    project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -284,6 +339,11 @@ struct GcInput {
 
     #[schemars(description = "Override GC score threshold")]
     threshold: Option<f64>,
+
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+    )]
+    project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -293,6 +353,11 @@ struct ReindexInput {
 
     #[schemars(description = "Only rebuild index, skip embedding")]
     index_only: Option<bool>,
+
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+    )]
+    project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -317,6 +382,27 @@ struct ListInput {
 
     #[schemars(description = "Maximum results")]
     limit: Option<usize>,
+
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+    )]
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct StatsInput {
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+    )]
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DoctorInput {
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+    )]
+    project: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -444,29 +530,116 @@ impl EngramDbServer {
         }
     }
 
-    /// Open a MemoryStore, auto-initializing if needed.
-    async fn open_store(&self) -> Result<MemoryStore, String> {
-        let engramdb_dir = self.dir.join(".engramdb");
+    /// Resolve the target project directory from an optional project override.
+    ///
+    /// - `None`          — returns `self.dir`
+    /// - 16-char hex     — looked up by project ID in the registry
+    /// - absolute path   — canonicalized, project ID computed and verified in registry
+    async fn resolve_dir(&self, project: Option<&str>) -> Result<PathBuf, String> {
+        let input = match project {
+            None => return Ok(self.dir.clone()),
+            Some(s) => s,
+        };
+
+        let is_project_id = input.len() == 16 && input.chars().all(|c| c.is_ascii_hexdigit());
+
+        if is_project_id {
+            let registry = self
+                .registry
+                .load()
+                .await
+                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            match registry.projects.iter().find(|e| e.project_id == input) {
+                Some(e) => Ok(PathBuf::from(&e.project_path)),
+                None => Err(error_response(
+                    ErrorCode::ProjectNotFound,
+                    &format!(
+                        "Project ID '{}' not found in registry. Run `engramdb init` in the target project first.",
+                        input
+                    ),
+                )),
+            }
+        } else {
+            let path = PathBuf::from(input);
+            if !path.is_absolute() {
+                return Err(error_response(
+                    ErrorCode::ValidationError,
+                    "Project path must be absolute, not relative.",
+                ));
+            }
+            let canonical = path.canonicalize().map_err(|e| {
+                error_response(
+                    ErrorCode::ProjectNotFound,
+                    &format!("Cannot access directory '{}': {}.", input, e),
+                )
+            })?;
+            let project_id = crate::storage::project_id::compute_project_id(&canonical);
+            let registry = self
+                .registry
+                .load()
+                .await
+                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            if !registry.projects.iter().any(|e| e.project_id == project_id) {
+                return Err(error_response(
+                    ErrorCode::ProjectNotFound,
+                    &format!(
+                        "Project at '{}' (id: {}) not found in registry. Run `engramdb init` there first.",
+                        input, project_id
+                    ),
+                ));
+            }
+            Ok(canonical)
+        }
+    }
+
+    /// Open a MemoryStore for the given project override, auto-initializing only for the default project.
+    async fn open_store_for(&self, project: Option<&str>) -> Result<MemoryStore, String> {
+        let dir = self.resolve_dir(project).await?;
+        let engramdb_dir = dir.join(".engramdb");
         if !engramdb_dir.exists() {
-            MemoryStore::init(&self.dir, self.registry.as_ref())
+            if project.is_some() {
+                return Err(error_response(
+                    ErrorCode::StoreNotInitialized,
+                    &format!(
+                        "Store not initialized at '{}'. Run `engramdb init` there first.",
+                        dir.display()
+                    ),
+                ));
+            }
+            MemoryStore::init(&dir, self.registry.as_ref())
                 .await
                 .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()))?;
         }
-        MemoryStore::open(&self.dir)
+        MemoryStore::open(&dir)
             .await
             .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()))
     }
 
-    async fn load_config(&self) -> crate::types::EngramConfig {
-        let config_path = self.dir.join(".engramdb").join("config.toml");
-        load_config(&config_path).await.unwrap_or_default()
+    /// Open a MemoryStore for the default project, auto-initializing if needed.
+    async fn open_store(&self) -> Result<MemoryStore, String> {
+        self.open_store_for(None).await
     }
 
-    /// Build a RetrievalEngine with optional embeddings support.
-    async fn build_engine(&self) -> Result<RetrievalEngine, String> {
-        let store = self.open_store().await?;
-        let config_path = self.dir.join(".engramdb").join("config.toml");
+    async fn load_config_for(
+        &self,
+        project: Option<&str>,
+    ) -> Result<crate::types::EngramConfig, String> {
+        let dir = self.resolve_dir(project).await?;
+        let config_path = dir.join(".engramdb").join("config.toml");
+        Ok(load_config(&config_path).await.unwrap_or_default())
+    }
+
+    /// Build a RetrievalEngine for the given project override.
+    async fn build_engine_for(&self, project: Option<&str>) -> Result<RetrievalEngine, String> {
+        let dir = self.resolve_dir(project).await?;
+        let store = self.open_store_for(project).await?;
+        let config_path = dir.join(".engramdb").join("config.toml");
         Ok(ops::build_engine(store, &config_path, self.embedding_backend).await)
+    }
+
+    /// Build a RetrievalEngine with optional embeddings support for the default project.
+    async fn build_engine(&self) -> Result<RetrievalEngine, String> {
+        self.build_engine_for(None).await
     }
 }
 
@@ -483,8 +656,8 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<CreateInput>,
     ) -> Result<String, String> {
-        let store = self.open_store().await?;
-        let engine = self.build_engine().await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
+        let engine = self.build_engine_for(input.project.as_deref()).await?;
         let type_ = ops::parse_memory_type(&input.type_)
             .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
@@ -545,7 +718,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<RetrieveInput>,
     ) -> Result<String, String> {
-        let engine = self.build_engine().await?;
+        let engine = self.build_engine_for(input.project.as_deref()).await?;
 
         let type_filter = if let Some(types) = &input.types {
             let mut parsed = Vec::new();
@@ -626,7 +799,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<SearchInput>,
     ) -> Result<String, String> {
-        let engine = self.build_engine().await?;
+        let engine = self.build_engine_for(input.project.as_deref()).await?;
 
         let type_filter = if let Some(types) = &input.types {
             let mut parsed = Vec::new();
@@ -689,7 +862,7 @@ impl EngramDbServer {
 
     #[tool(description = "Get full content of a specific memory, including details.")]
     async fn memory_get(&self, Parameters(input): Parameters<GetInput>) -> Result<String, String> {
-        let store = self.open_store().await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
         let memory = ops::get_memory(&store, &input.id)
             .await
             .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
@@ -703,8 +876,8 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<UpdateInput>,
     ) -> Result<String, String> {
-        let store = self.open_store().await?;
-        let engine = self.build_engine().await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
+        let engine = self.build_engine_for(input.project.as_deref()).await?;
 
         let type_ = input
             .type_
@@ -781,7 +954,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<DeleteInput>,
     ) -> Result<String, String> {
-        let store = self.open_store().await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
         ops::delete_memory(&store, &input.id)
             .await
             .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
@@ -798,7 +971,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<ChallengeInput>,
     ) -> Result<String, String> {
-        let store = self.open_store().await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
         let result = ops::challenge_memory(
             &store,
             &input.id,
@@ -820,7 +993,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<ReviewInput>,
     ) -> Result<String, String> {
-        let store = self.open_store().await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
 
         let type_filter = input
             .type_
@@ -858,7 +1031,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<ResolveInput>,
     ) -> Result<String, String> {
-        let store = self.open_store().await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
 
         let action = match input.action.as_str() {
             "keep" => ops::ResolveAction::Keep,
@@ -906,7 +1079,7 @@ impl EngramDbServer {
             ops::validate_score(t, "threshold")
                 .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
         }
-        let store = self.open_store().await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
         let result = ops::compress_candidates(&store, input.scope.as_deref(), input.threshold)
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
@@ -926,7 +1099,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<CompressApplyInput>,
     ) -> Result<String, String> {
-        let store = self.open_store().await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
         let result = ops::compress_apply(
             &store,
             input.source_ids,
@@ -947,8 +1120,11 @@ impl EngramDbServer {
     }
 
     #[tool(description = "Overview of memory store — counts by type, scope, status.")]
-    async fn memory_stats(&self) -> Result<String, String> {
-        let store = self.open_store().await?;
+    async fn memory_stats(
+        &self,
+        Parameters(input): Parameters<StatsInput>,
+    ) -> Result<String, String> {
+        let store = self.open_store_for(input.project.as_deref()).await?;
         let stats = ops::compute_stats(&store)
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
@@ -1000,8 +1176,8 @@ impl EngramDbServer {
             ops::validate_score(t, "threshold")
                 .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
         }
-        let store = self.open_store().await?;
-        let config = self.load_config().await;
+        let store = self.open_store_for(input.project.as_deref()).await?;
+        let config = self.load_config_for(input.project.as_deref()).await?;
         let dry_run = input.dry_run.unwrap_or(true);
 
         let result = ops::gc_memories(&store, &config, dry_run, input.threshold)
@@ -1027,13 +1203,13 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<ReindexInput>,
     ) -> Result<String, String> {
-        let store = self.open_store().await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
         let embeddings_only = input.embeddings_only.unwrap_or(false);
         let index_only = input.index_only.unwrap_or(false);
 
         // Build engine outside conditional so it stays alive for the reference
         let engine = if !index_only {
-            self.build_engine().await.ok()
+            self.build_engine_for(input.project.as_deref()).await.ok()
         } else {
             None
         };
@@ -1055,7 +1231,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<ListInput>,
     ) -> Result<String, String> {
-        let store = self.open_store().await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
 
         let sort_field =
             ops::parse_sort_field(input.sort_field.as_deref().unwrap_or("criticality"))
@@ -1103,8 +1279,11 @@ impl EngramDbServer {
     #[tool(
         description = "Check store health (index vs disk consistency). Fast, project-scoped check. For full environment diagnostics, use the CLI: `engramdb doctor`."
     )]
-    async fn memory_doctor(&self) -> Result<String, String> {
-        let store = self.open_store().await?;
+    async fn memory_doctor(
+        &self,
+        Parameters(input): Parameters<DoctorInput>,
+    ) -> Result<String, String> {
+        let store = self.open_store_for(input.project.as_deref()).await?;
         let result = ops::doctor(&store)
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
@@ -1155,7 +1334,10 @@ impl ServerHandler for EngramDbServer {
                  Stores decisions, hazards, conventions, and context about the codebase. \
                  IMPORTANT: Search memories (memory_search) before answering project questions, \
                  investigating workflows, or researching how things work — not only before \
-                 modifying files. Store new knowledge after significant discoveries."
+                 modifying files. Store new knowledge after significant discoveries. \
+                 All tools accept an optional `project` parameter (absolute path or 16-char \
+                 project ID from the registry) to operate on a different project's memories. \
+                 Omit `project` to use the current project."
                     .to_string(),
             ),
         }
@@ -1524,6 +1706,7 @@ mod tests {
             decay_half_life: None,
             decay_ttl: None,
             decay_floor: None,
+            project: None,
         }
     }
 
@@ -1580,6 +1763,7 @@ mod tests {
             decay_half_life: Some(86400),
             decay_ttl: None,
             decay_floor: Some(0.1),
+            project: None,
         };
         let result = server.memory_create(Parameters(input)).await;
         let val = parse_ok(&result);
@@ -1641,7 +1825,9 @@ mod tests {
             "All names use snake_case",
         )
         .await;
-        let result = server.memory_get(Parameters(GetInput { id })).await;
+        let result = server
+            .memory_get(Parameters(GetInput { id, project: None }))
+            .await;
         let val = parse_ok(&result);
         assert_eq!(val["summary"], "Use snake_case");
         assert_eq!(val["content"], "All names use snake_case");
@@ -1656,6 +1842,7 @@ mod tests {
         let result = server
             .memory_get(Parameters(GetInput {
                 id: "nonexistent-id-1234".to_string(),
+                project: None,
             }))
             .await;
         let val = parse_err(&result);
@@ -1670,6 +1857,7 @@ mod tests {
         let result = server
             .memory_get(Parameters(GetInput {
                 id: prefix.to_string(),
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -1705,12 +1893,15 @@ mod tests {
                 decay_half_life: None,
                 decay_ttl: None,
                 decay_floor: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
         assert_eq!(val["updated"], true);
 
-        let get_result = server.memory_get(Parameters(GetInput { id })).await;
+        let get_result = server
+            .memory_get(Parameters(GetInput { id, project: None }))
+            .await;
         let get_val = parse_ok(&get_result);
         assert_eq!(get_val["summary"], "New summary");
     }
@@ -1740,12 +1931,15 @@ mod tests {
                 decay_half_life: None,
                 decay_ttl: None,
                 decay_floor: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
         assert_eq!(val["updated"], true);
 
-        let get_result = server.memory_get(Parameters(GetInput { id })).await;
+        let get_result = server
+            .memory_get(Parameters(GetInput { id, project: None }))
+            .await;
         let get_val = parse_ok(&get_result);
         assert_eq!(get_val["type"], "hazard");
     }
@@ -1775,12 +1969,15 @@ mod tests {
                 decay_half_life: None,
                 decay_ttl: None,
                 decay_floor: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
         assert_eq!(val["updated"], true);
 
-        let get_result = server.memory_get(Parameters(GetInput { id })).await;
+        let get_result = server
+            .memory_get(Parameters(GetInput { id, project: None }))
+            .await;
         let get_val = parse_ok(&get_result);
         assert_eq!(get_val["status"], "challenged");
     }
@@ -1816,11 +2013,14 @@ mod tests {
                 decay_half_life: None,
                 decay_ttl: None,
                 decay_floor: None,
+                project: None,
             }))
             .await;
         parse_ok(&result);
 
-        let get_result = server.memory_get(Parameters(GetInput { id })).await;
+        let get_result = server
+            .memory_get(Parameters(GetInput { id, project: None }))
+            .await;
         let get_val = parse_ok(&get_result);
         let tags: Vec<String> = get_val["tags"]
             .as_array()
@@ -1858,6 +2058,7 @@ mod tests {
                 decay_half_life: None,
                 decay_ttl: None,
                 decay_floor: None,
+                project: None,
             }))
             .await;
         let val = parse_err(&result);
@@ -1870,7 +2071,7 @@ mod tests {
         let id = create_and_get_id(&server, "decision", "Summary", "Content").await;
         let result = server
             .memory_update(Parameters(UpdateInput {
-                id: id.clone(),
+                id,
                 decay_strategy: Some("exponential".to_string()),
                 decay_half_life: Some(3600),
                 decay_floor: Some(0.2),
@@ -1889,6 +2090,7 @@ mod tests {
                 status: None,
                 supersedes: None,
                 decay_ttl: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -1904,12 +2106,17 @@ mod tests {
         let (_dir, server) = setup().await;
         let id = create_and_get_id(&server, "decision", "To delete", "Content").await;
         let result = server
-            .memory_delete(Parameters(DeleteInput { id: id.clone() }))
+            .memory_delete(Parameters(DeleteInput {
+                id: id.clone(),
+                project: None,
+            }))
             .await;
         let val = parse_ok(&result);
         assert_eq!(val["deleted"], true);
 
-        let get_result = server.memory_get(Parameters(GetInput { id })).await;
+        let get_result = server
+            .memory_get(Parameters(GetInput { id, project: None }))
+            .await;
         let err_val = parse_err(&get_result);
         assert_eq!(err_val["error"]["code"], "MEMORY_NOT_FOUND");
     }
@@ -1922,6 +2129,7 @@ mod tests {
         let result = server
             .memory_delete(Parameters(DeleteInput {
                 id: "nonexistent-id-5678".to_string(),
+                project: None,
             }))
             .await;
         assert!(result.is_err());
@@ -1958,6 +2166,7 @@ mod tests {
                 logical: None,
                 min_criticality: None,
                 max_results: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -1979,6 +2188,7 @@ mod tests {
                 logical: None,
                 min_criticality: None,
                 max_results: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -2010,6 +2220,7 @@ mod tests {
                 logical: None,
                 min_criticality: None,
                 max_results: Some(1),
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -2030,6 +2241,7 @@ mod tests {
                 logical: None,
                 min_criticality: None,
                 max_results: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -2060,6 +2272,7 @@ mod tests {
                 max_results: None,
                 detail_level: None,
                 include_expired: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -2087,6 +2300,7 @@ mod tests {
                 max_results: None,
                 detail_level: None,
                 include_expired: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -2115,6 +2329,7 @@ mod tests {
                 max_results: None,
                 detail_level: Some("summary".to_string()),
                 include_expired: None,
+                project: None,
             }))
             .await;
         // Should succeed without error
@@ -2137,6 +2352,7 @@ mod tests {
                 max_results: None,
                 detail_level: Some("bogus".to_string()),
                 include_expired: None,
+                project: None,
             }))
             .await;
         let val = parse_err(&result);
@@ -2153,7 +2369,7 @@ mod tests {
         // Init the store by creating and immediately deleting a memory
         let id = create_and_get_id(&server, "decision", "Temp", "Temp").await;
         server
-            .memory_delete(Parameters(DeleteInput { id }))
+            .memory_delete(Parameters(DeleteInput { id, project: None }))
             .await
             .unwrap();
 
@@ -2166,6 +2382,7 @@ mod tests {
                 sort_field: None,
                 reverse: None,
                 limit: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -2189,6 +2406,7 @@ mod tests {
                 sort_field: None,
                 reverse: None,
                 limit: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -2211,6 +2429,7 @@ mod tests {
                 sort_field: None,
                 reverse: None,
                 limit: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -2238,6 +2457,7 @@ mod tests {
                 sort_field: Some("criticality".to_string()),
                 reverse: None,
                 limit: Some(2),
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -2258,6 +2478,7 @@ mod tests {
                 sort_field: Some("bogus".to_string()),
                 reverse: None,
                 limit: None,
+                project: None,
             }))
             .await;
         let val = parse_err(&result);
@@ -2277,12 +2498,15 @@ mod tests {
                 id: id.clone(),
                 evidence: "Found contradicting evidence".to_string(),
                 source_file: Some("src/test.rs".to_string()),
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
         assert_eq!(val["challenged"], true);
 
-        let get_result = server.memory_get(Parameters(GetInput { id })).await;
+        let get_result = server
+            .memory_get(Parameters(GetInput { id, project: None }))
+            .await;
         let get_val = parse_ok(&get_result);
         assert_eq!(get_val["status"], "challenged");
     }
@@ -2296,6 +2520,7 @@ mod tests {
                 id,
                 evidence: "Evidence".to_string(),
                 source_file: None,
+                project: None,
             }))
             .await
             .unwrap();
@@ -2307,6 +2532,7 @@ mod tests {
                 type_: None,
                 challenged_only: Some(true),
                 stale_only: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -2327,6 +2553,7 @@ mod tests {
                     id: id.clone(),
                     evidence: "Evidence".to_string(),
                     source_file: None,
+                    project: None,
                 }))
                 .await
                 .unwrap();
@@ -2339,6 +2566,7 @@ mod tests {
                 type_: Some("decision".to_string()),
                 challenged_only: Some(true),
                 stale_only: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -2356,6 +2584,7 @@ mod tests {
                 id: id.clone(),
                 evidence: "Maybe wrong".to_string(),
                 source_file: None,
+                project: None,
             }))
             .await
             .unwrap();
@@ -2366,13 +2595,16 @@ mod tests {
                 action: "keep".to_string(),
                 updated_content: None,
                 updated_summary: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
         assert_eq!(val["resolved"], true);
         assert_eq!(val["action"], "keep");
 
-        let get_result = server.memory_get(Parameters(GetInput { id })).await;
+        let get_result = server
+            .memory_get(Parameters(GetInput { id, project: None }))
+            .await;
         let get_val = parse_ok(&get_result);
         assert_eq!(get_val["status"], "active");
     }
@@ -2386,6 +2618,7 @@ mod tests {
                 id: id.clone(),
                 evidence: "Definitely wrong".to_string(),
                 source_file: None,
+                project: None,
             }))
             .await
             .unwrap();
@@ -2396,13 +2629,16 @@ mod tests {
                 action: "delete".to_string(),
                 updated_content: None,
                 updated_summary: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
         assert_eq!(val["resolved"], true);
         assert_eq!(val["action"], "delete");
 
-        let get_result = server.memory_get(Parameters(GetInput { id })).await;
+        let get_result = server
+            .memory_get(Parameters(GetInput { id, project: None }))
+            .await;
         assert!(get_result.is_err());
     }
 
@@ -2416,11 +2652,13 @@ mod tests {
         // Init store
         let id = create_and_get_id(&server, "decision", "Temp", "Temp").await;
         server
-            .memory_delete(Parameters(DeleteInput { id }))
+            .memory_delete(Parameters(DeleteInput { id, project: None }))
             .await
             .unwrap();
 
-        let result = server.memory_stats().await;
+        let result = server
+            .memory_stats(Parameters(StatsInput { project: None }))
+            .await;
         let val = parse_ok(&result);
         assert_eq!(val["total"], 0);
     }
@@ -2432,7 +2670,9 @@ mod tests {
         let _ = create_and_get_id(&server, "decision", "Dec2", "Content").await;
         let _ = create_and_get_id(&server, "hazard", "Haz1", "Content").await;
 
-        let result = server.memory_stats().await;
+        let result = server
+            .memory_stats(Parameters(StatsInput { project: None }))
+            .await;
         let val = parse_ok(&result);
         assert_eq!(val["total"], 3);
         assert_eq!(val["by_type"]["decision"], 2);
@@ -2452,6 +2692,7 @@ mod tests {
             .memory_gc(Parameters(GcInput {
                 dry_run: Some(true),
                 threshold: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -2467,6 +2708,7 @@ mod tests {
                 sort_field: None,
                 reverse: None,
                 limit: None,
+                project: None,
             }))
             .await;
         let list_val = parse_ok(&list_result);
@@ -2487,6 +2729,7 @@ mod tests {
             .memory_gc(Parameters(GcInput {
                 dry_run: Some(false),
                 threshold: Some(0.99),
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -2506,6 +2749,7 @@ mod tests {
             .memory_reindex(Parameters(ReindexInput {
                 embeddings_only: None,
                 index_only: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -2521,6 +2765,7 @@ mod tests {
             .memory_reindex(Parameters(ReindexInput {
                 embeddings_only: None,
                 index_only: Some(true),
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -2540,10 +2785,548 @@ mod tests {
             .memory_compress_candidates(Parameters(CompressCandidatesInput {
                 scope: None,
                 threshold: None,
+                project: None,
             }))
             .await;
         let val = parse_ok(&result);
         assert!(val["candidates"].is_array());
         assert!(val["total"].is_number());
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-project: resolve_dir
+    // -----------------------------------------------------------------------
+
+    /// Helper: set up two projects (A = server default, B = cross-project target)
+    /// with a shared registry that knows about both.
+    async fn setup_cross_project() -> (TempDir, TempDir, EngramDbServer) {
+        let dir_a = TempDir::new().unwrap();
+        let dir_b = TempDir::new().unwrap();
+
+        let project_id_b = crate::storage::project_id::compute_project_id(dir_b.path());
+
+        let registry = InMemoryRegistry::new();
+        // Register project B so resolve_dir can find it
+        registry.update(dir_b.path(), &project_id_b).await.unwrap();
+
+        let registry: Arc<dyn RegistryBackend> = Arc::new(registry);
+        let server = EngramDbServer::new_with_registry(
+            dir_a.path().to_path_buf(),
+            Some(EmbeddingBackend::Onnx),
+            registry,
+        );
+
+        // Init project B's store so cross-project opens work
+        MemoryStore::init(dir_b.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        (dir_a, dir_b, server)
+    }
+
+    #[tokio::test]
+    async fn resolve_dir_none_returns_self_dir() {
+        let (_dir, server) = setup().await;
+        let resolved = server.resolve_dir(None).await.unwrap();
+        assert_eq!(resolved, server.dir);
+    }
+
+    #[tokio::test]
+    async fn resolve_dir_valid_project_id() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let project_id_b = crate::storage::project_id::compute_project_id(dir_b.path());
+
+        let resolved = server.resolve_dir(Some(&project_id_b)).await.unwrap();
+        // The registry stores canonicalized paths
+        let expected = dir_b.path().canonicalize().unwrap();
+        assert_eq!(resolved, expected);
+    }
+
+    #[tokio::test]
+    async fn resolve_dir_valid_path() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let path_str = dir_b.path().to_string_lossy().to_string();
+
+        let resolved = server.resolve_dir(Some(&path_str)).await.unwrap();
+        let expected = dir_b.path().canonicalize().unwrap();
+        assert_eq!(resolved, expected);
+    }
+
+    #[tokio::test]
+    async fn resolve_dir_unregistered_project_id() {
+        let (_dir, server) = setup().await;
+        let result = server.resolve_dir(Some("abcdef0123456789")).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("PROJECT_NOT_FOUND"), "got: {}", err);
+    }
+
+    #[tokio::test]
+    async fn resolve_dir_unregistered_path() {
+        let (_dir, server) = setup().await;
+        let unregistered = TempDir::new().unwrap();
+        let path_str = unregistered.path().to_string_lossy().to_string();
+
+        let result = server.resolve_dir(Some(&path_str)).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("PROJECT_NOT_FOUND"), "got: {}", err);
+    }
+
+    #[tokio::test]
+    async fn resolve_dir_ambiguous_hex_treated_as_id() {
+        let (_dir, server) = setup().await;
+        // 16-char hex should be treated as project ID, not path
+        let result = server.resolve_dir(Some("0123456789abcdef")).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("PROJECT_NOT_FOUND"), "got: {}", err);
+    }
+
+    #[tokio::test]
+    async fn resolve_dir_relative_path_rejected() {
+        let (_dir, server) = setup().await;
+        let result = server.resolve_dir(Some("relative/path")).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("VALIDATION_ERROR"), "got: {}", err);
+    }
+
+    #[tokio::test]
+    async fn resolve_dir_nonexistent_path() {
+        let (_dir, server) = setup().await;
+        let result = server
+            .resolve_dir(Some("/tmp/nonexistent_engramdb_test_dir_12345"))
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("PROJECT_NOT_FOUND"), "got: {}", err);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-project: integration tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cross_project_create_and_get() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let project_b = dir_b.path().to_string_lossy().to_string();
+
+        // Create a memory in project B from server anchored at A
+        let mut input = create_input("decision", "Cross-project decision", "Stored in B");
+        input.project = Some(project_b.clone());
+        let result = server.memory_create(Parameters(input)).await;
+        let val = parse_ok(&result);
+        let id = val["id"].as_str().unwrap().to_string();
+        assert!(val["created"].as_bool().unwrap());
+
+        // Get it back via project override
+        let get_result = server
+            .memory_get(Parameters(GetInput {
+                id: id.clone(),
+                project: Some(project_b.clone()),
+            }))
+            .await;
+        let get_val = parse_ok(&get_result);
+        assert_eq!(get_val["summary"], "Cross-project decision");
+        assert_eq!(get_val["content"], "Stored in B");
+
+        // Verify it's NOT in project A
+        let get_from_a = server
+            .memory_get(Parameters(GetInput { id, project: None }))
+            .await;
+        assert!(get_from_a.is_err());
+    }
+
+    #[tokio::test]
+    async fn cross_project_search() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let project_b = dir_b.path().to_string_lossy().to_string();
+
+        // Create memories in project B
+        let mut input = create_input(
+            "convention",
+            "Use snake_case in B",
+            "Convention for project B",
+        );
+        input.project = Some(project_b.clone());
+        server.memory_create(Parameters(input)).await.unwrap();
+
+        // Search from server A targeting project B
+        let result = server
+            .memory_search(Parameters(SearchInput {
+                query: "snake_case".to_string(),
+                types: None,
+                tags: None,
+                physical: None,
+                logical: None,
+                min_criticality: None,
+                max_results: None,
+                project: Some(project_b),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(val["total"].as_u64().unwrap() > 0);
+        assert_eq!(val["memories"][0]["summary"], "Use snake_case in B");
+    }
+
+    #[tokio::test]
+    async fn cross_project_delete() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let project_b = dir_b.path().to_string_lossy().to_string();
+
+        // Create in B
+        let mut input = create_input("debug", "To delete from B", "Temp content");
+        input.project = Some(project_b.clone());
+        let result = server.memory_create(Parameters(input)).await;
+        let id = parse_ok(&result)["id"].as_str().unwrap().to_string();
+
+        // Delete from B via server A
+        let del_result = server
+            .memory_delete(Parameters(DeleteInput {
+                id: id.clone(),
+                project: Some(project_b.clone()),
+            }))
+            .await;
+        let del_val = parse_ok(&del_result);
+        assert!(del_val["deleted"].as_bool().unwrap());
+
+        // Confirm gone from B
+        let get_result = server
+            .memory_get(Parameters(GetInput {
+                id,
+                project: Some(project_b),
+            }))
+            .await;
+        assert!(get_result.is_err());
+    }
+
+    #[tokio::test]
+    async fn cross_project_stats() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let project_b = dir_b.path().to_string_lossy().to_string();
+
+        // Create a memory in B
+        let mut input = create_input("hazard", "Hazard in B", "Watch out");
+        input.project = Some(project_b.clone());
+        server.memory_create(Parameters(input)).await.unwrap();
+
+        // Stats for B from server A
+        let result = server
+            .memory_stats(Parameters(StatsInput {
+                project: Some(project_b),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["total"], 1);
+        assert_eq!(val["by_type"]["hazard"], 1);
+    }
+
+    #[tokio::test]
+    async fn cross_project_uninitialized_store_errors() {
+        let dir_a = TempDir::new().unwrap();
+        let dir_b = TempDir::new().unwrap();
+
+        let project_id_b = crate::storage::project_id::compute_project_id(dir_b.path());
+
+        let registry = InMemoryRegistry::new();
+        registry.update(dir_b.path(), &project_id_b).await.unwrap();
+
+        let registry: Arc<dyn RegistryBackend> = Arc::new(registry);
+        let server = EngramDbServer::new_with_registry(
+            dir_a.path().to_path_buf(),
+            Some(EmbeddingBackend::Onnx),
+            registry,
+        );
+
+        // Do NOT init project B — it should fail with StoreNotInitialized
+        let project_b = dir_b.path().to_string_lossy().to_string();
+        let result = server
+            .memory_stats(Parameters(StatsInput {
+                project: Some(project_b),
+            }))
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("STORE_NOT_INITIALIZED"),
+            "Expected STORE_NOT_INITIALIZED, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn default_behavior_preserved() {
+        let (_dir, server) = setup().await;
+        // Create without project override — should work as before
+        let id = create_and_get_id(&server, "decision", "Default project", "Content").await;
+        let result = server
+            .memory_get(Parameters(GetInput { id, project: None }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["summary"], "Default project");
+    }
+
+    #[tokio::test]
+    async fn cross_project_update() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let project_b = dir_b.path().to_string_lossy().to_string();
+
+        // Create in B
+        let mut input = create_input("decision", "Original summary", "Original content");
+        input.project = Some(project_b.clone());
+        let result = server.memory_create(Parameters(input)).await;
+        let id = parse_ok(&result)["id"].as_str().unwrap().to_string();
+
+        // Update in B from server A
+        let update_result = server
+            .memory_update(Parameters(UpdateInput {
+                id: id.clone(),
+                summary: Some("Updated summary".to_string()),
+                content: Some("Updated content".to_string()),
+                type_: None,
+                details: None,
+                physical: None,
+                logical: None,
+                tags: None,
+                tags_add: None,
+                tags_remove: None,
+                criticality: None,
+                confidence: None,
+                visibility: None,
+                status: None,
+                supersedes: None,
+                decay_strategy: None,
+                decay_half_life: None,
+                decay_ttl: None,
+                decay_floor: None,
+                project: Some(project_b.clone()),
+            }))
+            .await;
+        let update_val = parse_ok(&update_result);
+        assert!(update_val["updated"].as_bool().unwrap());
+
+        // Verify update landed in B
+        let get_result = server
+            .memory_get(Parameters(GetInput {
+                id,
+                project: Some(project_b),
+            }))
+            .await;
+        let get_val = parse_ok(&get_result);
+        assert_eq!(get_val["summary"], "Updated summary");
+        assert_eq!(get_val["content"], "Updated content");
+    }
+
+    #[tokio::test]
+    async fn cross_project_write_isolation() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let project_b = dir_b.path().to_string_lossy().to_string();
+
+        // Create memories in A
+        create_and_get_id(&server, "decision", "A memory 1", "Content A1").await;
+        create_and_get_id(&server, "convention", "A memory 2", "Content A2").await;
+
+        // Get A's count
+        let stats_a_before = server
+            .memory_stats(Parameters(StatsInput { project: None }))
+            .await;
+        let count_a_before = parse_ok(&stats_a_before)["total"].as_u64().unwrap();
+        assert_eq!(count_a_before, 2);
+
+        // Write to B
+        let mut input = create_input("hazard", "B hazard", "B content");
+        input.project = Some(project_b.clone());
+        server.memory_create(Parameters(input)).await.unwrap();
+
+        // Delete from B
+        let mut input2 = create_input("debug", "B debug to delete", "B temp");
+        input2.project = Some(project_b.clone());
+        let result = server.memory_create(Parameters(input2)).await;
+        let id_b = parse_ok(&result)["id"].as_str().unwrap().to_string();
+        server
+            .memory_delete(Parameters(DeleteInput {
+                id: id_b,
+                project: Some(project_b),
+            }))
+            .await
+            .unwrap();
+
+        // Verify A is completely unaffected
+        let stats_a_after = server
+            .memory_stats(Parameters(StatsInput { project: None }))
+            .await;
+        let count_a_after = parse_ok(&stats_a_after)["total"].as_u64().unwrap();
+        assert_eq!(count_a_after, count_a_before);
+    }
+
+    #[tokio::test]
+    async fn cross_project_via_project_id() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let project_id_b = crate::storage::project_id::compute_project_id(dir_b.path());
+
+        // Create using project ID instead of path
+        let mut input = create_input("convention", "Via project ID", "Created by ID");
+        input.project = Some(project_id_b.clone());
+        let result = server.memory_create(Parameters(input)).await;
+        let val = parse_ok(&result);
+        let id = val["id"].as_str().unwrap().to_string();
+        assert!(val["created"].as_bool().unwrap());
+
+        // Get back via project ID
+        let get_result = server
+            .memory_get(Parameters(GetInput {
+                id: id.clone(),
+                project: Some(project_id_b),
+            }))
+            .await;
+        let get_val = parse_ok(&get_result);
+        assert_eq!(get_val["summary"], "Via project ID");
+
+        // Verify not in A
+        let get_from_a = server
+            .memory_get(Parameters(GetInput { id, project: None }))
+            .await;
+        assert!(get_from_a.is_err());
+    }
+
+    #[tokio::test]
+    async fn cross_project_doctor() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let project_b = dir_b.path().to_string_lossy().to_string();
+
+        // Create a memory in B so the store has data
+        let mut input = create_input("context", "Doctor test", "Health check");
+        input.project = Some(project_b.clone());
+        server.memory_create(Parameters(input)).await.unwrap();
+
+        // Run doctor on B from server A
+        let result = server
+            .memory_doctor(Parameters(DoctorInput {
+                project: Some(project_b),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(val["healthy"].as_bool().unwrap());
+        assert_eq!(val["on_disk"], 1);
+    }
+
+    #[tokio::test]
+    async fn cross_project_list() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let project_b = dir_b.path().to_string_lossy().to_string();
+
+        // Create memories in B
+        let mut input1 = create_input("decision", "B decision", "Content");
+        input1.project = Some(project_b.clone());
+        server.memory_create(Parameters(input1)).await.unwrap();
+
+        let mut input2 = create_input("hazard", "B hazard", "Content");
+        input2.project = Some(project_b.clone());
+        server.memory_create(Parameters(input2)).await.unwrap();
+
+        // List from A targeting B
+        let result = server
+            .memory_list(Parameters(ListInput {
+                types: None,
+                tags: None,
+                status: None,
+                scope: None,
+                sort_field: None,
+                reverse: None,
+                limit: None,
+                project: Some(project_b),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["total"], 2);
+
+        // List A — should have nothing
+        let result_a = server
+            .memory_list(Parameters(ListInput {
+                types: None,
+                tags: None,
+                status: None,
+                scope: None,
+                sort_field: None,
+                reverse: None,
+                limit: None,
+                project: None,
+            }))
+            .await;
+        let val_a = parse_ok(&result_a);
+        assert_eq!(val_a["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn cross_project_challenge_and_review() {
+        let (_dir_a, dir_b, server) = setup_cross_project().await;
+        let project_b = dir_b.path().to_string_lossy().to_string();
+
+        // Create in B
+        let mut input = create_input("decision", "Questionable decision", "Maybe wrong");
+        input.project = Some(project_b.clone());
+        let result = server.memory_create(Parameters(input)).await;
+        let id = parse_ok(&result)["id"].as_str().unwrap().to_string();
+
+        // Challenge from A targeting B
+        let challenge_result = server
+            .memory_challenge(Parameters(ChallengeInput {
+                id: id.clone(),
+                evidence: "New evidence contradicts this".to_string(),
+                source_file: None,
+                project: Some(project_b.clone()),
+            }))
+            .await;
+        let challenge_val = parse_ok(&challenge_result);
+        assert!(challenge_val["challenged"].as_bool().unwrap());
+
+        // Review B from A — should show the challenged memory
+        let review_result = server
+            .memory_review(Parameters(ReviewInput {
+                scope: None,
+                max_results: None,
+                type_: None,
+                challenged_only: Some(true),
+                stale_only: None,
+                project: Some(project_b),
+            }))
+            .await;
+        let review_val = parse_ok(&review_result);
+        assert_eq!(review_val["total"], 1);
+        assert_eq!(review_val["memories"][0]["id"], id);
+    }
+
+    #[tokio::test]
+    async fn cross_project_create_on_uninitialized_errors() {
+        let dir_a = TempDir::new().unwrap();
+        let dir_b = TempDir::new().unwrap();
+
+        let project_id_b = crate::storage::project_id::compute_project_id(dir_b.path());
+        let registry = InMemoryRegistry::new();
+        registry.update(dir_b.path(), &project_id_b).await.unwrap();
+
+        let registry: Arc<dyn RegistryBackend> = Arc::new(registry);
+        let server = EngramDbServer::new_with_registry(
+            dir_a.path().to_path_buf(),
+            Some(EmbeddingBackend::Onnx),
+            registry,
+        );
+
+        // Try to create in uninitialized B — should fail, NOT auto-init
+        let project_b = dir_b.path().to_string_lossy().to_string();
+        let mut input = create_input("decision", "Should fail", "No auto-init");
+        input.project = Some(project_b);
+        let result = server.memory_create(Parameters(input)).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("STORE_NOT_INITIALIZED"),
+            "Expected STORE_NOT_INITIALIZED, got: {}",
+            err
+        );
+
+        // Verify B was NOT auto-initialized
+        assert!(!dir_b.path().join(".engramdb").exists());
     }
 }
