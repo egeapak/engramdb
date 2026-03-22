@@ -83,6 +83,7 @@ mod tests {
             id: id.to_string(),
             type_,
             summary: format!("Test summary for {}", id),
+            title: None,
             content: format!("Test content for {}", id),
             details: None,
             physical,

@@ -14,6 +14,7 @@ fn sample_memory() -> Memory {
         id: "test-123".to_string(),
         type_: MemoryType::Hazard,
         summary: "Test memory".to_string(),
+        title: None,
         content: "This is the content.".to_string(),
         details: Some("These are the details.".to_string()),
         physical: vec!["/".to_string()],
@@ -40,6 +41,7 @@ fn full_memory() -> Memory {
         id: "test-full".to_string(),
         type_: MemoryType::Decision,
         summary: "Full field test".to_string(),
+        title: Some("Full Field Test Title".to_string()),
         content: "Content here.".to_string(),
         details: Some("Details here.".to_string()),
         physical: vec!["src/db/**".to_string(), "src/lib.rs".to_string()],
@@ -917,4 +919,206 @@ fn test_rollback_via_writer_for_version() {
     assert_eq!(original.content, final_memory.content);
     assert_eq!(original.summary, final_memory.summary);
     assert_eq!(original.physical, final_memory.physical);
+}
+
+// ===========================================================================
+// Title support tests
+// ===========================================================================
+
+#[test]
+fn test_v2_roundtrip_with_title() {
+    let mut memory = sample_memory();
+    memory.title = Some("Database Decision".to_string());
+
+    let written = V2Writer.write(&memory).unwrap();
+    assert!(written.contains("title: Database Decision"));
+
+    let reparsed = V2Parser.parse(&written).unwrap();
+    assert_eq!(reparsed.title, Some("Database Decision".to_string()));
+    assert_eq!(reparsed.summary, "Test memory");
+}
+
+#[test]
+fn test_v2_roundtrip_without_title() {
+    let memory = sample_memory();
+    assert_eq!(memory.title, None);
+
+    let written = V2Writer.write(&memory).unwrap();
+    assert!(!written.contains("title:"));
+
+    let reparsed = V2Parser.parse(&written).unwrap();
+    assert_eq!(reparsed.title, None);
+}
+
+#[test]
+fn test_v1_roundtrip_with_title() {
+    let mut memory = sample_memory();
+    memory.title = Some("My Title".to_string());
+
+    let written = V1Writer.write(&memory).unwrap();
+    assert!(written.contains("# My Title"));
+
+    let reparsed = V1Parser.parse(&written).unwrap();
+    assert_eq!(reparsed.title, Some("My Title".to_string()));
+}
+
+#[test]
+fn test_v1_roundtrip_without_title() {
+    let memory = sample_memory();
+    let written = V1Writer.write(&memory).unwrap();
+    assert!(!written.contains("\n# "));
+
+    let reparsed = V1Parser.parse(&written).unwrap();
+    assert_eq!(reparsed.title, None);
+}
+
+#[test]
+fn test_title_survives_v1_to_v2_migration() {
+    let mut memory = sample_memory();
+    memory.title = Some("Important Title".to_string());
+
+    // Write as V1
+    let v1_content = V1Writer.write(&memory).unwrap();
+    // Parse V1 → migrate to V2
+    let from_v1 = V1Parser.parse(&v1_content).unwrap();
+    let v2_content = V2Writer.write(&from_v1).unwrap();
+    // Parse V2
+    let final_memory = V2Parser.parse(&v2_content).unwrap();
+
+    assert_eq!(final_memory.title, Some("Important Title".to_string()));
+}
+
+#[test]
+fn test_title_survives_v2_to_v1_rollback() {
+    let mut memory = sample_memory();
+    memory.title = Some("Important Title".to_string());
+
+    // Write as V2
+    let v2_content = V2Writer.write(&memory).unwrap();
+    // Parse V2 → rollback to V1
+    let from_v2 = V2Parser.parse(&v2_content).unwrap();
+    let v1_content = V1Writer.write(&from_v2).unwrap();
+    // Parse V1
+    let final_memory = V1Parser.parse(&v1_content).unwrap();
+
+    assert_eq!(final_memory.title, Some("Important Title".to_string()));
+}
+
+#[test]
+fn test_full_memory_title_roundtrip_v1_v2_v1() {
+    let original = full_memory();
+    assert_eq!(original.title, Some("Full Field Test Title".to_string()));
+
+    // V1 → V2 → V1
+    let v1 = V1Writer.write(&original).unwrap();
+    let from_v1 = V1Parser.parse(&v1).unwrap();
+    let v2 = V2Writer.write(&from_v1).unwrap();
+    let from_v2 = V2Parser.parse(&v2).unwrap();
+    let v1_back = V1Writer.write(&from_v2).unwrap();
+    let final_memory = V1Parser.parse(&v1_back).unwrap();
+
+    assert_eq!(final_memory.title, original.title);
+}
+
+// ===========================================================================
+// Filename helper tests
+// ===========================================================================
+
+#[test]
+fn test_slugify_basic() {
+    assert_eq!(slugify("Use Snake Case"), "use-snake-case");
+    assert_eq!(slugify("Hello, World!"), "hello-world");
+    assert_eq!(slugify("  spaces  "), "spaces");
+    assert_eq!(slugify("MixedCase_And-Stuff"), "mixedcase-and-stuff");
+}
+
+#[test]
+fn test_slugify_truncation() {
+    let long = "a".repeat(60);
+    let slug = slugify(&long);
+    assert!(slug.len() <= 50);
+}
+
+#[test]
+fn test_slugify_truncation_at_word_boundary() {
+    let title = "this is a title that is quite long and should be truncated at a word boundary";
+    let slug = slugify(title);
+    assert!(slug.len() <= 50);
+    assert!(!slug.ends_with('-'));
+}
+
+#[test]
+fn test_slugify_empty() {
+    assert_eq!(slugify(""), "");
+    assert_eq!(slugify("---"), "");
+    assert_eq!(slugify("!!!"), "");
+}
+
+#[test]
+fn test_memory_filename_with_title() {
+    let mut memory = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
+    memory.title = Some("Use Snake Case".to_string());
+    let filename = memory_filename(&memory);
+    assert!(filename.starts_with("use-snake-case_"));
+    assert!(filename.ends_with(".md"));
+    assert!(filename.contains(&memory.id));
+}
+
+#[test]
+fn test_memory_filename_without_title() {
+    let memory = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
+    let filename = memory_filename(&memory);
+    assert_eq!(filename, format!("{}.md", memory.id));
+}
+
+#[test]
+fn test_memory_filename_with_empty_slug_title() {
+    let mut memory = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
+    memory.title = Some("---".to_string());
+    let filename = memory_filename(&memory);
+    assert_eq!(filename, format!("{}.md", memory.id));
+}
+
+#[test]
+fn test_extract_id_from_stem_new_format() {
+    let stem = "use-snake-case_019f0d3e-7660-788a-b1d0-c4e0f5a6b7c8";
+    assert_eq!(
+        extract_id_from_stem(stem),
+        "019f0d3e-7660-788a-b1d0-c4e0f5a6b7c8"
+    );
+}
+
+#[test]
+fn test_extract_id_from_stem_old_format() {
+    let stem = "019f0d3e-7660-788a-b1d0-c4e0f5a6b7c8";
+    assert_eq!(
+        extract_id_from_stem(stem),
+        "019f0d3e-7660-788a-b1d0-c4e0f5a6b7c8"
+    );
+}
+
+#[test]
+fn test_stem_matches_id_prefix_new_format() {
+    let stem = "use-snake-case_019f0d3e-7660-788a-b1d0-c4e0f5a6b7c8";
+    assert!(stem_matches_id_prefix(stem, "019f0d3e"));
+    assert!(stem_matches_id_prefix(
+        stem,
+        "019f0d3e-7660-788a-b1d0-c4e0f5a6b7c8"
+    ));
+    assert!(!stem_matches_id_prefix(stem, "aaaa"));
+}
+
+#[test]
+fn test_stem_matches_id_prefix_old_format() {
+    let stem = "019f0d3e-7660-788a-b1d0-c4e0f5a6b7c8";
+    assert!(stem_matches_id_prefix(stem, "019f0d3e"));
+    assert!(!stem_matches_id_prefix(stem, "use-snake"));
+}
+
+#[test]
+fn test_parse_v1_without_title_backward_compat() {
+    // Old V1 file without title field should parse with title = None
+    let memory = parse_memory_file(sample_v1_content()).unwrap();
+    assert_eq!(memory.title, None);
+    assert_eq!(memory.content, "This is the content.");
 }

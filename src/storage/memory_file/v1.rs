@@ -70,6 +70,11 @@ fn parse_v1(frontmatter: &str, body: &str) -> Result<Memory> {
     let mut memory: Memory = serde_yml::from_str(frontmatter)?;
     let sections = parse_body_sections(body);
 
+    // H1 title in body overrides frontmatter title
+    if let Some(title) = sections.get("__h1__") {
+        memory.title = Some(title.clone());
+    }
+
     if let Some(content) = sections.get("Content") {
         memory.content = content.clone();
     }
@@ -91,9 +96,16 @@ fn write_v1(memory: &Memory) -> Result<String> {
     yaml_memory.details = None;
     let yaml = serde_yml::to_string(&yaml_memory)?;
     out.push_str(&yaml);
-    out.push_str("---\n");
+    out.push_str("---\n\n");
 
-    out.push_str("\n## Content\n\n");
+    // Write title as H1 if present
+    if let Some(ref title) = memory.title {
+        out.push_str("# ");
+        out.push_str(title);
+        out.push_str("\n\n");
+    }
+
+    out.push_str("## Content\n\n");
     out.push_str(&memory.content);
     out.push('\n');
 

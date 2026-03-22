@@ -27,6 +27,91 @@ pub use v2::{V2Parser, V2Writer};
 pub const CURRENT_FORMAT_VERSION: u32 = 2;
 
 // ===========================================================================
+// Filename helpers
+// ===========================================================================
+
+/// Slugify a title string for use in filenames.
+///
+/// Converts to lowercase, replaces non-alphanumeric characters with hyphens,
+/// collapses consecutive hyphens, trims leading/trailing hyphens, and truncates
+/// to a maximum of 50 characters (breaking at the last hyphen boundary).
+pub fn slugify(title: &str) -> String {
+    let slug: String = title
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+
+    // Collapse consecutive hyphens
+    let mut collapsed = String::with_capacity(slug.len());
+    let mut prev_hyphen = false;
+    for c in slug.chars() {
+        if c == '-' {
+            if !prev_hyphen {
+                collapsed.push('-');
+            }
+            prev_hyphen = true;
+        } else {
+            collapsed.push(c);
+            prev_hyphen = false;
+        }
+    }
+
+    // Trim hyphens and truncate
+    let trimmed = collapsed.trim_matches('-');
+    if trimmed.len() <= 50 {
+        trimmed.to_string()
+    } else {
+        // Break at last hyphen before 50 chars
+        let truncated = &trimmed[..50];
+        match truncated.rfind('-') {
+            Some(pos) => truncated[..pos].to_string(),
+            None => truncated.to_string(),
+        }
+    }
+}
+
+/// Generate a memory filename from the memory's title and ID.
+///
+/// If the memory has a title, the filename is `<slug>_<uuid>.md`.
+/// Otherwise, falls back to `<uuid>.md` for backward compatibility.
+pub fn memory_filename(memory: &Memory) -> String {
+    if let Some(ref title) = memory.title {
+        let slug = slugify(title);
+        if slug.is_empty() {
+            format!("{}.md", memory.id)
+        } else {
+            format!("{}_{}.md", slug, memory.id)
+        }
+    } else {
+        format!("{}.md", memory.id)
+    }
+}
+
+/// Extract the memory ID (UUID) from a file stem.
+///
+/// Handles both old format (`<uuid>`) and new format (`<slug>_<uuid>`).
+/// UUID v7 is always 36 characters: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`.
+pub fn extract_id_from_stem(stem: &str) -> &str {
+    if let Some(pos) = stem.rfind('_') {
+        let candidate = &stem[pos + 1..];
+        if candidate.len() == 36 && candidate.chars().filter(|c| *c == '-').count() == 4 {
+            return candidate;
+        }
+    }
+    // Old format or no slug: entire stem is the UUID
+    stem
+}
+
+/// Check if a file stem matches an ID or ID prefix.
+///
+/// Supports both old (`<uuid>`) and new (`<slug>_<uuid>`) filename formats.
+pub fn stem_matches_id_prefix(stem: &str, id_prefix: &str) -> bool {
+    let id_part = extract_id_from_stem(stem);
+    id_part.starts_with(id_prefix)
+}
+
+// ===========================================================================
 // Traits
 // ===========================================================================
 

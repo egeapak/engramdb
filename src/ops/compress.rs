@@ -6,6 +6,7 @@
 
 use crate::ops::{create_memory, CreateParams};
 use crate::storage::MemoryStore;
+use crate::title::TitleStrategy;
 use crate::types::{MemoryType, Provenance, Visibility};
 use anyhow::{bail, Result};
 use serde::Serialize;
@@ -105,6 +106,7 @@ pub async fn compress_apply(
             type_: MemoryType::Context,
             content,
             summary,
+            title: None,
             physical: vec!["/".to_string()],
             logical: scope.unwrap_or_default(),
             tags: tags.unwrap_or_default(),
@@ -118,6 +120,7 @@ pub async fn compress_apply(
             decay_half_life: None,
             decay_ttl: None,
             decay_floor: None,
+            title_strategy: TitleStrategy::None,
         },
         None,
     )
@@ -161,6 +164,7 @@ mod tests {
                 type_,
                 content: format!("Content for {}", summary),
                 summary: summary.to_string(),
+                title: None,
                 physical: vec!["/".to_string()],
                 logical,
                 tags: vec![],
@@ -174,6 +178,7 @@ mod tests {
                 decay_half_life: None,
                 decay_ttl: None,
                 decay_floor: None,
+                title_strategy: TitleStrategy::None,
             },
             None,
         )

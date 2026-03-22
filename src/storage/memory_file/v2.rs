@@ -54,6 +54,8 @@ struct MinimalFrontmatter {
     #[serde(rename = "type")]
     type_: MemoryType,
     status: Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -159,6 +161,7 @@ fn parse_v2(frontmatter: &str, body: &str) -> Result<Memory> {
     Ok(Memory {
         id: fm.id,
         type_: fm.type_,
+        title: fm.title,
         summary,
         content,
         details,
@@ -191,6 +194,7 @@ fn write_v2(memory: &Memory) -> Result<String> {
         id: memory.id.clone(),
         type_: memory.type_,
         status: memory.status,
+        title: memory.title.clone(),
     };
     let yaml = serde_yml::to_string(&fm)?;
     out.push_str(&yaml);
