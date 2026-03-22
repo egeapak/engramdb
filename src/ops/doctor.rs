@@ -99,8 +99,9 @@ async fn collect_orphans(
         if path.extension().is_some_and(|ext| ext == "md") {
             *on_disk += 1;
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if !indexed_ids.contains(stem) {
-                    orphaned.push(stem.to_string());
+                let id = crate::storage::memory_file::extract_id_from_stem(stem);
+                if !indexed_ids.contains(id) {
+                    orphaned.push(id.to_string());
                 }
             }
         }
