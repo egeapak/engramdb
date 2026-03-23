@@ -378,8 +378,10 @@ fn test_v2_writer_format_structure() {
     assert!(output.contains("type: decision"));
     assert!(output.contains("status: Active"));
 
-    // H1 summary
-    assert!(output.contains("# Full field test"));
+    // H1 title (title takes precedence over summary)
+    assert!(output.contains("# Full Field Test Title"));
+    // Summary preserved as bold field
+    assert!(output.contains("**Summary:** Full field test"));
 
     // Sections
     assert!(output.contains("## Content"));
