@@ -132,7 +132,13 @@ fn parse_v2(frontmatter: &str, body: &str) -> Result<Memory> {
 
     let sections = parse_body_sections(body);
 
-    let summary = sections.get("__h1__").cloned().unwrap_or_default();
+    let h1 = sections.get("__h1__").cloned().unwrap_or_default();
+    // When title is set, H1 is the title and summary is in a **Summary:** line
+    let summary = if fm.title.is_some() {
+        extract_bold_field(body, "Summary").unwrap_or(h1)
+    } else {
+        h1
+    };
     let content = sections.get("Content").cloned().unwrap_or_default();
     let details = sections.get("Details").cloned().filter(|s| !s.is_empty());
 
@@ -200,8 +206,14 @@ fn write_v2(memory: &Memory) -> Result<String> {
     out.push_str(&yaml);
     out.push_str("---\n\n");
 
-    // -- H1: summary --
-    out.push_str(&format!("# {}\n\n", memory.summary));
+    // -- H1: title (if set) or summary --
+    let heading = memory.title.as_deref().unwrap_or(&memory.summary);
+    out.push_str(&format!("# {heading}\n\n"));
+
+    // When title is used as H1, write summary separately so it round-trips
+    if memory.title.is_some() {
+        out.push_str(&format!("**Summary:** {}\n\n", memory.summary));
+    }
 
     // -- ## Content --
     out.push_str("## Content\n\n");
@@ -275,6 +287,21 @@ fn write_v2(memory: &Memory) -> Result<String> {
     out.push_str(&format!("\n<!-- engramdb\n{hidden_yaml}-->\n"));
 
     Ok(out)
+}
+
+/// Extract a value from a `**Field:** value` line in the body text.
+fn extract_bold_field(body: &str, field: &str) -> Option<String> {
+    let prefix = format!("**{field}:** ");
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix(&prefix) {
+            let val = rest.trim().to_string();
+            if !val.is_empty() {
+                return Some(val);
+            }
+        }
+    }
+    None
 }
 
 /// Extract `<!-- engramdb ... -->` block and parse as YAML.
