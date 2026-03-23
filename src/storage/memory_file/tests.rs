@@ -728,6 +728,7 @@ fn test_v2_output_format_readable() {
         id: "0195a3b7-8c4d-7e2f-a1b3-9d4e5f6a7b8c".to_string(),
         type_: MemoryType::Hazard,
         summary: "Never call sync() outside a transaction".to_string(),
+        title: None,
         content: "The sync() method acquires a write lock.".to_string(),
         details: Some("Incident on 2026-01-14.".to_string()),
         physical: vec!["src/db/**".to_string()],

@@ -39,7 +39,7 @@ pub async fn run_rollback(
 
     let manifest_path = engramdb_dir.join("manifest.toml");
     let personal_dir = if manifest_path.exists() {
-        let manifest = crate::storage::manifest::load_manifest(&manifest_path)?;
+        let manifest = crate::storage::manifest::load_manifest(&manifest_path).await?;
         paths::personal_memories_dir(&manifest.project).ok()
     } else {
         None
