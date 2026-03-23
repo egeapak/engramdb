@@ -486,6 +486,24 @@ pub enum Command {
         shell: clap_complete::Shell,
     },
 
+    /// Migrate memory files to the latest format version
+    Migrate {
+        /// Only report what would be migrated, don't change files
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Roll back memory files to a previous format version
+    Rollback {
+        /// Target format version (e.g., 1 for legacy YAML format). Defaults to 1.
+        #[arg(long, default_value = "1")]
+        target_version: u32,
+
+        /// Only report what would be rolled back, don't change files
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Rebuild index and re-embed memories
     Reindex {
         /// Only re-embed, don't rebuild index

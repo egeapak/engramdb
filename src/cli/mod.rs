@@ -313,6 +313,19 @@ pub async fn run(cli: Cli) -> Result<()> {
             commands::run_completions(shell);
             Ok(())
         }
+        Command::Migrate { dry_run } => commands::run_migrate(&dir, dry_run, &formatter).await,
+        Command::Rollback {
+            target_version,
+            dry_run,
+        } => {
+            // Version 1 is represented as None internally (legacy format without version field)
+            let target = if target_version <= 1 {
+                None
+            } else {
+                Some(target_version)
+            };
+            commands::run_rollback(&dir, target, dry_run, &formatter).await
+        }
         Command::Reindex {
             embeddings_only,
             index_only,
