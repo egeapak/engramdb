@@ -133,6 +133,10 @@ pub enum Command {
         #[arg(long, short = 's')]
         summary: Option<String>,
 
+        /// Short title (a few words) for human-readable filenames
+        #[arg(long, short = 'T')]
+        title: Option<String>,
+
         /// Physical scope (file paths or globs, can be repeated)
         #[arg(long, short = 'p')]
         physical: Vec<String>,
@@ -333,6 +337,10 @@ pub enum Command {
         #[arg(long, short = 's')]
         summary: Option<String>,
 
+        /// New title (short, a few words, for human-readable filenames)
+        #[arg(long, short = 'T')]
+        title: Option<String>,
+
         /// New physical scope (replaces existing)
         #[arg(long, short = 'p')]
         physical: Vec<String>,
@@ -481,6 +489,24 @@ pub enum Command {
         shell: clap_complete::Shell,
     },
 
+    /// Migrate memory files to the latest format version
+    Migrate {
+        /// Only report what would be migrated, don't change files
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Roll back memory files to a previous format version
+    Rollback {
+        /// Target format version (e.g., 1 for legacy YAML format). Defaults to 1.
+        #[arg(long, default_value = "1")]
+        target_version: u32,
+
+        /// Only report what would be rolled back, don't change files
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Rebuild index and re-embed memories
     Reindex {
         /// Only re-embed, don't rebuild index
@@ -496,6 +522,25 @@ pub enum Command {
     Hook {
         #[command(subcommand)]
         command: HookCommand,
+    },
+
+    /// Set up Claude Code integration (hooks, MCP, ENGRAM.md, CLAUDE.md)
+    Setup {
+        /// Skip plugin install in global mode, write hooks and MCP directly to settings.json
+        #[arg(long)]
+        no_plugin: bool,
+
+        /// Install to ~/.claude/ instead of project-local .claude/
+        #[arg(long)]
+        global: bool,
+
+        /// Show what would be changed without writing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Override .claude directory path (for testing)
+        #[arg(long, hide = true)]
+        claude_dir: Option<PathBuf>,
     },
 
     /// Interactive review of challenged/stale memories

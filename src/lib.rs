@@ -8,6 +8,7 @@ pub mod scope;
 pub mod scoring;
 pub mod search;
 pub mod storage;
+pub mod title;
 pub mod types;
 
 /// Test isolation: redirect global data and config dirs to per-process temp directories.

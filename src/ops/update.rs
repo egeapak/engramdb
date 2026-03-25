@@ -14,6 +14,7 @@ pub struct UpdateParams {
     pub type_: Option<MemoryType>,
     pub content: Option<String>,
     pub summary: Option<String>,
+    pub title: Option<String>,
     pub physical: Option<Vec<String>>,
     pub logical: Option<Vec<String>>,
     pub tags: Option<Vec<String>>,
@@ -49,6 +50,7 @@ pub async fn update_memory(
     update.type_ = params.type_;
     update.content = params.content;
     update.summary = params.summary;
+    update.title = params.title;
     update.details = params.details;
     update.physical = params.physical;
     update.logical = params.logical;
@@ -127,6 +129,7 @@ pub async fn update_memory(
     final_update.type_ = Some(memory.type_);
     final_update.content = Some(memory.content);
     final_update.summary = Some(memory.summary);
+    final_update.title = memory.title;
     final_update.details = memory.details;
     final_update.physical = Some(memory.physical);
     final_update.logical = Some(memory.logical);
@@ -181,6 +184,7 @@ mod tests {
             type_: None,
             content: None,
             summary: None,
+            title: None,
             physical: None,
             logical: None,
             tags: None,

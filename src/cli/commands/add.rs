@@ -5,6 +5,7 @@ use crate::cli::prompter::Prompter;
 use crate::cli::validation::validate_score;
 use crate::ops::{self, create_memory, parse_memory_type, parse_visibility, CreateParams};
 use crate::storage::{MemoryStore, RegistryBackend};
+use crate::title::TitleStrategy;
 use crate::types::{MemoryType, Provenance, Visibility};
 use anyhow::{anyhow, bail, Context, Result};
 use std::env;
@@ -18,6 +19,7 @@ pub struct AddParams {
     pub type_str: Option<String>,
     pub content: Option<String>,
     pub summary: Option<String>,
+    pub title: Option<String>,
     pub physical: Vec<String>,
     pub logical: Vec<String>,
     pub tags: Vec<String>,
@@ -148,6 +150,7 @@ async fn run_direct_mode(
                 .content
                 .ok_or_else(|| anyhow!("Content is required"))?,
             summary,
+            title: params.title,
             physical: params.physical,
             logical: params.logical,
             tags: params.tags,
@@ -161,6 +164,7 @@ async fn run_direct_mode(
             decay_half_life: params.decay_half_life,
             decay_ttl: params.decay_ttl,
             decay_floor: params.decay_floor,
+            title_strategy: TitleStrategy::default(),
         },
         Some(engine),
     )
@@ -280,6 +284,7 @@ async fn run_interactive_mode(
             type_,
             content,
             summary,
+            title: params.title,
             physical,
             logical,
             tags,
@@ -293,6 +298,7 @@ async fn run_interactive_mode(
             decay_half_life: None,
             decay_ttl: None,
             decay_floor: None,
+            title_strategy: TitleStrategy::default(),
         },
         Some(engine),
     )
@@ -317,6 +323,7 @@ async fn run_editor_mode(
     let template = format!(
         "# Type: {} (decision, convention, hazard, context, intent, relationship, debug, preference)
 # Summary: {}
+# Title: {} (short title for filename, a few words)
 # Tags: {}
 # Physical: {}
 # Logical: {}
@@ -326,6 +333,7 @@ async fn run_editor_mode(
 {}",
         params.type_str.as_deref().unwrap_or("convention"),
         params.summary.as_deref().unwrap_or(""),
+        params.title.as_deref().unwrap_or(""),
         params.tags.join(", "),
         params.physical.join(", "),
         params.logical.join(", "),
@@ -373,6 +381,7 @@ async fn run_editor_mode(
             type_: parsed.type_,
             content: parsed.content,
             summary: parsed.summary,
+            title: parsed.title,
             physical: parsed.physical,
             logical: parsed.logical,
             tags: parsed.tags,
@@ -386,6 +395,7 @@ async fn run_editor_mode(
             decay_half_life: None,
             decay_ttl: None,
             decay_floor: None,
+            title_strategy: TitleStrategy::default(),
         },
         Some(engine),
     )
@@ -399,6 +409,7 @@ async fn run_editor_mode(
 struct ParsedTemplate {
     type_: MemoryType,
     summary: String,
+    title: Option<String>,
     tags: Vec<String>,
     physical: Vec<String>,
     logical: Vec<String>,
@@ -411,6 +422,7 @@ struct ParsedTemplate {
 fn parse_editor_template(contents: &str) -> Result<ParsedTemplate> {
     let mut type_str = String::from("convention");
     let mut summary = String::new();
+    let mut title = String::new();
     let mut tags = Vec::new();
     let mut physical = Vec::new();
     let mut logical = Vec::new();
@@ -437,6 +449,10 @@ fn parse_editor_template(contents: &str) -> Result<ParsedTemplate> {
                 .unwrap_or("")
                 .trim()
                 .to_string();
+        } else if line.starts_with("# Title:") {
+            let value = line.strip_prefix("# Title:").unwrap_or("").trim();
+            // Strip the parenthesized hint if the user didn't replace it
+            title = value.split('(').next().unwrap_or(value).trim().to_string();
         } else if line.starts_with("# Tags:") {
             let value = line.strip_prefix("# Tags:").unwrap_or("").trim();
             if !value.is_empty() {
@@ -499,9 +515,12 @@ fn parse_editor_template(contents: &str) -> Result<ParsedTemplate> {
         bail!("Content is required");
     }
 
+    let title_opt = if title.is_empty() { None } else { Some(title) };
+
     Ok(ParsedTemplate {
         type_: parse_memory_type(&type_str)?,
         summary,
+        title: title_opt,
         tags,
         physical,
         logical,
@@ -568,6 +587,7 @@ mod tests {
             type_str: None,
             content: None,
             summary: None,
+            title: None,
             physical: vec![],
             logical: vec![],
             tags: vec![],
@@ -619,6 +639,7 @@ mod tests {
             type_str: Some("hazard".to_string()),
             content: Some("Preset content".to_string()),
             summary: Some("Preset summary".to_string()),
+            title: None,
             physical: vec![],
             logical: vec![],
             tags: vec![],
@@ -671,6 +692,7 @@ mod tests {
             type_str: None,
             content: None,
             summary: None,
+            title: None,
             physical: vec![],
             logical: vec![],
             tags: vec![],
@@ -723,6 +745,7 @@ mod tests {
             type_str: None,
             content: None,
             summary: None,
+            title: None,
             physical: vec![],
             logical: vec![],
             tags: vec![],

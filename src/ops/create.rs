@@ -3,6 +3,7 @@
 use crate::ops::parse_decay_strategy;
 use crate::retrieval::engine::RetrievalEngine;
 use crate::storage::MemoryStore;
+use crate::title::TitleStrategy;
 use crate::types::{Decay, DecayStrategy, Memory, MemoryType, Provenance, Visibility};
 use anyhow::Result;
 use chrono::Duration;
@@ -12,6 +13,7 @@ pub struct CreateParams {
     pub type_: MemoryType,
     pub content: String,
     pub summary: String,
+    pub title: Option<String>,
     pub physical: Vec<String>,
     pub logical: Vec<String>,
     pub tags: Vec<String>,
@@ -25,6 +27,7 @@ pub struct CreateParams {
     pub decay_half_life: Option<u64>,
     pub decay_ttl: Option<u64>,
     pub decay_floor: Option<f64>,
+    pub title_strategy: TitleStrategy,
 }
 
 /// Result of a create operation.
@@ -67,6 +70,14 @@ pub async fn create_memory(
 
     // Build memory
     let mut memory = Memory::new(params.type_, &summary, &params.content, params.provenance);
+    // Auto-generate title if not provided and strategy is not None
+    let title = if params.title.is_some() {
+        params.title
+    } else {
+        // Use summary as input for title generation (it's concise and descriptive)
+        crate::title::generate_title(params.title_strategy, &summary).await
+    };
+    memory.title = title;
     memory.physical = physical;
     memory.logical = params.logical;
     memory.tags = params.tags;
@@ -211,6 +222,7 @@ mod tests {
             type_: MemoryType::Decision,
             content: "Test content".to_string(),
             summary: "Test summary".to_string(),
+            title: None,
             physical: vec![],
             logical: vec![],
             tags: vec![],
@@ -224,6 +236,7 @@ mod tests {
             decay_half_life: None,
             decay_ttl: None,
             decay_floor: None,
+            title_strategy: TitleStrategy::None,
         }
     }
 
@@ -427,5 +440,44 @@ mod tests {
         let result = create_memory(&store, params, None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("100"));
+    }
+
+    #[tokio::test]
+    async fn test_create_memory_with_explicit_title() {
+        let (_temp, store) = setup_test_store().await;
+        let mut params = minimal_create_params();
+        params.title = Some("My Custom Title".to_string());
+        let result = create_memory(&store, params, None).await.unwrap();
+        let memory = store.get(&result.id).await.unwrap();
+        assert_eq!(memory.title, Some("My Custom Title".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_create_memory_without_title() {
+        let (_temp, store) = setup_test_store().await;
+        let params = minimal_create_params();
+        let result = create_memory(&store, params, None).await.unwrap();
+        let memory = store.get(&result.id).await.unwrap();
+        assert_eq!(memory.title, None);
+    }
+
+    #[tokio::test]
+    async fn test_create_memory_title_in_filename() {
+        let (_temp, store) = setup_test_store().await;
+        let mut params = minimal_create_params();
+        params.title = Some("Database Choice".to_string());
+        let result = create_memory(&store, params, None).await.unwrap();
+
+        // Verify the file on disk has the slug in its name
+        let memories_dir = _temp.path().join(".engramdb").join("memories");
+        let mut found = false;
+        for entry in std::fs::read_dir(&memories_dir).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.contains(&result.id) && name.starts_with("database-choice_") {
+                found = true;
+            }
+        }
+        assert!(found, "Expected file with slug prefix 'database-choice_'");
     }
 }

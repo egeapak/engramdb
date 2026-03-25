@@ -127,12 +127,13 @@ pub async fn memory_path(dir: &Path, id: &str) -> Option<PathBuf> {
 
 /// Helper function to find a memory file by ID prefix in a directory.
 ///
+/// Handles both old (`<uuid>.md`) and new (`<slug>_<uuid>.md`) filename formats.
+///
 /// Matching strategy:
-/// 1. If an exact filename match exists (id == file stem), return it immediately.
-/// 2. Otherwise, collect all prefix matches.
-///    - If exactly one prefix match is found, return it.
-///    - If multiple prefix matches are found, return `None` (ambiguous).
-///    - If no matches are found, return `None`.
+/// 1. Extract the UUID part from each file stem and check for exact or prefix match.
+/// 2. If exactly one match is found, return it.
+/// 3. If multiple matches are found, return `None` (ambiguous).
+/// 4. If no matches are found, return `None`.
 pub async fn find_memory_in_dir(dir: &Path, id: &str) -> Option<PathBuf> {
     if !dir.exists() {
         return None;
@@ -146,12 +147,13 @@ pub async fn find_memory_in_dir(dir: &Path, id: &str) -> Option<PathBuf> {
 
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
-        if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
-            if filename == id {
-                // Exact match — return immediately, no ambiguity.
-                return Some(path);
-            }
-            if filename.starts_with(id) {
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            if super::memory_file::stem_matches_id_prefix(stem, id) {
+                let id_part = super::memory_file::extract_id_from_stem(stem);
+                if id_part == id {
+                    // Exact match — return immediately, no ambiguity.
+                    return Some(path);
+                }
                 prefix_matches.push(path);
             }
         }
