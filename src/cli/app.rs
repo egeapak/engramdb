@@ -43,7 +43,10 @@ pub enum ProjectsCommand {
     },
     /// Show aggregate statistics across all projects
     Stats,
-    /// Remove all stale (unreachable) projects from the registry
+    /// Remove stale registry entries and orphan data directories.
+    ///
+    /// Stale: projects registered but whose path no longer exists on disk.
+    /// Orphan: data directories under the global store not tracked by the registry.
     Prune {
         /// Skip confirmation prompt
         #[arg(long, short = 'f')]

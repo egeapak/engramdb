@@ -172,47 +172,150 @@ impl OutputFormatter {
 
                     for check in &section.checks {
                         use crate::ops::CheckStatus;
-                        let is_info = check.status == Some(CheckStatus::Info);
 
-                        if is_info {
-                            // Informational: dimmed ○ icon
-                            if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                        let (icon, style) = match check.status {
+                            Some(CheckStatus::Info) => ("○", "info"),
+                            Some(CheckStatus::Warn) => ("⚠", "warn"),
+                            Some(CheckStatus::Pass) => ("✓", "pass"),
+                            Some(CheckStatus::Fail) => ("✗", "fail"),
+                            None if check.passed => ("✓", "pass"),
+                            None => ("✗", "fail"),
+                        };
+
+                        if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                            let colored_icon = match style {
+                                "info" => icon
+                                    .if_supports_color(Stream::Stdout, |t| t.dimmed())
+                                    .to_string(),
+                                "warn" => icon
+                                    .if_supports_color(Stream::Stdout, |t| t.yellow())
+                                    .to_string(),
+                                "pass" => icon
+                                    .if_supports_color(Stream::Stdout, |t| t.green())
+                                    .to_string(),
+                                _ => icon
+                                    .if_supports_color(Stream::Stdout, |t| t.red())
+                                    .to_string(),
+                            };
+                            if style == "info" {
                                 println!(
                                     "  {} {}: {}",
-                                    "○".if_supports_color(Stream::Stdout, |text| text.dimmed()),
-                                    check
-                                        .name
-                                        .if_supports_color(Stream::Stdout, |text| text.dimmed()),
+                                    colored_icon,
+                                    check.name.if_supports_color(Stream::Stdout, |t| t.dimmed()),
                                     check
                                         .message
-                                        .if_supports_color(Stream::Stdout, |text| text.dimmed()),
+                                        .if_supports_color(Stream::Stdout, |t| t.dimmed()),
                                 );
-                            } else {
-                                println!("  ○ {}: {}", check.name, check.message);
-                            }
-                        } else if check.passed {
-                            if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                            } else if style == "warn" {
                                 println!(
                                     "  {} {}: {}",
-                                    "✓".if_supports_color(Stream::Stdout, |text| text.green()),
-                                    check.name,
-                                    check.message
+                                    colored_icon,
+                                    check.name.if_supports_color(Stream::Stdout, |t| t.yellow()),
+                                    check.message,
                                 );
                             } else {
-                                println!("  ✓ {}: {}", check.name, check.message);
+                                println!("  {} {}: {}", colored_icon, check.name, check.message);
                             }
-                        } else if self.use_color && matches!(self.format, OutputFormat::Pretty) {
-                            println!(
-                                "  {} {}: {}",
-                                "✗".if_supports_color(Stream::Stdout, |text| text.red()),
-                                check.name,
-                                check.message
-                            );
                         } else {
-                            println!("  ✗ {}: {}", check.name, check.message);
+                            println!("  {} {}: {}", icon, check.name, check.message);
+                        }
+                        for detail in &check.details {
+                            if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                                println!(
+                                    "      {}",
+                                    detail.if_supports_color(Stream::Stdout, |text| text.dimmed())
+                                );
+                            } else {
+                                println!("      {}", detail);
+                            }
                         }
                         if let Some(ref suggestion) = check.suggestion {
                             self.print_hint(suggestion);
+                        }
+                    }
+
+                    for subsection in &section.subsections {
+                        if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                            println!(
+                                "  {}",
+                                subsection
+                                    .name
+                                    .if_supports_color(Stream::Stdout, |text| text.dimmed())
+                            );
+                        } else {
+                            println!("  {}", subsection.name);
+                        }
+                        for check in &subsection.checks {
+                            use crate::ops::CheckStatus;
+
+                            let (icon, style) = match check.status {
+                                Some(CheckStatus::Info) => ("○", "info"),
+                                Some(CheckStatus::Warn) => ("⚠", "warn"),
+                                Some(CheckStatus::Pass) => ("✓", "pass"),
+                                Some(CheckStatus::Fail) => ("✗", "fail"),
+                                None if check.passed => ("✓", "pass"),
+                                None => ("✗", "fail"),
+                            };
+
+                            if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                                let colored_icon = match style {
+                                    "info" => icon
+                                        .if_supports_color(Stream::Stdout, |t| t.dimmed())
+                                        .to_string(),
+                                    "warn" => icon
+                                        .if_supports_color(Stream::Stdout, |t| t.yellow())
+                                        .to_string(),
+                                    "pass" => icon
+                                        .if_supports_color(Stream::Stdout, |t| t.green())
+                                        .to_string(),
+                                    _ => icon
+                                        .if_supports_color(Stream::Stdout, |t| t.red())
+                                        .to_string(),
+                                };
+                                if style == "info" {
+                                    println!(
+                                        "    {} {}: {}",
+                                        colored_icon,
+                                        check
+                                            .name
+                                            .if_supports_color(Stream::Stdout, |t| t.dimmed()),
+                                        check
+                                            .message
+                                            .if_supports_color(Stream::Stdout, |t| t.dimmed()),
+                                    );
+                                } else if style == "warn" {
+                                    println!(
+                                        "    {} {}: {}",
+                                        colored_icon,
+                                        check
+                                            .name
+                                            .if_supports_color(Stream::Stdout, |t| t.yellow()),
+                                        check.message,
+                                    );
+                                } else {
+                                    println!(
+                                        "    {} {}: {}",
+                                        colored_icon, check.name, check.message
+                                    );
+                                }
+                            } else {
+                                println!("    {} {}: {}", icon, check.name, check.message);
+                            }
+                            for detail in &check.details {
+                                if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                                    println!(
+                                        "        {}",
+                                        detail.if_supports_color(Stream::Stdout, |text| {
+                                            text.dimmed()
+                                        })
+                                    );
+                                } else {
+                                    println!("        {}", detail);
+                                }
+                            }
+                            if let Some(ref suggestion) = check.suggestion {
+                                self.print_hint(suggestion);
+                            }
                         }
                     }
                 }

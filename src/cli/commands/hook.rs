@@ -61,7 +61,7 @@ const SESSION_CONTEXT_BUDGET: usize = 2000;
 /// Groups memories by type, includes tags/scope/content preview, and
 /// respects a character budget. When the budget is exceeded, remaining
 /// memories are omitted with a notice telling the agent to use
-/// `memory_search` for more.
+/// `search` for more.
 fn format_detailed_context(header: &str, memories: &[ScoredMemory]) -> String {
     format_detailed_context_with_budget(header, memories, SESSION_CONTEXT_BUDGET)
 }
@@ -106,7 +106,7 @@ fn format_detailed_context_with_budget(
     if included < total {
         let omitted = total - included;
         lines.push(format!(
-            "\n({} more memories omitted — use memory_search to find them)",
+            "\n({} more memories omitted — use search to find them)",
             omitted
         ));
     }
@@ -619,7 +619,7 @@ mod tests {
         let ctx =
             format_detailed_context_with_budget("[EngramDB] Key project memories:", &memories, 500);
         assert!(ctx.contains("more memories omitted"));
-        assert!(ctx.contains("memory_search"));
+        assert!(ctx.contains("use search to find them"));
         // Should include at least 1 but not all 10
         let included = memories
             .iter()

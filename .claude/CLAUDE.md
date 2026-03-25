@@ -1,4 +1,4 @@
-This project implements EngramDB — see docs/engramdb-spec.md for the full design specification.
+This project implements EngramDB — a project-scoped persistent memory store for coding agents.
 Tech stack: Rust, LanceDB, ONNX Runtime (all-MiniLM-L6-v2), MCP protocol.
 
 ## Code Quality (mandatory)
@@ -24,7 +24,7 @@ Never use default cache locations (e.g., `~/.cache/huggingface/hub/`).
 
 This project uses EngramDB as a persistent memory store via MCP.
 
-- **Before answering any project question** (conventions, workflows, architecture, tooling, "how do we..."), call `memory_search` with relevant keywords.
-- **Before modifying files**, call `memory_retrieve` with the file path to check for known decisions, hazards, or conventions.
-- **After discovering** important patterns, decisions, hazards, or conventions, store them with `memory_create`.
-- **If you find contradictory information**, use `memory_challenge` to flag the memory for review.
+- **Before answering any project question** (conventions, workflows, architecture, tooling, "how do we..."), call `search` with relevant keywords.
+- **Before modifying files**, call `retrieve` with the file path to check for known decisions, hazards, or conventions.
+- **After discovering** important patterns, decisions, hazards, or conventions, store them with `create`.
+- **If you find contradictory information**, use `challenge` to flag the memory for review.
