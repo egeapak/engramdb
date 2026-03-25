@@ -521,6 +521,25 @@ pub enum Command {
         command: HookCommand,
     },
 
+    /// Set up Claude Code integration (hooks, MCP, ENGRAM.md, CLAUDE.md)
+    Setup {
+        /// Skip plugin install in global mode, write hooks and MCP directly to settings.json
+        #[arg(long)]
+        no_plugin: bool,
+
+        /// Install to ~/.claude/ instead of project-local .claude/
+        #[arg(long)]
+        global: bool,
+
+        /// Show what would be changed without writing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Override .claude directory path (for testing)
+        #[arg(long, hide = true)]
+        claude_dir: Option<PathBuf>,
+    },
+
     /// Interactive review of challenged/stale memories
     Review {
         /// Filter by logical scope

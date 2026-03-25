@@ -347,6 +347,22 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
+        Command::Setup {
+            no_plugin,
+            global,
+            dry_run,
+            claude_dir,
+        } => {
+            commands::run_setup(
+                &dir,
+                no_plugin,
+                global,
+                dry_run,
+                claude_dir.as_deref(),
+                &formatter,
+            )
+            .await
+        }
         Command::Hook { command } => match command {
             HookCommand::PreToolUse => commands::run_hook_pre_tool_use(&dir, backend).await,
             HookCommand::SessionStart { min_criticality } => {
