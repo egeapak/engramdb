@@ -23,6 +23,7 @@ pub mod review;
 pub mod rollback;
 pub mod search;
 pub mod serve;
+pub mod setup;
 pub mod stats;
 pub mod update;
 
@@ -45,5 +46,6 @@ pub use review::run_review;
 pub use rollback::run_rollback;
 pub use search::{run_search, SearchParams};
 pub use serve::run_serve;
+pub use setup::run_setup;
 pub use stats::run_stats;
 pub use update::{run_update, UpdateParams};
