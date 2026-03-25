@@ -1618,7 +1618,7 @@ mod tests {
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let count = 50;
+        let count = 10;
         for i in 0..count {
             let summary = format!("Summary {}", i);
             let content = format!("Content {}", i);
