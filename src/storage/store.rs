@@ -1200,4 +1200,129 @@ mod tests {
         assert!(!existing.contains("fake-id-1"));
         assert!(!existing.contains("fake-id-2"));
     }
+
+    // --- Global memory store tests ---
+
+    /// Reinitialize the global store for a clean test.
+    async fn setup_global_store() -> (MemoryStore, tokio::sync::MutexGuard<'static, ()>) {
+        let guard = crate::GLOBAL_TEST_LOCK.lock().await;
+        let global_dir = paths::global_store_dir().unwrap();
+        let _ = async_fs::remove_dir_all(&global_dir).await;
+        let store = MemoryStore::init_global().await.unwrap();
+        (store, guard)
+    }
+
+    #[tokio::test]
+    async fn test_global_init_creates_structure() {
+        let (store, _guard) = setup_global_store().await;
+
+        assert!(store.is_global());
+        assert_eq!(store.project_id, paths::GLOBAL_PROJECT_ID);
+
+        let global_dir = paths::global_store_dir().unwrap();
+        assert!(global_dir.join(".engramdb").exists());
+        assert!(global_dir.join(".engramdb/memories").exists());
+        assert!(global_dir.join(".engramdb/manifest.toml").exists());
+        assert!(global_dir.join(".engramdb/config.toml").exists());
+        assert!(paths::global_lancedb_dir().unwrap().exists());
+    }
+
+    #[tokio::test]
+    async fn test_global_open_auto_inits() {
+        // open_global should auto-init if not present
+        let (store, _guard) = setup_global_store().await;
+        assert!(store.is_global());
+        assert_eq!(store.project_id, paths::GLOBAL_PROJECT_ID);
+    }
+
+    #[tokio::test]
+    async fn test_global_create_and_get() {
+        let (store, _guard) = setup_global_store().await;
+        let memory = create_test_memory("global-test-001", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        let retrieved = store.get("global-test-001").await.unwrap();
+        assert_eq!(retrieved.id, "global-test-001");
+        assert_eq!(retrieved.summary, "Test summary");
+    }
+
+    #[tokio::test]
+    async fn test_global_update() {
+        let (store, _guard) = setup_global_store().await;
+        let memory = create_test_memory("global-test-update", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        let mut update = MemoryUpdate::new();
+        update.summary = Some("Updated global summary".to_string());
+        store.update("global-test-update", update).await.unwrap();
+
+        let retrieved = store.get("global-test-update").await.unwrap();
+        assert_eq!(retrieved.summary, "Updated global summary");
+    }
+
+    #[tokio::test]
+    async fn test_global_delete() {
+        let (store, _guard) = setup_global_store().await;
+        let memory = create_test_memory("global-test-delete", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+        assert!(store.get("global-test-delete").await.is_ok());
+
+        store.delete("global-test-delete").await.unwrap();
+
+        let result = store.get("global-test-delete").await;
+        assert!(result.is_err());
+        match result {
+            Err(StorageError::NotFound(_)) => {}
+            _ => panic!("Expected NotFound error after delete"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_global_reindex() {
+        let (store, _guard) = setup_global_store().await;
+        let memory = create_test_memory("global-test-reindex", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        let count = store.reindex().await.unwrap();
+        assert!(count >= 1);
+
+        // Memory should still be accessible after reindex
+        let retrieved = store.get("global-test-reindex").await.unwrap();
+        assert_eq!(retrieved.id, "global-test-reindex");
+    }
+
+    #[tokio::test]
+    async fn test_global_isolation_from_project() {
+        let _guard = crate::GLOBAL_TEST_LOCK.lock().await;
+        let global_dir = paths::global_store_dir().unwrap();
+        let _ = async_fs::remove_dir_all(&global_dir).await;
+
+        // Global store should NOT contain project memories and vice versa
+        let temp_dir = TempDir::new().unwrap();
+        let project_store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let global_store = MemoryStore::init_global().await.unwrap();
+
+        let project_mem = create_test_memory("project-only-mem", Visibility::Shared);
+        project_store.create(&project_mem).await.unwrap();
+
+        let global_mem = create_test_memory("global-only-mem", Visibility::Shared);
+        global_store.create(&global_mem).await.unwrap();
+
+        // Global store should NOT have the project memory
+        assert!(global_store.get("project-only-mem").await.is_err());
+
+        // Project store should NOT have the global memory
+        assert!(project_store.get("global-only-mem").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_global_is_not_global_for_regular_store() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        assert!(!store.is_global());
+    }
 }

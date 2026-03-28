@@ -19,6 +19,11 @@ pub mod types;
 ///
 /// The `TempDir` handles are held in statics so they persist (and are cleaned
 /// up) when the process exits.
+/// Shared lock for serializing tests that access the global memory store.
+/// All test modules (store, server, etc.) must use this same lock.
+#[cfg(test)]
+pub static GLOBAL_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(test)]
 mod test_isolation {
     use std::sync::LazyLock;
