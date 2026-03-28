@@ -122,6 +122,91 @@ impl MemoryStore {
         })
     }
 
+    /// Initialize the global memory store.
+    ///
+    /// The global store lives under `<global_data_dir>/global/` and mirrors
+    /// a normal project layout (`.engramdb/memories/`, `manifest.toml`, etc.)
+    /// so all `MemoryStore` methods work unchanged.
+    pub async fn init_global() -> Result<Self> {
+        let global_dir = paths::global_store_dir()?;
+        let engramdb_dir = paths::project_dir(&global_dir);
+
+        async_fs::create_dir_all(&engramdb_dir).await?;
+        async_fs::create_dir_all(paths::memories_dir(&global_dir)).await?;
+
+        // Create manifest
+        let manifest_path = engramdb_dir.join("manifest.toml");
+        if !manifest_path.exists() {
+            let manifest = manifest::Manifest {
+                project: "global".to_string(),
+                ..Default::default()
+            };
+            manifest::save_manifest(&manifest_path, &manifest).await?;
+        }
+
+        // Create empty config if missing
+        let config_path = engramdb_dir.join("config.toml");
+        if !config_path.exists() {
+            async_fs::write(
+                &config_path,
+                "# EngramDB global configuration\n# See documentation for available settings\n",
+            )
+            .await?;
+        }
+
+        let project_id = paths::GLOBAL_PROJECT_ID.to_string();
+
+        // Create global LanceDB directory
+        let lance_path = paths::global_lancedb_dir()?;
+        async_fs::create_dir_all(&lance_path).await?;
+
+        let config: crate::types::EngramConfig =
+            load_config(&config_path).await.unwrap_or_default();
+
+        let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
+            .await
+            .map_err(|e| StorageError::Validation(format!("Global LanceDB init failed: {}", e)))?;
+
+        Ok(Self {
+            project_dir: global_dir,
+            project_id,
+            lance_index,
+        })
+    }
+
+    /// Open the global memory store, creating it if necessary.
+    pub async fn open_global() -> Result<Self> {
+        let global_dir = paths::global_store_dir()?;
+        let engramdb_dir = paths::project_dir(&global_dir);
+
+        if !engramdb_dir.exists() {
+            return Self::init_global().await;
+        }
+
+        let project_id = paths::GLOBAL_PROJECT_ID.to_string();
+        let lance_path = paths::global_lancedb_dir()?;
+        async_fs::create_dir_all(&lance_path).await?;
+
+        let config_path = engramdb_dir.join("config.toml");
+        let config: crate::types::EngramConfig =
+            load_config(&config_path).await.unwrap_or_default();
+
+        let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
+            .await
+            .map_err(|e| StorageError::Validation(format!("Global LanceDB open failed: {}", e)))?;
+
+        Ok(Self {
+            project_dir: global_dir,
+            project_id,
+            lance_index,
+        })
+    }
+
+    /// Returns `true` if this store is the global memory store.
+    pub fn is_global(&self) -> bool {
+        self.project_id == paths::GLOBAL_PROJECT_ID
+    }
+
     /// Open an existing EngramDB store.
     pub async fn open(dir: &Path) -> Result<Self> {
         let engramdb_dir = paths::project_dir(dir);

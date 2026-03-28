@@ -84,7 +84,7 @@ struct CreateInput {
     title_strategy: Option<String>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -118,8 +118,11 @@ struct RetrieveInput {
     #[schemars(description = "Include expired/decayed memories")]
     include_expired: Option<bool>,
 
+    #[schemars(description = "Also include global memories in results (default false)")]
+    include_global: Option<bool>,
+
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -147,8 +150,11 @@ struct SearchInput {
     #[schemars(description = "Max results (default 10)")]
     max_results: Option<usize>,
 
+    #[schemars(description = "Also include global memories in results (default false)")]
+    include_global: Option<bool>,
+
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -159,7 +165,7 @@ struct GetInput {
     id: String,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -228,7 +234,7 @@ struct UpdateInput {
     decay_floor: Option<f64>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -239,7 +245,7 @@ struct DeleteInput {
     id: String,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -256,7 +262,7 @@ struct ChallengeInput {
     source_file: Option<String>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -280,7 +286,7 @@ struct ReviewInput {
     stale_only: Option<bool>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -300,7 +306,7 @@ struct ResolveInput {
     updated_summary: Option<String>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -314,7 +320,7 @@ struct CompressCandidatesInput {
     threshold: Option<f64>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -337,7 +343,7 @@ struct CompressApplyInput {
     tags: Option<Vec<String>>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -351,7 +357,7 @@ struct GcInput {
     threshold: Option<f64>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -365,7 +371,7 @@ struct ReindexInput {
     index_only: Option<bool>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -394,7 +400,7 @@ struct ListInput {
     limit: Option<usize>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -402,7 +408,7 @@ struct ListInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct StatsInput {
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -410,7 +416,7 @@ struct StatsInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct DoctorInput {
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -441,6 +447,28 @@ struct MemoryOutput {
     criticality: f64,
     confidence: f64,
     status: String,
+}
+
+/// Merge global scored memories into the project results, re-sort by score,
+/// deduplicate by ID, and truncate to `max`.
+fn merge_scored_memories(
+    project: &mut Vec<crate::retrieval::engine::ScoredMemory>,
+    global: Vec<crate::retrieval::engine::ScoredMemory>,
+    max: usize,
+) {
+    use std::collections::HashSet;
+    let existing_ids: HashSet<String> = project.iter().map(|sm| sm.memory.id.clone()).collect();
+    for sm in global {
+        if !existing_ids.contains(&sm.memory.id) {
+            project.push(sm);
+        }
+    }
+    project.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    project.truncate(max);
 }
 
 fn memory_to_output(m: &crate::types::Memory, include_details: bool) -> MemoryOutput {
@@ -540,14 +568,24 @@ impl EngramDbServer {
         }
     }
 
+    /// Returns `true` if the given project override refers to the global store.
+    fn is_global(project: Option<&str>) -> bool {
+        matches!(project, Some("global"))
+    }
+
     /// Resolve the target project directory from an optional project override.
     ///
     /// - `None`          — returns `self.dir`
+    /// - `"global"`      — returns the global store directory
     /// - 16-char hex     — looked up by project ID in the registry
     /// - absolute path   — canonicalized, project ID computed and verified in registry
     async fn resolve_dir(&self, project: Option<&str>) -> Result<PathBuf, String> {
         let input = match project {
             None => return Ok(self.dir.clone()),
+            Some("global") => {
+                return crate::storage::paths::global_store_dir()
+                    .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()));
+            }
             Some(s) => s,
         };
 
@@ -604,6 +642,12 @@ impl EngramDbServer {
 
     /// Open a MemoryStore for the given project override, auto-initializing only for the default project.
     async fn open_store_for(&self, project: Option<&str>) -> Result<MemoryStore, String> {
+        if Self::is_global(project) {
+            return MemoryStore::open_global()
+                .await
+                .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()));
+        }
+
         let dir = self.resolve_dir(project).await?;
         let engramdb_dir = dir.join(".engramdb");
         if !engramdb_dir.exists() {
@@ -661,7 +705,7 @@ impl EngramDbServer {
 impl EngramDbServer {
     #[tool(
         name = "create",
-        description = "Store a new memory about the project. Use after discovering patterns, decisions, or hazards."
+        description = "Store a new memory about the project (or globally with project=\"global\"). Use after discovering patterns, decisions, or hazards."
     )]
     async fn memory_create(
         &self,
@@ -776,9 +820,20 @@ impl EngramDbServer {
             detail_level,
         };
 
-        let result = ops::retrieve_memories(&engine, &query)
+        let mut result = ops::retrieve_memories(&engine, &query)
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+
+        // Merge global memories if requested and not already targeting the global store
+        if input.include_global.unwrap_or(false) && !Self::is_global(input.project.as_deref()) {
+            if let Ok(global_engine) = self.build_engine_for(Some("global")).await {
+                if let Ok(global_result) = ops::retrieve_memories(&global_engine, &query).await {
+                    let max = query.max_results.unwrap_or(10);
+                    merge_scored_memories(&mut result.memories, global_result.memories, max);
+                    result.total += global_result.total;
+                }
+            }
+        }
 
         let include_details = input.detail_level.as_deref() == Some("full");
         let memories: Vec<ScoredMemoryOutput> = result
@@ -848,9 +903,20 @@ impl EngramDbServer {
         };
 
         let max = input.max_results.unwrap_or(10);
-        let results = ops::search_memories(&engine, &input.query, &filters, Some(max))
+        let mut results = ops::search_memories(&engine, &input.query, &filters, Some(max))
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+
+        // Merge global memories if requested and not already targeting the global store
+        if input.include_global.unwrap_or(false) && !Self::is_global(input.project.as_deref()) {
+            if let Ok(global_engine) = self.build_engine_for(Some("global")).await {
+                if let Ok(global_results) =
+                    ops::search_memories(&global_engine, &input.query, &filters, Some(max)).await
+                {
+                    merge_scored_memories(&mut results, global_results, max);
+                }
+            }
+        }
 
         let memories: Vec<ScoredMemoryOutput> = results
             .iter()
@@ -1389,8 +1455,11 @@ impl ServerHandler for EngramDbServer {
                  IMPORTANT: Search memories (search) before answering project questions, \
                  investigating workflows, or researching how things work — not only before \
                  modifying files. Store new knowledge after significant discoveries. \
-                 All tools accept an optional `project` parameter (absolute path or 16-char \
-                 project ID from the registry) to operate on a different project's memories. \
+                 All tools accept an optional `project` parameter (absolute path, 16-char \
+                 project ID, or \"global\") to operate on a different project's memories. \
+                 Use project=\"global\" for cross-project memories like personal preferences, \
+                 coding conventions, or knowledge that applies everywhere. \
+                 Use include_global=true on retrieve/search to merge global memories into results. \
                  Omit `project` to use the current project."
                     .to_string(),
             ),
@@ -2230,6 +2299,7 @@ mod tests {
                 logical: None,
                 min_criticality: None,
                 max_results: None,
+                include_global: None,
                 project: None,
             }))
             .await;
@@ -2252,6 +2322,7 @@ mod tests {
                 logical: None,
                 min_criticality: None,
                 max_results: None,
+                include_global: None,
                 project: None,
             }))
             .await;
@@ -2284,6 +2355,7 @@ mod tests {
                 logical: None,
                 min_criticality: None,
                 max_results: Some(1),
+                include_global: None,
                 project: None,
             }))
             .await;
@@ -2305,6 +2377,7 @@ mod tests {
                 logical: None,
                 min_criticality: None,
                 max_results: None,
+                include_global: None,
                 project: None,
             }))
             .await;
@@ -2336,6 +2409,7 @@ mod tests {
                 max_results: None,
                 detail_level: None,
                 include_expired: None,
+                include_global: None,
                 project: None,
             }))
             .await;
@@ -2364,6 +2438,7 @@ mod tests {
                 max_results: None,
                 detail_level: None,
                 include_expired: None,
+                include_global: None,
                 project: None,
             }))
             .await;
@@ -2393,6 +2468,7 @@ mod tests {
                 max_results: None,
                 detail_level: Some("summary".to_string()),
                 include_expired: None,
+                include_global: None,
                 project: None,
             }))
             .await;
@@ -2416,6 +2492,7 @@ mod tests {
                 max_results: None,
                 detail_level: Some("bogus".to_string()),
                 include_expired: None,
+                include_global: None,
                 project: None,
             }))
             .await;
@@ -3026,6 +3103,7 @@ mod tests {
                 logical: None,
                 min_criticality: None,
                 max_results: None,
+                include_global: None,
                 project: Some(project_b),
             }))
             .await;
