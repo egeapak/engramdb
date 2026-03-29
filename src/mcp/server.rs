@@ -3477,21 +3477,12 @@ mod tests {
     // Global memory tests — feature parity with project-scoped memories
     // =======================================================================
 
-    /// Setup for global tests: acquires a process-wide lock and reinitializes the global store.
-    async fn setup_global() -> (
-        TempDir,
-        EngramDbServer,
-        tokio::sync::MutexGuard<'static, ()>,
-    ) {
-        let guard = crate::GLOBAL_TEST_LOCK.lock().await;
-
-        // Wipe and reinitialize the global store so each test starts clean
-        let global_dir = crate::storage::paths::global_store_dir().unwrap();
-        let _ = tokio::fs::remove_dir_all(&global_dir).await;
+    /// Setup for global tests.
+    /// With nextest, each test runs in its own process with an isolated
+    /// ENGRAMDB_DATA_DIR, so no locking or cleanup is needed.
+    async fn setup_global() -> (TempDir, EngramDbServer) {
         MemoryStore::init_global().await.unwrap();
-
-        let (dir, server) = setup().await;
-        (dir, server, guard)
+        setup().await
     }
 
     fn global_project() -> Option<String> {
@@ -3522,7 +3513,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_create_basic() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         let result = server
             .memory_create(Parameters(create_global_input(
                 "decision",
@@ -3538,7 +3529,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_create_with_all_fields() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         let input = CreateInput {
             type_: "convention".to_string(),
             content: "Always use semantic versioning".to_string(),
@@ -3567,7 +3558,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_get() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         let id = create_global_and_get_id(
             &server,
             "preference",
@@ -3590,7 +3581,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_update() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         let id = create_global_and_get_id(
             &server,
             "convention",
@@ -3642,7 +3633,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_delete() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         let id = create_global_and_get_id(
             &server,
             "decision",
@@ -3675,7 +3666,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_memories_isolated_from_project() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
 
         // Create in global store
         let global_id = create_global_and_get_id(
@@ -3727,7 +3718,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_retrieve() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         create_global_and_get_id(
             &server,
             "convention",
@@ -3757,7 +3748,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_retrieve_with_semantic_query() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         create_global_and_get_id(
             &server,
             "convention",
@@ -3787,7 +3778,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_search() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         create_global_and_get_id(
             &server,
             "preference",
@@ -3815,7 +3806,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_search_with_type_filter() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         create_global_and_get_id(
             &server,
             "convention",
@@ -3849,7 +3840,7 @@ mod tests {
 
     #[tokio::test]
     async fn include_global_in_retrieve() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
 
         // Create a global memory
         create_global_and_get_id(
@@ -3905,7 +3896,7 @@ mod tests {
 
     #[tokio::test]
     async fn include_global_in_search() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
 
         create_global_and_get_id(
             &server,
@@ -3956,7 +3947,7 @@ mod tests {
 
     #[tokio::test]
     async fn include_global_false_excludes_global() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
 
         create_global_and_get_id(
             &server,
@@ -4004,7 +3995,7 @@ mod tests {
 
     #[tokio::test]
     async fn include_global_default_excludes_global() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
 
         create_global_and_get_id(
             &server,
@@ -4055,7 +4046,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_challenge_and_review() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         let id = create_global_and_get_id(
             &server,
             "convention",
@@ -4097,7 +4088,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_resolve_keep() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         let id = create_global_and_get_id(
             &server,
             "convention",
@@ -4144,7 +4135,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_resolve_update() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         let id = create_global_and_get_id(
             &server,
             "convention",
@@ -4189,7 +4180,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_resolve_delete() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         let id = create_global_and_get_id(
             &server,
             "decision",
@@ -4234,7 +4225,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_list() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         create_global_and_get_id(
             &server,
             "decision",
@@ -4268,7 +4259,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_list_with_type_filter() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         create_global_and_get_id(&server, "decision", "G decision", "Decision content").await;
         create_global_and_get_id(&server, "hazard", "G hazard", "Hazard content").await;
 
@@ -4293,7 +4284,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_stats() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         create_global_and_get_id(&server, "decision", "Stat decision", "Content").await;
         create_global_and_get_id(&server, "hazard", "Stat hazard", "Content").await;
 
@@ -4310,7 +4301,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_doctor() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         create_global_and_get_id(&server, "decision", "Doctor test", "Content").await;
 
         let result = server
@@ -4326,7 +4317,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_reindex() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         create_global_and_get_id(&server, "decision", "Reindex test", "Content to reindex").await;
 
         let result = server
@@ -4358,7 +4349,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_gc_dry_run() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         create_global_and_get_id(&server, "decision", "GC test", "Content").await;
 
         let result = server
@@ -4376,7 +4367,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_compress_candidates() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
 
         // Create low-criticality global memories
         let input1 = CreateInput {
@@ -4404,7 +4395,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_compress_apply() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
 
         let id1 = create_global_and_get_id(
             &server,
@@ -4452,7 +4443,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_all_memory_types() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         let types = [
             "decision",
             "convention",
@@ -4489,7 +4480,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_personal_visibility() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         let input = CreateInput {
             visibility: Some("personal".to_string()),
             ..create_global_input(
@@ -4516,7 +4507,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_retrieve_detail_levels() {
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
         let input = CreateInput {
             details: Some("Extended details for this global memory".to_string()),
             ..create_global_input(
@@ -4552,7 +4543,7 @@ mod tests {
     #[tokio::test]
     async fn global_auto_initializes() {
         // Unlike non-default project stores, global should auto-init
-        let (_dir, server, _guard) = setup_global().await;
+        let (_dir, server) = setup_global().await;
 
         // This should succeed even if global store wasn't explicitly initialized
         let result = server
