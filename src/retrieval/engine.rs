@@ -959,7 +959,7 @@ mod tests {
             .await
             .unwrap();
 
-        let config = EngramConfig::default(); // relevance_threshold = 0.3
+        let config = EngramConfig::default(); // relevance_threshold = 0.5
 
         // Expired memory with high criticality → score without decay
         // should exceed threshold: 1.0 * 0.8 * scope_mult(1.0) * trust(1.0) = 0.80

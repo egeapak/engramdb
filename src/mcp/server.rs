@@ -2321,6 +2321,7 @@ mod tests {
         let (_dir, server) = setup().await;
         let input = CreateInput {
             physical: Some(vec!["src/main.rs".to_string()]),
+            criticality: Some(0.9),
             ..create_input("decision", "Main entry", "The main function starts here")
         };
         server.memory_create(Parameters(input)).await.unwrap();
@@ -2348,14 +2349,15 @@ mod tests {
         let (_dir, server) = setup().await;
         let input = CreateInput {
             logical: Some(vec!["auth.login".to_string()]),
-            criticality: Some(0.8),
+            physical: Some(vec!["src/auth/login.rs".to_string()]),
+            criticality: Some(0.9),
             ..create_input("convention", "Login convention", "Always use OAuth2")
         };
         server.memory_create(Parameters(input)).await.unwrap();
 
         let result = server
             .memory_retrieve(Parameters(RetrieveInput {
-                path: None,
+                path: Some("src/auth/login.rs".to_string()),
                 logical: Some(vec!["auth.login".to_string()]),
                 query: None,
                 types: None,

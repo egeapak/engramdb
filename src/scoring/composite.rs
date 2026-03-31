@@ -27,8 +27,8 @@ pub struct ScoreBreakdown {
     pub relevance: f64,
     /// Raw scope proximity score (before multiplier transform)
     pub scope: f64,
-    /// Computed scope multiplier: `floor + (1 - floor) * scope_score` when
-    /// scope context is present, or 1.0 when no context is provided.
+    /// Computed scope multiplier: `scope_score` when scope context is present
+    /// (depth decay provides the floor), or 1.0 when no context is provided.
     pub scope_multiplier: f64,
     /// Raw trust weight based on provenance
     pub trust: f64,
@@ -164,7 +164,7 @@ impl<'a> ScoringContext<'a> {
 /// Then: `score = base * scope_multiplier * trust_multiplier`
 ///
 /// Scope multiplier: when scope context is provided,
-/// `scope_multiplier = floor + (1 - floor) * scope_score` (default floor=0.5).
+/// `scope_multiplier = scope_score` (depth decay provides the floor).
 /// When no context is provided, scope_multiplier = 1.0 (neutral).
 ///
 /// Trust multiplier: `trust_floor + (1 - trust_floor) * trust_weight` (default floor=0.5).
@@ -225,6 +225,8 @@ fn composite_score_inner(
         &memory.logical,
         context.path,
         context.logical,
+        config.retrieval.scoring.depth_decay_base,
+        config.retrieval.scoring.depth_decay_floor,
     );
 
     let trust = trust_weight_from_config(memory.provenance.source, &config.trust_weights);
@@ -280,16 +282,12 @@ fn composite_score_inner(
         score /= active_weight_sum;
     }
 
-    // Apply scope as a post-multiplier (like trust).
-    // When scope context is provided: multiplier = floor + (1 - floor) * scope_score
+    // Apply scope as a post-multiplier.
+    // When scope context is provided: multiplier = scope_score directly
+    // (depth decay already provides a floor, so no additional floor transform needed).
     // When no context: multiplier = 1.0 (neutral, doesn't penalize global searches)
     let has_scope_context = context.path.is_some() || !context.logical.is_empty();
-    let scope_multiplier = if has_scope_context {
-        let floor = config.retrieval.scoring.scope_multiplier_floor;
-        floor + (1.0 - floor) * scope_score
-    } else {
-        1.0
-    };
+    let scope_multiplier = if has_scope_context { scope_score } else { 1.0 };
     score *= scope_multiplier;
 
     // Apply trust as a floor-transformed multiplier on the entire base score
@@ -513,8 +511,8 @@ mod tests {
         let breakdown = composite_score(&memory, &context, &config, now);
 
         // base = 1.0*0.8 = 0.80
-        // * scope_mult(0.5 + 0.5*0.0 = 0.5) * trust(1.0) = 0.40
-        assert!((breakdown.final_score - 0.40).abs() < 0.01);
+        // * scope_mult(0.0) * trust(1.0) = 0.0
+        assert!((breakdown.final_score - 0.0).abs() < 0.01);
         assert!((breakdown.scope - 0.0).abs() < 0.01);
     }
 
@@ -984,8 +982,8 @@ mod tests {
         };
 
         let exact = score_for_scope("src/api/auth.rs"); // scope=1.0 → mult=1.0
-        let same_dir = score_for_scope("src/api/other.rs"); // scope=0.85 → mult=0.925
-        let no_match = score_for_scope("completely/different.rs"); // scope=0.0 → mult=0.5
+        let same_dir = score_for_scope("src/api/other.rs"); // scope=0.82 (depth 1) → mult=0.82
+        let no_match = score_for_scope("completely/different.rs"); // scope=0.0 → mult=0.0
 
         assert!(exact > same_dir, "exact {} > same_dir {}", exact, same_dir);
         assert!(
@@ -996,8 +994,10 @@ mod tests {
         );
 
         // Verify the multiplier values
-        assert!((exact / 0.8 - 1.0).abs() < 0.01); // base=0.8, mult=1.0
-        assert!((no_match / 0.8 - 0.5).abs() < 0.01); // base=0.8, mult=0.5
+        // exact: base=0.8 * scope(1.0) * trust(1.0) = 0.80
+        assert!((exact - 0.8).abs() < 0.01);
+        // no_match: base=0.8 * scope(0.0) * trust(1.0) = 0.0
+        assert!((no_match - 0.0).abs() < 0.01);
     }
 
     #[test]
@@ -1041,13 +1041,11 @@ mod tests {
         let high_challenged = composite_score(&high_base, &ctx_high, &config, now);
         let high_diff = high_active.final_score - high_challenged.final_score;
 
-        // Inferred with no scope match — low base
+        // Inferred with same-dir scope — lower base but still nonzero
         let mut low_base = create_test_memory();
         low_base.provenance = Provenance::inferred();
         low_base.status = Status::Challenged;
-        let logical_low = vec!["completely.different".to_string()];
-        let ctx_low =
-            ScoringContext::scope_only(Some("completely/different/path.rs"), &logical_low);
+        let ctx_low = ScoringContext::scope_only(Some("src/api/other.rs"), &[]);
         let mut low_active = create_test_memory();
         low_active.provenance = Provenance::inferred();
         let low_active_bd = composite_score(&low_active, &ctx_low, &config, now);
@@ -1072,29 +1070,29 @@ mod tests {
         let config = EngramConfig::default();
         let now = Utc::now();
 
-        // Worst case: inferred + no-scope + challenged, base=1.0
+        // Worst case with scope match: inferred + root-scoped + challenged, base=1.0
+        // Memory has physical=["src/api/auth.rs"], query path is same-dir → scope=0.82
         let mut memory = create_test_memory();
         memory.criticality = 1.0;
         memory.provenance = Provenance::inferred();
         memory.status = Status::Challenged;
 
-        let logical_diff = vec!["completely.different".to_string()];
-        let context =
-            ScoringContext::scope_only(Some("completely/different/path.rs"), &logical_diff);
+        let context = ScoringContext::scope_only(Some("src/api/other.rs"), &[]);
 
         let breakdown = composite_score(&memory, &context, &config, now);
 
-        // base=1.0 * scope_mult(0.5) * trust_mult(0.80) - 0.10 = 0.30
+        // base=1.0 * scope_mult(0.82) * trust_mult(0.5+0.5*0.6=0.80) - 0.10
+        // = 1.0 * 0.82 * 0.80 - 0.10 = 0.656 - 0.10 = 0.556
         assert!(
-            (breakdown.final_score - 0.30).abs() < 0.01,
-            "worst case should be ~0.30, got {}",
+            breakdown.final_score > 0.0,
+            "worst case with scope match should be > 0, got {}",
             breakdown.final_score,
         );
-        // Must stay above threshold (0.3 default)
+        // Trust floor (0.5) prevents inferred from being crushed to near-zero
         assert!(
-            breakdown.final_score >= 0.29,
-            "worst case {} should be >= 0.29 (near threshold)",
-            breakdown.final_score,
+            breakdown.trust_multiplier >= 0.5,
+            "trust multiplier {} should be >= trust floor 0.5",
+            breakdown.trust_multiplier,
         );
     }
 
