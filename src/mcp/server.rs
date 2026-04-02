@@ -84,7 +84,7 @@ struct CreateInput {
     title_strategy: Option<String>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -118,8 +118,11 @@ struct RetrieveInput {
     #[schemars(description = "Include expired/decayed memories")]
     include_expired: Option<bool>,
 
+    #[schemars(description = "Also include global memories in results (default false)")]
+    include_global: Option<bool>,
+
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -147,8 +150,11 @@ struct SearchInput {
     #[schemars(description = "Max results (default 10)")]
     max_results: Option<usize>,
 
+    #[schemars(description = "Also include global memories in results (default false)")]
+    include_global: Option<bool>,
+
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -159,7 +165,7 @@ struct GetInput {
     id: String,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -228,7 +234,7 @@ struct UpdateInput {
     decay_floor: Option<f64>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -239,7 +245,7 @@ struct DeleteInput {
     id: String,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -256,7 +262,7 @@ struct ChallengeInput {
     source_file: Option<String>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -280,7 +286,7 @@ struct ReviewInput {
     stale_only: Option<bool>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -300,7 +306,7 @@ struct ResolveInput {
     updated_summary: Option<String>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -314,7 +320,7 @@ struct CompressCandidatesInput {
     threshold: Option<f64>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -337,7 +343,7 @@ struct CompressApplyInput {
     tags: Option<Vec<String>>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -351,7 +357,7 @@ struct GcInput {
     threshold: Option<f64>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -365,7 +371,7 @@ struct ReindexInput {
     index_only: Option<bool>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -394,7 +400,7 @@ struct ListInput {
     limit: Option<usize>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -402,7 +408,7 @@ struct ListInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct StatsInput {
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -410,7 +416,7 @@ struct StatsInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct DoctorInput {
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (from registry). Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -441,6 +447,28 @@ struct MemoryOutput {
     criticality: f64,
     confidence: f64,
     status: String,
+}
+
+/// Merge global scored memories into the project results, re-sort by score,
+/// deduplicate by ID, and truncate to `max`.
+fn merge_scored_memories(
+    project: &mut Vec<crate::retrieval::engine::ScoredMemory>,
+    global: Vec<crate::retrieval::engine::ScoredMemory>,
+    max: usize,
+) {
+    use std::collections::HashSet;
+    let existing_ids: HashSet<String> = project.iter().map(|sm| sm.memory.id.clone()).collect();
+    for sm in global {
+        if !existing_ids.contains(&sm.memory.id) {
+            project.push(sm);
+        }
+    }
+    project.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    project.truncate(max);
 }
 
 fn memory_to_output(m: &crate::types::Memory, include_details: bool) -> MemoryOutput {
@@ -540,14 +568,24 @@ impl EngramDbServer {
         }
     }
 
+    /// Returns `true` if the given project override refers to the global store.
+    fn is_global(project: Option<&str>) -> bool {
+        matches!(project, Some("global"))
+    }
+
     /// Resolve the target project directory from an optional project override.
     ///
     /// - `None`          — returns `self.dir`
+    /// - `"global"`      — returns the global store directory
     /// - 16-char hex     — looked up by project ID in the registry
     /// - absolute path   — canonicalized, project ID computed and verified in registry
     async fn resolve_dir(&self, project: Option<&str>) -> Result<PathBuf, String> {
         let input = match project {
             None => return Ok(self.dir.clone()),
+            Some("global") => {
+                return crate::storage::paths::global_store_dir()
+                    .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()));
+            }
             Some(s) => s,
         };
 
@@ -604,6 +642,12 @@ impl EngramDbServer {
 
     /// Open a MemoryStore for the given project override, auto-initializing only for the default project.
     async fn open_store_for(&self, project: Option<&str>) -> Result<MemoryStore, String> {
+        if Self::is_global(project) {
+            return MemoryStore::open_global()
+                .await
+                .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()));
+        }
+
         let dir = self.resolve_dir(project).await?;
         let engramdb_dir = dir.join(".engramdb");
         if !engramdb_dir.exists() {
@@ -661,7 +705,7 @@ impl EngramDbServer {
 impl EngramDbServer {
     #[tool(
         name = "create",
-        description = "Store a new memory about the project. Use after discovering patterns, decisions, or hazards."
+        description = "Store a new memory about the project (or globally with project=\"global\"). Use after discovering patterns, decisions, or hazards."
     )]
     async fn memory_create(
         &self,
@@ -776,9 +820,20 @@ impl EngramDbServer {
             detail_level,
         };
 
-        let result = ops::retrieve_memories(&engine, &query)
+        let mut result = ops::retrieve_memories(&engine, &query)
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+
+        // Merge global memories if requested and not already targeting the global store
+        if input.include_global.unwrap_or(false) && !Self::is_global(input.project.as_deref()) {
+            if let Ok(global_engine) = self.build_engine_for(Some("global")).await {
+                if let Ok(global_result) = ops::retrieve_memories(&global_engine, &query).await {
+                    let max = query.max_results.unwrap_or(10);
+                    merge_scored_memories(&mut result.memories, global_result.memories, max);
+                    result.total += global_result.total;
+                }
+            }
+        }
 
         let include_details = input.detail_level.as_deref() == Some("full");
         let memories: Vec<ScoredMemoryOutput> = result
@@ -848,9 +903,20 @@ impl EngramDbServer {
         };
 
         let max = input.max_results.unwrap_or(10);
-        let results = ops::search_memories(&engine, &input.query, &filters, Some(max))
+        let mut results = ops::search_memories(&engine, &input.query, &filters, Some(max))
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+
+        // Merge global memories if requested and not already targeting the global store
+        if input.include_global.unwrap_or(false) && !Self::is_global(input.project.as_deref()) {
+            if let Ok(global_engine) = self.build_engine_for(Some("global")).await {
+                if let Ok(global_results) =
+                    ops::search_memories(&global_engine, &input.query, &filters, Some(max)).await
+                {
+                    merge_scored_memories(&mut results, global_results, max);
+                }
+            }
+        }
 
         let memories: Vec<ScoredMemoryOutput> = results
             .iter()
@@ -1389,8 +1455,11 @@ impl ServerHandler for EngramDbServer {
                  IMPORTANT: Search memories (search) before answering project questions, \
                  investigating workflows, or researching how things work — not only before \
                  modifying files. Store new knowledge after significant discoveries. \
-                 All tools accept an optional `project` parameter (absolute path or 16-char \
-                 project ID from the registry) to operate on a different project's memories. \
+                 All tools accept an optional `project` parameter (absolute path, 16-char \
+                 project ID, or \"global\") to operate on a different project's memories. \
+                 Use project=\"global\" for cross-project memories like personal preferences, \
+                 coding conventions, or knowledge that applies everywhere. \
+                 Use include_global=true on retrieve/search to merge global memories into results. \
                  Omit `project` to use the current project."
                     .to_string(),
             ),
@@ -2230,6 +2299,7 @@ mod tests {
                 logical: None,
                 min_criticality: None,
                 max_results: None,
+                include_global: None,
                 project: None,
             }))
             .await;
@@ -2252,6 +2322,7 @@ mod tests {
                 logical: None,
                 min_criticality: None,
                 max_results: None,
+                include_global: None,
                 project: None,
             }))
             .await;
@@ -2284,6 +2355,7 @@ mod tests {
                 logical: None,
                 min_criticality: None,
                 max_results: Some(1),
+                include_global: None,
                 project: None,
             }))
             .await;
@@ -2305,6 +2377,7 @@ mod tests {
                 logical: None,
                 min_criticality: None,
                 max_results: None,
+                include_global: None,
                 project: None,
             }))
             .await;
@@ -2336,6 +2409,7 @@ mod tests {
                 max_results: None,
                 detail_level: None,
                 include_expired: None,
+                include_global: None,
                 project: None,
             }))
             .await;
@@ -2364,6 +2438,7 @@ mod tests {
                 max_results: None,
                 detail_level: None,
                 include_expired: None,
+                include_global: None,
                 project: None,
             }))
             .await;
@@ -2393,6 +2468,7 @@ mod tests {
                 max_results: None,
                 detail_level: Some("summary".to_string()),
                 include_expired: None,
+                include_global: None,
                 project: None,
             }))
             .await;
@@ -2416,6 +2492,7 @@ mod tests {
                 max_results: None,
                 detail_level: Some("bogus".to_string()),
                 include_expired: None,
+                include_global: None,
                 project: None,
             }))
             .await;
@@ -3026,6 +3103,7 @@ mod tests {
                 logical: None,
                 min_criticality: None,
                 max_results: None,
+                include_global: None,
                 project: Some(project_b),
             }))
             .await;
@@ -3393,5 +3471,1089 @@ mod tests {
 
         // Verify B was NOT auto-initialized
         assert!(!dir_b.path().join(".engramdb").exists());
+    }
+
+    // =======================================================================
+    // Global memory tests — feature parity with project-scoped memories
+    // =======================================================================
+
+    /// Setup for global tests.
+    /// With nextest, each test runs in its own process with an isolated
+    /// ENGRAMDB_DATA_DIR, so no locking or cleanup is needed.
+    async fn setup_global() -> (TempDir, EngramDbServer) {
+        MemoryStore::init_global().await.unwrap();
+        setup().await
+    }
+
+    fn global_project() -> Option<String> {
+        Some("global".to_string())
+    }
+
+    fn create_global_input(type_: &str, summary: &str, content: &str) -> CreateInput {
+        CreateInput {
+            project: global_project(),
+            ..create_input(type_, summary, content)
+        }
+    }
+
+    async fn create_global_and_get_id(
+        server: &EngramDbServer,
+        type_: &str,
+        summary: &str,
+        content: &str,
+    ) -> String {
+        let result = server
+            .memory_create(Parameters(create_global_input(type_, summary, content)))
+            .await;
+        let val = parse_ok(&result);
+        val["id"].as_str().unwrap().to_string()
+    }
+
+    // --- Global CRUD ---
+
+    #[tokio::test]
+    async fn global_create_basic() {
+        let (_dir, server) = setup_global().await;
+        let result = server
+            .memory_create(Parameters(create_global_input(
+                "decision",
+                "Global preference",
+                "I prefer tabs over spaces",
+            )))
+            .await;
+        let val = parse_ok(&result);
+        assert!(val["id"].is_string());
+        assert_eq!(val["created"], true);
+        assert_eq!(val["summary"], "Global preference");
+    }
+
+    #[tokio::test]
+    async fn global_create_with_all_fields() {
+        let (_dir, server) = setup_global().await;
+        let input = CreateInput {
+            type_: "convention".to_string(),
+            content: "Always use semantic versioning".to_string(),
+            summary: "Use semver".to_string(),
+            details: Some("Major.Minor.Patch format".to_string()),
+            physical: Some(vec!["**/Cargo.toml".to_string()]),
+            logical: Some(vec!["versioning".to_string()]),
+            tags: Some(vec!["global".to_string(), "convention".to_string()]),
+            criticality: Some(0.9),
+            confidence: Some(0.95),
+            visibility: Some("shared".to_string()),
+            supersedes: Some(vec![]),
+            decay_strategy: None,
+            decay_half_life: None,
+            decay_ttl: None,
+            decay_floor: None,
+            title: Some("Semver Convention".to_string()),
+            title_strategy: None,
+            project: global_project(),
+        };
+        let result = server.memory_create(Parameters(input)).await;
+        let val = parse_ok(&result);
+        assert!(val["id"].is_string());
+        assert_eq!(val["created"], true);
+    }
+
+    #[tokio::test]
+    async fn global_get() {
+        let (_dir, server) = setup_global().await;
+        let id = create_global_and_get_id(
+            &server,
+            "preference",
+            "Dark mode pref",
+            "Always use dark mode in editors",
+        )
+        .await;
+
+        let result = server
+            .memory_get(Parameters(GetInput {
+                id: id.clone(),
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["id"], id);
+        assert_eq!(val["summary"], "Dark mode pref");
+        assert_eq!(val["content"], "Always use dark mode in editors");
+    }
+
+    #[tokio::test]
+    async fn global_update() {
+        let (_dir, server) = setup_global().await;
+        let id = create_global_and_get_id(
+            &server,
+            "convention",
+            "Commit convention",
+            "Use conventional commits",
+        )
+        .await;
+
+        let result = server
+            .memory_update(Parameters(UpdateInput {
+                id: id.clone(),
+                type_: None,
+                content: Some("Use conventional commits with scope".to_string()),
+                summary: Some("Commit convention v2".to_string()),
+                details: None,
+                physical: None,
+                logical: None,
+                tags: Some(vec!["git".to_string()]),
+                tags_add: None,
+                tags_remove: None,
+                criticality: Some(0.8),
+                confidence: None,
+                visibility: None,
+                title: None,
+                status: None,
+                supersedes: None,
+                decay_strategy: None,
+                decay_half_life: None,
+                decay_ttl: None,
+                decay_floor: None,
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["updated"], true);
+
+        // Verify the update
+        let get_result = server
+            .memory_get(Parameters(GetInput {
+                id,
+                project: global_project(),
+            }))
+            .await;
+        let get_val = parse_ok(&get_result);
+        assert_eq!(get_val["summary"], "Commit convention v2");
+        assert_eq!(get_val["content"], "Use conventional commits with scope");
+        assert!(get_val["tags"].as_array().unwrap().contains(&json!("git")));
+    }
+
+    #[tokio::test]
+    async fn global_delete() {
+        let (_dir, server) = setup_global().await;
+        let id = create_global_and_get_id(
+            &server,
+            "decision",
+            "To delete globally",
+            "Global content to remove",
+        )
+        .await;
+
+        let result = server
+            .memory_delete(Parameters(DeleteInput {
+                id: id.clone(),
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["deleted"], true);
+
+        // Verify it's gone
+        let get_result = server
+            .memory_get(Parameters(GetInput {
+                id,
+                project: global_project(),
+            }))
+            .await;
+        let err_val = parse_err(&get_result);
+        assert_eq!(err_val["error"]["code"], "MEMORY_NOT_FOUND");
+    }
+
+    // --- Global isolation ---
+
+    #[tokio::test]
+    async fn global_memories_isolated_from_project() {
+        let (_dir, server) = setup_global().await;
+
+        // Create in global store
+        let global_id = create_global_and_get_id(
+            &server,
+            "preference",
+            "Global only memory",
+            "This lives only in global",
+        )
+        .await;
+
+        // Create in project store
+        let project_id = create_and_get_id(
+            &server,
+            "decision",
+            "Project only memory",
+            "Project content",
+        )
+        .await;
+
+        // Global memory NOT visible in project
+        let result = server
+            .memory_get(Parameters(GetInput {
+                id: global_id.clone(),
+                project: None,
+            }))
+            .await;
+        assert!(result.is_err());
+
+        // Project memory NOT visible in global
+        let result = server
+            .memory_get(Parameters(GetInput {
+                id: project_id,
+                project: global_project(),
+            }))
+            .await;
+        assert!(result.is_err());
+
+        // Global memory IS visible with project="global"
+        let result = server
+            .memory_get(Parameters(GetInput {
+                id: global_id,
+                project: global_project(),
+            }))
+            .await;
+        assert!(result.is_ok());
+    }
+
+    // --- Global retrieve & search ---
+
+    #[tokio::test]
+    async fn global_retrieve() {
+        let (_dir, server) = setup_global().await;
+        create_global_and_get_id(
+            &server,
+            "convention",
+            "Always lint code",
+            "Run linters before committing",
+        )
+        .await;
+
+        let result = server
+            .memory_retrieve(Parameters(RetrieveInput {
+                path: Some("/".to_string()),
+                logical: None,
+                query: None,
+                types: None,
+                tags: None,
+                min_criticality: None,
+                max_results: None,
+                detail_level: None,
+                include_expired: None,
+                include_global: None,
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(!val["memories"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn global_retrieve_with_semantic_query() {
+        let (_dir, server) = setup_global().await;
+        create_global_and_get_id(
+            &server,
+            "convention",
+            "Error handling convention",
+            "Always use Result types for error handling in Rust",
+        )
+        .await;
+
+        let result = server
+            .memory_retrieve(Parameters(RetrieveInput {
+                path: None,
+                logical: None,
+                query: Some("error handling".to_string()),
+                types: None,
+                tags: None,
+                min_criticality: None,
+                max_results: None,
+                detail_level: None,
+                include_expired: None,
+                include_global: None,
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(!val["memories"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn global_search() {
+        let (_dir, server) = setup_global().await;
+        create_global_and_get_id(
+            &server,
+            "preference",
+            "Editor font preference",
+            "Use JetBrains Mono font in all editors",
+        )
+        .await;
+
+        let result = server
+            .memory_search(Parameters(SearchInput {
+                query: "JetBrains Mono".to_string(),
+                types: None,
+                tags: None,
+                physical: None,
+                logical: None,
+                min_criticality: None,
+                max_results: None,
+                include_global: None,
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(!val["memories"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn global_search_with_type_filter() {
+        let (_dir, server) = setup_global().await;
+        create_global_and_get_id(
+            &server,
+            "convention",
+            "Convention in global",
+            "Convention content",
+        )
+        .await;
+        create_global_and_get_id(&server, "hazard", "Hazard in global", "Hazard content").await;
+
+        let result = server
+            .memory_search(Parameters(SearchInput {
+                query: "content".to_string(),
+                types: Some(vec!["hazard".to_string()]),
+                tags: None,
+                physical: None,
+                logical: None,
+                min_criticality: None,
+                max_results: None,
+                include_global: None,
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        let memories = val["memories"].as_array().unwrap();
+        for m in memories {
+            assert_eq!(m["type"], "hazard");
+        }
+    }
+
+    // --- include_global merges results ---
+
+    #[tokio::test]
+    async fn include_global_in_retrieve() {
+        let (_dir, server) = setup_global().await;
+
+        // Create a global memory
+        create_global_and_get_id(
+            &server,
+            "convention",
+            "Global lint convention",
+            "Always run clippy before committing Rust code",
+        )
+        .await;
+
+        // Create a project memory
+        create_and_get_id(
+            &server,
+            "decision",
+            "Project-specific decision",
+            "Use tokio runtime",
+        )
+        .await;
+
+        // Retrieve with include_global=true should include both
+        let result = server
+            .memory_retrieve(Parameters(RetrieveInput {
+                path: Some("/".to_string()),
+                logical: None,
+                query: None,
+                types: None,
+                tags: None,
+                min_criticality: None,
+                max_results: Some(20),
+                detail_level: None,
+                include_expired: None,
+                include_global: Some(true),
+                project: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        let memories = val["memories"].as_array().unwrap();
+        let summaries: Vec<&str> = memories
+            .iter()
+            .filter_map(|m| m["summary"].as_str())
+            .collect();
+        assert!(
+            summaries.contains(&"Global lint convention"),
+            "Expected global memory in results, got: {:?}",
+            summaries
+        );
+        assert!(
+            summaries.contains(&"Project-specific decision"),
+            "Expected project memory in results, got: {:?}",
+            summaries
+        );
+    }
+
+    #[tokio::test]
+    async fn include_global_in_search() {
+        let (_dir, server) = setup_global().await;
+
+        create_global_and_get_id(
+            &server,
+            "preference",
+            "Global search test memory",
+            "This memory is global for search merge test",
+        )
+        .await;
+
+        create_and_get_id(
+            &server,
+            "decision",
+            "Project search test memory",
+            "This memory is project-scoped for search merge test",
+        )
+        .await;
+
+        let result = server
+            .memory_search(Parameters(SearchInput {
+                query: "search test memory".to_string(),
+                types: None,
+                tags: None,
+                physical: None,
+                logical: None,
+                min_criticality: None,
+                max_results: Some(20),
+                include_global: Some(true),
+                project: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        let memories = val["memories"].as_array().unwrap();
+        let summaries: Vec<&str> = memories
+            .iter()
+            .filter_map(|m| m["summary"].as_str())
+            .collect();
+        assert!(
+            summaries.contains(&"Global search test memory"),
+            "Expected global memory in search results, got: {:?}",
+            summaries
+        );
+        assert!(
+            summaries.contains(&"Project search test memory"),
+            "Expected project memory in search results, got: {:?}",
+            summaries
+        );
+    }
+
+    #[tokio::test]
+    async fn include_global_false_excludes_global() {
+        let (_dir, server) = setup_global().await;
+
+        create_global_and_get_id(
+            &server,
+            "convention",
+            "Global only for exclusion test",
+            "Should not appear when include_global=false",
+        )
+        .await;
+
+        create_and_get_id(
+            &server,
+            "decision",
+            "Project only for exclusion test",
+            "Should appear",
+        )
+        .await;
+
+        let result = server
+            .memory_retrieve(Parameters(RetrieveInput {
+                path: Some("/".to_string()),
+                logical: None,
+                query: None,
+                types: None,
+                tags: None,
+                min_criticality: None,
+                max_results: Some(20),
+                detail_level: None,
+                include_expired: None,
+                include_global: Some(false),
+                project: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        let memories = val["memories"].as_array().unwrap();
+        let summaries: Vec<&str> = memories
+            .iter()
+            .filter_map(|m| m["summary"].as_str())
+            .collect();
+        assert!(
+            !summaries.contains(&"Global only for exclusion test"),
+            "Global memory should NOT appear when include_global=false, got: {:?}",
+            summaries
+        );
+    }
+
+    #[tokio::test]
+    async fn include_global_default_excludes_global() {
+        let (_dir, server) = setup_global().await;
+
+        create_global_and_get_id(
+            &server,
+            "convention",
+            "Global default exclusion test",
+            "Should not appear when include_global is omitted",
+        )
+        .await;
+
+        create_and_get_id(
+            &server,
+            "decision",
+            "Project default exclusion test",
+            "Should appear",
+        )
+        .await;
+
+        // include_global defaults to None (false)
+        let result = server
+            .memory_retrieve(Parameters(RetrieveInput {
+                path: Some("/".to_string()),
+                logical: None,
+                query: None,
+                types: None,
+                tags: None,
+                min_criticality: None,
+                max_results: Some(20),
+                detail_level: None,
+                include_expired: None,
+                include_global: None,
+                project: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        let memories = val["memories"].as_array().unwrap();
+        let summaries: Vec<&str> = memories
+            .iter()
+            .filter_map(|m| m["summary"].as_str())
+            .collect();
+        assert!(
+            !summaries.contains(&"Global default exclusion test"),
+            "Global memory should NOT appear by default, got: {:?}",
+            summaries
+        );
+    }
+
+    // --- Global challenge / review / resolve ---
+
+    #[tokio::test]
+    async fn global_challenge_and_review() {
+        let (_dir, server) = setup_global().await;
+        let id = create_global_and_get_id(
+            &server,
+            "convention",
+            "Challengeable convention",
+            "Use semicolons in JS",
+        )
+        .await;
+
+        // Challenge
+        let result = server
+            .memory_challenge(Parameters(ChallengeInput {
+                id: id.clone(),
+                evidence: "Modern JS style guides recommend no semicolons".to_string(),
+                source_file: Some(".eslintrc".to_string()),
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["challenged"], true);
+
+        // Review should list challenged memory
+        let result = server
+            .memory_review(Parameters(ReviewInput {
+                scope: None,
+                max_results: None,
+                type_: None,
+                challenged_only: Some(true),
+                stale_only: None,
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        let memories = val["memories"].as_array().unwrap();
+        assert!(
+            memories.iter().any(|m| m["id"] == id),
+            "Challenged global memory should appear in review"
+        );
+    }
+
+    #[tokio::test]
+    async fn global_resolve_keep() {
+        let (_dir, server) = setup_global().await;
+        let id = create_global_and_get_id(
+            &server,
+            "convention",
+            "Resolve test",
+            "Convention to resolve",
+        )
+        .await;
+
+        // Challenge first
+        server
+            .memory_challenge(Parameters(ChallengeInput {
+                id: id.clone(),
+                evidence: "Might be wrong".to_string(),
+                source_file: None,
+                project: global_project(),
+            }))
+            .await
+            .unwrap();
+
+        // Resolve by keeping
+        let result = server
+            .memory_resolve(Parameters(ResolveInput {
+                id: id.clone(),
+                action: "keep".to_string(),
+                updated_content: None,
+                updated_summary: None,
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["resolved"], true);
+        assert_eq!(val["action"], "keep");
+
+        // Verify it's back to active
+        let get_result = server
+            .memory_get(Parameters(GetInput {
+                id,
+                project: global_project(),
+            }))
+            .await;
+        let get_val = parse_ok(&get_result);
+        assert_eq!(get_val["status"], "active");
+    }
+
+    #[tokio::test]
+    async fn global_resolve_update() {
+        let (_dir, server) = setup_global().await;
+        let id = create_global_and_get_id(
+            &server,
+            "convention",
+            "To resolve with update",
+            "Original content",
+        )
+        .await;
+
+        server
+            .memory_challenge(Parameters(ChallengeInput {
+                id: id.clone(),
+                evidence: "Needs update".to_string(),
+                source_file: None,
+                project: global_project(),
+            }))
+            .await
+            .unwrap();
+
+        let result = server
+            .memory_resolve(Parameters(ResolveInput {
+                id: id.clone(),
+                action: "update".to_string(),
+                updated_content: Some("Updated content after resolve".to_string()),
+                updated_summary: Some("Resolved convention".to_string()),
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["resolved"], true);
+
+        let get_val = parse_ok(
+            &server
+                .memory_get(Parameters(GetInput {
+                    id,
+                    project: global_project(),
+                }))
+                .await,
+        );
+        assert_eq!(get_val["summary"], "Resolved convention");
+        assert_eq!(get_val["content"], "Updated content after resolve");
+    }
+
+    #[tokio::test]
+    async fn global_resolve_delete() {
+        let (_dir, server) = setup_global().await;
+        let id = create_global_and_get_id(
+            &server,
+            "decision",
+            "To resolve-delete",
+            "Will be removed by resolve",
+        )
+        .await;
+
+        server
+            .memory_challenge(Parameters(ChallengeInput {
+                id: id.clone(),
+                evidence: "Should be deleted".to_string(),
+                source_file: None,
+                project: global_project(),
+            }))
+            .await
+            .unwrap();
+
+        let result = server
+            .memory_resolve(Parameters(ResolveInput {
+                id: id.clone(),
+                action: "delete".to_string(),
+                updated_content: None,
+                updated_summary: None,
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["resolved"], true);
+
+        // Should be gone
+        let get_result = server
+            .memory_get(Parameters(GetInput {
+                id,
+                project: global_project(),
+            }))
+            .await;
+        assert!(get_result.is_err());
+    }
+
+    // --- Global list, stats, doctor, reindex, gc ---
+
+    #[tokio::test]
+    async fn global_list() {
+        let (_dir, server) = setup_global().await;
+        create_global_and_get_id(
+            &server,
+            "decision",
+            "Listed global decision",
+            "Decision content",
+        )
+        .await;
+        create_global_and_get_id(
+            &server,
+            "convention",
+            "Listed global convention",
+            "Convention content",
+        )
+        .await;
+
+        let result = server
+            .memory_list(Parameters(ListInput {
+                types: None,
+                tags: None,
+                status: None,
+                scope: None,
+                sort_field: None,
+                reverse: None,
+                limit: None,
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(val["total"].as_u64().unwrap() >= 2);
+    }
+
+    #[tokio::test]
+    async fn global_list_with_type_filter() {
+        let (_dir, server) = setup_global().await;
+        create_global_and_get_id(&server, "decision", "G decision", "Decision content").await;
+        create_global_and_get_id(&server, "hazard", "G hazard", "Hazard content").await;
+
+        let result = server
+            .memory_list(Parameters(ListInput {
+                types: Some(vec!["hazard".to_string()]),
+                tags: None,
+                status: None,
+                scope: None,
+                sort_field: None,
+                reverse: None,
+                limit: None,
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        let memories = val["memories"].as_array().unwrap();
+        for m in memories {
+            assert_eq!(m["type"], "hazard");
+        }
+    }
+
+    #[tokio::test]
+    async fn global_stats() {
+        let (_dir, server) = setup_global().await;
+        create_global_and_get_id(&server, "decision", "Stat decision", "Content").await;
+        create_global_and_get_id(&server, "hazard", "Stat hazard", "Content").await;
+
+        let result = server
+            .memory_stats(Parameters(StatsInput {
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(val["total"].as_u64().unwrap() >= 2);
+        assert!(val["by_type"]["decision"].as_u64().unwrap() >= 1);
+        assert!(val["by_type"]["hazard"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn global_doctor() {
+        let (_dir, server) = setup_global().await;
+        create_global_and_get_id(&server, "decision", "Doctor test", "Content").await;
+
+        let result = server
+            .memory_doctor(Parameters(DoctorInput {
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["healthy"], true);
+        assert!(val["indexed"].as_u64().unwrap() >= 1);
+        assert!(val["on_disk"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn global_reindex() {
+        let (_dir, server) = setup_global().await;
+        create_global_and_get_id(&server, "decision", "Reindex test", "Content to reindex").await;
+
+        let result = server
+            .memory_reindex(Parameters(ReindexInput {
+                embeddings_only: None,
+                index_only: Some(true),
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(val["indexed"].as_u64().unwrap() >= 1);
+
+        // Memory should still be accessible after reindex
+        let list_result = server
+            .memory_list(Parameters(ListInput {
+                types: None,
+                tags: None,
+                status: None,
+                scope: None,
+                sort_field: None,
+                reverse: None,
+                limit: None,
+                project: global_project(),
+            }))
+            .await;
+        let list_val = parse_ok(&list_result);
+        assert!(list_val["total"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn global_gc_dry_run() {
+        let (_dir, server) = setup_global().await;
+        create_global_and_get_id(&server, "decision", "GC test", "Content").await;
+
+        let result = server
+            .memory_gc(Parameters(GcInput {
+                dry_run: Some(true),
+                threshold: None,
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["dry_run"], true);
+    }
+
+    // --- Global compress ---
+
+    #[tokio::test]
+    async fn global_compress_candidates() {
+        let (_dir, server) = setup_global().await;
+
+        // Create low-criticality global memories
+        let input1 = CreateInput {
+            criticality: Some(0.1),
+            ..create_global_input("context", "Low crit 1", "Low criticality global context 1")
+        };
+        server.memory_create(Parameters(input1)).await.unwrap();
+
+        let input2 = CreateInput {
+            criticality: Some(0.1),
+            ..create_global_input("context", "Low crit 2", "Low criticality global context 2")
+        };
+        server.memory_create(Parameters(input2)).await.unwrap();
+
+        let result = server
+            .memory_compress_candidates(Parameters(CompressCandidatesInput {
+                scope: None,
+                threshold: Some(0.3),
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(val["total"].as_u64().unwrap() >= 2);
+    }
+
+    #[tokio::test]
+    async fn global_compress_apply() {
+        let (_dir, server) = setup_global().await;
+
+        let id1 = create_global_and_get_id(
+            &server,
+            "context",
+            "Compress source 1",
+            "Global context to compress A",
+        )
+        .await;
+        let id2 = create_global_and_get_id(
+            &server,
+            "context",
+            "Compress source 2",
+            "Global context to compress B",
+        )
+        .await;
+
+        let result = server
+            .memory_compress_apply(Parameters(CompressApplyInput {
+                source_ids: vec![id1.clone(), id2.clone()],
+                summary: "Compressed global ctx".to_string(),
+                content: "Combined global context A and B".to_string(),
+                scope: None,
+                tags: Some(vec!["compressed".to_string()]),
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["applied"], true);
+        assert_eq!(val["superseded_count"], 2);
+        assert!(val["new_id"].is_string());
+
+        // New memory should be accessible
+        let new_id = val["new_id"].as_str().unwrap();
+        let get_result = server
+            .memory_get(Parameters(GetInput {
+                id: new_id.to_string(),
+                project: global_project(),
+            }))
+            .await;
+        let get_val = parse_ok(&get_result);
+        assert_eq!(get_val["summary"], "Compressed global ctx");
+    }
+
+    // --- Global with all memory types ---
+
+    #[tokio::test]
+    async fn global_all_memory_types() {
+        let (_dir, server) = setup_global().await;
+        let types = [
+            "decision",
+            "convention",
+            "hazard",
+            "context",
+            "intent",
+            "relationship",
+            "debug",
+            "preference",
+        ];
+
+        for t in &types {
+            let result = server
+                .memory_create(Parameters(create_global_input(
+                    t,
+                    &format!("Global {} memory", t),
+                    &format!("Content for global {}", t),
+                )))
+                .await;
+            let val = parse_ok(&result);
+            assert_eq!(val["created"], true, "Failed to create global {} memory", t);
+        }
+
+        let result = server
+            .memory_stats(Parameters(StatsInput {
+                project: global_project(),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(val["total"].as_u64().unwrap() >= types.len() as u64);
+    }
+
+    // --- Global with personal visibility ---
+
+    #[tokio::test]
+    async fn global_personal_visibility() {
+        let (_dir, server) = setup_global().await;
+        let input = CreateInput {
+            visibility: Some("personal".to_string()),
+            ..create_global_input(
+                "preference",
+                "Personal global pref",
+                "My personal preference stored globally",
+            )
+        };
+        let result = server.memory_create(Parameters(input)).await;
+        let val = parse_ok(&result);
+        let id = val["id"].as_str().unwrap();
+
+        let get_result = server
+            .memory_get(Parameters(GetInput {
+                id: id.to_string(),
+                project: global_project(),
+            }))
+            .await;
+        let get_val = parse_ok(&get_result);
+        assert_eq!(get_val["summary"], "Personal global pref");
+    }
+
+    // --- Global retrieve detail levels ---
+
+    #[tokio::test]
+    async fn global_retrieve_detail_levels() {
+        let (_dir, server) = setup_global().await;
+        let input = CreateInput {
+            details: Some("Extended details for this global memory".to_string()),
+            ..create_global_input(
+                "decision",
+                "Detail level test",
+                "Content for detail level test",
+            )
+        };
+        server.memory_create(Parameters(input)).await.unwrap();
+
+        for level in &["summary", "content", "full"] {
+            let result = server
+                .memory_retrieve(Parameters(RetrieveInput {
+                    path: Some("/".to_string()),
+                    logical: None,
+                    query: None,
+                    types: None,
+                    tags: None,
+                    min_criticality: None,
+                    max_results: None,
+                    detail_level: Some(level.to_string()),
+                    include_expired: None,
+                    include_global: None,
+                    project: global_project(),
+                }))
+                .await;
+            parse_ok(&result);
+        }
+    }
+
+    // --- Global auto-init ---
+
+    #[tokio::test]
+    async fn global_auto_initializes() {
+        // Unlike non-default project stores, global should auto-init
+        let (_dir, server) = setup_global().await;
+
+        // This should succeed even if global store wasn't explicitly initialized
+        let result = server
+            .memory_create(Parameters(create_global_input(
+                "decision",
+                "Auto-init test",
+                "Testing auto-initialization",
+            )))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["created"], true);
     }
 }

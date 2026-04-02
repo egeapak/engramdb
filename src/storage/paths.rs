@@ -94,6 +94,27 @@ pub fn lancedb_dir(project_id: &str) -> Result<PathBuf> {
         .join("lancedb"))
 }
 
+/// Well-known project ID for the global memory store.
+///
+/// This is 16 characters (matching the project ID format) but starts with
+/// underscores so it can never collide with a real SHA-256-derived hex ID.
+pub const GLOBAL_PROJECT_ID: &str = "__global_store__";
+
+/// Returns the root directory for the global memory store.
+///
+/// Layout mirrors a normal project:
+///   `<global_data_dir>/global/.engramdb/memories/`
+///   `<global_data_dir>/global/.engramdb/manifest.toml`
+///   `<global_data_dir>/global/.engramdb/config.toml`
+pub fn global_store_dir() -> Result<PathBuf> {
+    Ok(global_data_dir()?.join("global"))
+}
+
+/// Returns the LanceDB directory for the global memory store.
+pub fn global_lancedb_dir() -> Result<PathBuf> {
+    Ok(global_data_dir()?.join("global").join("lancedb"))
+}
+
 /// Returns the global registry path (`<global_config_dir>/registry.json`).
 ///
 /// Respects `ENGRAMDB_REGISTRY_PATH` env var for testing isolation.
