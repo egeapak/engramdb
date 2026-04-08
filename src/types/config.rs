@@ -322,7 +322,7 @@ pub struct RetrievalConfig {
 impl Default for RetrievalConfig {
     fn default() -> Self {
         Self {
-            relevance_threshold: 0.5,
+            relevance_threshold: 0.45,
             max_results: 10,
             include_expired: false,
             scoring: ScoringConfig::default(),
@@ -640,7 +640,7 @@ mod tests {
 
         // Retrieval config
         assert_eq!(config.retrieval.max_results, 10);
-        assert_eq!(config.retrieval.relevance_threshold, 0.5);
+        assert_eq!(config.retrieval.relevance_threshold, 0.45);
         assert!(!config.retrieval.include_expired);
 
         // Trust weights
