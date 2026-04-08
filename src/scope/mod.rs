@@ -28,7 +28,7 @@ pub mod physical;
 /// Calculates the combined proximity score between a memory's scopes and the current context.
 ///
 /// This function combines physical and logical scope proximity:
-/// - Physical score: based on file path matching (0.0 to 1.0)
+/// - Physical score: based on file path matching with depth decay (0.0 to 1.0)
 /// - Logical bonus: based on dot-notation scope hierarchy (0.0 to 0.3)
 /// - Total score is capped at 1.0
 ///
@@ -37,6 +37,8 @@ pub mod physical;
 /// * `memory_logical` - Logical scope tags from the memory (dot-notation)
 /// * `current_path` - Current file path (if any)
 /// * `current_logical` - Current logical scope tags
+/// * `depth_decay_base` - Exponential decay base for physical scope (e.g. 0.82)
+/// * `depth_decay_floor` - Minimum physical scope score (e.g. 0.3)
 ///
 /// # Returns
 /// Combined proximity score from 0.0 to 1.0
@@ -45,9 +47,11 @@ pub fn scope_proximity(
     memory_logical: &[String],
     current_path: Option<&str>,
     current_logical: &[String],
+    depth_decay_base: f64,
+    depth_decay_floor: f64,
 ) -> f64 {
     let physical_score = current_path
-        .map(|p| physical::proximity(memory_physical, p))
+        .map(|p| physical::proximity(memory_physical, p, depth_decay_base, depth_decay_floor))
         .unwrap_or(0.0);
 
     let logical_bonus = logical::proximity(memory_logical, current_logical);
@@ -58,6 +62,19 @@ pub fn scope_proximity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const BASE: f64 = 0.82;
+    const FLOOR: f64 = 0.3;
+
+    fn assert_approx(actual: f64, expected: f64, msg: &str) {
+        assert!(
+            (actual - expected).abs() < 0.01,
+            "{}: expected {:.4}, got {:.4}",
+            msg,
+            expected,
+            actual
+        );
+    }
 
     #[test]
     fn test_scope_proximity_combined() {
@@ -71,11 +88,13 @@ mod tests {
             &memory_logical,
             current_path,
             &current_logical,
+            BASE,
+            FLOOR,
         );
 
-        // Physical: 0.6 (parent module), Logical: 0.2 (parent match)
-        // Total: 0.8
-        assert_eq!(score, 0.8);
+        // Physical: 0.6724 (depth 2 from "src/api"), Logical: 0.2 (parent match)
+        // Total: 0.8724
+        assert_approx(score, 0.8724, "combined");
     }
 
     #[test]
@@ -90,6 +109,8 @@ mod tests {
             &memory_logical,
             current_path,
             &current_logical,
+            BASE,
+            FLOOR,
         );
 
         // Physical: 1.0 (exact), Logical: 0.3 (exact)
@@ -109,6 +130,8 @@ mod tests {
             &memory_logical,
             current_path,
             &current_logical,
+            BASE,
+            FLOOR,
         );
 
         // Physical: 0.0 (no current path), Logical: 0.2 (parent match)
@@ -127,6 +150,8 @@ mod tests {
             &memory_logical,
             current_path,
             &current_logical,
+            BASE,
+            FLOOR,
         );
 
         assert_eq!(score, 0.0);

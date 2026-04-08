@@ -37,7 +37,7 @@ fn scope_benchmarks(c: &mut Criterion) {
     // Exact match (best case)
     group.bench_function("physical_proximity/exact_match", |b| {
         let patterns = vec!["src/api/auth/handlers.rs".to_string()];
-        b.iter(|| physical::proximity(&patterns, "src/api/auth/handlers.rs"));
+        b.iter(|| physical::proximity(&patterns, "src/api/auth/handlers.rs", 0.82, 0.3));
     });
 
     // 5 patterns with one glob match (typical case)
@@ -49,7 +49,7 @@ fn scope_benchmarks(c: &mut Criterion) {
             "tests/integration.rs".to_string(),
             "docs/architecture.md".to_string(),
         ];
-        b.iter(|| physical::proximity(&patterns, "src/api/auth/handlers.rs"));
+        b.iter(|| physical::proximity(&patterns, "src/api/auth/handlers.rs", 0.82, 0.3));
     });
 
     // 20 patterns mixed (worst case)
@@ -62,7 +62,7 @@ fn scope_benchmarks(c: &mut Criterion) {
                 _ => "/".to_string(),
             })
             .collect();
-        b.iter(|| physical::proximity(&patterns, "src/module_5/subdir/file.rs"));
+        b.iter(|| physical::proximity(&patterns, "src/module_5/subdir/file.rs", 0.82, 0.3));
     });
 
     // --- Physical matches (GlobSet rebuild) ---

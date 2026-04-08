@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 /// Weights for scoring components.
 ///
 /// Trust and scope are applied as multipliers on the entire score,
-/// not as weighted components here. Scope uses `scope_multiplier_floor`
-/// from [`ScoringConfig`].
+/// not as weighted components here. Scope uses depth decay
+/// (`depth_decay_base` / `depth_decay_floor`) from [`ScoringConfig`].
 ///
 /// Active weights should sum to 1.0 (± 0.001). Use [`ScoringWeights::validate`]
 /// to check.
@@ -77,10 +77,10 @@ pub struct ScoringConfig {
     /// Weights for degraded mode (no embeddings)
     pub degraded: ScoringWeights,
 
-    /// Floor for the scope multiplier (default 0.5).
+    /// Deprecated: no longer used in scoring. Retained for TOML backward compatibility.
     ///
-    /// Scope is applied as a post-multiplier: `floor + (1 - floor) * scope_score`.
-    /// When no scope context is provided, the multiplier is 1.0 (neutral).
+    /// Scope scoring now uses depth decay (`depth_decay_base` / `depth_decay_floor`)
+    /// instead of a floor-transformed multiplier.
     #[serde(default = "ScoringConfig::default_scope_multiplier_floor")]
     pub scope_multiplier_floor: f64,
 
@@ -98,6 +98,18 @@ pub struct ScoringConfig {
     /// is uniform regardless of trust/scope combination.
     #[serde(default = "ScoringConfig::default_challenge_penalty")]
     pub challenge_penalty: f64,
+
+    /// Base for exponential depth decay of physical scope scores (default 0.82).
+    ///
+    /// Physical scope scores use `max(depth_decay_floor, depth_decay_base^depth)`
+    /// where depth is the number of directory levels between the memory scope
+    /// and the queried file path.
+    #[serde(default = "ScoringConfig::default_depth_decay_base")]
+    pub depth_decay_base: f64,
+
+    /// Floor for depth decay — minimum scope score regardless of depth (default 0.3).
+    #[serde(default = "ScoringConfig::default_depth_decay_floor")]
+    pub depth_decay_floor: f64,
 }
 
 impl ScoringConfig {
@@ -120,6 +132,14 @@ impl ScoringConfig {
     fn default_challenge_penalty() -> f64 {
         0.10
     }
+
+    fn default_depth_decay_base() -> f64 {
+        0.82
+    }
+
+    fn default_depth_decay_floor() -> f64 {
+        0.3
+    }
 }
 
 impl Default for ScoringConfig {
@@ -140,6 +160,8 @@ impl Default for ScoringConfig {
             scope_multiplier_floor: 0.5,
             trust_multiplier_floor: 0.5,
             challenge_penalty: 0.10,
+            depth_decay_base: 0.82,
+            depth_decay_floor: 0.3,
         }
     }
 }
@@ -300,7 +322,7 @@ pub struct RetrievalConfig {
 impl Default for RetrievalConfig {
     fn default() -> Self {
         Self {
-            relevance_threshold: 0.3,
+            relevance_threshold: 0.5,
             max_results: 10,
             include_expired: false,
             scoring: ScoringConfig::default(),
@@ -543,6 +565,12 @@ impl EngramConfig {
         if !(0.0..=1.0).contains(&self.retrieval.scoring.challenge_penalty) {
             anyhow::bail!("scoring.challenge_penalty must be in [0.0, 1.0]");
         }
+        if !(0.0..=1.0).contains(&self.retrieval.scoring.depth_decay_base) {
+            anyhow::bail!("scoring.depth_decay_base must be in [0.0, 1.0]");
+        }
+        if !(0.0..=1.0).contains(&self.retrieval.scoring.depth_decay_floor) {
+            anyhow::bail!("scoring.depth_decay_floor must be in [0.0, 1.0]");
+        }
 
         if self.embeddings.dimensions == 0 || self.embeddings.dimensions > 4096 {
             anyhow::bail!(
@@ -612,7 +640,7 @@ mod tests {
 
         // Retrieval config
         assert_eq!(config.retrieval.max_results, 10);
-        assert_eq!(config.retrieval.relevance_threshold, 0.3);
+        assert_eq!(config.retrieval.relevance_threshold, 0.5);
         assert!(!config.retrieval.include_expired);
 
         // Trust weights
@@ -657,6 +685,10 @@ mod tests {
 
         // Challenge penalty
         assert_eq!(config.retrieval.scoring.challenge_penalty, 0.10);
+
+        // Depth decay
+        assert_eq!(config.retrieval.scoring.depth_decay_base, 0.82);
+        assert_eq!(config.retrieval.scoring.depth_decay_floor, 0.3);
 
         // Search config
         assert_eq!(config.search.semantic_weight, 3.0);
@@ -1090,5 +1122,56 @@ weight = 0.7
 
         // valid defaults pass
         assert!(EngramConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_depth_decay_config_validate_rejects_invalid() {
+        // depth_decay_base > 1.0
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.depth_decay_base = 1.5;
+        assert!(config.validate().is_err());
+
+        // depth_decay_base < 0.0
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.depth_decay_base = -0.1;
+        assert!(config.validate().is_err());
+
+        // depth_decay_floor > 1.0
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.depth_decay_floor = 2.0;
+        assert!(config.validate().is_err());
+
+        // depth_decay_floor < 0.0
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.depth_decay_floor = -0.5;
+        assert!(config.validate().is_err());
+
+        // valid values pass
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.depth_decay_base = 0.9;
+        config.retrieval.scoring.depth_decay_floor = 0.1;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_depth_decay_config_toml_roundtrip() {
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.depth_decay_base = 0.75;
+        config.retrieval.scoring.depth_decay_floor = 0.2;
+
+        let temp_path = std::env::temp_dir().join("test_depth_decay_roundtrip.toml");
+        config.to_toml_file(&temp_path).unwrap();
+        let loaded = EngramConfig::from_toml_file(&temp_path).unwrap();
+        std::fs::remove_file(&temp_path).ok();
+
+        assert_eq!(loaded.retrieval.scoring.depth_decay_base, 0.75);
+        assert_eq!(loaded.retrieval.scoring.depth_decay_floor, 0.2);
+    }
+
+    #[test]
+    fn test_depth_decay_config_defaults_when_omitted() {
+        let config: EngramConfig = toml::from_str("").unwrap();
+        assert_eq!(config.retrieval.scoring.depth_decay_base, 0.82);
+        assert_eq!(config.retrieval.scoring.depth_decay_floor, 0.3);
     }
 }

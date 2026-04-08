@@ -210,6 +210,10 @@ fn retrieve_by_logical_scope() {
             "Content for logical",
             "-l",
             "db.schema",
+            "-p",
+            "src/db/schema.rs",
+            "--criticality",
+            "0.9",
         ],
     );
 
@@ -220,6 +224,8 @@ fn retrieve_by_logical_scope() {
             "retrieve",
             "-l",
             "db.schema",
+            "--path",
+            "src/db/schema.rs",
         ])
         .assert()
         .success()
