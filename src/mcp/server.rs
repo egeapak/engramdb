@@ -4536,7 +4536,12 @@ mod tests {
                     project: global_project(),
                 }))
                 .await;
-            parse_ok(&result);
+            let val = parse_ok(&result);
+            assert!(
+                !val["memories"].as_array().unwrap().is_empty(),
+                "detail_level={} returned no memories",
+                level
+            );
         }
     }
 
