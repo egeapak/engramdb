@@ -10,7 +10,8 @@ const ENGRAM_MD_CONTENT: &str = r#"# EngramDB
 
 This project uses EngramDB for persistent agent memory.
 
-- **Search before answering** — call `search` before answering project questions about conventions, architecture, workflows, or tooling.
+- **Expand surfaced memories** — when memories are surfaced at session start, `get` the full content of any relevant to the current task before proceeding.
+- **Search before answering** — call `search` before answering any question that touches project knowledge, whether real or hypothetical.
 - **Retrieve before modifying** — call `retrieve` with the file path before modifying files, to surface known decisions, hazards, or conventions.
 - **Store after discovering** — call `create` after discovering important patterns, decisions, hazards, or conventions worth preserving.
 - **Challenge contradictions** — call `challenge` when you find information that contradicts an existing memory.
