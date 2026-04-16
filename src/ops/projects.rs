@@ -19,6 +19,8 @@ pub struct ProjectInfo {
     pub memory_count: usize,
     pub logical_scopes: Vec<String>,
     pub created_at: DateTime<Utc>,
+    /// Parent project ID if this project is a sub-project (e.g. a worktree).
+    pub parent_project_id: Option<String>,
 }
 
 /// Entry in the project list.
@@ -26,6 +28,8 @@ pub struct ProjectListEntry {
     pub project_id: String,
     pub project_path: String,
     pub exists: bool,
+    /// Parent project ID if this project is a sub-project (e.g. a worktree).
+    pub parent_project_id: Option<String>,
 }
 
 /// Result of deleting a project.
@@ -72,6 +76,7 @@ pub async fn get_project_info(dir: &Path) -> Result<ProjectInfo> {
         memory_count,
         logical_scopes,
         created_at: manifest.created_at,
+        parent_project_id: manifest.parent_project_id,
     })
 }
 
@@ -83,11 +88,20 @@ pub async fn list_projects(registry: &dyn RegistryBackend) -> Result<Vec<Project
         .projects
         .into_iter()
         .map(|e| {
-            let exists = Path::new(&e.project_path).join(".engramdb").exists();
+            // Sub-projects (worktrees) don't have their own .engramdb/ — their
+            // storage lives at the parent — so treat them as alive if the
+            // worktree directory itself still exists.  Root projects use the
+            // usual .engramdb/ check.
+            let exists = if e.parent_project_id.is_some() {
+                Path::new(&e.project_path).exists()
+            } else {
+                Path::new(&e.project_path).join(".engramdb").exists()
+            };
             ProjectListEntry {
                 project_id: e.project_id,
                 project_path: e.project_path,
                 exists,
+                parent_project_id: e.parent_project_id,
             }
         })
         .collect();
@@ -471,6 +485,7 @@ mod tests {
         reg.projects.push(crate::storage::registry::RegistryEntry {
             project_id: "stale-proj-001".to_string(),
             project_path: "/nonexistent/path/to/project".to_string(),
+            parent_project_id: None,
         });
         registry.save(&reg).await.unwrap();
 

@@ -32,6 +32,7 @@ pub async fn run_projects(
                 memory_count: info.memory_count,
                 logical_scopes: info.logical_scopes,
                 created_at: info.created_at,
+                parent_project_id: info.parent_project_id,
             });
         }
         ProjectsCommand::List => {
@@ -42,6 +43,7 @@ pub async fn run_projects(
                     project_id: e.project_id,
                     project_path: e.project_path,
                     exists: e.exists,
+                    parent_project_id: e.parent_project_id,
                 })
                 .collect();
             formatter.print_project_list(&output);
@@ -173,6 +175,7 @@ mod tests {
         data.projects.push(RegistryEntry {
             project_id: "test-proj".to_string(),
             project_path: temp_dir.path().to_string_lossy().to_string(),
+            parent_project_id: None,
         });
         let registry = InMemoryRegistry::with(data);
         let formatter = OutputFormatter::new(None, false, true);
@@ -203,6 +206,7 @@ mod tests {
         data.projects.push(RegistryEntry {
             project_id: "test-proj".to_string(),
             project_path: temp_dir.path().to_string_lossy().to_string(),
+            parent_project_id: None,
         });
         let registry = InMemoryRegistry::with(data);
         let formatter = OutputFormatter::new(None, false, true);

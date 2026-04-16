@@ -6,7 +6,7 @@ use crate::embeddings::{
     OllamaModelSpec, OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT,
 };
 use crate::embeddings::{OnnxProvider, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT};
-use crate::storage::{MemoryStore, RegistryBackend};
+use crate::storage::{project_id, MemoryStore, RegistryBackend};
 use crate::types::EmbeddingBackend;
 use anyhow::{Context, Result};
 use std::fs;
@@ -31,8 +31,33 @@ pub async fn run_init(
     embedding_backend: Option<EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
+    // If the caller is inside a linked git worktree, transparently init the
+    // main project instead and register this worktree as a sub-project so
+    // all memory operations flow to the main project's storage.
+    let worktree_main = project_id::detect_worktree_main(dir);
+    let (target_dir, worktree_origin): (PathBuf, Option<PathBuf>) = match worktree_main {
+        Some(main) => {
+            formatter.print_message(&format!(
+                "Detected git worktree. Initializing main project at {} (memories shared across worktrees).",
+                main.display()
+            ));
+            (main, Some(dir.to_path_buf()))
+        }
+        None => (dir.to_path_buf(), None),
+    };
+    let dir: &Path = &target_dir;
+
     // Initialize the store
     let store = MemoryStore::init(dir, registry).await?;
+
+    // If we're in a worktree, register the worktree as a child of this main project.
+    if let Some(origin) = &worktree_origin {
+        let child_id = project_id::compute_project_id(origin);
+        let parent_id = store.project_id.clone();
+        registry
+            .update_with_parent(origin, &child_id, Some(&parent_id))
+            .await?;
+    }
 
     // Copy template if provided
     if let Some(template_path) = template {
@@ -103,6 +128,12 @@ pub async fn run_init(
         dir.join(".engramdb").display()
     ));
     formatter.print_message(&format!("Project ID: {}", store.project_id));
+    if let Some(origin) = &worktree_origin {
+        formatter.print_message(&format!(
+            "Registered worktree {} as a sub-project of this main project.",
+            origin.display()
+        ));
+    }
     formatter.print_message(
         "Try: engramdb add --type convention --summary 'Your first memory' --content '...'",
     );
@@ -290,6 +321,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_init_in_worktree_targets_main_project() {
+        // Build a fake worktree layout:
+        //   <tmp>/main/.git/                  (main .git dir)
+        //   <tmp>/main/.git/worktrees/wt/     (per-worktree gitdir)
+        //   <tmp>/wt/.git                     (file: `gitdir: ...`)
+        let tmp = TempDir::new().unwrap();
+        let main = tmp.path().join("main");
+        let wt = tmp.path().join("wt");
+        let wt_gitdir = main.join(".git").join("worktrees").join("wt");
+        fs::create_dir_all(main.join(".git")).unwrap();
+        fs::create_dir_all(&wt).unwrap();
+        fs::create_dir_all(&wt_gitdir).unwrap();
+        fs::write(wt_gitdir.join("commondir"), "../..").unwrap();
+        fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", wt_gitdir.display()),
+        )
+        .unwrap();
+
+        let formatter = OutputFormatter::new(None, false, true);
+        let registry = InMemoryRegistry::new();
+
+        // Running init inside the worktree should init the MAIN project and
+        // register the worktree as a sub-project.
+        run_init(&wt, &registry, true, None, None, &formatter)
+            .await
+            .unwrap();
+
+        // Main project has .engramdb/; worktree does not.
+        assert!(main.join(".engramdb").exists());
+        assert!(!wt.join(".engramdb").exists());
+
+        // Registry has both entries; the worktree entry has parent set.
+        let reg = registry.load().await.unwrap();
+        let main_id = project_id::compute_project_id(&main);
+        let wt_id = project_id::compute_project_id(&wt);
+        let main_entry = reg
+            .projects
+            .iter()
+            .find(|e| e.project_id == main_id)
+            .expect("main registered");
+        assert_eq!(main_entry.parent_project_id, None);
+        let wt_entry = reg
+            .projects
+            .iter()
+            .find(|e| e.project_id == wt_id)
+            .expect("worktree registered");
+        assert_eq!(
+            wt_entry.parent_project_id.as_deref(),
+            Some(main_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_init_in_worktree_is_idempotent() {
+        // Running `engramdb init` twice inside a worktree must not duplicate
+        // registry entries and must keep the parent link intact.
+        let tmp = TempDir::new().unwrap();
+        let main = tmp.path().join("main");
+        let wt = tmp.path().join("wt");
+        let wt_gitdir = main.join(".git").join("worktrees").join("wt");
+        fs::create_dir_all(main.join(".git")).unwrap();
+        fs::create_dir_all(&wt).unwrap();
+        fs::create_dir_all(&wt_gitdir).unwrap();
+        fs::write(wt_gitdir.join("commondir"), "../..").unwrap();
+        fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", wt_gitdir.display()),
+        )
+        .unwrap();
+
+        let formatter = OutputFormatter::new(None, false, true);
+        let registry = InMemoryRegistry::new();
+
+        run_init(&wt, &registry, true, None, None, &formatter)
+            .await
+            .unwrap();
+        run_init(&wt, &registry, true, None, None, &formatter)
+            .await
+            .unwrap();
+
+        let reg = registry.load().await.unwrap();
+        assert_eq!(reg.projects.len(), 2, "no duplicate registry entries");
+        let wt_id = project_id::compute_project_id(&wt);
+        let main_id = project_id::compute_project_id(&main);
+        let wt_entry = reg.projects.iter().find(|e| e.project_id == wt_id).unwrap();
+        assert_eq!(
+            wt_entry.parent_project_id.as_deref(),
+            Some(main_id.as_str())
+        );
+    }
+
+    #[tokio::test]
     async fn test_init_writes_valid_registry() {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path();
@@ -315,6 +439,7 @@ mod tests {
         registry.projects.push(RegistryEntry {
             project_path: "/path/to/project".to_string(),
             project_id: "test-id".to_string(),
+            parent_project_id: None,
         });
         let content = serde_json::to_string_pretty(&registry).unwrap();
         fs::write(&test_registry_path, content).unwrap();
@@ -341,10 +466,12 @@ mod tests {
         registry.projects.push(RegistryEntry {
             project_path: "/path/to/project1".to_string(),
             project_id: "id1".to_string(),
+            parent_project_id: None,
         });
         registry.projects.push(RegistryEntry {
             project_path: "/path/to/project2".to_string(),
             project_id: "id2".to_string(),
+            parent_project_id: None,
         });
 
         let content = serde_json::to_string_pretty(&registry).unwrap();
