@@ -3567,12 +3567,39 @@ mod tests {
     // Global memory tests — feature parity with project-scoped memories
     // =======================================================================
 
+    /// Handle returned by [`setup_global`]. Bundles the per-test `TempDir`
+    /// with a process-wide lock guard so that `let (_dir, server) = ...`
+    /// call sites get both test isolation and the expected `TempDir`
+    /// lifetime without threading extra values through every test body.
+    ///
+    /// The lock serializes all tests that touch the global store (see
+    /// [`crate::storage::test_support`] for background) and clears the
+    /// on-disk global layout before each test.
+    #[allow(dead_code)]
+    struct GlobalSetupHandle {
+        dir: TempDir,
+        _lock: crate::storage::test_support::GlobalTestLock,
+    }
+
+    impl GlobalSetupHandle {
+        #[allow(dead_code)]
+        fn path(&self) -> &std::path::Path {
+            self.dir.path()
+        }
+    }
+
     /// Setup for global tests.
-    /// With nextest, each test runs in its own process with an isolated
-    /// ENGRAMDB_DATA_DIR, so no locking or cleanup is needed.
-    async fn setup_global() -> (TempDir, EngramDbServer) {
+    ///
+    /// Under `cargo test` (one process, parallel tests) the global store's
+    /// on-disk layout is shared, so we serialize via
+    /// `acquire_global_test_lock` and wipe the global dir per test. Under
+    /// `cargo nextest` (one process per test) the lock is effectively
+    /// free — each test still sees a clean slate.
+    async fn setup_global() -> (GlobalSetupHandle, EngramDbServer) {
+        let lock = crate::storage::test_support::acquire_global_test_lock().await;
         MemoryStore::init_global().await.unwrap();
-        setup().await
+        let (dir, server) = setup().await;
+        (GlobalSetupHandle { dir, _lock: lock }, server)
     }
 
     fn global_project() -> Option<String> {

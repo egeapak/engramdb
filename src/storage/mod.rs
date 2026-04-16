@@ -17,6 +17,8 @@ pub mod paths;
 pub mod project_id;
 pub mod registry;
 pub mod store;
+#[cfg(test)]
+pub mod test_support;
 pub mod write_lock;
 
 pub use error::{Result, StorageError};
