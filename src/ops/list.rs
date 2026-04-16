@@ -91,10 +91,10 @@ pub async fn list_memories(
             });
         }
         SortField::Created => {
-            entries.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+            entries.sort_by_key(|a| a.created_at);
         }
         SortField::Updated => {
-            entries.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
+            entries.sort_by_key(|a| a.updated_at);
         }
         SortField::Type => {
             entries.sort_by(|a, b| format!("{:?}", a.type_).cmp(&format!("{:?}", b.type_)));
