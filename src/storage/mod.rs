@@ -26,7 +26,7 @@ pub use lance_index::{IndexFilterable, IndexForFiltering, IndexSummary, VectorMa
 pub use manifest::Manifest;
 pub use project_id::detect_worktree_main;
 pub use registry::{
-    resolve_root_project_id, FileRegistry, InMemoryRegistry, Registry, RegistryBackend,
-    RegistryEntry,
+    collect_descendants, list_children, resolve_root_project_id, FileRegistry, InMemoryRegistry,
+    Registry, RegistryBackend, RegistryEntry,
 };
 pub use store::MemoryStore;

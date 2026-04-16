@@ -101,6 +101,61 @@ pub trait RegistryBackend: Send + Sync {
 
         self.save(&registry).await
     }
+
+    /// Set (or clear) the `parent_project_id` of an already-registered project.
+    ///
+    /// Unlike [`update_with_parent`](Self::update_with_parent), this does not
+    /// touch the project path and returns an error if `project_id` is not in
+    /// the registry. Pass `parent_project_id = None` to promote the project
+    /// back to a root.
+    async fn set_parent(&self, project_id: &str, parent_project_id: Option<&str>) -> Result<()> {
+        let mut registry = self.load().await?;
+        let entry = registry
+            .projects
+            .iter_mut()
+            .find(|e| e.project_id == project_id)
+            .ok_or_else(|| {
+                super::error::StorageError::Validation(format!(
+                    "Project '{}' not found in registry",
+                    project_id
+                ))
+            })?;
+        entry.parent_project_id = parent_project_id.map(|s| s.to_string());
+        self.save(&registry).await
+    }
+}
+
+/// Collect all direct children of `project_id`.
+pub fn list_children<'a>(registry: &'a Registry, project_id: &str) -> Vec<&'a RegistryEntry> {
+    registry
+        .projects
+        .iter()
+        .filter(|e| e.parent_project_id.as_deref() == Some(project_id))
+        .collect()
+}
+
+/// Breadth-first walk of all descendants of `project_id`, returning project
+/// ids. Cycle-safe (visited-set bounded by registry size). Does not include
+/// `project_id` itself.
+pub fn collect_descendants(registry: &Registry, project_id: &str) -> Vec<String> {
+    use std::collections::{HashSet, VecDeque};
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    // Seed with the starting node so a cycle back to it doesn't cause it to
+    // be reported as its own descendant.
+    seen.insert(project_id.to_string());
+    let mut queue: VecDeque<String> = VecDeque::new();
+    queue.push_back(project_id.to_string());
+
+    while let Some(current) = queue.pop_front() {
+        for child in list_children(registry, &current) {
+            if seen.insert(child.project_id.clone()) {
+                out.push(child.project_id.clone());
+                queue.push_back(child.project_id.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Walk `parent_project_id` links in the registry to find the root project.
@@ -508,5 +563,129 @@ mod tests {
             result.is_err(),
             "Corrupted registry JSON should return an error, not silently discard data"
         );
+    }
+
+    // ---- set_parent ----
+
+    #[tokio::test]
+    async fn test_set_parent_on_existing_entry() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        registry.update(temp_dir.path(), "child").await.unwrap();
+
+        registry.set_parent("child", Some("parent")).await.unwrap();
+
+        let loaded = registry.load().await.unwrap();
+        assert_eq!(
+            loaded.projects[0].parent_project_id.as_deref(),
+            Some("parent")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_parent_clears_with_none() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        registry
+            .update_with_parent(temp_dir.path(), "child", Some("parent"))
+            .await
+            .unwrap();
+
+        registry.set_parent("child", None).await.unwrap();
+
+        let loaded = registry.load().await.unwrap();
+        assert_eq!(loaded.projects[0].parent_project_id, None);
+    }
+
+    #[tokio::test]
+    async fn test_set_parent_errors_when_child_missing() {
+        let registry = InMemoryRegistry::new();
+        let err = registry
+            .set_parent("nonexistent", Some("x"))
+            .await
+            .expect_err("set_parent on missing child should error");
+        assert!(format!("{err}").contains("nonexistent"));
+    }
+
+    // ---- list_children / collect_descendants ----
+
+    fn tree_registry() -> Registry {
+        // root
+        // ├── a
+        // │   └── a1
+        // └── b
+        let mut reg = Registry::default();
+        reg.projects.push(RegistryEntry {
+            project_id: "root".into(),
+            project_path: "/root".into(),
+            parent_project_id: None,
+        });
+        reg.projects.push(RegistryEntry {
+            project_id: "a".into(),
+            project_path: "/a".into(),
+            parent_project_id: Some("root".into()),
+        });
+        reg.projects.push(RegistryEntry {
+            project_id: "a1".into(),
+            project_path: "/a1".into(),
+            parent_project_id: Some("a".into()),
+        });
+        reg.projects.push(RegistryEntry {
+            project_id: "b".into(),
+            project_path: "/b".into(),
+            parent_project_id: Some("root".into()),
+        });
+        reg
+    }
+
+    #[test]
+    fn test_list_children_direct_only() {
+        let reg = tree_registry();
+        let ids: Vec<_> = list_children(&reg, "root")
+            .iter()
+            .map(|e| e.project_id.clone())
+            .collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_list_children_returns_empty_for_leaf() {
+        let reg = tree_registry();
+        assert!(list_children(&reg, "b").is_empty());
+    }
+
+    #[test]
+    fn test_collect_descendants_walks_whole_subtree() {
+        let reg = tree_registry();
+        let mut desc = collect_descendants(&reg, "root");
+        desc.sort();
+        assert_eq!(desc, vec!["a", "a1", "b"]);
+    }
+
+    #[test]
+    fn test_collect_descendants_returns_empty_for_leaf() {
+        let reg = tree_registry();
+        assert!(collect_descendants(&reg, "a1").is_empty());
+    }
+
+    #[test]
+    fn test_collect_descendants_cycle_safe() {
+        // a → b → a cycle. collect_descendants("a") must terminate.
+        let mut reg = Registry::default();
+        reg.projects.push(RegistryEntry {
+            project_id: "a".into(),
+            project_path: "/a".into(),
+            parent_project_id: Some("b".into()),
+        });
+        reg.projects.push(RegistryEntry {
+            project_id: "b".into(),
+            project_path: "/b".into(),
+            parent_project_id: Some("a".into()),
+        });
+        let mut desc = collect_descendants(&reg, "a");
+        desc.sort();
+        // Descendants of `a` includes `b` (whose parent is `a`). `a` itself
+        // is not reported. The walk must not loop forever.
+        assert_eq!(desc, vec!["b"]);
     }
 }

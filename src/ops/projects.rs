@@ -1,9 +1,11 @@
 //! Project management operations.
 //!
-//! Functions for inspecting, listing, deleting, and aggregating statistics
-//! across registered EngramDB projects.
+//! Functions for inspecting, listing, deleting, linking, and aggregating
+//! statistics across registered EngramDB projects.
 
-use crate::storage::{manifest, paths, MemoryStore, RegistryBackend};
+use crate::storage::{
+    collect_descendants, manifest, paths, resolve_root_project_id, MemoryStore, RegistryBackend,
+};
 use crate::types::MemoryType;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
@@ -33,9 +35,13 @@ pub struct ProjectListEntry {
 }
 
 /// Result of deleting a project.
+#[derive(Debug)]
 pub struct DeleteResult {
     pub project_path: String,
     pub global_data_removed: bool,
+    /// Project IDs of descendants that were also removed (cascade delete).
+    /// Empty when cascade was not requested or the project had no descendants.
+    pub cascaded_ids: Vec<String>,
 }
 
 /// Aggregate statistics across all projects.
@@ -110,9 +116,18 @@ pub async fn list_projects(registry: &dyn RegistryBackend) -> Result<Vec<Project
 }
 
 /// Remove a project from the registry and delete its global data.
+///
+/// When `cascade` is true, also removes every descendant (direct or
+/// transitive) of this project from the registry and deletes their global
+/// data. This is the right choice when removing a parent whose children
+/// (e.g. git worktrees) would otherwise be left dangling.
+///
+/// When `cascade` is false and the project has descendants, this function
+/// returns an error rather than silently leaving orphaned children behind.
 pub async fn delete_project(
     registry: &dyn RegistryBackend,
     project_id: &str,
+    cascade: bool,
 ) -> Result<DeleteResult> {
     let mut reg = registry.load().await?;
 
@@ -122,11 +137,27 @@ pub async fn delete_project(
         bail!("Project '{}' not found in registry", project_id);
     };
 
+    let descendants = collect_descendants(&reg, project_id);
+
+    if !cascade && !descendants.is_empty() {
+        bail!(
+            "Project '{}' has {} descendant project(s). Re-run with `--cascade` to delete them too, or unlink them first.",
+            project_id,
+            descendants.len()
+        );
+    }
+
     let entry = reg.projects.remove(idx);
+    // Remove descendants from registry as well.
+    if cascade {
+        reg.projects
+            .retain(|e| !descendants.iter().any(|d| d == &e.project_id));
+    }
     registry.save(&reg).await?;
 
-    // Delete global data directory for this project
-    let global_project_dir = paths::global_data_dir()?.join("projects").join(project_id);
+    // Delete global data directory for this project.
+    let projects_dir = paths::global_data_dir()?.join("projects");
+    let global_project_dir = projects_dir.join(project_id);
     let global_data_removed = if global_project_dir.exists() {
         async_fs::remove_dir_all(&global_project_dir).await?;
         true
@@ -134,10 +165,71 @@ pub async fn delete_project(
         false
     };
 
+    // Delete descendants' global data (only if we cascaded).
+    if cascade {
+        for desc_id in &descendants {
+            let dir = projects_dir.join(desc_id);
+            if dir.exists() {
+                // Best-effort: don't abort the whole delete if one child's
+                // data dir can't be removed.
+                let _ = async_fs::remove_dir_all(&dir).await;
+            }
+        }
+    }
+
     Ok(DeleteResult {
         project_path: entry.project_path,
         global_data_removed,
+        cascaded_ids: descendants,
     })
+}
+
+/// Link a child project to a parent, making the child a sub-project.
+///
+/// Rejects:
+/// - linking to self
+/// - linking where the parent is already a descendant of the child
+///   (would form a cycle)
+/// - linking when either project is not in the registry
+pub async fn link_project(
+    registry: &dyn RegistryBackend,
+    child_id: &str,
+    parent_id: &str,
+) -> Result<()> {
+    if child_id == parent_id {
+        bail!("Cannot link a project to itself");
+    }
+
+    let reg = registry.load().await?;
+
+    if !reg.projects.iter().any(|e| e.project_id == child_id) {
+        bail!("Child project '{}' not found in registry", child_id);
+    }
+    if !reg.projects.iter().any(|e| e.project_id == parent_id) {
+        bail!("Parent project '{}' not found in registry", parent_id);
+    }
+
+    // If the parent's root resolves to the child, adding this link would
+    // create a cycle.
+    let parent_root = resolve_root_project_id(&reg, parent_id);
+    if parent_root == child_id {
+        bail!(
+            "Cannot link: '{}' is already an ancestor of '{}' (would create a cycle)",
+            child_id,
+            parent_id
+        );
+    }
+
+    registry.set_parent(child_id, Some(parent_id)).await?;
+    Ok(())
+}
+
+/// Remove the parent link on a project, promoting it back to a root project.
+///
+/// A project with no parent is a no-op.
+pub async fn unlink_project(registry: &dyn RegistryBackend, child_id: &str) -> Result<()> {
+    registry.set_parent(child_id, None).await?;
+    Ok(())
 }
 
 /// Result of pruning stale projects.
@@ -433,15 +525,16 @@ mod tests {
         // Re-ensure our entry is in the registry right before deleting
         registry.update(temp_dir.path(), &pid).await.unwrap();
 
-        let result = delete_project(&registry, &pid).await.unwrap();
+        let result = delete_project(&registry, &pid, false).await.unwrap();
         assert!(!result.project_path.is_empty());
         assert!(!global_dir.exists(), "Global data dir should be removed");
+        assert!(result.cascaded_ids.is_empty());
     }
 
     #[tokio::test]
     async fn test_delete_project_not_found() {
         let registry = InMemoryRegistry::new();
-        let result = delete_project(&registry, "nonexistent-id-12345").await;
+        let result = delete_project(&registry, "nonexistent-id-12345", false).await;
         assert!(result.is_err());
     }
 
@@ -521,5 +614,210 @@ mod tests {
         let result = prune_stale_projects(&registry, |_| {}).await.unwrap();
         assert_eq!(result.stale_removed, 0);
         assert!(result.stale_ids.is_empty());
+    }
+
+    // ---- link / unlink ----
+
+    #[tokio::test]
+    async fn test_link_project_sets_parent() {
+        let temp_parent = TempDir::new().unwrap();
+        let temp_child = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+
+        let parent = MemoryStore::init(temp_parent.path(), &registry)
+            .await
+            .unwrap();
+        let child = MemoryStore::init(temp_child.path(), &registry)
+            .await
+            .unwrap();
+
+        link_project(&registry, &child.project_id, &parent.project_id)
+            .await
+            .unwrap();
+
+        let loaded = registry.load().await.unwrap();
+        let child_entry = loaded
+            .projects
+            .iter()
+            .find(|e| e.project_id == child.project_id)
+            .unwrap();
+        assert_eq!(
+            child_entry.parent_project_id.as_deref(),
+            Some(parent.project_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_link_project_rejects_self() {
+        let temp = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp.path(), &registry).await.unwrap();
+        let err = link_project(&registry, &store.project_id, &store.project_id)
+            .await
+            .expect_err("self-link must fail");
+        assert!(format!("{err}").to_lowercase().contains("itself"));
+    }
+
+    #[tokio::test]
+    async fn test_link_project_rejects_cycle() {
+        let temp_a = TempDir::new().unwrap();
+        let temp_b = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+
+        let a = MemoryStore::init(temp_a.path(), &registry).await.unwrap();
+        let b = MemoryStore::init(temp_b.path(), &registry).await.unwrap();
+
+        // b -> a
+        link_project(&registry, &b.project_id, &a.project_id)
+            .await
+            .unwrap();
+
+        // Now try a -> b: this would make b the parent of a, but b already
+        // resolves to root `a` via the chain → cycle.
+        let err = link_project(&registry, &a.project_id, &b.project_id)
+            .await
+            .expect_err("cycle must be rejected");
+        assert!(format!("{err}").to_lowercase().contains("cycle"));
+    }
+
+    #[tokio::test]
+    async fn test_link_project_rejects_missing_child() {
+        let temp = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let parent = MemoryStore::init(temp.path(), &registry).await.unwrap();
+        let err = link_project(&registry, "does-not-exist", &parent.project_id)
+            .await
+            .expect_err("missing child must fail");
+        assert!(format!("{err}").to_lowercase().contains("child"));
+    }
+
+    #[tokio::test]
+    async fn test_unlink_project_clears_parent() {
+        let temp_parent = TempDir::new().unwrap();
+        let temp_child = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+
+        let parent = MemoryStore::init(temp_parent.path(), &registry)
+            .await
+            .unwrap();
+        let child = MemoryStore::init(temp_child.path(), &registry)
+            .await
+            .unwrap();
+        link_project(&registry, &child.project_id, &parent.project_id)
+            .await
+            .unwrap();
+
+        unlink_project(&registry, &child.project_id).await.unwrap();
+
+        let loaded = registry.load().await.unwrap();
+        let child_entry = loaded
+            .projects
+            .iter()
+            .find(|e| e.project_id == child.project_id)
+            .unwrap();
+        assert_eq!(child_entry.parent_project_id, None);
+    }
+
+    // ---- cascade delete ----
+
+    #[tokio::test]
+    async fn test_delete_project_without_cascade_errors_when_children_exist() {
+        let temp_parent = TempDir::new().unwrap();
+        let temp_child = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+
+        let parent = MemoryStore::init(temp_parent.path(), &registry)
+            .await
+            .unwrap();
+        let child = MemoryStore::init(temp_child.path(), &registry)
+            .await
+            .unwrap();
+        link_project(&registry, &child.project_id, &parent.project_id)
+            .await
+            .unwrap();
+
+        let err = delete_project(&registry, &parent.project_id, false)
+            .await
+            .expect_err("must refuse to delete a parent with children by default");
+        assert!(format!("{err}").to_lowercase().contains("descendant"));
+
+        // Parent should still be in the registry.
+        let loaded = registry.load().await.unwrap();
+        assert!(loaded
+            .projects
+            .iter()
+            .any(|e| e.project_id == parent.project_id));
+    }
+
+    #[tokio::test]
+    async fn test_delete_project_with_cascade_removes_descendants() {
+        let temp_root = TempDir::new().unwrap();
+        let temp_a = TempDir::new().unwrap();
+        let temp_a1 = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+
+        let root = MemoryStore::init(temp_root.path(), &registry)
+            .await
+            .unwrap();
+        let a = MemoryStore::init(temp_a.path(), &registry).await.unwrap();
+        let a1 = MemoryStore::init(temp_a1.path(), &registry).await.unwrap();
+
+        // root -> a -> a1
+        link_project(&registry, &a.project_id, &root.project_id)
+            .await
+            .unwrap();
+        link_project(&registry, &a1.project_id, &a.project_id)
+            .await
+            .unwrap();
+
+        let result = delete_project(&registry, &root.project_id, true)
+            .await
+            .unwrap();
+
+        // Both descendants reported.
+        let mut cascaded = result.cascaded_ids.clone();
+        cascaded.sort();
+        let mut expected = vec![a.project_id.clone(), a1.project_id.clone()];
+        expected.sort();
+        assert_eq!(cascaded, expected);
+
+        let loaded = registry.load().await.unwrap();
+        for id in [&root.project_id, &a.project_id, &a1.project_id] {
+            assert!(
+                !loaded.projects.iter().any(|e| &e.project_id == id),
+                "{} should have been removed from registry",
+                id
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_project_cascade_removes_global_data_dirs() {
+        let temp_parent = TempDir::new().unwrap();
+        let temp_child = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+
+        let parent = MemoryStore::init(temp_parent.path(), &registry)
+            .await
+            .unwrap();
+        let child = MemoryStore::init(temp_child.path(), &registry)
+            .await
+            .unwrap();
+        link_project(&registry, &child.project_id, &parent.project_id)
+            .await
+            .unwrap();
+
+        let projects_dir = paths::global_data_dir().unwrap().join("projects");
+        let parent_global = projects_dir.join(&parent.project_id);
+        let child_global = projects_dir.join(&child.project_id);
+        assert!(parent_global.exists());
+        assert!(child_global.exists());
+
+        delete_project(&registry, &parent.project_id, true)
+            .await
+            .unwrap();
+
+        assert!(!parent_global.exists(), "parent global dir must be removed");
+        assert!(!child_global.exists(), "child global dir must be removed");
     }
 }

@@ -421,6 +421,29 @@ struct DoctorInput {
     project: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProjectsInfoInput {
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID. Omit for current project."
+    )]
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProjectsLinkInput {
+    #[schemars(description = "Project ID of the child to link (16-char hex)")]
+    child: String,
+
+    #[schemars(description = "Project ID of the parent (16-char hex)")]
+    parent: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProjectsUnlinkInput {
+    #[schemars(description = "Project ID of the child to promote back to a root (16-char hex)")]
+    project_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Serialisable output helpers
 // ---------------------------------------------------------------------------
@@ -1503,6 +1526,99 @@ impl EngramDbServer {
         }
         serde_json::to_string(&response)
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+    }
+
+    #[tool(
+        name = "projects_list",
+        description = "List all registered EngramDB projects, including hierarchy (parent_project_id). Useful for finding the 16-char IDs you pass as the `project` parameter to other tools."
+    )]
+    async fn projects_list(&self) -> Result<String, String> {
+        let entries = ops::projects::list_projects(self.registry.as_ref())
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+
+        let json: Vec<serde_json::Value> = entries
+            .into_iter()
+            .map(|e| {
+                let mut obj = serde_json::json!({
+                    "project_id": e.project_id,
+                    "project_path": e.project_path,
+                    "exists": e.exists,
+                });
+                if let Some(parent) = e.parent_project_id {
+                    obj["parent_project_id"] = serde_json::Value::String(parent);
+                }
+                obj
+            })
+            .collect();
+
+        serde_json::to_string(&json)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+    }
+
+    #[tool(
+        name = "projects_info",
+        description = "Info about a specific project: id, name, path, memory count, logical scopes, created_at, parent_project_id. Omit `project` for the current project."
+    )]
+    async fn projects_info(
+        &self,
+        Parameters(input): Parameters<ProjectsInfoInput>,
+    ) -> Result<String, String> {
+        let dir = self.resolve_dir(input.project.as_deref()).await?;
+        let info = ops::projects::get_project_info(&dir)
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+
+        let mut obj = serde_json::json!({
+            "project_id": info.project_id,
+            "project_name": info.project_name,
+            "project_path": info.project_path,
+            "memory_count": info.memory_count,
+            "logical_scopes": info.logical_scopes,
+            "created_at": info.created_at,
+        });
+        if let Some(parent) = info.parent_project_id {
+            obj["parent_project_id"] = serde_json::Value::String(parent);
+        }
+        serde_json::to_string(&obj)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+    }
+
+    #[tool(
+        name = "projects_link",
+        description = "Link a registered project as a sub-project of another. Rejects self-links and cycles. Use projects_list to discover project IDs."
+    )]
+    async fn projects_link(
+        &self,
+        Parameters(input): Parameters<ProjectsLinkInput>,
+    ) -> Result<String, String> {
+        ops::projects::link_project(self.registry.as_ref(), &input.child, &input.parent)
+            .await
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        serde_json::to_string(&serde_json::json!({
+            "linked": true,
+            "child": input.child,
+            "parent": input.parent,
+        }))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+    }
+
+    #[tool(
+        name = "projects_unlink",
+        description = "Remove the parent link on a project, promoting it back to a root project. No-op if the project has no parent."
+    )]
+    async fn projects_unlink(
+        &self,
+        Parameters(input): Parameters<ProjectsUnlinkInput>,
+    ) -> Result<String, String> {
+        ops::projects::unlink_project(self.registry.as_ref(), &input.project_id)
+            .await
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        serde_json::to_string(&serde_json::json!({
+            "unlinked": true,
+            "project_id": input.project_id,
+        }))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
 }
 
@@ -4893,5 +5009,151 @@ mod tests {
 
         // The worktree still has no .engramdb/.
         assert!(!wt.join(".engramdb").exists());
+    }
+
+    // -----------------------------------------------------------------------
+    // projects_list / projects_info / projects_link / projects_unlink
+    // -----------------------------------------------------------------------
+
+    async fn setup_two_registered_projects() -> (TempDir, TempDir, EngramDbServer, String, String) {
+        let parent_tmp = TempDir::new().unwrap();
+        let child_tmp = TempDir::new().unwrap();
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+
+        let parent_store = MemoryStore::init(parent_tmp.path(), registry.as_ref())
+            .await
+            .unwrap();
+        let child_store = MemoryStore::init(child_tmp.path(), registry.as_ref())
+            .await
+            .unwrap();
+        let parent_id = parent_store.project_id.clone();
+        let child_id = child_store.project_id.clone();
+
+        let server = EngramDbServer::new_with_registry(
+            parent_tmp.path().to_path_buf(),
+            Some(EmbeddingBackend::Onnx),
+            Arc::clone(&registry),
+        );
+        (parent_tmp, child_tmp, server, parent_id, child_id)
+    }
+
+    #[tokio::test]
+    async fn projects_list_shows_registered_projects() {
+        let (_p, _c, server, parent_id, child_id) = setup_two_registered_projects().await;
+        let result = server.projects_list().await;
+        let val = parse_ok(&result);
+        let arr = val.as_array().unwrap();
+        let ids: Vec<String> = arr
+            .iter()
+            .map(|e| e["project_id"].as_str().unwrap().to_string())
+            .collect();
+        assert!(ids.contains(&parent_id), "parent must be in list");
+        assert!(ids.contains(&child_id), "child must be in list");
+    }
+
+    #[tokio::test]
+    async fn projects_info_current_project() {
+        let (_p, _c, server, parent_id, _child_id) = setup_two_registered_projects().await;
+        let result = server
+            .projects_info(Parameters(ProjectsInfoInput { project: None }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["project_id"], parent_id);
+        assert!(val["memory_count"].is_number());
+    }
+
+    #[tokio::test]
+    async fn projects_info_by_id() {
+        let (_p, _c, server, _parent_id, child_id) = setup_two_registered_projects().await;
+        let result = server
+            .projects_info(Parameters(ProjectsInfoInput {
+                project: Some(child_id.clone()),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["project_id"], child_id);
+    }
+
+    #[tokio::test]
+    async fn projects_link_then_unlink_roundtrip() {
+        let (_p, _c, server, parent_id, child_id) = setup_two_registered_projects().await;
+
+        let link_res = server
+            .projects_link(Parameters(ProjectsLinkInput {
+                child: child_id.clone(),
+                parent: parent_id.clone(),
+            }))
+            .await;
+        let val = parse_ok(&link_res);
+        assert_eq!(val["linked"], true);
+
+        // projects_list should now reflect the parent_project_id on the child.
+        let list = parse_ok(&server.projects_list().await);
+        let child_entry = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["project_id"] == child_id)
+            .unwrap();
+        assert_eq!(child_entry["parent_project_id"], parent_id);
+
+        let unlink_res = server
+            .projects_unlink(Parameters(ProjectsUnlinkInput {
+                project_id: child_id.clone(),
+            }))
+            .await;
+        let val = parse_ok(&unlink_res);
+        assert_eq!(val["unlinked"], true);
+
+        let list = parse_ok(&server.projects_list().await);
+        let child_entry = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["project_id"] == child_id)
+            .unwrap();
+        assert!(child_entry.get("parent_project_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn projects_link_rejects_self() {
+        let (_p, _c, server, parent_id, _child_id) = setup_two_registered_projects().await;
+        let result = server
+            .projects_link(Parameters(ProjectsLinkInput {
+                child: parent_id.clone(),
+                parent: parent_id,
+            }))
+            .await;
+        let err = parse_err(&result);
+        assert_eq!(err["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn projects_link_rejects_cycle() {
+        let (_p, _c, server, parent_id, child_id) = setup_two_registered_projects().await;
+
+        // child → parent
+        server
+            .projects_link(Parameters(ProjectsLinkInput {
+                child: child_id.clone(),
+                parent: parent_id.clone(),
+            }))
+            .await
+            .unwrap();
+
+        // Reversing would create a cycle.
+        let result = server
+            .projects_link(Parameters(ProjectsLinkInput {
+                child: parent_id,
+                parent: child_id,
+            }))
+            .await;
+        let err = parse_err(&result);
+        assert_eq!(err["error"]["code"], "VALIDATION_ERROR");
+        assert!(err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("cycle"));
     }
 }
