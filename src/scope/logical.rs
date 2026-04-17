@@ -1,20 +1,31 @@
 //! Logical scope proximity based on hierarchical dot-notation tags
 //!
 //! This module calculates proximity bonuses between memory logical scopes and
-//! current logical scopes using hierarchical relationships in dot-notation.
+//! current logical scopes using distance-aware hierarchical relationships in
+//! dot-notation.
 //!
 //! # Scoring
 //!
-//! - **0.3**: Exact match (e.g., "auth.oauth" == "auth.oauth")
-//! - **0.2**: Parent/child relationship (e.g., "auth" is parent of "auth.oauth")
-//! - **0.15**: Sibling relationship (e.g., "auth.jwt" and "auth.oauth" share parent "auth")
-//! - **0.0**: No relationship
+//! The bonus decays with hierarchical distance. Given two scopes and their
+//! lowest common ancestor (LCA), `up_m` / `up_c` are the number of segments
+//! each scope sits below the LCA.
+//!
+//! | Relationship                         | (up_m, up_c)         | Bonus |
+//! |--------------------------------------|----------------------|-------|
+//! | Exact match                          | (0, 0)               | 0.30  |
+//! | Parent ↔ child                       | (0, 1) or (1, 0)     | 0.20  |
+//! | Sibling                              | (1, 1)               | 0.15  |
+//! | Grandparent ↔ grandchild             | (0, 2) or (2, 0)     | 0.10  |
+//! | Cousin                               | (2, 2)               | 0.05  |
+//! | Great-grandparent ↔ great-grandchild | (0, 3) or (3, 0)     | 0.05  |
+//! | Anything else                        | —                    | 0.00  |
 //!
 //! # Hierarchy Rules
 //!
-//! - Scopes are hierarchical using dot notation: "auth.oauth.google"
-//! - Parent-child relationships are bidirectional (both directions score 0.2)
-//! - Siblings must have the same immediate parent
+//! - Scopes are hierarchical using dot notation: `auth.oauth.google`.
+//! - Relationships are bidirectional — (memory, current) and (current, memory)
+//!   score identically.
+//! - Scopes that share no prefix segment score 0.
 //!
 //! # Key Functions
 //!
@@ -29,13 +40,7 @@
 /// * `current_scopes` - Current logical scope tags
 ///
 /// # Returns
-/// Proximity bonus from 0.0 to 0.3
-///
-/// # Scoring
-/// - **0.3**: Exact match
-/// - **0.2**: Parent scope match
-/// - **0.15**: Sibling scope match
-/// - **0.0**: No match
+/// Proximity bonus from 0.0 to 0.30
 pub fn proximity(memory_scopes: &[String], current_scopes: &[String]) -> f64 {
     let mut max_bonus = 0.0;
 
@@ -52,64 +57,82 @@ pub fn proximity(memory_scopes: &[String], current_scopes: &[String]) -> f64 {
 }
 
 fn calculate_scope_bonus(memory_scope: &str, current_scope: &str) -> f64 {
-    // Exact match
-    if memory_scope == current_scope {
-        return 0.3;
-    }
+    let Some((up_m, up_c)) = lca_distance(memory_scope, current_scope) else {
+        return 0.0;
+    };
 
-    // Parent match: memory is parent of current
-    if is_parent_scope(memory_scope, current_scope) {
-        return 0.2;
+    match (up_m, up_c) {
+        (0, 0) => 0.30,
+        (0, 1) | (1, 0) => 0.20,
+        (1, 1) => 0.15,
+        (0, 2) | (2, 0) => 0.10,
+        (2, 2) => 0.05,
+        (0, 3) | (3, 0) => 0.05,
+        _ => 0.0,
     }
-
-    // Parent match: current is parent of memory
-    if is_parent_scope(current_scope, memory_scope) {
-        return 0.2;
-    }
-
-    // Sibling match: both share a common parent
-    if are_siblings(memory_scope, current_scope) {
-        return 0.15;
-    }
-
-    0.0
 }
 
-/// Checks if scope A is a parent of scope B.
+/// Returns `Some(n)` iff `ancestor` is a strict ancestor of `descendant`,
+/// where `n` is the number of segments `descendant` sits below `ancestor`.
 ///
-/// A is a parent of B if B starts with A followed by a dot.
+/// Returns `None` if `ancestor == descendant`, neither is an ancestor of the
+/// other, or either scope is empty.
 ///
 /// # Examples
-/// - "auth" is parent of "auth.oauth" (true)
-/// - "auth.oauth" is parent of "auth.oauth.google" (true)
-/// - "auth" is NOT parent of "authentication" (false)
-fn is_parent_scope(parent: &str, child: &str) -> bool {
-    if parent.is_empty() || child.is_empty() {
-        return false;
+/// - `ancestor_distance("a", "a.b")` → `Some(1)`
+/// - `ancestor_distance("a", "a.b.c.d")` → `Some(3)`
+/// - `ancestor_distance("a.b", "a.b")` → `None`
+/// - `ancestor_distance("auth", "authentication")` → `None`
+fn ancestor_distance(ancestor: &str, descendant: &str) -> Option<usize> {
+    if ancestor.is_empty() || descendant.is_empty() {
+        return None;
     }
-
-    if child.len() <= parent.len() {
-        return false;
+    let asegs: Vec<&str> = ancestor.split('.').collect();
+    let dsegs: Vec<&str> = descendant.split('.').collect();
+    if asegs.len() >= dsegs.len() {
+        return None;
     }
-
-    child.starts_with(parent) && child[parent.len()..].starts_with('.')
+    if asegs.iter().zip(dsegs.iter()).all(|(a, d)| a == d) {
+        Some(dsegs.len() - asegs.len())
+    } else {
+        None
+    }
 }
 
-/// Checks if two scopes are siblings (share the same parent).
+/// Returns `Some((up_a, up_b))` — the number of segments each scope sits above
+/// their lowest common ancestor. Returns `None` when the scopes share no
+/// prefix segment (no LCA) or either scope is empty.
 ///
 /// # Examples
-/// - "auth.jwt" and "auth.oauth" are siblings (parent: "auth")
-/// - "api.users" and "api.posts" are siblings (parent: "api")
-/// - "auth" and "database" are NOT siblings (no common parent)
-fn are_siblings(scope_a: &str, scope_b: &str) -> bool {
-    let parent_a = extract_parent(scope_a);
-    let parent_b = extract_parent(scope_b);
-
-    if parent_a.is_none() || parent_b.is_none() {
-        return false;
+/// - `lca_distance("a.b.c", "a.b.d")` → `Some((1, 1))` (siblings)
+/// - `lca_distance("a.b.c", "a.d.e")` → `Some((2, 2))` (cousins)
+/// - `lca_distance("a", "a.b.c")` → `Some((0, 2))` (grandparent)
+/// - `lca_distance("a.b.c", "a.b.c")` → `Some((0, 0))` (exact)
+/// - `lca_distance("x.y", "a.b")` → `None`
+fn lca_distance(a: &str, b: &str) -> Option<(usize, usize)> {
+    if a.is_empty() || b.is_empty() {
+        return None;
     }
-
-    parent_a == parent_b && scope_a != scope_b
+    if a == b {
+        return Some((0, 0));
+    }
+    if let Some(d) = ancestor_distance(a, b) {
+        return Some((0, d));
+    }
+    if let Some(d) = ancestor_distance(b, a) {
+        return Some((d, 0));
+    }
+    let asegs: Vec<&str> = a.split('.').collect();
+    let bsegs: Vec<&str> = b.split('.').collect();
+    let common = asegs
+        .iter()
+        .zip(bsegs.iter())
+        .take_while(|(x, y)| x == y)
+        .count();
+    if common == 0 {
+        return None;
+    }
+    Some((asegs.len() - common, bsegs.len() - common))
 }
 
 /// Extracts the parent scope from a dot-notation scope.
@@ -118,6 +141,7 @@ fn are_siblings(scope_a: &str, scope_b: &str) -> bool {
 /// - "auth.oauth.google" → Some("auth.oauth")
 /// - "auth.oauth" → Some("auth")
 /// - "auth" → None (no parent)
+#[allow(dead_code)]
 fn extract_parent(scope: &str) -> Option<String> {
     scope.rfind('.').map(|pos| scope[..pos].to_string())
 }
@@ -181,24 +205,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_parent_scope() {
-        assert!(is_parent_scope("auth", "auth.oauth"));
-        assert!(is_parent_scope("auth.oauth", "auth.oauth.google"));
-        assert!(!is_parent_scope("auth.oauth", "auth"));
-        assert!(!is_parent_scope("auth", "auth"));
-        assert!(!is_parent_scope("auth", "authentication"));
-    }
-
-    #[test]
-    fn test_are_siblings() {
-        assert!(are_siblings("auth.jwt", "auth.oauth"));
-        assert!(are_siblings("api.users", "api.posts"));
-        assert!(!are_siblings("auth", "database"));
-        assert!(!are_siblings("auth.oauth", "auth"));
-        assert!(!are_siblings("auth.oauth", "auth.oauth"));
-    }
-
-    #[test]
     fn test_extract_parent() {
         assert_eq!(
             extract_parent("auth.oauth.google"),
@@ -223,5 +229,151 @@ mod tests {
         let memory = vec!["a.b.c.d.e".to_string()];
         let current = vec!["a.b.c.d.e".to_string()];
         assert_eq!(proximity(&memory, &current), 0.3);
+    }
+
+    #[test]
+    fn test_proximity_grandparent_bonus() {
+        // memory "a" is grandparent of current "a.b.c" → 0.10
+        let memory = vec!["a".to_string()];
+        let current = vec!["a.b.c".to_string()];
+        assert_eq!(proximity(&memory, &current), 0.10);
+    }
+
+    #[test]
+    fn test_proximity_grandchild_bonus() {
+        // memory "a.b.c" is grandchild of current "a" → 0.10
+        let memory = vec!["a.b.c".to_string()];
+        let current = vec!["a".to_string()];
+        assert_eq!(proximity(&memory, &current), 0.10);
+    }
+
+    #[test]
+    fn test_proximity_great_grandparent_bonus() {
+        // memory "a" is great-grandparent of current "a.b.c.d" → 0.05
+        let memory = vec!["a".to_string()];
+        let current = vec!["a.b.c.d".to_string()];
+        assert_eq!(proximity(&memory, &current), 0.05);
+    }
+
+    #[test]
+    fn test_proximity_great_grandchild_regression_abcd_vs_a() {
+        // Regression: memory "a.b.c.d" vs current "a" must be 0.05, not 0.20.
+        // Previous boolean is_parent_scope returned the full parent bonus
+        // regardless of distance. Distance-aware scoring must reflect that
+        // "a" is 3 segments above "a.b.c.d", not 1.
+        let memory = vec!["a.b.c.d".to_string()];
+        let current = vec!["a".to_string()];
+        assert_eq!(proximity(&memory, &current), 0.05);
+    }
+
+    #[test]
+    fn test_proximity_cousin_bonus() {
+        // memory "a.b.c" vs current "a.d.e" share grandparent "a" but not parent → 0.05
+        let memory = vec!["a.b.c".to_string()];
+        let current = vec!["a.d.e".to_string()];
+        assert_eq!(proximity(&memory, &current), 0.05);
+    }
+
+    #[test]
+    fn test_proximity_deep_no_match_beyond_great_grand() {
+        // memory "a" vs current "a.b.c.d.e" — 4 segments below exceeds table → 0.0
+        let memory = vec!["a".to_string()];
+        let current = vec!["a.b.c.d.e".to_string()];
+        assert_eq!(proximity(&memory, &current), 0.0);
+    }
+
+    #[test]
+    fn test_proximity_no_common_prefix() {
+        // memory "x.y" vs current "a.b" share nothing → 0.0
+        let memory = vec!["x.y".to_string()];
+        let current = vec!["a.b".to_string()];
+        assert_eq!(proximity(&memory, &current), 0.0);
+    }
+
+    #[test]
+    fn test_proximity_uneven_distance_no_match() {
+        // memory "a.b" vs current "a.c.d" — LCA "a"; distances (1, 2) — not in table → 0.0
+        let memory = vec!["a.b".to_string()];
+        let current = vec!["a.c.d".to_string()];
+        assert_eq!(proximity(&memory, &current), 0.0);
+    }
+
+    #[test]
+    fn test_ancestor_distance_parent() {
+        assert_eq!(ancestor_distance("a", "a.b"), Some(1));
+    }
+
+    #[test]
+    fn test_ancestor_distance_grandparent() {
+        assert_eq!(ancestor_distance("a", "a.b.c"), Some(2));
+    }
+
+    #[test]
+    fn test_ancestor_distance_great_grandparent() {
+        assert_eq!(ancestor_distance("a", "a.b.c.d"), Some(3));
+    }
+
+    #[test]
+    fn test_ancestor_distance_strict_equal_returns_none() {
+        assert_eq!(ancestor_distance("a.b", "a.b"), None);
+    }
+
+    #[test]
+    fn test_ancestor_distance_not_ancestor() {
+        assert_eq!(ancestor_distance("b", "a.b"), None);
+        assert_eq!(ancestor_distance("a.b", "a"), None);
+        assert_eq!(ancestor_distance("auth", "authentication"), None);
+    }
+
+    #[test]
+    fn test_ancestor_distance_empty_scopes() {
+        assert_eq!(ancestor_distance("", "a.b"), None);
+        assert_eq!(ancestor_distance("a", ""), None);
+    }
+
+    #[test]
+    fn test_lca_distance_siblings() {
+        assert_eq!(lca_distance("a.b.c", "a.b.d"), Some((1, 1)));
+    }
+
+    #[test]
+    fn test_lca_distance_cousins() {
+        assert_eq!(lca_distance("a.b.c", "a.d.e"), Some((2, 2)));
+    }
+
+    #[test]
+    fn test_lca_distance_ancestor() {
+        assert_eq!(lca_distance("a", "a.b"), Some((0, 1)));
+        assert_eq!(lca_distance("a.b", "a"), Some((1, 0)));
+        assert_eq!(lca_distance("a", "a.b.c.d"), Some((0, 3)));
+    }
+
+    #[test]
+    fn test_lca_distance_exact_match() {
+        assert_eq!(lca_distance("a.b.c", "a.b.c"), Some((0, 0)));
+    }
+
+    #[test]
+    fn test_lca_distance_no_common_prefix() {
+        assert_eq!(lca_distance("x.y", "a.b"), None);
+    }
+
+    #[test]
+    fn test_lca_distance_empty_scopes() {
+        assert_eq!(lca_distance("", "a.b"), None);
+        assert_eq!(lca_distance("a.b", ""), None);
+    }
+
+    #[test]
+    fn test_proximity_picks_best_of_multiple_relationships() {
+        // memory has: exact "a.b.c", cousin "a.d.e", and deep "a.x.y.z.q"
+        // current is "a.b.c" — exact match wins (0.30)
+        let memory = vec![
+            "a.d.e".to_string(),
+            "a.b.c".to_string(),
+            "a.x.y.z.q".to_string(),
+        ];
+        let current = vec!["a.b.c".to_string()];
+        assert_eq!(proximity(&memory, &current), 0.30);
     }
 }
