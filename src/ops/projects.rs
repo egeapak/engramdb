@@ -4,12 +4,13 @@
 //! statistics across registered EngramDB projects.
 
 use crate::storage::{
-    collect_descendants, manifest, paths, resolve_root_project_id, MemoryStore, RegistryBackend,
+    collect_descendants, manifest, paths, resolve_root_project_id, MemoryStore, Registry,
+    RegistryBackend,
 };
 use crate::types::MemoryType;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tokio::fs as async_fs;
 
@@ -242,6 +243,117 @@ pub struct PruneResult {
     pub orphans_removed: usize,
     /// Orphan project IDs that were removed.
     pub orphan_ids: Vec<String>,
+    /// Project IDs whose broken `parent_project_id` link was cleared
+    /// (dangling, stale-parent, or cycle-participating sub-projects).
+    pub hierarchy_cleared: Vec<String>,
+}
+
+/// Classification of a sub-project's parent chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParentStatus {
+    /// Parent chain resolves to a root that exists on disk.
+    Ok,
+    /// Parent ID (or an intermediate link) is not present in the registry.
+    Dangling,
+    /// Parent chain resolves to a root that has no `.engramdb/` directory.
+    StaleParent,
+    /// Parent chain loops back on itself.
+    Cycle,
+}
+
+/// Hierarchy issues discovered in the registry.
+#[derive(Debug, Default, Clone)]
+pub struct HierarchyIssues {
+    /// Sub-projects whose parent (or an intermediate ancestor) is missing.
+    pub dangling: Vec<String>,
+    /// Sub-projects whose root ancestor has no `.engramdb/` directory.
+    pub stale_parent: Vec<String>,
+    /// Sub-projects participating in a `parent_project_id` cycle.
+    pub cycle_members: Vec<String>,
+}
+
+impl HierarchyIssues {
+    /// Total number of affected sub-projects across all categories.
+    pub fn total(&self) -> usize {
+        self.dangling.len() + self.stale_parent.len() + self.cycle_members.len()
+    }
+
+    /// All affected project IDs, flattened across categories.
+    fn into_all_ids(self) -> Vec<String> {
+        let mut ids = self.dangling;
+        ids.extend(self.stale_parent);
+        ids.extend(self.cycle_members);
+        ids
+    }
+}
+
+/// Walk the parent chain of `child_id` and classify its outcome.
+fn classify_parent_chain(registry: &Registry, child_id: &str) -> ParentStatus {
+    let Some(child) = registry.projects.iter().find(|e| e.project_id == child_id) else {
+        return ParentStatus::Ok;
+    };
+    let Some(mut current) = child.parent_project_id.as_deref() else {
+        return ParentStatus::Ok;
+    };
+
+    let mut seen: HashSet<&str> = HashSet::new();
+    seen.insert(child_id);
+
+    loop {
+        if !seen.insert(current) {
+            return ParentStatus::Cycle;
+        }
+        let Some(entry) = registry.projects.iter().find(|e| e.project_id == current) else {
+            return ParentStatus::Dangling;
+        };
+        match entry.parent_project_id.as_deref() {
+            Some(next) => current = next,
+            None => {
+                return if Path::new(&entry.project_path).join(".engramdb").exists() {
+                    ParentStatus::Ok
+                } else {
+                    ParentStatus::StaleParent
+                };
+            }
+        }
+    }
+}
+
+/// Scan the registry for broken `parent_project_id` links without modifying it.
+pub fn scan_hierarchy_issues(registry: &Registry) -> HierarchyIssues {
+    let mut out = HierarchyIssues::default();
+    for entry in &registry.projects {
+        if entry.parent_project_id.is_none() {
+            continue;
+        }
+        match classify_parent_chain(registry, &entry.project_id) {
+            ParentStatus::Ok => {}
+            ParentStatus::Dangling => out.dangling.push(entry.project_id.clone()),
+            ParentStatus::StaleParent => out.stale_parent.push(entry.project_id.clone()),
+            ParentStatus::Cycle => out.cycle_members.push(entry.project_id.clone()),
+        }
+    }
+    out
+}
+
+/// Scan-and-repair: clear `parent_project_id` on every sub-project with a
+/// broken parent chain, promoting it back to a root.
+///
+/// Returns the issues that were repaired (empty when nothing was wrong).
+pub async fn repair_hierarchy(registry: &dyn RegistryBackend) -> Result<HierarchyIssues> {
+    let mut reg = registry.load().await?;
+    let issues = scan_hierarchy_issues(&reg);
+    if issues.total() == 0 {
+        return Ok(issues);
+    }
+    let ids: HashSet<String> = issues.clone().into_all_ids().into_iter().collect();
+    for entry in reg.projects.iter_mut() {
+        if ids.contains(&entry.project_id) {
+            entry.parent_project_id = None;
+        }
+    }
+    registry.save(&reg).await?;
+    Ok(issues)
 }
 
 /// Count orphan data directories (on disk under `projects/` but not in registry).
@@ -276,6 +388,7 @@ pub async fn count_orphan_dirs(registry: &dyn RegistryBackend) -> Result<usize> 
 pub enum PrunePhase {
     Stale,
     Orphan,
+    Hierarchy,
 }
 
 /// Remove stale registry entries and orphan data directories.
@@ -349,11 +462,34 @@ pub async fn prune_stale_projects(
 
     let orphans_removed = orphan_ids.len() - orphan_errors.load(Ordering::Relaxed);
 
+    // --- Hierarchy repair ---
+    //
+    // Runs after stale removal so that any children orphaned by a stale
+    // parent removal are caught in the same pass (they appear as "dangling"
+    // after the parent is gone).
+    let issues = scan_hierarchy_issues(&registry.load().await?);
+    let hierarchy_cleared = issues.into_all_ids();
+    if !hierarchy_cleared.is_empty() {
+        let mut reg = registry.load().await?;
+        let cleared_set: std::collections::HashSet<&str> =
+            hierarchy_cleared.iter().map(|s| s.as_str()).collect();
+        for entry in reg.projects.iter_mut() {
+            if cleared_set.contains(entry.project_id.as_str()) {
+                entry.parent_project_id = None;
+            }
+        }
+        registry.save(&reg).await?;
+        for _ in &hierarchy_cleared {
+            on_progress(PrunePhase::Hierarchy);
+        }
+    }
+
     Ok(PruneResult {
         stale_removed,
         stale_ids,
         orphans_removed,
         orphan_ids,
+        hierarchy_cleared,
     })
 }
 
@@ -819,5 +955,177 @@ mod tests {
 
         assert!(!parent_global.exists(), "parent global dir must be removed");
         assert!(!child_global.exists(), "child global dir must be removed");
+    }
+
+    // ---- hierarchy scan / repair ----
+
+    #[tokio::test]
+    async fn test_scan_hierarchy_issues_healthy_registry() {
+        let temp_parent = TempDir::new().unwrap();
+        let temp_child = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let parent = MemoryStore::init(temp_parent.path(), &registry)
+            .await
+            .unwrap();
+        let child = MemoryStore::init(temp_child.path(), &registry)
+            .await
+            .unwrap();
+        link_project(&registry, &child.project_id, &parent.project_id)
+            .await
+            .unwrap();
+
+        let reg = registry.load().await.unwrap();
+        let issues = scan_hierarchy_issues(&reg);
+        assert_eq!(issues.total(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_scan_hierarchy_issues_detects_dangling() {
+        let temp_child = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let child = MemoryStore::init(temp_child.path(), &registry)
+            .await
+            .unwrap();
+        // Hand-craft a dangling parent link (parent ID not in registry).
+        let mut reg = registry.load().await.unwrap();
+        reg.projects
+            .iter_mut()
+            .find(|e| e.project_id == child.project_id)
+            .unwrap()
+            .parent_project_id = Some("nonexistent-parent-id".to_string());
+        registry.save(&reg).await.unwrap();
+
+        let reg = registry.load().await.unwrap();
+        let issues = scan_hierarchy_issues(&reg);
+        assert_eq!(issues.dangling, vec![child.project_id.clone()]);
+        assert!(issues.stale_parent.is_empty());
+        assert!(issues.cycle_members.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scan_hierarchy_issues_detects_stale_parent() {
+        let temp_parent = TempDir::new().unwrap();
+        let temp_child = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let parent = MemoryStore::init(temp_parent.path(), &registry)
+            .await
+            .unwrap();
+        let child = MemoryStore::init(temp_child.path(), &registry)
+            .await
+            .unwrap();
+        link_project(&registry, &child.project_id, &parent.project_id)
+            .await
+            .unwrap();
+
+        // Remove parent's .engramdb/ to simulate a stale root.
+        async_fs::remove_dir_all(temp_parent.path().join(".engramdb"))
+            .await
+            .unwrap();
+
+        let reg = registry.load().await.unwrap();
+        let issues = scan_hierarchy_issues(&reg);
+        assert_eq!(issues.stale_parent, vec![child.project_id.clone()]);
+    }
+
+    #[tokio::test]
+    async fn test_scan_hierarchy_issues_detects_cycle() {
+        let temp_a = TempDir::new().unwrap();
+        let temp_b = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let a = MemoryStore::init(temp_a.path(), &registry).await.unwrap();
+        let b = MemoryStore::init(temp_b.path(), &registry).await.unwrap();
+
+        // Hand-craft cycle: a -> b, b -> a.
+        let mut reg = registry.load().await.unwrap();
+        for entry in reg.projects.iter_mut() {
+            if entry.project_id == a.project_id {
+                entry.parent_project_id = Some(b.project_id.clone());
+            } else if entry.project_id == b.project_id {
+                entry.parent_project_id = Some(a.project_id.clone());
+            }
+        }
+        registry.save(&reg).await.unwrap();
+
+        let reg = registry.load().await.unwrap();
+        let issues = scan_hierarchy_issues(&reg);
+        let mut cycle = issues.cycle_members.clone();
+        cycle.sort();
+        let mut expected = vec![a.project_id.clone(), b.project_id.clone()];
+        expected.sort();
+        assert_eq!(cycle, expected);
+    }
+
+    #[tokio::test]
+    async fn test_repair_hierarchy_clears_broken_links() {
+        let temp_child = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let child = MemoryStore::init(temp_child.path(), &registry)
+            .await
+            .unwrap();
+        // Dangling parent.
+        let mut reg = registry.load().await.unwrap();
+        reg.projects
+            .iter_mut()
+            .find(|e| e.project_id == child.project_id)
+            .unwrap()
+            .parent_project_id = Some("ghost".to_string());
+        registry.save(&reg).await.unwrap();
+
+        let repaired = repair_hierarchy(&registry).await.unwrap();
+        assert_eq!(repaired.dangling, vec![child.project_id.clone()]);
+
+        let reg = registry.load().await.unwrap();
+        let child_entry = reg
+            .projects
+            .iter()
+            .find(|e| e.project_id == child.project_id)
+            .unwrap();
+        assert_eq!(child_entry.parent_project_id, None);
+    }
+
+    #[tokio::test]
+    async fn test_repair_hierarchy_noop_when_healthy() {
+        let registry = InMemoryRegistry::new();
+        let temp = TempDir::new().unwrap();
+        let _store = MemoryStore::init(temp.path(), &registry).await.unwrap();
+
+        let repaired = repair_hierarchy(&registry).await.unwrap();
+        assert_eq!(repaired.total(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_prune_repairs_orphaned_children_after_stale_parent_removal() {
+        // Parent's .engramdb/ is gone → stale → prune removes the parent.
+        // Child was linked to parent → after removal, child's parent_project_id
+        // points to a registry ID that no longer exists. Prune must clear it.
+        let temp_parent = TempDir::new().unwrap();
+        let temp_child = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let parent = MemoryStore::init(temp_parent.path(), &registry)
+            .await
+            .unwrap();
+        let child = MemoryStore::init(temp_child.path(), &registry)
+            .await
+            .unwrap();
+        link_project(&registry, &child.project_id, &parent.project_id)
+            .await
+            .unwrap();
+
+        // Make parent stale: remove its .engramdb/.
+        async_fs::remove_dir_all(temp_parent.path().join(".engramdb"))
+            .await
+            .unwrap();
+
+        let result = prune_stale_projects(&registry, |_| {}).await.unwrap();
+        assert!(result.stale_ids.contains(&parent.project_id));
+        assert_eq!(result.hierarchy_cleared, vec![child.project_id.clone()]);
+
+        let reg = registry.load().await.unwrap();
+        let child_entry = reg
+            .projects
+            .iter()
+            .find(|e| e.project_id == child.project_id)
+            .unwrap();
+        assert_eq!(child_entry.parent_project_id, None);
     }
 }

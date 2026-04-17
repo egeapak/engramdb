@@ -132,8 +132,11 @@ pub async fn run_projects(
             let entries = projects::list_projects(registry).await?;
             let stale: Vec<_> = entries.iter().filter(|e| !e.exists).collect();
             let orphan_count = projects::count_orphan_dirs(registry).await?;
+            let reg_snapshot = registry.load().await?;
+            let hierarchy_issues = projects::scan_hierarchy_issues(&reg_snapshot);
+            drop(reg_snapshot);
 
-            if stale.is_empty() && orphan_count == 0 {
+            if stale.is_empty() && orphan_count == 0 && hierarchy_issues.total() == 0 {
                 formatter.print_success("Nothing to prune.");
                 return Ok(());
             }
@@ -152,6 +155,28 @@ pub async fn run_projects(
                 println!(
                     "  Found {} orphan data directory(ies) not in registry.",
                     orphan_count.yellow()
+                );
+            }
+            if hierarchy_issues.total() == 0 {
+                println!("  {} broken parent links found.", "No".green());
+            } else {
+                let mut parts = Vec::new();
+                if !hierarchy_issues.dangling.is_empty() {
+                    parts.push(format!("{} dangling", hierarchy_issues.dangling.len()));
+                }
+                if !hierarchy_issues.stale_parent.is_empty() {
+                    parts.push(format!(
+                        "{} stale-parent",
+                        hierarchy_issues.stale_parent.len()
+                    ));
+                }
+                if !hierarchy_issues.cycle_members.is_empty() {
+                    parts.push(format!("{} in cycle", hierarchy_issues.cycle_members.len()));
+                }
+                println!(
+                    "  Found {} sub-project(s) with broken parent link ({}).",
+                    hierarchy_issues.total().yellow(),
+                    parts.join(", ")
                 );
             }
 
@@ -176,19 +201,28 @@ pub async fn run_projects(
             }
 
             let orphan_pb = ProgressBar::new(orphan_count as u64);
-            orphan_pb.set_style(style);
+            orphan_pb.set_style(style.clone());
             orphan_pb.set_prefix("orphan");
             if orphan_count == 0 {
                 orphan_pb.finish_and_clear();
             }
 
+            let hierarchy_pb = ProgressBar::new(hierarchy_issues.total() as u64);
+            hierarchy_pb.set_style(style);
+            hierarchy_pb.set_prefix("links");
+            if hierarchy_issues.total() == 0 {
+                hierarchy_pb.finish_and_clear();
+            }
+
             let result = projects::prune_stale_projects(registry, |phase| match phase {
                 projects::PrunePhase::Stale => stale_pb.inc(1),
                 projects::PrunePhase::Orphan => orphan_pb.inc(1),
+                projects::PrunePhase::Hierarchy => hierarchy_pb.inc(1),
             })
             .await?;
             stale_pb.finish_and_clear();
             orphan_pb.finish_and_clear();
+            hierarchy_pb.finish_and_clear();
 
             if result.stale_removed > 0 {
                 println!(
@@ -202,6 +236,13 @@ pub async fn run_projects(
                     "  {} Removed {} orphan data directory(ies).",
                     "✓".green(),
                     result.orphans_removed.green()
+                );
+            }
+            if !result.hierarchy_cleared.is_empty() {
+                println!(
+                    "  {} Cleared broken parent link on {} sub-project(s).",
+                    "✓".green(),
+                    result.hierarchy_cleared.len().green()
                 );
             }
         }
