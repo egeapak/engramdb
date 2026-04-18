@@ -1360,14 +1360,16 @@ impl ServerHandler for EngramDbServer {
             instructions: Some(
                 "Project-scoped persistent memory store for coding agents. \
                  Stores decisions, hazards, conventions, and context about the codebase. \
-                 IMPORTANT: Search memories (search) before answering project questions, \
+                 IMPORTANT: Query memories (query) before answering project questions, \
                  investigating workflows, or researching how things work — not only before \
-                 modifying files. Store new knowledge after significant discoveries. \
+                 modifying files. Use mode=\"filter\" with a query/logical/path/tags signal \
+                 for specific lookups, mode=\"rank\" for context-aware browsing. \
+                 Store new knowledge after significant discoveries. \
                  All tools accept an optional `project` parameter (absolute path, 16-char \
                  project ID, or \"global\") to operate on a different project's memories. \
                  Use project=\"global\" for cross-project memories like personal preferences, \
                  coding conventions, or knowledge that applies everywhere. \
-                 Use include_global=true on retrieve/search to merge global memories into results. \
+                 Use include_global=true on query to merge global memories into results. \
                  Omit `project` to use the current project."
                     .to_string(),
             ),
