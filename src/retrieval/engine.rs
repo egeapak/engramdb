@@ -225,7 +225,7 @@ impl RetrievalEngine {
 
         // Filter by contradiction threshold
         let mut contradictions = Vec::new();
-        for (mem, result) in candidate_memories.iter().zip(results.into_iter()) {
+        for (mem, result) in candidate_memories.iter().zip(results) {
             if result.contradiction as f64 >= nli_config.contradiction_threshold {
                 contradictions.push((mem.id.clone(), result));
             }

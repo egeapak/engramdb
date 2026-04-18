@@ -17,10 +17,16 @@ pub mod paths;
 pub mod project_id;
 pub mod registry;
 pub mod store;
+#[cfg(test)]
+pub mod test_support;
 pub mod write_lock;
 
 pub use error::{Result, StorageError};
 pub use lance_index::{IndexFilterable, IndexForFiltering, IndexSummary, VectorMatch};
 pub use manifest::Manifest;
-pub use registry::{FileRegistry, InMemoryRegistry, Registry, RegistryBackend, RegistryEntry};
+pub use project_id::detect_worktree_main;
+pub use registry::{
+    collect_descendants, list_children, resolve_root_project_id, FileRegistry, InMemoryRegistry,
+    Registry, RegistryBackend, RegistryEntry,
+};
 pub use store::MemoryStore;

@@ -26,6 +26,11 @@ pub struct Manifest {
     pub created_at: DateTime<Utc>,
     /// Human-readable project description
     pub description: String,
+    /// If this project is a sub-project of another project, the parent's
+    /// project ID.  Primarily surfaced here for `engramdb projects info`;
+    /// the registry is the source of truth for hierarchy routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_project_id: Option<String>,
     /// Project statistics (updated automatically)
     pub stats: ManifestStats,
 }
@@ -46,6 +51,7 @@ impl Default for Manifest {
             project: "engramdb-project".to_string(),
             created_at: Utc::now(),
             description: "Agent memory store. See config.toml for retrieval settings.".to_string(),
+            parent_project_id: None,
             stats: ManifestStats {
                 memory_count: 0,
                 logical_scopes: Vec::new(),
