@@ -33,13 +33,20 @@ pub enum ProjectsCommand {
     Info,
     /// List all registered projects
     List,
-    /// Remove a project from the registry and delete its global data
+    /// Remove a project from the registry and delete its global data.
+    ///
+    /// Refuses by default when the project has sub-projects (children).
+    /// Re-run with `--cascade` to also delete descendants, or unlink the
+    /// children first with `engramdb projects unlink <id>`.
     Delete {
         /// Project ID to delete
         project_id: String,
         /// Skip confirmation prompt
         #[arg(long, short = 'f')]
         force: bool,
+        /// Also delete all descendants (children and their children).
+        #[arg(long)]
+        cascade: bool,
     },
     /// Show aggregate statistics across all projects
     Stats,
@@ -51,6 +58,23 @@ pub enum ProjectsCommand {
         /// Skip confirmation prompt
         #[arg(long, short = 'f')]
         force: bool,
+    },
+    /// Link a project as a sub-project of another project.
+    ///
+    /// Memory operations on the child still target its own storage, but
+    /// `engramdb projects list` displays the hierarchy, and a cascade delete
+    /// of the parent will take the child with it.
+    Link {
+        /// Project ID of the child
+        child: String,
+        /// Project ID of the parent
+        #[arg(long)]
+        parent: String,
+    },
+    /// Remove the parent link on a project, promoting it back to a root project.
+    Unlink {
+        /// Project ID of the child
+        project_id: String,
     },
 }
 
@@ -1310,12 +1334,63 @@ mod tests {
             Cli::try_parse_from(["engramdb", "projects", "delete", "some-id", "--force"]).unwrap();
         match cli.command {
             Command::Projects {
-                command: Some(ProjectsCommand::Delete { project_id, force }),
+                command:
+                    Some(ProjectsCommand::Delete {
+                        project_id,
+                        force,
+                        cascade,
+                    }),
             } => {
                 assert_eq!(project_id, "some-id");
                 assert!(force);
+                assert!(!cascade);
             }
             _ => panic!("Expected Projects Delete command"),
+        }
+    }
+
+    #[test]
+    fn test_projects_delete_cascade_parsing() {
+        let cli = Cli::try_parse_from(["engramdb", "projects", "delete", "some-id", "--cascade"])
+            .unwrap();
+        match cli.command {
+            Command::Projects {
+                command: Some(ProjectsCommand::Delete { cascade, .. }),
+            } => assert!(cascade),
+            _ => panic!("Expected Projects Delete command"),
+        }
+    }
+
+    #[test]
+    fn test_projects_link_parsing() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "projects",
+            "link",
+            "child-id",
+            "--parent",
+            "parent-id",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Projects {
+                command: Some(ProjectsCommand::Link { child, parent }),
+            } => {
+                assert_eq!(child, "child-id");
+                assert_eq!(parent, "parent-id");
+            }
+            _ => panic!("Expected Projects Link command"),
+        }
+    }
+
+    #[test]
+    fn test_projects_unlink_parsing() {
+        let cli = Cli::try_parse_from(["engramdb", "projects", "unlink", "child-id"]).unwrap();
+        match cli.command {
+            Command::Projects {
+                command: Some(ProjectsCommand::Unlink { project_id }),
+            } => assert_eq!(project_id, "child-id"),
+            _ => panic!("Expected Projects Unlink command"),
         }
     }
 

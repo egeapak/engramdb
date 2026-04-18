@@ -448,6 +448,9 @@ struct RegistryInfo {
     reachable_projects: usize,
     orphan_dirs: usize,
     loaded: bool,
+    hierarchy_dangling: usize,
+    hierarchy_stale_parent: usize,
+    hierarchy_cycle: usize,
 }
 
 /// Load registry info once for reuse across sections.
@@ -463,6 +466,9 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
                 reachable_projects: 0,
                 orphan_dirs: 0,
                 loaded: false,
+                hierarchy_dangling: 0,
+                hierarchy_stale_parent: 0,
+                hierarchy_cycle: 0,
             };
         }
     };
@@ -499,12 +505,17 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
                 })
                 .unwrap_or(0);
 
+            let issues = crate::ops::projects::scan_hierarchy_issues(&reg);
+
             RegistryInfo {
                 in_registry,
                 total_projects,
                 reachable_projects,
                 orphan_dirs,
                 loaded: true,
+                hierarchy_dangling: issues.dangling.len(),
+                hierarchy_stale_parent: issues.stale_parent.len(),
+                hierarchy_cycle: issues.cycle_members.len(),
             }
         }
         Err(_) => RegistryInfo {
@@ -513,6 +524,9 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
             reachable_projects: 0,
             orphan_dirs: 0,
             loaded: false,
+            hierarchy_dangling: 0,
+            hierarchy_stale_parent: 0,
+            hierarchy_cycle: 0,
         },
     }
 }
@@ -711,6 +725,40 @@ fn build_registry_checks(info: &RegistryInfo) -> Vec<EnvironmentCheck> {
             None
         },
     });
+
+    let total_hierarchy_issues =
+        info.hierarchy_dangling + info.hierarchy_stale_parent + info.hierarchy_cycle;
+    if total_hierarchy_issues > 0 {
+        let mut h_details = Vec::new();
+        if info.hierarchy_dangling > 0 {
+            h_details.push(format!("dangling parent: {}", info.hierarchy_dangling));
+        }
+        if info.hierarchy_stale_parent > 0 {
+            h_details.push(format!("stale parent: {}", info.hierarchy_stale_parent));
+        }
+        if info.hierarchy_cycle > 0 {
+            h_details.push(format!("cycle: {}", info.hierarchy_cycle));
+        }
+        checks.push(EnvironmentCheck {
+            name: "Project hierarchy".to_string(),
+            passed: true,
+            message: format!("{} sub-project(s) with broken parent link", total_hierarchy_issues),
+            suggestion: Some(
+                "Run `engramdb projects prune` to clear broken links (promotes affected sub-projects back to roots)".to_string(),
+            ),
+            details: h_details,
+            status: Some(CheckStatus::Warn),
+        });
+    } else {
+        checks.push(EnvironmentCheck {
+            name: "Project hierarchy".to_string(),
+            passed: true,
+            message: "healthy".to_string(),
+            suggestion: None,
+            details: vec![],
+            status: None,
+        });
+    }
 
     checks
 }
@@ -2055,12 +2103,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_registry_checks_returns_one_check() {
+    async fn test_build_registry_checks_returns_two_checks() {
         let temp_dir = TempDir::new().unwrap();
         let info = load_registry_info(temp_dir.path()).await;
         let checks = build_registry_checks(&info);
-        assert_eq!(checks.len(), 1);
+        assert_eq!(checks.len(), 2);
         assert_eq!(checks[0].name, "Registered projects");
+        assert_eq!(checks[1].name, "Project hierarchy");
     }
 
     #[tokio::test]
@@ -2071,6 +2120,9 @@ mod tests {
             reachable_projects: 3,
             orphan_dirs: 0,
             loaded: true,
+            hierarchy_dangling: 0,
+            hierarchy_stale_parent: 0,
+            hierarchy_cycle: 0,
         };
         let checks = build_registry_checks(&info);
         assert!(checks[0].message.contains("5 registered"));
@@ -2088,6 +2140,9 @@ mod tests {
             reachable_projects: 2,
             orphan_dirs: 0,
             loaded: true,
+            hierarchy_dangling: 0,
+            hierarchy_stale_parent: 0,
+            hierarchy_cycle: 0,
         };
         let checks = build_registry_checks(&info);
         let details_str = checks[0].details.join(" ");
@@ -2104,12 +2159,63 @@ mod tests {
             reachable_projects: 2,
             orphan_dirs: 10,
             loaded: true,
+            hierarchy_dangling: 0,
+            hierarchy_stale_parent: 0,
+            hierarchy_cycle: 0,
         };
         let checks = build_registry_checks(&info);
         assert_eq!(checks[0].status, Some(CheckStatus::Warn));
         let details_str = checks[0].details.join(" ");
         assert!(details_str.contains("orphan data dirs: 10"));
         assert!(checks[0].suggestion.as_ref().unwrap().contains("prune"));
+    }
+
+    #[tokio::test]
+    async fn test_build_registry_checks_hierarchy_healthy_passes_silently() {
+        let info = RegistryInfo {
+            in_registry: true,
+            total_projects: 2,
+            reachable_projects: 2,
+            orphan_dirs: 0,
+            loaded: true,
+            hierarchy_dangling: 0,
+            hierarchy_stale_parent: 0,
+            hierarchy_cycle: 0,
+        };
+        let checks = build_registry_checks(&info);
+        let hierarchy = checks
+            .iter()
+            .find(|c| c.name == "Project hierarchy")
+            .unwrap();
+        assert_eq!(hierarchy.status, None);
+        assert!(hierarchy.message.contains("healthy"));
+        assert!(hierarchy.suggestion.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_build_registry_checks_hierarchy_issues_warn() {
+        let info = RegistryInfo {
+            in_registry: true,
+            total_projects: 3,
+            reachable_projects: 3,
+            orphan_dirs: 0,
+            loaded: true,
+            hierarchy_dangling: 1,
+            hierarchy_stale_parent: 1,
+            hierarchy_cycle: 2,
+        };
+        let checks = build_registry_checks(&info);
+        let hierarchy = checks
+            .iter()
+            .find(|c| c.name == "Project hierarchy")
+            .unwrap();
+        assert_eq!(hierarchy.status, Some(CheckStatus::Warn));
+        assert!(hierarchy.message.contains("4"));
+        let details_str = hierarchy.details.join(" ");
+        assert!(details_str.contains("dangling parent: 1"));
+        assert!(details_str.contains("stale parent: 1"));
+        assert!(details_str.contains("cycle: 2"));
+        assert!(hierarchy.suggestion.as_ref().unwrap().contains("prune"));
     }
 
     #[tokio::test]

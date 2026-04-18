@@ -753,6 +753,16 @@ impl OutputFormatter {
                 };
                 println!("Project: {}", info.project_name);
                 println!("ID: {}", id_display);
+                if let Some(parent) = info.parent_project_id.as_deref() {
+                    let parent_display = if self.use_color {
+                        parent
+                            .if_supports_color(Stream::Stdout, |text| text.cyan())
+                            .to_string()
+                    } else {
+                        parent.to_string()
+                    };
+                    println!("Parent: {}", parent_display);
+                }
                 println!("Path: {}", info.project_path);
                 println!("Memories: {}", info.memory_count);
                 if !info.logical_scopes.is_empty() {
@@ -763,6 +773,9 @@ impl OutputFormatter {
             OutputFormat::Plain => {
                 println!("Project: {}", info.project_name);
                 println!("ID: {}", info.project_id);
+                if let Some(parent) = info.parent_project_id.as_deref() {
+                    println!("Parent: {}", parent);
+                }
                 println!("Path: {}", info.project_path);
                 println!("Memories: {}", info.memory_count);
                 if !info.logical_scopes.is_empty() {
@@ -802,7 +815,26 @@ impl OutputFormatter {
                     } else {
                         "missing".to_string()
                     };
-                    println!("{} {} ({})", id_display, entry.project_path, status,);
+                    let indent = if entry.parent_project_id.is_some() {
+                        "  ↳ "
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "{}{} {} ({})",
+                        indent, id_display, entry.project_path, status,
+                    );
+                    if let Some(parent) = entry.parent_project_id.as_deref() {
+                        let parent_short = short_id(parent);
+                        let parent_display = if self.use_color {
+                            parent_short
+                                .if_supports_color(Stream::Stdout, |text| text.dimmed())
+                                .to_string()
+                        } else {
+                            parent_short.to_string()
+                        };
+                        println!("      parent: {}", parent_display);
+                    }
                 }
             }
             OutputFormat::Plain => {
@@ -813,7 +845,15 @@ impl OutputFormatter {
                 for entry in entries {
                     let id_short = short_id(&entry.project_id);
                     let status = if entry.exists { "ok" } else { "missing" };
-                    println!("{} {} {}", id_short, entry.project_path, status,);
+                    let prefix = if entry.parent_project_id.is_some() {
+                        "  "
+                    } else {
+                        ""
+                    };
+                    println!("{}{} {} {}", prefix, id_short, entry.project_path, status,);
+                    if let Some(parent) = entry.parent_project_id.as_deref() {
+                        println!("    parent: {}", short_id(parent));
+                    }
                 }
             }
         }
@@ -857,6 +897,8 @@ pub struct ProjectInfoOutput {
     pub memory_count: usize,
     pub logical_scopes: Vec<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_project_id: Option<String>,
 }
 
 /// Output data for a single project list entry.
@@ -865,6 +907,8 @@ pub struct ProjectListOutput {
     pub project_id: String,
     pub project_path: String,
     pub exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_project_id: Option<String>,
 }
 
 /// Output data for aggregate stats across projects.

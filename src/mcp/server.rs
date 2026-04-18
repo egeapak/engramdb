@@ -397,6 +397,29 @@ struct DoctorInput {
     project: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProjectsInfoInput {
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID. Omit for current project."
+    )]
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProjectsLinkInput {
+    #[schemars(description = "Project ID of the child to link (16-char hex)")]
+    child: String,
+
+    #[schemars(description = "Project ID of the parent (16-char hex)")]
+    parent: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProjectsUnlinkInput {
+    #[schemars(description = "Project ID of the child to promote back to a root (16-char hex)")]
+    project_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Serialisable output helpers
 // ---------------------------------------------------------------------------
@@ -500,7 +523,13 @@ struct ScoredMemoryOutput {
 /// The EngramDB MCP server.
 #[derive(Clone)]
 pub struct EngramDbServer {
+    /// Original directory the server was launched in.  In a linked git
+    /// worktree this is the worktree path (not the main project root).
     dir: PathBuf,
+    /// Directory used for all storage operations.  Equal to `dir` for normal
+    /// projects; for linked worktrees this is the resolved main worktree path
+    /// so memory operations route to the main project.
+    effective_dir: PathBuf,
     embedding_backend: Option<EmbeddingBackend>,
     registry: Arc<dyn RegistryBackend>,
     #[allow(dead_code)]
@@ -511,6 +540,7 @@ impl std::fmt::Debug for EngramDbServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EngramDbServer")
             .field("dir", &self.dir)
+            .field("effective_dir", &self.effective_dir)
             .field("embedding_backend", &self.embedding_backend)
             .finish()
     }
@@ -522,8 +552,11 @@ impl EngramDbServer {
             FileRegistry::global()
                 .map_err(|e| anyhow::anyhow!("Failed to initialize registry: {}", e))?,
         );
+        let effective_dir =
+            crate::storage::project_id::detect_worktree_main(&dir).unwrap_or_else(|| dir.clone());
         Ok(Self {
             dir,
+            effective_dir,
             embedding_backend,
             registry,
             tool_router: Self::tool_router(),
@@ -536,12 +569,57 @@ impl EngramDbServer {
         embedding_backend: Option<EmbeddingBackend>,
         registry: Arc<dyn RegistryBackend>,
     ) -> Self {
+        let effective_dir =
+            crate::storage::project_id::detect_worktree_main(&dir).unwrap_or_else(|| dir.clone());
         Self {
             dir,
+            effective_dir,
             embedding_backend,
             registry,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// If the server was launched in a linked git worktree, make sure the
+    /// main project's store exists and register the worktree as a sub-project
+    /// of the main project.  No-op otherwise.
+    ///
+    /// Idempotent: safe to call on every server startup / per-connection
+    /// factory invocation.
+    pub async fn ensure_hierarchy(&self) -> anyhow::Result<()> {
+        if self.dir == self.effective_dir {
+            return Ok(());
+        }
+
+        // Auto-init the main project's store if it doesn't exist yet.
+        let main_engramdb = self.effective_dir.join(".engramdb");
+        if !main_engramdb.exists() {
+            MemoryStore::init(&self.effective_dir, self.registry.as_ref())
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to init main project at {}: {}",
+                        self.effective_dir.display(),
+                        e
+                    )
+                })?;
+        }
+
+        let child_id = crate::storage::project_id::compute_project_id(&self.dir);
+        let parent_id = crate::storage::project_id::compute_project_id(&self.effective_dir);
+
+        // Register (or refresh) the worktree as a sub-project of the main project.
+        self.registry
+            .update_with_parent(&self.dir, &child_id, Some(&parent_id))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to register worktree in registry: {}", e))?;
+
+        tracing::info!(
+            "Resolved git worktree: routing memory operations from {} to main project at {}",
+            self.dir.display(),
+            self.effective_dir.display()
+        );
+        Ok(())
     }
 
     /// Returns `true` if the given project override refers to the global store.
@@ -551,13 +629,19 @@ impl EngramDbServer {
 
     /// Resolve the target project directory from an optional project override.
     ///
-    /// - `None`          — returns `self.dir`
-    /// - `"global"`      — returns the global store directory
-    /// - 16-char hex     — looked up by project ID in the registry
-    /// - absolute path   — canonicalized, project ID computed and verified in registry
+    /// - `None`: returns the effective (hierarchy-resolved) dir for the
+    ///   default project. In a linked git worktree this is the main
+    ///   worktree's path.
+    /// - `"global"`: returns the global store directory.
+    /// - 16-char hex: looked up by project ID in the registry, then follows
+    ///   `parent_project_id` links so worktree IDs transparently resolve to
+    ///   their root project.
+    /// - absolute path: canonicalized.  If the path is a linked worktree,
+    ///   swaps to the main worktree's path.  The resulting project ID must
+    ///   be present in the registry.
     async fn resolve_dir(&self, project: Option<&str>) -> Result<PathBuf, String> {
         let input = match project {
-            None => return Ok(self.dir.clone()),
+            None => return Ok(self.effective_dir.clone()),
             Some("global") => {
                 return crate::storage::paths::global_store_dir()
                     .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()));
@@ -573,7 +657,10 @@ impl EngramDbServer {
                 .load()
                 .await
                 .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
-            match registry.projects.iter().find(|e| e.project_id == input) {
+            // Resolve parent chain so that passing a worktree's ID routes to
+            // the main project's storage.
+            let root_id = crate::storage::resolve_root_project_id(&registry, input);
+            match registry.projects.iter().find(|e| e.project_id == root_id) {
                 Some(e) => Ok(PathBuf::from(&e.project_path)),
                 None => Err(error_response(
                     ErrorCode::ProjectNotFound,
@@ -597,7 +684,11 @@ impl EngramDbServer {
                     &format!("Cannot access directory '{}': {}.", input, e),
                 )
             })?;
-            let project_id = crate::storage::project_id::compute_project_id(&canonical);
+            // If the caller pointed at a linked worktree, swap to the main
+            // worktree's project root so storage ops hit the right place.
+            let effective =
+                crate::storage::project_id::detect_worktree_main(&canonical).unwrap_or(canonical);
+            let project_id = crate::storage::project_id::compute_project_id(&effective);
             let registry = self
                 .registry
                 .load()
@@ -612,7 +703,7 @@ impl EngramDbServer {
                     ),
                 ));
             }
-            Ok(canonical)
+            Ok(effective)
         }
     }
 
@@ -636,9 +727,20 @@ impl EngramDbServer {
                     ),
                 ));
             }
+            // Default project: auto-init.  For linked worktrees this targets
+            // the main project's root (via effective_dir resolution above)
+            // and also registers the worktree as a sub-project.
             MemoryStore::init(&dir, self.registry.as_ref())
                 .await
                 .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()))?;
+            if self.dir != self.effective_dir && dir == self.effective_dir {
+                let child_id = crate::storage::project_id::compute_project_id(&self.dir);
+                let parent_id = crate::storage::project_id::compute_project_id(&self.effective_dir);
+                self.registry
+                    .update_with_parent(&self.dir, &child_id, Some(&parent_id))
+                    .await
+                    .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            }
         }
         MemoryStore::open(&dir)
             .await
@@ -1333,6 +1435,99 @@ impl EngramDbServer {
         serde_json::to_string(&response)
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
+
+    #[tool(
+        name = "projects_list",
+        description = "List all registered EngramDB projects, including hierarchy (parent_project_id). Useful for finding the 16-char IDs you pass as the `project` parameter to other tools."
+    )]
+    async fn projects_list(&self) -> Result<String, String> {
+        let entries = ops::projects::list_projects(self.registry.as_ref())
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+
+        let json: Vec<serde_json::Value> = entries
+            .into_iter()
+            .map(|e| {
+                let mut obj = serde_json::json!({
+                    "project_id": e.project_id,
+                    "project_path": e.project_path,
+                    "exists": e.exists,
+                });
+                if let Some(parent) = e.parent_project_id {
+                    obj["parent_project_id"] = serde_json::Value::String(parent);
+                }
+                obj
+            })
+            .collect();
+
+        serde_json::to_string(&json)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+    }
+
+    #[tool(
+        name = "projects_info",
+        description = "Info about a specific project: id, name, path, memory count, logical scopes, created_at, parent_project_id. Omit `project` for the current project."
+    )]
+    async fn projects_info(
+        &self,
+        Parameters(input): Parameters<ProjectsInfoInput>,
+    ) -> Result<String, String> {
+        let dir = self.resolve_dir(input.project.as_deref()).await?;
+        let info = ops::projects::get_project_info(&dir)
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+
+        let mut obj = serde_json::json!({
+            "project_id": info.project_id,
+            "project_name": info.project_name,
+            "project_path": info.project_path,
+            "memory_count": info.memory_count,
+            "logical_scopes": info.logical_scopes,
+            "created_at": info.created_at,
+        });
+        if let Some(parent) = info.parent_project_id {
+            obj["parent_project_id"] = serde_json::Value::String(parent);
+        }
+        serde_json::to_string(&obj)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+    }
+
+    #[tool(
+        name = "projects_link",
+        description = "Link a registered project as a sub-project of another. Rejects self-links and cycles. Use projects_list to discover project IDs."
+    )]
+    async fn projects_link(
+        &self,
+        Parameters(input): Parameters<ProjectsLinkInput>,
+    ) -> Result<String, String> {
+        ops::projects::link_project(self.registry.as_ref(), &input.child, &input.parent)
+            .await
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        serde_json::to_string(&serde_json::json!({
+            "linked": true,
+            "child": input.child,
+            "parent": input.parent,
+        }))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+    }
+
+    #[tool(
+        name = "projects_unlink",
+        description = "Remove the parent link on a project, promoting it back to a root project. No-op if the project has no parent."
+    )]
+    async fn projects_unlink(
+        &self,
+        Parameters(input): Parameters<ProjectsUnlinkInput>,
+    ) -> Result<String, String> {
+        ops::projects::unlink_project(self.registry.as_ref(), &input.project_id)
+            .await
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        serde_json::to_string(&serde_json::json!({
+            "unlinked": true,
+            "project_id": input.project_id,
+        }))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1653,6 +1848,8 @@ pub async fn run_stdio(
     embedding_backend: Option<EmbeddingBackend>,
 ) -> anyhow::Result<()> {
     let server = EngramDbServer::new(dir, embedding_backend)?;
+    // Detect git worktrees and register/init the main project if needed.
+    server.ensure_hierarchy().await?;
     let service = server.serve(rmcp::transport::io::stdio()).await?;
     service.waiting().await?;
     Ok(())
@@ -1668,6 +1865,13 @@ pub async fn run_sse(
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
     use std::sync::Arc;
+
+    // Resolve hierarchy eagerly once: subsequent per-connection server
+    // instances share the registry, so registration only happens once.
+    {
+        let warmup = EngramDbServer::new(dir.clone(), embedding_backend)?;
+        warmup.ensure_hierarchy().await?;
+    }
 
     let config = StreamableHttpServerConfig::default();
     let ct = config.cancellation_token.clone();
@@ -3407,12 +3611,39 @@ mod tests {
     // Global memory tests — feature parity with project-scoped memories
     // =======================================================================
 
+    /// Handle returned by [`setup_global`]. Bundles the per-test `TempDir`
+    /// with a process-wide lock guard so that `let (_dir, server) = ...`
+    /// call sites get both test isolation and the expected `TempDir`
+    /// lifetime without threading extra values through every test body.
+    ///
+    /// The lock serializes all tests that touch the global store (see
+    /// [`crate::storage::test_support`] for background) and clears the
+    /// on-disk global layout before each test.
+    #[allow(dead_code)]
+    struct GlobalSetupHandle {
+        dir: TempDir,
+        _lock: crate::storage::test_support::GlobalTestLock,
+    }
+
+    impl GlobalSetupHandle {
+        #[allow(dead_code)]
+        fn path(&self) -> &std::path::Path {
+            self.dir.path()
+        }
+    }
+
     /// Setup for global tests.
-    /// With nextest, each test runs in its own process with an isolated
-    /// ENGRAMDB_DATA_DIR, so no locking or cleanup is needed.
-    async fn setup_global() -> (TempDir, EngramDbServer) {
+    ///
+    /// Under `cargo test` (one process, parallel tests) the global store's
+    /// on-disk layout is shared, so we serialize via
+    /// `acquire_global_test_lock` and wipe the global dir per test. Under
+    /// `cargo nextest` (one process per test) the lock is effectively
+    /// free — each test still sees a clean slate.
+    async fn setup_global() -> (GlobalSetupHandle, EngramDbServer) {
+        let lock = crate::storage::test_support::acquire_global_test_lock().await;
         MemoryStore::init_global().await.unwrap();
-        setup().await
+        let (dir, server) = setup().await;
+        (GlobalSetupHandle { dir, _lock: lock }, server)
     }
 
     fn global_project() -> Option<String> {
@@ -4429,5 +4660,367 @@ mod tests {
             .await;
         let val = parse_ok(&result);
         assert_eq!(val["created"], true);
+    }
+
+    // =========================================================================
+    // Worktree / project hierarchy tests
+    // =========================================================================
+
+    /// Build a fake linked-worktree layout under `root`:
+    ///
+    ///   <root>/main/.git/                 (main .git dir)
+    ///   <root>/main/.git/worktrees/wt/    (per-worktree gitdir)
+    ///   <root>/wt/.git                    (file: `gitdir: <abs path>`)
+    ///
+    /// Returns (canonicalized main path, canonicalized worktree path).
+    fn make_fake_worktree_mcp(root: &std::path::Path) -> (PathBuf, PathBuf) {
+        let main = root.join("main");
+        let wt = root.join("wt");
+        let wt_gitdir = main.join(".git").join("worktrees").join("wt");
+        std::fs::create_dir_all(main.join(".git")).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::create_dir_all(&wt_gitdir).unwrap();
+        std::fs::write(wt_gitdir.join("commondir"), "../..").unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", wt_gitdir.display()),
+        )
+        .unwrap();
+        (main.canonicalize().unwrap(), wt.canonicalize().unwrap())
+    }
+
+    fn new_server_at(dir: &std::path::Path, registry: Arc<dyn RegistryBackend>) -> EngramDbServer {
+        EngramDbServer::new_with_registry(dir.to_path_buf(), Some(EmbeddingBackend::Onnx), registry)
+    }
+
+    #[tokio::test]
+    async fn effective_dir_in_worktree_resolves_to_main() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree_mcp(tmp.path());
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(&wt, registry);
+        assert_eq!(server.dir, wt);
+        assert_eq!(server.effective_dir, main);
+    }
+
+    #[tokio::test]
+    async fn effective_dir_for_non_worktree_equals_dir() {
+        let tmp = TempDir::new().unwrap();
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(tmp.path(), registry);
+        assert_eq!(server.dir, server.effective_dir);
+    }
+
+    #[tokio::test]
+    async fn ensure_hierarchy_noop_for_non_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(tmp.path(), registry.clone());
+        server
+            .ensure_hierarchy()
+            .await
+            .expect("ensure_hierarchy should succeed");
+        // No registration happens in a non-worktree; store is only init'd on
+        // the first actual memory operation.
+        let loaded = registry.load().await.unwrap();
+        assert!(loaded.projects.is_empty());
+        assert!(!tmp.path().join(".engramdb").exists());
+    }
+
+    #[tokio::test]
+    async fn ensure_hierarchy_auto_inits_main_and_registers_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree_mcp(tmp.path());
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(&wt, registry.clone());
+
+        server.ensure_hierarchy().await.unwrap();
+
+        // Main project got initialized.
+        assert!(main.join(".engramdb").exists());
+        // Worktree did NOT get its own .engramdb/.
+        assert!(!wt.join(".engramdb").exists());
+
+        // Registry contains both with the child's parent set to the main id.
+        let reg = registry.load().await.unwrap();
+        let main_id = crate::storage::project_id::compute_project_id(&main);
+        let wt_id = crate::storage::project_id::compute_project_id(&wt);
+        let main_entry = reg
+            .projects
+            .iter()
+            .find(|e| e.project_id == main_id)
+            .expect("main project registered");
+        assert_eq!(main_entry.parent_project_id, None);
+        let wt_entry = reg
+            .projects
+            .iter()
+            .find(|e| e.project_id == wt_id)
+            .expect("worktree registered");
+        assert_eq!(
+            wt_entry.parent_project_id.as_deref(),
+            Some(main_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_hierarchy_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree_mcp(tmp.path());
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(&wt, registry.clone());
+
+        server.ensure_hierarchy().await.unwrap();
+        server.ensure_hierarchy().await.unwrap();
+        server.ensure_hierarchy().await.unwrap();
+
+        // Still exactly two entries after repeated calls.
+        let reg = registry.load().await.unwrap();
+        assert_eq!(reg.projects.len(), 2);
+        let wt_id = crate::storage::project_id::compute_project_id(&wt);
+        let main_id = crate::storage::project_id::compute_project_id(&main);
+        let wt_entry = reg.projects.iter().find(|e| e.project_id == wt_id).unwrap();
+        assert_eq!(
+            wt_entry.parent_project_id.as_deref(),
+            Some(main_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_hierarchy_skips_init_when_main_already_initialized() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree_mcp(tmp.path());
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+
+        // Pre-initialize the main project.
+        MemoryStore::init(&main, registry.as_ref()).await.unwrap();
+
+        let server = new_server_at(&wt, registry.clone());
+        server.ensure_hierarchy().await.unwrap();
+
+        // Main still exists; worktree registered with parent link.
+        assert!(main.join(".engramdb").exists());
+        let reg = registry.load().await.unwrap();
+        assert_eq!(reg.projects.len(), 2);
+        let wt_id = crate::storage::project_id::compute_project_id(&wt);
+        let main_id = crate::storage::project_id::compute_project_id(&main);
+        let wt_entry = reg.projects.iter().find(|e| e.project_id == wt_id).unwrap();
+        assert_eq!(
+            wt_entry.parent_project_id.as_deref(),
+            Some(main_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_dir_none_in_worktree_returns_main_path() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree_mcp(tmp.path());
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(&wt, registry.clone());
+        server.ensure_hierarchy().await.unwrap();
+
+        let resolved = server.resolve_dir(None).await.unwrap();
+        assert_eq!(resolved, main);
+    }
+
+    #[tokio::test]
+    async fn resolve_dir_with_worktree_path_swaps_to_main() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree_mcp(tmp.path());
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(&wt, registry.clone());
+        server.ensure_hierarchy().await.unwrap();
+
+        let wt_str = wt.to_string_lossy().to_string();
+        let resolved = server.resolve_dir(Some(&wt_str)).await.unwrap();
+        assert_eq!(resolved, main);
+    }
+
+    #[tokio::test]
+    async fn resolve_dir_with_worktree_id_follows_parent_chain() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree_mcp(tmp.path());
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(&wt, registry.clone());
+        server.ensure_hierarchy().await.unwrap();
+
+        let wt_id = crate::storage::project_id::compute_project_id(&wt);
+        let resolved = server.resolve_dir(Some(&wt_id)).await.unwrap();
+        assert_eq!(resolved, main);
+    }
+
+    #[tokio::test]
+    async fn memory_create_in_worktree_writes_to_main_store() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree_mcp(tmp.path());
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(&wt, registry.clone());
+        server.ensure_hierarchy().await.unwrap();
+
+        // Create a memory via the MCP handler while running in the worktree.
+        let res = server
+            .memory_create(Parameters(create_input(
+                "decision",
+                "From worktree",
+                "Created while running in linked worktree",
+            )))
+            .await;
+        let val = parse_ok(&res);
+        assert_eq!(val["created"], true);
+
+        // The memory should live under the MAIN project's store, not the worktree.
+        let main_store = MemoryStore::open(&main).await.unwrap();
+        let summaries = main_store.list_summary().await.unwrap();
+        assert_eq!(summaries.len(), 1, "memory should be in main project");
+        let mem = main_store.get(&summaries[0].id).await.unwrap();
+        assert_eq!(mem.summary, "From worktree");
+
+        // The worktree still has no .engramdb/.
+        assert!(!wt.join(".engramdb").exists());
+    }
+
+    // -----------------------------------------------------------------------
+    // projects_list / projects_info / projects_link / projects_unlink
+    // -----------------------------------------------------------------------
+
+    async fn setup_two_registered_projects() -> (TempDir, TempDir, EngramDbServer, String, String) {
+        let parent_tmp = TempDir::new().unwrap();
+        let child_tmp = TempDir::new().unwrap();
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+
+        let parent_store = MemoryStore::init(parent_tmp.path(), registry.as_ref())
+            .await
+            .unwrap();
+        let child_store = MemoryStore::init(child_tmp.path(), registry.as_ref())
+            .await
+            .unwrap();
+        let parent_id = parent_store.project_id.clone();
+        let child_id = child_store.project_id.clone();
+
+        let server = EngramDbServer::new_with_registry(
+            parent_tmp.path().to_path_buf(),
+            Some(EmbeddingBackend::Onnx),
+            Arc::clone(&registry),
+        );
+        (parent_tmp, child_tmp, server, parent_id, child_id)
+    }
+
+    #[tokio::test]
+    async fn projects_list_shows_registered_projects() {
+        let (_p, _c, server, parent_id, child_id) = setup_two_registered_projects().await;
+        let result = server.projects_list().await;
+        let val = parse_ok(&result);
+        let arr = val.as_array().unwrap();
+        let ids: Vec<String> = arr
+            .iter()
+            .map(|e| e["project_id"].as_str().unwrap().to_string())
+            .collect();
+        assert!(ids.contains(&parent_id), "parent must be in list");
+        assert!(ids.contains(&child_id), "child must be in list");
+    }
+
+    #[tokio::test]
+    async fn projects_info_current_project() {
+        let (_p, _c, server, parent_id, _child_id) = setup_two_registered_projects().await;
+        let result = server
+            .projects_info(Parameters(ProjectsInfoInput { project: None }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["project_id"], parent_id);
+        assert!(val["memory_count"].is_number());
+    }
+
+    #[tokio::test]
+    async fn projects_info_by_id() {
+        let (_p, _c, server, _parent_id, child_id) = setup_two_registered_projects().await;
+        let result = server
+            .projects_info(Parameters(ProjectsInfoInput {
+                project: Some(child_id.clone()),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["project_id"], child_id);
+    }
+
+    #[tokio::test]
+    async fn projects_link_then_unlink_roundtrip() {
+        let (_p, _c, server, parent_id, child_id) = setup_two_registered_projects().await;
+
+        let link_res = server
+            .projects_link(Parameters(ProjectsLinkInput {
+                child: child_id.clone(),
+                parent: parent_id.clone(),
+            }))
+            .await;
+        let val = parse_ok(&link_res);
+        assert_eq!(val["linked"], true);
+
+        // projects_list should now reflect the parent_project_id on the child.
+        let list = parse_ok(&server.projects_list().await);
+        let child_entry = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["project_id"] == child_id)
+            .unwrap();
+        assert_eq!(child_entry["parent_project_id"], parent_id);
+
+        let unlink_res = server
+            .projects_unlink(Parameters(ProjectsUnlinkInput {
+                project_id: child_id.clone(),
+            }))
+            .await;
+        let val = parse_ok(&unlink_res);
+        assert_eq!(val["unlinked"], true);
+
+        let list = parse_ok(&server.projects_list().await);
+        let child_entry = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["project_id"] == child_id)
+            .unwrap();
+        assert!(child_entry.get("parent_project_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn projects_link_rejects_self() {
+        let (_p, _c, server, parent_id, _child_id) = setup_two_registered_projects().await;
+        let result = server
+            .projects_link(Parameters(ProjectsLinkInput {
+                child: parent_id.clone(),
+                parent: parent_id,
+            }))
+            .await;
+        let err = parse_err(&result);
+        assert_eq!(err["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn projects_link_rejects_cycle() {
+        let (_p, _c, server, parent_id, child_id) = setup_two_registered_projects().await;
+
+        // child → parent
+        server
+            .projects_link(Parameters(ProjectsLinkInput {
+                child: child_id.clone(),
+                parent: parent_id.clone(),
+            }))
+            .await
+            .unwrap();
+
+        // Reversing would create a cycle.
+        let result = server
+            .projects_link(Parameters(ProjectsLinkInput {
+                child: parent_id,
+                parent: child_id,
+            }))
+            .await;
+        let err = parse_err(&result);
+        assert_eq!(err["error"]["code"], "VALIDATION_ERROR");
+        assert!(err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("cycle"));
     }
 }
