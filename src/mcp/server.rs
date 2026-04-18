@@ -1,6 +1,6 @@
 //! EngramDB MCP server implementation.
 //!
-//! Defines the server struct, all MCP tools (16), resources (2), and prompts (2).
+//! Defines the server struct, all MCP tools (15), resources (2), and prompts (2).
 //! Tools delegate to the `ops` layer; the server opens a fresh `MemoryStore`
 //! per request so it always sees the latest on-disk state.
 
@@ -16,8 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::mcp::error::{error_response, ErrorCode};
 use crate::ops;
-use crate::retrieval::engine::{RetrievalEngine, RetrievalQuery};
-use crate::retrieval::filters::SearchFilters;
+use crate::retrieval::engine::{RetrievalEngine, RetrievalMode, RetrievalQuery};
 use crate::storage::config::load_config;
 use crate::storage::{FileRegistry, MemoryStore, RegistryBackend};
 use crate::title::TitleStrategy;
@@ -90,15 +89,22 @@ struct CreateInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct RetrieveInput {
-    #[schemars(description = "File path relative to project root")]
+struct QueryInput {
+    #[schemars(
+        description = "Mode: \"rank\" for context-aware ranked results (browse); \"filter\" to require a positive signal (keyword, scope, tag, or semantic match). Required."
+    )]
+    mode: String,
+
+    #[schemars(description = "Search query text (tokenized against summary, content, tags)")]
+    query: Option<String>,
+
+    #[schemars(description = "Physical scope — current file path for proximity scoring")]
     path: Option<String>,
 
-    #[schemars(description = "Logical scopes")]
+    #[schemars(
+        description = "Logical scopes in dot notation — contributes to hierarchy-proximity scoring (not a filter)"
+    )]
     logical: Option<Vec<String>>,
-
-    #[schemars(description = "Text query for semantic search")]
-    query: Option<String>,
 
     #[schemars(description = "Filter by memory types")]
     types: Option<Vec<String>>,
@@ -112,43 +118,13 @@ struct RetrieveInput {
     #[schemars(description = "Maximum results (default 10)")]
     max_results: Option<usize>,
 
-    #[schemars(description = "Detail: summary|content|full (default content)")]
+    #[schemars(
+        description = "Detail: summary|content|full (default content) — available in both modes"
+    )]
     detail_level: Option<String>,
 
     #[schemars(description = "Include expired/decayed memories")]
     include_expired: Option<bool>,
-
-    #[schemars(description = "Also include global memories in results (default false)")]
-    include_global: Option<bool>,
-
-    #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
-    )]
-    project: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct SearchInput {
-    #[schemars(description = "Search query against summary, content, and tags")]
-    query: String,
-
-    #[schemars(description = "Filter by memory types")]
-    types: Option<Vec<String>>,
-
-    #[schemars(description = "Filter by tags")]
-    tags: Option<Vec<String>>,
-
-    #[schemars(description = "Filter by physical scope")]
-    physical: Option<String>,
-
-    #[schemars(description = "Filter by logical scope")]
-    logical: Option<String>,
-
-    #[schemars(description = "Minimum criticality")]
-    min_criticality: Option<f64>,
-
-    #[schemars(description = "Max results (default 10)")]
-    max_results: Option<usize>,
 
     #[schemars(description = "Also include global memories in results (default false)")]
     include_global: Option<bool>,
@@ -774,13 +750,24 @@ impl EngramDbServer {
     }
 
     #[tool(
-        name = "retrieve",
-        description = "Get memories relevant to your current working context. Call before modifying files, researching project questions, or investigating how things work."
+        name = "query",
+        description = "Query all memories. Use `mode: \"rank\"` to browse memories ranked by relevance to a context (current file path, topic, logical scope) — good before modifying files or when orienting. Use `mode: \"filter\"` to find memories containing specific terms, scopes, or tag matches — good when you have a concrete lookup. Filter mode requires at least one of `query`, `logical`, `path`, or `tags`."
     )]
-    async fn memory_retrieve(
+    async fn memory_query(
         &self,
-        Parameters(input): Parameters<RetrieveInput>,
+        Parameters(input): Parameters<QueryInput>,
     ) -> Result<String, String> {
+        let mode = match input.mode.as_str() {
+            "rank" => RetrievalMode::Rank,
+            "filter" => RetrievalMode::Filter,
+            other => {
+                return Err(error_response(
+                    ErrorCode::ValidationError,
+                    &format!("mode must be \"rank\" or \"filter\", got {:?}", other),
+                ));
+            }
+        };
+
         let engine = self.build_engine_for(input.project.as_deref()).await?;
 
         let type_filter = if let Some(types) = &input.types {
@@ -809,6 +796,7 @@ impl EngramDbServer {
         }
 
         let query = RetrievalQuery {
+            mode,
             path: input.path,
             logical: input.logical.unwrap_or_default(),
             query: input.query,
@@ -820,14 +808,14 @@ impl EngramDbServer {
             detail_level,
         };
 
-        let mut result = ops::retrieve_memories(&engine, &query)
+        let mut result = ops::query_memories(&engine, &query)
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
         // Merge global memories if requested and not already targeting the global store
         if input.include_global.unwrap_or(false) && !Self::is_global(input.project.as_deref()) {
             if let Ok(global_engine) = self.build_engine_for(Some("global")).await {
-                if let Ok(global_result) = ops::retrieve_memories(&global_engine, &query).await {
+                if let Ok(global_result) = ops::query_memories(&global_engine, &query).await {
                     let max = query.max_results.unwrap_or(10);
                     merge_scored_memories(&mut result.memories, global_result.memories, max);
                     result.total += global_result.total;
@@ -861,87 +849,7 @@ impl EngramDbServer {
         serde_json::to_string(&serde_json::json!({
             "memories": memories,
             "total": result.total,
-            "query_mode": result.query_mode,
-        }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
-    }
-
-    #[tool(
-        name = "search",
-        description = "Search all memories by text. Use before answering questions about project conventions, workflows, architecture, or tooling."
-    )]
-    async fn memory_search(
-        &self,
-        Parameters(input): Parameters<SearchInput>,
-    ) -> Result<String, String> {
-        let engine = self.build_engine_for(input.project.as_deref()).await?;
-
-        let type_filter = if let Some(types) = &input.types {
-            let mut parsed = Vec::new();
-            for t in types {
-                parsed.push(
-                    ops::parse_memory_type(t)
-                        .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?,
-                );
-            }
-            Some(parsed)
-        } else {
-            None
-        };
-
-        if let Some(mc) = input.min_criticality {
-            ops::validate_score(mc, "min_criticality")
-                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
-        }
-
-        let filters = SearchFilters {
-            types: type_filter,
-            tags: input.tags,
-            physical: input.physical,
-            logical: input.logical,
-            min_criticality: input.min_criticality,
-        };
-
-        let max = input.max_results.unwrap_or(10);
-        let mut results = ops::search_memories(&engine, &input.query, &filters, Some(max))
-            .await
-            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
-
-        // Merge global memories if requested and not already targeting the global store
-        if input.include_global.unwrap_or(false) && !Self::is_global(input.project.as_deref()) {
-            if let Ok(global_engine) = self.build_engine_for(Some("global")).await {
-                if let Ok(global_results) =
-                    ops::search_memories(&global_engine, &input.query, &filters, Some(max)).await
-                {
-                    merge_scored_memories(&mut results, global_results, max);
-                }
-            }
-        }
-
-        let memories: Vec<ScoredMemoryOutput> = results
-            .iter()
-            .map(|sm| ScoredMemoryOutput {
-                memory: memory_to_output(&sm.memory, false),
-                score: sm.score,
-                score_breakdown: ScoreBreakdownOutput {
-                    final_score: sm.score_breakdown.final_score,
-                    semantic: sm.score_breakdown.semantic,
-                    keyword: sm.score_breakdown.keyword,
-                    rerank: sm.score_breakdown.rerank,
-                    relevance: sm.score_breakdown.relevance,
-                    scope: sm.score_breakdown.scope,
-                    scope_multiplier: sm.score_breakdown.scope_multiplier,
-                    trust: sm.score_breakdown.trust,
-                    trust_multiplier: sm.score_breakdown.trust_multiplier,
-                    decay: sm.score_breakdown.decay,
-                    criticality: sm.score_breakdown.criticality,
-                },
-            })
-            .collect();
-
-        serde_json::to_string(&serde_json::json!({
-            "memories": memories,
-            "total": results.len(),
+            "retrieval_quality": result.retrieval_quality,
         }))
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
     }
@@ -1562,11 +1470,12 @@ impl ServerHandler for EngramDbServer {
                     .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
 
                 let query = RetrievalQuery {
+                    mode: RetrievalMode::Rank,
                     path: Some(path.to_string()),
                     max_results: Some(10),
                     ..RetrievalQuery::default()
                 };
-                let result = ops::retrieve_memories(&engine, &query)
+                let result = ops::query_memories(&engine, &query)
                     .await
                     .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
@@ -1649,11 +1558,12 @@ impl ServerHandler for EngramDbServer {
 
                 if let Ok(engine) = self.build_engine().await {
                     let query = RetrievalQuery {
+                        mode: RetrievalMode::Rank,
                         path,
                         max_results: Some(10),
                         ..RetrievalQuery::default()
                     };
-                    if let Ok(result) = ops::retrieve_memories(&engine, &query).await {
+                    if let Ok(result) = ops::query_memories(&engine, &query).await {
                         for sm in &result.memories {
                             let status_marker = match sm.memory.status {
                                 Status::Challenged => " ⚠️",
@@ -1810,6 +1720,26 @@ mod tests {
     fn parse_err(result: &Result<String, String>) -> serde_json::Value {
         let json_str = result.as_ref().unwrap_err();
         serde_json::from_str(json_str).unwrap_or_else(|_| json!({"error": {"message": json_str}}))
+    }
+
+    /// Helper: build a QueryInput with all fields defaulted to None and the
+    /// given mode. Use with `..query_input(...)` in tests to override only
+    /// the fields that matter.
+    fn query_input(mode: &str) -> QueryInput {
+        QueryInput {
+            mode: mode.to_string(),
+            query: None,
+            path: None,
+            logical: None,
+            types: None,
+            tags: None,
+            min_criticality: None,
+            max_results: None,
+            detail_level: None,
+            include_expired: None,
+            include_global: None,
+            project: None,
+        }
     }
 
     fn create_input(type_: &str, summary: &str, content: &str) -> CreateInput {
@@ -2269,7 +2199,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // memory_search
+    // memory_query — filter mode (formerly `search`)
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -2291,16 +2221,9 @@ mod tests {
         .await;
 
         let result = server
-            .memory_search(Parameters(SearchInput {
-                query: "Rust fast".to_string(),
-                types: None,
-                tags: None,
-                physical: None,
-                logical: None,
-                min_criticality: None,
-                max_results: None,
-                include_global: None,
-                project: None,
+            .memory_query(Parameters(QueryInput {
+                query: Some("Rust fast".to_string()),
+                ..query_input("filter")
             }))
             .await;
         let val = parse_ok(&result);
@@ -2314,16 +2237,10 @@ mod tests {
         let _ = create_and_get_id(&server, "hazard", "Hazard mem", "Hazard content").await;
 
         let result = server
-            .memory_search(Parameters(SearchInput {
-                query: "content".to_string(),
+            .memory_query(Parameters(QueryInput {
+                query: Some("content".to_string()),
                 types: Some(vec!["hazard".to_string()]),
-                tags: None,
-                physical: None,
-                logical: None,
-                min_criticality: None,
-                max_results: None,
-                include_global: None,
-                project: None,
+                ..query_input("filter")
             }))
             .await;
         let val = parse_ok(&result);
@@ -2347,16 +2264,10 @@ mod tests {
         }
 
         let result = server
-            .memory_search(Parameters(SearchInput {
-                query: "topic".to_string(),
-                types: None,
-                tags: None,
-                physical: None,
-                logical: None,
-                min_criticality: None,
+            .memory_query(Parameters(QueryInput {
+                query: Some("topic".to_string()),
                 max_results: Some(1),
-                include_global: None,
-                project: None,
+                ..query_input("filter")
             }))
             .await;
         let val = parse_ok(&result);
@@ -2364,29 +2275,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_no_match() {
+    async fn search_low_similarity_query_does_not_boost_unrelated_memory() {
+        // With embeddings enabled, even a nonsense query yields non-zero
+        // semantic similarity, so filter-mode sufficiency passes for every
+        // memory. The invariant we preserve is weaker than the old
+        // `search()` "keyword-strict" contract: the returned memory should
+        // rank below a keyword-matching one. We verify that here by
+        // contrasting a keyword-matching query against the same corpus.
         let (_dir, server) = setup().await;
         let _ = create_and_get_id(&server, "decision", "About Rust", "Rust content").await;
 
-        let result = server
-            .memory_search(Parameters(SearchInput {
-                query: "xyzzy_nonexistent_term_9999".to_string(),
-                types: None,
-                tags: None,
-                physical: None,
-                logical: None,
-                min_criticality: None,
-                max_results: None,
-                include_global: None,
-                project: None,
+        let nonsense = server
+            .memory_query(Parameters(QueryInput {
+                query: Some("xyzzy_nonexistent_term_9999".to_string()),
+                ..query_input("filter")
             }))
             .await;
-        let val = parse_ok(&result);
-        assert_eq!(val["memories"].as_array().unwrap().len(), 0);
+        let keyword = server
+            .memory_query(Parameters(QueryInput {
+                query: Some("Rust".to_string()),
+                ..query_input("filter")
+            }))
+            .await;
+
+        let nonsense_val = parse_ok(&nonsense);
+        let keyword_val = parse_ok(&keyword);
+
+        // Keyword-matching query must return results.
+        assert!(!keyword_val["memories"].as_array().unwrap().is_empty());
+
+        // Even if the nonsense query returns the memory via semantic
+        // similarity, the keyword query must score it higher.
+        if let Some(ns_mem) = nonsense_val["memories"].as_array().unwrap().first() {
+            let ns_score = ns_mem["score"].as_f64().unwrap();
+            let kw_score = keyword_val["memories"][0]["score"].as_f64().unwrap();
+            assert!(
+                kw_score > ns_score,
+                "keyword match ({}) should outrank nonsense semantic match ({})",
+                kw_score,
+                ns_score,
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
-    // memory_retrieve
+    // memory_query — rank mode (context-aware ranking, formerly `retrieve`)
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -2400,18 +2333,9 @@ mod tests {
         server.memory_create(Parameters(input)).await.unwrap();
 
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
+            .memory_query(Parameters(QueryInput {
                 path: Some("src/main.rs".to_string()),
-                logical: None,
-                query: None,
-                types: None,
-                tags: None,
-                min_criticality: None,
-                max_results: None,
-                detail_level: None,
-                include_expired: None,
-                include_global: None,
-                project: None,
+                ..query_input("rank")
             }))
             .await;
         let val = parse_ok(&result);
@@ -2430,18 +2354,10 @@ mod tests {
         server.memory_create(Parameters(input)).await.unwrap();
 
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
+            .memory_query(Parameters(QueryInput {
                 path: Some("src/auth/login.rs".to_string()),
                 logical: Some(vec!["auth.login".to_string()]),
-                query: None,
-                types: None,
-                tags: None,
-                min_criticality: None,
-                max_results: None,
-                detail_level: None,
-                include_expired: None,
-                include_global: None,
-                project: None,
+                ..query_input("rank")
             }))
             .await;
         let val = parse_ok(&result);
@@ -2460,18 +2376,10 @@ mod tests {
         .await;
 
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
+            .memory_query(Parameters(QueryInput {
                 path: Some("/".to_string()),
-                logical: None,
-                query: None,
-                types: None,
-                tags: None,
-                min_criticality: None,
-                max_results: None,
                 detail_level: Some("summary".to_string()),
-                include_expired: None,
-                include_global: None,
-                project: None,
+                ..query_input("rank")
             }))
             .await;
         // Should succeed without error
@@ -2484,22 +2392,46 @@ mod tests {
         let _ = create_and_get_id(&server, "decision", "Setup", "Content").await;
 
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
-                path: None,
-                logical: None,
-                query: None,
-                types: None,
-                tags: None,
-                min_criticality: None,
-                max_results: None,
+            .memory_query(Parameters(QueryInput {
                 detail_level: Some("bogus".to_string()),
-                include_expired: None,
-                include_global: None,
-                project: None,
+                ..query_input("rank")
             }))
             .await;
         let val = parse_err(&result);
         assert_eq!(val["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn query_rejects_invalid_mode() {
+        let (_dir, server) = setup().await;
+        let result = server
+            .memory_query(Parameters(QueryInput {
+                query: Some("anything".to_string()),
+                ..query_input("invalid_mode_name")
+            }))
+            .await;
+        let val = parse_err(&result);
+        assert_eq!(val["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn query_filter_requires_a_signal() {
+        let (_dir, server) = setup().await;
+        let _ = create_and_get_id(&server, "decision", "anything", "content").await;
+
+        // No query/logical/path/tags — filter mode must reject.
+        let result = server
+            .memory_query(Parameters(QueryInput {
+                min_criticality: Some(0.5),
+                ..query_input("filter")
+            }))
+            .await;
+        let val = parse_err(&result);
+        assert_eq!(val["error"]["code"], "INTERNAL_ERROR");
+        assert!(val["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("filter requires at least one"));
     }
 
     // -----------------------------------------------------------------------
@@ -3097,16 +3029,10 @@ mod tests {
 
         // Search from server A targeting project B
         let result = server
-            .memory_search(Parameters(SearchInput {
-                query: "snake_case".to_string(),
-                types: None,
-                tags: None,
-                physical: None,
-                logical: None,
-                min_criticality: None,
-                max_results: None,
-                include_global: None,
+            .memory_query(Parameters(QueryInput {
+                query: Some("snake_case".to_string()),
                 project: Some(project_b),
+                ..query_input("filter")
             }))
             .await;
         let val = parse_ok(&result);
@@ -3730,18 +3656,10 @@ mod tests {
         .await;
 
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
+            .memory_query(Parameters(QueryInput {
                 path: Some("/".to_string()),
-                logical: None,
-                query: None,
-                types: None,
-                tags: None,
-                min_criticality: None,
-                max_results: None,
-                detail_level: None,
-                include_expired: None,
-                include_global: None,
                 project: global_project(),
+                ..query_input("rank")
             }))
             .await;
         let val = parse_ok(&result);
@@ -3760,18 +3678,10 @@ mod tests {
         .await;
 
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
-                path: None,
-                logical: None,
+            .memory_query(Parameters(QueryInput {
                 query: Some("error handling".to_string()),
-                types: None,
-                tags: None,
-                min_criticality: None,
-                max_results: None,
-                detail_level: None,
-                include_expired: None,
-                include_global: None,
                 project: global_project(),
+                ..query_input("rank")
             }))
             .await;
         let val = parse_ok(&result);
@@ -3790,16 +3700,10 @@ mod tests {
         .await;
 
         let result = server
-            .memory_search(Parameters(SearchInput {
-                query: "JetBrains Mono".to_string(),
-                types: None,
-                tags: None,
-                physical: None,
-                logical: None,
-                min_criticality: None,
-                max_results: None,
-                include_global: None,
+            .memory_query(Parameters(QueryInput {
+                query: Some("JetBrains Mono".to_string()),
                 project: global_project(),
+                ..query_input("filter")
             }))
             .await;
         let val = parse_ok(&result);
@@ -3819,16 +3723,11 @@ mod tests {
         create_global_and_get_id(&server, "hazard", "Hazard in global", "Hazard content").await;
 
         let result = server
-            .memory_search(Parameters(SearchInput {
-                query: "content".to_string(),
+            .memory_query(Parameters(QueryInput {
+                query: Some("content".to_string()),
                 types: Some(vec!["hazard".to_string()]),
-                tags: None,
-                physical: None,
-                logical: None,
-                min_criticality: None,
-                max_results: None,
-                include_global: None,
                 project: global_project(),
+                ..query_input("filter")
             }))
             .await;
         let val = parse_ok(&result);
@@ -3864,18 +3763,11 @@ mod tests {
 
         // Retrieve with include_global=true should include both
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
+            .memory_query(Parameters(QueryInput {
                 path: Some("/".to_string()),
-                logical: None,
-                query: None,
-                types: None,
-                tags: None,
-                min_criticality: None,
                 max_results: Some(20),
-                detail_level: None,
-                include_expired: None,
                 include_global: Some(true),
-                project: None,
+                ..query_input("rank")
             }))
             .await;
         let val = parse_ok(&result);
@@ -3917,16 +3809,11 @@ mod tests {
         .await;
 
         let result = server
-            .memory_search(Parameters(SearchInput {
-                query: "search test memory".to_string(),
-                types: None,
-                tags: None,
-                physical: None,
-                logical: None,
-                min_criticality: None,
+            .memory_query(Parameters(QueryInput {
+                query: Some("search test memory".to_string()),
                 max_results: Some(20),
                 include_global: Some(true),
-                project: None,
+                ..query_input("filter")
             }))
             .await;
         let val = parse_ok(&result);
@@ -3968,18 +3855,11 @@ mod tests {
         .await;
 
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
+            .memory_query(Parameters(QueryInput {
                 path: Some("/".to_string()),
-                logical: None,
-                query: None,
-                types: None,
-                tags: None,
-                min_criticality: None,
                 max_results: Some(20),
-                detail_level: None,
-                include_expired: None,
                 include_global: Some(false),
-                project: None,
+                ..query_input("rank")
             }))
             .await;
         let val = parse_ok(&result);
@@ -4017,18 +3897,10 @@ mod tests {
 
         // include_global defaults to None (false)
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
+            .memory_query(Parameters(QueryInput {
                 path: Some("/".to_string()),
-                logical: None,
-                query: None,
-                types: None,
-                tags: None,
-                min_criticality: None,
                 max_results: Some(20),
-                detail_level: None,
-                include_expired: None,
-                include_global: None,
-                project: None,
+                ..query_input("rank")
             }))
             .await;
         let val = parse_ok(&result);
@@ -4522,18 +4394,11 @@ mod tests {
 
         for level in &["summary", "content", "full"] {
             let result = server
-                .memory_retrieve(Parameters(RetrieveInput {
+                .memory_query(Parameters(QueryInput {
                     path: Some("/".to_string()),
-                    logical: None,
-                    query: None,
-                    types: None,
-                    tags: None,
-                    min_criticality: None,
-                    max_results: None,
                     detail_level: Some(level.to_string()),
-                    include_expired: None,
-                    include_global: None,
                     project: global_project(),
+                    ..query_input("rank")
                 }))
                 .await;
             let val = parse_ok(&result);

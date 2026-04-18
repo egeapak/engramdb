@@ -14,11 +14,10 @@ pub mod get;
 pub mod list;
 pub mod parsing;
 pub mod projects;
+pub mod query;
 pub mod reindex;
 pub mod resolve;
-pub mod retrieve;
 pub mod review;
-pub mod search;
 pub mod stats;
 pub mod update;
 
@@ -40,11 +39,10 @@ pub use parsing::{
     parse_decay_strategy, parse_detail_level, parse_memory_type, parse_status, parse_visibility,
     validate_score,
 };
+pub use query::query_memories;
 pub use reindex::{reindex, ReindexResult};
 pub use resolve::{resolve_memory, ResolveAction, ResolveParams, ResolveResult};
-pub use retrieve::retrieve_memories;
 pub use review::{review_memories, ReviewParams};
-pub use search::search_memories;
 pub use stats::{compute_stats, StoreStats};
 pub use update::{update_memory, UpdateParams};
 

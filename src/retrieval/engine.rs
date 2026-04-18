@@ -29,16 +29,35 @@ pub enum DetailLevel {
     Full,
 }
 
+/// Mode controlling whether query returns every passing memory (Rank) or
+/// only those with a positive relevance signal (Filter).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RetrievalMode {
+    /// Return every memory passing the type/tag/criticality filters, ranked
+    /// by composite score. The "context-aware browsing" flow.
+    #[default]
+    Rank,
+
+    /// Require at least one positive relevance signal (keyword, semantic,
+    /// scope proximity, or tag match). Memories with zero signal are dropped.
+    /// Used for specific-term lookups.
+    Filter,
+}
+
 /// Query parameters for retrieval.
 #[derive(Debug, Clone, Default)]
 pub struct RetrievalQuery {
+    /// Mode: Rank (browse by context) or Filter (require positive signal).
+    pub mode: RetrievalMode,
+
     /// Physical scope - current file path
     pub path: Option<String>,
 
-    /// Logical scopes - dot-notation domains
+    /// Logical scopes - dot-notation domains; contribute to scoring only,
+    /// never used as a filter.
     pub logical: Vec<String>,
 
-    /// Search query text (for semantic similarity)
+    /// Search query text (for semantic similarity + keyword search)
     pub query: Option<String>,
 
     /// Filter by memory types
@@ -80,8 +99,13 @@ pub struct RetrievalResult {
     /// Total number of memories before limit was applied
     pub total: usize,
 
-    /// Query mode used: "with_embeddings", "degraded_keyword", "degraded", or "scope_only"
-    pub query_mode: String,
+    /// Retrieval-quality label describing which scoring signals were
+    /// available for the query. One of:
+    /// - `"full"`           — query text + embeddings contributed
+    /// - `"keyword_only"`   — query text, keyword matched, no embeddings
+    /// - `"no_query_signals"` — query text provided but nothing matched
+    /// - `"scope_only"`     — no query text; scope / filter-only ranking
+    pub retrieval_quality: String,
 }
 
 /// Main retrieval engine for EngramDB.
@@ -355,34 +379,52 @@ impl RetrievalEngine {
         Ok(())
     }
 
-    /// Retrieve memories based on a query
+    /// Query memories with unified ranked / filtered retrieval.
     ///
-    /// # Algorithm
-    /// 1. Load all index entries from store
-    /// 2. Apply filters (type, tags, min_criticality, expired status)
-    /// 3. For each remaining entry, load the full memory
-    /// 4. Calculate composite score
-    /// 5. Filter memories below relevance_threshold (unless include_expired overrides)
-    /// 6. Sort by score descending
-    /// 7. Take top max_results
-    /// 8. Strip details based on detail_level
-    /// 9. Return RetrievalResult with total count before limit
-    pub async fn retrieve(&self, query: &RetrievalQuery) -> Result<RetrievalResult> {
-        // Step 1: Load lightweight index entries (6 columns)
+    /// Two modes:
+    /// - [`RetrievalMode::Rank`] — returns every memory passing the
+    ///   type/tag/criticality/physical filters, scored and sorted.
+    /// - [`RetrievalMode::Filter`] — requires at least one positive
+    ///   relevance signal (keyword, semantic, scope proximity, or a
+    ///   caller-supplied tag match). Memories with zero signal are dropped.
+    ///
+    /// Filter mode additionally requires at least one of
+    /// `query`, `logical`, `path`, or `tags` to be set, otherwise returns
+    /// [`StorageError::Validation`]. `min_criticality` alone is **not**
+    /// a relevance signal — it is an importance filter only.
+    ///
+    /// Logical scope is always a scoring signal, never a filter: scoping a
+    /// query with `logical = ["workflow.git.pr"]` makes unrelated memories
+    /// rank lower but does not exclude them.
+    pub async fn query(&self, query: &RetrievalQuery) -> Result<RetrievalResult> {
+        use crate::search::{keyword_search, normalize_keyword_score, query_token_count};
+
+        // Step 0: Filter-mode requires at least one positive relevance input.
+        if query.mode == RetrievalMode::Filter {
+            let has_signal = query.query.as_ref().is_some_and(|s| !s.is_empty())
+                || !query.logical.is_empty()
+                || query.path.as_ref().is_some_and(|s| !s.is_empty())
+                || query.tags.as_ref().is_some_and(|t| !t.is_empty());
+            if !has_signal {
+                return Err(crate::storage::StorageError::Validation(
+                    "mode=filter requires at least one of: query, logical, path, tags".to_string(),
+                ));
+            }
+        }
+
+        // Step 1: Load lightweight index entries (6 columns).
         let all_entries = self.store.list_for_filtering().await?;
 
-        // Step 2: Apply filters
+        // Step 2: Apply filters. Logical is NOT a filter — it only scores.
         let filters = SearchFilters {
             types: query.types.clone(),
             tags: query.tags.clone(),
             physical: query.path.clone(),
-            logical: query.logical.first().cloned(), // Use first logical scope for filtering
             min_criticality: query.min_criticality,
         };
-
         let filtered_entries = apply_index_filters(all_entries, &filters);
 
-        // Step 2.5: Pre-filter expired entries at the index level (before any disk I/O)
+        // Step 2.5: Pre-filter expired entries at the index level.
         let include_expired = query
             .include_expired
             .unwrap_or(self.config.retrieval.include_expired);
@@ -396,7 +438,12 @@ impl RetrievalEngine {
                 .collect()
         };
 
-        // Step 2.6: If query text provided and embeddings available, get semantic scores
+        // Step 3: Batch-load surviving memories (single dir scan).
+        let ids: Vec<&str> = filtered_entries.iter().map(|e| e.id.as_str()).collect();
+        let loaded = self.store.get_batch(&ids).await?;
+        let memory_map: HashMap<String, Memory> = loaded.into_iter().collect();
+
+        // Step 4: If query text + embeddings available, get semantic scores.
         let semantic_scores_map: Option<HashMap<String, f64>> = if let Some(ref q) = query.query {
             if let Some(provider) = &self.embedding_provider {
                 if let Ok(query_vector) = provider.embed(q).await {
@@ -404,11 +451,11 @@ impl RetrievalEngine {
                         .max_results
                         .unwrap_or(self.config.retrieval.max_results)
                         * 3;
-                    if let Ok(matches) = self.store.vector_search(query_vector, limit).await {
-                        Some(matches.into_iter().map(|m| (m.id, m.score)).collect())
-                    } else {
-                        None
-                    }
+                    self.store
+                        .vector_search(query_vector, limit)
+                        .await
+                        .ok()
+                        .map(|matches| matches.into_iter().map(|m| (m.id, m.score)).collect())
                 } else {
                     None
                 }
@@ -419,46 +466,32 @@ impl RetrievalEngine {
             None
         };
 
-        // Step 3 & 4: Batch-load all surviving memories (single dir scan) and calculate scores
-        let ids: Vec<&str> = filtered_entries.iter().map(|e| e.id.as_str()).collect();
-        let loaded = self.store.get_batch(&ids).await?;
-        let memory_map: HashMap<String, Memory> = loaded.into_iter().collect();
+        // Step 5: Run keyword search whenever query text is present. Keyword
+        // scores power both the "keyword_only" mode and the filter-mode
+        // sufficiency check, so we compute them even when embeddings are live.
+        let keyword_map: HashMap<String, f64> = if let Some(ref q) = query.query {
+            let memories_vec: Vec<&Memory> = memory_map.values().collect();
+            let kw_results = keyword_search(q, &memories_vec);
+            let num_tokens = query_token_count(q);
+            kw_results
+                .into_iter()
+                .map(|(idx, raw)| {
+                    let norm = normalize_keyword_score(raw, num_tokens);
+                    (memories_vec[idx].id.clone(), norm)
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
 
-        // Step 3.5: Run keyword search in degraded mode (query present, no embeddings).
-        // INVARIANT: keyword_search returns indices into memories_vec.
-        // The index resolution in .map() below must use this same vec
-        // without any intermediate mutation or reordering.
-        let degraded_kw: Option<HashMap<String, f64>> =
-            if query.query.is_some() && semantic_scores_map.is_none() {
-                let query_text = query.query.as_deref().unwrap();
-                let memories_vec: Vec<&Memory> = memory_map.values().collect();
-                let kw_results = crate::search::keyword_search(query_text, &memories_vec);
-                let num_tokens = crate::search::query_token_count(query_text);
-                if kw_results.is_empty() {
-                    None
-                } else {
-                    Some(
-                        kw_results
-                            .into_iter()
-                            .map(|(idx, raw)| {
-                                let norm = crate::search::normalize_keyword_score(raw, num_tokens);
-                                (memories_vec[idx].id.clone(), norm)
-                            })
-                            .collect(),
-                    )
-                }
-            } else {
-                None
-            };
-
-        // Determine query mode for the entire retrieval
-        let query_mode = if query.query.is_some() {
+        // Derive retrieval_quality label.
+        let retrieval_quality = if query.query.is_some() {
             if semantic_scores_map.is_some() {
-                "with_embeddings"
-            } else if degraded_kw.is_some() {
-                "degraded_keyword"
+                "full"
+            } else if !keyword_map.is_empty() {
+                "keyword_only"
             } else {
-                "degraded"
+                "no_query_signals"
             }
         } else {
             "scope_only"
@@ -466,40 +499,54 @@ impl RetrievalEngine {
 
         let mut scored_memories: Vec<ScoredMemory> = Vec::new();
         let query_path = query.path.as_deref();
+        let now = Utc::now();
+
         for entry in filtered_entries.iter() {
             let memory = match memory_map.get(&entry.id) {
                 Some(m) => m,
                 None => continue,
             };
 
-            // Calculate composite score
+            // Build scoring context. Semantic wins when present for this
+            // memory; keyword fills in otherwise; fall back to degraded when
+            // query text is set but nothing matched; scope_only when no query.
+            let sem_score = semantic_scores_map
+                .as_ref()
+                .and_then(|m| m.get(&memory.id))
+                .copied();
+            let kw_score = keyword_map.get(&memory.id).copied();
+
             let context = if let Some(ref q) = query.query {
-                if let Some(ref semantic_scores) = semantic_scores_map {
-                    if let Some(&sem_score) = semantic_scores.get(&memory.id) {
-                        // Full mode: query + embeddings
-                        ScoringContext::with_semantic(query_path, &query.logical, q, sem_score)
-                    } else {
-                        // Memory not in vector results, degraded mode
-                        ScoringContext::with_query_degraded(query_path, &query.logical, q)
-                    }
-                } else if let Some(kw_score) = degraded_kw.as_ref().and_then(|m| m.get(&memory.id))
-                {
-                    // Degraded mode with keyword scoring
-                    ScoringContext::with_keyword(query_path, &query.logical, q, *kw_score, None)
+                if let Some(s) = sem_score {
+                    ScoringContext::with_semantic(query_path, &query.logical, q, s)
+                } else if let Some(kw) = kw_score {
+                    ScoringContext::with_keyword(query_path, &query.logical, q, kw, None)
                 } else {
-                    // No embeddings, no keyword match
                     ScoringContext::with_query_degraded(query_path, &query.logical, q)
                 }
             } else {
-                // Scope-only retrieval
                 ScoringContext::scope_only(query_path, &query.logical)
             };
 
             let breakdown = if include_expired {
-                composite_score_ignore_decay(memory, &context, &self.config, Utc::now())
+                composite_score_ignore_decay(memory, &context, &self.config, now)
             } else {
-                composite_score(memory, &context, &self.config, Utc::now())
+                composite_score(memory, &context, &self.config, now)
             };
+
+            // Filter-mode sufficiency check: at least one positive relevance
+            // signal must be present. Criticality alone is not sufficient.
+            if query.mode == RetrievalMode::Filter {
+                let has_kw = kw_score.is_some_and(|v| v > 0.0);
+                let has_sem = sem_score.is_some_and(|v| v > 0.0);
+                let has_scope = breakdown.scope > 0.0;
+                let has_tag = query.tags.as_ref().is_some_and(|filter_tags| {
+                    !filter_tags.is_empty() && filter_tags.iter().any(|t| memory.tags.contains(t))
+                });
+                if !(has_kw || has_sem || has_scope || has_tag) {
+                    continue;
+                }
+            }
 
             scored_memories.push(ScoredMemory {
                 memory: memory.clone(),
@@ -508,166 +555,58 @@ impl RetrievalEngine {
             });
         }
 
-        // Step 5: Filter by relevance threshold
-        let relevance_threshold = self.config.retrieval.relevance_threshold;
-        scored_memories.retain(|sm| sm.score >= relevance_threshold);
+        // Step 6: Threshold. Rank mode uses retrieval.relevance_threshold;
+        // Filter mode uses the stricter search.threshold when set, since the
+        // flow is "find specific memories" rather than "browse context".
+        let threshold = match query.mode {
+            RetrievalMode::Rank => self.config.retrieval.relevance_threshold,
+            RetrievalMode::Filter => self.config.search.threshold.min(1.0),
+        };
+        if threshold > 0.0 {
+            scored_memories.retain(|sm| sm.score >= threshold);
+        }
 
-        // Step 6: Sort by score descending
+        // Step 7: Sort by score descending.
         scored_memories.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Step 6.5: Apply reranking if configured and query is present
+        // Step 8: Apply reranking if query text is present.
         if let Some(ref q) = query.query {
             if let Err(e) = self.apply_rerank(q, &mut scored_memories).await {
                 tracing::warn!("Reranking failed, using original scores: {}", e);
             }
         }
 
-        // Track total before applying limit
         let total = scored_memories.len();
 
-        // Step 7: Apply max_results limit
+        // Step 9: Apply max_results limit.
         let max_results = query
             .max_results
             .unwrap_or(self.config.retrieval.max_results);
         scored_memories.truncate(max_results);
 
-        // Step 8: Strip details based on detail_level
+        // Step 10: Strip detail per detail_level.
         for sm in &mut scored_memories {
             match query.detail_level {
                 DetailLevel::Summary => {
-                    // Keep only summary, clear content and details
                     sm.memory.content = String::new();
                     sm.memory.details = None;
                 }
                 DetailLevel::Content => {
-                    // Keep summary and content, clear details
                     sm.memory.details = None;
                 }
-                DetailLevel::Full => {
-                    // Keep everything
-                }
+                DetailLevel::Full => {}
             }
         }
 
         Ok(RetrievalResult {
             memories: scored_memories,
             total,
-            query_mode: query_mode.to_string(),
+            retrieval_quality: retrieval_quality.to_string(),
         })
-    }
-
-    /// Perform keyword-based search with quality signals.
-    ///
-    /// All scores are produced by `composite_score` in [0, 1] using the
-    /// `with_keyword` weight profile. Keyword raw scores are normalized
-    /// via shifted sigmoid before being passed to the scorer.
-    ///
-    /// # Algorithm
-    /// 1. Load all memories
-    /// 2. Apply filters
-    /// 3. Run keyword search
-    /// 4. If embeddings available, get semantic scores
-    /// 5. Normalize keyword scores and build ScoringContext::with_keyword
-    /// 6. Call composite_score for unified scoring
-    /// 7. Apply threshold, sort, rerank, return
-    pub async fn search(
-        &self,
-        query_text: &str,
-        filters: &SearchFilters,
-    ) -> Result<Vec<ScoredMemory>> {
-        use crate::search::normalize_keyword_score;
-
-        let threshold = self.config.search.threshold.min(1.0);
-        let num_query_tokens = crate::search::keyword::query_token_count(query_text);
-
-        // Step 1: Load lightweight index entries (6 columns)
-        let all_entries = self.store.list_for_filtering().await?;
-
-        // Step 2: Apply filters
-        let filtered_entries = apply_index_filters(all_entries, filters);
-
-        // Batch-load all surviving memories (single dir scan)
-        let ids: Vec<&str> = filtered_entries.iter().map(|e| e.id.as_str()).collect();
-        let loaded = self.store.get_batch(&ids).await?;
-        let memories: Vec<Memory> = loaded.into_iter().map(|(_, m)| m).collect();
-
-        // Step 3: Run keyword search (raw unbounded scores)
-        let keyword_results = crate::search::keyword_search(query_text, &memories);
-
-        // Step 4: Get semantic scores if embeddings available
-        let semantic_scores: HashMap<String, f64> = if let Some(provider) = &self.embedding_provider
-        {
-            if let Ok(query_vector) = provider.embed(query_text).await {
-                self.store
-                    .vector_search(query_vector, memories.len())
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|m| (m.id, m.score))
-                    .collect()
-            } else {
-                HashMap::new()
-            }
-        } else {
-            HashMap::new()
-        };
-
-        // Step 5: Build a map of keyword scores by index
-        let keyword_map: HashMap<usize, f64> = keyword_results.into_iter().collect();
-
-        // Step 6: Score every memory that has either keyword or semantic match
-        let mut scored_memories: Vec<ScoredMemory> = Vec::new();
-        let now = Utc::now();
-
-        for (idx, memory) in memories.iter().enumerate() {
-            let raw_kw = keyword_map.get(&idx).copied().unwrap_or(0.0);
-
-            // Search requires at least a keyword match. Semantic similarity
-            // augments scoring but is not sufficient on its own — use retrieve()
-            // for pure semantic queries.
-            if raw_kw == 0.0 {
-                continue;
-            }
-
-            let sem_score = semantic_scores.get(&memory.id).copied();
-
-            // Normalize keyword score to [0, 1], scaled by query length
-            let norm_kw = normalize_keyword_score(raw_kw, num_query_tokens);
-
-            // No scope context for global keyword search — scope_multiplier=1.0 (neutral)
-            let context = ScoringContext::with_keyword(None, &[], query_text, norm_kw, sem_score);
-
-            let breakdown = composite_score(memory, &context, &self.config, now);
-
-            scored_memories.push(ScoredMemory {
-                memory: memory.clone(),
-                score: breakdown.final_score,
-                score_breakdown: breakdown,
-            });
-        }
-
-        // Step 7: Apply threshold
-        if threshold > 0.0 {
-            scored_memories.retain(|sm| sm.score >= threshold);
-        }
-
-        // Sort by score descending
-        scored_memories.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // Apply reranking if configured
-        if let Err(e) = self.apply_rerank(query_text, &mut scored_memories).await {
-            tracing::warn!("Reranking failed, using original scores: {}", e);
-        }
-
-        Ok(scored_memories)
     }
 }
 
@@ -691,6 +630,17 @@ mod tests {
 
     fn try_reranker() -> Option<Arc<Mutex<fastembed::TextRerank>>> {
         SHARED_RERANKER.as_ref().cloned()
+    }
+
+    /// Filter-mode query with only a text query set, mirroring the shape
+    /// of the old keyword-search API used by these tests.
+    async fn filter_query(engine: &RetrievalEngine, query_text: &str) -> Vec<ScoredMemory> {
+        let query = RetrievalQuery {
+            mode: RetrievalMode::Filter,
+            query: Some(query_text.to_string()),
+            ..Default::default()
+        };
+        engine.query(&query).await.unwrap().memories
     }
 
     // Note: These tests would require a real MemoryStore instance,
@@ -741,7 +691,7 @@ mod tests {
 
         let engine = RetrievalEngine::new(store, config);
         let query = RetrievalQuery::default();
-        let result = engine.retrieve(&query).await.unwrap();
+        let result = engine.query(&query).await.unwrap();
 
         assert_eq!(result.memories.len(), 0);
         assert_eq!(result.total, 0);
@@ -793,7 +743,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.retrieve(&query).await.unwrap();
+        let result = engine.query(&query).await.unwrap();
 
         // Both should be returned, but the one with matching scope should score higher
         assert_eq!(result.memories.len(), 2);
@@ -850,7 +800,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.retrieve(&query).await.unwrap();
+        let result = engine.query(&query).await.unwrap();
 
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].memory.type_, MemoryType::Decision);
@@ -890,7 +840,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.retrieve(&query).await.unwrap();
+        let result = engine.query(&query).await.unwrap();
 
         assert_eq!(result.memories.len(), 2);
         assert_eq!(result.total, 5);
@@ -942,7 +892,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.retrieve(&query).await.unwrap();
+        let result = engine.query(&query).await.unwrap();
 
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].memory.summary, "Active memory");
@@ -995,7 +945,7 @@ mod tests {
             include_expired: Some(false),
             ..Default::default()
         };
-        let result = engine.retrieve(&query_exclude).await.unwrap();
+        let result = engine.query(&query_exclude).await.unwrap();
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].memory.summary, "Active memory");
 
@@ -1005,7 +955,7 @@ mod tests {
             include_expired: Some(true),
             ..Default::default()
         };
-        let result = engine.retrieve(&query_include).await.unwrap();
+        let result = engine.query(&query_include).await.unwrap();
         assert_eq!(
             result.memories.len(),
             2,
@@ -1062,7 +1012,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.retrieve(&query).await.unwrap();
+        let result = engine.query(&query).await.unwrap();
 
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].memory.summary, "Test memory");
@@ -1102,7 +1052,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.retrieve(&query).await.unwrap();
+        let result = engine.query(&query).await.unwrap();
 
         assert_eq!(result.memories.len(), 1);
         // Verify score_breakdown is populated
@@ -1117,7 +1067,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_retrieve_query_mode_scope_only() {
+    async fn test_query_rank_retrieval_quality_scope_only() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
@@ -1144,13 +1094,13 @@ mod tests {
 
         let query = RetrievalQuery::default();
 
-        let result = engine.retrieve(&query).await.unwrap();
+        let result = engine.query(&query).await.unwrap();
 
-        assert_eq!(result.query_mode, "scope_only");
+        assert_eq!(result.retrieval_quality, "scope_only");
     }
 
     #[tokio::test]
-    async fn test_retrieve_query_mode_degraded() {
+    async fn test_query_rank_retrieval_quality_keyword_only() {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
@@ -1180,11 +1130,11 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.retrieve(&query).await.unwrap();
+        let result = engine.query(&query).await.unwrap();
 
-        // Without embeddings configured, should be degraded_keyword mode
-        // (keyword search finds "test" in the memory summary)
-        assert_eq!(result.query_mode, "degraded_keyword");
+        // Without embeddings configured, should be keyword_only quality
+        // (keyword search finds "test" in the memory summary).
+        assert_eq!(result.retrieval_quality, "keyword_only");
     }
 
     #[tokio::test]
@@ -1221,8 +1171,7 @@ mod tests {
         let engine = RetrievalEngine::new(store, config);
 
         // Search for "authentication"
-        let filters = SearchFilters::default();
-        let results = engine.search("authentication", &filters).await.unwrap();
+        let results = filter_query(&engine, "authentication").await;
 
         // Should find memory1 with higher score
         assert!(!results.is_empty());
@@ -1271,8 +1220,7 @@ mod tests {
         store.create(&inferred_mem).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
-        let filters = SearchFilters::default();
-        let results = engine.search("authentication", &filters).await.unwrap();
+        let results = filter_query(&engine, "authentication").await;
 
         assert_eq!(results.len(), 2);
         // Both should have same keyword score, but different trust
@@ -1330,8 +1278,7 @@ mod tests {
         store.create(&old).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
-        let filters = SearchFilters::default();
-        let results = engine.search("authentication", &filters).await.unwrap();
+        let results = filter_query(&engine, "authentication").await;
 
         assert_eq!(results.len(), 2);
         let fresh_result = results.iter().find(|r| r.memory.id == fresh.id).unwrap();
@@ -1381,8 +1328,7 @@ mod tests {
         store.create(&challenged).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
-        let filters = SearchFilters::default();
-        let results = engine.search("authentication", &filters).await.unwrap();
+        let results = filter_query(&engine, "authentication").await;
 
         assert_eq!(results.len(), 2);
         let active_result = results.iter().find(|r| r.memory.id == active.id).unwrap();
@@ -1422,8 +1368,7 @@ mod tests {
         store.create(&memory).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
-        let filters = SearchFilters::default();
-        let results = engine.search("authentication", &filters).await.unwrap();
+        let results = filter_query(&engine, "authentication").await;
 
         // Scores are in [0, 1] and a single partial match won't reach 1.0
         assert!(results.is_empty());
@@ -1452,8 +1397,7 @@ mod tests {
         store.create(&memory).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
-        let filters = SearchFilters::default();
-        let results = engine.search("authentication", &filters).await.unwrap();
+        let results = filter_query(&engine, "authentication").await;
 
         assert_eq!(results.len(), 1);
     }
@@ -1480,8 +1424,7 @@ mod tests {
         store.create(&memory).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
-        let filters = SearchFilters::default();
-        let results = engine.search("authentication", &filters).await.unwrap();
+        let results = filter_query(&engine, "authentication").await;
 
         assert_eq!(results.len(), 1);
         let bd = &results[0].score_breakdown;
@@ -1524,11 +1467,7 @@ mod tests {
         }
 
         let engine = RetrievalEngine::new(store, config);
-        let filters = SearchFilters::default();
-        let results = engine
-            .search("auth password hashing", &filters)
-            .await
-            .unwrap();
+        let results = filter_query(&engine, "auth password hashing").await;
 
         for sm in &results {
             assert!(
@@ -1702,7 +1641,7 @@ mod tests {
             query: Some("test".to_string()),
             ..Default::default()
         };
-        let result = engine.retrieve(&query).await.unwrap();
+        let result = engine.query(&query).await.unwrap();
 
         assert_eq!(result.memories.len(), 1);
         // Without reranker, rerank score should be None
@@ -1730,8 +1669,7 @@ mod tests {
         store.create(&memory).await.unwrap();
 
         let engine = RetrievalEngine::new(store, config);
-        let filters = SearchFilters::default();
-        let results = engine.search("authentication", &filters).await.unwrap();
+        let results = filter_query(&engine, "authentication").await;
 
         assert!(!results.is_empty());
         // Without reranker, rerank score should be None
@@ -1807,7 +1745,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.retrieve(&query).await.unwrap();
+        let result = engine.query(&query).await.unwrap();
 
         // Both memories should be returned
         assert_eq!(result.memories.len(), 2);
@@ -1872,14 +1810,14 @@ mod tests {
             ..Default::default()
         };
 
-        let result_no_rerank = engine_no_rerank.retrieve(&query).await.unwrap();
+        let result_no_rerank = engine_no_rerank.query(&query).await.unwrap();
 
         // Now with reranker but weight=0.0
         let engine_rerank =
             RetrievalEngine::new(MemoryStore::open(temp_dir.path()).await.unwrap(), config)
                 .with_reranker(reranker);
 
-        let result_rerank = engine_rerank.retrieve(&query).await.unwrap();
+        let result_rerank = engine_rerank.query(&query).await.unwrap();
 
         // With weight=0.0, blended = 1.0 * original + 0.0 * rerank = original
         // Scores should be identical
@@ -1933,8 +1871,7 @@ mod tests {
 
         let engine = RetrievalEngine::new(store, config).with_reranker(reranker);
 
-        let filters = SearchFilters::default();
-        let results = engine.search("authentication", &filters).await.unwrap();
+        let results = filter_query(&engine, "authentication").await;
 
         assert!(!results.is_empty());
         // Should have rerank score populated
@@ -2000,7 +1937,7 @@ mod tests {
         };
 
         let engine_no_rerank = RetrievalEngine::new(store, config.clone());
-        let result_no_rerank = engine_no_rerank.retrieve(&query).await.unwrap();
+        let result_no_rerank = engine_no_rerank.query(&query).await.unwrap();
 
         assert_eq!(result_no_rerank.memories.len(), 2);
         // Without reranking: off-topic (criticality=0.95) is ranked first
@@ -2018,7 +1955,7 @@ mod tests {
         let store2 = MemoryStore::open(temp_dir.path()).await.unwrap();
         let engine_rerank = RetrievalEngine::new(store2, config).with_reranker(reranker);
 
-        let result_rerank = engine_rerank.retrieve(&query).await.unwrap();
+        let result_rerank = engine_rerank.query(&query).await.unwrap();
 
         assert_eq!(result_rerank.memories.len(), 2);
         // With reranking: on-topic memory should now rank first
@@ -2099,12 +2036,9 @@ mod tests {
         store.create(&semantically_relevant).await.unwrap();
         let semantically_relevant_id = semantically_relevant.id.clone();
 
-        let filters = SearchFilters::default();
         let engine_no_rerank = RetrievalEngine::new(store, config.clone());
-        let results_no_rerank = engine_no_rerank
-            .search("database migration strategy", &filters)
-            .await
-            .unwrap();
+        let results_no_rerank =
+            filter_query(&engine_no_rerank, "database migration strategy").await;
 
         assert_eq!(results_no_rerank.len(), 2);
         // Without reranking: keyword-heavy doc ranks first (4 pts vs 1 pt)
@@ -2124,10 +2058,7 @@ mod tests {
         let store2 = MemoryStore::open(temp_dir.path()).await.unwrap();
         let engine_rerank = RetrievalEngine::new(store2, config).with_reranker(reranker);
 
-        let results_rerank = engine_rerank
-            .search("database migration strategy", &filters)
-            .await
-            .unwrap();
+        let results_rerank = filter_query(&engine_rerank, "database migration strategy").await;
 
         assert_eq!(results_rerank.len(), 2);
         // With reranking: the semantically relevant doc should now rank first

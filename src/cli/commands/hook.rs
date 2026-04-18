@@ -3,7 +3,7 @@
 //! Reads hook event JSON from stdin, retrieves relevant memories,
 //! and outputs additionalContext JSON to stdout.
 
-use crate::retrieval::engine::{DetailLevel, RetrievalQuery, ScoredMemory};
+use crate::retrieval::engine::{DetailLevel, RetrievalMode, RetrievalQuery, ScoredMemory};
 use crate::storage::MemoryStore;
 use crate::types::EmbeddingBackend;
 use anyhow::Result;
@@ -106,7 +106,7 @@ fn format_detailed_context_with_budget(
     if included < total {
         let omitted = total - included;
         lines.push(format!(
-            "\n({} more memories omitted — use search to find them)",
+            "\n({} more memories omitted — use query to find them)",
             omitted
         ));
     }
@@ -194,6 +194,7 @@ async fn process_hook_input(
     let engine = crate::ops::build_engine(store, &config_path, embedding_backend).await;
 
     let query = RetrievalQuery {
+        mode: RetrievalMode::Rank,
         path: Some(relative_path),
         logical: vec![],
         query: None,
@@ -205,7 +206,7 @@ async fn process_hook_input(
         detail_level: DetailLevel::Summary,
     };
 
-    let result = match crate::ops::retrieve_memories(&engine, &query).await {
+    let result = match crate::ops::query_memories(&engine, &query).await {
         Ok(r) => r,
         Err(e) => {
             tracing::debug!("Hook retrieval failed (non-fatal): {}", e);
@@ -274,6 +275,7 @@ pub async fn run_hook_session_start(
     let engine = crate::ops::build_engine(store, &config_path, embedding_backend).await;
 
     let query = RetrievalQuery {
+        mode: RetrievalMode::Rank,
         path: None,
         logical: vec![],
         query: None,
@@ -285,7 +287,7 @@ pub async fn run_hook_session_start(
         detail_level: DetailLevel::Summary,
     };
 
-    let result = match crate::ops::retrieve_memories(&engine, &query).await {
+    let result = match crate::ops::query_memories(&engine, &query).await {
         Ok(r) => r,
         Err(e) => {
             tracing::debug!("Hook retrieval failed (non-fatal): {}", e);
@@ -619,7 +621,7 @@ mod tests {
         let ctx =
             format_detailed_context_with_budget("[EngramDB] Key project memories:", &memories, 500);
         assert!(ctx.contains("more memories omitted"));
-        assert!(ctx.contains("use search to find them"));
+        assert!(ctx.contains("use query to find them"));
         // Should include at least 1 but not all 10
         let included = memories
             .iter()

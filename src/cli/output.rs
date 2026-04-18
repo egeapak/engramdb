@@ -1054,7 +1054,7 @@ mod tests {
         let result = RetrievalResult {
             memories: vec![scored],
             total: 1,
-            query_mode: "with_embeddings".to_string(),
+            retrieval_quality: "full".to_string(),
         };
 
         // Verify it doesn't panic
@@ -1071,7 +1071,7 @@ mod tests {
         let empty_result = RetrievalResult {
             memories: vec![],
             total: 0,
-            query_mode: "scope_only".to_string(),
+            retrieval_quality: "scope_only".to_string(),
         };
 
         // Verify none panic with empty results

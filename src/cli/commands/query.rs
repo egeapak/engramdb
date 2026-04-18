@@ -1,17 +1,18 @@
-//! Retrieve memories by context.
+//! Unified memory query command.
 
 use crate::cli::output::OutputFormatter;
 use crate::ops::{parse_detail_level, parse_memory_type, validate_score};
-use crate::retrieval::engine::RetrievalQuery;
+use crate::retrieval::engine::{RetrievalMode, RetrievalQuery};
 use crate::storage::MemoryStore;
 use anyhow::Result;
 use std::path::Path;
 
-/// Parameters for the retrieve command.
-pub struct RetrieveParams {
+/// Parameters for the query command.
+pub struct QueryParams {
+    pub mode: RetrievalMode,
+    pub query: Option<String>,
     pub path: Option<String>,
     pub logical: Vec<String>,
-    pub query: Option<String>,
     pub type_filter: Vec<String>,
     pub tags: Vec<String>,
     pub min_criticality: Option<f64>,
@@ -21,15 +22,15 @@ pub struct RetrieveParams {
     pub show_scores: bool,
 }
 
-/// Retrieve memories based on context and query.
+/// Run a unified retrieval query.
 ///
-/// # Arguments
-/// * `dir` - The directory containing the EngramDB store
-/// * `params` - Retrieval query parameters
-/// * `formatter` - Output formatter for displaying results
-pub async fn run_retrieve(
+/// `mode: Rank` behaves like the old `retrieve` flow — returns every
+/// memory passing the type/tag/criticality/physical filters, scored and
+/// sorted. `mode: Filter` requires at least one positive relevance signal
+/// (keyword, semantic, scope proximity, or tag match).
+pub async fn run_query(
     dir: &Path,
-    params: RetrieveParams,
+    params: QueryParams,
     embedding_backend: Option<crate::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
@@ -40,7 +41,6 @@ pub async fn run_retrieve(
     let config_path = dir.join(".engramdb").join("config.toml");
     let engine = crate::ops::build_engine(store, &config_path, embedding_backend).await;
 
-    // Parse type filters
     let types = if !params.type_filter.is_empty() {
         let parsed_types: Result<Vec<_>> = params
             .type_filter
@@ -52,27 +52,24 @@ pub async fn run_retrieve(
         None
     };
 
-    // Parse tags
     let tags = if !params.tags.is_empty() {
         Some(params.tags)
     } else {
         None
     };
 
-    // Parse detail_level
     let detail_level = if let Some(ref level_str) = params.detail_level {
         parse_detail_level(level_str)?
     } else {
         crate::retrieval::engine::DetailLevel::Content
     };
 
-    // Validate min_criticality
     if let Some(mc) = params.min_criticality {
         validate_score(mc, "min_criticality")?;
     }
 
-    // Build retrieval query
     let query = RetrievalQuery {
+        mode: params.mode,
         path: params.path,
         logical: params.logical,
         query: params.query,
@@ -84,10 +81,7 @@ pub async fn run_retrieve(
         detail_level,
     };
 
-    // Perform retrieval
-    let result = crate::ops::retrieve_memories(&engine, &query).await?;
-
-    // Display results
+    let result = crate::ops::query_memories(&engine, &query).await?;
     formatter.print_retrieval_result(&result, params.show_scores);
 
     Ok(())
@@ -144,15 +138,12 @@ mod tests {
         (temp_dir, store)
     }
 
-    #[tokio::test]
-    async fn test_retrieve_returns_ok() {
-        let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
-
-        let params = RetrieveParams {
-            path: Some("src/main.rs".to_string()),
-            logical: vec![],
+    fn base_params() -> QueryParams {
+        QueryParams {
+            mode: RetrievalMode::Rank,
             query: None,
+            path: None,
+            logical: vec![],
             type_filter: vec![],
             tags: vec![],
             min_criticality: None,
@@ -160,31 +151,35 @@ mod tests {
             detail_level: None,
             include_expired: false,
             show_scores: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_rank_returns_ok() {
+        let (temp_dir, _store) = setup_test_store().await;
+        let formatter = OutputFormatter::new(None, false, true);
+
+        let params = QueryParams {
+            path: Some("src/main.rs".to_string()),
+            ..base_params()
         };
 
-        let result = run_retrieve(temp_dir.path(), params, None, &formatter).await;
+        let result = run_query(temp_dir.path(), params, None, &formatter).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
-    async fn test_retrieve_invalid_detail_level() {
+    async fn test_query_rank_invalid_detail_level() {
         let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
-        let params = RetrieveParams {
+        let params = QueryParams {
             path: Some("src/main.rs".to_string()),
-            logical: vec![],
-            query: None,
-            type_filter: vec![],
-            tags: vec![],
-            min_criticality: None,
-            max_results: 10,
             detail_level: Some("invalid".to_string()),
-            include_expired: false,
-            show_scores: false,
+            ..base_params()
         };
 
-        let result = run_retrieve(temp_dir.path(), params, None, &formatter).await;
+        let result = run_query(temp_dir.path(), params, None, &formatter).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -193,24 +188,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_retrieve_with_type_filter() {
+    async fn test_query_rank_with_type_filter() {
         let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
-        let params = RetrieveParams {
+        let params = QueryParams {
             path: Some("src/main.rs".to_string()),
-            logical: vec![],
-            query: None,
             type_filter: vec!["decision".to_string()],
-            tags: vec![],
-            min_criticality: None,
-            max_results: 10,
-            detail_level: None,
-            include_expired: false,
-            show_scores: false,
+            ..base_params()
         };
 
-        let result = run_retrieve(temp_dir.path(), params, None, &formatter).await;
+        let result = run_query(temp_dir.path(), params, None, &formatter).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_query_filter_with_text() {
+        let (temp_dir, _store) = setup_test_store().await;
+        let formatter = OutputFormatter::new(None, false, true);
+
+        let params = QueryParams {
+            mode: RetrievalMode::Filter,
+            query: Some("Test".to_string()),
+            ..base_params()
+        };
+
+        let result = run_query(temp_dir.path(), params, None, &formatter).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_query_filter_requires_signal() {
+        let (temp_dir, _store) = setup_test_store().await;
+        let formatter = OutputFormatter::new(None, false, true);
+
+        // No query, logical, path, or tags — must error.
+        let params = QueryParams {
+            mode: RetrievalMode::Filter,
+            min_criticality: Some(0.5),
+            ..base_params()
+        };
+
+        let result = run_query(temp_dir.path(), params, None, &formatter).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("filter requires at least one"),
+            "expected validation message, got: {}",
+            msg
+        );
     }
 }

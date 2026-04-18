@@ -377,7 +377,7 @@ fn retrieval_benchmarks(c: &mut Criterion) {
                 };
 
                 b.to_async(&rt)
-                    .iter(|| async { engine.retrieve(&query).await.unwrap() });
+                    .iter(|| async { engine.query(&query).await.unwrap() });
 
                 drop(temp_dir);
             },
@@ -451,7 +451,7 @@ fn hook_path_benchmarks(c: &mut Criterion) {
                             detail_level: DetailLevel::Summary,
                             ..Default::default()
                         };
-                        engine.retrieve(&query).await.unwrap()
+                        engine.query(&query).await.unwrap()
                     }
                 });
             },
@@ -541,7 +541,7 @@ mod budget_tests {
             detail_level: DetailLevel::Summary,
             ..Default::default()
         };
-        let _result = engine.retrieve(&query).await.unwrap();
+        let _result = engine.query(&query).await.unwrap();
 
         let elapsed = start.elapsed();
 
