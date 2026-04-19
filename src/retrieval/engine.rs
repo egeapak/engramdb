@@ -534,16 +534,30 @@ impl RetrievalEngine {
                 composite_score(memory, &context, &self.config, now)
             };
 
-            // Filter-mode sufficiency check: at least one positive relevance
-            // signal must be present. Criticality alone is not sufficient.
+            // Filter-mode sufficiency check.
+            //
+            // When the user provides query text we apply the legacy
+            // "keyword-strict" contract from the old `search()` API:
+            // semantic similarity alone is not enough because all-MiniLM
+            // assigns nontrivial cosine similarity (~0.4) even to
+            // unrelated short strings, so semantic-only would surface
+            // every memory for any query. A keyword token must match.
+            //
+            // When there is no query text, the user is filtering by
+            // logical/path/tags/types, so any of those signals — or
+            // scope proximity — is sufficient.
             if query.mode == RetrievalMode::Filter {
                 let has_kw = kw_score.is_some_and(|v| v > 0.0);
-                let has_sem = sem_score.is_some_and(|v| v > 0.0);
                 let has_scope = breakdown.scope > 0.0;
                 let has_tag = query.tags.as_ref().is_some_and(|filter_tags| {
                     !filter_tags.is_empty() && filter_tags.iter().any(|t| memory.tags.contains(t))
                 });
-                if !(has_kw || has_sem || has_scope || has_tag) {
+                let sufficient = if query.query.is_some() {
+                    has_kw || has_tag
+                } else {
+                    has_scope || has_tag
+                };
+                if !sufficient {
                     continue;
                 }
             }
