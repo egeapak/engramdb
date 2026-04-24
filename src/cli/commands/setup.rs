@@ -11,8 +11,7 @@ const ENGRAM_MD_CONTENT: &str = r#"# EngramDB
 This project uses EngramDB for persistent agent memory.
 
 - **Expand surfaced memories** — when memories are surfaced at session start, `get` the full content of any relevant to the current task before proceeding.
-- **Search before answering** — call `search` before answering any question that touches project knowledge, whether real or hypothetical.
-- **Retrieve before modifying** — call `retrieve` with the file path before modifying files, to surface known decisions, hazards, or conventions.
+- **Query before answering or modifying** — call `query` with `mode: "rank"` to surface memories relevant to your current file, topic, or logical scope; call with `mode: "filter"` (plus a `query` text, `logical` scopes, `path`, or `tags`) when you need specific-term lookup.
 - **Store after discovering** — call `create` after discovering important patterns, decisions, hazards, or conventions worth preserving.
 - **Challenge contradictions** — call `challenge` when you find information that contradicts an existing memory.
 "#;
@@ -21,8 +20,7 @@ const ENGRAM_MD_REF: &str = "@ENGRAM.md";
 
 /// MCP tool suffixes that need permission entries.
 const MCP_TOOL_SUFFIXES: &[&str] = &[
-    "search",
-    "retrieve",
+    "query",
     "create",
     "get",
     "list",
@@ -38,6 +36,12 @@ const MCP_TOOL_SUFFIXES: &[&str] = &[
     "compress_candidates",
     "compress_apply",
 ];
+
+/// MCP tool suffixes that were removed or renamed and must be stripped from
+/// existing settings.json permission lists during setup. Without this cleanup,
+/// stale allowlist entries under the old names silently stop matching the
+/// current tools and the user gets a permission prompt every invocation.
+const STALE_MCP_TOOL_SUFFIXES: &[&str] = &["search", "retrieve"];
 
 /// Tool prefix when engramdb is installed as a Claude Code plugin.
 const PLUGIN_MCP_PREFIX: &str = "mcp__plugin_engram_memory__";
@@ -374,34 +378,66 @@ fn ensure_mcp_permissions(
         .or_insert_with(|| json!([]));
     let allow_arr = allow.as_array_mut().unwrap();
 
+    // Remove stale entries for tools that have been renamed or removed. Stale
+    // entries silently fail to match the new tool names and cause a permission
+    // prompt on every invocation. Strip across BOTH the plugin and settings
+    // prefixes so the cleanup works regardless of which layout the user has.
+    let stale_names: std::collections::HashSet<String> = STALE_MCP_TOOL_SUFFIXES
+        .iter()
+        .flat_map(|suffix| {
+            [
+                format!("{PLUGIN_MCP_PREFIX}{suffix}"),
+                format!("{SETTINGS_MCP_PREFIX}{suffix}"),
+            ]
+        })
+        .collect();
+    let before_len = allow_arr.len();
+    allow_arr.retain(|v| match v.as_str() {
+        Some(s) => !stale_names.contains(s),
+        None => true,
+    });
+    let removed = before_len - allow_arr.len();
+
     let existing: std::collections::HashSet<String> = allow_arr
         .iter()
         .filter_map(|v| v.as_str().map(String::from))
         .collect();
 
-    let mut added = false;
+    let mut added = 0usize;
     for suffix in MCP_TOOL_SUFFIXES {
         let perm = format!("{prefix}{suffix}");
         if !existing.contains(&perm) {
             allow_arr.push(json!(perm));
-            added = true;
+            added += 1;
         }
     }
 
-    if !added {
+    if added == 0 && removed == 0 {
         formatter.print_message("MCP permissions already configured.");
         return Ok(false);
     }
 
     if dry_run {
-        formatter.print_message("Would add MCP tool permissions to settings.json.");
+        if removed > 0 {
+            formatter.print_message(&format!(
+                "Would remove {removed} stale MCP permission entries and add new ones."
+            ));
+        } else {
+            formatter.print_message("Would add MCP tool permissions to settings.json.");
+        }
         return Ok(true);
     }
 
     std::fs::create_dir_all(claude_dir)?;
     let formatted = serde_json::to_string_pretty(&settings)?;
     std::fs::write(&settings_path, formatted)?;
-    formatter.print_success("Added MCP tool permissions to settings.json.");
+    if removed > 0 {
+        formatter.print_success(&format!(
+            "Updated MCP tool permissions in settings.json (removed {removed} stale, added {added})."
+        ));
+    } else {
+        formatter.print_success("Added MCP tool permissions to settings.json.");
+    }
     Ok(true)
 }
 
@@ -1124,6 +1160,76 @@ mod tests {
                 "Missing permission: {expected}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_permissions_strip_stale_search_retrieve() {
+        let tmp = TempDir::new().unwrap();
+        let claude_dir = tmp.path().join("claude");
+        let plugins_dir = fake_plugins_dir_with_engram(&tmp);
+        let f = test_formatter();
+
+        // Pre-seed settings.json with old-style search/retrieve permissions that
+        // would have been written by a previous engramdb release.
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let preexisting = serde_json::json!({
+            "permissions": {
+                "allow": [
+                    format!("{PLUGIN_MCP_PREFIX}search"),
+                    format!("{PLUGIN_MCP_PREFIX}retrieve"),
+                    format!("{SETTINGS_MCP_PREFIX}search"),
+                    "Bash(ls:*)",
+                ]
+            }
+        });
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string_pretty(&preexisting).unwrap(),
+        )
+        .unwrap();
+
+        run_setup_inner(
+            tmp.path(),
+            false,
+            false,
+            false,
+            Some(&claude_dir),
+            Some(&plugins_dir),
+            &f,
+        )
+        .await
+        .unwrap();
+
+        let content = std::fs::read_to_string(claude_dir.join("settings.json")).unwrap();
+        let settings: Value = serde_json::from_str(&content).unwrap();
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        let perms: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
+
+        for stale in STALE_MCP_TOOL_SUFFIXES {
+            let plugin_name = format!("{PLUGIN_MCP_PREFIX}{stale}");
+            let settings_name = format!("{SETTINGS_MCP_PREFIX}{stale}");
+            assert!(
+                !perms.contains(&plugin_name.as_str()),
+                "Stale {plugin_name} should have been removed: {perms:?}"
+            );
+            assert!(
+                !perms.contains(&settings_name.as_str()),
+                "Stale {settings_name} should have been removed: {perms:?}"
+            );
+        }
+
+        // The unrelated non-engramdb permission stays in place.
+        assert!(
+            perms.contains(&"Bash(ls:*)"),
+            "Non-engramdb permission should be preserved: {perms:?}"
+        );
+
+        // The new query permission is present.
+        let new_query = format!("{PLUGIN_MCP_PREFIX}query");
+        assert!(
+            perms.contains(&new_query.as_str()),
+            "Expected new {new_query} permission: {perms:?}"
+        );
     }
 
     #[tokio::test]

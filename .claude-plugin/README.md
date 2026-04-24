@@ -38,9 +38,9 @@ engramdb --version
 
 ### MCP Server
 
-A full MCP server (`engramdb serve`) starts automatically, providing 16 tools for memory management:
+A full MCP server (`engramdb serve`) starts automatically, providing 15 tools for memory management:
 
-`search`, `retrieve`, `create`, `get`, `list`, `update`, `delete`, `challenge`, `review`, `resolve`, `stats`, `doctor`, `gc`, `reindex`, `compress_candidates`, `compress_apply`
+`query`, `create`, `get`, `list`, `update`, `delete`, `challenge`, `review`, `resolve`, `stats`, `doctor`, `gc`, `reindex`, `compress_candidates`, `compress_apply`
 
 ### Hooks
 
@@ -55,8 +55,8 @@ Run `engramdb setup --global` to auto-configure MCP tool permissions in your `se
 
 Once installed, the plugin works automatically. Your agent will:
 
-- **Search before answering** project questions about conventions, architecture, or workflows
-- **Retrieve before modifying** files, surfacing known decisions and hazards
+- **Query in filter mode** before answering project questions about conventions, architecture, or workflows
+- **Query in rank mode** before modifying files, surfacing memories relevant to the current path or scope
 - **Store after discovering** important patterns, decisions, or conventions
 - **Challenge contradictions** when it finds information that conflicts with existing memories
 
@@ -68,7 +68,7 @@ You can also use the CLI directly:
 engramdb add --type hazard --title "Vector store needs reindex after schema changes" \
   "Changing memory schema requires running engramdb reindex to rebuild embeddings."
 
-engramdb search "schema migration"
+engramdb query --mode filter "schema migration"
 ```
 
 ### Agent directives

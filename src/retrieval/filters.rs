@@ -19,7 +19,6 @@ pub trait Filterable {
     fn type_(&self) -> MemoryType;
     fn tags(&self) -> &[String];
     fn physical(&self) -> &[String];
-    fn logical(&self) -> &[String];
     fn criticality(&self) -> f64;
     fn expires_at(&self) -> Option<DateTime<Utc>>;
 }
@@ -36,9 +35,6 @@ impl Filterable for IndexFilterable {
     }
     fn physical(&self) -> &[String] {
         &self.physical
-    }
-    fn logical(&self) -> &[String] {
-        &self.logical
     }
     fn criticality(&self) -> f64 {
         self.criticality
@@ -61,9 +57,6 @@ impl Filterable for IndexForFiltering {
     fn physical(&self) -> &[String] {
         &self.physical
     }
-    fn logical(&self) -> &[String] {
-        &self.logical
-    }
     fn criticality(&self) -> f64 {
         self.criticality
     }
@@ -73,6 +66,9 @@ impl Filterable for IndexForFiltering {
 }
 
 /// Search filters for restricting retrieval results.
+///
+/// Logical scope is intentionally absent: it is a scoring signal, not a
+/// filter. See [`crate::scope::logical::proximity`].
 #[derive(Debug, Clone, Default)]
 pub struct SearchFilters {
     /// Filter by memory type
@@ -83,9 +79,6 @@ pub struct SearchFilters {
 
     /// Filter by physical scope (file path)
     pub physical: Option<String>,
-
-    /// Filter by logical scope
-    pub logical: Option<String>,
 
     /// Minimum criticality threshold
     pub min_criticality: Option<f64>,
@@ -124,13 +117,6 @@ pub fn apply_index_filters<T: Filterable>(entries: Vec<T>, filters: &SearchFilte
             // Filter by physical scope
             if let Some(ref physical_path) = filters.physical {
                 if !physical::matches(entry.physical(), physical_path) {
-                    return false;
-                }
-            }
-
-            // Filter by logical scope (check if any entry logical scope matches)
-            if let Some(ref logical_scope) = filters.logical {
-                if !entry.logical().iter().any(|scope| scope == logical_scope) {
                     return false;
                 }
             }
@@ -287,7 +273,10 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_by_logical_scope() {
+    fn test_logical_scope_is_not_a_filter() {
+        // Logical scope must not exclude memories; it is a scoring signal
+        // applied by the retrieval engine. apply_index_filters must
+        // completely ignore logical values stored on index entries.
         let entries = vec![
             create_test_entry(
                 "1",
@@ -302,26 +291,14 @@ mod tests {
                 MemoryType::Convention,
                 vec![],
                 vec![],
-                vec!["api".to_string(), "auth".to_string()],
-                0.7,
-            ),
-            create_test_entry(
-                "3",
-                MemoryType::Hazard,
-                vec![],
-                vec![],
                 vec!["database".to_string()],
-                0.6,
+                0.7,
             ),
         ];
 
-        let filters = SearchFilters {
-            logical: Some("auth".to_string()),
-            ..Default::default()
-        };
-
+        let filters = SearchFilters::default();
         let filtered = apply_index_filters(entries, &filters);
-        assert_eq!(filtered.len(), 2); // Entries 1 and 2
+        assert_eq!(filtered.len(), 2);
     }
 
     #[test]
@@ -375,7 +352,6 @@ mod tests {
             tags: Some(vec!["auth".to_string()]),
             physical: Some("src/api/handlers.rs".to_string()),
             min_criticality: Some(0.75),
-            ..Default::default()
         };
 
         let filtered = apply_index_filters(entries, &filters);

@@ -240,77 +240,60 @@ pub enum Command {
         path: bool,
     },
 
-    /// Retrieve memories by context
-    Retrieve {
-        /// Physical path context
-        #[arg(long)]
+    /// Query memories (unified ranked / filtered retrieval).
+    ///
+    /// `--mode rank` returns every memory passing the type/tag/criticality
+    /// filters, sorted by composite score (use for context-aware browsing).
+    /// `--mode filter` requires a positive relevance signal — at least one of
+    /// `--query`, `--logical`, `--path`, or `--tags` must be set.
+    Query {
+        /// Retrieval mode. Required.
+        #[arg(long, value_parser = ["rank", "filter"])]
+        mode: String,
+
+        /// Search query text (positional). Alternatively pass `--query`.
+        #[arg(value_name = "QUERY")]
+        query_pos: Option<String>,
+
+        /// Search query text (explicit flag; overrides positional when both set).
+        #[arg(long = "query")]
+        query: Option<String>,
+
+        /// Physical path context (scoring signal).
+        #[arg(long, short = 'p')]
         path: Option<String>,
 
-        /// Logical scope context (can be repeated)
+        /// Logical scope context — dot-notation; scoring signal, not a filter. Repeatable.
         #[arg(long, short = 'l')]
         logical: Vec<String>,
 
-        /// Query text for semantic search
-        #[arg(long)]
-        query: Option<String>,
-
-        /// Filter by type (can be repeated)
+        /// Filter by type (repeatable).
         #[arg(long, short = 't')]
         type_: Vec<String>,
 
-        /// Filter by tags (comma-separated or repeated)
+        /// Filter by tags (comma-separated or repeated).
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
 
-        /// Minimum criticality
+        /// Minimum criticality threshold.
         #[arg(long)]
         min_criticality: Option<f64>,
 
-        /// Maximum number of results
+        /// Maximum number of results.
         #[arg(long, short = 'n', default_value = "10")]
         max_results: usize,
 
-        /// Detail level: summary, content, full
+        /// Detail level: summary, content, full.
         #[arg(long)]
         detail_level: Option<String>,
 
-        /// Include expired memories
+        /// Include expired memories.
         #[arg(long)]
         include_expired: bool,
 
-        /// Show relevance scores alongside results
+        /// Show relevance scores alongside results.
         #[arg(long)]
         show_scores: bool,
-    },
-
-    /// Search memories by keyword
-    Search {
-        /// Search query
-        query: String,
-
-        /// Filter by type (can be repeated)
-        #[arg(long, short = 't')]
-        type_: Vec<String>,
-
-        /// Filter by tags (comma-separated or repeated)
-        #[arg(long, value_delimiter = ',')]
-        tags: Vec<String>,
-
-        /// Filter by physical scope
-        #[arg(long, short = 'p')]
-        physical: Option<String>,
-
-        /// Filter by logical scope (can be repeated)
-        #[arg(long, short = 'l')]
-        logical: Vec<String>,
-
-        /// Minimum criticality
-        #[arg(long)]
-        min_criticality: Option<f64>,
-
-        /// Maximum number of results to display
-        #[arg(long, short = 'n', default_value = "10")]
-        max_results: usize,
     },
 
     /// List all memories
@@ -593,20 +576,29 @@ mod tests {
 
     #[test]
     fn test_retrieve_with_query_long_flag() {
-        // Test that `retrieve --query test` works without conflicting with global `-q`
-        let result = Cli::try_parse_from(["engramdb", "retrieve", "--query", "test"]);
+        // Test that `query --mode rank --query test` works without conflicting
+        // with the global `-q` (quiet) flag.
+        let result =
+            Cli::try_parse_from(["engramdb", "query", "--mode", "rank", "--query", "test"]);
         assert!(
             result.is_ok(),
-            "Failed to parse retrieve --query: {:?}",
+            "Failed to parse query --mode rank --query test: {:?}",
             result.err()
         );
 
         let cli = result.unwrap();
         match cli.command {
-            Command::Retrieve { query, .. } => {
-                assert_eq!(query, Some("test".to_string()));
+            Command::Query {
+                mode,
+                query,
+                query_pos,
+                ..
+            } => {
+                assert_eq!(mode, "rank");
+                let text = query.or(query_pos);
+                assert_eq!(text, Some("test".to_string()));
             }
-            _ => panic!("Expected Retrieve command"),
+            _ => panic!("Expected Query command"),
         }
     }
 
@@ -652,12 +644,20 @@ mod tests {
 
     #[test]
     fn test_search_command_parses() {
-        let cli = Cli::try_parse_from(["engramdb", "search", "test query"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["engramdb", "query", "--mode", "filter", "test query"]).unwrap();
         match cli.command {
-            Command::Search { query, .. } => {
-                assert_eq!(query, "test query");
+            Command::Query {
+                mode,
+                query,
+                query_pos,
+                ..
+            } => {
+                assert_eq!(mode, "filter");
+                let text = query.or(query_pos);
+                assert_eq!(text, Some("test query".to_string()));
             }
-            _ => panic!("Expected Search command"),
+            _ => panic!("Expected Query command"),
         }
     }
 
@@ -804,29 +804,38 @@ mod tests {
         }
     }
 
-    // Search command parsing (5 tests)
+    // Query (filter-mode) parsing — covers the old search surface.
     #[test]
     fn test_search_multiple_type_filters() {
         let cli = Cli::try_parse_from([
-            "engramdb", "search", "foo", "-t", "decision", "-t", "hazard",
+            "engramdb", "query", "--mode", "filter", "foo", "-t", "decision", "-t", "hazard",
         ])
         .unwrap();
         match cli.command {
-            Command::Search { type_, .. } => {
+            Command::Query { type_, .. } => {
                 assert_eq!(type_, vec!["decision", "hazard"]);
             }
-            _ => panic!("Expected Search command"),
+            _ => panic!("Expected Query command"),
         }
     }
 
     #[test]
     fn test_search_physical_scope() {
-        let cli = Cli::try_parse_from(["engramdb", "search", "foo", "-p", "src/main.rs"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "query",
+            "--mode",
+            "filter",
+            "foo",
+            "-p",
+            "src/main.rs",
+        ])
+        .unwrap();
         match cli.command {
-            Command::Search { physical, .. } => {
-                assert_eq!(physical, Some("src/main.rs".to_string()));
+            Command::Query { path, .. } => {
+                assert_eq!(path, Some("src/main.rs".to_string()));
             }
-            _ => panic!("Expected Search command"),
+            _ => panic!("Expected Query command"),
         }
     }
 
@@ -834,7 +843,9 @@ mod tests {
     fn test_search_multiple_logical_scopes() {
         let cli = Cli::try_parse_from([
             "engramdb",
-            "search",
+            "query",
+            "--mode",
+            "filter",
             "foo",
             "-l",
             "db.schema",
@@ -843,62 +854,73 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Command::Search { logical, .. } => {
+            Command::Query { logical, .. } => {
                 assert_eq!(logical, vec!["db.schema", "app.core"]);
             }
-            _ => panic!("Expected Search command"),
+            _ => panic!("Expected Query command"),
         }
     }
 
     #[test]
     fn test_search_min_criticality() {
-        let cli =
-            Cli::try_parse_from(["engramdb", "search", "foo", "--min-criticality", "0.5"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "query",
+            "--mode",
+            "filter",
+            "foo",
+            "--min-criticality",
+            "0.5",
+        ])
+        .unwrap();
         match cli.command {
-            Command::Search {
+            Command::Query {
                 min_criticality, ..
             } => {
                 assert_eq!(min_criticality, Some(0.5));
             }
-            _ => panic!("Expected Search command"),
+            _ => panic!("Expected Query command"),
         }
     }
 
     #[test]
     fn test_search_max_results() {
-        let cli = Cli::try_parse_from(["engramdb", "search", "foo", "-n", "5"]).unwrap();
+        let cli = Cli::try_parse_from(["engramdb", "query", "--mode", "filter", "foo", "-n", "5"])
+            .unwrap();
         match cli.command {
-            Command::Search { max_results, .. } => {
+            Command::Query { max_results, .. } => {
                 assert_eq!(max_results, 5);
             }
-            _ => panic!("Expected Search command"),
+            _ => panic!("Expected Query command"),
         }
     }
 
-    // Retrieve command parsing (6 tests)
+    // Query (rank-mode) parsing — covers the old retrieve surface.
     #[test]
     fn test_retrieve_multiple_type_filters() {
         let cli = Cli::try_parse_from([
-            "engramdb", "retrieve", "--path", "x", "-t", "decision", "-t", "hazard",
+            "engramdb", "query", "--mode", "rank", "--path", "x", "-t", "decision", "-t", "hazard",
         ])
         .unwrap();
         match cli.command {
-            Command::Retrieve { type_, .. } => {
+            Command::Query { type_, .. } => {
                 assert_eq!(type_, vec!["decision", "hazard"]);
             }
-            _ => panic!("Expected Retrieve command"),
+            _ => panic!("Expected Query command"),
         }
     }
 
     #[test]
     fn test_retrieve_tags_filter() {
-        let cli =
-            Cli::try_parse_from(["engramdb", "retrieve", "--path", "x", "--tags", "a,b"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "engramdb", "query", "--mode", "rank", "--path", "x", "--tags", "a,b",
+        ])
+        .unwrap();
         match cli.command {
-            Command::Retrieve { tags, .. } => {
+            Command::Query { tags, .. } => {
                 assert_eq!(tags, vec!["a", "b"]);
             }
-            _ => panic!("Expected Retrieve command"),
+            _ => panic!("Expected Query command"),
         }
     }
 
@@ -906,7 +928,9 @@ mod tests {
     fn test_retrieve_min_criticality() {
         let cli = Cli::try_parse_from([
             "engramdb",
-            "retrieve",
+            "query",
+            "--mode",
+            "rank",
             "--path",
             "x",
             "--min-criticality",
@@ -914,26 +938,34 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Command::Retrieve {
+            Command::Query {
                 min_criticality, ..
             } => {
                 assert_eq!(min_criticality, Some(0.5));
             }
-            _ => panic!("Expected Retrieve command"),
+            _ => panic!("Expected Query command"),
         }
     }
 
     #[test]
     fn test_retrieve_include_expired() {
-        let cli = Cli::try_parse_from(["engramdb", "retrieve", "--path", "x", "--include-expired"])
-            .unwrap();
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "query",
+            "--mode",
+            "rank",
+            "--path",
+            "x",
+            "--include-expired",
+        ])
+        .unwrap();
         match cli.command {
-            Command::Retrieve {
+            Command::Query {
                 include_expired, ..
             } => {
                 assert!(include_expired);
             }
-            _ => panic!("Expected Retrieve command"),
+            _ => panic!("Expected Query command"),
         }
     }
 
@@ -942,7 +974,9 @@ mod tests {
         for level in &["summary", "content", "full"] {
             let cli = Cli::try_parse_from([
                 "engramdb",
-                "retrieve",
+                "query",
+                "--mode",
+                "rank",
                 "--path",
                 "x",
                 "--detail-level",
@@ -950,22 +984,24 @@ mod tests {
             ])
             .unwrap();
             match cli.command {
-                Command::Retrieve { detail_level, .. } => {
+                Command::Query { detail_level, .. } => {
                     assert_eq!(detail_level, Some(level.to_string()));
                 }
-                _ => panic!("Expected Retrieve command"),
+                _ => panic!("Expected Query command"),
             }
         }
     }
 
     #[test]
     fn test_retrieve_multiple_logical_scopes() {
-        let cli = Cli::try_parse_from(["engramdb", "retrieve", "-l", "a", "-l", "b"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["engramdb", "query", "--mode", "rank", "-l", "a", "-l", "b"])
+                .unwrap();
         match cli.command {
-            Command::Retrieve { logical, .. } => {
+            Command::Query { logical, .. } => {
                 assert_eq!(logical, vec!["a", "b"]);
             }
-            _ => panic!("Expected Retrieve command"),
+            _ => panic!("Expected Query command"),
         }
     }
 
