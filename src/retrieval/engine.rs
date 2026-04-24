@@ -424,7 +424,21 @@ impl RetrievalEngine {
         };
         let filtered_entries = apply_index_filters(all_entries, &filters);
 
-        // Step 2.5: Pre-filter expired entries at the index level.
+        // Step 2.5a: In filter mode, user-supplied logical scopes act as a
+        // hard filter (matching the legacy `search()` contract). Physical is
+        // already filtered via `SearchFilters.physical`; logical is not a
+        // field on `SearchFilters` because it's a scoring signal in rank
+        // mode, so we apply it here explicitly.
+        let filtered_entries = if query.mode == RetrievalMode::Filter && !query.logical.is_empty() {
+            filtered_entries
+                .into_iter()
+                .filter(|e| e.logical.iter().any(|s| query.logical.contains(s)))
+                .collect()
+        } else {
+            filtered_entries
+        };
+
+        // Step 2.5b: Pre-filter expired entries at the index level.
         let include_expired = query
             .include_expired
             .unwrap_or(self.config.retrieval.include_expired);
@@ -516,16 +530,30 @@ impl RetrievalEngine {
                 .copied();
             let kw_score = keyword_map.get(&memory.id).copied();
 
+            // Build scoring context. In rank mode the user-supplied path and
+            // logical scopes drive the scope proximity signal. In filter mode
+            // they have already been applied as hard filters (physical via
+            // `SearchFilters`, logical via the pre-filter above), so passing
+            // them to the scorer would double-count and, because scope acts
+            // as a post-multiplier, would penalize results that only matched
+            // via logical scope (logical contributes at most 0.3 to the
+            // multiplier, which silently drags scores below the filter
+            // threshold).
+            let (ctx_path, ctx_logical): (Option<&str>, &[String]) = match query.mode {
+                RetrievalMode::Rank => (query_path, &query.logical),
+                RetrievalMode::Filter => (None, &[]),
+            };
+
             let context = if let Some(ref q) = query.query {
                 if let Some(s) = sem_score {
-                    ScoringContext::with_semantic(query_path, &query.logical, q, s)
+                    ScoringContext::with_semantic(ctx_path, ctx_logical, q, s)
                 } else if let Some(kw) = kw_score {
-                    ScoringContext::with_keyword(query_path, &query.logical, q, kw, None)
+                    ScoringContext::with_keyword(ctx_path, ctx_logical, q, kw, None)
                 } else {
-                    ScoringContext::with_query_degraded(query_path, &query.logical, q)
+                    ScoringContext::with_query_degraded(ctx_path, ctx_logical, q)
                 }
             } else {
-                ScoringContext::scope_only(query_path, &query.logical)
+                ScoringContext::scope_only(ctx_path, ctx_logical)
             };
 
             let breakdown = if include_expired {
@@ -543,16 +571,15 @@ impl RetrievalEngine {
             //
             //   - keyword match on query text
             //   - tag match on user-supplied `tags` filter
-            //   - scope proximity from user-supplied `path` or `logical`
-            //     filters (these are scoring signals, not hard filters)
+            //   - user supplied `path` or `logical` (already applied as
+            //     hard filters above, so any surviving memory matched)
             if query.mode == RetrievalMode::Filter {
                 let has_kw = kw_score.is_some_and(|v| v > 0.0);
                 let has_tag = query.tags.as_ref().is_some_and(|filter_tags| {
                     !filter_tags.is_empty() && filter_tags.iter().any(|t| memory.tags.contains(t))
                 });
-                let has_user_scope =
-                    (query.path.is_some() || !query.logical.is_empty()) && breakdown.scope > 0.0;
-                if !(has_kw || has_tag || has_user_scope) {
+                let user_scope_supplied = query.path.is_some() || !query.logical.is_empty();
+                if !(has_kw || has_tag || user_scope_supplied) {
                     continue;
                 }
             }
