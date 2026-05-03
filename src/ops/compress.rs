@@ -121,6 +121,7 @@ pub async fn compress_apply(
             decay_ttl: None,
             decay_floor: None,
             title_strategy: TitleStrategy::None,
+            embed_async: false,
         },
         None,
     )
@@ -179,6 +180,7 @@ mod tests {
                 decay_ttl: None,
                 decay_floor: None,
                 title_strategy: TitleStrategy::None,
+                embed_async: false,
             },
             None,
         )

@@ -165,6 +165,9 @@ async fn run_direct_mode(
             decay_ttl: params.decay_ttl,
             decay_floor: params.decay_floor,
             title_strategy: TitleStrategy::default(),
+            // CLI exits after this returns; embed inline so the work isn't
+            // dropped with the runtime.
+            embed_async: false,
         },
         Some(engine),
     )
@@ -299,6 +302,7 @@ async fn run_interactive_mode(
             decay_ttl: None,
             decay_floor: None,
             title_strategy: TitleStrategy::default(),
+            embed_async: false,
         },
         Some(engine),
     )
@@ -396,6 +400,7 @@ async fn run_editor_mode(
             decay_ttl: None,
             decay_floor: None,
             title_strategy: TitleStrategy::default(),
+            embed_async: false,
         },
         Some(engine),
     )

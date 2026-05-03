@@ -42,6 +42,7 @@ mod title_integration {
             decay_ttl: None,
             decay_floor: None,
             title_strategy: TitleStrategy::None,
+            embed_async: false,
         }
     }
 

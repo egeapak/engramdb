@@ -82,7 +82,7 @@ pub fn resolve_backend(
 }
 
 /// Try to create an embedding provider for the given model name and backend.
-fn resolve_provider(model: &str, backend: EmbeddingBackend) -> Option<Box<dyn EmbeddingProvider>> {
+fn resolve_provider(model: &str, backend: EmbeddingBackend) -> Option<Arc<dyn EmbeddingProvider>> {
     #[cfg(not(feature = "ollama"))]
     if backend == EmbeddingBackend::Ollama {
         eprintln!(
@@ -94,21 +94,21 @@ fn resolve_provider(model: &str, backend: EmbeddingBackend) -> Option<Box<dyn Em
     match model {
         "onnx" | "all-minilm" => try_onnx_then_ollama(
             backend,
-            || OnnxProvider::try_new().map(|p| Box::new(p) as _),
+            || OnnxProvider::try_new().map(|p| Arc::new(p) as _),
             #[cfg(feature = "ollama")]
-            || OllamaProvider::try_new(ALL_MINILM).map(|p| Box::new(p) as _),
+            || OllamaProvider::try_new(ALL_MINILM).map(|p| Arc::new(p) as _),
         ),
         "nomic-embed-text" => try_onnx_then_ollama(
             backend,
-            || OnnxProvider::try_with_model(ONNX_NOMIC_EMBED_TEXT).map(|p| Box::new(p) as _),
+            || OnnxProvider::try_with_model(ONNX_NOMIC_EMBED_TEXT).map(|p| Arc::new(p) as _),
             #[cfg(feature = "ollama")]
-            || OllamaProvider::try_new(NOMIC_EMBED_TEXT).map(|p| Box::new(p) as _),
+            || OllamaProvider::try_new(NOMIC_EMBED_TEXT).map(|p| Arc::new(p) as _),
         ),
         "mxbai-embed-large" => try_onnx_then_ollama(
             backend,
-            || OnnxProvider::try_with_model(ONNX_MXBAI_EMBED_LARGE).map(|p| Box::new(p) as _),
+            || OnnxProvider::try_with_model(ONNX_MXBAI_EMBED_LARGE).map(|p| Arc::new(p) as _),
             #[cfg(feature = "ollama")]
-            || OllamaProvider::try_new(MXBAI_EMBED_LARGE).map(|p| Box::new(p) as _),
+            || OllamaProvider::try_new(MXBAI_EMBED_LARGE).map(|p| Arc::new(p) as _),
         ),
         other => {
             eprintln!(
@@ -123,9 +123,9 @@ fn resolve_provider(model: &str, backend: EmbeddingBackend) -> Option<Box<dyn Em
 /// Shared logic: try ONNX and/or Ollama based on the backend preference.
 fn try_onnx_then_ollama(
     backend: EmbeddingBackend,
-    try_onnx: impl FnOnce() -> Option<Box<dyn EmbeddingProvider>>,
-    #[cfg(feature = "ollama")] try_ollama: impl FnOnce() -> Option<Box<dyn EmbeddingProvider>>,
-) -> Option<Box<dyn EmbeddingProvider>> {
+    try_onnx: impl FnOnce() -> Option<Arc<dyn EmbeddingProvider>>,
+    #[cfg(feature = "ollama")] try_ollama: impl FnOnce() -> Option<Arc<dyn EmbeddingProvider>>,
+) -> Option<Arc<dyn EmbeddingProvider>> {
     if backend != EmbeddingBackend::Ollama {
         if let Some(p) = try_onnx() {
             return Some(p);
@@ -183,7 +183,7 @@ pub async fn build_engine(
     if config.nli.enabled {
         match OnnxNliProvider::try_new(&config.nli.model) {
             Some(provider) => {
-                engine = engine.with_nli_provider(Box::new(provider));
+                engine = engine.with_nli_provider(Arc::new(provider));
             }
             None => {
                 eprintln!("Warning: NLI contradiction detection enabled but model unavailable");
