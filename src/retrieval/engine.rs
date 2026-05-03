@@ -119,6 +119,12 @@ pub struct RetrievalEngine {
     embedding_provider: Option<Box<dyn EmbeddingProvider>>,
     nli_provider: Option<Box<dyn NliProvider>>,
     reranker: Option<Arc<Mutex<TextRerank>>>,
+    /// Optional runtime stats collector. When `Some`, the engine pushes
+    /// stage timings and query outcomes to it. `None` disables all telemetry.
+    stats: Option<Arc<crate::telemetry::StatsCollector>>,
+    /// Project ID used as the partition key for telemetry. Required whenever
+    /// `stats` is `Some`; ignored otherwise.
+    project_id: Option<String>,
 }
 
 impl RetrievalEngine {
@@ -134,6 +140,39 @@ impl RetrievalEngine {
             embedding_provider: None,
             nli_provider: None,
             reranker: None,
+            stats: None,
+            project_id: None,
+        }
+    }
+
+    /// Attach a runtime stats collector. The engine will push stage timings
+    /// (`embed`, `vector_search`, `score`, `rerank`, `query.total`,
+    /// `create.chunk_text`, `create.embed_batch`, `create.upsert_chunks`)
+    /// and query outcomes to it. Returns self for method chaining.
+    pub fn with_stats(mut self, stats: Arc<crate::telemetry::StatsCollector>) -> Self {
+        self.stats = Some(stats);
+        self
+    }
+
+    /// Set the project ID used as the partition key for telemetry. No effect
+    /// unless [`with_stats`](Self::with_stats) is also called. Returns self
+    /// for method chaining.
+    pub fn with_project_id(mut self, project_id: String) -> Self {
+        self.project_id = Some(project_id);
+        self
+    }
+
+    /// Internal: record a stage timing if telemetry is wired up.
+    fn record_stage(&self, stage: &'static str, ms: f64) {
+        if let (Some(stats), Some(pid)) = (self.stats.as_ref(), self.project_id.as_ref()) {
+            stats.record_stage(pid, stage, ms);
+        }
+    }
+
+    /// Internal: record a query outcome if telemetry is wired up.
+    fn record_query_outcome(&self, hit: bool, quality: &str) {
+        if let (Some(stats), Some(pid)) = (self.stats.as_ref(), self.project_id.as_ref()) {
+            stats.record_query_outcome(pid, hit, quality);
         }
     }
 
@@ -269,14 +308,24 @@ impl RetrievalEngine {
     pub async fn embed_memory(&self, memory: &Memory) -> anyhow::Result<()> {
         if let Some(provider) = &self.embedding_provider {
             let text = format!("{} {}", memory.summary, memory.content);
+
+            let t = std::time::Instant::now();
             let chunks = crate::embeddings::chunk_text(&text, provider.max_tokens());
+            self.record_stage("create.chunk_text", t.elapsed().as_secs_f64() * 1000.0);
+
             if chunks.is_empty() {
                 self.store.delete_chunks(&memory.id).await?;
                 return Ok(());
             }
             let chunk_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
+
+            let t = std::time::Instant::now();
             let vectors = provider.embed_batch(&chunk_refs).await?;
+            self.record_stage("create.embed_batch", t.elapsed().as_secs_f64() * 1000.0);
+
+            let t = std::time::Instant::now();
             self.store.upsert_chunks(&memory.id, vectors).await?;
+            self.record_stage("create.upsert_chunks", t.elapsed().as_secs_f64() * 1000.0);
         }
         Ok(())
     }
@@ -399,6 +448,8 @@ impl RetrievalEngine {
     pub async fn query(&self, query: &RetrievalQuery) -> Result<RetrievalResult> {
         use crate::search::{keyword_search, normalize_keyword_score, query_token_count};
 
+        let query_started = std::time::Instant::now();
+
         // Step 0: Filter-mode requires at least one positive relevance input.
         if query.mode == RetrievalMode::Filter {
             let has_signal = query.query.as_ref().is_some_and(|s| !s.is_empty())
@@ -460,14 +511,19 @@ impl RetrievalEngine {
         // Step 4: If query text + embeddings available, get semantic scores.
         let semantic_scores_map: Option<HashMap<String, f64>> = if let Some(ref q) = query.query {
             if let Some(provider) = &self.embedding_provider {
-                if let Ok(query_vector) = provider.embed(q).await {
+                let t_embed = std::time::Instant::now();
+                let embed_result = provider.embed(q).await;
+                self.record_stage("embed", t_embed.elapsed().as_secs_f64() * 1000.0);
+
+                if let Ok(query_vector) = embed_result {
                     let limit = query
                         .max_results
                         .unwrap_or(self.config.retrieval.max_results)
                         * 3;
-                    self.store
-                        .vector_search(query_vector, limit)
-                        .await
+                    let t_vs = std::time::Instant::now();
+                    let vs_result = self.store.vector_search(query_vector, limit).await;
+                    self.record_stage("vector_search", t_vs.elapsed().as_secs_f64() * 1000.0);
+                    vs_result
                         .ok()
                         .map(|matches| matches.into_iter().map(|m| (m.id, m.score)).collect())
                 } else {
@@ -515,6 +571,7 @@ impl RetrievalEngine {
         let query_path = query.path.as_deref();
         let now = Utc::now();
 
+        let t_score = std::time::Instant::now();
         for entry in filtered_entries.iter() {
             let memory = match memory_map.get(&entry.id) {
                 Some(m) => m,
@@ -591,6 +648,8 @@ impl RetrievalEngine {
             });
         }
 
+        self.record_stage("score", t_score.elapsed().as_secs_f64() * 1000.0);
+
         // Step 6: Threshold. Rank mode uses retrieval.relevance_threshold;
         // Filter mode uses the stricter search.threshold when set, since the
         // flow is "find specific memories" rather than "browse context".
@@ -610,8 +669,17 @@ impl RetrievalEngine {
         });
 
         // Step 8: Apply reranking if query text is present.
+        // Only timed when the reranker is actually configured + enabled to
+        // avoid recording bogus 0ms samples for the no-op path.
         if let Some(ref q) = query.query {
-            if let Err(e) = self.apply_rerank(q, &mut scored_memories).await {
+            if self.reranking_available() && !scored_memories.is_empty() {
+                let t_rerank = std::time::Instant::now();
+                let rerank_result = self.apply_rerank(q, &mut scored_memories).await;
+                self.record_stage("rerank", t_rerank.elapsed().as_secs_f64() * 1000.0);
+                if let Err(e) = rerank_result {
+                    tracing::warn!("Reranking failed, using original scores: {}", e);
+                }
+            } else if let Err(e) = self.apply_rerank(q, &mut scored_memories).await {
                 tracing::warn!("Reranking failed, using original scores: {}", e);
             }
         }
@@ -638,11 +706,19 @@ impl RetrievalEngine {
             }
         }
 
-        Ok(RetrievalResult {
+        let result = RetrievalResult {
             memories: scored_memories,
             total,
             retrieval_quality: retrieval_quality.to_string(),
-        })
+        };
+
+        self.record_stage(
+            "query.total",
+            query_started.elapsed().as_secs_f64() * 1000.0,
+        );
+        self.record_query_outcome(!result.memories.is_empty(), &result.retrieval_quality);
+
+        Ok(result)
     }
 }
 

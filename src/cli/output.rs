@@ -727,12 +727,22 @@ impl OutputFormatter {
             println!("Newest: {}", newest.format("%Y-%m-%d"));
         }
         println!("\nAverage Criticality: {:.2}", stats.avg_criticality);
+
+        if let Some(rt) = &stats.runtime {
+            print_runtime_pretty(rt);
+        }
     }
 
     fn print_stats_plain(&self, stats: &Stats) {
         println!("Total: {}", stats.total);
         for (type_, count) in &stats.by_type {
             println!("{:?}: {}", type_, count);
+        }
+        if let Some(rt) = &stats.runtime {
+            println!("Calls: {}", rt.view.usage.total_calls);
+            if rt.view.queries.total > 0 {
+                println!("Hit rate: {:.3}", rt.view.queries.hit_rate);
+            }
         }
     }
 
@@ -888,6 +898,70 @@ impl OutputFormatter {
     }
 }
 
+/// Pretty-print the runtime telemetry overlay below the static stats block.
+fn print_runtime_pretty(rt: &crate::telemetry::RuntimeSnapshot) {
+    println!(
+        "\nRuntime telemetry (since {}, project {}):",
+        rt.since.format("%Y-%m-%d %H:%M:%S UTC"),
+        rt.project_id
+    );
+    println!("  Total calls: {}", rt.view.usage.total_calls);
+    if !rt.view.usage.by_tool.is_empty() {
+        println!("  By tool:");
+        for (tool, count) in &rt.view.usage.by_tool {
+            let errors = rt.view.usage.errors_by_tool.get(tool).copied().unwrap_or(0);
+            if errors > 0 {
+                println!("    {}: {} ({} errors)", tool, count, errors);
+            } else {
+                println!("    {}: {}", tool, count);
+            }
+        }
+    }
+    if rt.view.queries.total > 0 {
+        println!(
+            "  Queries: {} (hits: {}, zero-result: {}, hit rate: {:.3})",
+            rt.view.queries.total,
+            rt.view.queries.hits,
+            rt.view.queries.zero_results,
+            rt.view.queries.hit_rate
+        );
+        if !rt.view.queries.by_quality.is_empty() {
+            print!("    Quality:");
+            for (label, count) in &rt.view.queries.by_quality {
+                print!(" {}={}", label, count);
+            }
+            println!();
+        }
+    }
+    if !rt.view.timings_ms.tool.is_empty() {
+        println!("  Tool timings (ms):");
+        for (tool, t) in &rt.view.timings_ms.tool {
+            println!(
+                "    {}: avg {:.1}, p50 {:.1}, p95 {:.1} (n={})",
+                tool, t.avg, t.p50, t.p95, t.count
+            );
+        }
+    }
+    if !rt.view.timings_ms.stages.is_empty() {
+        println!("  Stage timings (ms):");
+        for (stage, t) in &rt.view.timings_ms.stages {
+            println!(
+                "    {}: avg {:.1}, p50 {:.1}, p95 {:.1} (n={})",
+                stage, t.avg, t.p50, t.p95, t.count
+            );
+        }
+    }
+    if let Some(by_project) = &rt.by_project {
+        println!("  By project ({} project(s)):", by_project.len());
+        for (pid, view) in by_project {
+            println!(
+                "    {}: {} calls, {} queries (hit rate {:.3})",
+                pid, view.usage.total_calls, view.queries.total, view.queries.hit_rate
+            );
+        }
+    }
+}
+
 /// Output data for project info display.
 #[derive(Debug, serde::Serialize)]
 pub struct ProjectInfoOutput {
@@ -939,6 +1013,12 @@ pub struct Stats {
     pub newest: Option<chrono::DateTime<chrono::Utc>>,
     /// Average criticality across all memories
     pub avg_criticality: f64,
+    /// Optional runtime telemetry (per-project usage counters, hit-rate,
+    /// response timings). Populated from the persisted `stats.json`
+    /// snapshot for the current project, or `None` if no telemetry has
+    /// been recorded yet.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<crate::telemetry::RuntimeSnapshot>,
 }
 
 #[cfg(test)]

@@ -428,7 +428,11 @@ pub enum Command {
     },
 
     /// Show statistics
-    Stats,
+    Stats {
+        /// Include the cross-project telemetry breakdown.
+        #[arg(long)]
+        all_projects: bool,
+    },
 
     /// Check environment and store health
     Doctor {

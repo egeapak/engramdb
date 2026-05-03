@@ -540,6 +540,77 @@ pub struct EngramConfig {
     /// Cross-encoder reranking settings
     #[serde(default)]
     pub rerank: RerankConfig,
+
+    /// Runtime telemetry / statistics collection settings
+    #[serde(default)]
+    pub stats: StatsConfig,
+}
+
+/// Runtime telemetry / statistics collection settings.
+///
+/// Controls the in-memory `StatsCollector` that tracks tool usage, query
+/// outcomes, and stage timings. Counters are project-scoped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsConfig {
+    /// Master switch. When false, the collector is a no-op and the
+    /// `stats` tool/command falls back to static store counts only.
+    #[serde(default = "default_stats_enabled")]
+    pub enabled: bool,
+
+    /// Per-stage / per-tool histogram capacity. Percentiles are computed
+    /// over the most recent N samples (recency-weighted, not lifetime).
+    #[serde(default = "default_histogram_capacity")]
+    pub histogram_capacity: usize,
+
+    /// Optional retention window for the on-disk persisted aggregate
+    /// snapshot. `None` (the default) means unlimited retention. When
+    /// `Some(n)`, snapshots older than `n` days are not loaded on
+    /// startup and may be pruned by future maintenance tasks.
+    #[serde(default)]
+    pub retention_days: Option<u64>,
+
+    /// Snapshot flush interval in seconds. The persistence task writes
+    /// the aggregate snapshot to disk this often, plus on shutdown.
+    #[serde(default = "default_flush_interval_secs")]
+    pub flush_interval_secs: u64,
+}
+
+fn default_stats_enabled() -> bool {
+    true
+}
+fn default_histogram_capacity() -> usize {
+    256
+}
+fn default_flush_interval_secs() -> u64 {
+    60
+}
+
+impl Default for StatsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_stats_enabled(),
+            histogram_capacity: default_histogram_capacity(),
+            retention_days: None,
+            flush_interval_secs: default_flush_interval_secs(),
+        }
+    }
+}
+
+impl StatsConfig {
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if self.histogram_capacity == 0 {
+            anyhow::bail!("stats.histogram_capacity must be > 0");
+        }
+        if self.flush_interval_secs == 0 {
+            anyhow::bail!("stats.flush_interval_secs must be >= 1");
+        }
+        if let Some(days) = self.retention_days {
+            if days > 3650 {
+                anyhow::bail!("stats.retention_days ({}) must be <= 3650", days);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl EngramConfig {
@@ -555,6 +626,7 @@ impl EngramConfig {
         self.trust_weights.validate()?;
         self.nli.validate()?;
         self.rerank.validate()?;
+        self.stats.validate()?;
 
         if !(0.0..=1.0).contains(&self.retrieval.scoring.scope_multiplier_floor) {
             anyhow::bail!("scoring.scope_multiplier_floor must be in [0.0, 1.0]");
