@@ -542,6 +542,13 @@ pub struct EngramDbServer {
     /// `with_stats`. For SSE servers this Arc is shared across all per-
     /// connection instances; see `run_sse`.
     stats: Arc<crate::telemetry::StatsCollector>,
+    /// Stable session identifier used as a telemetry attribute. Sourced
+    /// from `CLAUDE_SESSION_ID` (or `MCP_SESSION_ID`) env var if set,
+    /// otherwise a fresh per-process UUID. For stdio servers (the
+    /// transport Claude Code uses today) this is one-session-per-process,
+    /// which matches Claude Code's lifecycle. For HTTP, each per-
+    /// connection server in the factory gets a fresh ID.
+    session_id: String,
     #[allow(dead_code)]
     tool_router: rmcp::handler::server::tool::ToolRouter<Self>,
 }
@@ -577,12 +584,14 @@ impl EngramDbServer {
         );
         let effective_dir =
             crate::storage::project_id::detect_worktree_main(&dir).unwrap_or_else(|| dir.clone());
+        let session_id = resolve_session_id();
         Ok(Self {
             dir,
             effective_dir,
             embedding_backend,
             registry,
             stats,
+            session_id,
             tool_router: Self::tool_router(),
         })
     }
@@ -597,12 +606,14 @@ impl EngramDbServer {
             crate::telemetry::StatsCollector::new(crate::types::EngramConfig::default().stats);
         let effective_dir =
             crate::storage::project_id::detect_worktree_main(&dir).unwrap_or_else(|| dir.clone());
+        let session_id = resolve_session_id();
         Self {
             dir,
             effective_dir,
             embedding_backend,
             registry,
             stats,
+            session_id,
             tool_router: Self::tool_router(),
         }
     }
@@ -611,6 +622,11 @@ impl EngramDbServer {
     /// for the CLI's process-scoped collector access.
     pub fn stats(&self) -> Arc<crate::telemetry::StatsCollector> {
         self.stats.clone()
+    }
+
+    /// Returns the session ID this server reports to telemetry.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     /// If the server was launched in a linked git worktree, make sure the
@@ -801,7 +817,10 @@ impl EngramDbServer {
         let config_path = dir.join(".engramdb").join("config.toml");
         let pid = self.project_id_for_dir(&dir, project);
         let engine = ops::build_engine(store, &config_path, self.embedding_backend).await;
-        Ok(engine.with_stats(self.stats.clone()).with_project_id(pid))
+        Ok(engine
+            .with_stats(self.stats.clone())
+            .with_project_id(pid)
+            .with_session_id(Some(self.session_id.clone())))
     }
 
     /// Compute the project ID used as the telemetry partition key for the
@@ -842,19 +861,46 @@ impl EngramDbServer {
     }
 
     /// Build a `StatsScope` for a tool handler. Drop-on-leave records latency
-    /// and success/error against the project ID partition.
+    /// and success/error against the (project_id, session_id) partition.
     pub(crate) fn scope(
         &self,
         tool: &'static str,
         project: Option<&str>,
     ) -> crate::telemetry::StatsScope {
-        crate::telemetry::StatsScope::new(self.stats.clone(), tool, self.pid_for_input(project))
+        crate::telemetry::StatsScope::new(
+            self.stats.clone(),
+            tool,
+            self.pid_for_input(project),
+            Some(self.session_id.clone()),
+        )
     }
 
     /// Build a RetrievalEngine with optional embeddings support for the default project.
     async fn build_engine(&self) -> Result<RetrievalEngine, String> {
         self.build_engine_for(None).await
     }
+}
+
+/// Resolve the session ID for a freshly-constructed server.
+///
+/// Priority:
+/// 1. `CLAUDE_SESSION_ID` env var (future-proofing for [issue
+///    anthropics/claude-code#25642](https://github.com/anthropics/claude-code/issues/25642)).
+/// 2. `MCP_SESSION_ID` env var (compatible with hypothetical wrappers
+///    that propagate the MCP session header into the subprocess env).
+/// 3. A fresh UUID v7 generated at server construction time.
+///
+/// Empty/whitespace env-var values are treated as unset.
+fn resolve_session_id() -> String {
+    for var in ["CLAUDE_SESSION_ID", "MCP_SESSION_ID"] {
+        if let Ok(v) = std::env::var(var) {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    uuid::Uuid::now_v7().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -2004,21 +2050,30 @@ pub async fn run_stdio(
     dir: PathBuf,
     embedding_backend: Option<EmbeddingBackend>,
 ) -> anyhow::Result<()> {
-    let stats = crate::telemetry::StatsCollector::new(crate::types::EngramConfig::default().stats);
-    // Hydrate counters from any persisted snapshots before serving requests.
+    let stats_cfg = crate::types::EngramConfig::default().stats;
+    let stats = crate::telemetry::StatsCollector::new(stats_cfg.clone());
+
+    // Hydrate counters by replaying recent events from each project's
+    // LanceDB `stats_events` table before serving requests.
     if let Err(e) = crate::telemetry::persistence::hydrate_collector(&stats).await {
         tracing::warn!("stats hydrate failed: {e}");
     }
-    let _flush = crate::telemetry::persistence::spawn_flush_task(stats.clone());
+
+    // Drain the collector's persistence channel into the per-project
+    // LanceDB tables in the background.
+    if let Some(rx) = stats.take_receiver() {
+        let _flush = crate::telemetry::persistence::spawn_flush_task(
+            rx,
+            stats_cfg.flush_interval_secs,
+            stats_cfg.retention_days,
+        );
+    }
 
     let server = EngramDbServer::new_with_stats(dir, embedding_backend, stats.clone())?;
     // Detect git worktrees and register/init the main project if needed.
     server.ensure_hierarchy().await?;
     let service = server.serve(rmcp::transport::io::stdio()).await?;
     service.waiting().await?;
-
-    // Final flush so counters from this session land on disk.
-    crate::telemetry::persistence::flush_once(&stats).await;
     Ok(())
 }
 
@@ -2035,11 +2090,18 @@ pub async fn run_sse(
 
     // One process-global stats collector shared across every per-connection
     // server instance. Hydrate once and spawn a single flush task.
-    let stats = crate::telemetry::StatsCollector::new(crate::types::EngramConfig::default().stats);
+    let stats_cfg = crate::types::EngramConfig::default().stats;
+    let stats = crate::telemetry::StatsCollector::new(stats_cfg.clone());
     if let Err(e) = crate::telemetry::persistence::hydrate_collector(&stats).await {
         tracing::warn!("stats hydrate failed: {e}");
     }
-    let _flush = crate::telemetry::persistence::spawn_flush_task(stats.clone());
+    if let Some(rx) = stats.take_receiver() {
+        let _flush = crate::telemetry::persistence::spawn_flush_task(
+            rx,
+            stats_cfg.flush_interval_secs,
+            stats_cfg.retention_days,
+        );
+    }
 
     // Resolve hierarchy eagerly once: subsequent per-connection server
     // instances share the registry, so registration only happens once.
@@ -2071,8 +2133,9 @@ pub async fn run_sse(
         .with_graceful_shutdown(async move { ct.cancelled().await })
         .await?;
 
-    // Final flush so counters from this session land on disk.
-    crate::telemetry::persistence::flush_once(&stats).await;
+    // Drop the collector — closing the channel triggers the flush task to
+    // drain any buffered events and exit cleanly.
+    drop(stats);
     Ok(())
 }
 
@@ -5336,5 +5399,61 @@ mod tests {
         // zero_results == total when there were no hits in the empty store
         assert!(queries["zero_results"].as_u64().unwrap() >= 1);
         assert!((queries["hit_rate"].as_f64().unwrap()) <= 1.0);
+    }
+
+    #[tokio::test]
+    async fn stats_reports_session_id_and_unique_sessions() {
+        let (_dir, server) = setup().await;
+        // Drive a couple of calls so the session is seen by telemetry.
+        let _ = create_and_get_id(&server, "decision", "Test", "Session test").await;
+        let _ = server
+            .memory_query(Parameters(QueryInput {
+                mode: "rank".to_string(),
+                query: Some("anything".to_string()),
+                ..query_input("rank")
+            }))
+            .await;
+
+        let result = server
+            .memory_stats(Parameters(StatsInput {
+                project: None,
+                all_projects: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+
+        // Server.session_id() must be non-empty and exactly one unique
+        // session must be observed for the project.
+        assert!(!server.session_id().is_empty());
+        assert_eq!(val["usage"]["unique_sessions"], 1);
+    }
+
+    #[tokio::test]
+    async fn stats_reports_followups_for_same_session_queries() {
+        let (_dir, server) = setup().await;
+        // Three back-to-back queries from the same server (=same session_id).
+        // First one is not a followup; the other two arrive within the
+        // 60s default followup window → followups == 2.
+        for _ in 0..3 {
+            let _ = server
+                .memory_query(Parameters(QueryInput {
+                    mode: "rank".to_string(),
+                    query: Some("hello".to_string()),
+                    ..query_input("rank")
+                }))
+                .await;
+        }
+
+        let result = server
+            .memory_stats(Parameters(StatsInput {
+                project: None,
+                all_projects: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        let q = &val["queries"];
+        assert_eq!(q["total"].as_u64().unwrap(), 3);
+        assert_eq!(q["followups"].as_u64().unwrap(), 2);
+        assert!(q["followup_rate"].as_f64().unwrap() > 0.6);
     }
 }

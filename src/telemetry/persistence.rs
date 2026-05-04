@@ -1,154 +1,358 @@
-//! Aggregate snapshot persistence for the runtime stats collector.
+//! LanceDB-backed event log for runtime telemetry.
 //!
-//! Each project's counters live as a JSON file at
-//! `<global_data_dir>/projects/{project_id}/stats.json`. The persistence
-//! layer is **aggregate-only** — we don't keep an event log. The file is
-//! rewritten via tempfile + atomic rename on every flush.
+//! Each project has a `stats_events` table stored alongside the project's
+//! existing LanceDB tables (memories, chunks). Rows are appended on every
+//! tool call, stage timing, and query outcome — the in-memory
+//! [`StatsCollector`] writes to LanceDB asynchronously through an mpsc
+//! channel so the hot path stays I/O-free.
 //!
-//! On server startup we load every project's snapshot back into the
-//! `StatsCollector`. Counters and ring buffers survive restarts.
+//! ## Why LanceDB and not a JSON snapshot
+//!
+//! - LanceDB is already a project dependency and its per-project directory
+//!   layout (`<global_data_dir>/projects/{id}/lancedb/`) is the natural
+//!   home for any per-project columnar data.
+//! - Append-batched Arrow writes match the workload (small rows,
+//!   high-frequency). No JSON re-serialization on every flush.
+//! - Queryable: future debug commands can `SELECT … FROM stats_events
+//!   WHERE …` directly.
+//!
+//! ## On-disk schema
+//!
+//! Single table `stats_events` per project, columns:
+//!
+//! | column            | type     | notes                                    |
+//! |-------------------|----------|------------------------------------------|
+//! | `ts`              | Utf8     | RFC3339 timestamp                        |
+//! | `event_type`      | Utf8     | `tool_call` / `stage` / `query_outcome`  |
+//! | `tool`            | Utf8     | tool name (`tool_call` only)             |
+//! | `stage`           | Utf8     | stage name (`stage` only)                |
+//! | `duration_ms`     | Float64  | nullable; absent for `query_outcome`     |
+//! | `success`         | Boolean  | nullable; `tool_call` only               |
+//! | `hit`             | Boolean  | nullable; `query_outcome` only           |
+//! | `retrieval_quality` | Utf8   | nullable; `query_outcome` only           |
+//! | `session_id`      | Utf8     | per-process UUID or `Mcp-Session-Id`     |
+//!
+//! ## Hydration
+//!
+//! On server startup we walk every project's LanceDB dir under
+//! `<global_data_dir>/projects/*/lancedb`, open the `stats_events` table
+//! if it exists, and read up to `STARTUP_REPLAY_CAP` (default 50,000)
+//! most-recent rows. Each row is replayed into the in-memory
+//! [`StatsCollector`], rebuilding both lifetime counters and the
+//! percentile ring buffers.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use arrow_array::{
+    Array, ArrayRef, BooleanArray, Float64Array, RecordBatch, RecordBatchIterator, StringArray,
+};
+use arrow_schema::{DataType, Field, Schema};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use futures_util::stream::StreamExt;
+use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::{connect, Connection, Table};
+use tokio::sync::mpsc;
 
-use crate::storage::paths::{global_data_dir, GLOBAL_PROJECT_ID};
-use crate::telemetry::collector::{ProjectStats, StatsCollector};
+use crate::storage::paths::{global_data_dir, global_lancedb_dir, lancedb_dir, GLOBAL_PROJECT_ID};
+use crate::telemetry::collector::{EventRow, EventType, StatsCollector};
 
-/// On-disk representation of one project's snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersistedSnapshot {
-    /// Schema version. Bump when the on-disk shape changes incompatibly.
-    pub version: u32,
-    /// When the snapshot was last written.
-    pub written_at: DateTime<Utc>,
-    /// When the *first* counter on this project was recorded. Reported as
-    /// `since` in the runtime stats payload so consumers see a stable window.
-    pub since: DateTime<Utc>,
-    pub stats: ProjectStats,
-}
+const TABLE_NAME: &str = "stats_events";
 
-const SCHEMA_VERSION: u32 = 1;
+/// Cap on rows replayed at startup, per project. Keeps hydration fast for
+/// projects with very long event histories. Older rows are still in the
+/// table — pruning honors `retention_days`.
+const STARTUP_REPLAY_CAP: usize = 50_000;
 
-/// Returns the path of `stats.json` for the given project ID.
-///
-/// Project layout mirrors `lancedb_dir` / `personal_dir` (`paths.rs`):
-///   `<global_data_dir>/projects/{id}/stats.json`
-/// or, for the global store:
-///   `<global_data_dir>/global/stats.json`
-pub fn snapshot_path(project_id: &str) -> Result<PathBuf> {
-    let root = global_data_dir().context("resolving global data dir")?;
-    let dir = if project_id == GLOBAL_PROJECT_ID {
-        root.join("global")
+/// Cap on events drained per flush cycle. Bounds memory under burst load;
+/// the channel is unbounded so excess events stay queued for the next tick.
+const FLUSH_BATCH_MAX: usize = 1_024;
+
+/// Resolve the LanceDB connection root for a project ID.
+fn lancedb_root(project_id: &str) -> Result<PathBuf> {
+    if project_id == GLOBAL_PROJECT_ID {
+        global_lancedb_dir().context("resolving global lancedb dir")
     } else {
-        root.join("projects").join(project_id)
-    };
-    Ok(dir.join("stats.json"))
-}
-
-/// Where every project's stats files live.
-fn projects_root() -> Result<PathBuf> {
-    Ok(global_data_dir()
-        .context("resolving global data dir")?
-        .join("projects"))
-}
-
-/// Atomically write the snapshot for a single project.
-pub async fn write_snapshot(project_id: &str, snap: &PersistedSnapshot) -> Result<()> {
-    let path = snapshot_path(project_id)?;
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("creating dir {}", parent.display()))?;
+        lancedb_dir(project_id).context("resolving project lancedb dir")
     }
-    let bytes = serde_json::to_vec_pretty(snap).context("serializing snapshot")?;
-    write_atomic(&path, &bytes).await
 }
 
-async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("stats path has no parent: {}", path.display()))?;
-    let tmp = tempfile::NamedTempFile::new_in(parent).context("creating tempfile")?;
-    let tmp_path = tmp.path().to_path_buf();
-    tokio::fs::write(&tmp_path, bytes)
+async fn connect_for(project_id: &str) -> Result<Connection> {
+    let dir = lancedb_root(project_id)?;
+    tokio::fs::create_dir_all(&dir)
         .await
-        .with_context(|| format!("writing tempfile {}", tmp_path.display()))?;
-    tmp.persist(path)
-        .map_err(|e| anyhow::anyhow!("atomic rename failed: {e}"))?;
+        .with_context(|| format!("creating {}", dir.display()))?;
+    let path_str = dir
+        .to_str()
+        .context("lancedb path is not valid UTF-8")?
+        .to_string();
+    connect(&path_str)
+        .execute()
+        .await
+        .context("opening LanceDB connection for stats_events")
+}
+
+fn events_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("ts", DataType::Utf8, false),
+        Field::new("event_type", DataType::Utf8, false),
+        Field::new("tool", DataType::Utf8, true),
+        Field::new("stage", DataType::Utf8, true),
+        Field::new("duration_ms", DataType::Float64, true),
+        Field::new("success", DataType::Boolean, true),
+        Field::new("hit", DataType::Boolean, true),
+        Field::new("retrieval_quality", DataType::Utf8, true),
+        Field::new("session_id", DataType::Utf8, true),
+    ]))
+}
+
+async fn ensure_table(conn: &Connection) -> Result<Table> {
+    match conn.open_table(TABLE_NAME).execute().await {
+        Ok(t) => Ok(t),
+        Err(_) => conn
+            .create_empty_table(TABLE_NAME, events_schema())
+            .execute()
+            .await
+            .context("creating stats_events table"),
+    }
+}
+
+/// Append a batch of events to the project's `stats_events` table. Errors
+/// are logged at warn level and never propagated — telemetry writes must
+/// never break a tool call.
+pub async fn append_events(project_id: &str, events: &[EventRow]) {
+    if events.is_empty() {
+        return;
+    }
+    if let Err(e) = append_events_inner(project_id, events).await {
+        tracing::warn!(
+            "stats: failed to append {} events for project {}: {}",
+            events.len(),
+            project_id,
+            e
+        );
+    }
+}
+
+async fn append_events_inner(project_id: &str, events: &[EventRow]) -> Result<()> {
+    let conn = connect_for(project_id).await?;
+    let table = ensure_table(&conn).await?;
+    let batch = events_to_batch(events)?;
+    let schema = batch.schema();
+    let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+    table
+        .add(Box::new(batches))
+        .execute()
+        .await
+        .context("appending stats_events rows")?;
     Ok(())
 }
 
-/// Read one project's snapshot, or `Ok(None)` if it doesn't exist or is
-/// older than the configured retention window.
-pub async fn read_snapshot(
-    project_id: &str,
-    retention_days: Option<u64>,
-) -> Result<Option<PersistedSnapshot>> {
-    let path = snapshot_path(project_id)?;
-    if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
-        return Ok(None);
+fn events_to_batch(events: &[EventRow]) -> Result<RecordBatch> {
+    let schema = events_schema();
+    let mut ts: Vec<String> = Vec::with_capacity(events.len());
+    let mut event_type: Vec<String> = Vec::with_capacity(events.len());
+    let mut tool: Vec<Option<String>> = Vec::with_capacity(events.len());
+    let mut stage: Vec<Option<String>> = Vec::with_capacity(events.len());
+    let mut duration_ms: Vec<Option<f64>> = Vec::with_capacity(events.len());
+    let mut success: Vec<Option<bool>> = Vec::with_capacity(events.len());
+    let mut hit: Vec<Option<bool>> = Vec::with_capacity(events.len());
+    let mut retrieval_quality: Vec<Option<String>> = Vec::with_capacity(events.len());
+    let mut session_id: Vec<Option<String>> = Vec::with_capacity(events.len());
+
+    for ev in events {
+        ts.push(ev.ts.to_rfc3339());
+        event_type.push(ev.event_type.as_str().to_string());
+        tool.push(ev.tool.clone());
+        stage.push(ev.stage.clone());
+        duration_ms.push(ev.duration_ms);
+        success.push(ev.success);
+        hit.push(ev.hit);
+        retrieval_quality.push(ev.retrieval_quality.clone());
+        session_id.push(ev.session_id.clone());
     }
-    let bytes = tokio::fs::read(&path)
-        .await
-        .with_context(|| format!("reading {}", path.display()))?;
-    let snap: PersistedSnapshot = match serde_json::from_slice(&bytes) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                "stats snapshot at {} is corrupt ({e}); ignoring",
-                path.display()
-            );
-            return Ok(None);
-        }
-    };
-    if snap.version != SCHEMA_VERSION {
-        tracing::warn!(
-            "stats snapshot at {} has schema version {} (expected {}); ignoring",
-            path.display(),
-            snap.version,
-            SCHEMA_VERSION
-        );
-        return Ok(None);
-    }
-    if let Some(days) = retention_days {
-        let age = Utc::now().signed_duration_since(snap.written_at);
-        if age.num_days() > days as i64 {
-            tracing::info!(
-                "stats snapshot at {} is older than retention ({} days); ignoring",
-                path.display(),
-                days
-            );
-            return Ok(None);
-        }
-    }
-    Ok(Some(snap))
+
+    let arrays: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(ts)),
+        Arc::new(StringArray::from(event_type)),
+        Arc::new(StringArray::from(tool)),
+        Arc::new(StringArray::from(stage)),
+        Arc::new(Float64Array::from(duration_ms)),
+        Arc::new(BooleanArray::from(success)),
+        Arc::new(BooleanArray::from(hit)),
+        Arc::new(StringArray::from(retrieval_quality)),
+        Arc::new(StringArray::from(session_id)),
+    ];
+
+    RecordBatch::try_new(schema, arrays).context("building stats_events RecordBatch")
 }
 
-/// Load every project's persisted snapshot from disk and hydrate the
-/// collector. Snapshots with a version mismatch or corrupt JSON are skipped
-/// with a `warn!` log line but never abort startup.
-pub async fn hydrate_collector(collector: &Arc<StatsCollector>) -> Result<()> {
-    let retention = collector.config().retention_days;
-    let mut by_project: HashMap<String, ProjectStats> = HashMap::new();
-    let mut earliest_since: Option<DateTime<Utc>> = None;
-
-    // Iterate <global_data_dir>/projects/*/stats.json
-    let root = match projects_root() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("stats: cannot resolve projects root: {e}");
-            return Ok(());
-        }
+/// Read up to `cap` rows for the given project, sorted by `ts` desc, returning
+/// them in original insertion order (oldest first) so replays stay
+/// chronological.
+pub async fn load_recent(project_id: &str, cap: usize) -> Result<Vec<EventRow>> {
+    let conn = connect_for(project_id).await?;
+    let table = match conn.open_table(TABLE_NAME).execute().await {
+        Ok(t) => t,
+        Err(_) => return Ok(Vec::new()),
     };
-    if tokio::fs::try_exists(&root).await.unwrap_or(false) {
-        let mut rd = tokio::fs::read_dir(&root)
+
+    let limit = cap.max(1);
+    let mut stream = table
+        .query()
+        .limit(limit)
+        .execute()
+        .await
+        .context("querying stats_events table")?;
+
+    let mut events = Vec::new();
+    while let Some(batch_result) = stream.next().await {
+        let batch = batch_result.context("reading stats_events batch")?;
+        events.extend(batch_to_events(&batch)?);
+    }
+    // LanceDB returns rows in storage order. Sort chronologically; ties
+    // preserve the original order via the stable sort.
+    events.sort_by(|a, b| a.ts.cmp(&b.ts));
+    if events.len() > cap {
+        let tail_start = events.len() - cap;
+        events.drain(0..tail_start);
+    }
+    Ok(events)
+}
+
+fn batch_to_events(batch: &RecordBatch) -> Result<Vec<EventRow>> {
+    let ts = batch
+        .column_by_name("ts")
+        .context("missing ts column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("ts column is not Utf8")?;
+    let event_type = batch
+        .column_by_name("event_type")
+        .context("missing event_type column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("event_type column is not Utf8")?;
+    let tool = batch
+        .column_by_name("tool")
+        .context("missing tool column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("tool column is not Utf8")?;
+    let stage = batch
+        .column_by_name("stage")
+        .context("missing stage column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("stage column is not Utf8")?;
+    let duration_ms = batch
+        .column_by_name("duration_ms")
+        .context("missing duration_ms column")?
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .context("duration_ms column is not Float64")?;
+    let success = batch
+        .column_by_name("success")
+        .context("missing success column")?
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .context("success column is not Boolean")?;
+    let hit = batch
+        .column_by_name("hit")
+        .context("missing hit column")?
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .context("hit column is not Boolean")?;
+    let retrieval_quality = batch
+        .column_by_name("retrieval_quality")
+        .context("missing retrieval_quality column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("retrieval_quality column is not Utf8")?;
+    let session_id = batch
+        .column_by_name("session_id")
+        .context("missing session_id column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("session_id column is not Utf8")?;
+
+    let mut rows = Vec::with_capacity(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        let ts_str = ts.value(i);
+        let parsed_ts = DateTime::parse_from_rfc3339(ts_str)
+            .with_context(|| format!("invalid ts {ts_str}"))?
+            .with_timezone(&Utc);
+        let event_type = EventType::parse_label(event_type.value(i)).unwrap_or(EventType::ToolCall);
+        rows.push(EventRow {
+            ts: parsed_ts,
+            event_type,
+            tool: nullable_str(tool, i),
+            stage: nullable_str(stage, i),
+            duration_ms: nullable_f64(duration_ms, i),
+            success: nullable_bool(success, i),
+            hit: nullable_bool(hit, i),
+            retrieval_quality: nullable_str(retrieval_quality, i),
+            session_id: nullable_str(session_id, i),
+        });
+    }
+    Ok(rows)
+}
+
+fn nullable_str(arr: &StringArray, i: usize) -> Option<String> {
+    if arr.is_null(i) {
+        None
+    } else {
+        Some(arr.value(i).to_string())
+    }
+}
+
+fn nullable_f64(arr: &Float64Array, i: usize) -> Option<f64> {
+    if arr.is_null(i) {
+        None
+    } else {
+        Some(arr.value(i))
+    }
+}
+
+fn nullable_bool(arr: &BooleanArray, i: usize) -> Option<bool> {
+    if arr.is_null(i) {
+        None
+    } else {
+        Some(arr.value(i))
+    }
+}
+
+/// Delete events older than `retention_days`. No-op when `retention_days`
+/// is `None` (the default) — counters cover the entire recorded history.
+pub async fn prune_older_than(project_id: &str, retention_days: u64) -> Result<()> {
+    let conn = connect_for(project_id).await?;
+    let table = match conn.open_table(TABLE_NAME).execute().await {
+        Ok(t) => t,
+        Err(_) => return Ok(()),
+    };
+    let cutoff = Utc::now() - chrono::Duration::days(retention_days as i64);
+    let predicate = format!("ts < '{}'", cutoff.to_rfc3339());
+    table
+        .delete(&predicate)
+        .await
+        .with_context(|| format!("pruning stats_events for project {project_id}"))?;
+    Ok(())
+}
+
+/// Walk every project under `<global_data_dir>/projects/*/` plus the global
+/// store, replaying recent events into the collector.
+pub async fn hydrate_collector(collector: &Arc<StatsCollector>) -> Result<()> {
+    let projects_root = global_data_dir()
+        .context("resolving global data dir")?
+        .join("projects");
+
+    let mut project_ids: Vec<String> = Vec::new();
+    if tokio::fs::try_exists(&projects_root).await.unwrap_or(false) {
+        let mut rd = tokio::fs::read_dir(&projects_root)
             .await
-            .with_context(|| format!("reading {}", root.display()))?;
+            .with_context(|| format!("reading {}", projects_root.display()))?;
         while let Some(entry) = rd.next_entry().await.transpose() {
             let entry = match entry {
                 Ok(e) => e,
@@ -157,163 +361,199 @@ pub async fn hydrate_collector(collector: &Arc<StatsCollector>) -> Result<()> {
                     continue;
                 }
             };
-            let pid = entry.file_name().to_string_lossy().to_string();
-            if let Ok(Some(snap)) = read_snapshot(&pid, retention).await {
-                earliest_since = Some(match earliest_since {
-                    Some(s) if s < snap.since => s,
-                    _ => snap.since,
-                });
-                by_project.insert(pid, snap.stats);
-            }
+            project_ids.push(entry.file_name().to_string_lossy().to_string());
         }
     }
+    project_ids.push(GLOBAL_PROJECT_ID.to_string());
 
-    // Also hydrate the global store, which lives at a different path.
-    if let Ok(Some(snap)) = read_snapshot(GLOBAL_PROJECT_ID, retention).await {
-        earliest_since = Some(match earliest_since {
-            Some(s) if s < snap.since => s,
-            _ => snap.since,
-        });
-        by_project.insert(GLOBAL_PROJECT_ID.to_string(), snap.stats);
-    }
-
-    if !by_project.is_empty() {
-        let since = earliest_since.unwrap_or_else(Utc::now);
-        collector.restore_from(since, by_project);
+    for pid in project_ids {
+        match load_recent(&pid, STARTUP_REPLAY_CAP).await {
+            Ok(events) if !events.is_empty() => {
+                collector.replay_events(&pid, &events);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("stats hydrate: load_recent for {pid} failed: {e}");
+            }
+        }
     }
     Ok(())
 }
 
-/// Spawn a background task that periodically flushes the collector's
-/// per-project snapshots to disk.
-///
-/// Cancellation: the task exits cleanly when the collector is dropped (the
-/// `Weak` upgrade returns `None`).
-pub fn spawn_flush_task(collector: Arc<StatsCollector>) -> tokio::task::JoinHandle<()> {
-    let interval_secs = collector.config().flush_interval_secs;
-    let weak = Arc::downgrade(&collector);
-    drop(collector);
+/// Spawn a background task that drains the collector's event channel and
+/// flushes batches into the per-project `stats_events` tables. The task
+/// exits cleanly when the collector is dropped (the receiver returns
+/// `None`).
+pub fn spawn_flush_task(
+    rx: mpsc::UnboundedReceiver<(String /*project_id*/, EventRow)>,
+    flush_interval_secs: u64,
+    retention_days: Option<u64>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-        // First tick fires immediately; skip it so we don't double-write at
-        // startup right after `hydrate_collector` ran.
+        let mut rx = rx;
+        let mut tick = tokio::time::interval(Duration::from_secs(flush_interval_secs.max(1)));
+        // Skip the first immediate tick so we don't flush an empty buffer
+        // right after startup.
         tick.tick().await;
+
+        let mut buf: std::collections::HashMap<String, Vec<EventRow>> =
+            std::collections::HashMap::new();
+        let mut prune_counter: u64 = 0;
+
         loop {
-            tick.tick().await;
-            let Some(c) = weak.upgrade() else {
-                return; // collector dropped → server shut down
-            };
-            if !c.enabled() {
-                continue;
+            tokio::select! {
+                msg = rx.recv() => {
+                    match msg {
+                        Some((pid, ev)) => {
+                            let entry = buf.entry(pid).or_default();
+                            entry.push(ev);
+                            // Cap per-project buffers — flush early under burst load.
+                            if entry.len() >= FLUSH_BATCH_MAX {
+                                let pid = entry_owner(&buf, FLUSH_BATCH_MAX).unwrap_or_default();
+                                if !pid.is_empty() {
+                                    if let Some(events) = buf.remove(&pid) {
+                                        append_events(&pid, &events).await;
+                                    }
+                                }
+                            }
+                        }
+                        None => {
+                            // Channel closed — final drain and exit.
+                            for (pid, events) in buf.drain() {
+                                append_events(&pid, &events).await;
+                            }
+                            return;
+                        }
+                    }
+                }
+                _ = tick.tick() => {
+                    let drained: Vec<(String, Vec<EventRow>)> = buf.drain().collect();
+                    for (pid, events) in &drained {
+                        append_events(pid, events).await;
+                    }
+                    // Run pruning every ~10 ticks so we don't hammer LanceDB
+                    // with deletes.
+                    prune_counter += 1;
+                    if prune_counter.is_multiple_of(10) {
+                        if let Some(days) = retention_days {
+                            for (pid, _) in &drained {
+                                if let Err(e) = prune_older_than(pid, days).await {
+                                    tracing::warn!("stats prune for {pid}: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            flush_once(&c).await;
         }
     })
 }
 
-/// Write each project's current snapshot to disk. Errors are logged but
-/// never propagated — telemetry must never break a tool call.
-pub async fn flush_once(collector: &Arc<StatsCollector>) {
-    let projects = collector.snapshot_for_persistence();
-    let since = collector.since();
-    let written_at = Utc::now();
-    for (pid, stats) in projects {
-        let snap = PersistedSnapshot {
-            version: SCHEMA_VERSION,
-            written_at,
-            since,
-            stats,
-        };
-        if let Err(e) = write_snapshot(&pid, &snap).await {
-            tracing::warn!("stats flush for project {pid} failed: {e}");
-        }
-    }
+fn entry_owner(
+    buf: &std::collections::HashMap<String, Vec<EventRow>>,
+    threshold: usize,
+) -> Option<String> {
+    buf.iter()
+        .find(|(_, v)| v.len() >= threshold)
+        .map(|(k, _)| k.clone())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::collector::StatsCollector;
+    use crate::telemetry::collector::{EventRow, EventType, StatsCollector};
     use crate::types::config::StatsConfig;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// Per-test unique project ID. Tests share the process-global
-    /// `ENGRAMDB_DATA_DIR` (set by `test_isolation`) so we avoid any env-var
-    /// mutation here and instead key on a unique ID per test invocation.
     fn unique_pid(prefix: &str) -> String {
         static N: AtomicU64 = AtomicU64::new(0);
-        format!("test-{}-{}", prefix, N.fetch_add(1, Ordering::Relaxed))
+        format!("test-{}-{:016x}", prefix, N.fetch_add(1, Ordering::Relaxed))
     }
 
-    #[tokio::test]
-    async fn write_then_read_roundtrip() {
-        let pid = unique_pid("rt");
-        let collector = StatsCollector::new(StatsConfig::default());
-        collector.record_tool_call(&pid, "query", 12.5, true);
-        collector.record_query_outcome(&pid, true, "full");
-        flush_once(&collector).await;
-
-        let read = read_snapshot(&pid, None).await.unwrap().unwrap();
-        assert_eq!(read.version, SCHEMA_VERSION);
-        assert_eq!(read.stats.total_calls, 1);
-        assert_eq!(read.stats.queries.total, 1);
-        assert_eq!(read.stats.queries.hits, 1);
-    }
-
-    #[tokio::test]
-    async fn hydrate_round_trip() {
-        let a = unique_pid("hyd-a");
-        let b = unique_pid("hyd-b");
-        // Write
-        {
-            let c = StatsCollector::new(StatsConfig::default());
-            c.record_tool_call(&a, "query", 10.0, true);
-            c.record_tool_call(&a, "query", 20.0, true);
-            c.record_tool_call(&b, "create", 30.0, false);
-            flush_once(&c).await;
+    fn tool_event(ts: DateTime<Utc>, tool: &str, ms: f64, success: bool, sid: &str) -> EventRow {
+        EventRow {
+            ts,
+            event_type: EventType::ToolCall,
+            tool: Some(tool.to_string()),
+            stage: None,
+            duration_ms: Some(ms),
+            success: Some(success),
+            hit: None,
+            retrieval_quality: None,
+            session_id: Some(sid.to_string()),
         }
-        // Read back into a fresh collector
-        let fresh = StatsCollector::new(StatsConfig::default());
-        hydrate_collector(&fresh).await.unwrap();
-
-        let snap_a = fresh.snapshot(&a, false);
-        assert_eq!(
-            snap_a.view.usage.total_calls, 2,
-            "proj-A total_calls restored"
-        );
-        assert_eq!(
-            snap_a.view.usage.by_tool.get("query").copied(),
-            Some(2),
-            "proj-A query count restored"
-        );
-        let snap_b = fresh.snapshot(&b, false);
-        assert_eq!(snap_b.view.usage.total_calls, 1);
-        assert_eq!(
-            snap_b.view.usage.errors_by_tool.get("create").copied(),
-            Some(1)
-        );
     }
 
     #[tokio::test]
-    async fn read_snapshot_returns_none_for_missing_file() {
-        let pid = unique_pid("miss");
-        let read = read_snapshot(&pid, None).await.unwrap();
-        assert!(read.is_none());
+    async fn append_then_load_roundtrip() {
+        let pid = unique_pid("rt");
+        let now = Utc::now();
+        let events = vec![
+            tool_event(now, "query", 12.5, true, "sess-A"),
+            tool_event(
+                now + chrono::Duration::seconds(1),
+                "create",
+                22.0,
+                true,
+                "sess-A",
+            ),
+        ];
+        append_events(&pid, &events).await;
+
+        let read = load_recent(&pid, 100).await.unwrap();
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].tool.as_deref(), Some("query"));
+        assert_eq!(read[1].tool.as_deref(), Some("create"));
+        assert_eq!(read[1].session_id.as_deref(), Some("sess-A"));
     }
 
     #[tokio::test]
-    async fn read_snapshot_drops_stale_when_retention_set() {
-        let pid = unique_pid("stale");
-        let stale_snap = PersistedSnapshot {
-            version: SCHEMA_VERSION,
-            written_at: Utc::now() - chrono::Duration::days(40),
-            since: Utc::now() - chrono::Duration::days(40),
-            stats: ProjectStats::default(),
-        };
-        write_snapshot(&pid, &stale_snap).await.unwrap();
-        let read = read_snapshot(&pid, Some(30)).await.unwrap();
-        assert!(read.is_none(), "stale snapshot should be dropped");
-        let read = read_snapshot(&pid, None).await.unwrap();
-        assert!(read.is_some(), "without retention, even old snapshot loads");
+    async fn load_recent_empty_when_no_table() {
+        let pid = unique_pid("empty");
+        let read = load_recent(&pid, 10).await.unwrap();
+        assert!(read.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hydrate_replays_into_collector() {
+        let pid = unique_pid("hyd");
+        let now = Utc::now();
+        let events = vec![
+            tool_event(now, "query", 10.0, true, "sess-X"),
+            tool_event(
+                now + chrono::Duration::milliseconds(50),
+                "query",
+                20.0,
+                true,
+                "sess-X",
+            ),
+        ];
+        append_events(&pid, &events).await;
+
+        let collector = StatsCollector::new(StatsConfig::default());
+        let recent = load_recent(&pid, 100).await.unwrap();
+        collector.replay_events(&pid, &recent);
+
+        let snap = collector.snapshot(&pid, false);
+        assert_eq!(snap.view.usage.total_calls, 2);
+        let q = snap.view.timings_ms.tool.get("query").unwrap();
+        assert_eq!(q.count, 2);
+    }
+
+    #[tokio::test]
+    async fn prune_drops_old_rows_when_retention_set() {
+        let pid = unique_pid("prune");
+        let now = Utc::now();
+        let events = vec![
+            tool_event(now - chrono::Duration::days(40), "query", 1.0, true, "old"),
+            tool_event(now, "query", 2.0, true, "new"),
+        ];
+        append_events(&pid, &events).await;
+
+        prune_older_than(&pid, 30).await.unwrap();
+
+        let read = load_recent(&pid, 100).await.unwrap();
+        assert_eq!(read.len(), 1, "stale row pruned");
+        assert_eq!(read[0].session_id.as_deref(), Some("new"));
     }
 }

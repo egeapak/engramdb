@@ -125,6 +125,9 @@ pub struct RetrievalEngine {
     /// Project ID used as the partition key for telemetry. Required whenever
     /// `stats` is `Some`; ignored otherwise.
     project_id: Option<String>,
+    /// Optional session ID — recorded with every event, used to compute
+    /// followup rate and unique-session count.
+    session_id: Option<String>,
 }
 
 impl RetrievalEngine {
@@ -142,6 +145,7 @@ impl RetrievalEngine {
             reranker: None,
             stats: None,
             project_id: None,
+            session_id: None,
         }
     }
 
@@ -162,17 +166,25 @@ impl RetrievalEngine {
         self
     }
 
+    /// Bind the session ID for telemetry events emitted from this engine.
+    /// Used by the collector to compute followup rate and unique-session
+    /// count. Returns self for method chaining.
+    pub fn with_session_id(mut self, session_id: Option<String>) -> Self {
+        self.session_id = session_id;
+        self
+    }
+
     /// Internal: record a stage timing if telemetry is wired up.
     fn record_stage(&self, stage: &'static str, ms: f64) {
         if let (Some(stats), Some(pid)) = (self.stats.as_ref(), self.project_id.as_ref()) {
-            stats.record_stage(pid, stage, ms);
+            stats.record_stage(pid, stage, ms, self.session_id.as_deref());
         }
     }
 
     /// Internal: record a query outcome if telemetry is wired up.
     fn record_query_outcome(&self, hit: bool, quality: &str) {
         if let (Some(stats), Some(pid)) = (self.stats.as_ref(), self.project_id.as_ref()) {
-            stats.record_query_outcome(pid, hit, quality);
+            stats.record_query_outcome(pid, hit, quality, self.session_id.as_deref());
         }
     }
 

@@ -562,17 +562,24 @@ pub struct StatsConfig {
     #[serde(default = "default_histogram_capacity")]
     pub histogram_capacity: usize,
 
-    /// Optional retention window for the on-disk persisted aggregate
-    /// snapshot. `None` (the default) means unlimited retention. When
-    /// `Some(n)`, snapshots older than `n` days are not loaded on
-    /// startup and may be pruned by future maintenance tasks.
+    /// Optional retention window for the on-disk LanceDB event log.
+    /// `None` (the default) means unlimited retention. When `Some(n)`,
+    /// the persistence flush task prunes events older than `n` days.
+    /// Note: lifetime counters become "since the oldest non-pruned event"
+    /// when retention is set.
     #[serde(default)]
     pub retention_days: Option<u64>,
 
-    /// Snapshot flush interval in seconds. The persistence task writes
-    /// the aggregate snapshot to disk this often, plus on shutdown.
+    /// Flush task interval in seconds. The persistence task drains
+    /// buffered events and appends them to the per-project `stats_events`
+    /// LanceDB table this often, plus on shutdown.
     #[serde(default = "default_flush_interval_secs")]
     pub flush_interval_secs: u64,
+
+    /// A query is counted as a "followup" if it arrives within this many
+    /// seconds of a previous query in the same session. Default 60.
+    #[serde(default = "default_followup_window_secs")]
+    pub followup_window_secs: u64,
 }
 
 fn default_stats_enabled() -> bool {
@@ -584,6 +591,9 @@ fn default_histogram_capacity() -> usize {
 fn default_flush_interval_secs() -> u64 {
     60
 }
+fn default_followup_window_secs() -> u64 {
+    60
+}
 
 impl Default for StatsConfig {
     fn default() -> Self {
@@ -592,6 +602,7 @@ impl Default for StatsConfig {
             histogram_capacity: default_histogram_capacity(),
             retention_days: None,
             flush_interval_secs: default_flush_interval_secs(),
+            followup_window_secs: default_followup_window_secs(),
         }
     }
 }
@@ -603,6 +614,9 @@ impl StatsConfig {
         }
         if self.flush_interval_secs == 0 {
             anyhow::bail!("stats.flush_interval_secs must be >= 1");
+        }
+        if self.followup_window_secs == 0 {
+            anyhow::bail!("stats.followup_window_secs must be >= 1");
         }
         if let Some(days) = self.retention_days {
             if days > 3650 {

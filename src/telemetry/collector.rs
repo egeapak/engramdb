@@ -1,12 +1,27 @@
 //! Process-wide stats collector with per-project breakdown.
+//!
+//! All recording paths update an in-memory aggregate AND emit a
+//! single-row [`EventRow`] onto an unbounded `mpsc` channel. The
+//! [`crate::telemetry::persistence`] flush task drains the channel and
+//! appends rows to each project's `stats_events` LanceDB table.
+//!
+//! Session IDs are passed through every recording call so we can:
+//! - count unique sessions per project,
+//! - compute the followup rate (queries within `followup_window_secs` of
+//!   a previous query *in the same session*).
+//!
+//! When the persistence receiver isn't taken (CLI / tests), events are
+//! still buffered in the channel; they're harmless and drop with the
+//! collector.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 use crate::types::config::StatsConfig;
 
@@ -38,6 +53,48 @@ impl QueryQualityBucket {
             Self::NoQuerySignals => "no_query_signals",
         }
     }
+}
+
+/// Type tag on a persisted event row.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum EventType {
+    ToolCall,
+    Stage,
+    QueryOutcome,
+}
+
+impl EventType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ToolCall => "tool_call",
+            Self::Stage => "stage",
+            Self::QueryOutcome => "query_outcome",
+        }
+    }
+
+    pub fn parse_label(s: &str) -> Option<Self> {
+        match s {
+            "tool_call" => Some(Self::ToolCall),
+            "stage" => Some(Self::Stage),
+            "query_outcome" => Some(Self::QueryOutcome),
+            _ => None,
+        }
+    }
+}
+
+/// One row in the persisted event log. Also the message type sent over
+/// the in-process mpsc channel.
+#[derive(Debug, Clone)]
+pub struct EventRow {
+    pub ts: DateTime<Utc>,
+    pub event_type: EventType,
+    pub tool: Option<String>,
+    pub stage: Option<String>,
+    pub duration_ms: Option<f64>,
+    pub success: Option<bool>,
+    pub hit: Option<bool>,
+    pub retrieval_quality: Option<String>,
+    pub session_id: Option<String>,
 }
 
 /// Fixed-capacity ring buffer of millisecond samples.
@@ -146,7 +203,7 @@ impl ToolCounters {
     }
 }
 
-/// Query-outcome counters (hits, zero-results, by-quality bucket).
+/// Query-outcome counters (hits, zero-results, by-quality bucket, followups).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QueryCounters {
     pub total: u64,
@@ -156,15 +213,21 @@ pub struct QueryCounters {
     pub by_quality_keyword_only: u64,
     pub by_quality_scope_only: u64,
     pub by_quality_no_query_signals: u64,
+    /// Queries that arrived within `followup_window_secs` of a prior query
+    /// in the same session.
+    pub followups: u64,
 }
 
 impl QueryCounters {
-    fn record(&mut self, hit: bool, quality: QueryQualityBucket) {
+    fn record(&mut self, hit: bool, quality: QueryQualityBucket, is_followup: bool) {
         self.total += 1;
         if hit {
             self.hits += 1;
         } else {
             self.zero_results += 1;
+        }
+        if is_followup {
+            self.followups += 1;
         }
         match quality {
             QueryQualityBucket::Full => self.by_quality_full += 1,
@@ -185,29 +248,50 @@ pub struct ProjectStats {
     /// `query.total`, `embed`, `vector_search`, `score`, `rerank`,
     /// `create.chunk_text`, `create.embed_batch`, `create.upsert_chunks`.
     pub stages: HashMap<String, RingHistogram>,
+    /// Set of distinct session IDs seen for this project.
+    pub sessions: BTreeSet<String>,
+    /// Most recent query timestamp per session, used to compute the
+    /// followup rate. Capped at a few entries per session — old sessions
+    /// linger only as keys with a `last_query_at`.
+    pub last_query_at: BTreeMap<String, DateTime<Utc>>,
 }
 
 /// Process-wide collector. Cheap to clone (everything behind `Arc`).
-#[derive(Debug)]
 pub struct StatsCollector {
     since: DateTime<Utc>,
     config: StatsConfig,
     inner: Mutex<Inner>,
+    /// Persistence event sender. Always present; the matching receiver is
+    /// stored in `inner.rx_slot` until [`take_receiver`] hands it to the
+    /// flush task.
+    tx: mpsc::UnboundedSender<(String /* project_id */, EventRow)>,
 }
 
-#[derive(Debug)]
+impl std::fmt::Debug for StatsCollector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StatsCollector")
+            .field("since", &self.since)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
 struct Inner {
     by_project: HashMap<String, ProjectStats>,
+    rx_slot: Option<mpsc::UnboundedReceiver<(String, EventRow)>>,
 }
 
 impl StatsCollector {
     pub fn new(config: StatsConfig) -> Arc<Self> {
+        let (tx, rx) = mpsc::unbounded_channel();
         Arc::new(Self {
             since: Utc::now(),
             config,
             inner: Mutex::new(Inner {
                 by_project: HashMap::new(),
+                rx_slot: Some(rx),
             }),
+            tx,
         })
     }
 
@@ -223,21 +307,18 @@ impl StatsCollector {
         &self.config
     }
 
-    /// Hydrate from a previously persisted snapshot. Replaces in-memory state.
-    pub fn restore_from(&self, since: DateTime<Utc>, projects: HashMap<String, ProjectStats>) {
-        // We can't change `since` after construction (it's behind &self,
-        // not &mut self), but the persistence layer wants to advertise the
-        // *original* start time. We expose `since` via `since()` for live
-        // reporting; the persisted `since` is reported separately by
-        // `RuntimeSnapshot::since` (set from the persisted file at load).
-        let _ = since;
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.by_project = projects;
-        }
+    /// Take the persistence receiver. Subsequent calls return `None`.
+    /// Called once at server startup by the flush-task spawner.
+    pub fn take_receiver(&self) -> Option<mpsc::UnboundedReceiver<(String, EventRow)>> {
+        self.inner.lock().ok().and_then(|mut i| i.rx_slot.take())
     }
 
     fn capacity(&self) -> usize {
         self.config.histogram_capacity
+    }
+
+    fn followup_window(&self) -> chrono::Duration {
+        chrono::Duration::seconds(self.config.followup_window_secs as i64)
     }
 
     fn with_project<F, R>(&self, project_id: &str, f: F) -> R
@@ -252,6 +333,21 @@ impl StatsCollector {
         f(entry)
     }
 
+    fn send_event(&self, project_id: &str, row: EventRow) {
+        // Errors here mean the receiver was dropped without the channel
+        // being closed by us — there's nothing we can do, and telemetry
+        // must never break a tool call.
+        let _ = self.tx.send((project_id.to_string(), row));
+    }
+
+    fn note_session(p: &mut ProjectStats, session_id: Option<&str>) {
+        if let Some(sid) = session_id {
+            if !sid.is_empty() {
+                p.sessions.insert(sid.to_string());
+            }
+        }
+    }
+
     /// Record a completed tool call (called from `StatsScope::drop`).
     pub fn record_tool_call(
         &self,
@@ -259,6 +355,7 @@ impl StatsCollector {
         tool: &'static str,
         elapsed_ms: f64,
         success: bool,
+        session_id: Option<&str>,
     ) {
         if !self.config.enabled {
             return;
@@ -275,11 +372,32 @@ impl StatsCollector {
                 counters.errors += 1;
             }
             counters.latency.record(elapsed_ms);
+            Self::note_session(p, session_id);
         });
+        self.send_event(
+            project_id,
+            EventRow {
+                ts: Utc::now(),
+                event_type: EventType::ToolCall,
+                tool: Some(tool.to_string()),
+                stage: None,
+                duration_ms: Some(elapsed_ms),
+                success: Some(success),
+                hit: None,
+                retrieval_quality: None,
+                session_id: session_id.map(str::to_owned),
+            },
+        );
     }
 
     /// Record a stage timing (embed, vector_search, rerank, etc.).
-    pub fn record_stage(&self, project_id: &str, stage: &'static str, elapsed_ms: f64) {
+    pub fn record_stage(
+        &self,
+        project_id: &str,
+        stage: &'static str,
+        elapsed_ms: f64,
+        session_id: Option<&str>,
+    ) {
         if !self.config.enabled {
             return;
         }
@@ -290,10 +408,31 @@ impl StatsCollector {
                 .or_insert_with(|| RingHistogram::new(cap))
                 .record(elapsed_ms);
         });
+        self.send_event(
+            project_id,
+            EventRow {
+                ts: Utc::now(),
+                event_type: EventType::Stage,
+                tool: None,
+                stage: Some(stage.to_string()),
+                duration_ms: Some(elapsed_ms),
+                success: None,
+                hit: None,
+                retrieval_quality: None,
+                session_id: session_id.map(str::to_owned),
+            },
+        );
     }
 
-    /// Record a query outcome — hit-rate / zero-result / quality bucket.
-    pub fn record_query_outcome(&self, project_id: &str, hit: bool, quality_label: &str) {
+    /// Record a query outcome — hit-rate / zero-result / quality bucket
+    /// and (when `session_id` is present) followup-rate computation.
+    pub fn record_query_outcome(
+        &self,
+        project_id: &str,
+        hit: bool,
+        quality_label: &str,
+        session_id: Option<&str>,
+    ) {
         if !self.config.enabled {
             return;
         }
@@ -301,7 +440,98 @@ impl StatsCollector {
             // Unknown labels fall through to "no_query_signals" so we don't lose them.
             QueryQualityBucket::NoQuerySignals,
         );
-        self.with_project(project_id, |p| p.queries.record(hit, bucket));
+        let now = Utc::now();
+        let window = self.followup_window();
+        self.with_project(project_id, |p| {
+            let is_followup = match session_id {
+                Some(sid) if !sid.is_empty() => match p.last_query_at.get(sid) {
+                    Some(prev) => (now - *prev) <= window,
+                    None => false,
+                },
+                _ => false,
+            };
+            p.queries.record(hit, bucket, is_followup);
+            Self::note_session(p, session_id);
+            if let Some(sid) = session_id {
+                if !sid.is_empty() {
+                    p.last_query_at.insert(sid.to_string(), now);
+                }
+            }
+        });
+        self.send_event(
+            project_id,
+            EventRow {
+                ts: now,
+                event_type: EventType::QueryOutcome,
+                tool: None,
+                stage: None,
+                duration_ms: None,
+                success: None,
+                hit: Some(hit),
+                retrieval_quality: Some(bucket.as_str().to_string()),
+                session_id: session_id.map(str::to_owned),
+            },
+        );
+    }
+
+    /// Replay a chronologically-sorted slice of events into the in-memory
+    /// state. Used by the persistence layer to hydrate counters and ring
+    /// buffers on server startup.
+    pub fn replay_events(&self, project_id: &str, events: &[EventRow]) {
+        let cap = self.capacity();
+        let window = self.followup_window();
+        self.with_project(project_id, |p| {
+            for ev in events {
+                Self::note_session(p, ev.session_id.as_deref());
+                match ev.event_type {
+                    EventType::ToolCall => {
+                        p.total_calls += 1;
+                        let tool = ev.tool.clone().unwrap_or_default();
+                        let counters = p
+                            .by_tool
+                            .entry(tool)
+                            .or_insert_with(|| ToolCounters::new(cap));
+                        counters.calls += 1;
+                        if ev.success == Some(false) {
+                            counters.errors += 1;
+                        }
+                        if let Some(d) = ev.duration_ms {
+                            counters.latency.record(d);
+                        }
+                    }
+                    EventType::Stage => {
+                        let stage = ev.stage.clone().unwrap_or_default();
+                        if let Some(d) = ev.duration_ms {
+                            p.stages
+                                .entry(stage)
+                                .or_insert_with(|| RingHistogram::new(cap))
+                                .record(d);
+                        }
+                    }
+                    EventType::QueryOutcome => {
+                        let bucket = ev
+                            .retrieval_quality
+                            .as_deref()
+                            .and_then(QueryQualityBucket::from_label)
+                            .unwrap_or(QueryQualityBucket::NoQuerySignals);
+                        let hit = ev.hit.unwrap_or(false);
+                        let is_followup = match ev.session_id.as_deref() {
+                            Some(sid) if !sid.is_empty() => match p.last_query_at.get(sid) {
+                                Some(prev) => (ev.ts - *prev) <= window,
+                                None => false,
+                            },
+                            _ => false,
+                        };
+                        p.queries.record(hit, bucket, is_followup);
+                        if let Some(sid) = ev.session_id.as_deref() {
+                            if !sid.is_empty() {
+                                p.last_query_at.insert(sid.to_string(), ev.ts);
+                            }
+                        }
+                    }
+                }
+            }
+        });
     }
 
     /// Returns a serializable snapshot. When `all_projects` is true, the
@@ -329,15 +559,6 @@ impl StatsCollector {
             by_project,
         }
     }
-
-    /// Return a clone of the entire by-project map for persistence.
-    pub fn snapshot_for_persistence(&self) -> HashMap<String, ProjectStats> {
-        let inner = self
-            .inner
-            .lock()
-            .expect("StatsCollector mutex poisoned — a previous panic left it in a bad state");
-        inner.by_project.clone()
-    }
 }
 
 fn project_to_view(stats: &ProjectStats) -> ProjectView {
@@ -354,6 +575,7 @@ fn project_to_view(stats: &ProjectStats) -> ProjectView {
         .collect();
     let usage = UsageView {
         total_calls: stats.total_calls,
+        unique_sessions: stats.sessions.len() as u64,
         by_tool,
         errors_by_tool,
     };
@@ -393,6 +615,7 @@ pub struct ProjectView {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct UsageView {
     pub total_calls: u64,
+    pub unique_sessions: u64,
     pub by_tool: BTreeMap<String, u64>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub errors_by_tool: BTreeMap<String, u64>,
@@ -404,6 +627,8 @@ pub struct QueriesView {
     pub hits: u64,
     pub zero_results: u64,
     pub hit_rate: f64,
+    pub followups: u64,
+    pub followup_rate: f64,
     pub by_quality: BTreeMap<&'static str, u64>,
 }
 
@@ -413,6 +638,11 @@ impl From<&QueryCounters> for QueriesView {
             0.0
         } else {
             (q.hits as f64) / (q.total as f64)
+        };
+        let followup_rate = if q.total == 0 {
+            0.0
+        } else {
+            (q.followups as f64) / (q.total as f64)
         };
         let mut by_quality = BTreeMap::new();
         if q.by_quality_full > 0 {
@@ -432,6 +662,8 @@ impl From<&QueryCounters> for QueriesView {
             hits: q.hits,
             zero_results: q.zero_results,
             hit_rate: round3(hit_rate),
+            followups: q.followups,
+            followup_rate: round3(followup_rate),
             by_quality,
         }
     }
@@ -482,16 +714,23 @@ pub struct StatsScope {
     collector: Arc<StatsCollector>,
     tool: &'static str,
     project_id: String,
+    session_id: Option<String>,
     started: Instant,
     success: AtomicBool,
 }
 
 impl StatsScope {
-    pub fn new(collector: Arc<StatsCollector>, tool: &'static str, project_id: String) -> Self {
+    pub fn new(
+        collector: Arc<StatsCollector>,
+        tool: &'static str,
+        project_id: String,
+        session_id: Option<String>,
+    ) -> Self {
         Self {
             collector,
             tool,
             project_id,
+            session_id,
             started: Instant::now(),
             success: AtomicBool::new(false),
         }
@@ -508,8 +747,13 @@ impl Drop for StatsScope {
     fn drop(&mut self) {
         let elapsed_ms = self.started.elapsed().as_secs_f64() * 1000.0;
         let success = self.success.load(Ordering::Relaxed);
-        self.collector
-            .record_tool_call(&self.project_id, self.tool, elapsed_ms, success);
+        self.collector.record_tool_call(
+            &self.project_id,
+            self.tool,
+            elapsed_ms,
+            success,
+            self.session_id.as_deref(),
+        );
     }
 }
 
@@ -527,6 +771,7 @@ mod tests {
             histogram_capacity: 256,
             retention_days: None,
             flush_interval_secs: 60,
+            followup_window_secs: 60,
         }
     }
 
@@ -536,17 +781,13 @@ mod tests {
         for i in 1..=256u32 {
             h.record(i as f64);
         }
-        // nearest-rank: p50 of 1..=256 is at rank ceil(128) = 128 → value 128
         assert_eq!(h.percentile(0.5), 128.0);
-        // p95 at rank ceil(243.2) = 244 → value 244
         assert_eq!(h.percentile(0.95), 244.0);
-        // running avg over lifetime = (1+256)/2 = 128.5
         assert!((h.avg() - 128.5).abs() < 1e-9);
 
-        // Insert one more, evicting the oldest (1). Now buffer is 2..=257.
         h.record(257.0);
         assert_eq!(h.percentile(0.5), 129.0);
-        assert_eq!(h.count, 257); // count is lifetime, doesn't roll back
+        assert_eq!(h.count, 257);
     }
 
     #[test]
@@ -555,8 +796,8 @@ mod tests {
         for i in 1..=10u32 {
             h.record(i as f64);
         }
-        assert_eq!(h.percentile(0.5), 5.0); // ceil(5) = 5 → idx 4 → value 5
-        assert_eq!(h.percentile(0.95), 10.0); // ceil(9.5) = 10 → idx 9 → value 10
+        assert_eq!(h.percentile(0.5), 5.0);
+        assert_eq!(h.percentile(0.95), 10.0);
         assert!((h.avg() - 5.5).abs() < 1e-9);
     }
 
@@ -571,11 +812,12 @@ mod tests {
     #[test]
     fn collector_records_tool_call_success() {
         let c = StatsCollector::new(cfg());
-        c.record_tool_call("proj-A", "query", 12.0, true);
-        c.record_tool_call("proj-A", "query", 18.0, true);
+        c.record_tool_call("proj-A", "query", 12.0, true, Some("s1"));
+        c.record_tool_call("proj-A", "query", 18.0, true, Some("s1"));
         let snap = c.snapshot("proj-A", false);
         assert_eq!(snap.view.usage.total_calls, 2);
         assert_eq!(snap.view.usage.by_tool.get("query").copied(), Some(2));
+        assert_eq!(snap.view.usage.unique_sessions, 1);
         assert!(snap.view.usage.errors_by_tool.is_empty());
         let t = snap.view.timings_ms.tool.get("query").unwrap();
         assert_eq!(t.count, 2);
@@ -583,10 +825,21 @@ mod tests {
     }
 
     #[test]
+    fn collector_counts_unique_sessions() {
+        let c = StatsCollector::new(cfg());
+        c.record_tool_call("p", "query", 1.0, true, Some("s1"));
+        c.record_tool_call("p", "query", 1.0, true, Some("s2"));
+        c.record_tool_call("p", "query", 1.0, true, Some("s2"));
+        c.record_tool_call("p", "query", 1.0, true, None);
+        let snap = c.snapshot("p", false);
+        assert_eq!(snap.view.usage.unique_sessions, 2);
+    }
+
+    #[test]
     fn collector_records_errors() {
         let c = StatsCollector::new(cfg());
-        c.record_tool_call("p", "query", 5.0, false);
-        c.record_tool_call("p", "query", 7.0, true);
+        c.record_tool_call("p", "query", 5.0, false, None);
+        c.record_tool_call("p", "query", 7.0, true, None);
         let snap = c.snapshot("p", false);
         assert_eq!(snap.view.usage.by_tool.get("query").copied(), Some(2));
         assert_eq!(
@@ -599,34 +852,56 @@ mod tests {
     fn collector_query_outcomes_compute_hit_rate() {
         let c = StatsCollector::new(cfg());
         for _ in 0..7 {
-            c.record_query_outcome("p", true, "full");
+            c.record_query_outcome("p", true, "full", Some("s"));
         }
         for _ in 0..3 {
-            c.record_query_outcome("p", false, "no_query_signals");
+            c.record_query_outcome("p", false, "no_query_signals", Some("s"));
         }
         let snap = c.snapshot("p", false);
         assert_eq!(snap.view.queries.total, 10);
         assert_eq!(snap.view.queries.hits, 7);
         assert_eq!(snap.view.queries.zero_results, 3);
         assert!((snap.view.queries.hit_rate - 0.7).abs() < 1e-6);
-        assert_eq!(snap.view.queries.by_quality.get("full").copied(), Some(7));
-        assert_eq!(
-            snap.view
-                .queries
-                .by_quality
-                .get("no_query_signals")
-                .copied(),
-            Some(3)
-        );
+    }
+
+    #[test]
+    fn followup_within_window_counted() {
+        let c = StatsCollector::new(cfg());
+        // First query — never a followup.
+        c.record_query_outcome("p", true, "full", Some("S"));
+        // Second query in the same session, immediately after — followup.
+        c.record_query_outcome("p", true, "full", Some("S"));
+        c.record_query_outcome("p", true, "full", Some("S"));
+        let snap = c.snapshot("p", false);
+        assert_eq!(snap.view.queries.followups, 2);
+        assert!(snap.view.queries.followup_rate > 0.6);
+    }
+
+    #[test]
+    fn followup_different_session_not_counted() {
+        let c = StatsCollector::new(cfg());
+        c.record_query_outcome("p", true, "full", Some("S1"));
+        c.record_query_outcome("p", true, "full", Some("S2"));
+        let snap = c.snapshot("p", false);
+        assert_eq!(snap.view.queries.followups, 0);
+    }
+
+    #[test]
+    fn followup_anonymous_session_not_counted() {
+        let c = StatsCollector::new(cfg());
+        c.record_query_outcome("p", true, "full", None);
+        c.record_query_outcome("p", true, "full", None);
+        let snap = c.snapshot("p", false);
+        assert_eq!(snap.view.queries.followups, 0);
     }
 
     #[test]
     fn collector_records_all_quality_buckets() {
         let c = StatsCollector::new(cfg());
-        c.record_query_outcome("p", true, "full");
-        c.record_query_outcome("p", true, "keyword_only");
-        c.record_query_outcome("p", false, "scope_only");
-        c.record_query_outcome("p", false, "no_query_signals");
+        c.record_query_outcome("p", true, "full", None);
+        c.record_query_outcome("p", true, "keyword_only", None);
+        c.record_query_outcome("p", false, "scope_only", None);
+        c.record_query_outcome("p", false, "no_query_signals", None);
         let snap = c.snapshot("p", false);
         assert_eq!(snap.view.queries.by_quality.len(), 4);
         for label in ["full", "keyword_only", "scope_only", "no_query_signals"] {
@@ -641,9 +916,9 @@ mod tests {
     #[test]
     fn per_project_isolation() {
         let c = StatsCollector::new(cfg());
-        c.record_tool_call("a", "query", 10.0, true);
-        c.record_tool_call("b", "create", 20.0, true);
-        c.record_query_outcome("a", true, "full");
+        c.record_tool_call("a", "query", 10.0, true, None);
+        c.record_tool_call("b", "create", 20.0, true, None);
+        c.record_query_outcome("a", true, "full", None);
 
         let snap_a = c.snapshot("a", false);
         assert_eq!(snap_a.view.usage.total_calls, 1);
@@ -666,8 +941,7 @@ mod tests {
     fn stats_scope_records_error_on_drop_without_mark_success() {
         let c = StatsCollector::new(cfg());
         {
-            let scope = StatsScope::new(c.clone(), "query", "p".to_string());
-            // Drop without mark_success → error path
+            let scope = StatsScope::new(c.clone(), "query", "p".to_string(), Some("s".to_string()));
             drop(scope);
         }
         let snap = c.snapshot("p", false);
@@ -682,7 +956,7 @@ mod tests {
     fn stats_scope_records_success_when_marked() {
         let c = StatsCollector::new(cfg());
         {
-            let scope = StatsScope::new(c.clone(), "query", "p".to_string());
+            let scope = StatsScope::new(c.clone(), "query", "p".to_string(), None);
             scope.mark_success();
         }
         let snap = c.snapshot("p", false);
@@ -693,9 +967,9 @@ mod tests {
     #[test]
     fn stage_timings_recorded_per_project() {
         let c = StatsCollector::new(cfg());
-        c.record_stage("p", "embed", 5.0);
-        c.record_stage("p", "embed", 15.0);
-        c.record_stage("p", "vector_search", 8.0);
+        c.record_stage("p", "embed", 5.0, None);
+        c.record_stage("p", "embed", 15.0, None);
+        c.record_stage("p", "vector_search", 8.0, None);
         let snap = c.snapshot("p", false);
         let t = snap.view.timings_ms.stages.get("embed").unwrap();
         assert_eq!(t.count, 2);
@@ -708,9 +982,9 @@ mod tests {
         let mut c = cfg();
         c.enabled = false;
         let collector = StatsCollector::new(c);
-        collector.record_tool_call("p", "query", 10.0, true);
-        collector.record_query_outcome("p", true, "full");
-        collector.record_stage("p", "embed", 1.0);
+        collector.record_tool_call("p", "query", 10.0, true, None);
+        collector.record_query_outcome("p", true, "full", None);
+        collector.record_stage("p", "embed", 1.0, None);
         let snap = collector.snapshot("p", false);
         assert_eq!(snap.view.usage.total_calls, 0);
         assert_eq!(snap.view.queries.total, 0);
@@ -720,9 +994,8 @@ mod tests {
     #[test]
     fn unknown_quality_label_falls_back() {
         let c = StatsCollector::new(cfg());
-        c.record_query_outcome("p", true, "weird-label");
+        c.record_query_outcome("p", true, "weird-label", None);
         let snap = c.snapshot("p", false);
-        // Should still count toward total + hit; bucket falls into no_query_signals
         assert_eq!(snap.view.queries.total, 1);
         assert_eq!(snap.view.queries.hits, 1);
         assert_eq!(
@@ -733,5 +1006,55 @@ mod tests {
                 .copied(),
             Some(1)
         );
+    }
+
+    #[test]
+    fn replay_events_rebuilds_state() {
+        let c = StatsCollector::new(cfg());
+        let now = Utc::now();
+        let events = vec![
+            EventRow {
+                ts: now,
+                event_type: EventType::ToolCall,
+                tool: Some("query".to_string()),
+                stage: None,
+                duration_ms: Some(10.0),
+                success: Some(true),
+                hit: None,
+                retrieval_quality: None,
+                session_id: Some("s".to_string()),
+            },
+            EventRow {
+                ts: now + chrono::Duration::milliseconds(50),
+                event_type: EventType::QueryOutcome,
+                tool: None,
+                stage: None,
+                duration_ms: None,
+                success: None,
+                hit: Some(true),
+                retrieval_quality: Some("full".to_string()),
+                session_id: Some("s".to_string()),
+            },
+            EventRow {
+                ts: now + chrono::Duration::milliseconds(100),
+                event_type: EventType::Stage,
+                tool: None,
+                stage: Some("embed".to_string()),
+                duration_ms: Some(5.0),
+                success: None,
+                hit: None,
+                retrieval_quality: None,
+                session_id: Some("s".to_string()),
+            },
+        ];
+        c.replay_events("p", &events);
+
+        let snap = c.snapshot("p", false);
+        assert_eq!(snap.view.usage.total_calls, 1);
+        assert_eq!(snap.view.usage.unique_sessions, 1);
+        assert_eq!(snap.view.queries.total, 1);
+        assert_eq!(snap.view.queries.hits, 1);
+        assert_eq!(snap.view.timings_ms.stages.get("embed").unwrap().count, 1);
+        assert_eq!(snap.view.timings_ms.tool.get("query").unwrap().count, 1);
     }
 }
