@@ -165,8 +165,10 @@ pub async fn create_memory(
         if engine.embeddings_available() {
             if params.embed_async {
                 // memory.id == id (set by Memory::new), so we can move the
-                // local memory into the spawned task without re-reading.
-                let _ = engine.spawn_ingest(memory.clone());
+                // local memory into the spawned task without re-reading from
+                // disk. The local `summary` variable carries the value through
+                // to the returned CreateResult below.
+                let _ = engine.spawn_ingest(memory);
             } else {
                 let saved = store.get(&id).await?;
                 engine.embed_memory(&saved).await?;
@@ -228,10 +230,7 @@ pub async fn create_memory(
         }
     }
 
-    Ok(CreateResult {
-        id,
-        summary: memory.summary,
-    })
+    Ok(CreateResult { id, summary })
 }
 
 #[cfg(test)]
