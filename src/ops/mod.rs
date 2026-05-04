@@ -21,7 +21,7 @@ pub mod review;
 pub mod stats;
 pub mod update;
 
-pub use challenge::{challenge_memory, ChallengeResult};
+pub use challenge::{challenge_for_contradictions, challenge_memory, ChallengeResult};
 pub use compress::{
     compress_apply, compress_candidates, CompressApplyResult, CompressCandidate,
     CompressCandidatesResult,

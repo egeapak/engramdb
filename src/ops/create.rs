@@ -175,13 +175,8 @@ pub async fn create_memory(
 
                 // Detect contradictions with existing memories (best-effort).
                 // Challenge writes are spawned so create_memory returns without
-                // waiting for them.
-                //
-                // Note: challenge writes are best-effort. If two memories are
-                // created concurrently and both contradict the same existing
-                // memory, one challenge may be lost due to a read-modify-write
-                // race on the challenges vec. This is acceptable since NLI
-                // contradiction detection is advisory, not transactional.
+                // waiting for them; per-write errors are logged inside the
+                // helper.
                 if engine.nli_available() {
                     if let Ok(contradictions) = engine.detect_contradictions(&saved).await {
                         if !contradictions.is_empty() {
@@ -191,37 +186,13 @@ pub async fn create_memory(
                                 "NLI detected contradictions with existing memories"
                             );
                             let store_clone = store.clone();
-                            let handle = tokio::spawn(async move {
-                                for (existing_id, nli_result) in &contradictions {
-                                    let evidence = format!(
-                                        "NLI contradiction detected (score: {:.2}): new memory '{}' contradicts this memory",
-                                        nli_result.contradiction, saved.summary
-                                    );
-                                    if let Err(e) = crate::ops::challenge::challenge_memory(
-                                        &store_clone,
-                                        existing_id,
-                                        &evidence,
-                                        None,
-                                    )
-                                    .await
-                                    {
-                                        tracing::warn!(
-                                            "Failed to challenge memory {} for NLI contradiction: {}",
-                                            existing_id,
-                                            e
-                                        );
-                                    }
-                                }
-                            });
-                            // Monitor the background task so panics are logged
-                            // instead of silently swallowed
                             tokio::spawn(async move {
-                                if let Err(e) = handle.await {
-                                    tracing::error!(
-                                        "NLI contradiction challenge task failed: {}",
-                                        e
-                                    );
-                                }
+                                crate::ops::challenge_for_contradictions(
+                                    &store_clone,
+                                    &saved.summary,
+                                    &contradictions,
+                                )
+                                .await;
                             });
                         }
                     }

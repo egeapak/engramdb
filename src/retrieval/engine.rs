@@ -284,26 +284,12 @@ impl RetrievalEngine {
                         count = contradictions.len(),
                         "NLI detected contradictions with existing memories"
                     );
-                    for (existing_id, nli_result) in &contradictions {
-                        let evidence = format!(
-                            "NLI contradiction detected (score: {:.2}): new memory '{}' contradicts this memory",
-                            nli_result.contradiction, memory.summary
-                        );
-                        if let Err(e) = crate::ops::challenge::challenge_memory(
-                            &store,
-                            existing_id,
-                            &evidence,
-                            None,
-                        )
-                        .await
-                        {
-                            tracing::warn!(
-                                "Failed to challenge memory {} for NLI contradiction: {}",
-                                existing_id,
-                                e
-                            );
-                        }
-                    }
+                    crate::ops::challenge_for_contradictions(
+                        &store,
+                        &memory.summary,
+                        &contradictions,
+                    )
+                    .await;
                 }
                 Ok(_) => {}
                 Err(e) => {

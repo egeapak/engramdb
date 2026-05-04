@@ -1,5 +1,6 @@
 //! Challenge a memory's validity.
 
+use crate::nli::NliResult;
 use crate::storage::MemoryStore;
 use crate::types::{Challenge, Memory, MemoryUpdate, Status};
 use anyhow::Result;
@@ -38,6 +39,38 @@ pub async fn challenge_memory(
         challenged: true,
         memory,
     })
+}
+
+/// Write a challenge to each memory in `contradictions`, attributing the
+/// challenge to the new memory whose summary is `new_memory_summary`.
+///
+/// Best-effort: per-iteration errors are logged via `tracing` and never
+/// propagate. Intended to run inside a `tokio::spawn`ed task or as the tail
+/// of one.
+///
+/// Note: if two new memories are created concurrently and both contradict
+/// the same existing memory, one challenge may be lost due to a
+/// read-modify-write race on the challenges vec inside `challenge_memory`.
+/// This is acceptable since NLI contradiction detection is advisory, not
+/// transactional.
+pub async fn challenge_for_contradictions(
+    store: &MemoryStore,
+    new_memory_summary: &str,
+    contradictions: &[(String, NliResult)],
+) {
+    for (existing_id, nli_result) in contradictions {
+        let evidence = format!(
+            "NLI contradiction detected (score: {:.2}): new memory '{}' contradicts this memory",
+            nli_result.contradiction, new_memory_summary
+        );
+        if let Err(e) = challenge_memory(store, existing_id, &evidence, None).await {
+            tracing::warn!(
+                "Failed to challenge memory {} for NLI contradiction: {}",
+                existing_id,
+                e
+            );
+        }
+    }
 }
 
 #[cfg(test)]

@@ -303,6 +303,7 @@ mod title_integration {
             decay_half_life: None,
             decay_ttl: None,
             decay_floor: None,
+            embed_async: false,
         };
 
         engramdb::ops::update_memory(&store, &id, update_params, None)
@@ -370,6 +371,7 @@ mod title_integration {
             decay_half_life: None,
             decay_ttl: None,
             decay_floor: None,
+            embed_async: false,
         };
 
         engramdb::ops::update_memory(&store, &id, update_params, None)

@@ -1042,6 +1042,9 @@ impl EngramDbServer {
                 decay_half_life: input.decay_half_life,
                 decay_ttl: input.decay_ttl,
                 decay_floor: input.decay_floor,
+                // Run re-embedding + contradiction detection in the background
+                // so the agent isn't blocked on embedding-model inference.
+                embed_async: true,
             },
             Some(&engine),
         )
