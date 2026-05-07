@@ -116,8 +116,8 @@ pub struct RetrievalResult {
 pub struct RetrievalEngine {
     store: MemoryStore,
     config: EngramConfig,
-    embedding_provider: Option<Box<dyn EmbeddingProvider>>,
-    nli_provider: Option<Box<dyn NliProvider>>,
+    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    nli_provider: Option<Arc<dyn NliProvider>>,
     reranker: Option<Arc<Mutex<TextRerank>>>,
     /// Optional runtime stats collector. When `Some`, the engine pushes
     /// stage timings and query outcomes to it. `None` disables all telemetry.
@@ -188,11 +188,26 @@ impl RetrievalEngine {
         }
     }
 
+    /// Build an [`IngestTelemetry`] from this engine when telemetry is
+    /// wired up. Used by both `embed_memory` (synchronous) and
+    /// `spawn_ingest` (spawned task) so create-side stage timings flow
+    /// through one path.
+    pub(crate) fn ingest_telemetry(&self) -> Option<IngestTelemetry> {
+        match (self.stats.as_ref(), self.project_id.as_ref()) {
+            (Some(stats), Some(pid)) => Some(IngestTelemetry {
+                stats: stats.clone(),
+                project_id: pid.clone(),
+                session_id: self.session_id.clone(),
+            }),
+            _ => None,
+        }
+    }
+
     /// Add an embedding provider to the retrieval engine.
     ///
     /// Enables semantic search capabilities. Vector storage is handled by
     /// the MemoryStore's integrated LanceDB. Returns self for method chaining.
-    pub fn with_embedding_provider(mut self, provider: Box<dyn EmbeddingProvider>) -> Self {
+    pub fn with_embedding_provider(mut self, provider: Arc<dyn EmbeddingProvider>) -> Self {
         self.embedding_provider = Some(provider);
         self
     }
@@ -219,7 +234,7 @@ impl RetrievalEngine {
     ///
     /// Enables automatic contradiction detection between memories.
     /// Returns self for method chaining.
-    pub fn with_nli_provider(mut self, provider: Box<dyn NliProvider>) -> Self {
+    pub fn with_nli_provider(mut self, provider: Arc<dyn NliProvider>) -> Self {
         self.nli_provider = Some(provider);
         self
     }
@@ -255,58 +270,14 @@ impl RetrievalEngine {
             None => return Ok(vec![]),
         };
 
-        let nli_config = &self.config.nli;
-
-        // Embed the new memory's text to find similar candidates
-        let text = format!("{} {}", memory.summary, memory.content);
-        let query_vector = embedding_provider.embed(&text).await?;
-
-        // Vector search for similar memories
-        let matches = self
-            .store
-            .vector_search(query_vector, nli_config.max_comparisons)
-            .await?;
-
-        // Filter by similarity threshold and exclude self
-        let candidates: Vec<_> = matches
-            .into_iter()
-            .filter(|m| m.score >= nli_config.similarity_threshold && m.id != memory.id)
-            .collect();
-
-        if candidates.is_empty() {
-            return Ok(vec![]);
-        }
-
-        // Load candidate memories
-        let mut candidate_memories: Vec<Memory> = Vec::new();
-
-        for candidate in &candidates {
-            if let Ok(mem) = self.store.get(&candidate.id).await {
-                candidate_memories.push(mem);
-            }
-        }
-
-        if candidate_memories.is_empty() {
-            return Ok(vec![]);
-        }
-
-        // Build refs for batch classification directly from source references
-        let pair_refs: Vec<(&str, &str)> = candidate_memories
-            .iter()
-            .map(|m| (memory.summary.as_str(), m.summary.as_str()))
-            .collect();
-
-        let results = nli.classify_batch(&pair_refs).await?;
-
-        // Filter by contradiction threshold
-        let mut contradictions = Vec::new();
-        for (mem, result) in candidate_memories.iter().zip(results) {
-            if result.contradiction as f64 >= nli_config.contradiction_threshold {
-                contradictions.push((mem.id.clone(), result));
-            }
-        }
-
-        Ok(contradictions)
+        detect_contradictions_with(
+            nli.as_ref(),
+            embedding_provider.as_ref(),
+            &self.store,
+            &self.config.nli,
+            memory,
+        )
+        .await
     }
 
     /// Chunk, embed, and upsert a memory's vectors into the store.
@@ -319,27 +290,92 @@ impl RetrievalEngine {
     /// * `memory` - The memory to embed
     pub async fn embed_memory(&self, memory: &Memory) -> anyhow::Result<()> {
         if let Some(provider) = &self.embedding_provider {
-            let text = format!("{} {}", memory.summary, memory.content);
-
-            let t = std::time::Instant::now();
-            let chunks = crate::embeddings::chunk_text(&text, provider.max_tokens());
-            self.record_stage("create.chunk_text", t.elapsed().as_secs_f64() * 1000.0);
-
-            if chunks.is_empty() {
-                self.store.delete_chunks(&memory.id).await?;
-                return Ok(());
-            }
-            let chunk_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
-
-            let t = std::time::Instant::now();
-            let vectors = provider.embed_batch(&chunk_refs).await?;
-            self.record_stage("create.embed_batch", t.elapsed().as_secs_f64() * 1000.0);
-
-            let t = std::time::Instant::now();
-            self.store.upsert_chunks(&memory.id, vectors).await?;
-            self.record_stage("create.upsert_chunks", t.elapsed().as_secs_f64() * 1000.0);
+            embed_memory_with(
+                provider.as_ref(),
+                &self.store,
+                memory,
+                self.ingest_telemetry().as_ref(),
+            )
+            .await?;
         }
         Ok(())
+    }
+
+    /// Spawn embedding + contradiction detection for a freshly-created memory
+    /// in the background and return immediately.
+    ///
+    /// The spawned task:
+    ///   1. Embeds the memory and upserts vectors into the chunks table.
+    ///   2. If NLI is enabled, vector-searches for similar candidates,
+    ///      classifies them, and writes a challenge to each existing memory
+    ///      whose contradiction probability exceeds the threshold.
+    ///
+    /// All errors inside the task are logged via `tracing` — they never
+    /// propagate back to the caller. Returns `None` when no embedding
+    /// provider is configured (nothing to do).
+    ///
+    /// Used by the MCP `create` tool so the agent isn't blocked on embedding
+    /// model inference and NLI classification during memory ingestion.
+    pub fn spawn_ingest(&self, memory: Memory) -> Option<tokio::task::JoinHandle<()>> {
+        let provider = Arc::clone(self.embedding_provider.as_ref()?);
+        let store = self.store.clone();
+        let nli_provider = if self.config.nli.enabled {
+            self.nli_provider.as_ref().map(Arc::clone)
+        } else {
+            None
+        };
+        let nli_config = self.config.nli.clone();
+        let telemetry = self.ingest_telemetry();
+
+        Some(tokio::spawn(async move {
+            if let Err(e) =
+                embed_memory_with(provider.as_ref(), &store, &memory, telemetry.as_ref()).await
+            {
+                tracing::warn!(
+                    memory_id = %memory.id,
+                    "Background embed failed: {}",
+                    e
+                );
+                return;
+            }
+
+            let nli = match nli_provider {
+                Some(n) => n,
+                None => return,
+            };
+
+            match detect_contradictions_with(
+                nli.as_ref(),
+                provider.as_ref(),
+                &store,
+                &nli_config,
+                &memory,
+            )
+            .await
+            {
+                Ok(contradictions) if !contradictions.is_empty() => {
+                    tracing::debug!(
+                        memory_id = %memory.id,
+                        count = contradictions.len(),
+                        "NLI detected contradictions with existing memories"
+                    );
+                    crate::ops::challenge_for_contradictions(
+                        &store,
+                        &memory.summary,
+                        &contradictions,
+                    )
+                    .await;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        memory_id = %memory.id,
+                        "Background contradiction detection failed: {}",
+                        e
+                    );
+                }
+            }
+        }))
     }
 
     /// Get a reference to the memory store.
@@ -737,6 +773,119 @@ impl RetrievalEngine {
 
         Ok(result)
     }
+}
+
+/// Chunk, embed, and upsert a memory's vectors into the store.
+///
+/// Free-function form of [`RetrievalEngine::embed_memory`] that takes borrowed
+/// providers/store so it can run inside a `tokio::spawn`ed task that owns its
+/// own `Arc` clones rather than the full engine.
+/// Per-call telemetry handle for ingest paths. Carries the collector,
+/// project_id, and session_id so both `embed_memory` (synchronous on the
+/// engine) and `spawn_ingest` (spawned, owned data) can record the same
+/// stage timings.
+#[derive(Clone)]
+pub(crate) struct IngestTelemetry {
+    pub stats: Arc<crate::telemetry::StatsCollector>,
+    pub project_id: String,
+    pub session_id: Option<String>,
+}
+
+impl IngestTelemetry {
+    fn record(&self, stage: &'static str, ms: f64) {
+        self.stats
+            .record_stage(&self.project_id, stage, ms, self.session_id.as_deref());
+    }
+}
+
+async fn embed_memory_with(
+    provider: &dyn EmbeddingProvider,
+    store: &MemoryStore,
+    memory: &Memory,
+    telemetry: Option<&IngestTelemetry>,
+) -> anyhow::Result<()> {
+    let text = format!("{} {}", memory.summary, memory.content);
+
+    let t = std::time::Instant::now();
+    let chunks = crate::embeddings::chunk_text(&text, provider.max_tokens());
+    if let Some(t_) = telemetry {
+        t_.record("create.chunk_text", t.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    if chunks.is_empty() {
+        store.delete_chunks(&memory.id).await?;
+        return Ok(());
+    }
+    let chunk_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
+
+    let t = std::time::Instant::now();
+    let vectors = provider.embed_batch(&chunk_refs).await?;
+    if let Some(t_) = telemetry {
+        t_.record("create.embed_batch", t.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    let t = std::time::Instant::now();
+    store.upsert_chunks(&memory.id, vectors).await?;
+    if let Some(t_) = telemetry {
+        t_.record("create.upsert_chunks", t.elapsed().as_secs_f64() * 1000.0);
+    }
+    Ok(())
+}
+
+/// Vector-search for similar memories and run NLI classification, returning
+/// the (memory_id, NliResult) pairs that exceed the contradiction threshold.
+///
+/// Free-function form of [`RetrievalEngine::detect_contradictions`] for use
+/// inside spawned tasks.
+async fn detect_contradictions_with(
+    nli: &dyn NliProvider,
+    embedding_provider: &dyn EmbeddingProvider,
+    store: &MemoryStore,
+    nli_config: &crate::types::NliConfig,
+    memory: &Memory,
+) -> anyhow::Result<Vec<(String, NliResult)>> {
+    let text = format!("{} {}", memory.summary, memory.content);
+    let query_vector = embedding_provider.embed(&text).await?;
+
+    let matches = store
+        .vector_search(query_vector, nli_config.max_comparisons)
+        .await?;
+
+    let candidates: Vec<_> = matches
+        .into_iter()
+        .filter(|m| m.score >= nli_config.similarity_threshold && m.id != memory.id)
+        .collect();
+
+    if candidates.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut candidate_memories: Vec<Memory> = Vec::new();
+    for candidate in &candidates {
+        if let Ok(mem) = store.get(&candidate.id).await {
+            candidate_memories.push(mem);
+        }
+    }
+
+    if candidate_memories.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let pair_refs: Vec<(&str, &str)> = candidate_memories
+        .iter()
+        .map(|m| (memory.summary.as_str(), m.summary.as_str()))
+        .collect();
+
+    let results = nli.classify_batch(&pair_refs).await?;
+
+    let mut contradictions = Vec::new();
+    for (mem, result) in candidate_memories.iter().zip(results) {
+        if result.contradiction as f64 >= nli_config.contradiction_threshold {
+            contradictions.push((mem.id.clone(), result));
+        }
+    }
+
+    Ok(contradictions)
 }
 
 #[cfg(test)]
@@ -1678,7 +1827,7 @@ mod tests {
 
         // Config disabled (default) + provider attached → nli_available should be false
         let config = EngramConfig::default();
-        let engine = RetrievalEngine::new(store, config).with_nli_provider(Box::new(DummyNli));
+        let engine = RetrievalEngine::new(store, config).with_nli_provider(Arc::new(DummyNli));
         assert!(
             !engine.nli_available(),
             "NLI should not be available when config.nli.enabled is false"
@@ -1688,7 +1837,7 @@ mod tests {
         let store2 = MemoryStore::open(temp_dir.path()).await.unwrap();
         let mut config2 = EngramConfig::default();
         config2.nli.enabled = true;
-        let engine2 = RetrievalEngine::new(store2, config2).with_nli_provider(Box::new(DummyNli));
+        let engine2 = RetrievalEngine::new(store2, config2).with_nli_provider(Arc::new(DummyNli));
         assert!(
             engine2.nli_available(),
             "NLI should be available when config.nli.enabled is true and provider is set"
@@ -1724,7 +1873,7 @@ mod tests {
 
         // Config disabled + provider attached → detect_contradictions should short-circuit
         let config = EngramConfig::default(); // nli.enabled = false
-        let engine = RetrievalEngine::new(store, config).with_nli_provider(Box::new(PanicNli));
+        let engine = RetrievalEngine::new(store, config).with_nli_provider(Arc::new(PanicNli));
 
         let memory = Memory::new(
             MemoryType::Decision,

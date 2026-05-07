@@ -1037,6 +1037,9 @@ impl EngramDbServer {
                     .transpose()
                     .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?
                     .unwrap_or_default(),
+                // Run embedding + contradiction detection in the background so the
+                // agent isn't blocked on embedding-model inference.
+                embed_async: true,
             },
             Some(&engine),
         )
@@ -1248,6 +1251,9 @@ impl EngramDbServer {
                 decay_half_life: input.decay_half_life,
                 decay_ttl: input.decay_ttl,
                 decay_floor: input.decay_floor,
+                // Run re-embedding + contradiction detection in the background
+                // so the agent isn't blocked on embedding-model inference.
+                embed_async: true,
             },
             Some(&engine),
         )
