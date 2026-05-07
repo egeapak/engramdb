@@ -2159,7 +2159,11 @@ pub async fn run_stdio(
     service.waiting().await?;
     drop(stats);
     if let Some(h) = flush_handle {
-        let _ = h.await;
+        // Safety net: if some Arc clone unexpectedly outlives `stats` the
+        // channel never closes and `h.await` would hang forever. Bound
+        // the wait so a clean exit always happens; legitimate flushes
+        // complete in milliseconds.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), h).await;
     }
     Ok(())
 }
@@ -2224,9 +2228,13 @@ pub async fn run_sse(
     // Drop the collector — closing the channel triggers the flush task to
     // drain any buffered events and exit cleanly. Then await the task so
     // tokio runtime teardown doesn't cancel it mid-`append_events`.
+    //
+    // Safety net: if any per-connection `EngramDbServer` Arc clone outlives
+    // `axum::serve` returning (e.g. via `LocalSessionManager` retention),
+    // the channel never closes and the await would hang. Bound the wait.
     drop(stats);
     if let Some(h) = flush_handle {
-        let _ = h.await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), h).await;
     }
     Ok(())
 }

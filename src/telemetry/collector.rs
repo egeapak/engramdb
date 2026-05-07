@@ -327,7 +327,11 @@ impl StatsCollector {
     /// Take the persistence receiver. Subsequent calls return `None`.
     /// Called once at server startup by the flush-task spawner.
     pub fn take_receiver(&self) -> Option<mpsc::UnboundedReceiver<(String, EventRow)>> {
-        self.inner.lock().ok().and_then(|mut i| i.rx_slot.take())
+        // Recover from a poisoned mutex rather than silently returning
+        // `None` — that would prevent the flush task from ever spawning,
+        // dropping all persistence without any signal.
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.rx_slot.take()
     }
 
     fn capacity(&self) -> usize {
