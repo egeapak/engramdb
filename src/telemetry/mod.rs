@@ -11,12 +11,17 @@
 //! - [`StatsScope`]: RAII guard placed at the top of every MCP tool handler.
 //!   On drop it records the elapsed time and success/error outcome.
 //!
-//! Persistence is handled by [`persistence`]: aggregates are snapshotted to a
-//! per-project JSON file so counters survive server restarts.
+//! Persistence is handled by [`persistence`]: events are appended to a
+//! per-project LanceDB `stats_events` table so counters survive restarts.
+//!
+//! Public surface is curated below. The `collector` and `persistence`
+//! submodules are `pub(crate)` so internal types like `EventRow` and
+//! `ToolCounters` aren't part of the library API.
 
-pub mod collector;
-pub mod persistence;
+pub(crate) mod collector;
+pub(crate) mod persistence;
 
 pub use collector::{
-    QueryQualityBucket, RingHistogram, RuntimeSnapshot, StatsCollector, StatsScope,
+    ProjectView, QueriesView, QueryQualityBucket, RingHistogram, RuntimeSnapshot, StatsCollector,
+    StatsScope, TimingStats, TimingsView, UsageView,
 };

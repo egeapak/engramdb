@@ -20,17 +20,17 @@
 //!
 //! Single table `stats_events` per project, columns:
 //!
-//! | column            | type     | notes                                    |
-//! |-------------------|----------|------------------------------------------|
-//! | `ts`              | Utf8     | RFC3339 timestamp                        |
-//! | `event_type`      | Utf8     | `tool_call` / `stage` / `query_outcome`  |
-//! | `tool`            | Utf8     | tool name (`tool_call` only)             |
-//! | `stage`           | Utf8     | stage name (`stage` only)                |
-//! | `duration_ms`     | Float64  | nullable; absent for `query_outcome`     |
-//! | `success`         | Boolean  | nullable; `tool_call` only               |
-//! | `hit`             | Boolean  | nullable; `query_outcome` only           |
-//! | `retrieval_quality` | Utf8   | nullable; `query_outcome` only           |
-//! | `session_id`      | Utf8     | per-process UUID or `Mcp-Session-Id`     |
+//! | column            | type                          | notes                                    |
+//! |-------------------|-------------------------------|------------------------------------------|
+//! | `ts`              | Timestamp(Microsecond, UTC)   | indexed (BTree)                          |
+//! | `event_type`      | Utf8                          | `tool_call` / `stage` / `query_outcome`  |
+//! | `tool`            | Utf8                          | tool name (`tool_call` only)             |
+//! | `stage`           | Utf8                          | stage name (`stage` only)                |
+//! | `duration_ms`     | Float64                       | nullable; absent for `query_outcome`     |
+//! | `success`         | Boolean                       | nullable; `tool_call` only               |
+//! | `hit`             | Boolean                       | nullable; `query_outcome` only           |
+//! | `retrieval_quality` | Utf8                        | nullable; `query_outcome` only           |
+//! | `session_id`      | Utf8                          | per-process UUID or `Mcp-Session-Id`     |
 //!
 //! ## Hydration
 //!
@@ -41,18 +41,20 @@
 //! [`StatsCollector`], rebuilding both lifetime counters and the
 //! percentile ring buffers.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arrow_array::{
     Array, ArrayRef, BooleanArray, Float64Array, RecordBatch, RecordBatchIterator, StringArray,
+    TimestampMicrosecondArray,
 };
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use chrono::{DateTime, Utc};
 use futures_util::stream::StreamExt;
-use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::query::ExecutableQuery;
 use lancedb::{connect, Connection, Table};
 use tokio::sync::mpsc;
 
@@ -79,8 +81,39 @@ fn lancedb_root(project_id: &str) -> Result<PathBuf> {
     }
 }
 
-async fn connect_for(project_id: &str) -> Result<Connection> {
+/// Cache of LanceDB connections keyed by project_id. LanceDB connections
+/// are cheap once open (Arc-shared internally) but each `connect()` call
+/// re-reads `_versions/` metadata, which adds up under burst flush.
+///
+/// `Arc<Connection>` lets us hand out clones to callers; entries are
+/// never evicted (a server typically touches a small set of project_ids).
+static CONN_CACHE: LazyLock<Mutex<HashMap<String, Arc<Connection>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Open or create the LanceDB connection for a project. Refuses to create
+/// a phantom dir for project IDs that don't have an initialized store —
+/// the parent path is created by `MemoryStore::init`, so its absence is a
+/// signal that this project_id came from a typo or unregistered path
+/// override and we shouldn't silently create scaffolding for it.
+async fn connect_for(project_id: &str) -> Result<Arc<Connection>> {
+    {
+        let cache = CONN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(conn) = cache.get(project_id) {
+            return Ok(conn.clone());
+        }
+    }
+
     let dir = lancedb_root(project_id)?;
+    let parent = dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("lancedb dir {} has no parent", dir.display()))?;
+    if !tokio::fs::try_exists(parent).await.unwrap_or(false) {
+        anyhow::bail!(
+            "stats: project {} has no initialized store at {} — refusing to create phantom telemetry dir",
+            project_id,
+            parent.display()
+        );
+    }
     tokio::fs::create_dir_all(&dir)
         .await
         .with_context(|| format!("creating {}", dir.display()))?;
@@ -88,15 +121,29 @@ async fn connect_for(project_id: &str) -> Result<Connection> {
         .to_str()
         .context("lancedb path is not valid UTF-8")?
         .to_string();
-    connect(&path_str)
-        .execute()
-        .await
-        .context("opening LanceDB connection for stats_events")
+    let conn = Arc::new(
+        connect(&path_str)
+            .execute()
+            .await
+            .context("opening LanceDB connection for stats_events")?,
+    );
+
+    let mut cache = CONN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(cache.entry(project_id.to_string()).or_insert(conn).clone())
 }
 
 fn events_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
-        Field::new("ts", DataType::Utf8, false),
+        // `ts` is a real timestamp column so that `prune_older_than` can use
+        // a typed comparison and so a BTree scalar index makes both pruning
+        // and recency reads cheap. Stored as microseconds-since-epoch in
+        // UTC (chrono::DateTime<Utc> serializes losslessly within
+        // microsecond precision).
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            false,
+        ),
         Field::new("event_type", DataType::Utf8, false),
         Field::new("tool", DataType::Utf8, true),
         Field::new("stage", DataType::Utf8, true),
@@ -111,19 +158,44 @@ fn events_schema() -> Arc<Schema> {
 async fn ensure_table(conn: &Connection) -> Result<Table> {
     match conn.open_table(TABLE_NAME).execute().await {
         Ok(t) => Ok(t),
-        Err(_) => conn
-            .create_empty_table(TABLE_NAME, events_schema())
-            .execute()
-            .await
-            .context("creating stats_events table"),
+        Err(_) => {
+            let table = conn
+                .create_empty_table(TABLE_NAME, events_schema())
+                .execute()
+                .await
+                .context("creating stats_events table")?;
+            // BTree on `ts` makes pruning and recency reads cheap; without
+            // it both operations require a full table scan.
+            if let Err(e) = table
+                .create_index(&["ts"], lancedb::index::Index::BTree(Default::default()))
+                .execute()
+                .await
+            {
+                tracing::warn!("stats: failed to create BTree index on ts: {e}");
+            }
+            Ok(table)
+        }
     }
+}
+
+/// Synthetic project IDs that should never hit disk. Mirrors the
+/// `SYSTEM_PROJECT_ID` constant in `mcp::server`.
+const IN_MEMORY_ONLY_IDS: &[&str] = &["__system__"];
+
+fn is_in_memory_only(project_id: &str) -> bool {
+    IN_MEMORY_ONLY_IDS.contains(&project_id)
 }
 
 /// Append a batch of events to the project's `stats_events` table. Errors
 /// are logged at warn level and never propagated — telemetry writes must
-/// never break a tool call.
-pub async fn append_events(project_id: &str, events: &[EventRow]) {
-    if events.is_empty() {
+/// never break a tool call. The optional collector ref is bumped on
+/// failure so operators can see persistence failures in the snapshot.
+pub async fn append_events(
+    project_id: &str,
+    events: &[EventRow],
+    collector: Option<&Arc<StatsCollector>>,
+) {
+    if events.is_empty() || is_in_memory_only(project_id) {
         return;
     }
     if let Err(e) = append_events_inner(project_id, events).await {
@@ -133,6 +205,9 @@ pub async fn append_events(project_id: &str, events: &[EventRow]) {
             project_id,
             e
         );
+        if let Some(c) = collector {
+            c.record_persistence_failure();
+        }
     }
 }
 
@@ -152,7 +227,7 @@ async fn append_events_inner(project_id: &str, events: &[EventRow]) -> Result<()
 
 fn events_to_batch(events: &[EventRow]) -> Result<RecordBatch> {
     let schema = events_schema();
-    let mut ts: Vec<String> = Vec::with_capacity(events.len());
+    let mut ts: Vec<i64> = Vec::with_capacity(events.len());
     let mut event_type: Vec<String> = Vec::with_capacity(events.len());
     let mut tool: Vec<Option<String>> = Vec::with_capacity(events.len());
     let mut stage: Vec<Option<String>> = Vec::with_capacity(events.len());
@@ -163,7 +238,7 @@ fn events_to_batch(events: &[EventRow]) -> Result<RecordBatch> {
     let mut session_id: Vec<Option<String>> = Vec::with_capacity(events.len());
 
     for ev in events {
-        ts.push(ev.ts.to_rfc3339());
+        ts.push(ev.ts.timestamp_micros());
         event_type.push(ev.event_type.as_str().to_string());
         tool.push(ev.tool.clone());
         stage.push(ev.stage.clone());
@@ -174,8 +249,9 @@ fn events_to_batch(events: &[EventRow]) -> Result<RecordBatch> {
         session_id.push(ev.session_id.clone());
     }
 
+    let ts_array = TimestampMicrosecondArray::from(ts).with_timezone(Arc::<str>::from("UTC"));
     let arrays: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from(ts)),
+        Arc::new(ts_array),
         Arc::new(StringArray::from(event_type)),
         Arc::new(StringArray::from(tool)),
         Arc::new(StringArray::from(stage)),
@@ -189,20 +265,33 @@ fn events_to_batch(events: &[EventRow]) -> Result<RecordBatch> {
     RecordBatch::try_new(schema, arrays).context("building stats_events RecordBatch")
 }
 
-/// Read up to `cap` rows for the given project, sorted by `ts` desc, returning
-/// them in original insertion order (oldest first) so replays stay
-/// chronological.
+/// Read up to `cap` most-recent rows for the given project, returned in
+/// chronological order (oldest first) for safe replay.
+///
+/// LanceDB's plain `query().limit(N)` returns rows in **storage order** with
+/// no recency guarantee, so we must read every row and then truncate after
+/// sorting. For typical workloads (≤ a few hundred thousand events) the
+/// scan is fast; pruning + retention bound the cost in steady state.
+///
+/// Returns `Ok(empty)` when no data exists for the project, including the
+/// case where the project's parent directory hasn't been initialized.
 pub async fn load_recent(project_id: &str, cap: usize) -> Result<Vec<EventRow>> {
-    let conn = connect_for(project_id).await?;
+    if is_in_memory_only(project_id) {
+        return Ok(Vec::new());
+    }
+    let conn = match connect_for(project_id).await {
+        Ok(c) => c,
+        // Parent dir doesn't exist (uninitialized project) or other open
+        // failure — treat as "no data yet" rather than propagating.
+        Err(_) => return Ok(Vec::new()),
+    };
     let table = match conn.open_table(TABLE_NAME).execute().await {
         Ok(t) => t,
         Err(_) => return Ok(Vec::new()),
     };
 
-    let limit = cap.max(1);
     let mut stream = table
         .query()
-        .limit(limit)
         .execute()
         .await
         .context("querying stats_events table")?;
@@ -212,8 +301,8 @@ pub async fn load_recent(project_id: &str, cap: usize) -> Result<Vec<EventRow>> 
         let batch = batch_result.context("reading stats_events batch")?;
         events.extend(batch_to_events(&batch)?);
     }
-    // LanceDB returns rows in storage order. Sort chronologically; ties
-    // preserve the original order via the stable sort.
+    // Sort chronologically (stable sort preserves insertion order for
+    // identical timestamps).
     events.sort_by(|a, b| a.ts.cmp(&b.ts));
     if events.len() > cap {
         let tail_start = events.len() - cap;
@@ -227,8 +316,8 @@ fn batch_to_events(batch: &RecordBatch) -> Result<Vec<EventRow>> {
         .column_by_name("ts")
         .context("missing ts column")?
         .as_any()
-        .downcast_ref::<StringArray>()
-        .context("ts column is not Utf8")?;
+        .downcast_ref::<TimestampMicrosecondArray>()
+        .context("ts column is not Timestamp(Microsecond)")?;
     let event_type = batch
         .column_by_name("event_type")
         .context("missing event_type column")?
@@ -280,10 +369,9 @@ fn batch_to_events(batch: &RecordBatch) -> Result<Vec<EventRow>> {
 
     let mut rows = Vec::with_capacity(batch.num_rows());
     for i in 0..batch.num_rows() {
-        let ts_str = ts.value(i);
-        let parsed_ts = DateTime::parse_from_rfc3339(ts_str)
-            .with_context(|| format!("invalid ts {ts_str}"))?
-            .with_timezone(&Utc);
+        let micros = ts.value(i);
+        let parsed_ts = DateTime::<Utc>::from_timestamp_micros(micros)
+            .with_context(|| format!("invalid ts microseconds: {micros}"))?;
         let event_type = EventType::parse_label(event_type.value(i)).unwrap_or(EventType::ToolCall);
         rows.push(EventRow {
             ts: parsed_ts,
@@ -327,13 +415,21 @@ fn nullable_bool(arr: &BooleanArray, i: usize) -> Option<bool> {
 /// Delete events older than `retention_days`. No-op when `retention_days`
 /// is `None` (the default) — counters cover the entire recorded history.
 pub async fn prune_older_than(project_id: &str, retention_days: u64) -> Result<()> {
+    if is_in_memory_only(project_id) {
+        return Ok(());
+    }
     let conn = connect_for(project_id).await?;
     let table = match conn.open_table(TABLE_NAME).execute().await {
         Ok(t) => t,
         Err(_) => return Ok(()),
     };
     let cutoff = Utc::now() - chrono::Duration::days(retention_days as i64);
-    let predicate = format!("ts < '{}'", cutoff.to_rfc3339());
+    // Use a typed timestamp comparison so the BTree index can serve the
+    // predicate. DataFusion accepts `TIMESTAMP '<rfc3339>'` literals.
+    let predicate = format!(
+        "ts < TIMESTAMP '{}'",
+        cutoff.format("%Y-%m-%d %H:%M:%S%.6f%:z")
+    );
     table
         .delete(&predicate)
         .await
@@ -361,6 +457,15 @@ pub async fn hydrate_collector(collector: &Arc<StatsCollector>) -> Result<()> {
                     continue;
                 }
             };
+            // Skip stray non-directory entries and dirs that don't look
+            // like initialized project stores (no `lancedb/` subdirectory).
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if !path.join("lancedb").is_dir() {
+                continue;
+            }
             project_ids.push(entry.file_name().to_string_lossy().to_string());
         }
     }
@@ -384,10 +489,23 @@ pub async fn hydrate_collector(collector: &Arc<StatsCollector>) -> Result<()> {
 /// flushes batches into the per-project `stats_events` tables. The task
 /// exits cleanly when the collector is dropped (the receiver returns
 /// `None`).
+///
+/// Concurrency model:
+/// - The recv loop never `await`s a LanceDB write directly. When a
+///   per-project buffer hits `FLUSH_BATCH_MAX`, the loop spawns a sub-task
+///   to do the append and goes back to draining the channel. This keeps
+///   the unbounded mpsc from accumulating events while a single slow
+///   write is in flight.
+/// - The interval-tick branch also spawns sub-tasks for each per-project
+///   batch, in parallel.
+/// - On channel close (collector dropped), the loop awaits all in-flight
+///   sub-tasks before exiting so events written just before shutdown
+///   land on disk.
 pub fn spawn_flush_task(
     rx: mpsc::UnboundedReceiver<(String /*project_id*/, EventRow)>,
     flush_interval_secs: u64,
     retention_days: Option<u64>,
+    collector: std::sync::Weak<StatsCollector>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut rx = rx;
@@ -399,28 +517,33 @@ pub fn spawn_flush_task(
         let mut buf: std::collections::HashMap<String, Vec<EventRow>> =
             std::collections::HashMap::new();
         let mut prune_counter: u64 = 0;
+        let mut in_flight: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
         loop {
             tokio::select! {
                 msg = rx.recv() => {
                     match msg {
                         Some((pid, ev)) => {
-                            let entry = buf.entry(pid).or_default();
+                            let entry = buf.entry(pid.clone()).or_default();
                             entry.push(ev);
-                            // Cap per-project buffers — flush early under burst load.
                             if entry.len() >= FLUSH_BATCH_MAX {
-                                let pid = entry_owner(&buf, FLUSH_BATCH_MAX).unwrap_or_default();
-                                if !pid.is_empty() {
-                                    if let Some(events) = buf.remove(&pid) {
-                                        append_events(&pid, &events).await;
-                                    }
-                                }
+                                // Flush exactly the project that just tripped
+                                // the cap — not whichever happens to come
+                                // first in the iteration order.
+                                let events = std::mem::take(entry);
+                                buf.remove(&pid);
+                                in_flight.push(spawn_append(&pid, events, collector.clone()));
                             }
                         }
                         None => {
-                            // Channel closed — final drain and exit.
+                            // Channel closed — final drain.
                             for (pid, events) in buf.drain() {
-                                append_events(&pid, &events).await;
+                                in_flight.push(spawn_append(&pid, events, collector.clone()));
+                            }
+                            // Wait for every in-flight write so events from
+                            // this session actually land on disk.
+                            for h in in_flight.drain(..) {
+                                let _ = h.await;
                             }
                             return;
                         }
@@ -428,34 +551,68 @@ pub fn spawn_flush_task(
                 }
                 _ = tick.tick() => {
                     let drained: Vec<(String, Vec<EventRow>)> = buf.drain().collect();
-                    for (pid, events) in &drained {
-                        append_events(pid, events).await;
+                    let prune_pids: Vec<String> = drained.iter().map(|(p, _)| p.clone()).collect();
+                    for (pid, events) in drained {
+                        in_flight.push(spawn_append(&pid, events, collector.clone()));
                     }
-                    // Run pruning every ~10 ticks so we don't hammer LanceDB
-                    // with deletes.
+                    // Run pruning + optimize every ~10 ticks so we don't
+                    // hammer LanceDB with maintenance work.
                     prune_counter += 1;
                     if prune_counter.is_multiple_of(10) {
                         if let Some(days) = retention_days {
-                            for (pid, _) in &drained {
+                            for pid in &prune_pids {
                                 if let Err(e) = prune_older_than(pid, days).await {
                                     tracing::warn!("stats prune for {pid}: {e}");
                                 }
                             }
                         }
+                        // Compact tiny Lance fragments to keep `open_table`
+                        // fast over the long haul.
+                        for pid in &prune_pids {
+                            if let Err(e) = optimize_table(pid).await {
+                                tracing::debug!("stats optimize for {pid}: {e}");
+                            }
+                        }
                     }
+                    // Reap any finished in-flight tasks so the vec doesn't
+                    // grow unboundedly.
+                    in_flight.retain(|h| !h.is_finished());
                 }
             }
         }
     })
 }
 
-fn entry_owner(
-    buf: &std::collections::HashMap<String, Vec<EventRow>>,
-    threshold: usize,
-) -> Option<String> {
-    buf.iter()
-        .find(|(_, v)| v.len() >= threshold)
-        .map(|(k, _)| k.clone())
+fn spawn_append(
+    pid: &str,
+    events: Vec<EventRow>,
+    collector: std::sync::Weak<StatsCollector>,
+) -> tokio::task::JoinHandle<()> {
+    let pid = pid.to_string();
+    tokio::spawn(async move {
+        let c = collector.upgrade();
+        append_events(&pid, &events, c.as_ref()).await;
+    })
+}
+
+/// Run `Table::optimize()` to compact small Lance fragments. Idempotent and
+/// safe to call concurrently with appends — Lance handles concurrent
+/// versioning. Errors are logged at debug level only (compaction is an
+/// optimization, not a correctness requirement).
+async fn optimize_table(project_id: &str) -> Result<()> {
+    if is_in_memory_only(project_id) {
+        return Ok(());
+    }
+    let conn = connect_for(project_id).await?;
+    let table = match conn.open_table(TABLE_NAME).execute().await {
+        Ok(t) => t,
+        Err(_) => return Ok(()),
+    };
+    table
+        .optimize(lancedb::table::OptimizeAction::All)
+        .await
+        .with_context(|| format!("optimizing stats_events for project {project_id}"))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -468,6 +625,14 @@ mod tests {
     fn unique_pid(prefix: &str) -> String {
         static N: AtomicU64 = AtomicU64::new(0);
         format!("test-{}-{:016x}", prefix, N.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Tests use synthetic project IDs without going through `MemoryStore::init`,
+    /// so we have to pre-create the project directory ourselves — `connect_for`
+    /// refuses to create LanceDB scaffolding under a parent that doesn't exist.
+    async fn ensure_project_dir(pid: &str) {
+        let parent = lancedb_root(pid).unwrap().parent().unwrap().to_path_buf();
+        tokio::fs::create_dir_all(&parent).await.unwrap();
     }
 
     fn tool_event(ts: DateTime<Utc>, tool: &str, ms: f64, success: bool, sid: &str) -> EventRow {
@@ -487,6 +652,7 @@ mod tests {
     #[tokio::test]
     async fn append_then_load_roundtrip() {
         let pid = unique_pid("rt");
+        ensure_project_dir(&pid).await;
         let now = Utc::now();
         let events = vec![
             tool_event(now, "query", 12.5, true, "sess-A"),
@@ -498,7 +664,7 @@ mod tests {
                 "sess-A",
             ),
         ];
-        append_events(&pid, &events).await;
+        append_events(&pid, &events, None).await;
 
         let read = load_recent(&pid, 100).await.unwrap();
         assert_eq!(read.len(), 2);
@@ -510,6 +676,7 @@ mod tests {
     #[tokio::test]
     async fn load_recent_empty_when_no_table() {
         let pid = unique_pid("empty");
+        ensure_project_dir(&pid).await;
         let read = load_recent(&pid, 10).await.unwrap();
         assert!(read.is_empty());
     }
@@ -517,6 +684,7 @@ mod tests {
     #[tokio::test]
     async fn hydrate_replays_into_collector() {
         let pid = unique_pid("hyd");
+        ensure_project_dir(&pid).await;
         let now = Utc::now();
         let events = vec![
             tool_event(now, "query", 10.0, true, "sess-X"),
@@ -528,7 +696,7 @@ mod tests {
                 "sess-X",
             ),
         ];
-        append_events(&pid, &events).await;
+        append_events(&pid, &events, None).await;
 
         let collector = StatsCollector::new(StatsConfig::default());
         let recent = load_recent(&pid, 100).await.unwrap();
@@ -543,17 +711,84 @@ mod tests {
     #[tokio::test]
     async fn prune_drops_old_rows_when_retention_set() {
         let pid = unique_pid("prune");
+        ensure_project_dir(&pid).await;
         let now = Utc::now();
         let events = vec![
             tool_event(now - chrono::Duration::days(40), "query", 1.0, true, "old"),
             tool_event(now, "query", 2.0, true, "new"),
         ];
-        append_events(&pid, &events).await;
+        append_events(&pid, &events, None).await;
 
         prune_older_than(&pid, 30).await.unwrap();
 
         let read = load_recent(&pid, 100).await.unwrap();
         assert_eq!(read.len(), 1, "stale row pruned");
         assert_eq!(read[0].session_id.as_deref(), Some("new"));
+    }
+
+    /// R4 regression: project IDs without an initialized parent directory
+    /// must not trigger creation of phantom telemetry scaffolding.
+    #[tokio::test]
+    async fn append_skipped_for_uninitialized_project() {
+        let pid = unique_pid("ghost"); // intentionally NOT calling ensure_project_dir
+        let now = Utc::now();
+        let events = vec![tool_event(now, "query", 1.0, true, "g")];
+        append_events(&pid, &events, None).await;
+
+        // No table created, no events written.
+        let read = load_recent(&pid, 10).await.unwrap();
+        assert!(read.is_empty(), "phantom dir suppressed");
+    }
+
+    /// End-to-end: events emitted via the collector flow through the
+    /// channel, the flush task drains and persists them, and a fresh
+    /// collector hydrating from disk sees the same counters. Exercises
+    /// the full StatsCollector → mpsc → spawn_flush_task → LanceDB →
+    /// hydrate_collector pipeline.
+    #[tokio::test]
+    async fn flush_task_persists_events_end_to_end() {
+        let pid = unique_pid("e2e");
+        ensure_project_dir(&pid).await;
+
+        // Build a collector and drive a flush task with a tight tick
+        // interval so the test doesn't have to wait long.
+        let config = StatsConfig {
+            flush_interval_secs: 1,
+            ..StatsConfig::default()
+        };
+        let collector = StatsCollector::new(config.clone());
+        let rx = collector.take_receiver().unwrap();
+        let handle = spawn_flush_task(
+            rx,
+            config.flush_interval_secs,
+            config.retention_days,
+            Arc::downgrade(&collector),
+        );
+
+        // Record a few events under the project.
+        collector.record_tool_call(&pid, "query", 12.0, true, Some("S"));
+        collector.record_tool_call(&pid, "create", 22.0, true, Some("S"));
+        collector.record_query_outcome(&pid, true, "full", Some("S"));
+
+        // Drop the collector so the flush task drains and exits cleanly.
+        drop(collector);
+        let _ = handle.await;
+
+        // Hydrate a fresh collector from disk and assert the event log
+        // contains everything we just emitted.
+        let fresh = StatsCollector::new(StatsConfig::default());
+        let recent = load_recent(&pid, 1024).await.unwrap();
+        assert!(
+            recent.len() >= 3,
+            "expected at least 3 events on disk, got {}",
+            recent.len()
+        );
+        fresh.replay_events(&pid, &recent);
+
+        let snap = fresh.snapshot(&pid, false);
+        assert_eq!(snap.view.usage.total_calls, 2);
+        assert_eq!(snap.view.queries.total, 1);
+        assert_eq!(snap.view.queries.hits, 1);
+        assert_eq!(snap.view.usage.unique_sessions, 1);
     }
 }

@@ -580,6 +580,13 @@ pub struct StatsConfig {
     /// seconds of a previous query in the same session. Default 60.
     #[serde(default = "default_followup_window_secs")]
     pub followup_window_secs: u64,
+
+    /// Soft cap on the number of distinct sessions tracked per project.
+    /// When exceeded, the oldest sessions (by `last_query_at`) are
+    /// evicted. Bounds memory growth on long-running daemons that see
+    /// many sessions. Default 10_000.
+    #[serde(default = "default_max_sessions_per_project")]
+    pub max_sessions_per_project: usize,
 }
 
 fn default_stats_enabled() -> bool {
@@ -594,6 +601,9 @@ fn default_flush_interval_secs() -> u64 {
 fn default_followup_window_secs() -> u64 {
     60
 }
+fn default_max_sessions_per_project() -> usize {
+    10_000
+}
 
 impl Default for StatsConfig {
     fn default() -> Self {
@@ -603,6 +613,7 @@ impl Default for StatsConfig {
             retention_days: None,
             flush_interval_secs: default_flush_interval_secs(),
             followup_window_secs: default_followup_window_secs(),
+            max_sessions_per_project: default_max_sessions_per_project(),
         }
     }
 }
@@ -617,6 +628,9 @@ impl StatsConfig {
         }
         if self.followup_window_secs == 0 {
             anyhow::bail!("stats.followup_window_secs must be >= 1");
+        }
+        if self.max_sessions_per_project == 0 {
+            anyhow::bail!("stats.max_sessions_per_project must be >= 1");
         }
         if let Some(days) = self.retention_days {
             if days > 3650 {

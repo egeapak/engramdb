@@ -7,8 +7,7 @@ use crate::embeddings::{OnnxProvider, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_T
 use crate::ops::compute_stats;
 use crate::storage::project_id::compute_project_id;
 use crate::storage::MemoryStore;
-use crate::telemetry::collector::StatsCollector;
-use crate::telemetry::persistence::hydrate_collector;
+use crate::telemetry::StatsCollector;
 use crate::types::{EmbeddingBackend, Status};
 use anyhow::Result;
 use std::path::Path;
@@ -57,7 +56,7 @@ pub async fn run_stats(
         .await
         .unwrap_or_default();
     let collector = StatsCollector::new(cfg.stats);
-    let _ = hydrate_collector(&collector).await;
+    let _ = crate::telemetry::persistence::hydrate_collector(&collector).await;
     let project_id = compute_project_id(dir);
     let runtime = collector.snapshot(&project_id, all_projects);
     let runtime_present = runtime.view.usage.total_calls > 0

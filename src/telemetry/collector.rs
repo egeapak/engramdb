@@ -265,6 +265,10 @@ pub struct StatsCollector {
     /// stored in `inner.rx_slot` until [`take_receiver`] hands it to the
     /// flush task.
     tx: mpsc::UnboundedSender<(String /* project_id */, EventRow)>,
+    /// Count of `stats_events` write failures observed by the persistence
+    /// layer. Surfaced in the runtime snapshot so operators have a signal
+    /// that telemetry is silently dropping rows.
+    persistence_failures: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for StatsCollector {
@@ -292,7 +296,20 @@ impl StatsCollector {
                 rx_slot: Some(rx),
             }),
             tx,
+            persistence_failures: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// Increment the persistence-failure counter. Called by the persistence
+    /// layer whenever an `append_events` write fails.
+    pub fn record_persistence_failure(&self) {
+        self.persistence_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn persistence_failures(&self) -> u64 {
+        self.persistence_failures
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn enabled(&self) -> bool {
@@ -328,7 +345,11 @@ impl StatsCollector {
         let mut inner = self
             .inner
             .lock()
-            .expect("StatsCollector mutex poisoned — a previous panic left it in a bad state");
+            // Telemetry must never break a tool call — recover poisoned
+            // state instead of panicking. Worst-case the inner state is
+            // partially mutated; subsequent record calls will continue
+            // updating it consistently.
+            .unwrap_or_else(|e| e.into_inner());
         let entry = inner.by_project.entry(project_id.to_string()).or_default();
         f(entry)
     }
@@ -348,6 +369,40 @@ impl StatsCollector {
         }
     }
 
+    /// Evict the oldest entries from `sessions` and `last_query_at` when
+    /// they exceed the configured cap. Called on the recording paths so
+    /// growth is amortized.
+    fn evict_if_needed(p: &mut ProjectStats, max: usize) {
+        if max == 0 {
+            return;
+        }
+        // last_query_at is the source of truth for recency.
+        if p.last_query_at.len() > max {
+            // Sort by timestamp ascending and drop the oldest until at cap.
+            let mut by_age: Vec<(DateTime<Utc>, String)> = p
+                .last_query_at
+                .iter()
+                .map(|(k, v)| (*v, k.clone()))
+                .collect();
+            by_age.sort_by_key(|(ts, _)| *ts);
+            let drop_count = p.last_query_at.len() - max;
+            for (_, sid) in by_age.into_iter().take(drop_count) {
+                p.last_query_at.remove(&sid);
+                p.sessions.remove(&sid);
+            }
+        }
+        // `sessions` may also exceed `max` from anonymous-only paths; cap
+        // it independently. We can only evict arbitrary entries since we
+        // don't track recency for sessions without queries.
+        if p.sessions.len() > max {
+            let drop_count = p.sessions.len() - max;
+            let to_drop: Vec<String> = p.sessions.iter().take(drop_count).cloned().collect();
+            for sid in to_drop {
+                p.sessions.remove(&sid);
+            }
+        }
+    }
+
     /// Record a completed tool call (called from `StatsScope::drop`).
     pub fn record_tool_call(
         &self,
@@ -361,6 +416,7 @@ impl StatsCollector {
             return;
         }
         let cap = self.capacity();
+        let max_sessions = self.config.max_sessions_per_project;
         self.with_project(project_id, |p| {
             p.total_calls += 1;
             let counters = p
@@ -373,6 +429,7 @@ impl StatsCollector {
             }
             counters.latency.record(elapsed_ms);
             Self::note_session(p, session_id);
+            Self::evict_if_needed(p, max_sessions);
         });
         self.send_event(
             project_id,
@@ -436,12 +493,19 @@ impl StatsCollector {
         if !self.config.enabled {
             return;
         }
-        let bucket = QueryQualityBucket::from_label(quality_label).unwrap_or(
-            // Unknown labels fall through to "no_query_signals" so we don't lose them.
-            QueryQualityBucket::NoQuerySignals,
+        // The producer is in-tree (`RetrievalEngine::query`) and emits one
+        // of four `&'static str` values. An unknown label is a programmer
+        // error; debug_assert catches it in tests, prod silently falls
+        // through to `no_query_signals` so we don't lose the event.
+        debug_assert!(
+            QueryQualityBucket::from_label(quality_label).is_some(),
+            "unknown retrieval_quality label: {quality_label:?}"
         );
+        let bucket = QueryQualityBucket::from_label(quality_label)
+            .unwrap_or(QueryQualityBucket::NoQuerySignals);
         let now = Utc::now();
         let window = self.followup_window();
+        let max_sessions = self.config.max_sessions_per_project;
         self.with_project(project_id, |p| {
             let is_followup = match session_id {
                 Some(sid) if !sid.is_empty() => match p.last_query_at.get(sid) {
@@ -457,6 +521,7 @@ impl StatsCollector {
                     p.last_query_at.insert(sid.to_string(), now);
                 }
             }
+            Self::evict_if_needed(p, max_sessions);
         });
         self.send_event(
             project_id,
@@ -474,14 +539,24 @@ impl StatsCollector {
         );
     }
 
-    /// Replay a chronologically-sorted slice of events into the in-memory
-    /// state. Used by the persistence layer to hydrate counters and ring
-    /// buffers on server startup.
+    /// Replay a slice of events into the in-memory state, replacing any
+    /// existing state for the project. Idempotent: calling twice with the
+    /// same input produces the same final counters. Defensive against
+    /// out-of-order input — the slice is sorted chronologically before
+    /// replay so a buggy persistence layer can't poison `last_query_at`
+    /// with future timestamps.
     pub fn replay_events(&self, project_id: &str, events: &[EventRow]) {
         let cap = self.capacity();
         let window = self.followup_window();
+        // Defensive copy + sort. Cost: O(N log N) over typically a few hundred
+        // to ~50k events — negligible at startup.
+        let mut sorted: Vec<&EventRow> = events.iter().collect();
+        sorted.sort_by(|a, b| a.ts.cmp(&b.ts));
         self.with_project(project_id, |p| {
-            for ev in events {
+            // Reset to a clean slate so repeated `replay_events` calls don't
+            // double-count.
+            *p = ProjectStats::default();
+            for ev in sorted.iter().copied() {
                 Self::note_session(p, ev.session_id.as_deref());
                 match ev.event_type {
                     EventType::ToolCall => {
@@ -541,7 +616,11 @@ impl StatsCollector {
         let inner = self
             .inner
             .lock()
-            .expect("StatsCollector mutex poisoned — a previous panic left it in a bad state");
+            // Telemetry must never break a tool call — recover poisoned
+            // state instead of panicking. Worst-case the inner state is
+            // partially mutated; subsequent record calls will continue
+            // updating it consistently.
+            .unwrap_or_else(|e| e.into_inner());
         let focus = inner.by_project.get(focus_project).cloned();
         let by_project = if all_projects {
             let mut map = BTreeMap::new();
@@ -555,6 +634,7 @@ impl StatsCollector {
         RuntimeSnapshot {
             since: self.since,
             project_id: focus_project.to_string(),
+            persistence_failures: self.persistence_failures(),
             view: focus.map(|s| project_to_view(&s)).unwrap_or_default(),
             by_project,
         }
@@ -692,6 +772,11 @@ pub struct TimingStats {
 pub struct RuntimeSnapshot {
     pub since: DateTime<Utc>,
     pub project_id: String,
+    /// Number of `stats_events` LanceDB writes that have failed since the
+    /// collector started. Non-zero values are operator signal — telemetry
+    /// is silently dropping rows. Surfaced unconditionally so dashboards
+    /// can alert on it.
+    pub persistence_failures: u64,
     #[serde(flatten)]
     pub view: ProjectView,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -714,7 +799,9 @@ pub struct StatsScope {
     collector: Arc<StatsCollector>,
     tool: &'static str,
     project_id: String,
-    session_id: Option<String>,
+    /// Session attribution. Empty string means "anonymous" — the session
+    /// dimension is omitted on this event.
+    session_id: String,
     started: Instant,
     success: AtomicBool,
 }
@@ -724,7 +811,7 @@ impl StatsScope {
         collector: Arc<StatsCollector>,
         tool: &'static str,
         project_id: String,
-        session_id: Option<String>,
+        session_id: String,
     ) -> Self {
         Self {
             collector,
@@ -747,13 +834,13 @@ impl Drop for StatsScope {
     fn drop(&mut self) {
         let elapsed_ms = self.started.elapsed().as_secs_f64() * 1000.0;
         let success = self.success.load(Ordering::Relaxed);
-        self.collector.record_tool_call(
-            &self.project_id,
-            self.tool,
-            elapsed_ms,
-            success,
-            self.session_id.as_deref(),
-        );
+        let sid = if self.session_id.is_empty() {
+            None
+        } else {
+            Some(self.session_id.as_str())
+        };
+        self.collector
+            .record_tool_call(&self.project_id, self.tool, elapsed_ms, success, sid);
     }
 }
 
@@ -772,6 +859,7 @@ mod tests {
             retention_days: None,
             flush_interval_secs: 60,
             followup_window_secs: 60,
+            max_sessions_per_project: 10_000,
         }
     }
 
@@ -941,7 +1029,7 @@ mod tests {
     fn stats_scope_records_error_on_drop_without_mark_success() {
         let c = StatsCollector::new(cfg());
         {
-            let scope = StatsScope::new(c.clone(), "query", "p".to_string(), Some("s".to_string()));
+            let scope = StatsScope::new(c.clone(), "query", "p".to_string(), "s".to_string());
             drop(scope);
         }
         let snap = c.snapshot("p", false);
@@ -956,7 +1044,7 @@ mod tests {
     fn stats_scope_records_success_when_marked() {
         let c = StatsCollector::new(cfg());
         {
-            let scope = StatsScope::new(c.clone(), "query", "p".to_string(), None);
+            let scope = StatsScope::new(c.clone(), "query", "p".to_string(), String::new());
             scope.mark_success();
         }
         let snap = c.snapshot("p", false);
@@ -991,21 +1079,15 @@ mod tests {
         assert!(snap.view.timings_ms.stages.is_empty());
     }
 
+    /// Unknown quality labels are a programmer error from in-tree
+    /// producers — the debug build panics. Release builds fall through
+    /// silently to `no_query_signals` so events aren't lost.
+    #[cfg(debug_assertions)]
     #[test]
-    fn unknown_quality_label_falls_back() {
+    #[should_panic(expected = "unknown retrieval_quality label")]
+    fn unknown_quality_label_panics_in_debug() {
         let c = StatsCollector::new(cfg());
         c.record_query_outcome("p", true, "weird-label", None);
-        let snap = c.snapshot("p", false);
-        assert_eq!(snap.view.queries.total, 1);
-        assert_eq!(snap.view.queries.hits, 1);
-        assert_eq!(
-            snap.view
-                .queries
-                .by_quality
-                .get("no_query_signals")
-                .copied(),
-            Some(1)
-        );
     }
 
     #[test]
@@ -1056,5 +1138,151 @@ mod tests {
         assert_eq!(snap.view.queries.hits, 1);
         assert_eq!(snap.view.timings_ms.stages.get("embed").unwrap().count, 1);
         assert_eq!(snap.view.timings_ms.tool.get("query").unwrap().count, 1);
+    }
+
+    /// Regression: `replay_events` must be idempotent. Calling it twice
+    /// with the same input produces the same counters; previously each
+    /// invocation incremented on top of the existing state.
+    #[test]
+    fn replay_events_is_idempotent() {
+        let c = StatsCollector::new(cfg());
+        let now = Utc::now();
+        let events = vec![
+            EventRow {
+                ts: now,
+                event_type: EventType::ToolCall,
+                tool: Some("query".to_string()),
+                stage: None,
+                duration_ms: Some(10.0),
+                success: Some(true),
+                hit: None,
+                retrieval_quality: None,
+                session_id: Some("s".to_string()),
+            },
+            EventRow {
+                ts: now + chrono::Duration::milliseconds(10),
+                event_type: EventType::QueryOutcome,
+                tool: None,
+                stage: None,
+                duration_ms: None,
+                success: None,
+                hit: Some(true),
+                retrieval_quality: Some("full".to_string()),
+                session_id: Some("s".to_string()),
+            },
+        ];
+        c.replay_events("p", &events);
+        c.replay_events("p", &events);
+        c.replay_events("p", &events);
+
+        let snap = c.snapshot("p", false);
+        assert_eq!(snap.view.usage.total_calls, 1, "calls don't double");
+        assert_eq!(snap.view.queries.total, 1, "queries don't double");
+        assert_eq!(snap.view.queries.hits, 1);
+    }
+
+    /// `take_receiver` returns the receiver exactly once. Subsequent
+    /// callers see `None`, so a misconfigured server can't accidentally
+    /// spawn two flush tasks competing on the same channel.
+    #[test]
+    fn take_receiver_returns_none_on_second_call() {
+        let c = StatsCollector::new(cfg());
+        assert!(c.take_receiver().is_some(), "first call returns Some");
+        assert!(c.take_receiver().is_none(), "second call returns None");
+        assert!(c.take_receiver().is_none(), "third call still None");
+    }
+
+    /// Disabled collector must not push events to the channel — the
+    /// receiver should observe nothing even after recording calls.
+    #[tokio::test]
+    async fn disabled_collector_emits_no_events() {
+        let mut c = cfg();
+        c.enabled = false;
+        let collector = StatsCollector::new(c);
+        let mut rx = collector.take_receiver().expect("first take");
+
+        collector.record_tool_call("p", "query", 10.0, true, Some("s"));
+        collector.record_query_outcome("p", true, "full", Some("s"));
+        collector.record_stage("p", "embed", 1.0, Some("s"));
+
+        // Try to receive — there should be nothing waiting. We assert
+        // try_recv returns Empty; the channel must not be closed because
+        // the collector is still alive.
+        match rx.try_recv() {
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            other => panic!("expected Empty, got {other:?}"),
+        }
+    }
+
+    /// R12 regression: when more than `max_sessions_per_project` distinct
+    /// sessions are seen, the oldest are evicted from both `sessions` and
+    /// `last_query_at` so memory stays bounded on long-running daemons.
+    #[test]
+    fn session_tracking_is_bounded() {
+        let mut c = cfg();
+        c.max_sessions_per_project = 4;
+        let collector = StatsCollector::new(c);
+        // Record 8 distinct sessions; only the 4 most-recent should remain.
+        for i in 0..8 {
+            collector.record_query_outcome("p", true, "full", Some(&format!("s{i}")));
+        }
+        let snap = collector.snapshot("p", false);
+        assert_eq!(
+            snap.view.usage.unique_sessions, 4,
+            "session count capped at max_sessions_per_project"
+        );
+        // All 8 queries are still counted — only session metadata is bounded.
+        assert_eq!(snap.view.queries.total, 8);
+    }
+
+    /// Regression: out-of-order events must not poison `last_query_at`
+    /// with future timestamps (which would otherwise mark every replayed
+    /// query as a followup of itself).
+    #[test]
+    fn replay_events_handles_out_of_order_input() {
+        let c = StatsCollector::new(cfg());
+        let now = Utc::now();
+        // Three queries from one session, given in reverse order.
+        let events = vec![
+            EventRow {
+                ts: now + chrono::Duration::seconds(20),
+                event_type: EventType::QueryOutcome,
+                tool: None,
+                stage: None,
+                duration_ms: None,
+                success: None,
+                hit: Some(true),
+                retrieval_quality: Some("full".to_string()),
+                session_id: Some("S".to_string()),
+            },
+            EventRow {
+                ts: now + chrono::Duration::seconds(10),
+                event_type: EventType::QueryOutcome,
+                tool: None,
+                stage: None,
+                duration_ms: None,
+                success: None,
+                hit: Some(true),
+                retrieval_quality: Some("full".to_string()),
+                session_id: Some("S".to_string()),
+            },
+            EventRow {
+                ts: now,
+                event_type: EventType::QueryOutcome,
+                tool: None,
+                stage: None,
+                duration_ms: None,
+                success: None,
+                hit: Some(true),
+                retrieval_quality: Some("full".to_string()),
+                session_id: Some("S".to_string()),
+            },
+        ];
+        c.replay_events("p", &events);
+        let snap = c.snapshot("p", false);
+        assert_eq!(snap.view.queries.total, 3);
+        // Two of the three are within-window followups (sorted: 0s, 10s, 20s
+        // — the 10s and 20s ones are followups of their predecessors).
+        assert_eq!(snap.view.queries.followups, 2);
     }
 }

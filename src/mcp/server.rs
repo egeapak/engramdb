@@ -22,6 +22,11 @@ use crate::storage::{FileRegistry, MemoryStore, RegistryBackend};
 use crate::title::TitleStrategy;
 use crate::types::{EmbeddingBackend, Provenance, Status, Visibility};
 
+/// Synthetic telemetry partition for registry-level operations
+/// (`projects_list/link/unlink`) that aren't scoped to any single project.
+/// Persistence skips this bucket — it lives in-memory only.
+pub(crate) const SYSTEM_PROJECT_ID: &str = "__system__";
+
 // ---------------------------------------------------------------------------
 // Input parameter structs for tool aggregation
 // ---------------------------------------------------------------------------
@@ -549,6 +554,13 @@ pub struct EngramDbServer {
     /// which matches Claude Code's lifecycle. For HTTP, each per-
     /// connection server in the factory gets a fresh ID.
     session_id: String,
+    /// Cache of resolved project_ids, keyed by the literal `project` input
+    /// string (or `""` for `None`). Populated lazily on the first
+    /// telemetry recording per project. Avoids repeating the synchronous
+    /// path canonicalization + `.git/config` read on every tool handler
+    /// entry. Project IDs are deterministic, so the cache never needs
+    /// invalidation.
+    pid_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
     #[allow(dead_code)]
     tool_router: rmcp::handler::server::tool::ToolRouter<Self>,
 }
@@ -592,6 +604,7 @@ impl EngramDbServer {
             registry,
             stats,
             session_id,
+            pid_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             tool_router: Self::tool_router(),
         })
     }
@@ -614,6 +627,7 @@ impl EngramDbServer {
             registry,
             stats,
             session_id,
+            pid_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             tool_router: Self::tool_router(),
         }
     }
@@ -841,7 +855,26 @@ impl EngramDbServer {
     /// when it looks like a project ID, and a hash of the canonicalized path
     /// for path-based overrides. Bogus inputs fall back to the launching
     /// project's ID so stats are never lost.
+    ///
+    /// Results are cached on `self.pid_cache` so the synchronous filesystem
+    /// work (canonicalize + `.git/config` read inside `compute_project_id`)
+    /// runs at most once per unique `project` input over the server's
+    /// lifetime. Project IDs are deterministic, so the cache never
+    /// invalidates.
     pub(crate) fn pid_for_input(&self, project: Option<&str>) -> String {
+        let key = project.unwrap_or("").to_string();
+        {
+            let cache = self.pid_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(v) = cache.get(&key) {
+                return v.clone();
+            }
+        }
+        let pid = self.resolve_pid_uncached(project);
+        let mut cache = self.pid_cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.entry(key).or_insert(pid).clone()
+    }
+
+    fn resolve_pid_uncached(&self, project: Option<&str>) -> String {
         match project {
             None => crate::storage::project_id::compute_project_id(&self.effective_dir),
             Some("global") => crate::storage::paths::GLOBAL_PROJECT_ID.to_string(),
@@ -854,6 +887,14 @@ impl EngramDbServer {
                         .unwrap_or(canonical);
                     crate::storage::project_id::compute_project_id(&effective)
                 } else {
+                    // Relative-path inputs are ill-formed (the storage layer
+                    // will reject them in `resolve_dir`); fall back to the
+                    // launching project so the eventually-failing call still
+                    // gets bucketed somewhere recognizable.
+                    tracing::warn!(
+                        "stats: pid_for_input given relative path {:?}; bucketing under launching project",
+                        p
+                    );
                     crate::storage::project_id::compute_project_id(&self.effective_dir)
                 }
             }
@@ -871,7 +912,23 @@ impl EngramDbServer {
             self.stats.clone(),
             tool,
             self.pid_for_input(project),
-            Some(self.session_id.clone()),
+            self.session_id.clone(),
+        )
+    }
+
+    /// Build a `StatsScope` bucketed under the synthetic `_system` project.
+    /// Use for registry-level operations (`projects_list/link/unlink`)
+    /// that aren't tied to any single project — without this they'd skew
+    /// per-project usage counts on the launching project.
+    ///
+    /// The `_system` partition is in-memory only; persistence skips it via
+    /// the parent-dir check in `connect_for`.
+    pub(crate) fn scope_system(&self, tool: &'static str) -> crate::telemetry::StatsScope {
+        crate::telemetry::StatsScope::new(
+            self.stats.clone(),
+            tool,
+            SYSTEM_PROJECT_ID.to_string(),
+            self.session_id.clone(),
         )
     }
 
@@ -891,6 +948,20 @@ impl EngramDbServer {
 /// 3. A fresh UUID v7 generated at server construction time.
 ///
 /// Empty/whitespace env-var values are treated as unset.
+///
+/// ## HTTP transport caveat
+///
+/// rmcp 0.15's streamable-HTTP server assigns a real `Mcp-Session-Id`
+/// header per session, surfaced in `RequestContext.extensions` per
+/// request. We do **not** extract it today — the session ID is set once
+/// at server construction. This works correctly under stateful HTTP
+/// (rmcp's `LocalSessionManager` invokes the factory once per session),
+/// where our UUID coincidentally maps 1:1 with rmcp's. Under stateless
+/// HTTP it over-segments: every request gets a fresh server →
+/// `unique_sessions` explodes. If/when stateless HTTP becomes a
+/// supported mode here, threading `RequestContext` through every
+/// handler is the structural fix; until then `MCP_SESSION_ID` lets
+/// wrappers pin a stable id externally.
 fn resolve_session_id() -> String {
     for var in ["CLAUDE_SESSION_ID", "MCP_SESSION_ID"] {
         if let Ok(v) = std::env::var(var) {
@@ -1632,7 +1703,7 @@ impl EngramDbServer {
         description = "List all registered EngramDB projects, including hierarchy (parent_project_id). Useful for finding the 16-char IDs you pass as the `project` parameter to other tools."
     )]
     async fn projects_list(&self) -> Result<String, String> {
-        let _scope = self.scope("projects_list", None);
+        let _scope = self.scope_system("projects_list");
         let entries = ops::projects::list_projects(self.registry.as_ref())
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
@@ -1697,7 +1768,8 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<ProjectsLinkInput>,
     ) -> Result<String, String> {
-        let _scope = self.scope("projects_link", None);
+        let _scope = self.scope_system("projects_link");
+        // (`projects_link` is registry-level — no per-project bucket)
         ops::projects::link_project(self.registry.as_ref(), &input.child, &input.parent)
             .await
             .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
@@ -1719,7 +1791,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<ProjectsUnlinkInput>,
     ) -> Result<String, String> {
-        let _scope = self.scope("projects_unlink", None);
+        let _scope = self.scope_system("projects_unlink");
         ops::projects::unlink_project(self.registry.as_ref(), &input.project_id)
             .await
             .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
@@ -2060,20 +2132,35 @@ pub async fn run_stdio(
     }
 
     // Drain the collector's persistence channel into the per-project
-    // LanceDB tables in the background.
-    if let Some(rx) = stats.take_receiver() {
-        let _flush = crate::telemetry::persistence::spawn_flush_task(
+    // LanceDB tables in the background. Capture the JoinHandle so we can
+    // await it on shutdown — without this, tokio runtime teardown
+    // cancels mid-`append_events` and tail events are lost.
+    let flush_handle = stats.take_receiver().map(|rx| {
+        crate::telemetry::persistence::spawn_flush_task(
             rx,
             stats_cfg.flush_interval_secs,
             stats_cfg.retention_days,
-        );
-    }
+            Arc::downgrade(&stats),
+        )
+    });
 
     let server = EngramDbServer::new_with_stats(dir, embedding_backend, stats.clone())?;
     // Detect git worktrees and register/init the main project if needed.
     server.ensure_hierarchy().await?;
+    // `serve` consumes the server; the running service owns the remaining
+    // `Arc<StatsCollector>` baked into it. Wait on the service, then drop
+    // both it and the local `stats` so the channel closes and the flush
+    // task can finalize before we await it.
     let service = server.serve(rmcp::transport::io::stdio()).await?;
+    // `waiting` takes ownership and consumes `service` on completion, so by
+    // the time it returns the rmcp service has already dropped its
+    // `Arc<StatsCollector>` clone — leaving the local `stats` as the last
+    // Arc holder. Dropping it now closes the channel.
     service.waiting().await?;
+    drop(stats);
+    if let Some(h) = flush_handle {
+        let _ = h.await;
+    }
     Ok(())
 }
 
@@ -2095,13 +2182,14 @@ pub async fn run_sse(
     if let Err(e) = crate::telemetry::persistence::hydrate_collector(&stats).await {
         tracing::warn!("stats hydrate failed: {e}");
     }
-    if let Some(rx) = stats.take_receiver() {
-        let _flush = crate::telemetry::persistence::spawn_flush_task(
+    let flush_handle = stats.take_receiver().map(|rx| {
+        crate::telemetry::persistence::spawn_flush_task(
             rx,
             stats_cfg.flush_interval_secs,
             stats_cfg.retention_days,
-        );
-    }
+            Arc::downgrade(&stats),
+        )
+    });
 
     // Resolve hierarchy eagerly once: subsequent per-connection server
     // instances share the registry, so registration only happens once.
@@ -2134,8 +2222,12 @@ pub async fn run_sse(
         .await?;
 
     // Drop the collector — closing the channel triggers the flush task to
-    // drain any buffered events and exit cleanly.
+    // drain any buffered events and exit cleanly. Then await the task so
+    // tokio runtime teardown doesn't cancel it mid-`append_events`.
     drop(stats);
+    if let Some(h) = flush_handle {
+        let _ = h.await;
+    }
     Ok(())
 }
 
@@ -5455,5 +5547,63 @@ mod tests {
         assert_eq!(q["total"].as_u64().unwrap(), 3);
         assert_eq!(q["followups"].as_u64().unwrap(), 2);
         assert!(q["followup_rate"].as_f64().unwrap() > 0.6);
+    }
+
+    /// Test gap covered: a tool call that returns Err must show up under
+    /// `errors_by_tool` (the RAII guard records on Drop without
+    /// `mark_success`).
+    #[tokio::test]
+    async fn stats_records_tool_errors() {
+        let (_dir, server) = setup().await;
+        // `memory_get` against a non-existent ID returns MemoryNotFound.
+        let _ = server
+            .memory_get(Parameters(GetInput {
+                id: "this-id-does-not-exist".to_string(),
+                project: None,
+            }))
+            .await;
+
+        let result = server
+            .memory_stats(Parameters(StatsInput {
+                project: None,
+                all_projects: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        let errors = &val["usage"]["errors_by_tool"];
+        assert_eq!(
+            errors["get"].as_u64().unwrap_or(0),
+            1,
+            "errored memory_get must appear in errors_by_tool"
+        );
+    }
+
+    /// Test gap covered: registry-level tools (`projects_list/link/unlink`)
+    /// bucket under `__system__`, not the launching project.
+    #[tokio::test]
+    async fn stats_buckets_projects_list_under_system() {
+        let (_dir, server) = setup().await;
+        let _ = server.projects_list().await;
+
+        // Snapshot with all_projects to see the by_project breakdown.
+        let result = server
+            .memory_stats(Parameters(StatsInput {
+                project: None,
+                all_projects: Some(true),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        let bp = &val["by_project"];
+        assert!(
+            bp["__system__"].is_object(),
+            "projects_list bucketed under __system__: got {}",
+            bp
+        );
+        assert_eq!(
+            bp["__system__"]["usage"]["by_tool"]["projects_list"]
+                .as_u64()
+                .unwrap(),
+            1
+        );
     }
 }

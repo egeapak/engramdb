@@ -469,6 +469,11 @@ impl RetrievalEngine {
                 || query.path.as_ref().is_some_and(|s| !s.is_empty())
                 || query.tags.as_ref().is_some_and(|t| !t.is_empty());
             if !has_signal {
+                // Record the outcome before bailing so the `no_query_signals`
+                // bucket reflects this failure class. Without this, the
+                // quality-bucket counts silently miss a whole category of
+                // user errors.
+                self.record_query_outcome(false, "no_query_signals");
                 return Err(crate::storage::StorageError::Validation(
                     "mode=filter requires at least one of: query, logical, path, tags".to_string(),
                 ));
