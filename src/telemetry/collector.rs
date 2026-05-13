@@ -555,7 +555,7 @@ impl StatsCollector {
         // Defensive copy + sort. Cost: O(N log N) over typically a few hundred
         // to ~50k events — negligible at startup.
         let mut sorted: Vec<&EventRow> = events.iter().collect();
-        sorted.sort_by(|a, b| a.ts.cmp(&b.ts));
+        sorted.sort_by_key(|e| e.ts);
         self.with_project(project_id, |p| {
             // Reset to a clean slate so repeated `replay_events` calls don't
             // double-count.
