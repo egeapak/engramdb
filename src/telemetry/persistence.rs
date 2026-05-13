@@ -303,7 +303,7 @@ pub async fn load_recent(project_id: &str, cap: usize) -> Result<Vec<EventRow>> 
     }
     // Sort chronologically (stable sort preserves insertion order for
     // identical timestamps).
-    events.sort_by(|a, b| a.ts.cmp(&b.ts));
+    events.sort_by_key(|e| e.ts);
     if events.len() > cap {
         let tail_start = events.len() - cap;
         events.drain(0..tail_start);
