@@ -28,7 +28,7 @@ use std::env;
 use std::path::PathBuf;
 
 use app::{Cli, Command, HookCommand};
-use commands::{AddParams, ChallengeParams, RetrieveParams, SearchParams, UpdateParams};
+use commands::{AddParams, ChallengeParams, QueryParams, UpdateParams};
 use output::OutputFormatter;
 
 use crate::storage::FileRegistry;
@@ -147,10 +147,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             raw,
             path,
         } => commands::run_get(&dir, &id, full, raw, path, &formatter).await,
-        Command::Retrieve {
+        Command::Query {
+            mode,
+            query_pos,
+            query,
             path,
             logical,
-            query,
             type_,
             tags,
             min_criticality,
@@ -159,12 +161,27 @@ pub async fn run(cli: Cli) -> Result<()> {
             include_expired,
             show_scores,
         } => {
-            commands::run_retrieve(
+            let retrieval_mode = match mode.as_str() {
+                "rank" => crate::retrieval::engine::RetrievalMode::Rank,
+                "filter" => crate::retrieval::engine::RetrievalMode::Filter,
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "Invalid --mode value {:?}; expected \"rank\" or \"filter\"",
+                        other
+                    ));
+                }
+            };
+
+            // Explicit --query wins over positional.
+            let query_text = query.or(query_pos);
+
+            commands::run_query(
                 &dir,
-                RetrieveParams {
+                QueryParams {
+                    mode: retrieval_mode,
+                    query: query_text,
                     path,
                     logical,
-                    query,
                     type_filter: type_,
                     tags,
                     min_criticality,
@@ -172,31 +189,6 @@ pub async fn run(cli: Cli) -> Result<()> {
                     detail_level,
                     include_expired,
                     show_scores,
-                },
-                backend,
-                &formatter,
-            )
-            .await
-        }
-        Command::Search {
-            query,
-            type_,
-            tags,
-            physical,
-            logical,
-            min_criticality,
-            max_results,
-        } => {
-            commands::run_search(
-                &dir,
-                SearchParams {
-                    query,
-                    type_filter: type_,
-                    tags,
-                    physical,
-                    logical,
-                    min_criticality,
-                    max_results,
                 },
                 backend,
                 &formatter,
@@ -282,7 +274,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Delete { id, force } => commands::run_delete(&dir, &id, force, &formatter).await,
-        Command::Stats => commands::run_stats(&dir, backend, &formatter).await,
+        Command::Stats { all_projects } => {
+            commands::run_stats(&dir, backend, all_projects, &formatter).await
+        }
         Command::Doctor { command } => commands::run_doctor(&dir, command, &formatter).await,
         Command::Challenge {
             id,

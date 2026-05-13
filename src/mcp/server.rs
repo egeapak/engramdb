@@ -1,10 +1,10 @@
 //! EngramDB MCP server implementation.
 //!
-//! Defines the server struct, all MCP tools (16), resources (2), and prompts (2).
+//! Defines the server struct, all MCP tools (15), resources (2), and prompts (2).
 //! Tools delegate to the `ops` layer; the server opens a fresh `MemoryStore`
 //! per request so it always sees the latest on-disk state.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rmcp::handler::server::wrapper::Parameters;
@@ -16,12 +16,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::mcp::error::{error_response, ErrorCode};
 use crate::ops;
-use crate::retrieval::engine::{RetrievalEngine, RetrievalQuery};
-use crate::retrieval::filters::SearchFilters;
+use crate::retrieval::engine::{RetrievalEngine, RetrievalMode, RetrievalQuery};
 use crate::storage::config::load_config;
 use crate::storage::{FileRegistry, MemoryStore, RegistryBackend};
 use crate::title::TitleStrategy;
 use crate::types::{EmbeddingBackend, Provenance, Status, Visibility};
+
+/// Synthetic telemetry partition for registry-level operations
+/// (`projects_list/link/unlink`) that aren't scoped to any single project.
+/// Persistence skips this bucket — it lives in-memory only.
+pub(crate) const SYSTEM_PROJECT_ID: &str = "__system__";
 
 // ---------------------------------------------------------------------------
 // Input parameter structs for tool aggregation
@@ -90,15 +94,22 @@ struct CreateInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct RetrieveInput {
-    #[schemars(description = "File path relative to project root")]
+struct QueryInput {
+    #[schemars(
+        description = "Mode: \"rank\" for context-aware ranked results (browse); \"filter\" to require a positive signal (keyword, scope, tag, or semantic match). Required."
+    )]
+    mode: String,
+
+    #[schemars(description = "Search query text (tokenized against summary, content, tags)")]
+    query: Option<String>,
+
+    #[schemars(description = "Physical scope — current file path for proximity scoring")]
     path: Option<String>,
 
-    #[schemars(description = "Logical scopes")]
+    #[schemars(
+        description = "Logical scopes in dot notation — contributes to hierarchy-proximity scoring (not a filter)"
+    )]
     logical: Option<Vec<String>>,
-
-    #[schemars(description = "Text query for semantic search")]
-    query: Option<String>,
 
     #[schemars(description = "Filter by memory types")]
     types: Option<Vec<String>>,
@@ -112,43 +123,13 @@ struct RetrieveInput {
     #[schemars(description = "Maximum results (default 10)")]
     max_results: Option<usize>,
 
-    #[schemars(description = "Detail: summary|content|full (default content)")]
+    #[schemars(
+        description = "Detail: summary|content|full (default content) — available in both modes"
+    )]
     detail_level: Option<String>,
 
     #[schemars(description = "Include expired/decayed memories")]
     include_expired: Option<bool>,
-
-    #[schemars(description = "Also include global memories in results (default false)")]
-    include_global: Option<bool>,
-
-    #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
-    )]
-    project: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct SearchInput {
-    #[schemars(description = "Search query against summary, content, and tags")]
-    query: String,
-
-    #[schemars(description = "Filter by memory types")]
-    types: Option<Vec<String>>,
-
-    #[schemars(description = "Filter by tags")]
-    tags: Option<Vec<String>>,
-
-    #[schemars(description = "Filter by physical scope")]
-    physical: Option<String>,
-
-    #[schemars(description = "Filter by logical scope")]
-    logical: Option<String>,
-
-    #[schemars(description = "Minimum criticality")]
-    min_criticality: Option<f64>,
-
-    #[schemars(description = "Max results (default 10)")]
-    max_results: Option<usize>,
 
     #[schemars(description = "Also include global memories in results (default false)")]
     include_global: Option<bool>,
@@ -411,6 +392,11 @@ struct StatsInput {
         description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
+    #[schemars(
+        description = "If true, include a `by_project` map breaking down runtime telemetry per project ID. Default false."
+    )]
+    #[serde(default)]
+    all_projects: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -419,6 +405,29 @@ struct DoctorInput {
         description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProjectsInfoInput {
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID. Omit for current project."
+    )]
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProjectsLinkInput {
+    #[schemars(description = "Project ID of the child to link (16-char hex)")]
+    child: String,
+
+    #[schemars(description = "Project ID of the parent (16-char hex)")]
+    parent: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProjectsUnlinkInput {
+    #[schemars(description = "Project ID of the child to promote back to a root (16-char hex)")]
+    project_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -524,9 +533,34 @@ struct ScoredMemoryOutput {
 /// The EngramDB MCP server.
 #[derive(Clone)]
 pub struct EngramDbServer {
+    /// Original directory the server was launched in.  In a linked git
+    /// worktree this is the worktree path (not the main project root).
     dir: PathBuf,
+    /// Directory used for all storage operations.  Equal to `dir` for normal
+    /// projects; for linked worktrees this is the resolved main worktree path
+    /// so memory operations route to the main project.
+    effective_dir: PathBuf,
     embedding_backend: Option<EmbeddingBackend>,
     registry: Arc<dyn RegistryBackend>,
+    /// Process-wide runtime stats collector. Cloned (Arc) into every tool
+    /// handler via `StatsScope` and into every retrieval engine via
+    /// `with_stats`. For SSE servers this Arc is shared across all per-
+    /// connection instances; see `run_sse`.
+    stats: Arc<crate::telemetry::StatsCollector>,
+    /// Stable session identifier used as a telemetry attribute. Sourced
+    /// from `CLAUDE_SESSION_ID` (or `MCP_SESSION_ID`) env var if set,
+    /// otherwise a fresh per-process UUID. For stdio servers (the
+    /// transport Claude Code uses today) this is one-session-per-process,
+    /// which matches Claude Code's lifecycle. For HTTP, each per-
+    /// connection server in the factory gets a fresh ID.
+    session_id: String,
+    /// Cache of resolved project_ids, keyed by the literal `project` input
+    /// string (or `""` for `None`). Populated lazily on the first
+    /// telemetry recording per project. Avoids repeating the synchronous
+    /// path canonicalization + `.git/config` read on every tool handler
+    /// entry. Project IDs are deterministic, so the cache never needs
+    /// invalidation.
+    pid_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
     #[allow(dead_code)]
     tool_router: rmcp::handler::server::tool::ToolRouter<Self>,
 }
@@ -535,6 +569,7 @@ impl std::fmt::Debug for EngramDbServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EngramDbServer")
             .field("dir", &self.dir)
+            .field("effective_dir", &self.effective_dir)
             .field("embedding_backend", &self.embedding_backend)
             .finish()
     }
@@ -542,14 +577,34 @@ impl std::fmt::Debug for EngramDbServer {
 
 impl EngramDbServer {
     pub fn new(dir: PathBuf, embedding_backend: Option<EmbeddingBackend>) -> anyhow::Result<Self> {
+        let stats =
+            crate::telemetry::StatsCollector::new(crate::types::EngramConfig::default().stats);
+        Self::new_with_stats(dir, embedding_backend, stats)
+    }
+
+    /// Construct a server using a pre-built stats collector. SSE startup uses
+    /// this so every per-connection server instance pushes into the same
+    /// collector.
+    pub fn new_with_stats(
+        dir: PathBuf,
+        embedding_backend: Option<EmbeddingBackend>,
+        stats: Arc<crate::telemetry::StatsCollector>,
+    ) -> anyhow::Result<Self> {
         let registry: Arc<dyn RegistryBackend> = Arc::new(
             FileRegistry::global()
                 .map_err(|e| anyhow::anyhow!("Failed to initialize registry: {}", e))?,
         );
+        let effective_dir =
+            crate::storage::project_id::detect_worktree_main(&dir).unwrap_or_else(|| dir.clone());
+        let session_id = resolve_session_id();
         Ok(Self {
             dir,
+            effective_dir,
             embedding_backend,
             registry,
+            stats,
+            session_id,
+            pid_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             tool_router: Self::tool_router(),
         })
     }
@@ -560,12 +615,74 @@ impl EngramDbServer {
         embedding_backend: Option<EmbeddingBackend>,
         registry: Arc<dyn RegistryBackend>,
     ) -> Self {
+        let stats =
+            crate::telemetry::StatsCollector::new(crate::types::EngramConfig::default().stats);
+        let effective_dir =
+            crate::storage::project_id::detect_worktree_main(&dir).unwrap_or_else(|| dir.clone());
+        let session_id = resolve_session_id();
         Self {
             dir,
+            effective_dir,
             embedding_backend,
             registry,
+            stats,
+            session_id,
+            pid_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Returns a clone of the runtime stats collector. Useful in tests and
+    /// for the CLI's process-scoped collector access.
+    pub fn stats(&self) -> Arc<crate::telemetry::StatsCollector> {
+        self.stats.clone()
+    }
+
+    /// Returns the session ID this server reports to telemetry.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// If the server was launched in a linked git worktree, make sure the
+    /// main project's store exists and register the worktree as a sub-project
+    /// of the main project.  No-op otherwise.
+    ///
+    /// Idempotent: safe to call on every server startup / per-connection
+    /// factory invocation.
+    pub async fn ensure_hierarchy(&self) -> anyhow::Result<()> {
+        if self.dir == self.effective_dir {
+            return Ok(());
+        }
+
+        // Auto-init the main project's store if it doesn't exist yet.
+        let main_engramdb = self.effective_dir.join(".engramdb");
+        if !main_engramdb.exists() {
+            MemoryStore::init(&self.effective_dir, self.registry.as_ref())
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to init main project at {}: {}",
+                        self.effective_dir.display(),
+                        e
+                    )
+                })?;
+        }
+
+        let child_id = crate::storage::project_id::compute_project_id(&self.dir);
+        let parent_id = crate::storage::project_id::compute_project_id(&self.effective_dir);
+
+        // Register (or refresh) the worktree as a sub-project of the main project.
+        self.registry
+            .update_with_parent(&self.dir, &child_id, Some(&parent_id))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to register worktree in registry: {}", e))?;
+
+        tracing::info!(
+            "Resolved git worktree: routing memory operations from {} to main project at {}",
+            self.dir.display(),
+            self.effective_dir.display()
+        );
+        Ok(())
     }
 
     /// Returns `true` if the given project override refers to the global store.
@@ -575,13 +692,19 @@ impl EngramDbServer {
 
     /// Resolve the target project directory from an optional project override.
     ///
-    /// - `None`          — returns `self.dir`
-    /// - `"global"`      — returns the global store directory
-    /// - 16-char hex     — looked up by project ID in the registry
-    /// - absolute path   — canonicalized, project ID computed and verified in registry
+    /// - `None`: returns the effective (hierarchy-resolved) dir for the
+    ///   default project. In a linked git worktree this is the main
+    ///   worktree's path.
+    /// - `"global"`: returns the global store directory.
+    /// - 16-char hex: looked up by project ID in the registry, then follows
+    ///   `parent_project_id` links so worktree IDs transparently resolve to
+    ///   their root project.
+    /// - absolute path: canonicalized.  If the path is a linked worktree,
+    ///   swaps to the main worktree's path.  The resulting project ID must
+    ///   be present in the registry.
     async fn resolve_dir(&self, project: Option<&str>) -> Result<PathBuf, String> {
         let input = match project {
-            None => return Ok(self.dir.clone()),
+            None => return Ok(self.effective_dir.clone()),
             Some("global") => {
                 return crate::storage::paths::global_store_dir()
                     .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()));
@@ -597,7 +720,10 @@ impl EngramDbServer {
                 .load()
                 .await
                 .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
-            match registry.projects.iter().find(|e| e.project_id == input) {
+            // Resolve parent chain so that passing a worktree's ID routes to
+            // the main project's storage.
+            let root_id = crate::storage::resolve_root_project_id(&registry, input);
+            match registry.projects.iter().find(|e| e.project_id == root_id) {
                 Some(e) => Ok(PathBuf::from(&e.project_path)),
                 None => Err(error_response(
                     ErrorCode::ProjectNotFound,
@@ -621,7 +747,11 @@ impl EngramDbServer {
                     &format!("Cannot access directory '{}': {}.", input, e),
                 )
             })?;
-            let project_id = crate::storage::project_id::compute_project_id(&canonical);
+            // If the caller pointed at a linked worktree, swap to the main
+            // worktree's project root so storage ops hit the right place.
+            let effective =
+                crate::storage::project_id::detect_worktree_main(&canonical).unwrap_or(canonical);
+            let project_id = crate::storage::project_id::compute_project_id(&effective);
             let registry = self
                 .registry
                 .load()
@@ -636,7 +766,7 @@ impl EngramDbServer {
                     ),
                 ));
             }
-            Ok(canonical)
+            Ok(effective)
         }
     }
 
@@ -660,9 +790,20 @@ impl EngramDbServer {
                     ),
                 ));
             }
+            // Default project: auto-init.  For linked worktrees this targets
+            // the main project's root (via effective_dir resolution above)
+            // and also registers the worktree as a sub-project.
             MemoryStore::init(&dir, self.registry.as_ref())
                 .await
                 .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()))?;
+            if self.dir != self.effective_dir && dir == self.effective_dir {
+                let child_id = crate::storage::project_id::compute_project_id(&self.dir);
+                let parent_id = crate::storage::project_id::compute_project_id(&self.effective_dir);
+                self.registry
+                    .update_with_parent(&self.dir, &child_id, Some(&parent_id))
+                    .await
+                    .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            }
         }
         MemoryStore::open(&dir)
             .await
@@ -688,13 +829,149 @@ impl EngramDbServer {
         let dir = self.resolve_dir(project).await?;
         let store = self.open_store_for(project).await?;
         let config_path = dir.join(".engramdb").join("config.toml");
-        Ok(ops::build_engine(store, &config_path, self.embedding_backend).await)
+        let pid = self.project_id_for_dir(&dir, project);
+        let engine = ops::build_engine(store, &config_path, self.embedding_backend).await;
+        Ok(engine
+            .with_stats(self.stats.clone())
+            .with_project_id(pid)
+            .with_session_id(Some(self.session_id.clone())))
+    }
+
+    /// Compute the project ID used as the telemetry partition key for the
+    /// resolved project directory. Mirrors the convention used by
+    /// `crate::storage::paths::lancedb_dir`: the global store uses
+    /// `GLOBAL_PROJECT_ID`; everything else hashes its directory.
+    pub(crate) fn project_id_for_dir(&self, dir: &Path, project: Option<&str>) -> String {
+        if Self::is_global(project) {
+            return crate::storage::paths::GLOBAL_PROJECT_ID.to_string();
+        }
+        crate::storage::project_id::compute_project_id(dir)
+    }
+
+    /// Synchronous best-effort project ID resolution used as the telemetry
+    /// partition key. Unlike `resolve_dir`, this never touches the registry —
+    /// it returns the `effective_dir` ID for the default project, the
+    /// well-known constant for the global store, the supplied 16-hex string
+    /// when it looks like a project ID, and a hash of the canonicalized path
+    /// for path-based overrides. Bogus inputs fall back to the launching
+    /// project's ID so stats are never lost.
+    ///
+    /// Results are cached on `self.pid_cache` so the synchronous filesystem
+    /// work (canonicalize + `.git/config` read inside `compute_project_id`)
+    /// runs at most once per unique `project` input over the server's
+    /// lifetime. Project IDs are deterministic, so the cache never
+    /// invalidates.
+    pub(crate) fn pid_for_input(&self, project: Option<&str>) -> String {
+        let key = project.unwrap_or("").to_string();
+        {
+            let cache = self.pid_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(v) = cache.get(&key) {
+                return v.clone();
+            }
+        }
+        let pid = self.resolve_pid_uncached(project);
+        let mut cache = self.pid_cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.entry(key).or_insert(pid).clone()
+    }
+
+    fn resolve_pid_uncached(&self, project: Option<&str>) -> String {
+        match project {
+            None => crate::storage::project_id::compute_project_id(&self.effective_dir),
+            Some("global") => crate::storage::paths::GLOBAL_PROJECT_ID.to_string(),
+            Some(s) if s.len() == 16 && s.chars().all(|c| c.is_ascii_hexdigit()) => s.to_string(),
+            Some(p) => {
+                let path = std::path::PathBuf::from(p);
+                if path.is_absolute() {
+                    let canonical = path.canonicalize().unwrap_or(path);
+                    let effective = crate::storage::project_id::detect_worktree_main(&canonical)
+                        .unwrap_or(canonical);
+                    crate::storage::project_id::compute_project_id(&effective)
+                } else {
+                    // Relative-path inputs are ill-formed (the storage layer
+                    // will reject them in `resolve_dir`); fall back to the
+                    // launching project so the eventually-failing call still
+                    // gets bucketed somewhere recognizable.
+                    tracing::warn!(
+                        "stats: pid_for_input given relative path {:?}; bucketing under launching project",
+                        p
+                    );
+                    crate::storage::project_id::compute_project_id(&self.effective_dir)
+                }
+            }
+        }
+    }
+
+    /// Build a `StatsScope` for a tool handler. Drop-on-leave records latency
+    /// and success/error against the (project_id, session_id) partition.
+    pub(crate) fn scope(
+        &self,
+        tool: &'static str,
+        project: Option<&str>,
+    ) -> crate::telemetry::StatsScope {
+        crate::telemetry::StatsScope::new(
+            self.stats.clone(),
+            tool,
+            self.pid_for_input(project),
+            self.session_id.clone(),
+        )
+    }
+
+    /// Build a `StatsScope` bucketed under the synthetic `_system` project.
+    /// Use for registry-level operations (`projects_list/link/unlink`)
+    /// that aren't tied to any single project — without this they'd skew
+    /// per-project usage counts on the launching project.
+    ///
+    /// The `_system` partition is in-memory only; persistence skips it via
+    /// the parent-dir check in `connect_for`.
+    pub(crate) fn scope_system(&self, tool: &'static str) -> crate::telemetry::StatsScope {
+        crate::telemetry::StatsScope::new(
+            self.stats.clone(),
+            tool,
+            SYSTEM_PROJECT_ID.to_string(),
+            self.session_id.clone(),
+        )
     }
 
     /// Build a RetrievalEngine with optional embeddings support for the default project.
     async fn build_engine(&self) -> Result<RetrievalEngine, String> {
         self.build_engine_for(None).await
     }
+}
+
+/// Resolve the session ID for a freshly-constructed server.
+///
+/// Priority:
+/// 1. `CLAUDE_SESSION_ID` env var (future-proofing for [issue
+///    anthropics/claude-code#25642](https://github.com/anthropics/claude-code/issues/25642)).
+/// 2. `MCP_SESSION_ID` env var (compatible with hypothetical wrappers
+///    that propagate the MCP session header into the subprocess env).
+/// 3. A fresh UUID v7 generated at server construction time.
+///
+/// Empty/whitespace env-var values are treated as unset.
+///
+/// ## HTTP transport caveat
+///
+/// rmcp 0.15's streamable-HTTP server assigns a real `Mcp-Session-Id`
+/// header per session, surfaced in `RequestContext.extensions` per
+/// request. We do **not** extract it today — the session ID is set once
+/// at server construction. This works correctly under stateful HTTP
+/// (rmcp's `LocalSessionManager` invokes the factory once per session),
+/// where our UUID coincidentally maps 1:1 with rmcp's. Under stateless
+/// HTTP it over-segments: every request gets a fresh server →
+/// `unique_sessions` explodes. If/when stateless HTTP becomes a
+/// supported mode here, threading `RequestContext` through every
+/// handler is the structural fix; until then `MCP_SESSION_ID` lets
+/// wrappers pin a stable id externally.
+fn resolve_session_id() -> String {
+    for var in ["CLAUDE_SESSION_ID", "MCP_SESSION_ID"] {
+        if let Ok(v) = std::env::var(var) {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    uuid::Uuid::now_v7().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -711,6 +988,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<CreateInput>,
     ) -> Result<String, String> {
+        let _scope = self.scope("create", input.project.as_deref());
         let store = self.open_store_for(input.project.as_deref()).await?;
         let engine = self.build_engine_for(input.project.as_deref()).await?;
         let type_ = ops::parse_memory_type(&input.type_)
@@ -759,28 +1037,45 @@ impl EngramDbServer {
                     .transpose()
                     .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?
                     .unwrap_or_default(),
+                // Run embedding + contradiction detection in the background so the
+                // agent isn't blocked on embedding-model inference.
+                embed_async: true,
             },
             Some(&engine),
         )
         .await
         .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
-        serde_json::to_string(&CreateOutput {
+        let r = serde_json::to_string(&CreateOutput {
             id: result.id,
             created: true,
             summary: result.summary,
         })
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
     }
 
     #[tool(
-        name = "retrieve",
-        description = "Get memories relevant to your current working context. Call before modifying files, researching project questions, or investigating how things work."
+        name = "query",
+        description = "Query all memories. Use `mode: \"rank\"` to browse memories ranked by relevance to a context (current file path, topic, logical scope) — good before modifying files or when orienting. Use `mode: \"filter\"` to find memories containing specific terms, scopes, or tag matches — good when you have a concrete lookup. Filter mode requires at least one of `query`, `logical`, `path`, or `tags`."
     )]
-    async fn memory_retrieve(
+    async fn memory_query(
         &self,
-        Parameters(input): Parameters<RetrieveInput>,
+        Parameters(input): Parameters<QueryInput>,
     ) -> Result<String, String> {
+        let _scope = self.scope("query", input.project.as_deref());
+        let mode = match input.mode.as_str() {
+            "rank" => RetrievalMode::Rank,
+            "filter" => RetrievalMode::Filter,
+            other => {
+                return Err(error_response(
+                    ErrorCode::ValidationError,
+                    &format!("mode must be \"rank\" or \"filter\", got {:?}", other),
+                ));
+            }
+        };
+
         let engine = self.build_engine_for(input.project.as_deref()).await?;
 
         let type_filter = if let Some(types) = &input.types {
@@ -809,6 +1104,7 @@ impl EngramDbServer {
         }
 
         let query = RetrievalQuery {
+            mode,
             path: input.path,
             logical: input.logical.unwrap_or_default(),
             query: input.query,
@@ -820,14 +1116,14 @@ impl EngramDbServer {
             detail_level,
         };
 
-        let mut result = ops::retrieve_memories(&engine, &query)
+        let mut result = ops::query_memories(&engine, &query)
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
         // Merge global memories if requested and not already targeting the global store
         if input.include_global.unwrap_or(false) && !Self::is_global(input.project.as_deref()) {
             if let Ok(global_engine) = self.build_engine_for(Some("global")).await {
-                if let Ok(global_result) = ops::retrieve_memories(&global_engine, &query).await {
+                if let Ok(global_result) = ops::query_memories(&global_engine, &query).await {
                     let max = query.max_results.unwrap_or(10);
                     merge_scored_memories(&mut result.memories, global_result.memories, max);
                     result.total += global_result.total;
@@ -858,92 +1154,14 @@ impl EngramDbServer {
             })
             .collect();
 
-        serde_json::to_string(&serde_json::json!({
+        let r = serde_json::to_string(&serde_json::json!({
             "memories": memories,
             "total": result.total,
-            "query_mode": result.query_mode,
+            "retrieval_quality": result.retrieval_quality,
         }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
-    }
-
-    #[tool(
-        name = "search",
-        description = "Search all memories by text. Use before answering questions about project conventions, workflows, architecture, or tooling."
-    )]
-    async fn memory_search(
-        &self,
-        Parameters(input): Parameters<SearchInput>,
-    ) -> Result<String, String> {
-        let engine = self.build_engine_for(input.project.as_deref()).await?;
-
-        let type_filter = if let Some(types) = &input.types {
-            let mut parsed = Vec::new();
-            for t in types {
-                parsed.push(
-                    ops::parse_memory_type(t)
-                        .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?,
-                );
-            }
-            Some(parsed)
-        } else {
-            None
-        };
-
-        if let Some(mc) = input.min_criticality {
-            ops::validate_score(mc, "min_criticality")
-                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
-        }
-
-        let filters = SearchFilters {
-            types: type_filter,
-            tags: input.tags,
-            physical: input.physical,
-            logical: input.logical,
-            min_criticality: input.min_criticality,
-        };
-
-        let max = input.max_results.unwrap_or(10);
-        let mut results = ops::search_memories(&engine, &input.query, &filters, Some(max))
-            .await
-            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
-
-        // Merge global memories if requested and not already targeting the global store
-        if input.include_global.unwrap_or(false) && !Self::is_global(input.project.as_deref()) {
-            if let Ok(global_engine) = self.build_engine_for(Some("global")).await {
-                if let Ok(global_results) =
-                    ops::search_memories(&global_engine, &input.query, &filters, Some(max)).await
-                {
-                    merge_scored_memories(&mut results, global_results, max);
-                }
-            }
-        }
-
-        let memories: Vec<ScoredMemoryOutput> = results
-            .iter()
-            .map(|sm| ScoredMemoryOutput {
-                memory: memory_to_output(&sm.memory, false),
-                score: sm.score,
-                score_breakdown: ScoreBreakdownOutput {
-                    final_score: sm.score_breakdown.final_score,
-                    semantic: sm.score_breakdown.semantic,
-                    keyword: sm.score_breakdown.keyword,
-                    rerank: sm.score_breakdown.rerank,
-                    relevance: sm.score_breakdown.relevance,
-                    scope: sm.score_breakdown.scope,
-                    scope_multiplier: sm.score_breakdown.scope_multiplier,
-                    trust: sm.score_breakdown.trust,
-                    trust_multiplier: sm.score_breakdown.trust_multiplier,
-                    decay: sm.score_breakdown.decay,
-                    criticality: sm.score_breakdown.criticality,
-                },
-            })
-            .collect();
-
-        serde_json::to_string(&serde_json::json!({
-            "memories": memories,
-            "total": results.len(),
-        }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
     }
 
     #[tool(
@@ -951,13 +1169,16 @@ impl EngramDbServer {
         description = "Get full content of a specific memory, including details."
     )]
     async fn memory_get(&self, Parameters(input): Parameters<GetInput>) -> Result<String, String> {
+        let _scope = self.scope("get", input.project.as_deref());
         let store = self.open_store_for(input.project.as_deref()).await?;
         let memory = ops::get_memory(&store, &input.id)
             .await
             .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
-        serde_json::to_string(&memory_to_output(&memory, true))
-            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+        let r = serde_json::to_string(&memory_to_output(&memory, true))
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
     }
 
     #[tool(
@@ -968,6 +1189,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<UpdateInput>,
     ) -> Result<String, String> {
+        let _scope = self.scope("update", input.project.as_deref());
         let store = self.open_store_for(input.project.as_deref()).await?;
         let engine = self.build_engine_for(input.project.as_deref()).await?;
 
@@ -1029,17 +1251,22 @@ impl EngramDbServer {
                 decay_half_life: input.decay_half_life,
                 decay_ttl: input.decay_ttl,
                 decay_floor: input.decay_floor,
+                // Run re-embedding + contradiction detection in the background
+                // so the agent isn't blocked on embedding-model inference.
+                embed_async: true,
             },
             Some(&engine),
         )
         .await
         .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
-        serde_json::to_string(&serde_json::json!({
+        let r = serde_json::to_string(&serde_json::json!({
             "id": input.id,
             "updated": true
         }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
     }
 
     #[tool(
@@ -1050,16 +1277,19 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<DeleteInput>,
     ) -> Result<String, String> {
+        let _scope = self.scope("delete", input.project.as_deref());
         let store = self.open_store_for(input.project.as_deref()).await?;
         ops::delete_memory(&store, &input.id)
             .await
             .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
-        serde_json::to_string(&serde_json::json!({
+        let r = serde_json::to_string(&serde_json::json!({
             "id": input.id,
             "deleted": true
         }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
     }
 
     #[tool(
@@ -1070,6 +1300,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<ChallengeInput>,
     ) -> Result<String, String> {
+        let _scope = self.scope("challenge", input.project.as_deref());
         let store = self.open_store_for(input.project.as_deref()).await?;
         let result = ops::challenge_memory(
             &store,
@@ -1080,11 +1311,13 @@ impl EngramDbServer {
         .await
         .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
-        serde_json::to_string(&serde_json::json!({
+        let r = serde_json::to_string(&serde_json::json!({
             "challenged": result.challenged,
             "memory": memory_to_output(&result.memory, true)
         }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
     }
 
     #[tool(
@@ -1095,6 +1328,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<ReviewInput>,
     ) -> Result<String, String> {
+        let _scope = self.scope("review", input.project.as_deref());
         let store = self.open_store_for(input.project.as_deref()).await?;
 
         let type_filter = input
@@ -1121,11 +1355,13 @@ impl EngramDbServer {
             .map(|m| memory_to_output(m, false))
             .collect();
 
-        serde_json::to_string(&serde_json::json!({
+        let r = serde_json::to_string(&serde_json::json!({
             "memories": outputs,
             "total": memories.len()
         }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
     }
 
     #[tool(
@@ -1136,6 +1372,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<ResolveInput>,
     ) -> Result<String, String> {
+        let _scope = self.scope("resolve", input.project.as_deref());
         let store = self.open_store_for(input.project.as_deref()).await?;
 
         let action = match input.action.as_str() {
@@ -1165,12 +1402,14 @@ impl EngramDbServer {
         .await
         .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
-        serde_json::to_string(&serde_json::json!({
+        let r = serde_json::to_string(&serde_json::json!({
             "id": input.id,
             "action": result.action,
             "resolved": result.resolved
         }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
     }
 
     #[tool(
@@ -1181,6 +1420,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<CompressCandidatesInput>,
     ) -> Result<String, String> {
+        let _scope = self.scope("compress_candidates", input.project.as_deref());
         if let Some(t) = input.threshold {
             ops::validate_score(t, "threshold")
                 .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
@@ -1190,12 +1430,14 @@ impl EngramDbServer {
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
-        serde_json::to_string(&serde_json::json!({
+        let r = serde_json::to_string(&serde_json::json!({
             "candidates": result.candidates,
             "total": result.total,
             "threshold": result.threshold,
         }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
     }
 
     #[tool(
@@ -1206,6 +1448,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<CompressApplyInput>,
     ) -> Result<String, String> {
+        let _scope = self.scope("compress_apply", input.project.as_deref());
         let store = self.open_store_for(input.project.as_deref()).await?;
         let result = ops::compress_apply(
             &store,
@@ -1218,12 +1461,14 @@ impl EngramDbServer {
         .await
         .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
-        serde_json::to_string(&serde_json::json!({
+        let r = serde_json::to_string(&serde_json::json!({
             "new_id": result.new_id,
             "superseded_count": result.superseded_count,
             "applied": true,
         }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
     }
 
     #[tool(
@@ -1234,6 +1479,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<StatsInput>,
     ) -> Result<String, String> {
+        let _scope = self.scope("stats", input.project.as_deref());
         let store = self.open_store_for(input.project.as_deref()).await?;
         let stats = ops::compute_stats(&store)
             .await
@@ -1267,7 +1513,16 @@ impl EngramDbServer {
             .map(|(s, c)| (s.clone(), serde_json::Value::Number((*c).into())))
             .collect();
 
-        serde_json::to_string(&serde_json::json!({
+        // Runtime telemetry overlay: per-project counters, hit-rate, response
+        // timings, per-tool usage. Merged at the top level next to the
+        // existing static fields — schema is purely additive.
+        let pid = self.pid_for_input(input.project.as_deref());
+        let runtime = self
+            .stats
+            .snapshot(&pid, input.all_projects.unwrap_or(false));
+        let runtime_value = serde_json::to_value(&runtime).unwrap_or(serde_json::Value::Null);
+
+        let mut payload = serde_json::json!({
             "total": stats.total,
             "by_type": by_type,
             "by_status": by_status,
@@ -1275,9 +1530,20 @@ impl EngramDbServer {
             "expired": stats.expired,
             "oldest": stats.oldest,
             "newest": stats.newest,
-            "avg_criticality": stats.avg_criticality
-        }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+            "avg_criticality": stats.avg_criticality,
+        });
+        if let serde_json::Value::Object(rt_obj) = runtime_value {
+            if let serde_json::Value::Object(ref mut p_obj) = payload {
+                for (k, v) in rt_obj {
+                    p_obj.insert(k, v);
+                }
+            }
+        }
+
+        let r = serde_json::to_string(&payload)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
     }
 
     #[tool(
@@ -1285,6 +1551,7 @@ impl EngramDbServer {
         description = "Garbage collect decayed memories. Always dry_run first."
     )]
     async fn memory_gc(&self, Parameters(input): Parameters<GcInput>) -> Result<String, String> {
+        let _scope = self.scope("gc", input.project.as_deref());
         if let Some(t) = input.threshold {
             ops::validate_score(t, "threshold")
                 .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
@@ -1307,8 +1574,10 @@ impl EngramDbServer {
             response["warning"] =
                 serde_json::json!("Stale index entries found. Run reindex to fix.");
         }
-        serde_json::to_string(&response)
-            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+        let r = serde_json::to_string(&response)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
     }
 
     #[tool(
@@ -1319,6 +1588,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<ReindexInput>,
     ) -> Result<String, String> {
+        let _scope = self.scope("reindex", input.project.as_deref());
         let store = self.open_store_for(input.project.as_deref()).await?;
         let embeddings_only = input.embeddings_only.unwrap_or(false);
         let index_only = input.index_only.unwrap_or(false);
@@ -1334,12 +1604,14 @@ impl EngramDbServer {
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
-        serde_json::to_string(&serde_json::json!({
+        let r = serde_json::to_string(&serde_json::json!({
             "indexed": result.indexed,
             "embedded": result.embedded,
             "errors": result.errors
         }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
     }
 
     #[tool(
@@ -1350,6 +1622,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<ListInput>,
     ) -> Result<String, String> {
+        let _scope = self.scope("list", input.project.as_deref());
         let store = self.open_store_for(input.project.as_deref()).await?;
 
         let sort_field =
@@ -1388,11 +1661,13 @@ impl EngramDbServer {
             })
             .collect();
 
-        serde_json::to_string(&serde_json::json!({
+        let r = serde_json::to_string(&serde_json::json!({
             "memories": output,
             "total": output.len()
         }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
     }
 
     #[tool(
@@ -1403,6 +1678,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<DoctorInput>,
     ) -> Result<String, String> {
+        let _scope = self.scope("doctor", input.project.as_deref());
         let store = self.open_store_for(input.project.as_deref()).await?;
         let result = ops::doctor(&store)
             .await
@@ -1422,8 +1698,116 @@ impl EngramDbServer {
         if !result.healthy {
             response["fix"] = serde_json::json!("Run reindex to repair.");
         }
-        serde_json::to_string(&response)
-            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))
+        let r = serde_json::to_string(&response)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
+    }
+
+    #[tool(
+        name = "projects_list",
+        description = "List all registered EngramDB projects, including hierarchy (parent_project_id). Useful for finding the 16-char IDs you pass as the `project` parameter to other tools."
+    )]
+    async fn projects_list(&self) -> Result<String, String> {
+        let _scope = self.scope_system("projects_list");
+        let entries = ops::projects::list_projects(self.registry.as_ref())
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+
+        let json: Vec<serde_json::Value> = entries
+            .into_iter()
+            .map(|e| {
+                let mut obj = serde_json::json!({
+                    "project_id": e.project_id,
+                    "project_path": e.project_path,
+                    "exists": e.exists,
+                });
+                if let Some(parent) = e.parent_project_id {
+                    obj["parent_project_id"] = serde_json::Value::String(parent);
+                }
+                obj
+            })
+            .collect();
+
+        let r = serde_json::to_string(&json)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
+    }
+
+    #[tool(
+        name = "projects_info",
+        description = "Info about a specific project: id, name, path, memory count, logical scopes, created_at, parent_project_id. Omit `project` for the current project."
+    )]
+    async fn projects_info(
+        &self,
+        Parameters(input): Parameters<ProjectsInfoInput>,
+    ) -> Result<String, String> {
+        let _scope = self.scope("projects_info", input.project.as_deref());
+        let dir = self.resolve_dir(input.project.as_deref()).await?;
+        let info = ops::projects::get_project_info(&dir)
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+
+        let mut obj = serde_json::json!({
+            "project_id": info.project_id,
+            "project_name": info.project_name,
+            "project_path": info.project_path,
+            "memory_count": info.memory_count,
+            "logical_scopes": info.logical_scopes,
+            "created_at": info.created_at,
+        });
+        if let Some(parent) = info.parent_project_id {
+            obj["parent_project_id"] = serde_json::Value::String(parent);
+        }
+        let r = serde_json::to_string(&obj)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
+    }
+
+    #[tool(
+        name = "projects_link",
+        description = "Link a registered project as a sub-project of another. Rejects self-links and cycles. Use projects_list to discover project IDs."
+    )]
+    async fn projects_link(
+        &self,
+        Parameters(input): Parameters<ProjectsLinkInput>,
+    ) -> Result<String, String> {
+        let _scope = self.scope_system("projects_link");
+        // (`projects_link` is registry-level — no per-project bucket)
+        ops::projects::link_project(self.registry.as_ref(), &input.child, &input.parent)
+            .await
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        let r = serde_json::to_string(&serde_json::json!({
+            "linked": true,
+            "child": input.child,
+            "parent": input.parent,
+        }))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
+    }
+
+    #[tool(
+        name = "projects_unlink",
+        description = "Remove the parent link on a project, promoting it back to a root project. No-op if the project has no parent."
+    )]
+    async fn projects_unlink(
+        &self,
+        Parameters(input): Parameters<ProjectsUnlinkInput>,
+    ) -> Result<String, String> {
+        let _scope = self.scope_system("projects_unlink");
+        ops::projects::unlink_project(self.registry.as_ref(), &input.project_id)
+            .await
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        let r = serde_json::to_string(&serde_json::json!({
+            "unlinked": true,
+            "project_id": input.project_id,
+        }))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
     }
 }
 
@@ -1452,14 +1836,16 @@ impl ServerHandler for EngramDbServer {
             instructions: Some(
                 "Project-scoped persistent memory store for coding agents. \
                  Stores decisions, hazards, conventions, and context about the codebase. \
-                 IMPORTANT: Search memories (search) before answering project questions, \
+                 IMPORTANT: Query memories (query) before answering project questions, \
                  investigating workflows, or researching how things work — not only before \
-                 modifying files. Store new knowledge after significant discoveries. \
+                 modifying files. Use mode=\"filter\" with a query/logical/path/tags signal \
+                 for specific lookups, mode=\"rank\" for context-aware browsing. \
+                 Store new knowledge after significant discoveries. \
                  All tools accept an optional `project` parameter (absolute path, 16-char \
                  project ID, or \"global\") to operate on a different project's memories. \
                  Use project=\"global\" for cross-project memories like personal preferences, \
                  coding conventions, or knowledge that applies everywhere. \
-                 Use include_global=true on retrieve/search to merge global memories into results. \
+                 Use include_global=true on query to merge global memories into results. \
                  Omit `project` to use the current project."
                     .to_string(),
             ),
@@ -1562,11 +1948,12 @@ impl ServerHandler for EngramDbServer {
                     .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
 
                 let query = RetrievalQuery {
+                    mode: RetrievalMode::Rank,
                     path: Some(path.to_string()),
                     max_results: Some(10),
                     ..RetrievalQuery::default()
                 };
-                let result = ops::retrieve_memories(&engine, &query)
+                let result = ops::query_memories(&engine, &query)
                     .await
                     .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
@@ -1649,11 +2036,12 @@ impl ServerHandler for EngramDbServer {
 
                 if let Ok(engine) = self.build_engine().await {
                     let query = RetrievalQuery {
+                        mode: RetrievalMode::Rank,
                         path,
                         max_results: Some(10),
                         ..RetrievalQuery::default()
                     };
-                    if let Ok(result) = ops::retrieve_memories(&engine, &query).await {
+                    if let Ok(result) = ops::query_memories(&engine, &query).await {
                         for sm in &result.memories {
                             let status_marker = match sm.memory.status {
                                 Status::Challenged => " ⚠️",
@@ -1740,9 +2128,49 @@ pub async fn run_stdio(
     dir: PathBuf,
     embedding_backend: Option<EmbeddingBackend>,
 ) -> anyhow::Result<()> {
-    let server = EngramDbServer::new(dir, embedding_backend)?;
+    let stats_cfg = crate::types::EngramConfig::default().stats;
+    let stats = crate::telemetry::StatsCollector::new(stats_cfg.clone());
+
+    // Hydrate counters by replaying recent events from each project's
+    // LanceDB `stats_events` table before serving requests.
+    if let Err(e) = crate::telemetry::persistence::hydrate_collector(&stats).await {
+        tracing::warn!("stats hydrate failed: {e}");
+    }
+
+    // Drain the collector's persistence channel into the per-project
+    // LanceDB tables in the background. Capture the JoinHandle so we can
+    // await it on shutdown — without this, tokio runtime teardown
+    // cancels mid-`append_events` and tail events are lost.
+    let flush_handle = stats.take_receiver().map(|rx| {
+        crate::telemetry::persistence::spawn_flush_task(
+            rx,
+            stats_cfg.flush_interval_secs,
+            stats_cfg.retention_days,
+            Arc::downgrade(&stats),
+        )
+    });
+
+    let server = EngramDbServer::new_with_stats(dir, embedding_backend, stats.clone())?;
+    // Detect git worktrees and register/init the main project if needed.
+    server.ensure_hierarchy().await?;
+    // `serve` consumes the server; the running service owns the remaining
+    // `Arc<StatsCollector>` baked into it. Wait on the service, then drop
+    // both it and the local `stats` so the channel closes and the flush
+    // task can finalize before we await it.
     let service = server.serve(rmcp::transport::io::stdio()).await?;
+    // `waiting` takes ownership and consumes `service` on completion, so by
+    // the time it returns the rmcp service has already dropped its
+    // `Arc<StatsCollector>` clone — leaving the local `stats` as the last
+    // Arc holder. Dropping it now closes the channel.
     service.waiting().await?;
+    drop(stats);
+    if let Some(h) = flush_handle {
+        // Safety net: if some Arc clone unexpectedly outlives `stats` the
+        // channel never closes and `h.await` would hang forever. Bound
+        // the wait so a clean exit always happens; legitimate flushes
+        // complete in milliseconds.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), h).await;
+    }
     Ok(())
 }
 
@@ -1757,12 +2185,38 @@ pub async fn run_sse(
     };
     use std::sync::Arc;
 
+    // One process-global stats collector shared across every per-connection
+    // server instance. Hydrate once and spawn a single flush task.
+    let stats_cfg = crate::types::EngramConfig::default().stats;
+    let stats = crate::telemetry::StatsCollector::new(stats_cfg.clone());
+    if let Err(e) = crate::telemetry::persistence::hydrate_collector(&stats).await {
+        tracing::warn!("stats hydrate failed: {e}");
+    }
+    let flush_handle = stats.take_receiver().map(|rx| {
+        crate::telemetry::persistence::spawn_flush_task(
+            rx,
+            stats_cfg.flush_interval_secs,
+            stats_cfg.retention_days,
+            Arc::downgrade(&stats),
+        )
+    });
+
+    // Resolve hierarchy eagerly once: subsequent per-connection server
+    // instances share the registry, so registration only happens once.
+    {
+        let warmup = EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())?;
+        warmup.ensure_hierarchy().await?;
+    }
+
     let config = StreamableHttpServerConfig::default();
     let ct = config.cancellation_token.clone();
     let service = StreamableHttpService::new(
-        move || {
-            EngramDbServer::new(dir.clone(), embedding_backend)
-                .map_err(|e| std::io::Error::other(e.to_string()))
+        {
+            let stats = stats.clone();
+            move || {
+                EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())
+                    .map_err(|e| std::io::Error::other(e.to_string()))
+            }
         },
         Arc::new(LocalSessionManager::default()),
         config,
@@ -1776,6 +2230,18 @@ pub async fn run_sse(
     axum::serve(listener, router)
         .with_graceful_shutdown(async move { ct.cancelled().await })
         .await?;
+
+    // Drop the collector — closing the channel triggers the flush task to
+    // drain any buffered events and exit cleanly. Then await the task so
+    // tokio runtime teardown doesn't cancel it mid-`append_events`.
+    //
+    // Safety net: if any per-connection `EngramDbServer` Arc clone outlives
+    // `axum::serve` returning (e.g. via `LocalSessionManager` retention),
+    // the channel never closes and the await would hang. Bound the wait.
+    drop(stats);
+    if let Some(h) = flush_handle {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), h).await;
+    }
     Ok(())
 }
 
@@ -1810,6 +2276,26 @@ mod tests {
     fn parse_err(result: &Result<String, String>) -> serde_json::Value {
         let json_str = result.as_ref().unwrap_err();
         serde_json::from_str(json_str).unwrap_or_else(|_| json!({"error": {"message": json_str}}))
+    }
+
+    /// Helper: build a QueryInput with all fields defaulted to None and the
+    /// given mode. Use with `..query_input(...)` in tests to override only
+    /// the fields that matter.
+    fn query_input(mode: &str) -> QueryInput {
+        QueryInput {
+            mode: mode.to_string(),
+            query: None,
+            path: None,
+            logical: None,
+            types: None,
+            tags: None,
+            min_criticality: None,
+            max_results: None,
+            detail_level: None,
+            include_expired: None,
+            include_global: None,
+            project: None,
+        }
     }
 
     fn create_input(type_: &str, summary: &str, content: &str) -> CreateInput {
@@ -2269,7 +2755,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // memory_search
+    // memory_query — filter mode (formerly `search`)
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -2291,16 +2777,9 @@ mod tests {
         .await;
 
         let result = server
-            .memory_search(Parameters(SearchInput {
-                query: "Rust fast".to_string(),
-                types: None,
-                tags: None,
-                physical: None,
-                logical: None,
-                min_criticality: None,
-                max_results: None,
-                include_global: None,
-                project: None,
+            .memory_query(Parameters(QueryInput {
+                query: Some("Rust fast".to_string()),
+                ..query_input("filter")
             }))
             .await;
         let val = parse_ok(&result);
@@ -2314,16 +2793,10 @@ mod tests {
         let _ = create_and_get_id(&server, "hazard", "Hazard mem", "Hazard content").await;
 
         let result = server
-            .memory_search(Parameters(SearchInput {
-                query: "content".to_string(),
+            .memory_query(Parameters(QueryInput {
+                query: Some("content".to_string()),
                 types: Some(vec!["hazard".to_string()]),
-                tags: None,
-                physical: None,
-                logical: None,
-                min_criticality: None,
-                max_results: None,
-                include_global: None,
-                project: None,
+                ..query_input("filter")
             }))
             .await;
         let val = parse_ok(&result);
@@ -2347,16 +2820,10 @@ mod tests {
         }
 
         let result = server
-            .memory_search(Parameters(SearchInput {
-                query: "topic".to_string(),
-                types: None,
-                tags: None,
-                physical: None,
-                logical: None,
-                min_criticality: None,
+            .memory_query(Parameters(QueryInput {
+                query: Some("topic".to_string()),
                 max_results: Some(1),
-                include_global: None,
-                project: None,
+                ..query_input("filter")
             }))
             .await;
         let val = parse_ok(&result);
@@ -2364,29 +2831,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_no_match() {
+    async fn search_low_similarity_query_does_not_boost_unrelated_memory() {
+        // With embeddings enabled, even a nonsense query yields non-zero
+        // semantic similarity, so filter-mode sufficiency passes for every
+        // memory. The invariant we preserve is weaker than the old
+        // `search()` "keyword-strict" contract: the returned memory should
+        // rank below a keyword-matching one. We verify that here by
+        // contrasting a keyword-matching query against the same corpus.
         let (_dir, server) = setup().await;
         let _ = create_and_get_id(&server, "decision", "About Rust", "Rust content").await;
 
-        let result = server
-            .memory_search(Parameters(SearchInput {
-                query: "xyzzy_nonexistent_term_9999".to_string(),
-                types: None,
-                tags: None,
-                physical: None,
-                logical: None,
-                min_criticality: None,
-                max_results: None,
-                include_global: None,
-                project: None,
+        let nonsense = server
+            .memory_query(Parameters(QueryInput {
+                query: Some("xyzzy_nonexistent_term_9999".to_string()),
+                ..query_input("filter")
             }))
             .await;
-        let val = parse_ok(&result);
-        assert_eq!(val["memories"].as_array().unwrap().len(), 0);
+        let keyword = server
+            .memory_query(Parameters(QueryInput {
+                query: Some("Rust".to_string()),
+                ..query_input("filter")
+            }))
+            .await;
+
+        let nonsense_val = parse_ok(&nonsense);
+        let keyword_val = parse_ok(&keyword);
+
+        // Keyword-matching query must return results.
+        assert!(!keyword_val["memories"].as_array().unwrap().is_empty());
+
+        // Even if the nonsense query returns the memory via semantic
+        // similarity, the keyword query must score it higher.
+        if let Some(ns_mem) = nonsense_val["memories"].as_array().unwrap().first() {
+            let ns_score = ns_mem["score"].as_f64().unwrap();
+            let kw_score = keyword_val["memories"][0]["score"].as_f64().unwrap();
+            assert!(
+                kw_score > ns_score,
+                "keyword match ({}) should outrank nonsense semantic match ({})",
+                kw_score,
+                ns_score,
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
-    // memory_retrieve
+    // memory_query — rank mode (context-aware ranking, formerly `retrieve`)
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -2400,18 +2889,9 @@ mod tests {
         server.memory_create(Parameters(input)).await.unwrap();
 
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
+            .memory_query(Parameters(QueryInput {
                 path: Some("src/main.rs".to_string()),
-                logical: None,
-                query: None,
-                types: None,
-                tags: None,
-                min_criticality: None,
-                max_results: None,
-                detail_level: None,
-                include_expired: None,
-                include_global: None,
-                project: None,
+                ..query_input("rank")
             }))
             .await;
         let val = parse_ok(&result);
@@ -2430,18 +2910,10 @@ mod tests {
         server.memory_create(Parameters(input)).await.unwrap();
 
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
+            .memory_query(Parameters(QueryInput {
                 path: Some("src/auth/login.rs".to_string()),
                 logical: Some(vec!["auth.login".to_string()]),
-                query: None,
-                types: None,
-                tags: None,
-                min_criticality: None,
-                max_results: None,
-                detail_level: None,
-                include_expired: None,
-                include_global: None,
-                project: None,
+                ..query_input("rank")
             }))
             .await;
         let val = parse_ok(&result);
@@ -2460,18 +2932,10 @@ mod tests {
         .await;
 
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
+            .memory_query(Parameters(QueryInput {
                 path: Some("/".to_string()),
-                logical: None,
-                query: None,
-                types: None,
-                tags: None,
-                min_criticality: None,
-                max_results: None,
                 detail_level: Some("summary".to_string()),
-                include_expired: None,
-                include_global: None,
-                project: None,
+                ..query_input("rank")
             }))
             .await;
         // Should succeed without error
@@ -2484,22 +2948,46 @@ mod tests {
         let _ = create_and_get_id(&server, "decision", "Setup", "Content").await;
 
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
-                path: None,
-                logical: None,
-                query: None,
-                types: None,
-                tags: None,
-                min_criticality: None,
-                max_results: None,
+            .memory_query(Parameters(QueryInput {
                 detail_level: Some("bogus".to_string()),
-                include_expired: None,
-                include_global: None,
-                project: None,
+                ..query_input("rank")
             }))
             .await;
         let val = parse_err(&result);
         assert_eq!(val["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn query_rejects_invalid_mode() {
+        let (_dir, server) = setup().await;
+        let result = server
+            .memory_query(Parameters(QueryInput {
+                query: Some("anything".to_string()),
+                ..query_input("invalid_mode_name")
+            }))
+            .await;
+        let val = parse_err(&result);
+        assert_eq!(val["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn query_filter_requires_a_signal() {
+        let (_dir, server) = setup().await;
+        let _ = create_and_get_id(&server, "decision", "anything", "content").await;
+
+        // No query/logical/path/tags — filter mode must reject.
+        let result = server
+            .memory_query(Parameters(QueryInput {
+                min_criticality: Some(0.5),
+                ..query_input("filter")
+            }))
+            .await;
+        let val = parse_err(&result);
+        assert_eq!(val["error"]["code"], "INTERNAL_ERROR");
+        assert!(val["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("filter requires at least one"));
     }
 
     // -----------------------------------------------------------------------
@@ -2800,7 +3288,10 @@ mod tests {
             .unwrap();
 
         let result = server
-            .memory_stats(Parameters(StatsInput { project: None }))
+            .memory_stats(Parameters(StatsInput {
+                project: None,
+                all_projects: None,
+            }))
             .await;
         let val = parse_ok(&result);
         assert_eq!(val["total"], 0);
@@ -2814,7 +3305,10 @@ mod tests {
         let _ = create_and_get_id(&server, "hazard", "Haz1", "Content").await;
 
         let result = server
-            .memory_stats(Parameters(StatsInput { project: None }))
+            .memory_stats(Parameters(StatsInput {
+                project: None,
+                all_projects: None,
+            }))
             .await;
         let val = parse_ok(&result);
         assert_eq!(val["total"], 3);
@@ -3097,16 +3591,10 @@ mod tests {
 
         // Search from server A targeting project B
         let result = server
-            .memory_search(Parameters(SearchInput {
-                query: "snake_case".to_string(),
-                types: None,
-                tags: None,
-                physical: None,
-                logical: None,
-                min_criticality: None,
-                max_results: None,
-                include_global: None,
+            .memory_query(Parameters(QueryInput {
+                query: Some("snake_case".to_string()),
                 project: Some(project_b),
+                ..query_input("filter")
             }))
             .await;
         let val = parse_ok(&result);
@@ -3159,6 +3647,7 @@ mod tests {
         let result = server
             .memory_stats(Parameters(StatsInput {
                 project: Some(project_b),
+                all_projects: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -3188,6 +3677,7 @@ mod tests {
         let result = server
             .memory_stats(Parameters(StatsInput {
                 project: Some(project_b),
+                all_projects: None,
             }))
             .await;
         assert!(result.is_err());
@@ -3274,7 +3764,10 @@ mod tests {
 
         // Get A's count
         let stats_a_before = server
-            .memory_stats(Parameters(StatsInput { project: None }))
+            .memory_stats(Parameters(StatsInput {
+                project: None,
+                all_projects: None,
+            }))
             .await;
         let count_a_before = parse_ok(&stats_a_before)["total"].as_u64().unwrap();
         assert_eq!(count_a_before, 2);
@@ -3299,7 +3792,10 @@ mod tests {
 
         // Verify A is completely unaffected
         let stats_a_after = server
-            .memory_stats(Parameters(StatsInput { project: None }))
+            .memory_stats(Parameters(StatsInput {
+                project: None,
+                all_projects: None,
+            }))
             .await;
         let count_a_after = parse_ok(&stats_a_after)["total"].as_u64().unwrap();
         assert_eq!(count_a_after, count_a_before);
@@ -3479,12 +3975,39 @@ mod tests {
     // Global memory tests — feature parity with project-scoped memories
     // =======================================================================
 
+    /// Handle returned by [`setup_global`]. Bundles the per-test `TempDir`
+    /// with a process-wide lock guard so that `let (_dir, server) = ...`
+    /// call sites get both test isolation and the expected `TempDir`
+    /// lifetime without threading extra values through every test body.
+    ///
+    /// The lock serializes all tests that touch the global store (see
+    /// [`crate::storage::test_support`] for background) and clears the
+    /// on-disk global layout before each test.
+    #[allow(dead_code)]
+    struct GlobalSetupHandle {
+        dir: TempDir,
+        _lock: crate::storage::test_support::GlobalTestLock,
+    }
+
+    impl GlobalSetupHandle {
+        #[allow(dead_code)]
+        fn path(&self) -> &std::path::Path {
+            self.dir.path()
+        }
+    }
+
     /// Setup for global tests.
-    /// With nextest, each test runs in its own process with an isolated
-    /// ENGRAMDB_DATA_DIR, so no locking or cleanup is needed.
-    async fn setup_global() -> (TempDir, EngramDbServer) {
+    ///
+    /// Under `cargo test` (one process, parallel tests) the global store's
+    /// on-disk layout is shared, so we serialize via
+    /// `acquire_global_test_lock` and wipe the global dir per test. Under
+    /// `cargo nextest` (one process per test) the lock is effectively
+    /// free — each test still sees a clean slate.
+    async fn setup_global() -> (GlobalSetupHandle, EngramDbServer) {
+        let lock = crate::storage::test_support::acquire_global_test_lock().await;
         MemoryStore::init_global().await.unwrap();
-        setup().await
+        let (dir, server) = setup().await;
+        (GlobalSetupHandle { dir, _lock: lock }, server)
     }
 
     fn global_project() -> Option<String> {
@@ -3730,18 +4253,10 @@ mod tests {
         .await;
 
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
+            .memory_query(Parameters(QueryInput {
                 path: Some("/".to_string()),
-                logical: None,
-                query: None,
-                types: None,
-                tags: None,
-                min_criticality: None,
-                max_results: None,
-                detail_level: None,
-                include_expired: None,
-                include_global: None,
                 project: global_project(),
+                ..query_input("rank")
             }))
             .await;
         let val = parse_ok(&result);
@@ -3760,18 +4275,10 @@ mod tests {
         .await;
 
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
-                path: None,
-                logical: None,
+            .memory_query(Parameters(QueryInput {
                 query: Some("error handling".to_string()),
-                types: None,
-                tags: None,
-                min_criticality: None,
-                max_results: None,
-                detail_level: None,
-                include_expired: None,
-                include_global: None,
                 project: global_project(),
+                ..query_input("rank")
             }))
             .await;
         let val = parse_ok(&result);
@@ -3790,16 +4297,10 @@ mod tests {
         .await;
 
         let result = server
-            .memory_search(Parameters(SearchInput {
-                query: "JetBrains Mono".to_string(),
-                types: None,
-                tags: None,
-                physical: None,
-                logical: None,
-                min_criticality: None,
-                max_results: None,
-                include_global: None,
+            .memory_query(Parameters(QueryInput {
+                query: Some("JetBrains Mono".to_string()),
                 project: global_project(),
+                ..query_input("filter")
             }))
             .await;
         let val = parse_ok(&result);
@@ -3819,16 +4320,11 @@ mod tests {
         create_global_and_get_id(&server, "hazard", "Hazard in global", "Hazard content").await;
 
         let result = server
-            .memory_search(Parameters(SearchInput {
-                query: "content".to_string(),
+            .memory_query(Parameters(QueryInput {
+                query: Some("content".to_string()),
                 types: Some(vec!["hazard".to_string()]),
-                tags: None,
-                physical: None,
-                logical: None,
-                min_criticality: None,
-                max_results: None,
-                include_global: None,
                 project: global_project(),
+                ..query_input("filter")
             }))
             .await;
         let val = parse_ok(&result);
@@ -3864,18 +4360,11 @@ mod tests {
 
         // Retrieve with include_global=true should include both
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
+            .memory_query(Parameters(QueryInput {
                 path: Some("/".to_string()),
-                logical: None,
-                query: None,
-                types: None,
-                tags: None,
-                min_criticality: None,
                 max_results: Some(20),
-                detail_level: None,
-                include_expired: None,
                 include_global: Some(true),
-                project: None,
+                ..query_input("rank")
             }))
             .await;
         let val = parse_ok(&result);
@@ -3917,16 +4406,11 @@ mod tests {
         .await;
 
         let result = server
-            .memory_search(Parameters(SearchInput {
-                query: "search test memory".to_string(),
-                types: None,
-                tags: None,
-                physical: None,
-                logical: None,
-                min_criticality: None,
+            .memory_query(Parameters(QueryInput {
+                query: Some("search test memory".to_string()),
                 max_results: Some(20),
                 include_global: Some(true),
-                project: None,
+                ..query_input("filter")
             }))
             .await;
         let val = parse_ok(&result);
@@ -3968,18 +4452,11 @@ mod tests {
         .await;
 
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
+            .memory_query(Parameters(QueryInput {
                 path: Some("/".to_string()),
-                logical: None,
-                query: None,
-                types: None,
-                tags: None,
-                min_criticality: None,
                 max_results: Some(20),
-                detail_level: None,
-                include_expired: None,
                 include_global: Some(false),
-                project: None,
+                ..query_input("rank")
             }))
             .await;
         let val = parse_ok(&result);
@@ -4017,18 +4494,10 @@ mod tests {
 
         // include_global defaults to None (false)
         let result = server
-            .memory_retrieve(Parameters(RetrieveInput {
+            .memory_query(Parameters(QueryInput {
                 path: Some("/".to_string()),
-                logical: None,
-                query: None,
-                types: None,
-                tags: None,
-                min_criticality: None,
                 max_results: Some(20),
-                detail_level: None,
-                include_expired: None,
-                include_global: None,
-                project: None,
+                ..query_input("rank")
             }))
             .await;
         let val = parse_ok(&result);
@@ -4293,6 +4762,7 @@ mod tests {
         let result = server
             .memory_stats(Parameters(StatsInput {
                 project: global_project(),
+                all_projects: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -4472,6 +4942,7 @@ mod tests {
         let result = server
             .memory_stats(Parameters(StatsInput {
                 project: global_project(),
+                all_projects: None,
             }))
             .await;
         let val = parse_ok(&result);
@@ -4522,18 +4993,11 @@ mod tests {
 
         for level in &["summary", "content", "full"] {
             let result = server
-                .memory_retrieve(Parameters(RetrieveInput {
+                .memory_query(Parameters(QueryInput {
                     path: Some("/".to_string()),
-                    logical: None,
-                    query: None,
-                    types: None,
-                    tags: None,
-                    min_criticality: None,
-                    max_results: None,
                     detail_level: Some(level.to_string()),
-                    include_expired: None,
-                    include_global: None,
                     project: global_project(),
+                    ..query_input("rank")
                 }))
                 .await;
             let val = parse_ok(&result);
@@ -4562,5 +5026,598 @@ mod tests {
             .await;
         let val = parse_ok(&result);
         assert_eq!(val["created"], true);
+    }
+
+    // =========================================================================
+    // Worktree / project hierarchy tests
+    // =========================================================================
+
+    /// Build a fake linked-worktree layout under `root`:
+    ///
+    ///   <root>/main/.git/                 (main .git dir)
+    ///   <root>/main/.git/worktrees/wt/    (per-worktree gitdir)
+    ///   <root>/wt/.git                    (file: `gitdir: <abs path>`)
+    ///
+    /// Returns (canonicalized main path, canonicalized worktree path).
+    fn make_fake_worktree_mcp(root: &std::path::Path) -> (PathBuf, PathBuf) {
+        let main = root.join("main");
+        let wt = root.join("wt");
+        let wt_gitdir = main.join(".git").join("worktrees").join("wt");
+        std::fs::create_dir_all(main.join(".git")).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::create_dir_all(&wt_gitdir).unwrap();
+        std::fs::write(wt_gitdir.join("commondir"), "../..").unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", wt_gitdir.display()),
+        )
+        .unwrap();
+        (main.canonicalize().unwrap(), wt.canonicalize().unwrap())
+    }
+
+    fn new_server_at(dir: &std::path::Path, registry: Arc<dyn RegistryBackend>) -> EngramDbServer {
+        EngramDbServer::new_with_registry(dir.to_path_buf(), Some(EmbeddingBackend::Onnx), registry)
+    }
+
+    #[tokio::test]
+    async fn effective_dir_in_worktree_resolves_to_main() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree_mcp(tmp.path());
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(&wt, registry);
+        assert_eq!(server.dir, wt);
+        assert_eq!(server.effective_dir, main);
+    }
+
+    #[tokio::test]
+    async fn effective_dir_for_non_worktree_equals_dir() {
+        let tmp = TempDir::new().unwrap();
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(tmp.path(), registry);
+        assert_eq!(server.dir, server.effective_dir);
+    }
+
+    #[tokio::test]
+    async fn ensure_hierarchy_noop_for_non_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(tmp.path(), registry.clone());
+        server
+            .ensure_hierarchy()
+            .await
+            .expect("ensure_hierarchy should succeed");
+        // No registration happens in a non-worktree; store is only init'd on
+        // the first actual memory operation.
+        let loaded = registry.load().await.unwrap();
+        assert!(loaded.projects.is_empty());
+        assert!(!tmp.path().join(".engramdb").exists());
+    }
+
+    #[tokio::test]
+    async fn ensure_hierarchy_auto_inits_main_and_registers_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree_mcp(tmp.path());
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(&wt, registry.clone());
+
+        server.ensure_hierarchy().await.unwrap();
+
+        // Main project got initialized.
+        assert!(main.join(".engramdb").exists());
+        // Worktree did NOT get its own .engramdb/.
+        assert!(!wt.join(".engramdb").exists());
+
+        // Registry contains both with the child's parent set to the main id.
+        let reg = registry.load().await.unwrap();
+        let main_id = crate::storage::project_id::compute_project_id(&main);
+        let wt_id = crate::storage::project_id::compute_project_id(&wt);
+        let main_entry = reg
+            .projects
+            .iter()
+            .find(|e| e.project_id == main_id)
+            .expect("main project registered");
+        assert_eq!(main_entry.parent_project_id, None);
+        let wt_entry = reg
+            .projects
+            .iter()
+            .find(|e| e.project_id == wt_id)
+            .expect("worktree registered");
+        assert_eq!(
+            wt_entry.parent_project_id.as_deref(),
+            Some(main_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_hierarchy_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree_mcp(tmp.path());
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(&wt, registry.clone());
+
+        server.ensure_hierarchy().await.unwrap();
+        server.ensure_hierarchy().await.unwrap();
+        server.ensure_hierarchy().await.unwrap();
+
+        // Still exactly two entries after repeated calls.
+        let reg = registry.load().await.unwrap();
+        assert_eq!(reg.projects.len(), 2);
+        let wt_id = crate::storage::project_id::compute_project_id(&wt);
+        let main_id = crate::storage::project_id::compute_project_id(&main);
+        let wt_entry = reg.projects.iter().find(|e| e.project_id == wt_id).unwrap();
+        assert_eq!(
+            wt_entry.parent_project_id.as_deref(),
+            Some(main_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_hierarchy_skips_init_when_main_already_initialized() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree_mcp(tmp.path());
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+
+        // Pre-initialize the main project.
+        MemoryStore::init(&main, registry.as_ref()).await.unwrap();
+
+        let server = new_server_at(&wt, registry.clone());
+        server.ensure_hierarchy().await.unwrap();
+
+        // Main still exists; worktree registered with parent link.
+        assert!(main.join(".engramdb").exists());
+        let reg = registry.load().await.unwrap();
+        assert_eq!(reg.projects.len(), 2);
+        let wt_id = crate::storage::project_id::compute_project_id(&wt);
+        let main_id = crate::storage::project_id::compute_project_id(&main);
+        let wt_entry = reg.projects.iter().find(|e| e.project_id == wt_id).unwrap();
+        assert_eq!(
+            wt_entry.parent_project_id.as_deref(),
+            Some(main_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_dir_none_in_worktree_returns_main_path() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree_mcp(tmp.path());
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(&wt, registry.clone());
+        server.ensure_hierarchy().await.unwrap();
+
+        let resolved = server.resolve_dir(None).await.unwrap();
+        assert_eq!(resolved, main);
+    }
+
+    #[tokio::test]
+    async fn resolve_dir_with_worktree_path_swaps_to_main() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree_mcp(tmp.path());
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(&wt, registry.clone());
+        server.ensure_hierarchy().await.unwrap();
+
+        let wt_str = wt.to_string_lossy().to_string();
+        let resolved = server.resolve_dir(Some(&wt_str)).await.unwrap();
+        assert_eq!(resolved, main);
+    }
+
+    #[tokio::test]
+    async fn resolve_dir_with_worktree_id_follows_parent_chain() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree_mcp(tmp.path());
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(&wt, registry.clone());
+        server.ensure_hierarchy().await.unwrap();
+
+        let wt_id = crate::storage::project_id::compute_project_id(&wt);
+        let resolved = server.resolve_dir(Some(&wt_id)).await.unwrap();
+        assert_eq!(resolved, main);
+    }
+
+    #[tokio::test]
+    async fn memory_create_in_worktree_writes_to_main_store() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree_mcp(tmp.path());
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(&wt, registry.clone());
+        server.ensure_hierarchy().await.unwrap();
+
+        // Create a memory via the MCP handler while running in the worktree.
+        let res = server
+            .memory_create(Parameters(create_input(
+                "decision",
+                "From worktree",
+                "Created while running in linked worktree",
+            )))
+            .await;
+        let val = parse_ok(&res);
+        assert_eq!(val["created"], true);
+
+        // The memory should live under the MAIN project's store, not the worktree.
+        let main_store = MemoryStore::open(&main).await.unwrap();
+        let summaries = main_store.list_summary().await.unwrap();
+        assert_eq!(summaries.len(), 1, "memory should be in main project");
+        let mem = main_store.get(&summaries[0].id).await.unwrap();
+        assert_eq!(mem.summary, "From worktree");
+
+        // The worktree still has no .engramdb/.
+        assert!(!wt.join(".engramdb").exists());
+    }
+
+    // -----------------------------------------------------------------------
+    // projects_list / projects_info / projects_link / projects_unlink
+    // -----------------------------------------------------------------------
+
+    async fn setup_two_registered_projects() -> (TempDir, TempDir, EngramDbServer, String, String) {
+        let parent_tmp = TempDir::new().unwrap();
+        let child_tmp = TempDir::new().unwrap();
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+
+        let parent_store = MemoryStore::init(parent_tmp.path(), registry.as_ref())
+            .await
+            .unwrap();
+        let child_store = MemoryStore::init(child_tmp.path(), registry.as_ref())
+            .await
+            .unwrap();
+        let parent_id = parent_store.project_id.clone();
+        let child_id = child_store.project_id.clone();
+
+        let server = EngramDbServer::new_with_registry(
+            parent_tmp.path().to_path_buf(),
+            Some(EmbeddingBackend::Onnx),
+            Arc::clone(&registry),
+        );
+        (parent_tmp, child_tmp, server, parent_id, child_id)
+    }
+
+    #[tokio::test]
+    async fn projects_list_shows_registered_projects() {
+        let (_p, _c, server, parent_id, child_id) = setup_two_registered_projects().await;
+        let result = server.projects_list().await;
+        let val = parse_ok(&result);
+        let arr = val.as_array().unwrap();
+        let ids: Vec<String> = arr
+            .iter()
+            .map(|e| e["project_id"].as_str().unwrap().to_string())
+            .collect();
+        assert!(ids.contains(&parent_id), "parent must be in list");
+        assert!(ids.contains(&child_id), "child must be in list");
+    }
+
+    #[tokio::test]
+    async fn projects_info_current_project() {
+        let (_p, _c, server, parent_id, _child_id) = setup_two_registered_projects().await;
+        let result = server
+            .projects_info(Parameters(ProjectsInfoInput { project: None }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["project_id"], parent_id);
+        assert!(val["memory_count"].is_number());
+    }
+
+    #[tokio::test]
+    async fn projects_info_by_id() {
+        let (_p, _c, server, _parent_id, child_id) = setup_two_registered_projects().await;
+        let result = server
+            .projects_info(Parameters(ProjectsInfoInput {
+                project: Some(child_id.clone()),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(val["project_id"], child_id);
+    }
+
+    #[tokio::test]
+    async fn projects_link_then_unlink_roundtrip() {
+        let (_p, _c, server, parent_id, child_id) = setup_two_registered_projects().await;
+
+        let link_res = server
+            .projects_link(Parameters(ProjectsLinkInput {
+                child: child_id.clone(),
+                parent: parent_id.clone(),
+            }))
+            .await;
+        let val = parse_ok(&link_res);
+        assert_eq!(val["linked"], true);
+
+        // projects_list should now reflect the parent_project_id on the child.
+        let list = parse_ok(&server.projects_list().await);
+        let child_entry = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["project_id"] == child_id)
+            .unwrap();
+        assert_eq!(child_entry["parent_project_id"], parent_id);
+
+        let unlink_res = server
+            .projects_unlink(Parameters(ProjectsUnlinkInput {
+                project_id: child_id.clone(),
+            }))
+            .await;
+        let val = parse_ok(&unlink_res);
+        assert_eq!(val["unlinked"], true);
+
+        let list = parse_ok(&server.projects_list().await);
+        let child_entry = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["project_id"] == child_id)
+            .unwrap();
+        assert!(child_entry.get("parent_project_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn projects_link_rejects_self() {
+        let (_p, _c, server, parent_id, _child_id) = setup_two_registered_projects().await;
+        let result = server
+            .projects_link(Parameters(ProjectsLinkInput {
+                child: parent_id.clone(),
+                parent: parent_id,
+            }))
+            .await;
+        let err = parse_err(&result);
+        assert_eq!(err["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn projects_link_rejects_cycle() {
+        let (_p, _c, server, parent_id, child_id) = setup_two_registered_projects().await;
+
+        // child → parent
+        server
+            .projects_link(Parameters(ProjectsLinkInput {
+                child: child_id.clone(),
+                parent: parent_id.clone(),
+            }))
+            .await
+            .unwrap();
+
+        // Reversing would create a cycle.
+        let result = server
+            .projects_link(Parameters(ProjectsLinkInput {
+                child: parent_id,
+                parent: child_id,
+            }))
+            .await;
+        let err = parse_err(&result);
+        assert_eq!(err["error"]["code"], "VALIDATION_ERROR");
+        assert!(err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("cycle"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Runtime telemetry overlay on `stats`
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn stats_includes_runtime_fields_after_calls() {
+        let (_dir, server) = setup().await;
+
+        // Drive a few tool calls. Two creates and one query that should
+        // succeed against the memories we just inserted (filter mode picks
+        // up keyword matches).
+        let _id1 = create_and_get_id(&server, "decision", "Snake case", "We use snake_case").await;
+        let _id2 = create_and_get_id(&server, "convention", "Tabs", "We use tabs").await;
+
+        let _ = server
+            .memory_query(Parameters(QueryInput {
+                mode: "filter".to_string(),
+                query: Some("snake_case".to_string()),
+                ..query_input("filter")
+            }))
+            .await;
+
+        let result = server
+            .memory_stats(Parameters(StatsInput {
+                project: None,
+                all_projects: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+
+        // Existing static fields are still there.
+        assert!(val.get("total").is_some(), "static `total` preserved");
+        assert!(val.get("by_type").is_some(), "static `by_type` preserved");
+        assert!(
+            val.get("avg_criticality").is_some(),
+            "static `avg_criticality` preserved"
+        );
+
+        // New runtime fields are present.
+        assert!(val.get("since").is_some(), "runtime `since` added");
+        assert!(
+            val.get("project_id").is_some(),
+            "runtime `project_id` added"
+        );
+        let usage = &val["usage"];
+        assert_eq!(usage["by_tool"]["create"], 2);
+        // The stats call itself is counted (in-flight, but the scope hasn't
+        // dropped yet inside this handler — so just assert >= 1 query).
+        assert!(usage["by_tool"]["query"].as_u64().unwrap() >= 1);
+        let queries = &val["queries"];
+        assert!(queries["total"].as_u64().unwrap() >= 1);
+        assert!(queries["hit_rate"].as_f64().unwrap() >= 0.0);
+        assert!(
+            val["timings_ms"]["tool"]["create"]["count"]
+                .as_u64()
+                .unwrap()
+                >= 2
+        );
+
+        // by_project map is omitted unless requested.
+        assert!(
+            val.get("by_project").is_none(),
+            "by_project absent unless all_projects=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn stats_all_projects_returns_breakdown() {
+        let (_dir, server) = setup().await;
+        let _id = create_and_get_id(&server, "decision", "X", "We chose X").await;
+
+        let result = server
+            .memory_stats(Parameters(StatsInput {
+                project: None,
+                all_projects: Some(true),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(
+            val.get("by_project").is_some(),
+            "by_project present with all_projects=true"
+        );
+        assert!(
+            !val["by_project"].as_object().unwrap().is_empty(),
+            "at least one project recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn stats_records_zero_results_and_quality() {
+        let (_dir, server) = setup().await;
+
+        // Issue a query with nothing in the store; embeddings unavailable in
+        // tests without ONNX setup, so this should land in the
+        // `no_query_signals` quality bucket and count as zero-result.
+        let _ = server
+            .memory_query(Parameters(QueryInput {
+                mode: "rank".to_string(),
+                query: Some("nonexistent gobbledygook".to_string()),
+                ..query_input("rank")
+            }))
+            .await;
+
+        let result = server
+            .memory_stats(Parameters(StatsInput {
+                project: None,
+                all_projects: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        let queries = &val["queries"];
+        assert!(queries["total"].as_u64().unwrap() >= 1);
+        // zero_results == total when there were no hits in the empty store
+        assert!(queries["zero_results"].as_u64().unwrap() >= 1);
+        assert!((queries["hit_rate"].as_f64().unwrap()) <= 1.0);
+    }
+
+    #[tokio::test]
+    async fn stats_reports_session_id_and_unique_sessions() {
+        let (_dir, server) = setup().await;
+        // Drive a couple of calls so the session is seen by telemetry.
+        let _ = create_and_get_id(&server, "decision", "Test", "Session test").await;
+        let _ = server
+            .memory_query(Parameters(QueryInput {
+                mode: "rank".to_string(),
+                query: Some("anything".to_string()),
+                ..query_input("rank")
+            }))
+            .await;
+
+        let result = server
+            .memory_stats(Parameters(StatsInput {
+                project: None,
+                all_projects: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+
+        // Server.session_id() must be non-empty and exactly one unique
+        // session must be observed for the project.
+        assert!(!server.session_id().is_empty());
+        assert_eq!(val["usage"]["unique_sessions"], 1);
+    }
+
+    #[tokio::test]
+    async fn stats_reports_followups_for_same_session_queries() {
+        let (_dir, server) = setup().await;
+        // Three back-to-back queries from the same server (=same session_id).
+        // First one is not a followup; the other two arrive within the
+        // 60s default followup window → followups == 2.
+        for _ in 0..3 {
+            let _ = server
+                .memory_query(Parameters(QueryInput {
+                    mode: "rank".to_string(),
+                    query: Some("hello".to_string()),
+                    ..query_input("rank")
+                }))
+                .await;
+        }
+
+        let result = server
+            .memory_stats(Parameters(StatsInput {
+                project: None,
+                all_projects: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        let q = &val["queries"];
+        assert_eq!(q["total"].as_u64().unwrap(), 3);
+        assert_eq!(q["followups"].as_u64().unwrap(), 2);
+        assert!(q["followup_rate"].as_f64().unwrap() > 0.6);
+    }
+
+    /// Test gap covered: a tool call that returns Err must show up under
+    /// `errors_by_tool` (the RAII guard records on Drop without
+    /// `mark_success`).
+    #[tokio::test]
+    async fn stats_records_tool_errors() {
+        let (_dir, server) = setup().await;
+        // `memory_get` against a non-existent ID returns MemoryNotFound.
+        let _ = server
+            .memory_get(Parameters(GetInput {
+                id: "this-id-does-not-exist".to_string(),
+                project: None,
+            }))
+            .await;
+
+        let result = server
+            .memory_stats(Parameters(StatsInput {
+                project: None,
+                all_projects: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        let errors = &val["usage"]["errors_by_tool"];
+        assert_eq!(
+            errors["get"].as_u64().unwrap_or(0),
+            1,
+            "errored memory_get must appear in errors_by_tool"
+        );
+    }
+
+    /// Test gap covered: registry-level tools (`projects_list/link/unlink`)
+    /// bucket under `__system__`, not the launching project.
+    #[tokio::test]
+    async fn stats_buckets_projects_list_under_system() {
+        let (_dir, server) = setup().await;
+        let _ = server.projects_list().await;
+
+        // Snapshot with all_projects to see the by_project breakdown.
+        let result = server
+            .memory_stats(Parameters(StatsInput {
+                project: None,
+                all_projects: Some(true),
+            }))
+            .await;
+        let val = parse_ok(&result);
+        let bp = &val["by_project"];
+        assert!(
+            bp["__system__"].is_object(),
+            "projects_list bucketed under __system__: got {}",
+            bp
+        );
+        assert_eq!(
+            bp["__system__"]["usage"]["by_tool"]["projects_list"]
+                .as_u64()
+                .unwrap(),
+            1
+        );
     }
 }

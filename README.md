@@ -62,11 +62,11 @@ engramdb init
 engramdb add --type decision --title "Use PostgreSQL for persistence" \
   "Chose PostgreSQL over SQLite for concurrent write support."
 
-# Search memories
-engramdb search "database choice"
+# Find memories by keyword (filter mode requires a query signal)
+engramdb query --mode filter "database choice"
 
-# Retrieve context for a file
-engramdb retrieve --context src/db/connection.rs
+# Rank memories relevant to a file (rank mode browses by context)
+engramdb query --mode rank --path src/db/connection.rs
 ```
 
 ## How It Works
@@ -91,8 +91,7 @@ When integrated with Claude Code:
 | `init` | Initialize a new EngramDB store |
 | `add` | Add a new memory |
 | `get` | Get a memory by ID |
-| `search` | Search memories by keyword |
-| `retrieve` | Retrieve memories relevant to a context (file path, topic) |
+| `query` | Unified search: `--mode filter` requires a query signal; `--mode rank` browses by context |
 | `list` | List all memories |
 | `update` | Update an existing memory |
 | `delete` | Delete a memory |
@@ -119,8 +118,7 @@ When running as an MCP server (`engramdb serve`), the following tools are availa
 
 | Tool | Description |
 |------|-------------|
-| `search` | Semantic + keyword search across memories |
-| `retrieve` | Get memories relevant to a file path or context |
+| `query` | Unified search/retrieve. `mode: "filter"` narrows by query/logical/path/tags; `mode: "rank"` ranks memories by relevance to a context |
 | `create` | Store a new memory |
 | `get` | Fetch a specific memory by ID |
 | `list` | List all memories with optional filters |

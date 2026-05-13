@@ -30,6 +30,15 @@ pub struct UpdateParams {
     pub decay_half_life: Option<u64>,
     pub decay_ttl: Option<u64>,
     pub decay_floor: Option<f64>,
+    /// When `true`, run re-embedding + contradiction detection in a background
+    /// `tokio::spawn`ed task and return immediately. Errors in the background
+    /// task are logged via `tracing` and never surface to the caller. Used by
+    /// the MCP `update` tool so the agent isn't blocked on embedding inference.
+    ///
+    /// When `false` (default), re-embedding runs inline before the function
+    /// returns; contradiction detection is not performed (matches the
+    /// pre-async-flag CLI behavior).
+    pub embed_async: bool,
 }
 
 /// Update an existing memory.
@@ -143,11 +152,26 @@ pub async fn update_memory(
 
     store.update(id, final_update).await?;
 
-    // Re-embed the updated memory if an engine with embeddings is available
+    // Re-embed the updated memory if an engine with embeddings is available.
+    //
+    // - `embed_async = true`  (MCP path): spawn embed + NLI contradiction
+    //                                     detection in the background. An edit
+    //                                     can introduce a new contradiction
+    //                                     against existing memories, so the
+    //                                     async path opportunistically writes
+    //                                     challenges. Vector search may briefly
+    //                                     not reflect the edit until the task
+    //                                     finishes.
+    // - `embed_async = false` (CLI / tests): re-embed inline; no NLI pass
+    //                                        (preserves the pre-flag behavior).
     if let Some(engine) = engine {
         if engine.embeddings_available() {
             let saved = store.get(id).await?;
-            engine.embed_memory(&saved).await?;
+            if params.embed_async {
+                let _ = engine.spawn_ingest(saved);
+            } else {
+                engine.embed_memory(&saved).await?;
+            }
         }
     }
 
@@ -200,6 +224,7 @@ mod tests {
             decay_half_life: None,
             decay_ttl: None,
             decay_floor: None,
+            embed_async: false,
         }
     }
 

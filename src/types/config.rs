@@ -540,6 +540,105 @@ pub struct EngramConfig {
     /// Cross-encoder reranking settings
     #[serde(default)]
     pub rerank: RerankConfig,
+
+    /// Runtime telemetry / statistics collection settings
+    #[serde(default)]
+    pub stats: StatsConfig,
+}
+
+/// Runtime telemetry / statistics collection settings.
+///
+/// Controls the in-memory `StatsCollector` that tracks tool usage, query
+/// outcomes, and stage timings. Counters are project-scoped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsConfig {
+    /// Master switch. When false, the collector is a no-op and the
+    /// `stats` tool/command falls back to static store counts only.
+    #[serde(default = "default_stats_enabled")]
+    pub enabled: bool,
+
+    /// Per-stage / per-tool histogram capacity. Percentiles are computed
+    /// over the most recent N samples (recency-weighted, not lifetime).
+    #[serde(default = "default_histogram_capacity")]
+    pub histogram_capacity: usize,
+
+    /// Optional retention window for the on-disk LanceDB event log.
+    /// `None` (the default) means unlimited retention. When `Some(n)`,
+    /// the persistence flush task prunes events older than `n` days.
+    /// Note: lifetime counters become "since the oldest non-pruned event"
+    /// when retention is set.
+    #[serde(default)]
+    pub retention_days: Option<u64>,
+
+    /// Flush task interval in seconds. The persistence task drains
+    /// buffered events and appends them to the per-project `stats_events`
+    /// LanceDB table this often, plus on shutdown.
+    #[serde(default = "default_flush_interval_secs")]
+    pub flush_interval_secs: u64,
+
+    /// A query is counted as a "followup" if it arrives within this many
+    /// seconds of a previous query in the same session. Default 60.
+    #[serde(default = "default_followup_window_secs")]
+    pub followup_window_secs: u64,
+
+    /// Soft cap on the number of distinct sessions tracked per project.
+    /// When exceeded, the oldest sessions (by `last_query_at`) are
+    /// evicted. Bounds memory growth on long-running daemons that see
+    /// many sessions. Default 10_000.
+    #[serde(default = "default_max_sessions_per_project")]
+    pub max_sessions_per_project: usize,
+}
+
+fn default_stats_enabled() -> bool {
+    true
+}
+fn default_histogram_capacity() -> usize {
+    256
+}
+fn default_flush_interval_secs() -> u64 {
+    60
+}
+fn default_followup_window_secs() -> u64 {
+    60
+}
+fn default_max_sessions_per_project() -> usize {
+    10_000
+}
+
+impl Default for StatsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_stats_enabled(),
+            histogram_capacity: default_histogram_capacity(),
+            retention_days: None,
+            flush_interval_secs: default_flush_interval_secs(),
+            followup_window_secs: default_followup_window_secs(),
+            max_sessions_per_project: default_max_sessions_per_project(),
+        }
+    }
+}
+
+impl StatsConfig {
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if self.histogram_capacity == 0 {
+            anyhow::bail!("stats.histogram_capacity must be > 0");
+        }
+        if self.flush_interval_secs == 0 {
+            anyhow::bail!("stats.flush_interval_secs must be >= 1");
+        }
+        if self.followup_window_secs == 0 {
+            anyhow::bail!("stats.followup_window_secs must be >= 1");
+        }
+        if self.max_sessions_per_project == 0 {
+            anyhow::bail!("stats.max_sessions_per_project must be >= 1");
+        }
+        if let Some(days) = self.retention_days {
+            if days > 3650 {
+                anyhow::bail!("stats.retention_days ({}) must be <= 3650", days);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl EngramConfig {
@@ -555,6 +654,7 @@ impl EngramConfig {
         self.trust_weights.validate()?;
         self.nli.validate()?;
         self.rerank.validate()?;
+        self.stats.validate()?;
 
         if !(0.0..=1.0).contains(&self.retrieval.scoring.scope_multiplier_floor) {
             anyhow::bail!("scoring.scope_multiplier_floor must be in [0.0, 1.0]");

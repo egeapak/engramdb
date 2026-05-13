@@ -1203,11 +1203,32 @@ mod tests {
 
     // --- Global memory store tests ---
 
+    /// Handle returned by [`setup_global_store`]. Holds the live
+    /// `MemoryStore` alongside a process-wide lock guard that serializes
+    /// global-store tests within a single `cargo test` process. Derefs to
+    /// `MemoryStore` so existing call sites (`let store = ...;
+    /// store.create(...)`) keep working without change.
+    struct GlobalStoreHandle {
+        store: MemoryStore,
+        _lock: crate::storage::test_support::GlobalTestLock,
+    }
+
+    impl std::ops::Deref for GlobalStoreHandle {
+        type Target = MemoryStore;
+        fn deref(&self) -> &MemoryStore {
+            &self.store
+        }
+    }
+
     /// Initialize a fresh global store for testing.
-    /// With nextest, each test runs in its own process with an isolated
-    /// ENGRAMDB_DATA_DIR, so no locking or cleanup is needed.
-    async fn setup_global_store() -> MemoryStore {
-        MemoryStore::init_global().await.unwrap()
+    ///
+    /// Acquires the shared global-test lock and wipes the on-disk global
+    /// layout before each test, so concurrent `cargo test` runs don't race
+    /// on LanceDB table creation or leak state across tests.
+    async fn setup_global_store() -> GlobalStoreHandle {
+        let lock = crate::storage::test_support::acquire_global_test_lock().await;
+        let store = MemoryStore::init_global().await.unwrap();
+        GlobalStoreHandle { store, _lock: lock }
     }
 
     #[tokio::test]
@@ -1291,7 +1312,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_global_isolation_from_project() {
-        // Global store should NOT contain project memories and vice versa
+        // Global store should NOT contain project memories and vice versa.
+        // Hold the global-test lock for the whole test; otherwise a parallel
+        // global test can mutate `global_store`'s on-disk state mid-assertion.
+        let _lock = crate::storage::test_support::acquire_global_test_lock().await;
         let temp_dir = TempDir::new().unwrap();
         let project_store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
             .await

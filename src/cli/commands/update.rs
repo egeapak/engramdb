@@ -201,6 +201,9 @@ pub async fn run_update(
             decay_half_life: params.decay_half_life,
             decay_ttl: params.decay_ttl,
             decay_floor: params.decay_floor,
+            // CLI exits after this returns; embed inline so the work isn't
+            // dropped with the runtime.
+            embed_async: false,
         },
         Some(&engine),
     )
