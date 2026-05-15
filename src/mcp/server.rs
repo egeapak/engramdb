@@ -1846,7 +1846,12 @@ impl ServerHandler for EngramDbServer {
                  Use project=\"global\" for cross-project memories like personal preferences, \
                  coding conventions, or knowledge that applies everywhere. \
                  Use include_global=true on query to merge global memories into results. \
-                 Omit `project` to use the current project."
+                 Omit `project` to use the current project. \
+                 When you finish the task(s) you were assigned and are about to hand control \
+                 back to the user, reflect: if anything durable about the project, the \
+                 environment/tooling, or the user's preferences came up (not task minutiae), \
+                 query existing memories then create the new ones and challenge any \
+                 contradictions. This is a suggested nudge, not a required step."
                     .to_string(),
             ),
         }
@@ -5619,5 +5624,19 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn get_info_instructions_includes_reflection_nudge() {
+        let tmp = TempDir::new().unwrap();
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(tmp.path(), registry);
+        let info = server.get_info();
+        let instructions = info.instructions.expect("server exposes instructions");
+        assert!(
+            instructions.contains("When you finish"),
+            "instructions should nudge end-of-task reflection, got: {instructions}"
+        );
+        assert!(instructions.contains("reflect"));
     }
 }
