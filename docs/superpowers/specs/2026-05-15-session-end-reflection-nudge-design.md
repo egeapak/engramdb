@@ -59,18 +59,40 @@ context, in two places:
    ~line 298). The nudge must be emitted **even when the store is empty**, so
    this path must still output the nudge context instead of returning silently.
 
-**Nudge text (canonical wording, reused in both places and the slash command):**
+**Channel-appropriate wording (intentional asymmetry — not duplicated verbatim).**
 
-> When you finish the task(s) assigned to you and are about to hand control
-> back to the user, briefly reflect: is there anything durable worth
-> remembering about the **project**, the **environment/tooling**, or the
-> **user's preferences** — *not* minutiae about the current task? If so:
-> `query` existing memories first (to update rather than duplicate), then
-> `create` the durable ones, and `challenge` anything that contradicts an
-> existing memory. This is a suggested nudge, not a required step.
+The two surfaces are semantically different — Surface 1 is *how to use the
+tool*, Surface 2 is *the tool's output* — and degrade independently. The nudge
+applies to both, but is worded for its channel:
 
-The MCP-instructions copy may be condensed to one or two sentences to keep that
-block tight; the SessionStart copy and the slash command use the fuller form.
+- **MCP `instructions` copy (MCP-explicit).** Only delivered when the MCP
+  server is connected, so it *may* assume MCP and explicitly pushes the MCP
+  tools (`query` → `create` → `challenge`). Kept terse to keep that block
+  tight.
+
+  > When you finish the task you were assigned, reflect: if anything durable
+  > about the project, the environment/tooling, or the user's preferences came
+  > up (not task minutiae), `query` existing memories, then `create` the new
+  > ones and `challenge` contradictions. Suggested, not required.
+
+- **SessionStart hook copy (MCP-agnostic).** The hook can run in a hooks-only
+  install with **no MCP server**, so it must **not** name MCP tools or assume
+  MCP. It describes the action generically against "EngramDB memories"
+  (`REFLECTION_NUDGE` constant; a unit test enforces the absence of
+  `query`/`create`/`challenge`/`mcp`).
+
+  > [EngramDB] When you finish the task you were assigned, before handing
+  > back: did anything durable about the project, the environment/tooling, or
+  > the user's preferences come up — not task minutiae? If so, review existing
+  > EngramDB memories and record the durable ones, and flag anything that
+  > contradicts a memory. Suggested, not required.
+
+The `/engram:reflect` command (Component 2) ships only with the plugin, which
+also provides the MCP server, so it may be MCP-explicit like Surface 1.
+
+The shared ~1-sentence overlap when both channels fire is accepted, deliberate
+belt-and-suspenders redundancy (~80 tokens), so the nudge survives if either
+channel is unavailable.
 
 ### Component 2 — `/engram:reflect` slash command (mandatory)
 

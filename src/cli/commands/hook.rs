@@ -61,13 +61,16 @@ const SESSION_CONTEXT_BUDGET: usize = 2000;
 /// Suggested (never required) prompt asking the agent to capture durable
 /// project / environment / user-preference learnings when it finishes the
 /// task it was assigned. Deliberately excludes task minutiae.
+///
+/// Intentionally MCP-agnostic: the SessionStart hook can run in a
+/// hooks-only install with no MCP server, so this must not name MCP tools
+/// or assume MCP is available. The MCP-aware variant lives in the server's
+/// `instructions` string.
 const REFLECTION_NUDGE: &str =
-    "[EngramDB] When you finish the task(s) assigned to you and are about \
-to hand control back to the user, briefly reflect: is there anything durable worth remembering \
-about the project, the environment/tooling, or the user's preferences — not minutiae about the \
-current task? If so, query existing memories first (to update rather than duplicate), then create \
-the durable ones, and challenge anything that contradicts an existing memory. This is a suggested \
-nudge, not a required step.";
+    "[EngramDB] When you finish the task you were assigned, before handing back: did anything \
+durable about the project, the environment/tooling, or the user's preferences come up — not task \
+minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything \
+that contradicts a memory. Suggested, not required.";
 
 /// Format scored memories with full metadata (for SessionStart).
 ///
@@ -795,6 +798,21 @@ mod tests {
         let ctx = build_session_start_context(&[]);
         assert!(ctx.contains("When you finish the task"));
         assert!(!ctx.contains("Key project memories"));
+    }
+
+    #[test]
+    fn test_session_start_nudge_is_mcp_agnostic() {
+        // The SessionStart hook can run in a hooks-only install with no MCP
+        // server connected, so the nudge must not reference MCP tool names
+        // or assume MCP is available.
+        let lower = REFLECTION_NUDGE.to_lowercase();
+        for forbidden in ["query", "create", "challenge", "mcp"] {
+            assert!(
+                !lower.contains(forbidden),
+                "hook nudge must be MCP-agnostic; found '{forbidden}' in: {REFLECTION_NUDGE}"
+            );
+        }
+        assert!(REFLECTION_NUDGE.contains("EngramDB"));
     }
 
     // --- Unit tests for truncate_content ---

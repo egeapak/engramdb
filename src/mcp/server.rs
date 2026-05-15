@@ -1847,11 +1847,10 @@ impl ServerHandler for EngramDbServer {
                  coding conventions, or knowledge that applies everywhere. \
                  Use include_global=true on query to merge global memories into results. \
                  Omit `project` to use the current project. \
-                 When you finish the task(s) you were assigned and are about to hand control \
-                 back to the user, reflect: if anything durable about the project, the \
-                 environment/tooling, or the user's preferences came up (not task minutiae), \
-                 query existing memories then create the new ones and challenge any \
-                 contradictions. This is a suggested nudge, not a required step."
+                 When you finish the task you were assigned, reflect: if anything durable \
+                 about the project, the environment/tooling, or the user's preferences came \
+                 up (not task minutiae), query existing memories, then create the new ones \
+                 and challenge contradictions. Suggested, not required."
                     .to_string(),
             ),
         }
@@ -5638,5 +5637,12 @@ mod tests {
             "instructions should nudge end-of-task reflection, got: {instructions}"
         );
         assert!(instructions.contains("reflect"));
+        // The MCP-aware variant should explicitly push the MCP tools
+        // ("challenge" only appears in the reflection nudge, not the base
+        // instructions), unlike the MCP-agnostic SessionStart hook copy.
+        assert!(
+            instructions.contains("challenge"),
+            "MCP instructions nudge should reference MCP tools, got: {instructions}"
+        );
     }
 }
