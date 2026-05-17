@@ -561,6 +561,16 @@ pub struct EngramDbServer {
     /// entry. Project IDs are deterministic, so the cache never needs
     /// invalidation.
     pid_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+    /// Cache of model-backed engine providers, keyed by a signature of the
+    /// provider-relevant config fields. Loading the ONNX embedding model is a
+    /// ~240ms session init; without this cache it was paid synchronously on
+    /// every tool call (`create`, `query`, `update`, ...) because each call
+    /// rebuilt the retrieval engine from scratch. Providers carry no
+    /// per-store state, so one bundle is shared across all projects for the
+    /// life of the process. The async mutex also dedupes concurrent first
+    /// builds so the model loads exactly once.
+    provider_cache:
+        Arc<tokio::sync::Mutex<std::collections::HashMap<String, ops::EngineProviders>>>,
     #[allow(dead_code)]
     tool_router: rmcp::handler::server::tool::ToolRouter<Self>,
 }
@@ -605,6 +615,7 @@ impl EngramDbServer {
             stats,
             session_id,
             pid_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            provider_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             tool_router: Self::tool_router(),
         })
     }
@@ -628,6 +639,7 @@ impl EngramDbServer {
             stats,
             session_id,
             pid_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            provider_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             tool_router: Self::tool_router(),
         }
     }
@@ -825,16 +837,64 @@ impl EngramDbServer {
     }
 
     /// Build a RetrievalEngine for the given project override.
+    ///
+    /// The model-backed providers are resolved through [`Self::cached_providers`]
+    /// so the embedding model is loaded once per process rather than on every
+    /// tool call; only the cheap per-store wiring happens here.
     async fn build_engine_for(&self, project: Option<&str>) -> Result<RetrievalEngine, String> {
         let dir = self.resolve_dir(project).await?;
         let store = self.open_store_for(project).await?;
         let config_path = dir.join(".engramdb").join("config.toml");
         let pid = self.project_id_for_dir(&dir, project);
-        let engine = ops::build_engine(store, &config_path, self.embedding_backend).await;
+        let config = load_config(&config_path).await.unwrap_or_default();
+        let providers = self.cached_providers(&config).await;
+        let engine = ops::assemble_engine(store, config, providers);
         Ok(engine
             .with_stats(self.stats.clone())
             .with_project_id(pid)
             .with_session_id(Some(self.session_id.clone())))
+    }
+
+    /// Resolve the model-backed providers for `config`, building them at most
+    /// once per process per distinct provider-relevant config signature.
+    ///
+    /// Loading the ONNX embedding model is a ~240ms session init. Before this
+    /// cache it ran synchronously on every `create`/`query`/`update` call,
+    /// dominating tool latency even though embedding *inference* was already
+    /// moved to a background task. Providers hold no per-store state, so a
+    /// single bundle is reused across projects and calls. The model build runs
+    /// on a blocking thread, and the async mutex is held across it so
+    /// concurrent first calls collapse into a single load.
+    async fn cached_providers(&self, config: &crate::types::EngramConfig) -> ops::EngineProviders {
+        let backend = ops::resolve_backend(config.embeddings.backend, self.embedding_backend);
+        let key = format!(
+            "{backend}|{}|{}|{}|{}|{}|{}",
+            config.embeddings.provider,
+            config.embeddings.dimensions,
+            config.nli.enabled,
+            config.nli.model,
+            config.rerank.enabled,
+            config.rerank.model,
+        );
+
+        let mut cache = self.provider_cache.lock().await;
+        if let Some(p) = cache.get(&key) {
+            return p.clone();
+        }
+
+        let cfg = config.clone();
+        let backend_override = self.embedding_backend;
+        let providers = tokio::task::spawn_blocking(move || {
+            ops::resolve_engine_providers(&cfg, backend_override)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("engine provider init task panicked: {e}");
+            ops::EngineProviders::default()
+        });
+
+        cache.insert(key, providers.clone());
+        providers
     }
 
     /// Compute the project ID used as the telemetry partition key for the

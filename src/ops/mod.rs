@@ -51,7 +51,7 @@ use crate::embeddings::{
 };
 #[cfg(feature = "ollama")]
 use crate::embeddings::{OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT};
-use crate::nli::OnnxNliProvider;
+use crate::nli::{NliProvider, OnnxNliProvider};
 use crate::retrieval::engine::RetrievalEngine;
 use crate::storage::MemoryStore;
 use crate::types::EmbeddingBackend;
@@ -151,21 +151,34 @@ fn resolve_reranker_model(name: &str) -> RerankerModel {
     }
 }
 
-/// Build a `RetrievalEngine` with optional embeddings and reranker from a store + config path.
+/// The model-backed providers a [`RetrievalEngine`] is wired with.
 ///
-/// This is the shared helper that CLI and MCP callers use so they don't duplicate
-/// the provider wiring.  Returns an engine that always works for storage operations;
-/// embeddings and reranking are attached on a best-effort basis.  Vector storage is
-/// handled by the MemoryStore's integrated LanceDB.
-pub async fn build_engine(
-    store: MemoryStore,
-    config_path: &std::path::Path,
+/// Each field is an `Arc` over an in-memory model session (ONNX embedding
+/// model, NLI classifier, cross-encoder reranker). Building these is the
+/// expensive part of engine construction — loading the embedding model alone
+/// is a ~240ms ONNX session init. The providers carry no per-store state, so
+/// a single bundle is safely shared across every project and every tool call
+/// for the lifetime of a process. The MCP server caches one bundle per
+/// distinct config signature so models load once instead of once per call.
+#[derive(Clone, Default)]
+pub struct EngineProviders {
+    pub embedding: Option<Arc<dyn EmbeddingProvider>>,
+    pub nli: Option<Arc<dyn NliProvider>>,
+    pub reranker: Option<Arc<Mutex<TextRerank>>>,
+}
+
+/// Load the model-backed providers selected by `config`.
+///
+/// This is the heavyweight step: it initializes ONNX Runtime sessions for the
+/// embedding model (always attempted) and, when enabled, the NLI and reranker
+/// models. It performs blocking model loading and is intended to be called at
+/// most once per process per distinct config (the MCP server caches the
+/// result; the CLI calls it once and exits).
+pub fn resolve_engine_providers(
+    config: &crate::types::EngramConfig,
     backend_override: Option<EmbeddingBackend>,
-) -> RetrievalEngine {
-    let config = crate::storage::config::load_config(config_path)
-        .await
-        .unwrap_or_default();
-    let mut engine = RetrievalEngine::new(store, config.clone());
+) -> EngineProviders {
+    let mut providers = EngineProviders::default();
 
     let backend = resolve_backend(config.embeddings.backend, backend_override);
     if let Some(provider) = resolve_provider(config.embeddings.provider.as_str(), backend) {
@@ -176,22 +189,18 @@ pub async fn build_engine(
                 config.embeddings.dimensions
             );
         }
-        engine = engine.with_embedding_provider(provider);
+        providers.embedding = Some(provider);
     }
 
-    // Initialize NLI provider if enabled
     if config.nli.enabled {
         match OnnxNliProvider::try_new(&config.nli.model) {
-            Some(provider) => {
-                engine = engine.with_nli_provider(Arc::new(provider));
-            }
+            Some(provider) => providers.nli = Some(Arc::new(provider)),
             None => {
-                eprintln!("Warning: NLI contradiction detection enabled but model unavailable");
+                eprintln!("Warning: NLI contradiction detection enabled but model unavailable")
             }
         }
     }
 
-    // Initialize cross-encoder reranker if enabled
     if config.rerank.enabled {
         let cache_dir = crate::storage::paths::model_cache_dir()
             .unwrap_or_else(|_| PathBuf::from(".cache/engramdb/models"));
@@ -202,14 +211,55 @@ pub async fn build_engine(
             .with_show_download_progress(false);
 
         match TextRerank::try_new(options) {
-            Ok(reranker) => {
-                engine = engine.with_reranker(Arc::new(Mutex::new(reranker)));
-            }
-            Err(e) => {
-                eprintln!("Warning: reranker init failed, continuing without: {}", e);
-            }
+            Ok(reranker) => providers.reranker = Some(Arc::new(Mutex::new(reranker))),
+            Err(e) => eprintln!("Warning: reranker init failed, continuing without: {}", e),
         }
     }
 
+    providers
+}
+
+/// Assemble a [`RetrievalEngine`] from a store, config, and pre-built
+/// providers. This is the cheap part of engine construction — it just wires
+/// already-loaded model sessions onto the per-store engine, doing no I/O or
+/// model loading.
+pub fn assemble_engine(
+    store: MemoryStore,
+    config: crate::types::EngramConfig,
+    providers: EngineProviders,
+) -> RetrievalEngine {
+    let mut engine = RetrievalEngine::new(store, config);
+    if let Some(p) = providers.embedding {
+        engine = engine.with_embedding_provider(p);
+    }
+    if let Some(p) = providers.nli {
+        engine = engine.with_nli_provider(p);
+    }
+    if let Some(r) = providers.reranker {
+        engine = engine.with_reranker(r);
+    }
     engine
+}
+
+/// Build a `RetrievalEngine` with optional embeddings and reranker from a store + config path.
+///
+/// This is the shared helper that CLI and MCP callers use so they don't duplicate
+/// the provider wiring.  Returns an engine that always works for storage operations;
+/// embeddings and reranking are attached on a best-effort basis.  Vector storage is
+/// handled by the MemoryStore's integrated LanceDB.
+///
+/// This rebuilds the model providers on every call. Long-lived callers that
+/// invoke this per request (the MCP server) should instead cache
+/// [`resolve_engine_providers`] and use [`assemble_engine`] so the embedding
+/// model isn't reloaded on every tool call.
+pub async fn build_engine(
+    store: MemoryStore,
+    config_path: &std::path::Path,
+    backend_override: Option<EmbeddingBackend>,
+) -> RetrievalEngine {
+    let config = crate::storage::config::load_config(config_path)
+        .await
+        .unwrap_or_default();
+    let providers = resolve_engine_providers(&config, backend_override);
+    assemble_engine(store, config, providers)
 }
