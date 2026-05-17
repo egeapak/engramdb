@@ -866,7 +866,25 @@ impl EngramDbServer {
     /// on a blocking thread, and the async mutex is held across it so
     /// concurrent first calls collapse into a single load.
     async fn cached_providers(&self, config: &crate::types::EngramConfig) -> ops::EngineProviders {
-        let backend = ops::resolve_backend(config.embeddings.backend, self.embedding_backend);
+        Self::resolve_or_cache_providers(
+            self.provider_cache.clone(),
+            config.clone(),
+            self.embedding_backend,
+        )
+        .await
+    }
+
+    /// Cache-keyed provider resolution shared by [`Self::cached_providers`] and
+    /// [`Self::spawn_provider_warmup`]. Takes owned handles instead of `&self`
+    /// so it can run inside a detached warmup task. Holding the async mutex
+    /// across the blocking build collapses concurrent first callers (e.g. a
+    /// tool call racing the startup warmup) into a single model load.
+    async fn resolve_or_cache_providers(
+        cache: Arc<tokio::sync::Mutex<std::collections::HashMap<String, ops::EngineProviders>>>,
+        config: crate::types::EngramConfig,
+        backend_override: Option<EmbeddingBackend>,
+    ) -> ops::EngineProviders {
+        let backend = ops::resolve_backend(config.embeddings.backend, backend_override);
         let key = format!(
             "{backend}|{}|{}|{}|{}|{}|{}",
             config.embeddings.provider,
@@ -877,13 +895,12 @@ impl EngramDbServer {
             config.rerank.model,
         );
 
-        let mut cache = self.provider_cache.lock().await;
+        let mut cache = cache.lock().await;
         if let Some(p) = cache.get(&key) {
             return p.clone();
         }
 
         let cfg = config.clone();
-        let backend_override = self.embedding_backend;
         let providers = tokio::task::spawn_blocking(move || {
             ops::resolve_engine_providers(&cfg, backend_override)
         })
@@ -895,6 +912,26 @@ impl EngramDbServer {
 
         cache.insert(key, providers.clone());
         providers
+    }
+
+    /// Preload the default project's engine providers in the background so the
+    /// embedding model is loaded *before* the first tool call rather than on
+    /// it. Without this the cache is populated lazily, so the first
+    /// `create`/`query` of a session still pays the ~240ms ONNX session init.
+    ///
+    /// Non-blocking: spawns a task and returns immediately. Best-effort —
+    /// failures are logged, never fatal. If a tool call races this warmup the
+    /// shared async mutex makes it await the in-flight build instead of
+    /// starting a second one, so the model still loads exactly once.
+    pub fn spawn_provider_warmup(&self) {
+        let cache = self.provider_cache.clone();
+        let backend = self.embedding_backend;
+        let config_path = self.effective_dir.join(".engramdb").join("config.toml");
+        tokio::spawn(async move {
+            let config = load_config(&config_path).await.unwrap_or_default();
+            let _ = Self::resolve_or_cache_providers(cache, config, backend).await;
+            tracing::debug!("engine provider warmup complete");
+        });
     }
 
     /// Compute the project ID used as the telemetry partition key for the
@@ -2213,6 +2250,9 @@ pub async fn run_stdio(
     let server = EngramDbServer::new_with_stats(dir, embedding_backend, stats.clone())?;
     // Detect git worktrees and register/init the main project if needed.
     server.ensure_hierarchy().await?;
+    // Load the embedding model in the background now so the first tool call
+    // doesn't pay the ~240ms ONNX session init synchronously.
+    server.spawn_provider_warmup();
     // `serve` consumes the server; the running service owns the remaining
     // `Arc<StatsCollector>` baked into it. Wait on the service, then drop
     // both it and the local `stats` so the channel closes and the flush
