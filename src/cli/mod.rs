@@ -354,7 +354,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             } else {
                 dir.clone()
             };
-            commands::run_migrate(&target_dir, dry_run, &formatter).await
+            commands::run_migrate(&target_dir, global, dry_run, &formatter).await
         }
         Command::Rollback {
             target_version,
@@ -372,7 +372,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             } else {
                 dir.clone()
             };
-            commands::run_rollback(&target_dir, target, dry_run, &formatter).await
+            commands::run_rollback(&target_dir, global, target, dry_run, &formatter).await
         }
         Command::Reindex {
             embeddings_only,

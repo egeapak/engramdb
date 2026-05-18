@@ -111,6 +111,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_doctor_store_global_targets_global_store() {
+        let _lock = crate::storage::test_support::acquire_global_test_lock().await;
+        let global = MemoryStore::open_global().await.unwrap();
+        let mem = Memory::new(
+            MemoryType::Decision,
+            "Global",
+            "Content",
+            Provenance::human(),
+        );
+        global.create(&mem).await.unwrap();
+
+        // `dir` points at an uninitialized project; --global must ignore it
+        // and check the (healthy) global store instead.
+        let temp_dir = TempDir::new().unwrap();
+        let formatter = OutputFormatter::new(None, false, true);
+        let result = run_doctor(
+            temp_dir.path(),
+            true,
+            Some(DoctorCommand::Store),
+            &formatter,
+        )
+        .await;
+        assert!(result.is_ok(), "doctor --global failed: {:?}", result);
+
+        // Without --global the project store is uninitialized → error.
+        let project = run_doctor(
+            temp_dir.path(),
+            false,
+            Some(DoctorCommand::Store),
+            &formatter,
+        )
+        .await;
+        assert!(project.is_err());
+    }
+
+    #[tokio::test]
     async fn test_doctor_store_with_orphan() {
         let temp_dir = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();

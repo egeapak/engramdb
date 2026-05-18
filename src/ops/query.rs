@@ -113,4 +113,21 @@ mod tests {
         assert_eq!(project.len(), 2);
         assert_eq!(project[0].memory.id, "p2");
     }
+
+    #[test]
+    fn merge_truncation_can_evict_project_entry_for_higher_global() {
+        // With max=1, a higher-scoring global hit must displace the lower
+        // project hit (proves truncation applies after the merge+sort).
+        let mut project = vec![scored("p1", 0.10)];
+        merge_scored_memories(&mut project, vec![scored("g1", 0.90)], 1);
+        assert_eq!(project.len(), 1);
+        assert_eq!(project[0].memory.id, "g1");
+    }
+
+    #[test]
+    fn merge_with_max_zero_yields_empty() {
+        let mut project = vec![scored("p1", 0.5)];
+        merge_scored_memories(&mut project, vec![scored("g1", 0.9)], 0);
+        assert!(project.is_empty());
+    }
 }
