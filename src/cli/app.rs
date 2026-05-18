@@ -493,6 +493,18 @@ pub enum Command {
         port: Option<u16>,
     },
 
+    /// Run the shared embedding daemon (normally auto-spawned by MCP)
+    Daemon {
+        /// Unix socket to bind. Defaults to the shared per-user path
+        /// (also overridable via ENGRAMDB_DAEMON_SOCKET).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+
+        /// Seconds to stay alive with no active connections before exiting.
+        #[arg(long)]
+        idle_timeout: Option<u64>,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell type

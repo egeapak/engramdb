@@ -53,8 +53,9 @@ use crate::embeddings::{
 use crate::embeddings::{OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT};
 use crate::nli::{NliProvider, OnnxNliProvider};
 use crate::retrieval::engine::RetrievalEngine;
+use crate::retrieval::reranker::{LocalReranker, Reranker};
 use crate::storage::MemoryStore;
-use crate::types::EmbeddingBackend;
+use crate::types::{EmbeddingBackend, EngramConfig};
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -164,7 +165,7 @@ fn resolve_reranker_model(name: &str) -> RerankerModel {
 pub struct EngineProviders {
     pub embedding: Option<Arc<dyn EmbeddingProvider>>,
     pub nli: Option<Arc<dyn NliProvider>>,
-    pub reranker: Option<Arc<Mutex<TextRerank>>>,
+    pub reranker: Option<Arc<dyn Reranker>>,
 }
 
 /// Load the model-backed providers selected by `config`.
@@ -211,7 +212,9 @@ pub fn resolve_engine_providers(
             .with_show_download_progress(false);
 
         match TextRerank::try_new(options) {
-            Ok(reranker) => providers.reranker = Some(Arc::new(Mutex::new(reranker))),
+            Ok(reranker) => {
+                providers.reranker = Some(LocalReranker::shared(Arc::new(Mutex::new(reranker))))
+            }
             Err(e) => eprintln!("Warning: reranker init failed, continuing without: {}", e),
         }
     }
@@ -262,4 +265,74 @@ pub async fn build_engine(
         .unwrap_or_default();
     let providers = resolve_engine_providers(&config, backend_override);
     assemble_engine(store, config, providers)
+}
+
+/// Signature of the provider-relevant config fields.
+///
+/// Two configs with the same key resolve to interchangeable model sessions, so
+/// the bundle can be shared. The resolved embedding backend is folded in so a
+/// CLI/env backend override doesn't collide with the config-default backend.
+pub fn provider_cache_key(
+    config: &EngramConfig,
+    backend_override: Option<EmbeddingBackend>,
+) -> String {
+    let backend = resolve_backend(config.embeddings.backend, backend_override);
+    format!(
+        "{backend}|{}|{}|{}|{}|{}|{}",
+        config.embeddings.provider,
+        config.embeddings.dimensions,
+        config.nli.enabled,
+        config.nli.model,
+        config.rerank.enabled,
+        config.rerank.model,
+    )
+}
+
+/// Process-wide cache of model-backed [`EngineProviders`], keyed by
+/// [`provider_cache_key`].
+///
+/// Loading the ONNX embedding model is a ~240ms session init (NLI / reranker
+/// add more). This cache makes the models load at most once per distinct
+/// config for the life of the process. It backs both the in-process MCP
+/// fallback path and the shared embedding daemon, so both share identical
+/// load-once semantics. `providers` carry no per-store state, so one bundle is
+/// reused across every project and call.
+#[derive(Clone, Default)]
+pub struct ProviderCache {
+    inner: Arc<tokio::sync::Mutex<std::collections::HashMap<String, EngineProviders>>>,
+}
+
+impl ProviderCache {
+    /// Create an empty cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resolve providers for `config`, building them at most once per signature.
+    ///
+    /// The blocking model load runs on a blocking thread; the async mutex is
+    /// held across it so concurrent first callers (e.g. a tool call racing the
+    /// startup warmup) collapse into a single load instead of each loading the
+    /// model.
+    pub async fn get(
+        &self,
+        config: &EngramConfig,
+        backend_override: Option<EmbeddingBackend>,
+    ) -> EngineProviders {
+        let key = provider_cache_key(config, backend_override);
+        let mut guard = self.inner.lock().await;
+        if let Some(p) = guard.get(&key) {
+            return p.clone();
+        }
+        let cfg = config.clone();
+        let providers =
+            tokio::task::spawn_blocking(move || resolve_engine_providers(&cfg, backend_override))
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("engine provider init task panicked: {e}");
+                    EngineProviders::default()
+                });
+        guard.insert(key, providers.clone());
+        providers
+    }
 }

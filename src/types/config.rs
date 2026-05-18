@@ -544,6 +544,61 @@ pub struct EngramConfig {
     /// Runtime telemetry / statistics collection settings
     #[serde(default)]
     pub stats: StatsConfig,
+
+    /// Shared embedding daemon settings
+    #[serde(default)]
+    pub daemon: DaemonConfig,
+}
+
+/// Shared embedding-daemon settings.
+///
+/// stdio MCP is one process per agent session, so without a daemon every
+/// concurrent session loads its own copy of the embedding (and optional
+/// NLI / reranker) models. When `enabled`, MCP processes delegate all model
+/// inference to a single long-lived daemon over a Unix domain socket, so the
+/// models load exactly once machine-wide. When disabled — or when the daemon
+/// is unreachable — each process falls back to loading the models in-process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonConfig {
+    /// Master switch. When `true` (default) MCP delegates embedding / NLI /
+    /// rerank to the shared daemon (auto-spawning it if needed). When `false`
+    /// the daemon is never contacted and models load in-process.
+    #[serde(default = "default_daemon_enabled")]
+    pub enabled: bool,
+
+    /// Seconds the daemon stays alive with no active connections before
+    /// exiting. A fresh daemon is auto-spawned on demand by the next MCP
+    /// process, so a low value just trades a one-time respawn for not keeping
+    /// idle model memory resident.
+    #[serde(default = "default_daemon_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+}
+
+fn default_daemon_enabled() -> bool {
+    true
+}
+
+fn default_daemon_idle_timeout_secs() -> u64 {
+    900
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_daemon_enabled(),
+            idle_timeout_secs: default_daemon_idle_timeout_secs(),
+        }
+    }
+}
+
+impl DaemonConfig {
+    /// Validate that daemon configuration values are within acceptable ranges.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if self.idle_timeout_secs == 0 {
+            anyhow::bail!("daemon.idle_timeout_secs must be > 0");
+        }
+        Ok(())
+    }
 }
 
 /// Runtime telemetry / statistics collection settings.
@@ -655,6 +710,7 @@ impl EngramConfig {
         self.nli.validate()?;
         self.rerank.validate()?;
         self.stats.validate()?;
+        self.daemon.validate()?;
 
         if !(0.0..=1.0).contains(&self.retrieval.scoring.scope_multiplier_floor) {
             anyhow::bail!("scoring.scope_multiplier_floor must be in [0.0, 1.0]");

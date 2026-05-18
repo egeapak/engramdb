@@ -303,6 +303,17 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Serve { transport, port } => {
             commands::run_serve(&dir, &transport, port, backend, &formatter).await
         }
+        Command::Daemon {
+            socket,
+            idle_timeout,
+        } => {
+            let socket = socket.unwrap_or_else(crate::daemon::socket_path);
+            let idle = std::time::Duration::from_secs(
+                idle_timeout
+                    .unwrap_or_else(|| crate::types::DaemonConfig::default().idle_timeout_secs),
+            );
+            crate::daemon::run_daemon(socket, idle).await
+        }
         Command::Completions { shell } => {
             commands::run_completions(shell);
             Ok(())
