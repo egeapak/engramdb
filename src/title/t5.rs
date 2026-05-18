@@ -52,17 +52,38 @@ impl T5TitleGenerator {
         Self::with_repo(MODEL_REPO)
     }
 
-    /// Create with a custom HuggingFace repository.
+    /// Create the default model on an explicit execution backend.
+    pub fn new_on(backend: crate::onnx_ep::Backend) -> Result<Self> {
+        Self::with_repo_on(MODEL_REPO, backend)
+    }
+
+    /// Try to create the default model on an explicit backend, returning
+    /// None if unavailable.
+    pub fn try_new_on(backend: crate::onnx_ep::Backend) -> Option<Self> {
+        Self::new_on(backend).ok()
+    }
+
+    /// Create with a custom HuggingFace repository, using the build-selected
+    /// default execution backend.
     pub fn with_repo(repo: &str) -> Result<Self> {
+        Self::with_repo_on(repo, crate::onnx_ep::default_backend())
+    }
+
+    /// Create with a custom HuggingFace repository on an explicit execution
+    /// backend.
+    ///
+    /// Used by the benchmark suite to compare CPU vs Core ML on identical
+    /// workloads; production code should use [`T5TitleGenerator::with_repo`].
+    pub fn with_repo_on(repo: &str, backend: crate::onnx_ep::Backend) -> Result<Self> {
         let (encoder_path, decoder_path, tokenizer_path) = download_model_files(repo)?;
 
-        let encoder = crate::onnx_ep::apply_execution_providers(Session::builder()?)?
+        let encoder = crate::onnx_ep::apply_backend(Session::builder()?, backend)?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(1)?
             .commit_from_file(&encoder_path)
             .context("Failed to load T5 encoder ONNX model")?;
 
-        let decoder = crate::onnx_ep::apply_execution_providers(Session::builder()?)?
+        let decoder = crate::onnx_ep::apply_backend(Session::builder()?, backend)?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(1)?
             .commit_from_file(&decoder_path)

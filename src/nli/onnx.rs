@@ -48,9 +48,17 @@ impl OnnxNliProvider {
     /// The files are cached in the unified EngramDB model cache directory
     /// (`<cache_dir>/engramdb/models/`).
     pub fn new(model_repo: &str) -> Result<Self> {
+        Self::new_on(model_repo, crate::onnx_ep::default_backend())
+    }
+
+    /// Create a new ONNX NLI provider on an explicit execution backend.
+    ///
+    /// Used by the benchmark suite to compare CPU vs Core ML on identical
+    /// workloads; production code should use [`OnnxNliProvider::new`].
+    pub fn new_on(model_repo: &str, backend: crate::onnx_ep::Backend) -> Result<Self> {
         let (model_path, tokenizer_path) = download_model_files(model_repo)?;
 
-        let builder = crate::onnx_ep::apply_execution_providers(Session::builder()?)?;
+        let builder = crate::onnx_ep::apply_backend(Session::builder()?, backend)?;
         let session = builder
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(1)?
@@ -77,6 +85,12 @@ impl OnnxNliProvider {
                 None
             }
         }
+    }
+
+    /// Try to create a provider on an explicit backend, returning None if
+    /// unavailable.
+    pub fn try_new_on(model_repo: &str, backend: crate::onnx_ep::Backend) -> Option<Self> {
+        Self::new_on(model_repo, backend).ok()
     }
 }
 

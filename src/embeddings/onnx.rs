@@ -49,16 +49,26 @@ pub struct OnnxProvider {
 }
 
 impl OnnxProvider {
-    /// Create a new ONNX provider with the specified model.
+    /// Create a new ONNX provider with the specified model, using the
+    /// build-selected default execution backend.
     ///
     /// The model is cached in the platform cache directory so it only
     /// downloads once per machine.
     pub fn with_model(spec: OnnxModelSpec) -> Result<Self> {
+        Self::with_model_on(spec, crate::onnx_ep::default_backend())
+    }
+
+    /// Create a new ONNX provider with the specified model on an explicit
+    /// execution backend.
+    ///
+    /// Used by the benchmark suite to compare CPU vs Core ML on identical
+    /// workloads; production code should use [`OnnxProvider::with_model`].
+    pub fn with_model_on(spec: OnnxModelSpec, backend: crate::onnx_ep::Backend) -> Result<Self> {
         let cache_dir =
             crate::storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let mut options = InitOptions::new(spec.fastembed_model).with_cache_dir(cache_dir);
-        let eps = crate::onnx_ep::execution_providers();
+        let eps = crate::onnx_ep::providers_for(backend);
         if !eps.is_empty() {
             options = options.with_execution_providers(eps);
         }
@@ -77,9 +87,20 @@ impl OnnxProvider {
         Self::with_model(ONNX_ALL_MINILM)
     }
 
+    /// Create the default all-MiniLM-L6-v2 model on an explicit backend.
+    pub fn new_on(backend: crate::onnx_ep::Backend) -> Result<Self> {
+        Self::with_model_on(ONNX_ALL_MINILM, backend)
+    }
+
     /// Try to create a provider with the specified model, returning None if unavailable.
     pub fn try_with_model(spec: OnnxModelSpec) -> Option<Self> {
         Self::with_model(spec).ok()
+    }
+
+    /// Try to create the default model on an explicit backend, returning
+    /// None if unavailable.
+    pub fn try_new_on(backend: crate::onnx_ep::Backend) -> Option<Self> {
+        Self::new_on(backend).ok()
     }
 
     /// Try to create a provider with the default model, returning None if unavailable.

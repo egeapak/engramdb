@@ -4,6 +4,9 @@ use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
+use engramdb::embeddings::{EmbeddingProvider, OnnxProvider};
+use engramdb::nli::{NliProvider, OnnxNliProvider};
+use engramdb::onnx_ep::Backend;
 use engramdb::retrieval::{
     apply_index_filters, DetailLevel, RetrievalEngine, RetrievalQuery, SearchFilters,
 };
@@ -11,6 +14,7 @@ use engramdb::scope::{logical, physical};
 use engramdb::scoring::trust_weight_from_config;
 use engramdb::scoring::{composite_score, decay_factor, effective_relevance, ScoringContext};
 use engramdb::storage::MemoryStore;
+use engramdb::title::{t5::T5TitleGenerator, TitleGenerator};
 use engramdb::types::{Decay, DecayStrategy, EngramConfig, Memory, MemoryType, ProvenanceSource};
 
 use chrono::Utc;
@@ -594,6 +598,86 @@ fn ops_benchmarks(c: &mut Criterion) {
 }
 
 // ===========================================================================
+// Group 7: ONNX Backend Benchmarks — CPU vs Core ML (Apple GPU/ANE)
+// ===========================================================================
+//
+// A/B the same ONNX inference workloads (embeddings, NLI contradiction
+// classifier, T5 title generation) on the CPU provider vs the Core ML
+// provider. Both variants are built in one process so results are directly
+// comparable.
+//
+// The "coreml" variant only differs from "cpu" when the crate is built with
+// `--features coreml` on macOS (`cargo bench --features coreml`); otherwise
+// Core ML is unavailable and only the CPU variant is benchmarked. Each model
+// is downloaded on first use; if a model cannot be loaded (e.g. offline CI)
+// that sub-benchmark is skipped rather than failing.
+
+fn onnx_backend_benchmarks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("onnx_backend");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(5));
+    let rt = runtime();
+
+    let backends: Vec<(&str, Backend)> = if engramdb::onnx_ep::coreml_available() {
+        vec![("cpu", Backend::Cpu), ("coreml", Backend::CoreMl)]
+    } else {
+        eprintln!(
+            "onnx_backend bench: Core ML not compiled in (build with `--features coreml` \
+             on macOS to A/B GPU vs CPU); benchmarking CPU only."
+        );
+        vec![("cpu", Backend::Cpu)]
+    };
+
+    let sample_text = "The authentication handler validates JWT tokens issued by the \
+                       OAuth provider and refreshes them when they expire.";
+    let batch_texts: Vec<&str> = vec![sample_text; 16];
+    let nli_repo = EngramConfig::default().nli.model;
+
+    for (label, backend) in backends {
+        // --- Embeddings (all-MiniLM-L6-v2) ---
+        if let Some(provider) = OnnxProvider::try_new_on(backend) {
+            group.bench_function(BenchmarkId::new("embed_single", label), |b| {
+                b.to_async(&rt)
+                    .iter(|| async { provider.embed(sample_text).await.unwrap() });
+            });
+            group.bench_function(BenchmarkId::new("embed_batch16", label), |b| {
+                b.to_async(&rt)
+                    .iter(|| async { provider.embed_batch(&batch_texts).await.unwrap() });
+            });
+        } else {
+            eprintln!("onnx_backend/{label}: embedding model unavailable, skipping");
+        }
+
+        // --- NLI contradiction classifier (DeBERTa v3 xsmall) ---
+        if let Some(provider) = OnnxNliProvider::try_new_on(&nli_repo, backend) {
+            group.bench_function(BenchmarkId::new("nli_classify", label), |b| {
+                b.to_async(&rt).iter(|| async {
+                    provider
+                        .classify("The database uses PostgreSQL.", "The database uses MySQL.")
+                        .await
+                        .unwrap()
+                });
+            });
+        } else {
+            eprintln!("onnx_backend/{label}: NLI model unavailable, skipping");
+        }
+
+        // --- T5-small abstractive title generation ---
+        if let Some(generator) = T5TitleGenerator::try_new_on(backend) {
+            group.bench_function(BenchmarkId::new("t5_title", label), |b| {
+                b.to_async(&rt)
+                    .iter(|| async { generator.generate(sample_text).await.unwrap() });
+            });
+        } else {
+            eprintln!("onnx_backend/{label}: T5 model unavailable, skipping");
+        }
+    }
+
+    group.finish();
+}
+
+// ===========================================================================
 // Criterion registration
 // ===========================================================================
 
@@ -605,5 +689,6 @@ criterion_group!(
     retrieval_benchmarks,
     hook_path_benchmarks,
     ops_benchmarks,
+    onnx_backend_benchmarks,
 );
 criterion_main!(benches);
