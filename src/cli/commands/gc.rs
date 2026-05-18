@@ -13,6 +13,7 @@ use std::path::Path;
 /// Use --confirm to actually delete.
 pub async fn run_gc(
     dir: &Path,
+    global: bool,
     confirm: bool,
     threshold: Option<f64>,
     formatter: &OutputFormatter,
@@ -21,8 +22,12 @@ pub async fn run_gc(
         validate_score(t, "threshold")?;
     }
 
-    let store = MemoryStore::open(dir).await?;
-    let config_path = dir.join(".engramdb").join("config.toml");
+    let store = if global {
+        MemoryStore::open_global().await?
+    } else {
+        MemoryStore::open(dir).await?
+    };
+    let config_path = store.project_dir.join(".engramdb").join("config.toml");
     let config = crate::storage::config::load_config(&config_path).await?;
 
     let dry_run = !confirm;
@@ -126,7 +131,7 @@ mod tests {
 
         let formatter = OutputFormatter::new(None, false, true);
 
-        let result = run_gc(temp_dir.path(), false, None, &formatter).await;
+        let result = run_gc(temp_dir.path(), false, false, None, &formatter).await;
 
         assert!(result.is_ok());
     }
@@ -136,7 +141,7 @@ mod tests {
         let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
-        let result = run_gc(temp_dir.path(), false, None, &formatter).await;
+        let result = run_gc(temp_dir.path(), false, false, None, &formatter).await;
         assert!(result.is_ok());
     }
 }

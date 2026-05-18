@@ -39,7 +39,7 @@ pub use parsing::{
     parse_decay_strategy, parse_detail_level, parse_memory_type, parse_status, parse_visibility,
     validate_score,
 };
-pub use query::query_memories;
+pub use query::{merge_scored_memories, query_memories};
 pub use reindex::{reindex, ReindexResult};
 pub use resolve::{resolve_memory, ResolveAction, ResolveParams, ResolveResult};
 pub use review::{review_memories, ReviewParams};

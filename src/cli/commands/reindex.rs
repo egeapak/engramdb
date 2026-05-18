@@ -17,24 +17,27 @@ use std::path::Path;
 /// * `formatter` - Output formatter for success/error messages
 pub async fn run_reindex(
     dir: &Path,
+    global: bool,
     embeddings_only: bool,
     index_only: bool,
     embedding_backend: Option<crate::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
-    let config_path = dir.join(".engramdb").join("config.toml");
+    let store = if global {
+        MemoryStore::open_global().await?
+    } else {
+        MemoryStore::open(dir).await?
+    };
+    let config_path = store.project_dir.join(".engramdb").join("config.toml");
 
     // Set up engine with embeddings if not index_only
     let engine = if !index_only {
-        Some(
-            crate::ops::build_engine(
-                MemoryStore::open(dir).await?,
-                &config_path,
-                embedding_backend,
-            )
-            .await,
-        )
+        let engine_store = if global {
+            MemoryStore::open_global().await?
+        } else {
+            MemoryStore::open(dir).await?
+        };
+        Some(crate::ops::build_engine(engine_store, &config_path, embedding_backend).await)
     } else {
         None
     };
