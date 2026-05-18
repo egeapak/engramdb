@@ -18,11 +18,16 @@ use std::path::Path;
 /// * `formatter` - Output formatter for success/error messages
 pub async fn run_delete(
     dir: &Path,
+    global: bool,
     id: &str,
     force: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = if global {
+        MemoryStore::open_global().await?
+    } else {
+        MemoryStore::open(dir).await?
+    };
 
     // Get the memory to confirm what we're deleting
     let memory = get_memory(&store, id).await?;

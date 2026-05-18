@@ -10,6 +10,7 @@ use std::path::Path;
 /// List compression candidates and direct users to MCP mode.
 pub async fn run_compress(
     dir: &Path,
+    global: bool,
     scope: Option<String>,
     threshold: Option<f64>,
     formatter: &OutputFormatter,
@@ -18,7 +19,11 @@ pub async fn run_compress(
         validate_score(t, "threshold")?;
     }
 
-    let store = MemoryStore::open(dir).await?;
+    let store = if global {
+        MemoryStore::open_global().await?
+    } else {
+        MemoryStore::open(dir).await?
+    };
     let result = ops::compress_candidates(&store, scope.as_deref(), threshold).await?;
 
     if result.candidates.is_empty() {
@@ -105,7 +110,7 @@ mod tests {
 
         let formatter = OutputFormatter::new(None, false, true);
 
-        let result = run_compress(temp_dir.path(), None, None, &formatter).await;
+        let result = run_compress(temp_dir.path(), false, None, None, &formatter).await;
 
         assert!(result.is_ok());
     }
@@ -115,7 +120,7 @@ mod tests {
         let (temp_dir, _store) = setup_test_store().await;
         let formatter = OutputFormatter::new(None, false, true);
 
-        let result = run_compress(temp_dir.path(), None, None, &formatter).await;
+        let result = run_compress(temp_dir.path(), false, None, None, &formatter).await;
         assert!(result.is_ok());
     }
 }
