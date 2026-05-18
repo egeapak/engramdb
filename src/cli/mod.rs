@@ -163,6 +163,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             detail_level,
             include_expired,
             show_scores,
+            include_global,
             global,
         } => {
             let retrieval_mode = match mode.as_str() {
@@ -194,6 +195,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     detail_level,
                     include_expired,
                     show_scores,
+                    include_global,
                 },
                 backend,
                 &formatter,

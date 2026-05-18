@@ -20,6 +20,8 @@ pub struct QueryParams {
     pub detail_level: Option<String>,
     pub include_expired: bool,
     pub show_scores: bool,
+    /// Also merge global-store memories into the project results.
+    pub include_global: bool,
 }
 
 /// Run a unified retrieval query.
@@ -86,7 +88,31 @@ pub async fn run_query(
         detail_level,
     };
 
-    let result = crate::ops::query_memories(&engine, &query).await?;
+    let mut result = crate::ops::query_memories(&engine, &query).await?;
+
+    // Optionally fold in global-store memories. Mirrors the MCP
+    // `include_global` option; skipped when already querying the global
+    // store (`--global`) since there is nothing extra to merge.
+    if params.include_global && !global {
+        if let Ok(global_store) = MemoryStore::open_global().await {
+            let global_config = global_store
+                .project_dir
+                .join(".engramdb")
+                .join("config.toml");
+            let global_engine =
+                crate::ops::build_engine(global_store, &global_config, embedding_backend).await;
+            if let Ok(global_result) = crate::ops::query_memories(&global_engine, &query).await {
+                let max = query.max_results.unwrap_or(params.max_results);
+                crate::ops::merge_scored_memories(
+                    &mut result.memories,
+                    global_result.memories,
+                    max,
+                );
+                result.total += global_result.total;
+            }
+        }
+    }
+
     formatter.print_retrieval_result(&result, params.show_scores);
 
     Ok(())
@@ -156,6 +182,7 @@ mod tests {
             detail_level: None,
             include_expired: false,
             show_scores: false,
+            include_global: false,
         }
     }
 
@@ -220,6 +247,36 @@ mod tests {
 
         let result = run_query(temp_dir.path(), false, params, None, &formatter).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_query_rank_include_global_merges_without_error() {
+        // Serialize global-store access and start from a clean global store.
+        let _lock = crate::storage::test_support::acquire_global_test_lock().await;
+        let global = MemoryStore::open_global().await.unwrap();
+        global
+            .create(&create_test_memory(
+                "global-q-001-zzz",
+                MemoryType::Decision,
+                0.95,
+            ))
+            .await
+            .unwrap();
+
+        let (temp_dir, _store) = setup_test_store().await;
+        let formatter = OutputFormatter::new(None, false, true);
+
+        // Rank mode with no query text needs no embeddings, so this exercises
+        // the global-merge path offline.
+        let params = QueryParams {
+            mode: RetrievalMode::Rank,
+            path: Some("src/main.rs".to_string()),
+            include_global: true,
+            ..base_params()
+        };
+
+        let result = run_query(temp_dir.path(), false, params, None, &formatter).await;
+        assert!(result.is_ok(), "include_global query failed: {:?}", result);
     }
 
     #[tokio::test]

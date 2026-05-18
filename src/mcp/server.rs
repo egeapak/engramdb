@@ -458,28 +458,6 @@ struct MemoryOutput {
     status: String,
 }
 
-/// Merge global scored memories into the project results, re-sort by score,
-/// deduplicate by ID, and truncate to `max`.
-fn merge_scored_memories(
-    project: &mut Vec<crate::retrieval::engine::ScoredMemory>,
-    global: Vec<crate::retrieval::engine::ScoredMemory>,
-    max: usize,
-) {
-    use std::collections::HashSet;
-    let existing_ids: HashSet<String> = project.iter().map(|sm| sm.memory.id.clone()).collect();
-    for sm in global {
-        if !existing_ids.contains(&sm.memory.id) {
-            project.push(sm);
-        }
-    }
-    project.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    project.truncate(max);
-}
-
 fn memory_to_output(m: &crate::types::Memory, include_details: bool) -> MemoryOutput {
     MemoryOutput {
         id: m.id.clone(),
@@ -1222,7 +1200,7 @@ impl EngramDbServer {
             if let Ok(global_engine) = self.build_engine_for(Some("global")).await {
                 if let Ok(global_result) = ops::query_memories(&global_engine, &query).await {
                     let max = query.max_results.unwrap_or(10);
-                    merge_scored_memories(&mut result.memories, global_result.memories, max);
+                    ops::merge_scored_memories(&mut result.memories, global_result.memories, max);
                     result.total += global_result.total;
                 }
             }

@@ -303,6 +303,14 @@ pub enum Command {
         #[arg(long)]
         show_scores: bool,
 
+        /// Also merge global (cross-project) memories into the results.
+        ///
+        /// Runs the same query against the global store and folds its hits
+        /// into the project results (deduplicated, re-sorted, truncated).
+        /// Ignored when `--global` is set (already querying the global store).
+        #[arg(long)]
+        include_global: bool,
+
         /// Query the global (cross-project) memory store instead of the current project
         #[arg(long)]
         global: bool,
@@ -1488,6 +1496,30 @@ mod tests {
         match cli.command {
             Command::Stats { global, .. } => assert!(!global),
             _ => panic!("Expected Stats command"),
+        }
+    }
+
+    #[test]
+    fn test_query_include_global_flag_parses() {
+        let cli = Cli::try_parse_from(["engramdb", "query", "--mode", "rank", "--include-global"])
+            .unwrap();
+        match cli.command {
+            Command::Query {
+                include_global,
+                global,
+                ..
+            } => {
+                assert!(include_global);
+                assert!(!global, "--include-global must not imply --global");
+            }
+            _ => panic!("Expected Query command"),
+        }
+
+        // Defaults to false when omitted.
+        let cli = Cli::try_parse_from(["engramdb", "query", "--mode", "rank"]).unwrap();
+        match cli.command {
+            Command::Query { include_global, .. } => assert!(!include_global),
+            _ => panic!("Expected Query command"),
         }
     }
 
