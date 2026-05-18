@@ -140,6 +140,22 @@ where
     R: AsyncBufReadExt + Unpin,
     T: DeserializeOwned,
 {
+    read_msg_capped(r, MAX_FRAME_BYTES).await
+}
+
+/// [`read_msg`] with an explicit byte cap. Split out so the cap behavior is
+/// unit-testable without allocating the 64 MiB production limit.
+pub(crate) async fn read_msg_capped<R, T>(r: &mut R, max: usize) -> std::io::Result<Option<T>>
+where
+    R: AsyncBufReadExt + Unpin,
+    T: DeserializeOwned,
+{
+    let too_big = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "daemon frame exceeds maximum size",
+        )
+    };
     let mut buf: Vec<u8> = Vec::new();
     loop {
         let chunk = r.fill_buf().await?;
@@ -156,18 +172,12 @@ where
         let n = chunk.len();
         buf.extend_from_slice(chunk);
         r.consume(n);
-        if buf.len() > MAX_FRAME_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "daemon frame exceeds maximum size",
-            ));
+        if buf.len() > max {
+            return Err(too_big());
         }
     }
-    if buf.len() > MAX_FRAME_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "daemon frame exceeds maximum size",
-        ));
+    if buf.len() > max {
+        return Err(too_big());
     }
     if buf.iter().all(|b| b.is_ascii_whitespace()) {
         return Ok(None);

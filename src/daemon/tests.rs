@@ -552,6 +552,239 @@ fn resolve_socket_precedence() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Frame cap + malformed input
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn read_msg_capped_enforces_limit_and_parses() {
+    use super::protocol::read_msg_capped;
+
+    // A small valid frame under the cap parses fine.
+    let mut r =
+        BufReader::new(&b"{\"dir\":\"\",\"backend\":null,\"op\":{\"kind\":\"ping\"}}\n"[..]);
+    let ok: Option<DaemonRequest> = read_msg_capped(&mut r, 1024).await.unwrap();
+    assert!(matches!(ok.unwrap().op, DaemonOp::Ping));
+
+    // A newline-less stream exceeding the cap is rejected (no OOM, no hang).
+    let flood = vec![b'x'; 4096];
+    let mut r = BufReader::new(&flood[..]);
+    let err = read_msg_capped::<_, DaemonRequest>(&mut r, 64)
+        .await
+        .expect_err("oversized frame must error");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+    // Well-formed line, but not valid JSON for the target type.
+    let mut r = BufReader::new(&b"not json at all\n"[..]);
+    let err = read_msg_capped::<_, DaemonRequest>(&mut r, 1024)
+        .await
+        .expect_err("garbage must error");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
+
+// ---------------------------------------------------------------------------
+// Daemon dispatch + stale-socket reclaim
+// ---------------------------------------------------------------------------
+
+/// Model-free dispatch path: a non-Ping/Status op with an empty `dir` is
+/// rejected before any model load.
+#[tokio::test]
+async fn dispatch_rejects_missing_dir() {
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("d.sock");
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    let resp = wait_request(
+        &socket,
+        DaemonRequest {
+            dir: String::new(),
+            backend: None,
+            op: DaemonOp::Embed {
+                texts: vec!["x".to_string()],
+            },
+        },
+    )
+    .await;
+    match resp {
+        DaemonResponse::Error { message } => assert!(message.contains("missing store directory")),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+/// A stale file left at the socket path (crashed daemon) is reclaimed via the
+/// atomic bind-temp + rename path, and the new daemon serves normally.
+#[tokio::test]
+async fn daemon_reclaims_stale_socket() {
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("d.sock");
+    std::fs::write(&socket, b"stale - not a live socket").unwrap();
+
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    let resp = wait_request(
+        &socket,
+        DaemonRequest {
+            dir: String::new(),
+            backend: None,
+            op: DaemonOp::Ping,
+        },
+    )
+    .await;
+    assert!(matches!(resp, DaemonResponse::Pong { .. }));
+}
+
+// ---------------------------------------------------------------------------
+// Client: status parsing + protocol-version gate
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn query_status_parses_stub_status() {
+    use super::protocol::DaemonStatus;
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("stub.sock");
+    spawn_stub(socket.clone(), |op| match op {
+        DaemonOp::Status => DaemonResponse::Status(DaemonStatus {
+            version: super::PROTOCOL_VERSION.to_string(),
+            pid: 77,
+            uptime_secs: 1,
+            idle_secs: 0,
+            bundles_loaded: 3,
+            requests_embed: 4,
+            requests_classify: 0,
+            requests_rerank: 0,
+            requests_meta: 1,
+            requests_status: 2,
+            requests_total: 7,
+        }),
+        _ => DaemonResponse::Error {
+            message: "unexpected".to_string(),
+        },
+    });
+    for _ in 0..100 {
+        if UnixStream::connect(&socket).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let s = super::query_status(&socket)
+        .await
+        .unwrap()
+        .expect("status present");
+    assert_eq!(s.pid, 77);
+    assert_eq!(s.bundles_loaded, 3);
+    assert_eq!(s.requests_total, 7);
+}
+
+#[tokio::test]
+async fn healthy_rejects_protocol_version_mismatch() {
+    let tmp = TempDir::new().unwrap();
+
+    let good = tmp.path().join("good.sock");
+    spawn_stub(good.clone(), |_| DaemonResponse::Pong {
+        version: super::PROTOCOL_VERSION.to_string(),
+    });
+    let bad = tmp.path().join("bad.sock");
+    spawn_stub(bad.clone(), |_| DaemonResponse::Pong {
+        version: "999.bogus".to_string(),
+    });
+    for s in [&good, &bad] {
+        for _ in 0..100 {
+            if UnixStream::connect(s).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    assert!(
+        super::DaemonHandle::connect_existing(good)
+            .check_health()
+            .await
+    );
+    assert!(
+        !super::DaemonHandle::connect_existing(bad)
+            .check_health()
+            .await,
+        "a version mismatch must be treated as unhealthy"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Remote NLI / reranker + config-gated wiring
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn remote_providers_wire_nli_and_reranker_per_config() {
+    use super::protocol::NliWire;
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("stub.sock");
+    spawn_stub(socket.clone(), |op| match op {
+        DaemonOp::Meta => DaemonResponse::Meta {
+            dimensions: 4,
+            max_tokens: 64,
+        },
+        DaemonOp::Classify { pairs } => DaemonResponse::Classified {
+            results: pairs
+                .iter()
+                .map(|_| NliWire {
+                    entailment: 0.1,
+                    neutral: 0.2,
+                    contradiction: 0.7,
+                })
+                .collect(),
+        },
+        DaemonOp::Rerank { documents, .. } => DaemonResponse::Reranked {
+            scores: documents
+                .iter()
+                .enumerate()
+                .map(|(i, _)| (i, 1.0 - i as f32))
+                .collect(),
+        },
+        _ => DaemonResponse::Error {
+            message: "unexpected".to_string(),
+        },
+    });
+    for _ in 0..100 {
+        if UnixStream::connect(&socket).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Default config: NLI + rerank disabled ⇒ not wired.
+    let handle = super::DaemonHandle::connect_existing(socket.clone());
+    let p = super::remote_providers(
+        handle,
+        "/tmp/x".to_string(),
+        None,
+        &crate::types::EngramConfig::default(),
+    )
+    .await
+    .expect("providers");
+    assert!(p.embedding.is_some());
+    assert!(p.nli.is_none());
+    assert!(p.reranker.is_none());
+
+    // Enable both ⇒ wired, and they round-trip through the daemon.
+    let mut cfg = crate::types::EngramConfig::default();
+    cfg.nli.enabled = true;
+    cfg.rerank.enabled = true;
+    let handle = super::DaemonHandle::connect_existing(socket.clone());
+    let p = super::remote_providers(handle, "/tmp/x".to_string(), None, &cfg)
+        .await
+        .expect("providers");
+    let nli = p.nli.expect("nli wired when enabled");
+    let res = nli.classify_batch(&[("a", "b")]).await.unwrap();
+    assert_eq!(res.len(), 1);
+    assert!((res[0].contradiction - 0.7).abs() < 1e-6);
+
+    let rr = p.reranker.expect("reranker wired when enabled");
+    let scores = rr
+        .rerank("q", &["d0".to_string(), "d1".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(scores.len(), 2);
+    assert_eq!(scores[0].index, 0);
+}
+
 /// Send one request over a fresh connection, retrying connect until the
 /// daemon is up.
 async fn wait_request(socket: &std::path::Path, req: DaemonRequest) -> DaemonResponse {

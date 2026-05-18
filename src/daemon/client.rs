@@ -163,6 +163,12 @@ impl DaemonHandle {
         Arc::new(Self { socket })
     }
 
+    /// Test-only accessor for the private liveness/version probe.
+    #[cfg(test)]
+    pub(crate) async fn check_health(&self) -> bool {
+        self.healthy().await
+    }
+
     /// Send one request and read its response over a fresh connection.
     ///
     /// Bounded by [`Self::REQUEST_TIMEOUT`]: a daemon that accepts the
