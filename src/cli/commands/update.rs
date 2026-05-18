@@ -46,13 +46,21 @@ pub struct UpdateParams {
 /// * `formatter` - Output formatter for success/error messages
 pub async fn run_update(
     dir: &Path,
+    global: bool,
     params: UpdateParams,
     embedding_backend: Option<crate::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
+    // Resolve the directory backing the target store (global or project).
+    let store_dir: PathBuf = if global {
+        crate::storage::paths::global_store_dir()?
+    } else {
+        dir.to_path_buf()
+    };
+
     // Handle editor flag first if present
     if params.editor {
-        let memory_file_path = memory_path(dir, &params.id)
+        let memory_file_path = memory_path(&store_dir, &params.id)
             .await
             .with_context(|| format!("Memory {} not found", params.id))?;
 
@@ -101,11 +109,19 @@ pub async fn run_update(
         }
     }
 
-    let store = MemoryStore::open(dir).await?;
+    let store = if global {
+        MemoryStore::open_global().await?
+    } else {
+        MemoryStore::open(dir).await?
+    };
 
     // Build engine for auto-embedding on update
-    let config_path = dir.join(".engramdb").join("config.toml");
-    let engine_store = MemoryStore::open(dir).await?;
+    let config_path = store.project_dir.join(".engramdb").join("config.toml");
+    let engine_store = if global {
+        MemoryStore::open_global().await?
+    } else {
+        MemoryStore::open(dir).await?
+    };
     let engine = ops::build_engine(engine_store, &config_path, embedding_backend).await;
 
     let type_ = params.type_.map(|s| parse_memory_type(&s)).transpose()?;

@@ -30,15 +30,20 @@ pub struct QueryParams {
 /// (keyword, semantic, scope proximity, or tag match).
 pub async fn run_query(
     dir: &Path,
+    global: bool,
     params: QueryParams,
     embedding_backend: Option<crate::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = if global {
+        MemoryStore::open_global().await?
+    } else {
+        MemoryStore::open(dir).await?
+    };
     if let Ok(Some(warning)) = store.check_staleness().await {
         formatter.print_warning(&warning);
     }
-    let config_path = dir.join(".engramdb").join("config.toml");
+    let config_path = store.project_dir.join(".engramdb").join("config.toml");
     let engine = crate::ops::build_engine(store, &config_path, embedding_backend).await;
 
     let types = if !params.type_filter.is_empty() {
@@ -164,7 +169,7 @@ mod tests {
             ..base_params()
         };
 
-        let result = run_query(temp_dir.path(), params, None, &formatter).await;
+        let result = run_query(temp_dir.path(), false, params, None, &formatter).await;
         assert!(result.is_ok());
     }
 
@@ -179,7 +184,7 @@ mod tests {
             ..base_params()
         };
 
-        let result = run_query(temp_dir.path(), params, None, &formatter).await;
+        let result = run_query(temp_dir.path(), false, params, None, &formatter).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -198,7 +203,7 @@ mod tests {
             ..base_params()
         };
 
-        let result = run_query(temp_dir.path(), params, None, &formatter).await;
+        let result = run_query(temp_dir.path(), false, params, None, &formatter).await;
         assert!(result.is_ok());
     }
 
@@ -213,7 +218,7 @@ mod tests {
             ..base_params()
         };
 
-        let result = run_query(temp_dir.path(), params, None, &formatter).await;
+        let result = run_query(temp_dir.path(), false, params, None, &formatter).await;
         assert!(result.is_ok());
     }
 
@@ -229,7 +234,7 @@ mod tests {
             ..base_params()
         };
 
-        let result = run_query(temp_dir.path(), params, None, &formatter).await;
+        let result = run_query(temp_dir.path(), false, params, None, &formatter).await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(

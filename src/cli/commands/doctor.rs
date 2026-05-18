@@ -13,18 +13,23 @@ use std::path::Path;
 /// - `Some(DoctorCommand::Store)` → fast store-only health check
 pub async fn run_doctor(
     dir: &Path,
+    global: bool,
     command: Option<DoctorCommand>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
     match command {
-        Some(DoctorCommand::Store) => run_store_check(dir, formatter).await,
-        None => run_environment_check(dir, formatter).await,
+        Some(DoctorCommand::Store) => run_store_check(dir, global, formatter).await,
+        None => run_environment_check(dir, global, formatter).await,
     }
 }
 
 /// Fast store-only health check (what MCP calls on session start).
-async fn run_store_check(dir: &Path, formatter: &OutputFormatter) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+async fn run_store_check(dir: &Path, global: bool, formatter: &OutputFormatter) -> Result<()> {
+    let store = if global {
+        MemoryStore::open_global().await?
+    } else {
+        MemoryStore::open(dir).await?
+    };
     let result = doctor(&store).await?;
 
     if result.healthy {
@@ -58,9 +63,21 @@ async fn run_store_check(dir: &Path, formatter: &OutputFormatter) -> Result<()> 
 }
 
 /// Full environment diagnostics with actionable suggestions.
-async fn run_environment_check(dir: &Path, formatter: &OutputFormatter) -> Result<()> {
-    let store = MemoryStore::open(dir).await.ok();
-    let result = doctor_environment(dir, store.as_ref()).await;
+async fn run_environment_check(
+    dir: &Path,
+    global: bool,
+    formatter: &OutputFormatter,
+) -> Result<()> {
+    let store = if global {
+        MemoryStore::open_global().await.ok()
+    } else {
+        MemoryStore::open(dir).await.ok()
+    };
+    let check_dir = store
+        .as_ref()
+        .map(|s| s.project_dir.clone())
+        .unwrap_or_else(|| dir.to_path_buf());
+    let result = doctor_environment(&check_dir, store.as_ref()).await;
     formatter.print_environment_doctor(&result);
     Ok(())
 }
@@ -83,7 +100,13 @@ mod tests {
         store.create(&mem).await.unwrap();
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_doctor(temp_dir.path(), Some(DoctorCommand::Store), &formatter).await;
+        let result = run_doctor(
+            temp_dir.path(),
+            false,
+            Some(DoctorCommand::Store),
+            &formatter,
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -104,7 +127,13 @@ mod tests {
             .unwrap();
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_doctor(temp_dir.path(), Some(DoctorCommand::Store), &formatter).await;
+        let result = run_doctor(
+            temp_dir.path(),
+            false,
+            Some(DoctorCommand::Store),
+            &formatter,
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -113,7 +142,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_doctor(temp_dir.path(), None, &formatter).await;
+        let result = run_doctor(temp_dir.path(), false, None, &formatter).await;
         assert!(result.is_ok());
     }
 
@@ -124,7 +153,7 @@ mod tests {
         MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_doctor(temp_dir.path(), None, &formatter).await;
+        let result = run_doctor(temp_dir.path(), false, None, &formatter).await;
         assert!(result.is_ok());
     }
 
@@ -134,7 +163,13 @@ mod tests {
         // No init — store does not exist
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_doctor(temp_dir.path(), Some(DoctorCommand::Store), &formatter).await;
+        let result = run_doctor(
+            temp_dir.path(),
+            false,
+            Some(DoctorCommand::Store),
+            &formatter,
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -144,7 +179,7 @@ mod tests {
         // No init — but environment check should still succeed gracefully
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_doctor(temp_dir.path(), None, &formatter).await;
+        let result = run_doctor(temp_dir.path(), false, None, &formatter).await;
         assert!(result.is_ok());
     }
 
@@ -159,7 +194,13 @@ mod tests {
 
         // JSON formatter — exercises the json output path
         let formatter = OutputFormatter::new(None, true, true);
-        let result = run_doctor(temp_dir.path(), Some(DoctorCommand::Store), &formatter).await;
+        let result = run_doctor(
+            temp_dir.path(),
+            false,
+            Some(DoctorCommand::Store),
+            &formatter,
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -181,7 +222,13 @@ mod tests {
         tokio::fs::remove_file(&file_path).await.unwrap();
 
         let formatter = OutputFormatter::new(None, false, true);
-        let result = run_doctor(temp_dir.path(), Some(DoctorCommand::Store), &formatter).await;
+        let result = run_doctor(
+            temp_dir.path(),
+            false,
+            Some(DoctorCommand::Store),
+            &formatter,
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -193,7 +240,7 @@ mod tests {
 
         // JSON formatter + environment (None subcommand)
         let formatter = OutputFormatter::new(None, true, true);
-        let result = run_doctor(temp_dir.path(), None, &formatter).await;
+        let result = run_doctor(temp_dir.path(), false, None, &formatter).await;
         assert!(result.is_ok());
     }
 }

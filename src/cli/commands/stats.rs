@@ -5,7 +5,6 @@ use crate::cli::output::{OutputFormatter, Stats};
 use crate::embeddings::{OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT};
 use crate::embeddings::{OnnxProvider, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT};
 use crate::ops::compute_stats;
-use crate::storage::project_id::compute_project_id;
 use crate::storage::MemoryStore;
 use crate::telemetry::StatsCollector;
 use crate::types::{EmbeddingBackend, Status};
@@ -26,11 +25,16 @@ use std::path::Path;
 /// * `formatter` - Output formatter for displaying statistics
 pub async fn run_stats(
     dir: &Path,
+    global: bool,
     embedding_backend: Option<EmbeddingBackend>,
     all_projects: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = if global {
+        MemoryStore::open_global().await?
+    } else {
+        MemoryStore::open(dir).await?
+    };
     let store_stats = compute_stats(&store).await?;
 
     // Extract health warning counts before moving data into Stats
@@ -52,12 +56,12 @@ pub async fn run_stats(
     // CLI is process-scoped so we won't see in-flight counters from a running
     // MCP server, but we do see counters that the server has flushed to disk
     // (default flush interval 60s + on shutdown).
-    let cfg = crate::storage::config::load_config(&dir.join(".engramdb/config.toml"))
+    let cfg = crate::storage::config::load_config(&store.project_dir.join(".engramdb/config.toml"))
         .await
         .unwrap_or_default();
     let collector = StatsCollector::new(cfg.stats);
     let _ = crate::telemetry::persistence::hydrate_collector(&collector).await;
-    let project_id = compute_project_id(dir);
+    let project_id = store.project_id.clone();
     let runtime = collector.snapshot(&project_id, all_projects);
     let runtime_present = runtime.view.usage.total_calls > 0
         || runtime.view.queries.total > 0
@@ -80,7 +84,7 @@ pub async fn run_stats(
 
     // Print embeddings status
     println!();
-    let config_path = dir.join(".engramdb/config.toml");
+    let config_path = store.project_dir.join(".engramdb/config.toml");
     let config = crate::storage::config::load_config(&config_path)
         .await
         .unwrap_or_default();

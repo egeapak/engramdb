@@ -21,6 +21,7 @@ use std::path::Path;
 #[allow(clippy::too_many_arguments)]
 pub async fn run_review(
     dir: &Path,
+    global: bool,
     scope: Option<String>,
     type_str: Option<String>,
     challenged_only: bool,
@@ -28,7 +29,11 @@ pub async fn run_review(
     formatter: &OutputFormatter,
     prompter: &dyn Prompter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = if global {
+        MemoryStore::open_global().await?
+    } else {
+        MemoryStore::open(dir).await?
+    };
 
     let type_filter = type_str.as_deref().map(parse_memory_type).transpose()?;
 
@@ -186,6 +191,7 @@ mod tests {
 
         run_review(
             temp_dir.path(),
+            false,
             None,
             None,
             false,
@@ -213,6 +219,7 @@ mod tests {
 
         run_review(
             temp_dir.path(),
+            false,
             None,
             None,
             false,
@@ -240,6 +247,7 @@ mod tests {
 
         run_review(
             temp_dir.path(),
+            false,
             None,
             None,
             false,
@@ -289,6 +297,7 @@ mod tests {
 
         run_review(
             temp_dir.path(),
+            false,
             None,
             None,
             false,
@@ -318,6 +327,7 @@ mod tests {
 
         let result = run_review(
             temp_dir.path(),
+            false,
             None,
             None,
             false,

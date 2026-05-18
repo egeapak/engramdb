@@ -49,20 +49,25 @@ pub struct AddParams {
 /// * `formatter` - Output formatter for success/error messages
 pub async fn run_add(
     dir: &Path,
+    global: bool,
     registry: &dyn RegistryBackend,
     params: AddParams,
     embedding_backend: Option<crate::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
     prompter: &dyn Prompter,
 ) -> Result<()> {
-    // Open or initialize store
-    let store = match MemoryStore::open(dir).await {
-        Ok(s) => s,
-        Err(_) => MemoryStore::init(dir, registry).await?,
+    // Open or initialize store. The global store auto-initializes on open.
+    let store = if global {
+        MemoryStore::open_global().await?
+    } else {
+        match MemoryStore::open(dir).await {
+            Ok(s) => s,
+            Err(_) => MemoryStore::init(dir, registry).await?,
+        }
     };
 
     // Build engine for auto-embedding on create
-    let config_path = dir.join(".engramdb").join("config.toml");
+    let config_path = store.project_dir.join(".engramdb").join("config.toml");
     let engine = ops::build_engine(store.clone(), &config_path, embedding_backend).await;
 
     // Handle details file

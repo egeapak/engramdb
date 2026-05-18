@@ -110,9 +110,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             interactive,
             editor,
             details_file,
+            global,
         } => {
             commands::run_add(
                 &dir,
+                global,
                 &registry,
                 AddParams {
                     type_str: type_,
@@ -146,7 +148,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             full,
             raw,
             path,
-        } => commands::run_get(&dir, &id, full, raw, path, &formatter).await,
+            global,
+        } => commands::run_get(&dir, global, &id, full, raw, path, &formatter).await,
         Command::Query {
             mode,
             query_pos,
@@ -160,6 +163,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             detail_level,
             include_expired,
             show_scores,
+            global,
         } => {
             let retrieval_mode = match mode.as_str() {
                 "rank" => crate::retrieval::engine::RetrievalMode::Rank,
@@ -177,6 +181,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 
             commands::run_query(
                 &dir,
+                global,
                 QueryParams {
                     mode: retrieval_mode,
                     query: query_text,
@@ -203,9 +208,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             sort,
             reverse,
             limit,
+            global,
         } => {
             commands::run_list(
                 &dir,
+                global,
                 type_,
                 tags,
                 status,
@@ -241,9 +248,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             decay_ttl,
             decay_floor,
             editor,
+            global,
         } => {
             commands::run_update(
                 &dir,
+                global,
                 UpdateParams {
                     id,
                     type_,
@@ -273,18 +282,25 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Command::Delete { id, force } => commands::run_delete(&dir, &id, force, &formatter).await,
-        Command::Stats { all_projects } => {
-            commands::run_stats(&dir, backend, all_projects, &formatter).await
+        Command::Delete { id, force, global } => {
+            commands::run_delete(&dir, global, &id, force, &formatter).await
         }
-        Command::Doctor { command } => commands::run_doctor(&dir, command, &formatter).await,
+        Command::Stats {
+            all_projects,
+            global,
+        } => commands::run_stats(&dir, global, backend, all_projects, &formatter).await,
+        Command::Doctor { command, global } => {
+            commands::run_doctor(&dir, global, command, &formatter).await
+        }
         Command::Challenge {
             id,
             evidence,
             source_file,
+            global,
         } => {
             commands::run_challenge(
                 &dir,
+                global,
                 ChallengeParams {
                     id,
                     evidence,
@@ -294,12 +310,16 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Command::Gc { confirm, threshold } => {
-            commands::run_gc(&dir, confirm, threshold, &formatter).await
-        }
-        Command::Compress { scope, threshold } => {
-            commands::run_compress(&dir, scope, threshold, &formatter).await
-        }
+        Command::Gc {
+            confirm,
+            threshold,
+            global,
+        } => commands::run_gc(&dir, global, confirm, threshold, &formatter).await,
+        Command::Compress {
+            scope,
+            threshold,
+            global,
+        } => commands::run_compress(&dir, global, scope, threshold, &formatter).await,
         Command::Serve { transport, port } => {
             commands::run_serve(&dir, &transport, port, backend, &formatter).await
         }
@@ -307,10 +327,18 @@ pub async fn run(cli: Cli) -> Result<()> {
             commands::run_completions(shell);
             Ok(())
         }
-        Command::Migrate { dry_run } => commands::run_migrate(&dir, dry_run, &formatter).await,
+        Command::Migrate { dry_run, global } => {
+            let target_dir = if global {
+                crate::storage::paths::global_store_dir()?
+            } else {
+                dir.clone()
+            };
+            commands::run_migrate(&target_dir, dry_run, &formatter).await
+        }
         Command::Rollback {
             target_version,
             dry_run,
+            global,
         } => {
             // Version 1 is represented as None internally (legacy format without version field)
             let target = if target_version <= 1 {
@@ -318,20 +346,38 @@ pub async fn run(cli: Cli) -> Result<()> {
             } else {
                 Some(target_version)
             };
-            commands::run_rollback(&dir, target, dry_run, &formatter).await
+            let target_dir = if global {
+                crate::storage::paths::global_store_dir()?
+            } else {
+                dir.clone()
+            };
+            commands::run_rollback(&target_dir, target, dry_run, &formatter).await
         }
         Command::Reindex {
             embeddings_only,
             index_only,
-        } => commands::run_reindex(&dir, embeddings_only, index_only, backend, &formatter).await,
+            global,
+        } => {
+            commands::run_reindex(
+                &dir,
+                global,
+                embeddings_only,
+                index_only,
+                backend,
+                &formatter,
+            )
+            .await
+        }
         Command::Review {
             scope,
             type_,
             challenged_only,
             stale_only,
+            global,
         } => {
             commands::run_review(
                 &dir,
+                global,
                 scope,
                 type_,
                 challenged_only,
