@@ -158,6 +158,7 @@ threshold = 0.1    # Minimum criticality to keep
 [daemon]
 enabled = true            # Delegate embedding/NLI/rerank to the shared daemon
 idle_timeout_secs = 900   # Daemon exits after this long with no activity
+# socket_path = "/run/user/1000/engramdb/daemon.sock"  # optional override
 ```
 
 ### Embedding backends
@@ -193,8 +194,14 @@ process (it is already cross-process safe), so only inference is delegated.
   engramdb daemon status     # running? pid, uptime, request metrics
   engramdb daemon stop       # graceful shutdown (next MCP run respawns it)
   engramdb daemon restart    # stop + start a fresh one
+  engramdb daemon run        # run the loop in the foreground (debugging)
   engramdb stats --daemon    # cumulative request metrics (persisted)
   ```
+
+  The socket path resolves with precedence `--socket` flag >
+  `ENGRAMDB_DAEMON_SOCKET` env > `[daemon].socket_path` config > the
+  default per-user runtime path. `status`/`stop`/`restart`/`run` all
+  accept `--socket` to target a non-default daemon.
 
 Daemon request metrics are persisted to the global store's LanceDB, so
 `stats --daemon` reports figures even when no daemon is currently running, and

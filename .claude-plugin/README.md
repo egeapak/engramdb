@@ -42,6 +42,21 @@ A full MCP server (`engramdb serve`) starts automatically, providing 15 tools fo
 
 `query`, `create`, `get`, `list`, `update`, `delete`, `challenge`, `review`, `resolve`, `stats`, `doctor`, `gc`, `reindex`, `compress_candidates`, `compress_apply`
 
+### Shared embedding daemon
+
+Each Claude Code session runs its own `engramdb serve` process. Rather than
+every session loading its own copy of the embedding (and optional NLI /
+reranker) models, EngramDB **auto-spawns a single shared daemon** that loads
+each model once machine-wide and serves inference over a per-user Unix socket.
+It is fully automatic — no setup, nothing to run — and self-exits when idle; the
+next session that needs it spawns a fresh one. If it can't start, sessions fall
+back to loading models in-process, so nothing ever fails because of it.
+
+You normally never touch it, but `engramdb daemon status|stop|restart` and
+`engramdb stats --daemon` are available, `engramdb doctor` reports its state,
+and it can be disabled with `enabled = false` under `[daemon]` in
+`.engramdb/config.toml`.
+
 ### Hooks
 
 - **SessionStart** — injects high-criticality memories (hazards, active decisions) into the conversation when a session begins
