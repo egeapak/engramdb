@@ -620,6 +620,25 @@ impl EngramDbServer {
         })
     }
 
+    /// Replace this server's model caches with process-shared ones.
+    ///
+    /// The SSE transport builds a fresh `EngramDbServer` per connection. Each
+    /// default-constructed server has its own empty [`ops::ProviderCache`] and
+    /// daemon `OnceCell`, so without sharing every HTTP connection would reload
+    /// the embedding model (or re-probe/auto-spawn the daemon) on its first
+    /// tool call — defeating the load-once-per-process intent. Injecting one
+    /// process-wide cache + daemon handle restores it on SSE the same way
+    /// stdio gets it for free (single server instance).
+    fn with_shared_model_caches(
+        mut self,
+        provider_cache: ops::ProviderCache,
+        daemon: Arc<tokio::sync::OnceCell<Option<Arc<crate::daemon::DaemonHandle>>>>,
+    ) -> Self {
+        self.provider_cache = provider_cache;
+        self.daemon = daemon;
+        self
+    }
+
     #[cfg(test)]
     pub fn new_with_registry(
         dir: PathBuf,
@@ -2329,11 +2348,23 @@ pub async fn run_sse(
         )
     });
 
+    // One process-wide model cache + daemon handle shared across every
+    // per-connection server, so the embedding model loads once (or the
+    // daemon is probed/spawned once) for the whole process rather than per
+    // HTTP connection.
+    let provider_cache = ops::ProviderCache::new();
+    let daemon: Arc<tokio::sync::OnceCell<Option<Arc<crate::daemon::DaemonHandle>>>> =
+        Arc::new(tokio::sync::OnceCell::new());
+
     // Resolve hierarchy eagerly once: subsequent per-connection server
-    // instances share the registry, so registration only happens once.
+    // instances share the registry, so registration only happens once. Warm
+    // the shared model cache / daemon here too so the first tool call of the
+    // first connection doesn't pay the load.
     {
-        let warmup = EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())?;
+        let warmup = EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())?
+            .with_shared_model_caches(provider_cache.clone(), daemon.clone());
         warmup.ensure_hierarchy().await?;
+        warmup.spawn_provider_warmup();
     }
 
     let config = StreamableHttpServerConfig::default();
@@ -2343,6 +2374,7 @@ pub async fn run_sse(
             let stats = stats.clone();
             move || {
                 EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())
+                    .map(|s| s.with_shared_model_caches(provider_cache.clone(), daemon.clone()))
                     .map_err(|e| std::io::Error::other(e.to_string()))
             }
         },

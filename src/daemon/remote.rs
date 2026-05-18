@@ -18,6 +18,19 @@ use crate::ops::EngineProviders;
 use crate::retrieval::reranker::{RerankScore, Reranker};
 use crate::types::{EmbeddingBackend, EngramConfig};
 
+/// Short discriminant for a response, for error messages — never dump a full
+/// `DaemonResponse` (an `Embedded` carries every chunk vector).
+fn response_kind(resp: &DaemonResponse) -> &'static str {
+    match resp {
+        DaemonResponse::Pong { .. } => "pong",
+        DaemonResponse::Meta { .. } => "meta",
+        DaemonResponse::Embedded { .. } => "embedded",
+        DaemonResponse::Classified { .. } => "classified",
+        DaemonResponse::Reranked { .. } => "reranked",
+        DaemonResponse::Error { .. } => "error",
+    }
+}
+
 /// Shared per-(store, backend) routing state for the remote providers.
 struct RemoteCtx {
     handle: Arc<DaemonHandle>,
@@ -57,7 +70,10 @@ impl EmbeddingProvider for RemoteEmbeddingProvider {
         match self.ctx.send(DaemonOp::Embed { texts }).await? {
             DaemonResponse::Embedded { vectors } => Ok(vectors),
             DaemonResponse::Error { message } => Err(anyhow::anyhow!(message)),
-            other => Err(anyhow::anyhow!("unexpected daemon response: {other:?}")),
+            other => Err(anyhow::anyhow!(
+                "unexpected daemon response: {}",
+                response_kind(&other)
+            )),
         }
     }
 
@@ -94,7 +110,10 @@ impl NliProvider for RemoteNliProvider {
                 .map(|w| NliResult::from_probs(w.entailment, w.neutral, w.contradiction))
                 .collect()),
             DaemonResponse::Error { message } => Err(anyhow::anyhow!(message)),
-            other => Err(anyhow::anyhow!("unexpected daemon response: {other:?}")),
+            other => Err(anyhow::anyhow!(
+                "unexpected daemon response: {}",
+                response_kind(&other)
+            )),
         }
     }
 }
@@ -117,7 +136,10 @@ impl Reranker for RemoteReranker {
                 .map(|(index, score)| RerankScore { index, score })
                 .collect()),
             DaemonResponse::Error { message } => Err(anyhow::anyhow!(message)),
-            other => Err(anyhow::anyhow!("unexpected daemon response: {other:?}")),
+            other => Err(anyhow::anyhow!(
+                "unexpected daemon response: {}",
+                response_kind(&other)
+            )),
         }
     }
 }
@@ -153,7 +175,10 @@ pub async fn remote_providers(
             return None;
         }
         Ok(other) => {
-            tracing::warn!("unexpected daemon meta response: {other:?}; using in-process models");
+            tracing::warn!(
+                "unexpected daemon meta response: {}; using in-process models",
+                response_kind(&other)
+            );
             return None;
         }
         Err(e) => {

@@ -94,23 +94,55 @@ where
     w.flush().await
 }
 
-/// Read one newline-delimited JSON frame. Returns `Ok(None)` on a clean EOF
-/// (peer closed without sending a partial frame).
+/// Hard cap on a single frame. The socket is a local IPC trust boundary; a
+/// buggy or hostile peer that never sends `\n` must not be able to drive the
+/// daemon (or a client) to OOM. 64 MiB is far above any legitimate frame —
+/// requests carry short texts and responses carry per-memory chunk vectors.
+const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
+/// Read one newline-delimited JSON frame, bounded by [`MAX_FRAME_BYTES`].
+///
+/// Returns `Ok(None)` on a clean EOF or an empty/blank frame (peer closed
+/// without sending data). Errors with `InvalidData` if a frame exceeds the
+/// cap or isn't valid JSON.
 pub async fn read_msg<R, T>(r: &mut R) -> std::io::Result<Option<T>>
 where
     R: AsyncBufReadExt + Unpin,
     T: DeserializeOwned,
 {
-    let mut line = String::new();
-    let n = r.read_line(&mut line).await?;
-    if n == 0 {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let chunk = r.fill_buf().await?;
+        if chunk.is_empty() {
+            // EOF. A partial (newline-less) frame here is a truncated peer;
+            // treat it as a clean close rather than feeding junk to serde.
+            return Ok(None);
+        }
+        if let Some(pos) = chunk.iter().position(|&b| b == b'\n') {
+            buf.extend_from_slice(&chunk[..pos]);
+            r.consume(pos + 1);
+            break;
+        }
+        let n = chunk.len();
+        buf.extend_from_slice(chunk);
+        r.consume(n);
+        if buf.len() > MAX_FRAME_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "daemon frame exceeds maximum size",
+            ));
+        }
+    }
+    if buf.len() > MAX_FRAME_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "daemon frame exceeds maximum size",
+        ));
+    }
+    if buf.iter().all(|b| b.is_ascii_whitespace()) {
         return Ok(None);
     }
-    let trimmed = line.trim_end();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let msg = serde_json::from_str(trimmed)
+    let msg = serde_json::from_slice(&buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     Ok(Some(msg))
 }

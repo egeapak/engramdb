@@ -311,9 +311,13 @@ impl ProviderCache {
     /// Resolve providers for `config`, building them at most once per signature.
     ///
     /// The blocking model load runs on a blocking thread; the async mutex is
-    /// held across it so concurrent first callers (e.g. a tool call racing the
-    /// startup warmup) collapse into a single load instead of each loading the
-    /// model.
+    /// held across it so concurrent first callers collapse into a single load
+    /// instead of each loading the model. Note this serializes the *first*
+    /// build of every distinct signature process-wide (a cold load for one
+    /// config briefly blocks a cache lookup for another). That's acceptable
+    /// here: a process almost always uses a single signature, and with the
+    /// daemon enabled (the default) this in-process path is only the fallback.
+    /// Cached lookups are not serialized beyond the brief map lock.
     pub async fn get(
         &self,
         config: &EngramConfig,

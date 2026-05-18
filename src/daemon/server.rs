@@ -77,8 +77,15 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
         let cache = cache.clone();
         let active = Arc::clone(&active);
         let last_activity = Arc::clone(&last_activity);
+        // Count the connection and stamp activity *before* spawning, so the
+        // idle watchdog can't observe `active == 0` in the gap between
+        // `accept` and the task's first instruction and exit the process out
+        // from under a just-accepted client.
+        active.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut t) = last_activity.lock() {
+            *t = Instant::now();
+        }
         tokio::spawn(async move {
-            active.fetch_add(1, Ordering::SeqCst);
             if let Err(e) = handle_conn(stream, &cache, &last_activity).await {
                 tracing::debug!("daemon connection ended: {e}");
             }
@@ -101,14 +108,19 @@ async fn bind_or_yield(socket: &Path) -> anyhow::Result<Option<UnixListener>> {
     if UnixStream::connect(socket).await.is_ok() {
         return Ok(None);
     }
-    // No listener — the socket file is stale. Reclaim it.
-    let _ = std::fs::remove_file(socket);
-    match UnixListener::bind(socket) {
-        Ok(l) => Ok(Some(l)),
-        // Lost the reclaim race to another daemon that bound first.
-        Err(e) if e.kind() == ErrorKind::AddrInUse => Ok(None),
-        Err(e) => Err(e.into()),
+    // No listener — the socket file is stale. Reclaim it atomically: bind a
+    // private per-pid path, then `rename` it over the target. `rename` is
+    // atomic and replaces the entry in-place, so there's never a window where
+    // the target has no listener, and we can't unlink a socket a competing
+    // daemon just bound at the target (we only ever touch our own temp path).
+    let tmp = socket.with_extension(format!("tmp.{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let listener = UnixListener::bind(&tmp)?;
+    if let Err(e) = std::fs::rename(&tmp, socket) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
     }
+    Ok(Some(listener))
 }
 
 async fn handle_conn(
@@ -120,11 +132,14 @@ async fn handle_conn(
     let mut reader = BufReader::new(read_half);
 
     while let Some(req) = read_msg::<_, DaemonRequest>(&mut reader).await? {
+        let resp = dispatch(req, cache).await;
+        write_msg(&mut write_half, &resp).await?;
+        // Stamp *after* serving so idle is measured from when work last
+        // finished, not when it started — a slow inference call shouldn't
+        // make the daemon look idle the moment it returns.
         if let Ok(mut t) = last_activity.lock() {
             *t = Instant::now();
         }
-        let resp = dispatch(req, cache).await;
-        write_msg(&mut write_half, &resp).await?;
     }
     Ok(())
 }
@@ -145,6 +160,9 @@ async fn dispatch(req: DaemonRequest, cache: &ProviderCache) -> DaemonResponse {
     let config = crate::storage::config::load_config(&config_path)
         .await
         .unwrap_or_default();
+    // `req.backend` is the backend the client already resolved; trust it over
+    // this daemon process's own environment so the provider-cache key (and
+    // thus the loaded model) matches what the client expects.
     let providers = cache.get(&config, req.backend).await;
 
     match req.op {

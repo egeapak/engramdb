@@ -20,6 +20,12 @@ pub struct DaemonHandle {
 }
 
 impl DaemonHandle {
+    /// Upper bound on a single request/response round-trip. Generous so a
+    /// cold first call (which triggers the daemon's ~240ms+ model load, plus
+    /// inference over a memory's chunks) never trips it; tight enough that a
+    /// wedged daemon doesn't hang a tool call indefinitely.
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
     /// Get a handle to a live daemon, spawning one if none is reachable.
     ///
     /// Returns `None` if no daemon could be reached or started, or if a
@@ -108,16 +114,26 @@ impl DaemonHandle {
     }
 
     /// Send one request and read its response over a fresh connection.
+    ///
+    /// Bounded by [`Self::REQUEST_TIMEOUT`]: a daemon that accepts the
+    /// connection but then wedges (deadlocked model mutex, stuck ONNX thread)
+    /// must not hang the agent's tool call forever — on timeout this errors so
+    /// the caller can fall back to in-process models. The bound is generous
+    /// enough for a cold first request that triggers the daemon's model load.
     pub async fn request(&self, req: DaemonRequest) -> anyhow::Result<DaemonResponse> {
-        let stream = UnixStream::connect(&self.socket).await?;
-        let (read_half, mut write_half) = stream.into_split();
-        write_msg(&mut write_half, &req).await?;
-        let mut reader = BufReader::new(read_half);
-        match read_msg::<_, DaemonResponse>(&mut reader).await? {
-            Some(resp) => Ok(resp),
-            None => Err(anyhow::anyhow!(
-                "daemon closed connection without a response"
-            )),
-        }
+        tokio::time::timeout(Self::REQUEST_TIMEOUT, async {
+            let stream = UnixStream::connect(&self.socket).await?;
+            let (read_half, mut write_half) = stream.into_split();
+            write_msg(&mut write_half, &req).await?;
+            let mut reader = BufReader::new(read_half);
+            match read_msg::<_, DaemonResponse>(&mut reader).await? {
+                Some(resp) => Ok(resp),
+                None => Err(anyhow::anyhow!(
+                    "daemon closed connection without a response"
+                )),
+            }
+        })
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("daemon request timed out")))
     }
 }
