@@ -559,6 +559,55 @@ impl LanceIndex {
         Ok(ids.into_iter().collect())
     }
 
+    /// Return every embedding chunk for `memory_id`, ordered by `chunk_index`.
+    ///
+    /// Empty when the memory has no embeddings. Used to relocate vectors when
+    /// consolidating a worktree's stray store into the main project so the
+    /// migrated memories stay searchable without re-embedding.
+    pub async fn chunks_for_memory(&self, memory_id: &str) -> Result<Vec<Vec<f32>>> {
+        let table = self.open_chunks_table().await?;
+        let escaped_id = memory_id.replace('\'', "''");
+
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec![
+                "chunk_index".into(),
+                "vector".into(),
+            ]))
+            .only_if(format!("memory_id = '{}'", escaped_id))
+            .execute()
+            .await
+            .context("Failed to query chunks for memory")?;
+
+        let mut rows: Vec<(u32, Vec<f32>)> = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read chunk batch")?;
+            let idx_col = batch
+                .column_by_name("chunk_index")
+                .context("Missing 'chunk_index' column in chunks")?
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .context("Failed to cast 'chunk_index'")?;
+            let vec_col = batch
+                .column_by_name("vector")
+                .context("Missing 'vector' column in chunks")?
+                .as_any()
+                .downcast_ref::<FixedSizeListArray>()
+                .context("Failed to cast 'vector'")?;
+            for i in 0..batch.num_rows() {
+                let values = vec_col.value(i);
+                let floats = values
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .context("Failed to cast chunk vector values")?;
+                rows.push((idx_col.value(i), floats.values().to_vec()));
+            }
+        }
+
+        rows.sort_by_key(|(idx, _)| *idx);
+        Ok(rows.into_iter().map(|(_, v)| v).collect())
+    }
+
     /// Delete all chunks for a given memory_id.
     pub async fn delete_chunks(&self, memory_id: &str) -> Result<()> {
         let table = self.open_chunks_table().await?;
