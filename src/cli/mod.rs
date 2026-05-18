@@ -77,13 +77,15 @@ pub async fn run(cli: Cli) -> Result<()> {
     // stray store, and register the worktree as a sub-project. `init` and
     // `serve` perform their own worktree handling (they own user-facing
     // messaging / run the MCP server); `completions` and `setup` don't touch
-    // a memory store.
+    // a memory store; `daemon` is a process-wide model host that ignores
+    // `dir` entirely (each request carries its own resolved store dir).
     let dir = if matches!(
         cli.command,
         Command::Init { .. }
             | Command::Serve { .. }
             | Command::Completions { .. }
             | Command::Setup { .. }
+            | Command::Daemon { .. }
     ) {
         dir
     } else {
@@ -309,7 +311,8 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Stats {
             all_projects,
             global,
-        } => commands::run_stats(&dir, global, backend, all_projects, &formatter).await,
+            daemon,
+        } => commands::run_stats(&dir, global, daemon, backend, all_projects, &formatter).await,
         Command::Doctor { command, global } => {
             commands::run_doctor(&dir, global, command, &formatter).await
         }
@@ -344,6 +347,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Serve { transport, port } => {
             commands::run_serve(&dir, &transport, port, backend, &formatter).await
         }
+        Command::Daemon { command } => commands::run_daemon_cmd(command, &formatter).await,
         Command::Completions { shell } => {
             commands::run_completions(shell);
             Ok(())

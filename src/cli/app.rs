@@ -26,6 +26,44 @@ pub enum DoctorCommand {
     Store,
 }
 
+/// Subcommands for `engramdb daemon`.
+#[derive(Subcommand)]
+pub enum DaemonCommand {
+    /// Run the daemon event loop (this is what MCP auto-spawns).
+    Run {
+        /// Unix socket to bind. Defaults to the shared per-user path
+        /// (also overridable via ENGRAMDB_DAEMON_SOCKET).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+
+        /// Seconds to stay alive with no active connections before exiting.
+        #[arg(long)]
+        idle_timeout: Option<u64>,
+    },
+    /// Show whether a daemon is running and its request metrics.
+    Status {
+        /// Socket to target. Overrides ENGRAMDB_DAEMON_SOCKET and config.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Ask a running daemon to exit gracefully.
+    Stop {
+        /// Socket to target. Overrides ENGRAMDB_DAEMON_SOCKET and config.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Stop a running daemon (if any) and start a fresh one.
+    Restart {
+        /// Socket to target. Overrides ENGRAMDB_DAEMON_SOCKET and config.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+
+        /// Idle timeout for the newly started daemon.
+        #[arg(long)]
+        idle_timeout: Option<u64>,
+    },
+}
+
 /// Subcommands for `engramdb projects`.
 #[derive(Subcommand)]
 pub enum ProjectsCommand {
@@ -468,6 +506,10 @@ pub enum Command {
         /// Show statistics for the global (cross-project) memory store instead of the current project
         #[arg(long)]
         global: bool,
+
+        /// Show the shared embedding daemon's metrics instead of memory-store stats
+        #[arg(long)]
+        daemon: bool,
     },
 
     /// Check environment and store health
@@ -543,6 +585,12 @@ pub enum Command {
         /// Port for SSE transport
         #[arg(long)]
         port: Option<u16>,
+    },
+
+    /// Run the shared embedding daemon (normally auto-spawned by MCP)
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
     },
 
     /// Generate shell completions
@@ -789,6 +837,120 @@ mod tests {
                 assert_eq!(port, None);
             }
             _ => panic!("Expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_daemon_run_command_parsing() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "daemon",
+            "run",
+            "--socket",
+            "/tmp/x.sock",
+            "--idle-timeout",
+            "42",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Daemon {
+                command:
+                    DaemonCommand::Run {
+                        socket,
+                        idle_timeout,
+                    },
+            } => {
+                assert_eq!(socket, Some(PathBuf::from("/tmp/x.sock")));
+                assert_eq!(idle_timeout, Some(42));
+            }
+            _ => panic!("Expected Daemon Run subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_daemon_status_stop_restart_parsing() {
+        // Bare status.
+        match Cli::try_parse_from(["engramdb", "daemon", "status"])
+            .unwrap()
+            .command
+        {
+            Command::Daemon {
+                command: DaemonCommand::Status { socket },
+            } => assert_eq!(socket, None),
+            _ => panic!("Expected Daemon Status"),
+        }
+        // Status with --socket override.
+        match Cli::try_parse_from(["engramdb", "daemon", "status", "--socket", "/s.sock"])
+            .unwrap()
+            .command
+        {
+            Command::Daemon {
+                command: DaemonCommand::Status { socket },
+            } => assert_eq!(socket, Some(PathBuf::from("/s.sock"))),
+            _ => panic!("Expected Daemon Status --socket"),
+        }
+        // Stop.
+        match Cli::try_parse_from(["engramdb", "daemon", "stop"])
+            .unwrap()
+            .command
+        {
+            Command::Daemon {
+                command: DaemonCommand::Stop { socket },
+            } => assert_eq!(socket, None),
+            _ => panic!("Expected Daemon Stop"),
+        }
+        // Restart with both options.
+        match Cli::try_parse_from([
+            "engramdb",
+            "daemon",
+            "restart",
+            "--socket",
+            "/r.sock",
+            "--idle-timeout",
+            "7",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Daemon {
+                command:
+                    DaemonCommand::Restart {
+                        socket,
+                        idle_timeout,
+                    },
+            } => {
+                assert_eq!(socket, Some(PathBuf::from("/r.sock")));
+                assert_eq!(idle_timeout, Some(7));
+            }
+            _ => panic!("Expected Daemon Restart"),
+        }
+    }
+
+    #[test]
+    fn test_daemon_requires_subcommand() {
+        // `daemon` with no subcommand is an error (it's a subcommand group).
+        assert!(Cli::try_parse_from(["engramdb", "daemon"]).is_err());
+    }
+
+    #[test]
+    fn test_stats_daemon_flag() {
+        let cli = Cli::try_parse_from(["engramdb", "stats", "--daemon"]).unwrap();
+        match cli.command {
+            Command::Stats {
+                daemon,
+                global,
+                all_projects,
+            } => {
+                assert!(daemon);
+                assert!(!global);
+                assert!(!all_projects);
+            }
+            _ => panic!("Expected Stats command"),
+        }
+        // Defaults: --daemon off.
+        match Cli::try_parse_from(["engramdb", "stats"]).unwrap().command {
+            Command::Stats { daemon, .. } => assert!(!daemon),
+            _ => panic!("Expected Stats command"),
         }
     }
 

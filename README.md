@@ -14,6 +14,7 @@ EngramDB gives your AI coding agent a memory layer that persists between convers
 - **Contradiction detection** — NLI-based challenge system flags conflicting information
 - **Memory lifecycle** — criticality scoring, garbage collection, compression of stale memories
 - **MCP server** — full Model Context Protocol integration (stdio and SSE transports)
+- **Shared embedding daemon** — auto-spawned; loads models once machine-wide instead of once per agent session, with graceful in-process fallback
 - **Claude Code plugin** — one-command install with hooks, MCP, and permissions
 - **Offline-first** — all embeddings run locally via ONNX Runtime (or optionally Ollama)
 - **Multiple output formats** — pretty, JSON, or plain text for scripting
@@ -105,10 +106,16 @@ When integrated with Claude Code:
 | `migrate` | Migrate memory files to latest format |
 | `rollback` | Roll back memory files to previous format |
 | `serve` | Start the MCP server |
+| `daemon` | Manage the shared embedding daemon (`run`/`status`/`stop`/`restart`) |
 | `setup` | Set up Claude Code integration |
 | `hook` | Claude Code plugin hook handler |
 | `projects` | Manage registered EngramDB projects |
 | `completions` | Generate shell completions |
+
+`stats --daemon` shows the embedding daemon's cumulative request metrics
+(falling back to the last persisted snapshot when no daemon is running), and
+`doctor` includes a **Daemon** section reporting whether it's enabled and
+running.
 
 Use `engramdb <command> --help` for detailed options.
 
@@ -147,6 +154,11 @@ decay_rate = 0.01  # Daily criticality decay
 
 [gc]
 threshold = 0.1    # Minimum criticality to keep
+
+[daemon]
+enabled = true            # Delegate embedding/NLI/rerank to the shared daemon
+idle_timeout_secs = 900   # Daemon exits after this long with no activity
+# socket_path = "/run/user/1000/engramdb/daemon.sock"  # optional override
 ```
 
 ### Embedding backends
@@ -156,6 +168,44 @@ threshold = 0.1    # Minimum criticality to keep
 - **auto** — tries ONNX first, falls back to Ollama
 
 Models are cached in the system cache directory (`~/Library/Caches/engramdb/models` on macOS).
+
+## Embedding daemon
+
+Each `engramdb serve` (stdio MCP) process is one-per-agent-session, so without
+coordination every concurrent session loads its own copy of the embedding (and
+optional NLI/reranker) models — hundreds of MB and a ~240 ms ONNX init each.
+
+When `[daemon].enabled` is `true` (the default), MCP processes delegate **all**
+model work to a single long-lived **daemon** over a per-user Unix domain
+socket, so each model loads exactly once machine-wide. Storage stays in the MCP
+process (it is already cross-process safe), so only inference is delegated.
+
+- **Auto-spawned on demand.** You never start it manually. When an MCP process
+  needs the daemon and none is reachable, it spawns one (`engramdb daemon run`)
+  detached, waits briefly, and connects. Concurrent spawns are race-safe (only
+  one binds the socket). The daemon exits after `idle_timeout_secs` with no
+  activity; **the next MCP run simply spawns a fresh one**.
+- **Graceful fallback.** If the daemon is disabled or unreachable, the MCP
+  process loads models in-process exactly as before — operations never fail
+  because of the daemon.
+- **Manage it directly** (rarely needed):
+
+  ```bash
+  engramdb daemon status     # running? pid, uptime, request metrics
+  engramdb daemon stop       # graceful shutdown (next MCP run respawns it)
+  engramdb daemon restart    # stop + start a fresh one
+  engramdb daemon run        # run the loop in the foreground (debugging)
+  engramdb stats --daemon    # cumulative request metrics (persisted)
+  ```
+
+  The socket path resolves with precedence `--socket` flag >
+  `ENGRAMDB_DAEMON_SOCKET` env > `[daemon].socket_path` config > the
+  default per-user runtime path. `status`/`stop`/`restart`/`run` all
+  accept `--socket` to target a non-default daemon.
+
+Daemon request metrics are persisted to the global store's LanceDB, so
+`stats --daemon` reports figures even when no daemon is currently running, and
+counts stay cumulative across daemon restarts.
 
 ## Building from Source
 
