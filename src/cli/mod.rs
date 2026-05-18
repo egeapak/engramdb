@@ -77,13 +77,15 @@ pub async fn run(cli: Cli) -> Result<()> {
     // stray store, and register the worktree as a sub-project. `init` and
     // `serve` perform their own worktree handling (they own user-facing
     // messaging / run the MCP server); `completions` and `setup` don't touch
-    // a memory store.
+    // a memory store; `daemon` is a process-wide model host that ignores
+    // `dir` entirely (each request carries its own resolved store dir).
     let dir = if matches!(
         cli.command,
         Command::Init { .. }
             | Command::Serve { .. }
             | Command::Completions { .. }
             | Command::Setup { .. }
+            | Command::Daemon { .. }
     ) {
         dir
     } else {
