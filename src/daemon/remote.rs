@@ -27,6 +27,8 @@ fn response_kind(resp: &DaemonResponse) -> &'static str {
         DaemonResponse::Embedded { .. } => "embedded",
         DaemonResponse::Classified { .. } => "classified",
         DaemonResponse::Reranked { .. } => "reranked",
+        DaemonResponse::Status(_) => "status",
+        DaemonResponse::ShuttingDown => "shutting_down",
         DaemonResponse::Error { .. } => "error",
     }
 }

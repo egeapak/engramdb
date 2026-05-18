@@ -308,6 +308,11 @@ impl ProviderCache {
         Self::default()
     }
 
+    /// Number of distinct provider bundles (config signatures) resident.
+    pub async fn loaded_count(&self) -> usize {
+        self.inner.lock().await.len()
+    }
+
     /// Resolve providers for `config`, building them at most once per signature.
     ///
     /// The blocking model load runs on a blocking thread; the async mutex is

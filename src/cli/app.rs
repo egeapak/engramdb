@@ -26,6 +26,32 @@ pub enum DoctorCommand {
     Store,
 }
 
+/// Subcommands for `engramdb daemon`.
+#[derive(Subcommand)]
+pub enum DaemonCommand {
+    /// Run the daemon event loop (this is what MCP auto-spawns).
+    Run {
+        /// Unix socket to bind. Defaults to the shared per-user path
+        /// (also overridable via ENGRAMDB_DAEMON_SOCKET).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+
+        /// Seconds to stay alive with no active connections before exiting.
+        #[arg(long)]
+        idle_timeout: Option<u64>,
+    },
+    /// Show whether a daemon is running and its request metrics.
+    Status,
+    /// Ask a running daemon to exit gracefully.
+    Stop,
+    /// Stop a running daemon (if any) and start a fresh one.
+    Restart {
+        /// Idle timeout for the newly started daemon.
+        #[arg(long)]
+        idle_timeout: Option<u64>,
+    },
+}
+
 /// Subcommands for `engramdb projects`.
 #[derive(Subcommand)]
 pub enum ProjectsCommand {
@@ -468,6 +494,10 @@ pub enum Command {
         /// Show statistics for the global (cross-project) memory store instead of the current project
         #[arg(long)]
         global: bool,
+
+        /// Show the shared embedding daemon's metrics instead of memory-store stats
+        #[arg(long)]
+        daemon: bool,
     },
 
     /// Check environment and store health
@@ -547,14 +577,8 @@ pub enum Command {
 
     /// Run the shared embedding daemon (normally auto-spawned by MCP)
     Daemon {
-        /// Unix socket to bind. Defaults to the shared per-user path
-        /// (also overridable via ENGRAMDB_DAEMON_SOCKET).
-        #[arg(long)]
-        socket: Option<PathBuf>,
-
-        /// Seconds to stay alive with no active connections before exiting.
-        #[arg(long)]
-        idle_timeout: Option<u64>,
+        #[command(subcommand)]
+        command: DaemonCommand,
     },
 
     /// Generate shell completions

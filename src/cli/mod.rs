@@ -311,7 +311,8 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Stats {
             all_projects,
             global,
-        } => commands::run_stats(&dir, global, backend, all_projects, &formatter).await,
+            daemon,
+        } => commands::run_stats(&dir, global, daemon, backend, all_projects, &formatter).await,
         Command::Doctor { command, global } => {
             commands::run_doctor(&dir, global, command, &formatter).await
         }
@@ -346,17 +347,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Serve { transport, port } => {
             commands::run_serve(&dir, &transport, port, backend, &formatter).await
         }
-        Command::Daemon {
-            socket,
-            idle_timeout,
-        } => {
-            let socket = socket.unwrap_or_else(crate::daemon::socket_path);
-            let idle = std::time::Duration::from_secs(
-                idle_timeout
-                    .unwrap_or_else(|| crate::types::DaemonConfig::default().idle_timeout_secs),
-            );
-            crate::daemon::run_daemon(socket, idle).await
-        }
+        Command::Daemon { command } => commands::run_daemon_cmd(command, &formatter).await,
         Command::Completions { shell } => {
             commands::run_completions(shell);
             Ok(())

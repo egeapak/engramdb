@@ -49,6 +49,11 @@ pub enum DaemonOp {
         query: String,
         documents: Vec<String>,
     },
+    /// Report daemon status + cumulative request metrics. Loads no models.
+    Status,
+    /// Ask the daemon to exit. It acks, finishes flushing the response, then
+    /// terminates (a fresh one is auto-spawned by the next MCP run).
+    Shutdown,
 }
 
 /// A response frame.
@@ -68,9 +73,34 @@ pub enum DaemonResponse {
     Classified { results: Vec<NliWire> },
     /// Reply to [`DaemonOp::Rerank`]: `(original_index, raw_score)` pairs.
     Reranked { scores: Vec<(usize, f32)> },
+    /// Reply to [`DaemonOp::Status`].
+    Status(DaemonStatus),
+    /// Reply to [`DaemonOp::Shutdown`] — sent immediately before the daemon
+    /// exits.
+    ShuttingDown,
     /// The daemon could not satisfy the request (e.g. model unavailable). The
     /// caller falls back to in-process handling.
     Error { message: String },
+}
+
+/// Daemon status + cumulative request metrics. `requests*` are cumulative
+/// across daemon restarts (persisted to the global LanceDB store).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonStatus {
+    pub version: String,
+    pub pid: u32,
+    /// Seconds since *this* daemon process started.
+    pub uptime_secs: u64,
+    /// Seconds since the daemon last served a request.
+    pub idle_secs: u64,
+    /// Distinct model bundles (config signatures) currently resident.
+    pub bundles_loaded: usize,
+    pub requests_embed: u64,
+    pub requests_classify: u64,
+    pub requests_rerank: u64,
+    pub requests_meta: u64,
+    pub requests_status: u64,
+    pub requests_total: u64,
 }
 
 /// NLI class probabilities. The dominant label is recomputed client-side via

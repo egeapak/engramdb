@@ -9,10 +9,37 @@ use std::time::{Duration, Instant};
 use tokio::io::BufReader;
 use tokio::net::{UnixListener, UnixStream};
 
+use super::metrics::{self, Counters};
 use super::protocol::{
-    read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, NliWire, PROTOCOL_VERSION,
+    read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, DaemonStatus, NliWire,
+    PROTOCOL_VERSION,
 };
 use crate::ops::ProviderCache;
+
+/// Snapshot is persisted to the global store at least this often while the
+/// daemon runs (plus on idle-exit and on graceful shutdown), so `stats
+/// --daemon` stays reasonably fresh even without a clean shutdown.
+const PERSIST_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Shared per-process daemon state.
+struct Ctx {
+    cache: ProviderCache,
+    counters: Arc<Counters>,
+    start: Instant,
+    pid: u32,
+    last_activity: Mutex<Instant>,
+}
+
+impl Ctx {
+    async fn persist(&self) {
+        metrics::persist(
+            self.pid,
+            self.start.elapsed().as_secs(),
+            self.counters.snapshot(),
+        )
+        .await;
+    }
+}
 
 /// Run the embedding daemon until idle-timeout or termination.
 ///
@@ -36,16 +63,39 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
     };
     tracing::info!("engramdb daemon listening on {socket:?}");
 
-    let cache = ProviderCache::new();
+    // Seed counters from the last persisted snapshot so request totals are
+    // cumulative across daemon restarts.
+    let base = metrics::load_latest()
+        .await
+        .map(|p| p.snapshot)
+        .unwrap_or_default();
+    let ctx = Arc::new(Ctx {
+        cache: ProviderCache::new(),
+        counters: Arc::new(Counters::seeded(base)),
+        start: Instant::now(),
+        pid: std::process::id(),
+        last_activity: Mutex::new(Instant::now()),
+    });
     let active = Arc::new(AtomicUsize::new(0));
-    let last_activity = Arc::new(Mutex::new(Instant::now()));
 
-    // Idle watchdog: exit the process (leaving the socket for the next
-    // daemon to reclaim) once nothing has used us for `idle_timeout` and no
-    // connection is in flight.
+    // Periodic persistence so an unclean exit (kill -9, crash) still leaves a
+    // recent snapshot for `stats --daemon`.
     {
+        let ctx = Arc::clone(&ctx);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(PERSIST_INTERVAL).await;
+                ctx.persist().await;
+            }
+        });
+    }
+
+    // Idle watchdog: persist a final snapshot, then exit the process (leaving
+    // the socket for the next daemon to reclaim) once nothing has used us for
+    // `idle_timeout` and no connection is in flight.
+    {
+        let ctx = Arc::clone(&ctx);
         let active = Arc::clone(&active);
-        let last_activity = Arc::clone(&last_activity);
         let tick = idle_timeout
             .min(Duration::from_secs(30))
             .max(Duration::from_secs(1));
@@ -53,12 +103,14 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
             loop {
                 tokio::time::sleep(tick).await;
                 if active.load(Ordering::SeqCst) == 0 {
-                    let idle_for = last_activity
+                    let idle_for = ctx
+                        .last_activity
                         .lock()
                         .map(|t| t.elapsed())
                         .unwrap_or_default();
                     if idle_for >= idle_timeout {
                         tracing::info!("engramdb daemon idle for {idle_for:?}; exiting");
+                        ctx.persist().await;
                         std::process::exit(0);
                     }
                 }
@@ -74,19 +126,18 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
                 continue;
             }
         };
-        let cache = cache.clone();
+        let ctx = Arc::clone(&ctx);
         let active = Arc::clone(&active);
-        let last_activity = Arc::clone(&last_activity);
         // Count the connection and stamp activity *before* spawning, so the
         // idle watchdog can't observe `active == 0` in the gap between
         // `accept` and the task's first instruction and exit the process out
         // from under a just-accepted client.
         active.fetch_add(1, Ordering::SeqCst);
-        if let Ok(mut t) = last_activity.lock() {
+        if let Ok(mut t) = ctx.last_activity.lock() {
             *t = Instant::now();
         }
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(stream, &cache, &last_activity).await {
+            if let Err(e) = handle_conn(stream, &ctx).await {
                 tracing::debug!("daemon connection ended: {e}");
             }
             active.fetch_sub(1, Ordering::SeqCst);
@@ -123,32 +174,62 @@ async fn bind_or_yield(socket: &Path) -> anyhow::Result<Option<UnixListener>> {
     Ok(Some(listener))
 }
 
-async fn handle_conn(
-    stream: UnixStream,
-    cache: &ProviderCache,
-    last_activity: &Mutex<Instant>,
-) -> std::io::Result<()> {
+async fn handle_conn(stream: UnixStream, ctx: &Ctx) -> std::io::Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
     while let Some(req) = read_msg::<_, DaemonRequest>(&mut reader).await? {
-        let resp = dispatch(req, cache).await;
+        // Shutdown is terminal: ack, flush, persist, then exit the process.
+        if let DaemonOp::Shutdown = req.op {
+            write_msg(&mut write_half, &DaemonResponse::ShuttingDown).await?;
+            tracing::info!("engramdb daemon shutting down on request");
+            ctx.persist().await;
+            std::process::exit(0);
+        }
+
+        let resp = dispatch(req, ctx).await;
         write_msg(&mut write_half, &resp).await?;
         // Stamp *after* serving so idle is measured from when work last
         // finished, not when it started — a slow inference call shouldn't
         // make the daemon look idle the moment it returns.
-        if let Ok(mut t) = last_activity.lock() {
+        if let Ok(mut t) = ctx.last_activity.lock() {
             *t = Instant::now();
         }
     }
     Ok(())
 }
 
-async fn dispatch(req: DaemonRequest, cache: &ProviderCache) -> DaemonResponse {
-    if let DaemonOp::Ping = req.op {
-        return DaemonResponse::Pong {
-            version: PROTOCOL_VERSION.to_string(),
-        };
+async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
+    match req.op {
+        DaemonOp::Shutdown => unreachable!("handled in handle_conn"),
+        DaemonOp::Ping => {
+            return DaemonResponse::Pong {
+                version: PROTOCOL_VERSION.to_string(),
+            }
+        }
+        DaemonOp::Status => {
+            ctx.counters.incr_status();
+            let s = ctx.counters.snapshot();
+            let idle_secs = ctx
+                .last_activity
+                .lock()
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0);
+            return DaemonResponse::Status(DaemonStatus {
+                version: PROTOCOL_VERSION.to_string(),
+                pid: ctx.pid,
+                uptime_secs: ctx.start.elapsed().as_secs(),
+                idle_secs,
+                bundles_loaded: ctx.cache.loaded_count().await,
+                requests_embed: s.embed,
+                requests_classify: s.classify,
+                requests_rerank: s.rerank,
+                requests_meta: s.meta,
+                requests_status: s.status,
+                requests_total: s.total(),
+            });
+        }
+        _ => {}
     }
 
     if req.dir.is_empty() {
@@ -163,71 +244,85 @@ async fn dispatch(req: DaemonRequest, cache: &ProviderCache) -> DaemonResponse {
     // `req.backend` is the backend the client already resolved; trust it over
     // this daemon process's own environment so the provider-cache key (and
     // thus the loaded model) matches what the client expects.
-    let providers = cache.get(&config, req.backend).await;
+    let providers = ctx.cache.get(&config, req.backend).await;
 
     match req.op {
-        DaemonOp::Ping => unreachable!("handled above"),
-        DaemonOp::Meta => match providers.embedding {
-            Some(p) => DaemonResponse::Meta {
-                dimensions: p.dimensions(),
-                max_tokens: p.max_tokens(),
-            },
-            None => DaemonResponse::Error {
-                message: "embedding model unavailable".to_string(),
-            },
-        },
-        DaemonOp::Embed { texts } => match providers.embedding {
-            Some(p) => {
-                let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-                match p.embed_batch(&refs).await {
-                    Ok(vectors) => DaemonResponse::Embedded { vectors },
-                    Err(e) => DaemonResponse::Error {
-                        message: format!("embed failed: {e}"),
-                    },
-                }
-            }
-            None => DaemonResponse::Error {
-                message: "embedding model unavailable".to_string(),
-            },
-        },
-        DaemonOp::Classify { pairs } => match providers.nli {
-            Some(n) => {
-                let refs: Vec<(&str, &str)> = pairs
-                    .iter()
-                    .map(|(a, b)| (a.as_str(), b.as_str()))
-                    .collect();
-                match n.classify_batch(&refs).await {
-                    Ok(results) => DaemonResponse::Classified {
-                        results: results
-                            .into_iter()
-                            .map(|r| NliWire {
-                                entailment: r.entailment,
-                                neutral: r.neutral,
-                                contradiction: r.contradiction,
-                            })
-                            .collect(),
-                    },
-                    Err(e) => DaemonResponse::Error {
-                        message: format!("classify failed: {e}"),
-                    },
-                }
-            }
-            None => DaemonResponse::Error {
-                message: "nli model unavailable".to_string(),
-            },
-        },
-        DaemonOp::Rerank { query, documents } => match providers.reranker {
-            Some(r) => match r.rerank(&query, &documents).await {
-                Ok(scores) => DaemonResponse::Reranked {
-                    scores: scores.into_iter().map(|s| (s.index, s.score)).collect(),
+        DaemonOp::Ping | DaemonOp::Status | DaemonOp::Shutdown => {
+            unreachable!("handled above")
+        }
+        DaemonOp::Meta => {
+            ctx.counters.incr_meta();
+            match providers.embedding {
+                Some(p) => DaemonResponse::Meta {
+                    dimensions: p.dimensions(),
+                    max_tokens: p.max_tokens(),
                 },
-                Err(e) => DaemonResponse::Error {
-                    message: format!("rerank failed: {e}"),
+                None => DaemonResponse::Error {
+                    message: "embedding model unavailable".to_string(),
                 },
-            },
-            None => DaemonResponse::Error {
-                message: "reranker model unavailable".to_string(),
-            },
-        },
+            }
+        }
+        DaemonOp::Embed { texts } => {
+            ctx.counters.incr_embed();
+            match providers.embedding {
+                Some(p) => {
+                    let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+                    match p.embed_batch(&refs).await {
+                        Ok(vectors) => DaemonResponse::Embedded { vectors },
+                        Err(e) => DaemonResponse::Error {
+                            message: format!("embed failed: {e}"),
+                        },
+                    }
+                }
+                None => DaemonResponse::Error {
+                    message: "embedding model unavailable".to_string(),
+                },
+            }
+        }
+        DaemonOp::Classify { pairs } => {
+            ctx.counters.incr_classify();
+            match providers.nli {
+                Some(n) => {
+                    let refs: Vec<(&str, &str)> = pairs
+                        .iter()
+                        .map(|(a, b)| (a.as_str(), b.as_str()))
+                        .collect();
+                    match n.classify_batch(&refs).await {
+                        Ok(results) => DaemonResponse::Classified {
+                            results: results
+                                .into_iter()
+                                .map(|r| NliWire {
+                                    entailment: r.entailment,
+                                    neutral: r.neutral,
+                                    contradiction: r.contradiction,
+                                })
+                                .collect(),
+                        },
+                        Err(e) => DaemonResponse::Error {
+                            message: format!("classify failed: {e}"),
+                        },
+                    }
+                }
+                None => DaemonResponse::Error {
+                    message: "nli model unavailable".to_string(),
+                },
+            }
+        }
+        DaemonOp::Rerank { query, documents } => {
+            ctx.counters.incr_rerank();
+            match providers.reranker {
+                Some(r) => match r.rerank(&query, &documents).await {
+                    Ok(scores) => DaemonResponse::Reranked {
+                        scores: scores.into_iter().map(|s| (s.index, s.score)).collect(),
+                    },
+                    Err(e) => DaemonResponse::Error {
+                        message: format!("rerank failed: {e}"),
+                    },
+                },
+                None => DaemonResponse::Error {
+                    message: "reranker model unavailable".to_string(),
+                },
+            }
+        }
     }
 }

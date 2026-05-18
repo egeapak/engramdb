@@ -26,10 +26,15 @@ use std::path::Path;
 pub async fn run_stats(
     dir: &Path,
     global: bool,
+    daemon: bool,
     embedding_backend: Option<EmbeddingBackend>,
     all_projects: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
+    if daemon {
+        return run_daemon_stats(formatter).await;
+    }
+
     let store = if global {
         MemoryStore::open_global().await?
     } else {
@@ -109,6 +114,52 @@ pub async fn run_stats(
         }
     }
 
+    Ok(())
+}
+
+/// Show the shared embedding daemon's cumulative request metrics.
+///
+/// Prefers a live query to the running daemon (authoritative, includes
+/// in-flight counts); falls back to the last snapshot persisted to the global
+/// LanceDB store when no daemon is currently running.
+async fn run_daemon_stats(formatter: &OutputFormatter) -> Result<()> {
+    let socket = crate::daemon::socket_path();
+    if let Some(s) = crate::daemon::query_status(&socket).await? {
+        formatter.print_success(&format!("Embedding daemon: running (pid {})", s.pid));
+        println!("  socket:        {}", socket.display());
+        println!("  protocol:      v{}", s.version);
+        println!("  uptime:        {}s", s.uptime_secs);
+        println!("  idle:          {}s", s.idle_secs);
+        println!("  model bundles: {}", s.bundles_loaded);
+        println!("  requests (cumulative across restarts):");
+        println!("    embed:       {}", s.requests_embed);
+        println!("    classify:    {}", s.requests_classify);
+        println!("    rerank:      {}", s.requests_rerank);
+        println!("    meta:        {}", s.requests_meta);
+        println!("    status:      {}", s.requests_status);
+        println!("    total:       {}", s.requests_total);
+        return Ok(());
+    }
+
+    match crate::daemon::metrics::load_latest().await {
+        Some(p) => {
+            formatter.print_message("Embedding daemon: not running (last persisted snapshot)");
+            let s = p.snapshot;
+            println!("  requests (cumulative across restarts):");
+            println!("    embed:       {}", s.embed);
+            println!("    classify:    {}", s.classify);
+            println!("    rerank:      {}", s.rerank);
+            println!("    meta:        {}", s.meta);
+            println!("    status:      {}", s.status);
+            println!("    total:       {}", s.total());
+        }
+        None => {
+            formatter.print_message("Embedding daemon: not running and no metrics persisted yet.");
+            formatter.print_message(
+                "It is auto-spawned on demand by the next MCP run when [daemon] is enabled.",
+            );
+        }
+    }
     Ok(())
 }
 

@@ -1,14 +1,63 @@
 //! Client handle: connect to the daemon, auto-spawning it if absent.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::BufReader;
 use tokio::net::UnixStream;
 
-use super::protocol::{read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse};
+use super::protocol::{read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, DaemonStatus};
 use super::PROTOCOL_VERSION;
+
+/// One-shot request over a fresh connection to a socket, without spawning.
+/// Used by the `engramdb daemon` CLI subcommands and `doctor`/`stats`, which
+/// only ever talk to an already-running daemon (never auto-spawn).
+async fn oneshot(socket: &Path, op: DaemonOp) -> anyhow::Result<DaemonResponse> {
+    let fut = async {
+        let stream = UnixStream::connect(socket).await?;
+        let (read_half, mut write_half) = stream.into_split();
+        write_msg(
+            &mut write_half,
+            &DaemonRequest {
+                dir: String::new(),
+                backend: None,
+                op,
+            },
+        )
+        .await?;
+        let mut reader = BufReader::new(read_half);
+        match read_msg::<_, DaemonResponse>(&mut reader).await? {
+            Some(resp) => Ok(resp),
+            None => Err(anyhow::anyhow!(
+                "daemon closed connection without a response"
+            )),
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), fut)
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("daemon request timed out")))
+}
+
+/// Query a running daemon's status. `Ok(None)` means no daemon is listening
+/// on `socket` (not an error — the daemon is auto-spawned on demand).
+pub async fn query_status(socket: &Path) -> anyhow::Result<Option<DaemonStatus>> {
+    match oneshot(socket, DaemonOp::Status).await {
+        Ok(DaemonResponse::Status(s)) => Ok(Some(s)),
+        Ok(other) => Err(anyhow::anyhow!("unexpected daemon response: {other:?}")),
+        // Connection refused / no socket ⇒ not running.
+        Err(_) => Ok(None),
+    }
+}
+
+/// Ask a running daemon to exit. `Ok(false)` means none was running.
+pub async fn request_shutdown(socket: &Path) -> anyhow::Result<bool> {
+    match oneshot(socket, DaemonOp::Shutdown).await {
+        Ok(DaemonResponse::ShuttingDown) => Ok(true),
+        Ok(other) => Err(anyhow::anyhow!("unexpected daemon response: {other:?}")),
+        Err(_) => Ok(false),
+    }
+}
 
 /// A connection factory for the shared daemon.
 ///
@@ -92,6 +141,7 @@ impl DaemonHandle {
         };
         let mut cmd = std::process::Command::new(exe);
         cmd.arg("daemon")
+            .arg("run")
             .arg("--socket")
             .arg(socket)
             .arg("--idle-timeout")
