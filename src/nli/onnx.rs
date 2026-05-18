@@ -50,7 +50,8 @@ impl OnnxNliProvider {
     pub fn new(model_repo: &str) -> Result<Self> {
         let (model_path, tokenizer_path) = download_model_files(model_repo)?;
 
-        let session = Session::builder()?
+        let builder = crate::onnx_ep::apply_execution_providers(Session::builder()?)?;
+        let session = builder
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(1)?
             .commit_from_file(&model_path)

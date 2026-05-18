@@ -17,6 +17,10 @@ path = "src/lib.rs"
 [features]
 default = ["ollama"]
 ollama = ["reqwest"]
+# Apple Core ML (GPU / Neural Engine) acceleration for all ONNX models.
+# Enable on macOS only: `cargo build --features coreml`. Off by default so
+# the Linux/CI build and prebuilt-binary download are unchanged.
+coreml = ["ort/coreml"]
 
 [dependencies]
 # MCP Server

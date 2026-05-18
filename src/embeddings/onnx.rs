@@ -57,7 +57,11 @@ impl OnnxProvider {
         let cache_dir =
             crate::storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        let options = InitOptions::new(spec.fastembed_model).with_cache_dir(cache_dir);
+        let mut options = InitOptions::new(spec.fastembed_model).with_cache_dir(cache_dir);
+        let eps = crate::onnx_ep::execution_providers();
+        if !eps.is_empty() {
+            options = options.with_execution_providers(eps);
+        }
         let model =
             TextEmbedding::try_new(options).context("Failed to initialize embedding model")?;
 

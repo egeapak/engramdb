@@ -2,6 +2,7 @@ pub mod cli;
 pub mod embeddings;
 pub mod mcp;
 pub mod nli;
+pub mod onnx_ep;
 pub mod ops;
 pub mod retrieval;
 pub mod scope;

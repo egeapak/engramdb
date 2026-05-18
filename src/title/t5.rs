@@ -56,13 +56,13 @@ impl T5TitleGenerator {
     pub fn with_repo(repo: &str) -> Result<Self> {
         let (encoder_path, decoder_path, tokenizer_path) = download_model_files(repo)?;
 
-        let encoder = Session::builder()?
+        let encoder = crate::onnx_ep::apply_execution_providers(Session::builder()?)?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(1)?
             .commit_from_file(&encoder_path)
             .context("Failed to load T5 encoder ONNX model")?;
 
-        let decoder = Session::builder()?
+        let decoder = crate::onnx_ep::apply_execution_providers(Session::builder()?)?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(1)?
             .commit_from_file(&decoder_path)

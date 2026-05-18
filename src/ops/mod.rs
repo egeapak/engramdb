@@ -206,9 +206,13 @@ pub fn resolve_engine_providers(
             .unwrap_or_else(|_| PathBuf::from(".cache/engramdb/models"));
 
         let model = resolve_reranker_model(&config.rerank.model);
-        let options = RerankInitOptions::new(model)
+        let mut options = RerankInitOptions::new(model)
             .with_cache_dir(cache_dir)
             .with_show_download_progress(false);
+        let eps = crate::onnx_ep::execution_providers();
+        if !eps.is_empty() {
+            options = options.with_execution_providers(eps);
+        }
 
         match TextRerank::try_new(options) {
             Ok(reranker) => providers.reranker = Some(Arc::new(Mutex::new(reranker))),
