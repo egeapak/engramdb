@@ -123,7 +123,15 @@ pub async fn run_stats(
 /// in-flight counts); falls back to the last snapshot persisted to the global
 /// LanceDB store when no daemon is currently running.
 async fn run_daemon_stats(formatter: &OutputFormatter) -> Result<()> {
-    let socket = crate::daemon::socket_path();
+    let cfg = crate::storage::config::load_config(
+        &std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(".engramdb")
+            .join("config.toml"),
+    )
+    .await
+    .unwrap_or_default();
+    let socket = crate::daemon::resolve_socket(None, &cfg.daemon);
     if let Some(s) = crate::daemon::query_status(&socket).await? {
         formatter.print_success(&format!("Embedding daemon: running (pid {})", s.pid));
         println!("  socket:        {}", socket.display());

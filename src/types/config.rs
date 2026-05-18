@@ -572,6 +572,13 @@ pub struct DaemonConfig {
     /// idle model memory resident.
     #[serde(default = "default_daemon_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+
+    /// Override the Unix socket path. When unset the per-user default is
+    /// used. Resolution precedence (highest first): an explicit `--socket`
+    /// CLI flag, the `ENGRAMDB_DAEMON_SOCKET` env var, this config value,
+    /// then the default per-user runtime path.
+    #[serde(default)]
+    pub socket_path: Option<String>,
 }
 
 fn default_daemon_enabled() -> bool {
@@ -587,6 +594,7 @@ impl Default for DaemonConfig {
         Self {
             enabled: default_daemon_enabled(),
             idle_timeout_secs: default_daemon_idle_timeout_secs(),
+            socket_path: None,
         }
     }
 }
@@ -1329,5 +1337,46 @@ weight = 0.7
         let config: EngramConfig = toml::from_str("").unwrap();
         assert_eq!(config.retrieval.scoring.depth_decay_base, 0.82);
         assert_eq!(config.retrieval.scoring.depth_decay_floor, 0.3);
+    }
+
+    #[test]
+    fn test_daemon_config_defaults() {
+        let d = DaemonConfig::default();
+        assert!(d.enabled);
+        assert_eq!(d.idle_timeout_secs, 900);
+        assert_eq!(d.socket_path, None);
+        // Absent `[daemon]` section ⇒ defaults (enabled by default).
+        let cfg: EngramConfig = toml::from_str("").unwrap();
+        assert!(cfg.daemon.enabled);
+        assert_eq!(cfg.daemon.idle_timeout_secs, 900);
+        assert_eq!(cfg.daemon.socket_path, None);
+    }
+
+    #[test]
+    fn test_daemon_config_validate() {
+        let mut d = DaemonConfig::default();
+        assert!(d.validate().is_ok());
+        d.idle_timeout_secs = 0;
+        assert!(d.validate().is_err());
+        // Surfaced through the top-level config validate too.
+        let mut cfg = EngramConfig::default();
+        cfg.daemon.idle_timeout_secs = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_daemon_config_partial_toml() {
+        // Only one field set; the rest fall back to defaults.
+        let cfg: EngramConfig = toml::from_str("[daemon]\nenabled = false\n").unwrap();
+        assert!(!cfg.daemon.enabled);
+        assert_eq!(cfg.daemon.idle_timeout_secs, 900);
+        assert_eq!(cfg.daemon.socket_path, None);
+
+        let cfg: EngramConfig =
+            toml::from_str("[daemon]\nidle_timeout_secs = 30\nsocket_path = \"/run/x.sock\"\n")
+                .unwrap();
+        assert!(cfg.daemon.enabled);
+        assert_eq!(cfg.daemon.idle_timeout_secs, 30);
+        assert_eq!(cfg.daemon.socket_path.as_deref(), Some("/run/x.sock"));
     }
 }

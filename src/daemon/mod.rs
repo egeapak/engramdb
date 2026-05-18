@@ -42,14 +42,41 @@ fn runtime_base() -> PathBuf {
         .join("engramdb")
 }
 
-/// Path to the daemon's Unix domain socket.
+/// The default per-user socket path (no overrides applied).
+fn default_socket_path() -> PathBuf {
+    runtime_base().join("daemon.sock")
+}
+
+/// Path to the daemon's Unix domain socket, applying env + default only.
 ///
 /// Overridable via `ENGRAMDB_DAEMON_SOCKET` so tests (and unusual setups where
 /// the default path would exceed the ~104-byte `sun_path` limit) can relocate
-/// it. Clients and the daemon resolve this identically.
+/// it. Prefer [`resolve_socket`] where a config is available.
 pub fn socket_path() -> PathBuf {
     if let Some(p) = std::env::var_os("ENGRAMDB_DAEMON_SOCKET") {
         return PathBuf::from(p);
     }
-    runtime_base().join("daemon.sock")
+    default_socket_path()
+}
+
+/// Resolve the daemon socket from the full override chain. Precedence,
+/// highest first:
+/// 1. an explicit `--socket` CLI flag (`cli`),
+/// 2. the `ENGRAMDB_DAEMON_SOCKET` env var,
+/// 3. `[daemon].socket_path` in config (`cfg`),
+/// 4. the default per-user runtime path.
+///
+/// Clients, the MCP server, `doctor`, `stats`, and the daemon itself all
+/// resolve identically so they agree on which socket a daemon lives at.
+pub fn resolve_socket(cli: Option<&std::path::Path>, cfg: &crate::types::DaemonConfig) -> PathBuf {
+    if let Some(p) = cli {
+        return p.to_path_buf();
+    }
+    if let Some(p) = std::env::var_os("ENGRAMDB_DAEMON_SOCKET") {
+        return PathBuf::from(p);
+    }
+    if let Some(p) = cfg.socket_path.as_deref().filter(|s| !s.is_empty()) {
+        return PathBuf::from(p);
+    }
+    default_socket_path()
 }

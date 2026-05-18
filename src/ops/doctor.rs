@@ -396,7 +396,7 @@ async fn check_daemon(dir: &Path) -> EnvironmentCheck {
     let config = crate::storage::config::load_config(&dir.join(".engramdb").join("config.toml"))
         .await
         .unwrap_or_default();
-    let socket = crate::daemon::socket_path();
+    let socket = crate::daemon::resolve_socket(None, &config.daemon);
     let mut details = vec![
         format!("socket: {}", socket.display()),
         format!(

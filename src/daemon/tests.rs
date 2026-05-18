@@ -126,6 +126,432 @@ async fn remote_embedding_end_to_end() {
     assert_eq!(v.len(), emb.dimensions());
 }
 
+// ---------------------------------------------------------------------------
+// Protocol: new Status / Shutdown frames + chunked reads + frame cap
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn status_and_shutdown_frames_roundtrip() {
+    use super::protocol::DaemonStatus;
+    let (a, b) = tokio::io::duplex(4096);
+    let (ar, mut aw) = tokio::io::split(a);
+    let (br, mut bw) = tokio::io::split(b);
+    let mut ar = BufReader::new(ar);
+    let mut br = BufReader::new(br);
+
+    // DaemonOp::Status / Shutdown survive a request round-trip.
+    for op in [DaemonOp::Status, DaemonOp::Shutdown] {
+        let want = format!("{op:?}");
+        write_msg(
+            &mut aw,
+            &DaemonRequest {
+                dir: String::new(),
+                backend: None,
+                op,
+            },
+        )
+        .await
+        .unwrap();
+        let got: DaemonRequest = read_msg(&mut br).await.unwrap().unwrap();
+        assert_eq!(format!("{:?}", got.op), want);
+    }
+
+    // DaemonResponse::Status(_) (internally-tagged struct newtype) and the
+    // unit ShuttingDown variant survive a response round-trip.
+    let status = DaemonStatus {
+        version: super::PROTOCOL_VERSION.to_string(),
+        pid: 4242,
+        uptime_secs: 12,
+        idle_secs: 3,
+        bundles_loaded: 2,
+        requests_embed: 5,
+        requests_classify: 1,
+        requests_rerank: 0,
+        requests_meta: 7,
+        requests_status: 9,
+        requests_total: 22,
+    };
+    write_msg(&mut bw, &DaemonResponse::Status(status.clone()))
+        .await
+        .unwrap();
+    match read_msg::<_, DaemonResponse>(&mut ar)
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        DaemonResponse::Status(s) => {
+            assert_eq!(s.pid, 4242);
+            assert_eq!(s.requests_total, 22);
+            assert_eq!(s.version, super::PROTOCOL_VERSION);
+        }
+        other => panic!("expected Status, got {other:?}"),
+    }
+    write_msg(&mut bw, &DaemonResponse::ShuttingDown)
+        .await
+        .unwrap();
+    assert!(matches!(
+        read_msg::<_, DaemonResponse>(&mut ar)
+            .await
+            .unwrap()
+            .unwrap(),
+        DaemonResponse::ShuttingDown
+    ));
+}
+
+/// A frame far larger than the BufReader's internal buffer must reassemble
+/// correctly across many `fill_buf`/`consume` iterations (the bounded reader
+/// rewrite).
+#[tokio::test]
+async fn large_frame_reassembles_across_buffer_boundaries() {
+    let (a, b) = tokio::io::duplex(8 * 1024);
+    let (ar, _aw) = tokio::io::split(a);
+    let (_br, mut bw) = tokio::io::split(b);
+    let mut ar = BufReader::with_capacity(8 * 1024, ar);
+
+    // ~ 20k floats ⇒ hundreds of KB of JSON, dwarfing the 8 KiB buffer.
+    let big = DaemonResponse::Embedded {
+        vectors: (0..2000).map(|i| vec![i as f32; 10]).collect(),
+    };
+    let expected_len = 2000;
+    tokio::spawn(async move {
+        write_msg(&mut bw, &big).await.unwrap();
+    });
+    match read_msg::<_, DaemonResponse>(&mut ar)
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        DaemonResponse::Embedded { vectors } => assert_eq!(vectors.len(), expected_len),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn blank_frame_is_treated_as_eof() {
+    let (a, b) = tokio::io::duplex(64);
+    let (ar, _aw) = tokio::io::split(a);
+    let (_br, mut bw) = tokio::io::split(b);
+    tokio::io::AsyncWriteExt::write_all(&mut bw, b"   \n")
+        .await
+        .unwrap();
+    let mut ar = BufReader::new(ar);
+    let got: Option<DaemonRequest> = read_msg(&mut ar).await.unwrap();
+    assert!(got.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Daemon: Status / Shutdown end-to-end + startup race
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn daemon_status_reports_metrics() {
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("d.sock");
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+
+    // First Status: status counter is incremented for this very request.
+    let first = wait_request(
+        &socket,
+        DaemonRequest {
+            dir: String::new(),
+            backend: None,
+            op: DaemonOp::Status,
+        },
+    )
+    .await;
+    let s1 = match first {
+        DaemonResponse::Status(s) => s,
+        other => panic!("expected Status, got {other:?}"),
+    };
+    assert_eq!(s1.version, super::PROTOCOL_VERSION);
+    assert!(s1.pid > 0);
+    assert!(s1.requests_status >= 1);
+
+    // A second Status shows the counter advancing.
+    let s2 = match wait_request(
+        &socket,
+        DaemonRequest {
+            dir: String::new(),
+            backend: None,
+            op: DaemonOp::Status,
+        },
+    )
+    .await
+    {
+        DaemonResponse::Status(s) => s,
+        other => panic!("expected Status, got {other:?}"),
+    };
+    assert!(s2.requests_status > s1.requests_status);
+}
+
+#[tokio::test]
+async fn client_helpers_without_daemon() {
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("absent.sock");
+    assert!(super::query_status(&socket).await.unwrap().is_none());
+    assert!(!super::request_shutdown(&socket).await.unwrap());
+}
+
+/// `request_shutdown` maps a `ShuttingDown` ack to `Ok(true)`.
+///
+/// Note: we deliberately do NOT drive a *real* in-process daemon here — its
+/// `Shutdown` handler calls `std::process::exit`, which would terminate the
+/// test runner. A stub that returns `ShuttingDown` exercises the client
+/// mapping safely; the real daemon's exit-on-shutdown is covered by the
+/// `daemon` CLI in practice.
+#[tokio::test]
+async fn request_shutdown_maps_ack() {
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("stub.sock");
+    spawn_stub(socket.clone(), |op| match op {
+        DaemonOp::Shutdown => DaemonResponse::ShuttingDown,
+        _ => DaemonResponse::Error {
+            message: "unexpected".to_string(),
+        },
+    });
+    for _ in 0..100 {
+        if UnixStream::connect(&socket).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(super::request_shutdown(&socket).await.unwrap());
+}
+
+/// A second `run_daemon` on a socket a live daemon owns yields immediately
+/// (returns `Ok(())`) instead of binding.
+#[tokio::test]
+async fn second_daemon_yields_to_live_one() {
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("d.sock");
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    for _ in 0..100 {
+        if UnixStream::connect(&socket).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // The second invocation must return promptly (yielded), not block in the
+    // accept loop.
+    let r = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_daemon(socket.clone(), Duration::from_secs(3600)),
+    )
+    .await
+    .expect("second run_daemon should yield, not block");
+    assert!(r.is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
+
+#[test]
+fn counters_seed_and_snapshot() {
+    use super::metrics::{Counters, MetricsSnapshot};
+    let c = Counters::default();
+    assert_eq!(c.snapshot().total(), 0);
+
+    let c = Counters::seeded(MetricsSnapshot {
+        embed: 10,
+        classify: 2,
+        rerank: 0,
+        meta: 3,
+        status: 1,
+    });
+    c.incr_embed();
+    c.incr_embed();
+    c.incr_meta();
+    c.incr_status();
+    let s = c.snapshot();
+    assert_eq!(s.embed, 12);
+    assert_eq!(s.meta, 4);
+    assert_eq!(s.status, 2);
+    assert_eq!(s.classify, 2);
+    assert_eq!(s.total(), 12 + 2 + 4 + 2);
+}
+
+#[tokio::test]
+async fn metrics_persist_then_load_latest() {
+    use super::metrics::{self, MetricsSnapshot};
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+
+    assert!(metrics::load_latest_at(dir).await.unwrap().is_none());
+
+    metrics::persist_at(
+        dir,
+        111,
+        60,
+        MetricsSnapshot {
+            embed: 1,
+            classify: 0,
+            rerank: 0,
+            meta: 2,
+            status: 0,
+        },
+    )
+    .await
+    .unwrap();
+    // Ensure a distinct, strictly-later timestamp for the second row.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    metrics::persist_at(
+        dir,
+        111,
+        120,
+        MetricsSnapshot {
+            embed: 9,
+            classify: 4,
+            rerank: 2,
+            meta: 5,
+            status: 3,
+        },
+    )
+    .await
+    .unwrap();
+
+    let latest = metrics::load_latest_at(dir).await.unwrap().unwrap();
+    assert_eq!(latest.snapshot.embed, 9);
+    assert_eq!(latest.snapshot.total(), 9 + 4 + 2 + 5 + 3);
+    assert_eq!(latest.uptime_secs, 120);
+}
+
+// ---------------------------------------------------------------------------
+// Remote providers: error mapping + None-on-Meta-failure
+// ---------------------------------------------------------------------------
+
+/// Spawn a stub daemon on `socket` that replies to each request with the
+/// response produced by `reply`.
+fn spawn_stub<F>(socket: std::path::PathBuf, reply: F)
+where
+    F: Fn(&DaemonOp) -> DaemonResponse + Send + Sync + 'static,
+{
+    tokio::spawn(async move {
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            let (rh, mut wh) = stream.into_split();
+            let mut r = BufReader::new(rh);
+            while let Some(req) = read_msg::<_, DaemonRequest>(&mut r).await.unwrap_or(None) {
+                let resp = reply(&req.op);
+                if write_msg(&mut wh, &resp).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+}
+
+#[tokio::test]
+async fn remote_providers_none_when_meta_errors() {
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("stub.sock");
+    spawn_stub(socket.clone(), |_op| DaemonResponse::Error {
+        message: "no model here".to_string(),
+    });
+    for _ in 0..100 {
+        if UnixStream::connect(&socket).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let handle = super::DaemonHandle::connect_existing(socket);
+    let out = super::remote_providers(
+        handle,
+        "/tmp/whatever".to_string(),
+        None,
+        &crate::types::EngramConfig::default(),
+    )
+    .await;
+    assert!(out.is_none(), "Meta error must yield in-process fallback");
+}
+
+#[tokio::test]
+async fn remote_embedding_maps_daemon_error() {
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("stub.sock");
+    // Meta succeeds (so providers build) but Embed fails.
+    spawn_stub(socket.clone(), |op| match op {
+        DaemonOp::Meta => DaemonResponse::Meta {
+            dimensions: 8,
+            max_tokens: 128,
+        },
+        DaemonOp::Embed { .. } => DaemonResponse::Error {
+            message: "boom".to_string(),
+        },
+        _ => DaemonResponse::Error {
+            message: "unexpected".to_string(),
+        },
+    });
+    for _ in 0..100 {
+        if UnixStream::connect(&socket).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let handle = super::DaemonHandle::connect_existing(socket);
+    let providers = super::remote_providers(
+        handle,
+        "/tmp/whatever".to_string(),
+        None,
+        &crate::types::EngramConfig::default(),
+    )
+    .await
+    .expect("providers (Meta ok)");
+    let emb = providers.embedding.expect("embedding provider");
+    assert_eq!(emb.dimensions(), 8);
+    assert_eq!(emb.max_tokens(), 128);
+    let err = emb.embed("hi").await.expect_err("daemon returned Error");
+    assert!(err.to_string().contains("boom"), "got: {err}");
+}
+
+// ---------------------------------------------------------------------------
+// Socket resolution precedence
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolve_socket_precedence() {
+    use crate::types::DaemonConfig;
+    let env_key = "ENGRAMDB_DAEMON_SOCKET";
+    let saved = std::env::var_os(env_key);
+    std::env::remove_var(env_key);
+
+    let mut cfg = DaemonConfig::default();
+
+    // 4. default when nothing set.
+    let d = super::resolve_socket(None, &cfg);
+    assert!(d.ends_with("daemon.sock"));
+
+    // 3. config value beats default.
+    cfg.socket_path = Some("/tmp/from-config.sock".to_string());
+    assert_eq!(
+        super::resolve_socket(None, &cfg),
+        std::path::PathBuf::from("/tmp/from-config.sock")
+    );
+
+    // 2. env beats config.
+    std::env::set_var(env_key, "/tmp/from-env.sock");
+    assert_eq!(
+        super::resolve_socket(None, &cfg),
+        std::path::PathBuf::from("/tmp/from-env.sock")
+    );
+
+    // 1. explicit CLI beats env + config.
+    assert_eq!(
+        super::resolve_socket(Some(std::path::Path::new("/tmp/from-cli.sock")), &cfg),
+        std::path::PathBuf::from("/tmp/from-cli.sock")
+    );
+
+    // restore env for other tests
+    std::env::remove_var(env_key);
+    if let Some(v) = saved {
+        std::env::set_var(env_key, v);
+    }
+}
+
 /// Send one request over a fresh connection, retrying connect until the
 /// daemon is up.
 async fn wait_request(socket: &std::path::Path, req: DaemonRequest) -> DaemonResponse {

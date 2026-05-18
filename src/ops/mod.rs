@@ -345,3 +345,55 @@ impl ProviderCache {
         providers
     }
 }
+
+#[cfg(test)]
+mod provider_cache_tests {
+    use super::*;
+
+    #[test]
+    fn cache_key_is_deterministic_and_signature_sensitive() {
+        let base = EngramConfig::default();
+        let k = provider_cache_key(&base, None);
+        // Deterministic.
+        assert_eq!(k, provider_cache_key(&base, None));
+
+        // Backend override is folded in.
+        assert_ne!(k, provider_cache_key(&base, Some(EmbeddingBackend::Onnx)));
+
+        // Each provider-relevant field changes the key.
+        let mut c = base.clone();
+        c.embeddings.provider = "mxbai-embed-large".to_string();
+        assert_ne!(k, provider_cache_key(&c, None));
+
+        let mut c = base.clone();
+        c.embeddings.dimensions += 1;
+        assert_ne!(k, provider_cache_key(&c, None));
+
+        let mut c = base.clone();
+        c.nli.enabled = !c.nli.enabled;
+        assert_ne!(k, provider_cache_key(&c, None));
+
+        let mut c = base.clone();
+        c.nli.model = "other-nli".to_string();
+        assert_ne!(k, provider_cache_key(&c, None));
+
+        let mut c = base.clone();
+        c.rerank.enabled = !c.rerank.enabled;
+        assert_ne!(k, provider_cache_key(&c, None));
+
+        let mut c = base.clone();
+        c.rerank.model = "other-reranker".to_string();
+        assert_ne!(k, provider_cache_key(&c, None));
+
+        // A daemon-only config change does NOT change the model signature.
+        let mut c = base.clone();
+        c.daemon.idle_timeout_secs += 1;
+        assert_eq!(k, provider_cache_key(&c, None));
+    }
+
+    #[tokio::test]
+    async fn provider_cache_starts_empty() {
+        let cache = ProviderCache::new();
+        assert_eq!(cache.loaded_count().await, 0);
+    }
+}

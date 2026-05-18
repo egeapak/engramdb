@@ -110,16 +110,15 @@ fn schema() -> Arc<Schema> {
     ]))
 }
 
-async fn open_table() -> Result<lancedb::Table> {
-    let dir = global_lancedb_dir().context("resolving global lancedb dir")?;
-    tokio::fs::create_dir_all(&dir)
+async fn open_table_at(dir: &std::path::Path) -> Result<lancedb::Table> {
+    tokio::fs::create_dir_all(dir)
         .await
         .with_context(|| format!("creating {}", dir.display()))?;
-    let path = dir.to_str().context("global lancedb path is not UTF-8")?;
+    let path = dir.to_str().context("lancedb path is not UTF-8")?;
     let conn = connect(path)
         .execute()
         .await
-        .context("opening global LanceDB connection")?;
+        .context("opening LanceDB connection")?;
     match conn.open_table(TABLE_NAME).execute().await {
         Ok(t) => Ok(t),
         Err(_) => conn
@@ -133,13 +132,26 @@ async fn open_table() -> Result<lancedb::Table> {
 /// Append one cumulative snapshot row. Best-effort — failures are logged, not
 /// fatal (the daemon must keep serving even if the metrics store is unwritable).
 pub async fn persist(pid: u32, uptime_secs: u64, snap: MetricsSnapshot) {
-    if let Err(e) = persist_inner(pid, uptime_secs, snap).await {
+    let dir = match global_lancedb_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("daemon metrics persist failed: {e}");
+            return;
+        }
+    };
+    if let Err(e) = persist_at(&dir, pid, uptime_secs, snap).await {
         tracing::warn!("daemon metrics persist failed: {e}");
     }
 }
 
-async fn persist_inner(pid: u32, uptime_secs: u64, snap: MetricsSnapshot) -> Result<()> {
-    let table = open_table().await?;
+/// Append a snapshot row to a specific LanceDB directory (testable form).
+pub(crate) async fn persist_at(
+    dir: &std::path::Path,
+    pid: u32,
+    uptime_secs: u64,
+    snap: MetricsSnapshot,
+) -> Result<()> {
+    let table = open_table_at(dir).await?;
     let schema = schema();
     let arrays: Vec<ArrayRef> = vec![
         Arc::new(
@@ -178,7 +190,8 @@ pub struct PersistedMetrics {
 /// caller) when the table is absent or unreadable — used both to seed a fresh
 /// daemon and to answer `stats --daemon` when no daemon is running.
 pub async fn load_latest() -> Option<PersistedMetrics> {
-    match load_latest_inner().await {
+    let dir = global_lancedb_dir().ok()?;
+    match load_latest_at(&dir).await {
         Ok(v) => v,
         Err(e) => {
             tracing::debug!("daemon metrics load failed: {e}");
@@ -187,8 +200,8 @@ pub async fn load_latest() -> Option<PersistedMetrics> {
     }
 }
 
-async fn load_latest_inner() -> Result<Option<PersistedMetrics>> {
-    let dir = global_lancedb_dir()?;
+/// Read the newest snapshot from a specific LanceDB directory (testable form).
+pub(crate) async fn load_latest_at(dir: &std::path::Path) -> Result<Option<PersistedMetrics>> {
     let path = match dir.to_str() {
         Some(p) => p,
         None => return Ok(None),

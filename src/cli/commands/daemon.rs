@@ -5,7 +5,22 @@ use crate::cli::output::OutputFormatter;
 use crate::daemon;
 use crate::types::DaemonConfig;
 use anyhow::Result;
+use std::path::PathBuf;
 use std::time::Duration;
+
+/// Load the `[daemon]` config from the current directory's store (best
+/// effort; defaults when absent). Used so a configured `socket_path` /
+/// `idle_timeout_secs` apply to the `daemon` subcommands too.
+async fn cwd_daemon_config() -> DaemonConfig {
+    let path = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".engramdb")
+        .join("config.toml");
+    crate::storage::config::load_config(&path)
+        .await
+        .unwrap_or_default()
+        .daemon
+}
 
 fn fmt_dur(secs: u64) -> String {
     let (d, h, m, s) = (secs / 86400, secs / 3600 % 24, secs / 60 % 60, secs % 60);
@@ -22,20 +37,19 @@ fn fmt_dur(secs: u64) -> String {
 
 /// Dispatch an `engramdb daemon <sub>` invocation.
 pub async fn run_daemon_cmd(command: DaemonCommand, formatter: &OutputFormatter) -> Result<()> {
+    let cfg = cwd_daemon_config().await;
     match command {
         DaemonCommand::Run {
             socket,
             idle_timeout,
         } => {
-            let socket = socket.unwrap_or_else(daemon::socket_path);
-            let idle = Duration::from_secs(
-                idle_timeout.unwrap_or_else(|| DaemonConfig::default().idle_timeout_secs),
-            );
+            let socket = daemon::resolve_socket(socket.as_deref(), &cfg);
+            let idle = Duration::from_secs(idle_timeout.unwrap_or(cfg.idle_timeout_secs));
             daemon::run_daemon(socket, idle).await
         }
 
-        DaemonCommand::Status => {
-            let socket = daemon::socket_path();
+        DaemonCommand::Status { socket } => {
+            let socket = daemon::resolve_socket(socket.as_deref(), &cfg);
             match daemon::query_status(&socket).await? {
                 None => {
                     formatter.print_message(&format!(
@@ -65,8 +79,8 @@ pub async fn run_daemon_cmd(command: DaemonCommand, formatter: &OutputFormatter)
             Ok(())
         }
 
-        DaemonCommand::Stop => {
-            let socket = daemon::socket_path();
+        DaemonCommand::Stop { socket } => {
+            let socket = daemon::resolve_socket(socket.as_deref(), &cfg);
             if daemon::request_shutdown(&socket).await? {
                 formatter.print_success("Daemon: shutdown requested");
             } else {
@@ -75,8 +89,11 @@ pub async fn run_daemon_cmd(command: DaemonCommand, formatter: &OutputFormatter)
             Ok(())
         }
 
-        DaemonCommand::Restart { idle_timeout } => {
-            let socket = daemon::socket_path();
+        DaemonCommand::Restart {
+            socket,
+            idle_timeout,
+        } => {
+            let socket = daemon::resolve_socket(socket.as_deref(), &cfg);
             let was_running = daemon::request_shutdown(&socket).await?;
             if was_running {
                 // Wait for the old daemon to release the socket before
@@ -89,7 +106,7 @@ pub async fn run_daemon_cmd(command: DaemonCommand, formatter: &OutputFormatter)
                     }
                 }
             }
-            let idle = idle_timeout.unwrap_or_else(|| DaemonConfig::default().idle_timeout_secs);
+            let idle = idle_timeout.unwrap_or(cfg.idle_timeout_secs);
             match daemon::DaemonHandle::connect_or_spawn(socket.clone(), idle).await {
                 Some(_) => {
                     let verb = if was_running { "restarted" } else { "started" };

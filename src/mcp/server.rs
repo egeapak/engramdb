@@ -936,10 +936,10 @@ impl EngramDbServer {
         config: &crate::types::EngramConfig,
     ) -> Option<Arc<crate::daemon::DaemonHandle>> {
         let idle = config.daemon.idle_timeout_secs;
+        let socket = crate::daemon::resolve_socket(None, &config.daemon);
         daemon
             .get_or_init(|| async move {
-                crate::daemon::DaemonHandle::connect_or_spawn(crate::daemon::socket_path(), idle)
-                    .await
+                crate::daemon::DaemonHandle::connect_or_spawn(socket, idle).await
             })
             .await
             .clone()
