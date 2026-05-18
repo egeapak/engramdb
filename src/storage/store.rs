@@ -549,6 +549,19 @@ impl MemoryStore {
         })
     }
 
+    /// Read every embedding chunk for `memory_id`, ordered by chunk index.
+    ///
+    /// Empty when the memory was never embedded. Used to relocate vectors
+    /// during worktree consolidation so migrated memories stay searchable.
+    pub async fn export_chunks(&self, memory_id: &str) -> Result<Vec<Vec<f32>>> {
+        self.lance_index
+            .chunks_for_memory(memory_id)
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB chunks_for_memory failed: {}", e))
+            })
+    }
+
     /// Perform vector similarity search.
     pub async fn vector_search(&self, query: Vec<f32>, limit: usize) -> Result<Vec<VectorMatch>> {
         self.lance_index

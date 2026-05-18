@@ -700,6 +700,13 @@ impl EngramDbServer {
                 })?;
         }
 
+        // Consolidate any memories that were written under the worktree's
+        // own stray store (e.g. by a CLI invocation before this fix) into
+        // the main project so nothing is left stranded.
+        crate::storage::worktree::consolidate_worktree_into_main(&self.dir, &self.effective_dir)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to consolidate worktree memories: {}", e))?;
+
         let child_id = crate::storage::project_id::compute_project_id(&self.dir);
         let parent_id = crate::storage::project_id::compute_project_id(&self.effective_dir);
 

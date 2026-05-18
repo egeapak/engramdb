@@ -71,6 +71,25 @@ pub async fn run(cli: Cli) -> Result<()> {
     // Create global file-backed registry for all commands
     let registry = FileRegistry::global()?;
 
+    // If we're inside a linked git worktree, transparently route memory
+    // operations to the main worktree's project: ensure it is initialized,
+    // consolidate any memories that were written under this worktree's own
+    // stray store, and register the worktree as a sub-project. `init` and
+    // `serve` perform their own worktree handling (they own user-facing
+    // messaging / run the MCP server); `completions` and `setup` don't touch
+    // a memory store.
+    let dir = if matches!(
+        cli.command,
+        Command::Init { .. }
+            | Command::Serve { .. }
+            | Command::Completions { .. }
+            | Command::Setup { .. }
+    ) {
+        dir
+    } else {
+        crate::storage::worktree::resolve_project_root(&dir, &registry).await?
+    };
+
     // Create production prompter for interactive commands
     let prompter = InquirePrompter;
 

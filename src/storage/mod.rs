@@ -19,6 +19,7 @@ pub mod registry;
 pub mod store;
 #[cfg(test)]
 pub mod test_support;
+pub mod worktree;
 pub mod write_lock;
 
 pub use error::{Result, StorageError};
@@ -30,3 +31,4 @@ pub use registry::{
     Registry, RegistryBackend, RegistryEntry,
 };
 pub use store::MemoryStore;
+pub use worktree::{consolidate_worktree_into_main, resolve_project_root};
