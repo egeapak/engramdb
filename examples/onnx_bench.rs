@@ -373,6 +373,57 @@ async fn concurrent_t5_window(
 // Lever E main bench: embedding + NLI + T5 concurrency tables
 // ---------------------------------------------------------------------------
 
+/// Measure a round-robin embedding pool under `k` concurrent submitters for
+/// `window`. Returns (completed ops, per-op latency samples). An empty pool
+/// yields zeros so callers can render a blank column.
+async fn measure_embed_pool(
+    pool: &[Arc<OnnxProvider>],
+    k: usize,
+    window: Duration,
+) -> (u64, Vec<Duration>) {
+    if pool.is_empty() {
+        return (0, Vec::new());
+    }
+    let pool = pool.to_vec();
+    let idx = Arc::new(AtomicU64::new(0));
+    let total_ops = Arc::new(AtomicU64::new(0));
+    let all_samples: Arc<tokio::sync::Mutex<Vec<Duration>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let deadline = Instant::now() + window;
+    let mut handles = Vec::with_capacity(k);
+    for task_i in 0..k {
+        let pool_ref = pool.clone();
+        let counter = Arc::clone(&total_ops);
+        let samples_out = Arc::clone(&all_samples);
+        let idx_ref = Arc::clone(&idx);
+        handles.push(tokio::spawn(async move {
+            let mut local = Vec::new();
+            let mut i = task_i;
+            while Instant::now() < deadline {
+                let slot = idx_ref.fetch_add(1, Ordering::Relaxed) as usize % pool_ref.len();
+                let p = &pool_ref[slot];
+                let input = INPUTS[i % INPUTS.len()];
+                let t = Instant::now();
+                if p.embed(input).await.is_ok() {
+                    local.push(t.elapsed());
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+                i += 1;
+            }
+            let mut g = samples_out.lock().await;
+            g.extend(local);
+        }));
+    }
+    for h in handles {
+        let _ = h.await;
+    }
+    let total = total_ops.load(Ordering::Relaxed);
+    let samples = Arc::try_unwrap(all_samples)
+        .map(|m| m.into_inner())
+        .unwrap_or_default();
+    (total, samples)
+}
+
 /// Lever E: single-session (current arch) vs naive pool-of-N, at K=1,2,4,8.
 /// Covers all three ONNX model families used in the create+query hot path.
 async fn bench_lever_e() {
@@ -397,25 +448,45 @@ async fn bench_lever_e() {
             return;
         }
     };
-    // Pool-of-2: two independent OnnxProvider sessions, requests round-robin.
-    let pool: Vec<Arc<OnnxProvider>> = (0..2)
-        .filter_map(|_| {
-            OnnxProvider::with_model(engramdb::embeddings::ONNX_ALL_MINILM_Q)
-                .ok()
-                .map(Arc::new)
-        })
-        .collect();
-    // Warm up.
+    // Two pool sizes compared: the documented pool-of-2, and cores/2 (the
+    // largest the pool*intra<=cores rule allows with intra_threads<=2).
+    // Embedding sessions are fastembed `TextEmbedding`, each managing its OWN
+    // internal threadpool (NOT the ORT `intra_threads` knob that bounds
+    // NLI/T5), so whether cores/2 parallel sessions beat 2 — or degrade from
+    // oversubscription — is an empirical question, not settled by the rule.
+    let pool_n = (cores / 2).max(2);
+    let build_pool = |n: usize| -> Vec<Arc<OnnxProvider>> {
+        (0..n)
+            .filter_map(|_| {
+                OnnxProvider::with_model(engramdb::embeddings::ONNX_ALL_MINILM_Q)
+                    .ok()
+                    .map(Arc::new)
+            })
+            .collect()
+    };
+    let pool2 = build_pool(2);
+    let pooln = build_pool(pool_n);
+    // Warm up every session.
     let _ = single_session.embed(INPUTS[0]).await;
-    for p in &pool {
+    for p in pool2.iter().chain(pooln.iter()) {
         let _ = p.embed(INPUTS[0]).await;
     }
 
+    let pooln_hdr = format!("pool-{pool_n} ops/s");
     println!(
-        "\n  {:>3}  {:>14}  {:>9}  {:>9}  |  {:>14}  {:>9}  {:>9}",
-        "K", "single ops/s", "mean ms", "p99 ms", "pool-2 ops/s", "mean ms", "p99 ms"
+        "\n  {:>3}  {:>14}  {:>9}  {:>9}  |  {:>14}  {:>9}  {:>9}  |  {:>14}  {:>9}  {:>9}",
+        "K",
+        "single ops/s",
+        "mean ms",
+        "p99 ms",
+        "pool-2 ops/s",
+        "mean ms",
+        "p99 ms",
+        pooln_hdr,
+        "mean ms",
+        "p99 ms",
     );
-    println!("  {}", "-".repeat(80));
+    println!("  {}", "-".repeat(112));
 
     for &k in &[1usize, 2, 4, 8] {
         let (s_ops, s_samples) =
@@ -423,66 +494,32 @@ async fn bench_lever_e() {
         let s_stats = summarize(s_samples);
         let s_throughput = s_ops as f64 / CONCURRENT_WINDOW.as_secs_f64();
 
-        let (p_ops, p_samples) = if pool.len() >= 2 {
-            let idx = Arc::new(AtomicU64::new(0));
-            let p_total_ops = Arc::new(AtomicU64::new(0));
-            let p_all_samples: Arc<tokio::sync::Mutex<Vec<Duration>>> =
-                Arc::new(tokio::sync::Mutex::new(Vec::new()));
-            let deadline = Instant::now() + CONCURRENT_WINDOW;
-            let mut handles = Vec::with_capacity(k);
-            for task_i in 0..k {
-                let pool_ref: Vec<Arc<OnnxProvider>> = pool.clone();
-                let counter = Arc::clone(&p_total_ops);
-                let samples_out = Arc::clone(&p_all_samples);
-                let idx_ref = Arc::clone(&idx);
-                handles.push(tokio::spawn(async move {
-                    let mut local = Vec::new();
-                    let mut i = task_i;
-                    while Instant::now() < deadline {
-                        let slot =
-                            idx_ref.fetch_add(1, Ordering::Relaxed) as usize % pool_ref.len();
-                        let p = &pool_ref[slot];
-                        let input = INPUTS[i % INPUTS.len()];
-                        let t = Instant::now();
-                        if p.embed(input).await.is_ok() {
-                            local.push(t.elapsed());
-                            counter.fetch_add(1, Ordering::Relaxed);
-                        }
-                        i += 1;
-                    }
-                    let mut g = samples_out.lock().await;
-                    g.extend(local);
-                }));
-            }
-            for h in handles {
-                let _ = h.await;
-            }
-            let total = p_total_ops.load(Ordering::Relaxed);
-            let samples = Arc::try_unwrap(p_all_samples)
-                .map(|m| m.into_inner())
-                .unwrap_or_default();
-            (total, samples)
-        } else {
-            (0, Vec::new())
-        };
-        let p_stats = summarize(p_samples);
-        let p_throughput = p_ops as f64 / CONCURRENT_WINDOW.as_secs_f64();
+        let (p2_ops, p2_samples) = measure_embed_pool(&pool2, k, CONCURRENT_WINDOW).await;
+        let p2_stats = summarize(p2_samples);
+        let p2_throughput = p2_ops as f64 / CONCURRENT_WINDOW.as_secs_f64();
+
+        let (pn_ops, pn_samples) = measure_embed_pool(&pooln, k, CONCURRENT_WINDOW).await;
+        let pn_stats = summarize(pn_samples);
+        let pn_throughput = pn_ops as f64 / CONCURRENT_WINDOW.as_secs_f64();
 
         println!(
-            "  {:>3}  {:>14.1}  {:>9.2}  {:>9.2}  |  {:>14.1}  {:>9.2}  {:>9.2}",
+            "  {:>3}  {:>14.1}  {:>9.2}  {:>9.2}  |  {:>14.1}  {:>9.2}  {:>9.2}  |  {:>14.1}  {:>9.2}  {:>9.2}",
             k,
             s_throughput,
             s_stats.mean_ms,
             s_stats.p99_ms,
-            p_throughput,
-            p_stats.mean_ms,
-            p_stats.p99_ms,
+            p2_throughput,
+            p2_stats.mean_ms,
+            p2_stats.p99_ms,
+            pn_throughput,
+            pn_stats.mean_ms,
+            pn_stats.p99_ms,
         );
     }
 
     println!(
-        "\n  Oversubscription point: {cores} cores / {intra} intra_threads = {} parallel ORT sessions\
-         \n  before threads compete. Pool-of-2 is safe iff intra_threads <= cores/2.",
+        "\n  Oversubscription point (NLI/T5): {cores} cores / {intra} intra_threads = {} parallel ORT\
+         \n  sessions. Embedding uses fastembed's own threadpool — pool-2 vs pool-{pool_n} measured above.",
         cores / intra.max(1)
     );
 

@@ -408,6 +408,45 @@ pub struct EmbeddingsConfig {
     /// different model than the one now in use (default: warn).
     #[serde(default)]
     pub reindex_on_model_change: ReindexOnModelChange,
+
+    /// Number of independent embedding model sessions to load and
+    /// round-robin across.
+    ///
+    /// One session serializes all inference behind its mutex, so under
+    /// concurrent load (the shared daemon serving N agent sessions)
+    /// throughput is mutex-bound. `None` (the default) auto-sizes via
+    /// [`EmbeddingsConfig::resolved_pool_size`] to `cores/2` for long-lived
+    /// multi-tenant contexts (daemon / MCP server); one-shot CLI runs pass
+    /// `1` explicitly regardless. `Some(1)` forces a single session;
+    /// `Some(n)` pins the pool to `n`. Embedding uses fastembed's own
+    /// internal threadpool, so the `pool_size × intra_threads ≤ cores`
+    /// constraint that bounds the NLI/T5 sessions does not apply here.
+    #[serde(default)]
+    pub pool_size: Option<usize>,
+}
+
+impl EmbeddingsConfig {
+    /// Resolve the configured embedding pool size for a machine with
+    /// `cores` logical CPUs: the configured value (only floored at 1 so it
+    /// can never disable embeddings), else auto `cores/2` (also ≥ 1).
+    ///
+    /// `cores` is passed in (not read from the machine here) so the policy
+    /// is deterministically unit-testable. Callers in one-shot contexts
+    /// (the CLI) bypass this and pass `1` directly — auto-sizing is for the
+    /// long-lived multi-tenant daemon / MCP server, where extra sessions
+    /// pay back across many concurrent callers.
+    pub fn resolved_pool_size(&self, cores: usize) -> usize {
+        self.pool_size.unwrap_or((cores / 2).max(1)).max(1)
+    }
+}
+
+/// Logical CPU count for auto-sizing pools, or `1` if it can't be queried.
+/// The single place the machine is consulted, kept out of the pure
+/// `resolved_pool_size` policy functions so those stay testable.
+pub fn available_cores() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
 }
 
 impl Default for EmbeddingsConfig {
@@ -418,6 +457,7 @@ impl Default for EmbeddingsConfig {
             dimensions: 384,
             max_tokens: 256,
             reindex_on_model_change: ReindexOnModelChange::default(),
+            pool_size: None,
         }
     }
 }
@@ -531,6 +571,47 @@ impl Default for RerankConfig {
     }
 }
 
+/// Automatic title-generation configuration.
+///
+/// `strategy` selects how a memory's title is derived when the caller
+/// doesn't supply one explicitly:
+/// - `keyword` (default): RAKE keyword extraction — in-process, no model,
+///   negligible cost; never cached/pooled.
+/// - `t5`: abstractive T5-small summarization. The model session is
+///   expensive (encoder + decoder ONNX init), so when this is configured
+///   the daemon / MCP server loads it **once** into the provider bundle
+///   (and pools it) instead of rebuilding it on every `create`.
+/// - `none`: no automatic title.
+///
+/// This is the deployment default; the MCP `create` tool's per-call
+/// `title_strategy` still overrides it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TitleConfig {
+    /// Title-generation strategy. Default `keyword`.
+    #[serde(default)]
+    pub strategy: crate::title::TitleStrategy,
+
+    /// Number of independent T5 sessions to pool when `strategy = "t5"`.
+    /// `None` (default) auto-sizes to 2 — the bench-optimal for the heavy
+    /// encoder+decoder pair — clamped to the core count, and only in
+    /// long-lived multi-tenant contexts (the one-shot CLI always uses 1).
+    /// Unlike embedding, T5 sessions are direct ORT sessions with an
+    /// explicit `intra_threads`, so the builder reduces each member's
+    /// `intra_threads` to keep `pool_size × intra_threads ≤ cores`.
+    #[serde(default)]
+    pub pool_size: Option<usize>,
+}
+
+impl TitleConfig {
+    /// Resolve the T5 title pool size: configured value, else auto `2`
+    /// (bench-optimal), never exceeding the core count. Paired with a
+    /// reduced per-session `intra_threads` by the caller so the pool does
+    /// not oversubscribe the CPU.
+    pub fn resolved_pool_size(&self, cores: usize) -> usize {
+        self.pool_size.unwrap_or(2).clamp(1, cores.max(1))
+    }
+}
+
 /// Top-level EngramDB configuration
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EngramConfig {
@@ -577,6 +658,10 @@ pub struct EngramConfig {
     /// Shared embedding daemon settings
     #[serde(default)]
     pub daemon: DaemonConfig,
+
+    /// Automatic title-generation settings
+    #[serde(default)]
+    pub title: TitleConfig,
 }
 
 /// Shared embedding-daemon settings.
@@ -1443,6 +1528,79 @@ weight = 0.7
         let mut cfg = EngramConfig::default();
         cfg.daemon.idle_timeout_secs = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn title_config_serde_default_and_roundtrip() {
+        use crate::title::TitleStrategy;
+
+        // Absent `[title]` ⇒ keyword (unchanged behavior for old configs).
+        let cfg: EngramConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.title.strategy, TitleStrategy::Keyword);
+        assert_eq!(TitleConfig::default().strategy, TitleStrategy::Keyword);
+
+        // Each strategy parses by its lowercase name.
+        for (name, want) in [
+            ("keyword", TitleStrategy::Keyword),
+            ("t5", TitleStrategy::T5),
+            ("none", TitleStrategy::None),
+        ] {
+            let cfg: EngramConfig =
+                toml::from_str(&format!("[title]\nstrategy = \"{name}\"\n")).unwrap();
+            assert_eq!(cfg.title.strategy, want, "strategy = {name:?}");
+        }
+
+        // Round-trips through the file writer.
+        let mut cfg = EngramConfig::default();
+        cfg.title.strategy = TitleStrategy::T5;
+        let temp_path = std::env::temp_dir().join("test_title_config_roundtrip.toml");
+        cfg.to_toml_file(&temp_path).unwrap();
+        let loaded = EngramConfig::from_toml_file(&temp_path).unwrap();
+        std::fs::remove_file(&temp_path).ok();
+        assert_eq!(loaded.title.strategy, TitleStrategy::T5);
+    }
+
+    #[test]
+    fn title_pool_size_resolution() {
+        // Unset ⇒ auto 2, but never more than the core count.
+        let t = TitleConfig::default();
+        assert_eq!(t.pool_size, None);
+        assert_eq!(t.resolved_pool_size(8), 2);
+        assert_eq!(t.resolved_pool_size(1), 1); // clamped to cores
+        assert_eq!(t.resolved_pool_size(0), 1); // cores.max(1) guard
+
+        // Explicit value parses and is clamped to [1, cores].
+        let cfg: EngramConfig =
+            toml::from_str("[title]\nstrategy = \"t5\"\npool_size = 3\n").unwrap();
+        assert_eq!(cfg.title.pool_size, Some(3));
+        assert_eq!(cfg.title.resolved_pool_size(8), 3);
+        assert_eq!(cfg.title.resolved_pool_size(2), 2); // clamp down to cores
+    }
+
+    #[test]
+    fn embeddings_pool_size_serde_and_resolved() {
+        // Unset ⇒ None; resolver auto-sizes to cores/2, floored at 1.
+        // `cores` is passed explicitly so the assertion is identical on any
+        // machine / CI runner (not derived from the host CPU count).
+        let cfg: EngramConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.embeddings.pool_size, None);
+        assert_eq!(cfg.embeddings.resolved_pool_size(8), 4);
+        assert_eq!(cfg.embeddings.resolved_pool_size(1), 1); // cores/2 floored at 1
+        assert_eq!(cfg.embeddings.resolved_pool_size(0), 1); // (cores/2).max(1) guard
+
+        // Explicit value is honored verbatim regardless of cores (only a
+        // floor of 1 so it can't disable embeddings).
+        let cfg: EngramConfig =
+            toml::from_str("[embeddings]\nprovider = \"onnx\"\ndimensions = 384\nmax_tokens = 256\npool_size = 3\n")
+                .unwrap();
+        assert_eq!(cfg.embeddings.pool_size, Some(3));
+        assert_eq!(cfg.embeddings.resolved_pool_size(2), 3);
+        assert_eq!(cfg.embeddings.resolved_pool_size(64), 3);
+
+        // Legacy `[embeddings]` without the field still parses (back-compat).
+        let legacy: EmbeddingsConfig =
+            toml::from_str("provider = \"onnx\"\ndimensions = 384\nmax_tokens = 256\n").unwrap();
+        assert_eq!(legacy.pool_size, None);
     }
 
     #[test]

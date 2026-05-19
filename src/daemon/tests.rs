@@ -169,7 +169,8 @@ async fn status_and_shutdown_frames_roundtrip() {
         requests_rerank: 0,
         requests_meta: 7,
         requests_status: 9,
-        requests_total: 22,
+        requests_title: 3,
+        requests_total: 25,
     };
     write_msg(&mut bw, &DaemonResponse::Status(status.clone()))
         .await
@@ -181,7 +182,8 @@ async fn status_and_shutdown_frames_roundtrip() {
     {
         DaemonResponse::Status(s) => {
             assert_eq!(s.pid, 4242);
-            assert_eq!(s.requests_total, 22);
+            assert_eq!(s.requests_title, 3);
+            assert_eq!(s.requests_total, 25);
             assert_eq!(s.version, super::PROTOCOL_VERSION);
         }
         other => panic!("expected Status, got {other:?}"),
@@ -358,17 +360,20 @@ fn counters_seed_and_snapshot() {
         rerank: 0,
         meta: 3,
         status: 1,
+        title: 5,
     });
     c.incr_embed();
     c.incr_embed();
     c.incr_meta();
     c.incr_status();
+    c.incr_title();
     let s = c.snapshot();
     assert_eq!(s.embed, 12);
     assert_eq!(s.meta, 4);
     assert_eq!(s.status, 2);
     assert_eq!(s.classify, 2);
-    assert_eq!(s.total(), 12 + 2 + 4 + 2);
+    assert_eq!(s.title, 6);
+    assert_eq!(s.total(), 12 + 2 + 4 + 2 + 6);
 }
 
 #[tokio::test]
@@ -389,6 +394,7 @@ async fn metrics_persist_then_load_latest() {
             rerank: 0,
             meta: 2,
             status: 0,
+            title: 0,
         },
     )
     .await
@@ -405,6 +411,7 @@ async fn metrics_persist_then_load_latest() {
             rerank: 2,
             meta: 5,
             status: 3,
+            title: 7,
         },
     )
     .await
@@ -412,7 +419,8 @@ async fn metrics_persist_then_load_latest() {
 
     let latest = metrics::load_latest_at(dir).await.unwrap().unwrap();
     assert_eq!(latest.snapshot.embed, 9);
-    assert_eq!(latest.snapshot.total(), 9 + 4 + 2 + 5 + 3);
+    assert_eq!(latest.snapshot.title, 7);
+    assert_eq!(latest.snapshot.total(), 9 + 4 + 2 + 5 + 3 + 7);
     assert_eq!(latest.uptime_secs, 120);
 }
 
@@ -653,6 +661,7 @@ async fn query_status_parses_stub_status() {
             requests_rerank: 0,
             requests_meta: 1,
             requests_status: 2,
+            requests_title: 0,
             requests_total: 7,
         }),
         _ => DaemonResponse::Error {

@@ -226,6 +226,7 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                 requests_rerank: s.rerank,
                 requests_meta: s.meta,
                 requests_status: s.status,
+                requests_title: s.title,
                 requests_total: s.total(),
             });
         }
@@ -322,6 +323,20 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                 },
                 None => DaemonResponse::Error {
                     message: "reranker model unavailable".to_string(),
+                },
+            }
+        }
+        DaemonOp::Title { text } => {
+            ctx.counters.incr_title();
+            match providers.title {
+                Some(t) => match t.generate(&text).await {
+                    Ok(title) => DaemonResponse::Title { title },
+                    Err(e) => DaemonResponse::Error {
+                        message: format!("title generation failed: {e}"),
+                    },
+                },
+                None => DaemonResponse::Error {
+                    message: "title model unavailable".to_string(),
                 },
             }
         }

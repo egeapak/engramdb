@@ -112,22 +112,39 @@ impl T5TitleGenerator {
     }
 
     /// Create from an explicit [`T5ModelSpec`] on an explicit execution
-    /// backend.
+    /// backend, using the default (`onnx_ep::intra_threads`) thread count.
     ///
     /// Used by the benchmark/comparison harnesses to A/B model sources and
     /// backends; production code should use [`T5TitleGenerator::new`].
     pub fn with_spec_on(spec: &T5ModelSpec, backend: crate::onnx_ep::Backend) -> Result<Self> {
+        Self::with_spec_on_intra(spec, backend, crate::onnx_ep::intra_threads())
+    }
+
+    /// Create from an explicit spec/backend with an explicit
+    /// `intra_threads` for both the encoder and decoder sessions.
+    ///
+    /// Pooling T5 (several independent sessions for concurrent `create`s)
+    /// must keep `pool_size × intra_threads ≤ cores` or the sessions
+    /// oversubscribe the CPU and every member gets slower. The pool builder
+    /// sizes `intra_threads` down accordingly and constructs each member
+    /// through here.
+    pub fn with_spec_on_intra(
+        spec: &T5ModelSpec,
+        backend: crate::onnx_ep::Backend,
+        intra_threads: usize,
+    ) -> Result<Self> {
         let (encoder_path, decoder_path, tokenizer_path) = download_model_files(spec)?;
+        let intra = intra_threads.max(1);
 
         let encoder = crate::onnx_ep::apply_backend(Session::builder()?, backend)?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(crate::onnx_ep::intra_threads())?
+            .with_intra_threads(intra)?
             .commit_from_file(&encoder_path)
             .context("Failed to load T5 encoder ONNX model")?;
 
         let decoder = crate::onnx_ep::apply_backend(Session::builder()?, backend)?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(crate::onnx_ep::intra_threads())?
+            .with_intra_threads(intra)?
             .commit_from_file(&decoder_path)
             .context("Failed to load T5 decoder ONNX model")?;
 
@@ -144,6 +161,23 @@ impl T5TitleGenerator {
     /// Try to create, returning None if unavailable.
     pub fn try_new() -> Option<Self> {
         match Self::new() {
+            Ok(gen) => Some(gen),
+            Err(e) => {
+                tracing::warn!("T5 title generator unavailable: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Try to create [`DEFAULT_T5_MODEL`] on the default backend with an
+    /// explicit `intra_threads`, returning `None` (and logging) if
+    /// unavailable. Used to build pooled members at a reduced thread count.
+    pub fn try_new_with_intra(intra_threads: usize) -> Option<Self> {
+        match Self::with_spec_on_intra(
+            &DEFAULT_T5_MODEL,
+            crate::onnx_ep::default_backend(),
+            intra_threads,
+        ) {
             Ok(gen) => Some(gen),
             Err(e) => {
                 tracing::warn!("T5 title generator unavailable: {}", e);

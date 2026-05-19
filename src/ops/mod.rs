@@ -265,6 +265,11 @@ pub struct EngineProviders {
     pub embedding: Option<Arc<dyn EmbeddingProvider>>,
     pub nli: Option<Arc<dyn NliProvider>>,
     pub reranker: Option<Arc<dyn Reranker>>,
+    /// Abstractive (T5) title generator, when `title.strategy = "t5"`.
+    /// Keyword titling is in-process and cheap so it is never cached here;
+    /// caching exists precisely because building T5 is an
+    /// encoder+decoder ONNX init that otherwise ran on *every* `create`.
+    pub title: Option<Arc<dyn crate::title::TitleGenerator>>,
 }
 
 /// Load the model-backed providers selected by `config`.
@@ -277,11 +282,25 @@ pub struct EngineProviders {
 pub fn resolve_engine_providers(
     config: &crate::types::EngramConfig,
     backend_override: Option<EmbeddingBackend>,
+    embedding_pool_size: usize,
 ) -> EngineProviders {
     let mut providers = EngineProviders::default();
 
     let backend = resolve_backend(config.embeddings.backend, backend_override);
-    if let Some(provider) = resolve_provider(config.embeddings.provider.as_str(), backend) {
+    // Build up to `embedding_pool_size` independent sessions of the *same*
+    // model and round-robin across them, so concurrent callers (the daemon
+    // serving N agent sessions) don't all serialize behind one session's
+    // mutex. A first-load failure leaves the pool empty → embeddings
+    // disabled, exactly as a single-load failure behaved before; a later
+    // session failing just yields a smaller pool (graceful degradation).
+    let mut sessions = Vec::with_capacity(embedding_pool_size.max(1));
+    for _ in 0..embedding_pool_size.max(1) {
+        match resolve_provider(config.embeddings.provider.as_str(), backend) {
+            Some(p) => sessions.push(p),
+            None => break,
+        }
+    }
+    if let Some(provider) = crate::embeddings::PooledEmbeddingProvider::build(sessions) {
         if provider.dimensions() != config.embeddings.dimensions {
             eprintln!(
                 "Warning: provider dimensions ({}) != config dimensions ({})",
@@ -322,6 +341,42 @@ pub fn resolve_engine_providers(
         }
     }
 
+    // Only T5 is worth caching: keyword titling is in-process and cheap, and
+    // `none` builds nothing. Loading T5 here (an encoder+decoder ONNX init)
+    // means the long-lived daemon / MCP server loads it once into the bundle
+    // instead of rebuilding it on every single `create` — and, under
+    // concurrency, pooling it cuts the dominant create-path tail latency.
+    if config.title.strategy == crate::title::TitleStrategy::T5 {
+        let cores = crate::types::config::available_cores();
+        // The CLI passes `embedding_pool_size == 1` (one-shot, no
+        // concurrency) — don't pay N× the heavy T5 load there. Long-lived
+        // daemon / MCP (pool > 1) pool T5 too. Each session's intra_threads
+        // is reduced so `pool × intra ≤ cores` (T5 sessions are direct ORT
+        // sessions, unlike fastembed), capped at the Lever A sweet spot.
+        let title_pool = if embedding_pool_size <= 1 {
+            1
+        } else {
+            config.title.resolved_pool_size(cores)
+        };
+        let intra = (cores / title_pool.max(1))
+            .min(crate::onnx_ep::intra_threads())
+            .max(1);
+        let mut generators: Vec<Arc<dyn crate::title::TitleGenerator>> =
+            Vec::with_capacity(title_pool);
+        for _ in 0..title_pool {
+            match crate::title::t5::T5TitleGenerator::try_new_with_intra(intra) {
+                Some(gen) => generators.push(Arc::new(gen)),
+                None => break,
+            }
+        }
+        match crate::title::PooledTitleGenerator::build(generators) {
+            Some(t) => providers.title = Some(t),
+            None => {
+                eprintln!("Warning: title strategy 't5' configured but the T5 model is unavailable")
+            }
+        }
+    }
+
     providers
 }
 
@@ -343,6 +398,9 @@ pub fn assemble_engine(
     }
     if let Some(r) = providers.reranker {
         engine = engine.with_reranker(r);
+    }
+    if let Some(t) = providers.title {
+        engine = engine.with_title_provider(t);
     }
     engine
 }
@@ -366,7 +424,11 @@ pub async fn build_engine(
     let config = crate::storage::config::load_config(config_path)
         .await
         .unwrap_or_default();
-    let providers = resolve_engine_providers(&config, backend_override);
+    // The CLI is one-shot (one op, then exit) with no concurrency, so a pool
+    // would only pay N× the ~240ms model load for no throughput gain. Force
+    // a single embedding session here regardless of config; pool auto-sizing
+    // is for the long-lived daemon / MCP server.
+    let providers = resolve_engine_providers(&config, backend_override, 1);
     assemble_engine(store, config, providers)
 }
 
@@ -378,16 +440,19 @@ pub async fn build_engine(
 pub fn provider_cache_key(
     config: &EngramConfig,
     backend_override: Option<EmbeddingBackend>,
+    embedding_pool_size: usize,
 ) -> String {
     let backend = resolve_backend(config.embeddings.backend, backend_override);
     format!(
-        "{backend}|{}|{}|{}|{}|{}|{}",
+        "{backend}|{}|{}|{}|{}|{}|{}|{}|{:?}",
         config.embeddings.provider,
         config.embeddings.dimensions,
+        embedding_pool_size,
         config.nli.enabled,
         config.nli.model,
         config.rerank.enabled,
         config.rerank.model,
+        config.title.strategy,
     )
 }
 
@@ -431,19 +496,28 @@ impl ProviderCache {
         config: &EngramConfig,
         backend_override: Option<EmbeddingBackend>,
     ) -> EngineProviders {
-        let key = provider_cache_key(config, backend_override);
+        // The cache backs the long-lived daemon / in-process MCP fallback —
+        // both serve many concurrent callers — so honor the configured (or
+        // auto `cores/2`) embedding pool size. The size is folded into the
+        // cache key so a config change re-resolves instead of handing back a
+        // wrong-sized pool.
+        let pool_size = config
+            .embeddings
+            .resolved_pool_size(crate::types::config::available_cores());
+        let key = provider_cache_key(config, backend_override, pool_size);
         let mut guard = self.inner.lock().await;
         if let Some(p) = guard.get(&key) {
             return p.clone();
         }
         let cfg = config.clone();
-        let providers =
-            tokio::task::spawn_blocking(move || resolve_engine_providers(&cfg, backend_override))
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!("engine provider init task panicked: {e}");
-                    EngineProviders::default()
-                });
+        let providers = tokio::task::spawn_blocking(move || {
+            resolve_engine_providers(&cfg, backend_override, pool_size)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("engine provider init task panicked: {e}");
+            EngineProviders::default()
+        });
         guard.insert(key, providers.clone());
         providers
     }
@@ -456,42 +530,57 @@ mod provider_cache_tests {
     #[test]
     fn cache_key_is_deterministic_and_signature_sensitive() {
         let base = EngramConfig::default();
-        let k = provider_cache_key(&base, None);
+        let k = provider_cache_key(&base, None, 2);
         // Deterministic.
-        assert_eq!(k, provider_cache_key(&base, None));
+        assert_eq!(k, provider_cache_key(&base, None, 2));
 
         // Backend override is folded in.
-        assert_ne!(k, provider_cache_key(&base, Some(EmbeddingBackend::Onnx)));
+        assert_ne!(
+            k,
+            provider_cache_key(&base, Some(EmbeddingBackend::Onnx), 2)
+        );
+
+        // Pool size is folded in: two pools of different sizes are NOT
+        // interchangeable model bundles (handing back a wrong-sized pool
+        // would silently under- or over-provision the daemon).
+        assert_ne!(k, provider_cache_key(&base, None, 4));
+        assert_eq!(k, provider_cache_key(&base, None, 2));
 
         // Each provider-relevant field changes the key.
         let mut c = base.clone();
         c.embeddings.provider = "mxbai-embed-large".to_string();
-        assert_ne!(k, provider_cache_key(&c, None));
+        assert_ne!(k, provider_cache_key(&c, None, 2));
 
         let mut c = base.clone();
         c.embeddings.dimensions += 1;
-        assert_ne!(k, provider_cache_key(&c, None));
+        assert_ne!(k, provider_cache_key(&c, None, 2));
 
         let mut c = base.clone();
         c.nli.enabled = !c.nli.enabled;
-        assert_ne!(k, provider_cache_key(&c, None));
+        assert_ne!(k, provider_cache_key(&c, None, 2));
 
         let mut c = base.clone();
         c.nli.model = "other-nli".to_string();
-        assert_ne!(k, provider_cache_key(&c, None));
+        assert_ne!(k, provider_cache_key(&c, None, 2));
 
         let mut c = base.clone();
         c.rerank.enabled = !c.rerank.enabled;
-        assert_ne!(k, provider_cache_key(&c, None));
+        assert_ne!(k, provider_cache_key(&c, None, 2));
 
         let mut c = base.clone();
         c.rerank.model = "other-reranker".to_string();
-        assert_ne!(k, provider_cache_key(&c, None));
+        assert_ne!(k, provider_cache_key(&c, None, 2));
+
+        // Title strategy is folded in: T5 pulls a cached generator into the
+        // bundle, so it is a distinct signature from keyword/none.
+        let mut c = base.clone();
+        c.title.strategy = crate::title::TitleStrategy::T5;
+        assert_ne!(k, provider_cache_key(&c, None, 2));
 
         // A daemon-only config change does NOT change the model signature.
         let mut c = base.clone();
         c.daemon.idle_timeout_secs += 1;
-        assert_eq!(k, provider_cache_key(&c, None));
+        assert_eq!(k, provider_cache_key(&c, None, 2));
     }
 
     #[tokio::test]

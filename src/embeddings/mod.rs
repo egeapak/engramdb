@@ -7,6 +7,7 @@ mod chunking;
 #[cfg(feature = "ollama")]
 mod ollama;
 mod onnx;
+mod pool;
 
 pub use chunking::chunk_text;
 #[cfg(feature = "ollama")]
@@ -17,6 +18,7 @@ pub use onnx::{
     OnnxModelSpec, OnnxProvider, DEFAULT_ONNX_EMBEDDING, ONNX_ALL_MINILM, ONNX_ALL_MINILM_Q,
     ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT,
 };
+pub use pool::PooledEmbeddingProvider;
 
 use anyhow::Result;
 use async_trait::async_trait;

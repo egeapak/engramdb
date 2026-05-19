@@ -115,7 +115,12 @@ async fn main() {
         .await
         .unwrap_or_default();
     let (resolve_ms, providers) = ms(async {
-        tokio::task::spawn_blocking(move || ops::resolve_engine_providers(&cfg, None))
+        // Mirror the server: resolve the configured (auto cores/2) embedding
+        // pool so this measures the real provider-resolve cost.
+        let pool = cfg
+            .embeddings
+            .resolved_pool_size(engramdb::types::config::available_cores());
+        tokio::task::spawn_blocking(move || ops::resolve_engine_providers(&cfg, None, pool))
             .await
             .unwrap()
     })

@@ -12,7 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 /// Bumped on any incompatible wire change. A client that gets a mismatched
 /// `Pong.version` treats the daemon as unusable and falls back in-process
 /// rather than risk decoding garbage from a stale daemon binary.
-pub const PROTOCOL_VERSION: &str = "1";
+pub const PROTOCOL_VERSION: &str = "2";
 
 /// A request frame: which store's config selects the model, the resolved
 /// embedding backend (sent so the daemon's provider key matches the client's
@@ -49,6 +49,10 @@ pub enum DaemonOp {
         query: String,
         documents: Vec<String>,
     },
+    /// Generate an abstractive (T5) title for `text`. Delegated so the
+    /// dominant create-path model loads once machine-wide (and is pooled)
+    /// instead of being rebuilt per `create`.
+    Title { text: String },
     /// Report daemon status + cumulative request metrics. Loads no models.
     Status,
     /// Ask the daemon to exit. It acks, finishes flushing the response, then
@@ -77,6 +81,8 @@ pub enum DaemonResponse {
     Classified { results: Vec<NliWire> },
     /// Reply to [`DaemonOp::Rerank`]: `(original_index, raw_score)` pairs.
     Reranked { scores: Vec<(usize, f32)> },
+    /// Reply to [`DaemonOp::Title`]: the generated title.
+    Title { title: String },
     /// Reply to [`DaemonOp::Status`].
     Status(DaemonStatus),
     /// Reply to [`DaemonOp::Shutdown`] — sent immediately before the daemon
@@ -104,6 +110,7 @@ pub struct DaemonStatus {
     pub requests_rerank: u64,
     pub requests_meta: u64,
     pub requests_status: u64,
+    pub requests_title: u64,
     pub requests_total: u64,
 }
 
