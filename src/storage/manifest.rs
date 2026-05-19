@@ -33,6 +33,23 @@ pub struct Manifest {
     pub parent_project_id: Option<String>,
     /// Project statistics (updated automatically)
     pub stats: ManifestStats,
+    /// Identity of the embedding model the stored vectors were produced
+    /// with. `None` on legacy stores created before model tracking
+    /// (treated as "untracked" — a reindex stamps it). Used to detect a
+    /// model swap so search isn't silently served from mixed/stale vectors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<EmbeddingFingerprint>,
+}
+
+/// Identity of the embedding model a store's vectors were generated with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddingFingerprint {
+    /// Stable model id, e.g. `onnx/all-MiniLM-L6-v2-q` or
+    /// `ollama/all-minilm` (from `EmbeddingProvider::model_id`).
+    pub model: String,
+    /// Embedding dimensionality (also baked into the Arrow schema; kept
+    /// here for diagnostics and early, clear dimension-change detection).
+    pub dimensions: usize,
 }
 
 /// Statistics tracked in the manifest.
@@ -56,6 +73,7 @@ impl Default for Manifest {
                 memory_count: 0,
                 logical_scopes: Vec::new(),
             },
+            embedding: None,
         }
     }
 }

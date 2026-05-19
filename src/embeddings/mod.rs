@@ -71,4 +71,12 @@ pub trait EmbeddingProvider: Send + Sync {
     /// Text longer than this will be silently truncated by the model.
     /// Use this to chunk text before embedding.
     fn max_tokens(&self) -> usize;
+
+    /// Stable identifier of the embedding model (e.g. `onnx/all-MiniLM-L6-v2`
+    /// vs `onnx/all-MiniLM-L6-v2-q`, or `ollama/<model>`).
+    ///
+    /// Persisted with the store's embeddings so a later model swap is
+    /// detectable; distinct fp32 vs int8 ids are required so quantization
+    /// changes are caught.
+    fn model_id(&self) -> String;
 }

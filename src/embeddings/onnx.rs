@@ -12,6 +12,10 @@ pub struct OnnxModelSpec {
     pub fastembed_model: EmbeddingModel,
     pub dimensions: usize,
     pub max_tokens: usize,
+    /// Stable identifier for this model, persisted with embeddings to
+    /// detect model swaps. Distinguishes fp32 vs int8. Used as
+    /// `onnx/<name>` in the embedding fingerprint.
+    pub name: &'static str,
 }
 
 /// all-MiniLM-L6-v2: 384-dimensional, 256 token context (fp32).
@@ -19,6 +23,7 @@ pub const ONNX_ALL_MINILM: OnnxModelSpec = OnnxModelSpec {
     fastembed_model: EmbeddingModel::AllMiniLML6V2,
     dimensions: 384,
     max_tokens: 256,
+    name: "all-MiniLM-L6-v2",
 };
 
 /// all-MiniLM-L6-v2 int8-quantized (`Xenova/all-MiniLM-L6-v2`,
@@ -28,6 +33,7 @@ pub const ONNX_ALL_MINILM_Q: OnnxModelSpec = OnnxModelSpec {
     fastembed_model: EmbeddingModel::AllMiniLML6V2Q,
     dimensions: 384,
     max_tokens: 256,
+    name: "all-MiniLM-L6-v2-q",
 };
 
 /// nomic-embed-text-v1.5: 768-dimensional, 8192 token context.
@@ -35,12 +41,14 @@ pub const ONNX_NOMIC_EMBED_TEXT: OnnxModelSpec = OnnxModelSpec {
     fastembed_model: EmbeddingModel::NomicEmbedTextV15,
     dimensions: 768,
     max_tokens: 8192,
+    name: "nomic-embed-text-v1.5",
 };
 
 /// mxbai-embed-large-v1: 1024-dimensional, 512 token context.
 pub const ONNX_MXBAI_EMBED_LARGE: OnnxModelSpec = OnnxModelSpec {
     fastembed_model: EmbeddingModel::MxbaiEmbedLargeV1,
     dimensions: 1024,
+    name: "mxbai-embed-large-v1",
     max_tokens: 512,
 };
 
@@ -66,6 +74,7 @@ pub struct OnnxProvider {
     model: Arc<Mutex<TextEmbedding>>,
     dimensions: usize,
     max_tokens: usize,
+    model_id: String,
 }
 
 impl OnnxProvider {
@@ -99,6 +108,7 @@ impl OnnxProvider {
             model: Arc::new(Mutex::new(model)),
             dimensions: spec.dimensions,
             max_tokens: spec.max_tokens,
+            model_id: format!("onnx/{}", spec.name),
         })
     }
 
@@ -176,6 +186,10 @@ impl EmbeddingProvider for OnnxProvider {
 
     fn max_tokens(&self) -> usize {
         self.max_tokens
+    }
+
+    fn model_id(&self) -> String {
+        self.model_id.clone()
     }
 }
 
