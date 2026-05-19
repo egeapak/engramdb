@@ -1,30 +1,28 @@
-//! Optional Core ML (Apple GPU / Neural Engine) execution-provider wiring.
+//! Optional ONNX Runtime execution-provider wiring (Core ML, XNNPACK).
 //!
-//! ONNX Runtime has no literal "MPS" execution provider. On Apple platforms
-//! the Metal / Neural Engine acceleration path is the **Core ML** execution
-//! provider: Core ML lowers supported subgraphs onto the Apple Neural Engine,
-//! the GPU (via Metal Performance Shaders), or the CPU as appropriate. This
-//! module centralizes the feature-gated decision of which execution providers
-//! to register so every ONNX session in the codebase — both the sessions we
-//! build directly through `ort` (NLI, T5) and the ones `fastembed` builds
-//! internally (embeddings, reranker) — picks up the same acceleration policy.
+//! ONNX Runtime has no literal "MPS" provider. On Apple platforms the
+//! Metal / Neural Engine path is the **Core ML** EP. **XNNPACK** is a
+//! portable, per-node CPU kernel EP (NEON/SVE on ARM) that falls back to
+//! ONNX Runtime's MLAS kernels op-by-op for anything it doesn't implement.
+//! This module centralizes the feature-gated decision of which providers to
+//! register so every ONNX session — the ones we build directly via `ort`
+//! (NLI, T5) and the ones `fastembed` builds internally (embeddings,
+//! reranker) — picks up the same policy.
 //!
-//! Behavior matrix:
-//! - `coreml` feature **off** (default): no execution providers registered;
-//!   ONNX Runtime uses its built-in CPU provider. Byte-for-byte the previous
-//!   behavior, so the default Linux/CI build is unaffected.
-//! - `coreml` feature **on**, `target_os = "macos"`: the Core ML EP is
-//!   prepended (compute units = all: ANE + GPU + CPU). ONNX Runtime
-//!   automatically falls back to CPU for any op or subgraph Core ML cannot
-//!   run, so this is safe even for models that are not fully Core
-//!   ML-compatible.
-//! - `coreml` feature **on**, non-macOS: no-op (the provider is unavailable
-//!   on the platform), so the build still succeeds but runs on CPU.
+//! Both accelerators are **off by default**. With the feature off,
+//! [`providers_for`] returns an empty list and ONNX Runtime uses its
+//! built-in CPU (MLAS) provider — byte-for-byte the previous behavior, so
+//! the default build is unaffected.
 //!
-//! Production code uses the build-selected default ([`default_backend`] via
-//! [`execution_providers`] / [`apply_execution_providers`]). The explicit
-//! [`Backend`] variants exist so the benchmark suite can A/B the same
-//! workload on CPU vs Core ML within a single process.
+//! - `coreml` (macOS only): Core ML EP, compute units = all (ANE+GPU+CPU);
+//!   ORT auto-falls back to CPU for unsupported subgraphs.
+//! - `xnnpack` (aarch64/x86_64): XNNPACK EP; per-node MLAS fallback. The
+//!   provider is compiled into the prebuilt `ort` binary we already
+//!   download, so only the Cargo feature is needed (no source build).
+//!
+//! Production code uses the build-selected default ([`default_backend`]).
+//! The explicit [`Backend`] variants exist so the benchmark suite can A/B
+//! the same workload across backends within one process.
 
 use ort::ep::ExecutionProviderDispatch;
 use ort::session::builder::SessionBuilder;
@@ -32,25 +30,31 @@ use ort::session::builder::SessionBuilder;
 /// Which ONNX Runtime execution backend to register for a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
-    /// ONNX Runtime's built-in CPU provider (no extra EP registered).
+    /// ONNX Runtime's built-in CPU (MLAS) provider — no extra EP registered.
     Cpu,
-    /// Apple Core ML provider (Neural Engine + GPU via Metal + CPU). Only
-    /// effective when compiled `--features coreml` on macOS; on any other
-    /// target it degrades to the same behavior as [`Backend::Cpu`].
+    /// Apple Core ML (Neural Engine + GPU via Metal + CPU). Effective only
+    /// when compiled `--features coreml` on macOS; otherwise == [`Self::Cpu`].
     CoreMl,
+    /// XNNPACK portable CPU kernels with per-node MLAS fallback. Effective
+    /// only when compiled `--features xnnpack`; otherwise == [`Self::Cpu`].
+    Xnnpack,
 }
 
-/// Whether the Core ML provider is actually compiled in and usable on this
-/// target.
-///
-/// Lets benchmarks/diagnostics avoid misreporting a CPU-vs-CPU comparison as
-/// CPU-vs-Core ML when built without `--features coreml` or off macOS.
+/// Whether the Core ML provider is compiled in and usable on this target.
 pub fn coreml_available() -> bool {
     cfg!(all(feature = "coreml", target_os = "macos"))
 }
 
-/// The backend selected by build configuration: Core ML when compiled with
-/// `--features coreml` on macOS, otherwise CPU.
+/// Whether the XNNPACK provider is compiled in for this target. XNNPACK is
+/// supported by ONNX Runtime on aarch64 and x86_64, which covers every
+/// EngramDB target; the gate is purely the Cargo feature.
+pub fn xnnpack_available() -> bool {
+    cfg!(feature = "xnnpack")
+}
+
+/// The backend selected by build configuration. Core ML when available,
+/// else CPU. XNNPACK is never the implicit default — it is opt-in via the
+/// benchmark harness until its A/B data justifies promoting it.
 pub fn default_backend() -> Backend {
     if coreml_available() {
         Backend::CoreMl
@@ -59,30 +63,40 @@ pub fn default_backend() -> Backend {
     }
 }
 
+#[cfg(all(feature = "coreml", target_os = "macos"))]
+fn coreml_eps() -> Vec<ExecutionProviderDispatch> {
+    use ort::ep::{coreml::ComputeUnits, CoreML};
+    vec![CoreML::default()
+        .with_compute_units(ComputeUnits::All)
+        .build()]
+}
+
+#[cfg(not(all(feature = "coreml", target_os = "macos")))]
+fn coreml_eps() -> Vec<ExecutionProviderDispatch> {
+    Vec::new()
+}
+
+#[cfg(feature = "xnnpack")]
+fn xnnpack_eps() -> Vec<ExecutionProviderDispatch> {
+    use ort::ep::XNNPACK;
+    vec![XNNPACK::default().build()]
+}
+
+#[cfg(not(feature = "xnnpack"))]
+fn xnnpack_eps() -> Vec<ExecutionProviderDispatch> {
+    Vec::new()
+}
+
 /// Execution providers for an explicit backend, in priority order.
 ///
-/// Empty for [`Backend::Cpu`] (ONNX Runtime uses its built-in CPU provider),
-/// and also empty for [`Backend::CoreMl`] on targets where Core ML is
-/// unavailable, so the caller transparently runs on CPU.
+/// Empty for [`Backend::Cpu`], and also empty for an accelerator backend on
+/// a target/build where it is unavailable, so the caller transparently
+/// runs on the built-in CPU provider.
 pub fn providers_for(backend: Backend) -> Vec<ExecutionProviderDispatch> {
-    #[cfg(all(feature = "coreml", target_os = "macos"))]
-    {
-        match backend {
-            Backend::Cpu => Vec::new(),
-            Backend::CoreMl => {
-                use ort::ep::{coreml::ComputeUnits, CoreML};
-                vec![CoreML::default()
-                    .with_compute_units(ComputeUnits::All)
-                    .build()]
-            }
-        }
-    }
-    #[cfg(not(all(feature = "coreml", target_os = "macos")))]
-    {
-        // Core ML is not compiled in / not on macOS: every backend runs on
-        // the built-in CPU provider.
-        let _ = backend;
-        Vec::new()
+    match backend {
+        Backend::Cpu => Vec::new(),
+        Backend::CoreMl => coreml_eps(),
+        Backend::Xnnpack => xnnpack_eps(),
     }
 }
 
@@ -94,9 +108,8 @@ pub fn execution_providers() -> Vec<ExecutionProviderDispatch> {
 /// Apply an explicit backend's execution providers to an `ort` session
 /// builder.
 ///
-/// Returns the builder unchanged when the backend registers no providers
-/// (CPU, or Core ML on an unsupported target), preserving the plain
-/// CPU-only path with zero behavior change.
+/// Returns the builder unchanged when the backend registers no providers,
+/// preserving the plain CPU-only path with zero behavior change.
 pub fn apply_backend(builder: SessionBuilder, backend: Backend) -> ort::Result<SessionBuilder> {
     let eps = providers_for(backend);
     if eps.is_empty() {

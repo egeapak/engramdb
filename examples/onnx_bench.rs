@@ -286,15 +286,19 @@ async fn run_backend(backend_label: &str, backend: Backend) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("EngramDB ONNX backend benchmark — CPU vs Core ML");
+    println!("EngramDB ONNX backend benchmark");
     println!(
-        "Core ML compiled in: {} (need --features coreml on macOS for a real A/B)",
-        engramdb::onnx_ep::coreml_available()
+        "Core ML compiled in: {} | XNNPACK compiled in: {}",
+        engramdb::onnx_ep::coreml_available(),
+        engramdb::onnx_ep::xnnpack_available()
     );
 
     run_backend("cpu", Backend::Cpu).await;
     if engramdb::onnx_ep::coreml_available() {
         run_backend("coreml", Backend::CoreMl).await;
+    }
+    if engramdb::onnx_ep::xnnpack_available() {
+        run_backend("xnnpack", Backend::Xnnpack).await;
     }
 
     println!("\nDone. Compare warm vs contended, sustained ops/s, and RSS across backends.");

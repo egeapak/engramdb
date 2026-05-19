@@ -21,6 +21,10 @@ ollama = ["reqwest"]
 # Enable on macOS only: `cargo build --features coreml`. Off by default so
 # the Linux/CI build and prebuilt-binary download are unchanged.
 coreml = ["ort/coreml"]
+# XNNPACK portable CPU-kernel EP (per-node MLAS fallback). Off by default;
+# the provider ships in the prebuilt `ort` binary so only this feature is
+# needed (no source build, same downloaded binary). For A/B benchmarking.
+xnnpack = ["ort/xnnpack"]
 
 [dependencies]
 # MCP Server
