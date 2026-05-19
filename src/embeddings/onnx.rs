@@ -14,9 +14,18 @@ pub struct OnnxModelSpec {
     pub max_tokens: usize,
 }
 
-/// all-MiniLM-L6-v2: 384-dimensional, 256 token context.
+/// all-MiniLM-L6-v2: 384-dimensional, 256 token context (fp32).
 pub const ONNX_ALL_MINILM: OnnxModelSpec = OnnxModelSpec {
     fastembed_model: EmbeddingModel::AllMiniLML6V2,
+    dimensions: 384,
+    max_tokens: 256,
+};
+
+/// all-MiniLM-L6-v2 int8-quantized (`Xenova/all-MiniLM-L6-v2`,
+/// `onnx/model_quantized.onnx`, ~22 MB vs ~86 MB fp32). Same 384-dim
+/// output; for the CPU latency/footprint A/B.
+pub const ONNX_ALL_MINILM_Q: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::AllMiniLML6V2Q,
     dimensions: 384,
     max_tokens: 256,
 };

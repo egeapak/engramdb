@@ -30,7 +30,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use engramdb::embeddings::{EmbeddingProvider, OnnxProvider};
+use engramdb::embeddings::{EmbeddingProvider, OnnxProvider, ONNX_ALL_MINILM, ONNX_ALL_MINILM_Q};
 use engramdb::nli::{NliProvider, OnnxNliProvider};
 use engramdb::onnx_ep::Backend;
 use engramdb::title::t5::T5TitleGenerator;
@@ -219,44 +219,51 @@ async fn run_backend(backend_label: &str, backend: Backend) {
     println!("\n=== backend: {backend_label} ===");
     let nli_repo = EngramConfig::default().nli.model;
 
-    if enabled("embed_single") || enabled("embed_batch") {
+    // fp32 vs int8 all-MiniLM A/B (Lever B). "_q" = int8 quantized.
+    for (suffix, spec) in [("", ONNX_ALL_MINILM), ("_q", ONNX_ALL_MINILM_Q)] {
+        let single = format!("embed_single{suffix}");
+        let batched = format!("embed_batch{suffix}");
+        if !enabled(&single) && !enabled(&batched) {
+            continue;
+        }
         let base_rss = rss_kib();
-        if let Some(provider) = OnnxProvider::try_new_on(backend) {
-            if enabled("embed_single") {
-                report(
-                    "embed_single",
-                    backend_label,
-                    bench("embed_single", backend_label, base_rss, 300, 60, |t| {
-                        let p = &provider;
-                        async move {
-                            p.embed(t).await?;
-                            Ok(())
-                        }
-                    }),
-                )
-                .await;
+        match OnnxProvider::with_model_on(spec, backend) {
+            Ok(provider) => {
+                if enabled(&single) {
+                    report(
+                        &single,
+                        backend_label,
+                        bench(&single, backend_label, base_rss, 300, 60, |t| {
+                            let p = &provider;
+                            async move {
+                                p.embed(t).await?;
+                                Ok(())
+                            }
+                        }),
+                    )
+                    .await;
+                }
+                if enabled(&batched) {
+                    let batch: Vec<&str> = INPUTS
+                        .iter()
+                        .flat_map(|s| std::iter::repeat_n(*s, 6))
+                        .collect();
+                    report(
+                        &batched,
+                        backend_label,
+                        bench(&batched, backend_label, base_rss, 120, 30, |_| {
+                            let p = &provider;
+                            let batch = &batch;
+                            async move {
+                                p.embed_batch(batch).await?;
+                                Ok(())
+                            }
+                        }),
+                    )
+                    .await;
+                }
             }
-            if enabled("embed_batch") {
-                let batch: Vec<&str> = INPUTS
-                    .iter()
-                    .flat_map(|s| std::iter::repeat_n(*s, 6))
-                    .collect();
-                report(
-                    "embed_batch",
-                    backend_label,
-                    bench("embed_batch", backend_label, base_rss, 120, 30, |_| {
-                        let p = &provider;
-                        let batch = &batch;
-                        async move {
-                            p.embed_batch(batch).await?;
-                            Ok(())
-                        }
-                    }),
-                )
-                .await;
-            }
-        } else {
-            println!("  embedding model unavailable, skipping");
+            Err(_) => println!("  embedding model '{single}' unavailable, skipping"),
         }
     }
 
