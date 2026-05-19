@@ -150,3 +150,31 @@ pub fn apply_backend(builder: SessionBuilder, backend: Backend) -> ort::Result<S
 pub fn apply_execution_providers(builder: SessionBuilder) -> ort::Result<SessionBuilder> {
     apply_backend(builder, default_backend())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ENGRAMDB_ONNX_INTRA_THREADS` parsing: a valid value wins; `0`,
+    /// non-numeric, and unset all fall back to the computed default. Relies
+    /// on nextest's process-per-test isolation for safe env mutation (the
+    /// project runs tests via `cargo nextest`, never `cargo test`).
+    #[test]
+    fn intra_threads_env_override() {
+        std::env::set_var("ENGRAMDB_ONNX_INTRA_THREADS", "3");
+        assert_eq!(intra_threads(), 3);
+
+        // Zero is explicitly rejected → computed default.
+        std::env::set_var("ENGRAMDB_ONNX_INTRA_THREADS", "0");
+        assert_eq!(intra_threads(), default_intra_threads());
+
+        // Non-numeric is ignored → computed default.
+        std::env::set_var("ENGRAMDB_ONNX_INTRA_THREADS", "lots");
+        assert_eq!(intra_threads(), default_intra_threads());
+
+        // Unset → computed default, which is always >= 1.
+        std::env::remove_var("ENGRAMDB_ONNX_INTRA_THREADS");
+        assert_eq!(intra_threads(), default_intra_threads());
+        assert!(intra_threads() >= 1);
+    }
+}

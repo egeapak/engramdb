@@ -221,9 +221,19 @@ fn encode(
     // hidden dimension and making every decode fail).
     let (_shape, hidden_slice) = outputs[0].try_extract_tensor::<f32>()?;
     let data = hidden_slice.to_vec();
-    let hidden_dim = data.len() / length.max(1);
+    let shape = encoder_hidden_shape(data.len(), length);
 
-    Ok((data, vec![1, length, hidden_dim]))
+    Ok((data, shape))
+}
+
+/// Recover the `[1, seq_len, hidden_dim]` shape of the encoder hidden
+/// states from the flat output length. Extracted so the arithmetic that
+/// silently broke decoding before this branch (it returned `[1, seq_len]`,
+/// dropping `hidden_dim`, so every T5 decode failed) is unit-testable
+/// without loading the ONNX model. `seq_len.max(1)` guards div-by-zero.
+fn encoder_hidden_shape(flat_len: usize, seq_len: usize) -> Vec<usize> {
+    let hidden_dim = flat_len / seq_len.max(1);
+    vec![1, seq_len, hidden_dim]
 }
 
 /// Greedy decode: generate tokens one at a time using the decoder.
@@ -331,5 +341,26 @@ impl TitleGenerator for T5TitleGenerator {
         tokio::task::spawn_blocking(move || generate_sync(&encoder, &decoder, &tokenizer, &text))
             .await
             .context("T5 title generation task panicked")?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for the latent bug this branch fixed: `encode()` returned
+    /// `[1, seq_len]` (dropping `hidden_dim`) so every T5 decode failed and
+    /// T5 titling never worked. The shape must be 3D with the hidden dim
+    /// recovered from the flat length, and div-by-zero guarded.
+    #[test]
+    fn encoder_hidden_shape_recovers_hidden_dim() {
+        // T5-small: 10 tokens × 512 hidden = 5120 flat → [1, 10, 512].
+        assert_eq!(encoder_hidden_shape(10 * 512, 10), vec![1, 10, 512]);
+        // Single token.
+        assert_eq!(encoder_hidden_shape(512, 1), vec![1, 1, 512]);
+        // Zero-length must not divide by zero (guard: seq_len.max(1)).
+        assert_eq!(encoder_hidden_shape(512, 0), vec![1, 0, 512]);
+        // Must be 3D — the pre-fix bug produced a 2-element shape.
+        assert_eq!(encoder_hidden_shape(7 * 64, 7).len(), 3);
     }
 }

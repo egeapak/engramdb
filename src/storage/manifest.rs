@@ -217,6 +217,112 @@ mod tests {
         ));
     }
 
+    // --- Embedding model-identity lifecycle (silent-corruption guards) ---
+
+    #[test]
+    fn embedding_status_truth_table() {
+        let fp = EmbeddingFingerprint {
+            model: "onnx/all-MiniLM-L6-v2-q".to_string(),
+            dimensions: 384,
+        };
+
+        // Match: same model, same dims.
+        assert_eq!(
+            embedding_status(Some(&fp), "onnx/all-MiniLM-L6-v2-q", 384),
+            EmbeddingModelStatus::Match
+        );
+        assert!(embedding_status(Some(&fp), "onnx/all-MiniLM-L6-v2-q", 384).is_consistent());
+
+        // Mismatch: same dims, different model.
+        assert_eq!(
+            embedding_status(Some(&fp), "onnx/all-MiniLM-L6-v2", 384),
+            EmbeddingModelStatus::Mismatch {
+                stored: "onnx/all-MiniLM-L6-v2-q".to_string(),
+                current: "onnx/all-MiniLM-L6-v2".to_string(),
+            }
+        );
+
+        // DimensionMismatch must win even when the model name ALSO differs
+        // (arm priority: dimensions checked before model — a regression here
+        // would misclassify a schema-breaking change as a soft Mismatch).
+        assert_eq!(
+            embedding_status(Some(&fp), "onnx/nomic-embed-text-v1.5", 768),
+            EmbeddingModelStatus::DimensionMismatch {
+                stored: 384,
+                current: 768,
+            }
+        );
+
+        // Untracked: legacy store, no fingerprint.
+        assert_eq!(
+            embedding_status(None, "onnx/all-MiniLM-L6-v2-q", 384),
+            EmbeddingModelStatus::Untracked {
+                current: "onnx/all-MiniLM-L6-v2-q".to_string(),
+            }
+        );
+
+        // Only Match is consistent.
+        for s in [
+            EmbeddingModelStatus::Mismatch {
+                stored: "a".into(),
+                current: "b".into(),
+            },
+            EmbeddingModelStatus::DimensionMismatch {
+                stored: 1,
+                current: 2,
+            },
+            EmbeddingModelStatus::Untracked {
+                current: "x".into(),
+            },
+        ] {
+            assert!(!s.is_consistent(), "{s:?} must not be consistent");
+        }
+    }
+
+    #[tokio::test]
+    async fn manifest_embedding_fingerprint_roundtrips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("manifest.toml");
+
+        let mut original = Manifest {
+            project: "p".to_string(),
+            ..Default::default()
+        };
+        original.embedding = Some(EmbeddingFingerprint {
+            model: "onnx/all-MiniLM-L6-v2-q".to_string(),
+            dimensions: 384,
+        });
+
+        save_manifest(&path, &original).await.unwrap();
+        let loaded = load_manifest(&path).await.unwrap();
+        assert_eq!(loaded.embedding, original.embedding);
+    }
+
+    #[tokio::test]
+    async fn manifest_without_embedding_section_loads_as_none() {
+        // Backward-compat: a manifest written before the lifecycle (no
+        // `[embedding]`) must still parse, with `embedding == None`. A
+        // `None` fingerprint must also not serialize a stray `embedding`
+        // key (skip_serializing_if) — old readers would choke on it.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("manifest.toml");
+
+        let legacy = Manifest {
+            project: "p".to_string(),
+            ..Default::default()
+        };
+        assert!(legacy.embedding.is_none());
+        save_manifest(&path, &legacy).await.unwrap();
+
+        let raw = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(
+            !raw.contains("embedding"),
+            "a None fingerprint must not serialize an `embedding` key; got:\n{raw}"
+        );
+        let loaded = load_manifest(&path).await.unwrap();
+        assert!(loaded.embedding.is_none());
+    }
+
     #[test]
     fn test_update_stats() {
         let mut manifest = Manifest::default();

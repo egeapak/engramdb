@@ -776,6 +776,46 @@ mod tests {
     }
 
     #[test]
+    fn reindex_on_model_change_serde_and_backward_compat() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct W {
+            v: ReindexOnModelChange,
+        }
+        // Every variant round-trips by its lowercase name.
+        for (variant, name) in [
+            (ReindexOnModelChange::Off, "off"),
+            (ReindexOnModelChange::Warn, "warn"),
+            (ReindexOnModelChange::Auto, "auto"),
+            (ReindexOnModelChange::Error, "error"),
+        ] {
+            let toml_str = toml::to_string(&W { v: variant }).unwrap();
+            assert!(
+                toml_str.contains(&format!("v = \"{name}\"")),
+                "{variant:?} must serialize as {name:?}; got {toml_str:?}"
+            );
+            let back: W = toml::from_str(&format!("v = \"{name}\"\n")).unwrap();
+            assert_eq!(back.v, variant);
+        }
+
+        // Backward-compat: an `[embeddings]` table written before this field
+        // existed must still parse, defaulting to `Warn` — otherwise every
+        // pre-lifecycle deployment fails to start after upgrade.
+        let legacy: EmbeddingsConfig =
+            toml::from_str("provider = \"onnx\"\ndimensions = 384\nmax_tokens = 256\n").unwrap();
+        assert_eq!(legacy.reindex_on_model_change, ReindexOnModelChange::Warn);
+
+        // And the in-code defaults agree.
+        assert_eq!(
+            EmbeddingsConfig::default().reindex_on_model_change,
+            ReindexOnModelChange::Warn
+        );
+        assert_eq!(
+            EngramConfig::default().embeddings.reindex_on_model_change,
+            ReindexOnModelChange::Warn
+        );
+    }
+
+    #[test]
     fn test_config_defaults() {
         let config = EngramConfig::default();
 
