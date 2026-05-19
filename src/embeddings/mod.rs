@@ -14,8 +14,8 @@ pub use ollama::{
     OllamaModelSpec, OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT,
 };
 pub use onnx::{
-    OnnxModelSpec, OnnxProvider, ONNX_ALL_MINILM, ONNX_ALL_MINILM_Q, ONNX_MXBAI_EMBED_LARGE,
-    ONNX_NOMIC_EMBED_TEXT,
+    OnnxModelSpec, OnnxProvider, DEFAULT_ONNX_EMBEDDING, ONNX_ALL_MINILM, ONNX_ALL_MINILM_Q,
+    ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT,
 };
 
 use anyhow::Result;

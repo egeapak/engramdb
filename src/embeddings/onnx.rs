@@ -44,6 +44,17 @@ pub const ONNX_MXBAI_EMBED_LARGE: OnnxModelSpec = OnnxModelSpec {
     max_tokens: 512,
 };
 
+/// Default embedding model (single source of truth, mirrors
+/// `DEFAULT_T5_MODEL` / `DEFAULT_NLI_MODEL`).
+///
+/// Still fp32 [`ONNX_ALL_MINILM`]. The Lever B A/B showed int8
+/// ([`ONNX_ALL_MINILM_Q`]) is 1.4–1.9× faster with no quality loss, but
+/// flipping it is deferred: the embedding model identity is not persisted,
+/// so a swap would silently mix fp32/int8 vectors in existing stores. It
+/// can move to `ONNX_ALL_MINILM_Q` once model-id tracking + reindex-on-
+/// mismatch land (see the future task).
+pub const DEFAULT_ONNX_EMBEDDING: OnnxModelSpec = ONNX_ALL_MINILM;
+
 /// ONNX-based embedding provider using fastembed.
 ///
 /// This provider uses the fastembed crate to generate embeddings locally
@@ -91,14 +102,14 @@ impl OnnxProvider {
         })
     }
 
-    /// Create a new ONNX provider with the default all-MiniLM-L6-v2 model.
+    /// Create a new ONNX provider with [`DEFAULT_ONNX_EMBEDDING`].
     pub fn new() -> Result<Self> {
-        Self::with_model(ONNX_ALL_MINILM)
+        Self::with_model(DEFAULT_ONNX_EMBEDDING)
     }
 
-    /// Create the default all-MiniLM-L6-v2 model on an explicit backend.
+    /// Create [`DEFAULT_ONNX_EMBEDDING`] on an explicit backend.
     pub fn new_on(backend: crate::onnx_ep::Backend) -> Result<Self> {
-        Self::with_model_on(ONNX_ALL_MINILM, backend)
+        Self::with_model_on(DEFAULT_ONNX_EMBEDDING, backend)
     }
 
     /// Try to create a provider with the specified model, returning None if unavailable.

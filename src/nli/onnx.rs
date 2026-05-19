@@ -46,12 +46,18 @@ pub const NLI_DEBERTA_XSMALL: NliModelSpec = NliModelSpec {
 };
 
 /// `Xenova/nli-deberta-v3-xsmall` int8-quantized (~83 MB vs ~271 MB;
-/// identical id2label ordering). For the CPU latency/footprint A/B.
+/// identical id2label ordering). ~2× faster, ~3.7× less RAM.
 pub const NLI_DEBERTA_XSMALL_Q: NliModelSpec = NliModelSpec {
     repo: "Xenova/nli-deberta-v3-xsmall",
     model_file: "onnx/model_quantized.onnx",
     tokenizer_file: "tokenizer.json",
 };
+
+/// Default NLI model (single source of truth, mirrors `DEFAULT_T5_MODEL`).
+/// int8 chosen after the Lever D A/B: ~2× faster, ~3.7× less RAM, same
+/// label ordering, no quality regression. `NliConfig::default().model`
+/// must equal `DEFAULT_NLI_MODEL.repo`.
+pub const DEFAULT_NLI_MODEL: NliModelSpec = NLI_DEBERTA_XSMALL_Q;
 
 /// Model output label ordering:
 /// - Index 0: contradiction
@@ -86,7 +92,23 @@ impl OnnxNliProvider {
     /// Used by the benchmark suite to compare CPU vs Core ML on identical
     /// workloads; production code should use [`OnnxNliProvider::new`].
     pub fn new_on(model_repo: &str, backend: crate::onnx_ep::Backend) -> Result<Self> {
-        Self::build(model_repo, MODEL_FILE, TOKENIZER_FILE, backend)
+        // Map known repos to the right ONNX file so the string-based
+        // config API still selects the int8 model for the default repo.
+        // Unknown (user-custom) repos keep the historical fp32 defaults.
+        let (model_file, tokenizer_file) = if model_repo == NLI_DEBERTA_XSMALL_Q.repo {
+            (
+                NLI_DEBERTA_XSMALL_Q.model_file,
+                NLI_DEBERTA_XSMALL_Q.tokenizer_file,
+            )
+        } else if model_repo == NLI_DEBERTA_XSMALL.repo {
+            (
+                NLI_DEBERTA_XSMALL.model_file,
+                NLI_DEBERTA_XSMALL.tokenizer_file,
+            )
+        } else {
+            (MODEL_FILE, TOKENIZER_FILE)
+        };
+        Self::build(model_repo, model_file, tokenizer_file, backend)
     }
 
     /// Create from an explicit [`NliModelSpec`] on an explicit backend.

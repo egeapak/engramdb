@@ -443,7 +443,11 @@ impl Default for NliConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            model: "cross-encoder/nli-deberta-v3-xsmall".to_string(),
+            // Must equal `nli::DEFAULT_NLI_MODEL.repo` (int8-quantized
+            // mirror: ~2× faster, ~3.7× less RAM, identical id2label). The
+            // NLI loader maps this repo to its quantized ONNX file; custom
+            // repos keep the fp32 defaults.
+            model: "Xenova/nli-deberta-v3-xsmall".to_string(),
             contradiction_threshold: 0.7,
             max_comparisons: 10,
             similarity_threshold: 0.3,
@@ -806,7 +810,7 @@ mod tests {
 
         // NLI config
         assert!(!config.nli.enabled);
-        assert_eq!(config.nli.model, "cross-encoder/nli-deberta-v3-xsmall");
+        assert_eq!(config.nli.model, "Xenova/nli-deberta-v3-xsmall");
         assert_eq!(config.nli.contradiction_threshold, 0.7);
         assert_eq!(config.nli.max_comparisons, 10);
         assert_eq!(config.nli.similarity_threshold, 0.3);
@@ -967,7 +971,7 @@ threshold = 0.25
     fn test_nli_config_defaults() {
         let config = NliConfig::default();
         assert!(!config.enabled);
-        assert_eq!(config.model, "cross-encoder/nli-deberta-v3-xsmall");
+        assert_eq!(config.model, "Xenova/nli-deberta-v3-xsmall");
         assert_eq!(config.contradiction_threshold, 0.7);
         assert_eq!(config.max_comparisons, 10);
         assert_eq!(config.similarity_threshold, 0.3);
@@ -990,7 +994,7 @@ threshold = 0.25
         assert_eq!(loaded.nli.contradiction_threshold, 0.85);
         assert_eq!(loaded.nli.max_comparisons, 20);
         assert_eq!(loaded.nli.similarity_threshold, 0.5);
-        assert_eq!(loaded.nli.model, "cross-encoder/nli-deberta-v3-xsmall");
+        assert_eq!(loaded.nli.model, "Xenova/nli-deberta-v3-xsmall");
     }
 
     #[test]

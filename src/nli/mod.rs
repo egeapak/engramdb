@@ -6,7 +6,9 @@
 
 pub mod onnx;
 
-pub use onnx::{NliModelSpec, OnnxNliProvider, NLI_DEBERTA_XSMALL, NLI_DEBERTA_XSMALL_Q};
+pub use onnx::{
+    NliModelSpec, OnnxNliProvider, DEFAULT_NLI_MODEL, NLI_DEBERTA_XSMALL, NLI_DEBERTA_XSMALL_Q,
+};
 
 use anyhow::Result;
 use async_trait::async_trait;
