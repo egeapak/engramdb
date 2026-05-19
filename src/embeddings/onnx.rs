@@ -55,13 +55,14 @@ pub const ONNX_MXBAI_EMBED_LARGE: OnnxModelSpec = OnnxModelSpec {
 /// Default embedding model (single source of truth, mirrors
 /// `DEFAULT_T5_MODEL` / `DEFAULT_NLI_MODEL`).
 ///
-/// Still fp32 [`ONNX_ALL_MINILM`]. The Lever B A/B showed int8
-/// ([`ONNX_ALL_MINILM_Q`]) is 1.4–1.9× faster with no quality loss, but
-/// flipping it is deferred: the embedding model identity is not persisted,
-/// so a swap would silently mix fp32/int8 vectors in existing stores. It
-/// can move to `ONNX_ALL_MINILM_Q` once model-id tracking + reindex-on-
-/// mismatch land (see the future task).
-pub const DEFAULT_ONNX_EMBEDDING: OnnxModelSpec = ONNX_ALL_MINILM;
+/// int8 [`ONNX_ALL_MINILM_Q`] — the Lever B A/B showed it 1.4–1.9× faster
+/// (2.5–6× under CPU contention), ~4× smaller, with no measurable
+/// retrieval-quality loss (cosine vs fp32 ≈ 0.99, 4/4 ranking agreement).
+/// Safe to default now that the embedding model identity is persisted and
+/// a mismatch is surfaced/enforced via `embeddings.reindex_on_model_change`
+/// (existing fp32 stores are flagged on connect and fixed by
+/// `engramdb reindex --embeddings-only`).
+pub const DEFAULT_ONNX_EMBEDDING: OnnxModelSpec = ONNX_ALL_MINILM_Q;
 
 /// ONNX-based embedding provider using fastembed.
 ///
@@ -164,6 +165,11 @@ impl EmbeddingProvider for OnnxProvider {
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        // Short-circuit empty input: fastembed's quantized models panic
+        // ("chunk size must be non-zero") on an empty batch.
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
         // Convert &str to String for fastembed
         let texts_owned: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
         let model = Arc::clone(&self.model);
