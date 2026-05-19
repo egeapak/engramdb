@@ -21,13 +21,18 @@ use tokio::fs;
 /// * `formatter` - Output formatter for displaying the memory
 pub async fn run_get(
     dir: &Path,
+    global: bool,
     id: &str,
     full: bool,
     raw: bool,
     path_only: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = if global {
+        MemoryStore::open_global().await?
+    } else {
+        MemoryStore::open(dir).await?
+    };
     if let Ok(Some(warning)) = store.check_staleness().await {
         formatter.print_warning(&warning);
     }
@@ -128,6 +133,7 @@ mod tests {
 
         let result = run_get(
             temp_dir.path(),
+            false,
             "mem-test-001-aaa",
             false,
             false,
@@ -147,6 +153,7 @@ mod tests {
         // Use a unique prefix that matches only one memory
         let result = run_get(
             temp_dir.path(),
+            false,
             "mem-test-001",
             false,
             false,
@@ -165,6 +172,7 @@ mod tests {
 
         let result = run_get(
             temp_dir.path(),
+            false,
             "nonexistent-id",
             false,
             false,
@@ -174,5 +182,48 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_global_targets_global_store() {
+        // Seed a memory directly into the global store (no embeddings).
+        let _lock = crate::storage::test_support::acquire_global_test_lock().await;
+        let global = MemoryStore::open_global().await.unwrap();
+        let mem = create_test_memory("global-mem-001-zzz", MemoryType::Decision, 0.9);
+        global.create(&mem).await.unwrap();
+
+        // A project dir that was never initialized as an EngramDB store.
+        let temp_dir = TempDir::new().unwrap();
+        let formatter = OutputFormatter::new(None, false, true);
+
+        // With --global, the memory resolves out of the global store...
+        let global_result = run_get(
+            temp_dir.path(),
+            true,
+            "global-mem-001-zzz",
+            false,
+            false,
+            false,
+            &formatter,
+        )
+        .await;
+        assert!(global_result.is_ok(), "global lookup should succeed");
+
+        // ...while the same command without --global targets the (uninitialized)
+        // project store and fails — proving the flag changes the target store.
+        let project_result = run_get(
+            temp_dir.path(),
+            false,
+            "global-mem-001-zzz",
+            false,
+            false,
+            false,
+            &formatter,
+        )
+        .await;
+        assert!(
+            project_result.is_err(),
+            "project lookup must not see global memories"
+        );
     }
 }

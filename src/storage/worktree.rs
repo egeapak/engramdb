@@ -197,7 +197,14 @@ mod tests {
         let registry = InMemoryRegistry::new();
 
         let resolved = resolve_project_root(&wt, &registry).await.unwrap();
-        assert_eq!(resolved, main);
+        // `resolve_project_root` canonicalizes its result (on macOS
+        // `$TMPDIR` is a `/var` -> `/private/var` symlink), so compare the
+        // fully-resolved form on both sides — symlink-agnostic and a no-op
+        // on platforms without the indirection.
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            main.canonicalize().unwrap()
+        );
 
         // Main got initialized; the worktree never gets its own store.
         assert!(main.join(".engramdb").exists());
@@ -316,7 +323,14 @@ mod tests {
         wt_store.create(&mem).await.unwrap();
 
         let resolved = resolve_project_root(&wt, &registry).await.unwrap();
-        assert_eq!(resolved, main);
+        // `resolve_project_root` canonicalizes its result (on macOS
+        // `$TMPDIR` is a `/var` -> `/private/var` symlink), so compare the
+        // fully-resolved form on both sides — symlink-agnostic and a no-op
+        // on platforms without the indirection.
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            main.canonicalize().unwrap()
+        );
 
         // The memory is now owned by the main project and the link exists.
         let main_store = MemoryStore::open(&main).await.unwrap();

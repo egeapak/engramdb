@@ -458,28 +458,6 @@ struct MemoryOutput {
     status: String,
 }
 
-/// Merge global scored memories into the project results, re-sort by score,
-/// deduplicate by ID, and truncate to `max`.
-fn merge_scored_memories(
-    project: &mut Vec<crate::retrieval::engine::ScoredMemory>,
-    global: Vec<crate::retrieval::engine::ScoredMemory>,
-    max: usize,
-) {
-    use std::collections::HashSet;
-    let existing_ids: HashSet<String> = project.iter().map(|sm| sm.memory.id.clone()).collect();
-    for sm in global {
-        if !existing_ids.contains(&sm.memory.id) {
-            project.push(sm);
-        }
-    }
-    project.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    project.truncate(max);
-}
-
 fn memory_to_output(m: &crate::types::Memory, include_details: bool) -> MemoryOutput {
     MemoryOutput {
         id: m.id.clone(),
@@ -561,16 +539,15 @@ pub struct EngramDbServer {
     /// entry. Project IDs are deterministic, so the cache never needs
     /// invalidation.
     pid_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
-    /// Cache of model-backed engine providers, keyed by a signature of the
-    /// provider-relevant config fields. Loading the ONNX embedding model is a
-    /// ~240ms session init; without this cache it was paid synchronously on
-    /// every tool call (`create`, `query`, `update`, ...) because each call
-    /// rebuilt the retrieval engine from scratch. Providers carry no
-    /// per-store state, so one bundle is shared across all projects for the
-    /// life of the process. The async mutex also dedupes concurrent first
-    /// builds so the model loads exactly once.
-    provider_cache:
-        Arc<tokio::sync::Mutex<std::collections::HashMap<String, ops::EngineProviders>>>,
+    /// Process-wide in-process provider cache used when the daemon is
+    /// disabled or unreachable. Keyed by the provider-relevant config
+    /// signature so each model loads at most once per process (PR #35).
+    provider_cache: ops::ProviderCache,
+    /// Process-wide handle to the shared embedding daemon, established (and
+    /// the daemon auto-spawned) at most once. An inner `None` means a prior
+    /// connect/spawn attempt failed and this process uses in-process models
+    /// for its lifetime — cached so we don't spawn-storm.
+    daemon: Arc<tokio::sync::OnceCell<Option<Arc<crate::daemon::DaemonHandle>>>>,
     /// Embedding-model-change warning computed once at daemon startup for
     /// the primary project, appended to `get_info` instructions so the
     /// connecting agent surfaces it to the user. `None` = no mismatch /
@@ -620,10 +597,30 @@ impl EngramDbServer {
             stats,
             session_id,
             pid_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            provider_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            provider_cache: ops::ProviderCache::new(),
+            daemon: Arc::new(tokio::sync::OnceCell::new()),
             embedding_warning: None,
             tool_router: Self::tool_router(),
         })
+    }
+
+    /// Replace this server's model caches with process-shared ones.
+    ///
+    /// The SSE transport builds a fresh `EngramDbServer` per connection. Each
+    /// default-constructed server has its own empty [`ops::ProviderCache`] and
+    /// daemon `OnceCell`, so without sharing every HTTP connection would reload
+    /// the embedding model (or re-probe/auto-spawn the daemon) on its first
+    /// tool call — defeating the load-once-per-process intent. Injecting one
+    /// process-wide cache + daemon handle restores it on SSE the same way
+    /// stdio gets it for free (single server instance).
+    fn with_shared_model_caches(
+        mut self,
+        provider_cache: ops::ProviderCache,
+        daemon: Arc<tokio::sync::OnceCell<Option<Arc<crate::daemon::DaemonHandle>>>>,
+    ) -> Self {
+        self.provider_cache = provider_cache;
+        self.daemon = daemon;
+        self
     }
 
     #[cfg(test)]
@@ -645,7 +642,8 @@ impl EngramDbServer {
             stats,
             session_id,
             pid_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            provider_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            provider_cache: ops::ProviderCache::new(),
+            daemon: Arc::new(tokio::sync::OnceCell::new()),
             embedding_warning: None,
             tool_router: Self::tool_router(),
         }
@@ -852,9 +850,11 @@ impl EngramDbServer {
 
     /// Build a RetrievalEngine for the given project override.
     ///
-    /// The model-backed providers are resolved through [`Self::cached_providers`]
-    /// so the embedding model is loaded once per process rather than on every
-    /// tool call; only the cheap per-store wiring happens here.
+    /// Model-backed providers come from the shared embedding daemon when
+    /// `daemon.enabled` and a daemon is reachable (so this process loads no
+    /// models), otherwise from the process-wide in-process cache so the model
+    /// still loads at most once per process. Only the cheap per-store wiring
+    /// happens here.
     async fn build_engine_for(&self, project: Option<&str>) -> Result<RetrievalEngine, String> {
         let dir = self.resolve_dir(project).await?;
         let store = self.open_store_for(project).await?;
@@ -862,7 +862,14 @@ impl EngramDbServer {
         let pid = self.project_id_for_dir(&dir, project);
         let config = load_config(&config_path).await.unwrap_or_default();
         let mode = config.embeddings.reindex_on_model_change;
-        let providers = self.cached_providers(&config).await;
+        let providers = Self::resolve_providers(
+            &self.provider_cache,
+            &self.daemon,
+            self.embedding_backend,
+            &config,
+            &dir,
+        )
+        .await;
         // Strict mode: refuse embedding-dependent work on a model mismatch
         // so the agent gets an actionable error instead of degraded search.
         if mode == crate::types::ReindexOnModelChange::Error {
@@ -901,7 +908,14 @@ impl EngramDbServer {
         let config_path = dir.join(".engramdb").join("config.toml");
         let pid = self.project_id_for_dir(&dir, project);
         let config = load_config(&config_path).await.unwrap_or_default();
-        let providers = self.cached_providers(&config).await;
+        let providers = Self::resolve_providers(
+            &self.provider_cache,
+            &self.daemon,
+            self.embedding_backend,
+            &config,
+            &dir,
+        )
+        .await;
         Ok(self.finish_engine(store, config, providers, pid))
     }
 
@@ -960,7 +974,14 @@ impl EngramDbServer {
         if mode == crate::types::ReindexOnModelChange::Off {
             return None;
         }
-        let providers = self.cached_providers(&config).await;
+        let providers = Self::resolve_providers(
+            &self.provider_cache,
+            &self.daemon,
+            self.embedding_backend,
+            &config,
+            &dir,
+        )
+        .await;
         let current = providers
             .embedding
             .as_ref()
@@ -986,81 +1007,99 @@ impl EngramDbServer {
         Ok(())
     }
 
-    /// Resolve the model-backed providers for `config`, building them at most
-    /// once per process per distinct provider-relevant config signature.
+    /// Whether the shared-daemon path should be taken. Always disabled under
+    /// the crate's own `cargo test --lib` (see [`Self::resolve_providers`]).
+    #[cfg(not(test))]
+    fn daemon_path_enabled(config: &crate::types::EngramConfig) -> bool {
+        config.daemon.enabled
+    }
+
+    #[cfg(test)]
+    fn daemon_path_enabled(_config: &crate::types::EngramConfig) -> bool {
+        false
+    }
+
+    /// Resolve the model-backed providers for `config` at `dir`.
     ///
-    /// Loading the ONNX embedding model is a ~240ms session init. Before this
-    /// cache it ran synchronously on every `create`/`query`/`update` call,
-    /// dominating tool latency even though embedding *inference* was already
-    /// moved to a background task. Providers hold no per-store state, so a
-    /// single bundle is reused across projects and calls. The model build runs
-    /// on a blocking thread, and the async mutex is held across it so
-    /// concurrent first calls collapse into a single load.
-    async fn cached_providers(&self, config: &crate::types::EngramConfig) -> ops::EngineProviders {
-        Self::resolve_or_cache_providers(
-            self.provider_cache.clone(),
-            config.clone(),
-            self.embedding_backend,
-        )
-        .await
-    }
-
-    /// Cache-keyed provider resolution shared by [`Self::cached_providers`] and
-    /// [`Self::spawn_provider_warmup`]. Takes owned handles instead of `&self`
-    /// so it can run inside a detached warmup task. Holding the async mutex
-    /// across the blocking build collapses concurrent first callers (e.g. a
-    /// tool call racing the startup warmup) into a single model load.
-    async fn resolve_or_cache_providers(
-        cache: Arc<tokio::sync::Mutex<std::collections::HashMap<String, ops::EngineProviders>>>,
-        config: crate::types::EngramConfig,
+    /// When `daemon.enabled`, delegates every model (embedding / NLI /
+    /// reranker) to the shared daemon — this process loads none. On any
+    /// failure (disabled, daemon unreachable, or the daemon lacks the model)
+    /// it falls back to the in-process [`ops::ProviderCache`], which still
+    /// loads each model at most once per process (PR #35). Associated rather
+    /// than a `&self` method so the warmup task can call it with cloned
+    /// handles.
+    ///
+    /// The daemon branch is compiled out under `cfg(test)`: the crate's own
+    /// `cargo test --lib` would otherwise auto-spawn the *test* binary as a
+    /// daemon (it isn't the CLI), stalling every server test on the
+    /// connect/retry budget. The daemon path has dedicated coverage in
+    /// [`crate::daemon::tests`]; integration tests build the lib without
+    /// `cfg(test)` so they exercise it normally.
+    async fn resolve_providers(
+        provider_cache: &ops::ProviderCache,
+        daemon: &Arc<tokio::sync::OnceCell<Option<Arc<crate::daemon::DaemonHandle>>>>,
         backend_override: Option<EmbeddingBackend>,
+        config: &crate::types::EngramConfig,
+        dir: &Path,
     ) -> ops::EngineProviders {
-        let backend = ops::resolve_backend(config.embeddings.backend, backend_override);
-        let key = format!(
-            "{backend}|{}|{}|{}|{}|{}|{}",
-            config.embeddings.provider,
-            config.embeddings.dimensions,
-            config.nli.enabled,
-            config.nli.model,
-            config.rerank.enabled,
-            config.rerank.model,
-        );
-
-        let mut cache = cache.lock().await;
-        if let Some(p) = cache.get(&key) {
-            return p.clone();
+        if Self::daemon_path_enabled(config) {
+            if let Some(handle) = Self::daemon_handle(daemon, config).await {
+                // Send the resolved concrete backend so the daemon's provider
+                // key matches ours regardless of the daemon's environment.
+                let backend = Some(ops::resolve_backend(
+                    config.embeddings.backend,
+                    backend_override,
+                ));
+                if let Some(p) = crate::daemon::remote_providers(
+                    handle,
+                    dir.to_string_lossy().into_owned(),
+                    backend,
+                    config,
+                )
+                .await
+                {
+                    return p;
+                }
+            }
         }
-
-        let cfg = config.clone();
-        let providers = tokio::task::spawn_blocking(move || {
-            ops::resolve_engine_providers(&cfg, backend_override)
-        })
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!("engine provider init task panicked: {e}");
-            ops::EngineProviders::default()
-        });
-
-        cache.insert(key, providers.clone());
-        providers
+        provider_cache.get(config, backend_override).await
     }
 
-    /// Preload the default project's engine providers in the background so the
-    /// embedding model is loaded *before* the first tool call rather than on
-    /// it. Without this the cache is populated lazily, so the first
-    /// `create`/`query` of a session still pays the ~240ms ONNX session init.
+    /// Process-wide daemon handle, established (and the daemon auto-spawned)
+    /// at most once. The result — including a `None` failure — is cached for
+    /// the process lifetime so a one-time connect/spawn failure doesn't
+    /// trigger a spawn storm.
+    async fn daemon_handle(
+        daemon: &Arc<tokio::sync::OnceCell<Option<Arc<crate::daemon::DaemonHandle>>>>,
+        config: &crate::types::EngramConfig,
+    ) -> Option<Arc<crate::daemon::DaemonHandle>> {
+        let idle = config.daemon.idle_timeout_secs;
+        let socket = crate::daemon::resolve_socket(None, &config.daemon);
+        daemon
+            .get_or_init(|| async move {
+                crate::daemon::DaemonHandle::connect_or_spawn(socket, idle).await
+            })
+            .await
+            .clone()
+    }
+
+    /// Preload the embedding model *before* the first tool call so it isn't
+    /// paid on it. With the daemon enabled this spawns/connects the daemon and
+    /// warms its model; otherwise it warms the in-process cache.
     ///
     /// Non-blocking: spawns a task and returns immediately. Best-effort —
     /// failures are logged, never fatal. If a tool call races this warmup the
-    /// shared async mutex makes it await the in-flight build instead of
-    /// starting a second one, so the model still loads exactly once.
+    /// daemon's lock / the cache's async mutex make the model load exactly
+    /// once.
     pub fn spawn_provider_warmup(&self) {
-        let cache = self.provider_cache.clone();
+        let provider_cache = self.provider_cache.clone();
+        let daemon = Arc::clone(&self.daemon);
         let backend = self.embedding_backend;
+        let dir = self.effective_dir.clone();
         let config_path = self.effective_dir.join(".engramdb").join("config.toml");
         tokio::spawn(async move {
             let config = load_config(&config_path).await.unwrap_or_default();
-            let _ = Self::resolve_or_cache_providers(cache, config, backend).await;
+            let _ = Self::resolve_providers(&provider_cache, &daemon, backend, &config, &dir).await;
             tracing::debug!("engine provider warmup complete");
         });
     }
@@ -1353,7 +1392,7 @@ impl EngramDbServer {
             if let Ok(global_engine) = self.build_engine_for(Some("global")).await {
                 if let Ok(global_result) = ops::query_memories(&global_engine, &query).await {
                     let max = query.max_results.unwrap_or(10);
-                    merge_scored_memories(&mut result.memories, global_result.memories, max);
+                    ops::merge_scored_memories(&mut result.memories, global_result.memories, max);
                     result.total += global_result.total;
                 }
             }
@@ -2470,6 +2509,14 @@ pub async fn run_sse(
         )
     });
 
+    // One process-wide model cache + daemon handle shared across every
+    // per-connection server, so the embedding model loads once (or the
+    // daemon is probed/spawned once) for the whole process rather than per
+    // HTTP connection.
+    let provider_cache = ops::ProviderCache::new();
+    let daemon: Arc<tokio::sync::OnceCell<Option<Arc<crate::daemon::DaemonHandle>>>> =
+        Arc::new(tokio::sync::OnceCell::new());
+
     // Resolve hierarchy eagerly once: subsequent per-connection server
     // instances share the registry, so registration only happens once.
     //
@@ -2479,10 +2526,13 @@ pub async fn run_sse(
     // connection would silently skip the check (`embedding_warning: None`)
     // and `auto` mode would never re-embed. Mirror `run_stdio`: compute the
     // warning (and auto-reindex if requested) exactly once, then seed every
-    // per-connection server with the resulting warning.
+    // per-connection server with the resulting warning. The warmup server
+    // shares the process-wide model cache / daemon so the check (and any
+    // auto-reindex) reuse the same providers the connections will.
     let embedding_warning = {
         let mut warmup =
-            EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())?;
+            EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())?
+                .with_shared_model_caches(provider_cache.clone(), daemon.clone());
         warmup.ensure_hierarchy().await?;
         if let Some((mode, report)) = warmup.embedding_startup_report().await {
             if !report.status.is_consistent() {
@@ -2504,6 +2554,9 @@ pub async fn run_sse(
                 }
             }
         }
+        // Warm the shared model cache / daemon once (after any auto-reindex)
+        // so the first connection's first tool call doesn't pay the load.
+        warmup.spawn_provider_warmup();
         warmup.embedding_warning
     };
 
@@ -2513,9 +2566,12 @@ pub async fn run_sse(
         {
             let stats = stats.clone();
             let embedding_warning = embedding_warning.clone();
+            let provider_cache = provider_cache.clone();
+            let daemon = daemon.clone();
             move || {
                 let mut server =
                     EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())
+                        .map(|s| s.with_shared_model_caches(provider_cache.clone(), daemon.clone()))
                         .map_err(|e| std::io::Error::other(e.to_string()))?;
                 server.embedding_warning = embedding_warning.clone();
                 Ok(server)

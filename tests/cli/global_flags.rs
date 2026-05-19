@@ -133,6 +133,99 @@ fn verbose_flag() {
 }
 
 #[test]
+fn global_store_flag_list_succeeds() {
+    // `list --global` targets the global store, which auto-initializes on
+    // first open — no project `init` required. Pin a private data dir so the
+    // single global-store location isn't raced by sibling tests.
+    let dir = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+
+    helpers::cmd()
+        .env("ENGRAMDB_DATA_DIR", data.path())
+        .args(["--dir", dir.path().to_str().unwrap(), "list", "--global"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn global_store_flag_stats_succeeds() {
+    let dir = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+
+    helpers::cmd()
+        .env("ENGRAMDB_DATA_DIR", data.path())
+        .args(["--dir", dir.path().to_str().unwrap(), "stats", "--global"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn global_store_flag_migrate_and_rollback_target_global_store() {
+    // migrate/rollback resolve `--global` in cli::run (dir substitution),
+    // a branch no handler test can reach. Drive it through the binary.
+    let dir = TempDir::new().unwrap(); // intentionally uninitialized project
+    let data = TempDir::new().unwrap();
+
+    // Auto-initialize the global store.
+    helpers::cmd()
+        .env("ENGRAMDB_DATA_DIR", data.path())
+        .args(["--dir", dir.path().to_str().unwrap(), "list", "--global"])
+        .assert()
+        .success();
+
+    // migrate --global must find the initialized global store (it reaches the
+    // "Dry run:" summary) rather than bailing on a missing project store.
+    let out = helpers::cmd()
+        .env("ENGRAMDB_DATA_DIR", data.path())
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "migrate",
+            "--global",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("Dry run:") && !text.contains("No .engramdb"),
+        "migrate --global should target the global store, got: {text}"
+    );
+
+    let out = helpers::cmd()
+        .env("ENGRAMDB_DATA_DIR", data.path())
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "rollback",
+            "--global",
+            "--target-version",
+            "1",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("Dry run:") && !text.contains("No .engramdb"),
+        "rollback --global should target the global store, got: {text}"
+    );
+}
+
+#[test]
+fn global_store_flag_listed_in_help() {
+    let output = helpers::cmd().args(["list", "--help"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--global"),
+        "list --help should advertise --global: {}",
+        stdout
+    );
+}
+
+#[test]
 fn json_shorthand_matches_format_json() {
     let dir = TempDir::new().unwrap();
     helpers::init_store(dir.path());

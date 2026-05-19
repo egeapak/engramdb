@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod daemon;
 pub mod embeddings;
 pub mod mcp;
 pub mod nli;

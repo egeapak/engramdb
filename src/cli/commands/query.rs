@@ -2,7 +2,7 @@
 
 use crate::cli::output::OutputFormatter;
 use crate::ops::{parse_detail_level, parse_memory_type, validate_score};
-use crate::retrieval::engine::{RetrievalMode, RetrievalQuery};
+use crate::retrieval::engine::{RetrievalMode, RetrievalQuery, RetrievalResult};
 use crate::storage::MemoryStore;
 use anyhow::Result;
 use std::path::Path;
@@ -20,6 +20,8 @@ pub struct QueryParams {
     pub detail_level: Option<String>,
     pub include_expired: bool,
     pub show_scores: bool,
+    /// Also merge global-store memories into the project results.
+    pub include_global: bool,
 }
 
 /// Run a unified retrieval query.
@@ -30,15 +32,40 @@ pub struct QueryParams {
 /// (keyword, semantic, scope proximity, or tag match).
 pub async fn run_query(
     dir: &Path,
+    global: bool,
     params: QueryParams,
     embedding_backend: Option<crate::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = if global {
+        MemoryStore::open_global().await?
+    } else {
+        MemoryStore::open(dir).await?
+    };
     if let Ok(Some(warning)) = store.check_staleness().await {
         formatter.print_warning(&warning);
     }
-    let config_path = dir.join(".engramdb").join("config.toml");
+
+    let show_scores = params.show_scores;
+    let result = compute_query_result(store, global, params, embedding_backend).await?;
+
+    formatter.print_retrieval_result(&result, show_scores);
+
+    Ok(())
+}
+
+/// Build the retrieval engine for `store`, run `params` against it, and
+/// (when `params.include_global` is set and we are not already querying the
+/// global store) merge in global-store hits — mirroring the MCP
+/// `include_global` option. Returned separately from rendering so the merge
+/// behavior is unit-testable offline.
+pub(crate) async fn compute_query_result(
+    store: MemoryStore,
+    global: bool,
+    params: QueryParams,
+    embedding_backend: Option<crate::types::EmbeddingBackend>,
+) -> Result<RetrievalResult> {
+    let config_path = store.project_dir.join(".engramdb").join("config.toml");
     let engine = crate::ops::build_engine(store, &config_path, embedding_backend).await;
 
     let types = if !params.type_filter.is_empty() {
@@ -81,10 +108,31 @@ pub async fn run_query(
         detail_level,
     };
 
-    let result = crate::ops::query_memories(&engine, &query).await?;
-    formatter.print_retrieval_result(&result, params.show_scores);
+    let mut result = crate::ops::query_memories(&engine, &query).await?;
 
-    Ok(())
+    // Optionally fold in global-store memories. Skipped when already
+    // querying the global store (`--global`) — nothing extra to merge.
+    if params.include_global && !global {
+        if let Ok(global_store) = MemoryStore::open_global().await {
+            let global_config = global_store
+                .project_dir
+                .join(".engramdb")
+                .join("config.toml");
+            let global_engine =
+                crate::ops::build_engine(global_store, &global_config, embedding_backend).await;
+            if let Ok(global_result) = crate::ops::query_memories(&global_engine, &query).await {
+                let max = query.max_results.unwrap_or(params.max_results);
+                crate::ops::merge_scored_memories(
+                    &mut result.memories,
+                    global_result.memories,
+                    max,
+                );
+                result.total += global_result.total;
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -151,6 +199,7 @@ mod tests {
             detail_level: None,
             include_expired: false,
             show_scores: false,
+            include_global: false,
         }
     }
 
@@ -164,7 +213,7 @@ mod tests {
             ..base_params()
         };
 
-        let result = run_query(temp_dir.path(), params, None, &formatter).await;
+        let result = run_query(temp_dir.path(), false, params, None, &formatter).await;
         assert!(result.is_ok());
     }
 
@@ -179,7 +228,7 @@ mod tests {
             ..base_params()
         };
 
-        let result = run_query(temp_dir.path(), params, None, &formatter).await;
+        let result = run_query(temp_dir.path(), false, params, None, &formatter).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -198,7 +247,7 @@ mod tests {
             ..base_params()
         };
 
-        let result = run_query(temp_dir.path(), params, None, &formatter).await;
+        let result = run_query(temp_dir.path(), false, params, None, &formatter).await;
         assert!(result.is_ok());
     }
 
@@ -213,8 +262,59 @@ mod tests {
             ..base_params()
         };
 
-        let result = run_query(temp_dir.path(), params, None, &formatter).await;
+        let result = run_query(temp_dir.path(), false, params, None, &formatter).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_include_global_merges_global_hits_with_negative_control() {
+        // Serialize global-store access and start from a clean global store.
+        let _lock = crate::storage::test_support::acquire_global_test_lock().await;
+        let global = MemoryStore::open_global().await.unwrap();
+        global
+            .create(&create_test_memory(
+                "global-q-001-zzz",
+                MemoryType::Decision,
+                0.95,
+            ))
+            .await
+            .unwrap();
+
+        let (temp_dir, _store) = setup_test_store().await;
+
+        // Rank mode with no query text needs no embeddings → fully offline.
+        let mk = |include_global: bool| QueryParams {
+            mode: RetrievalMode::Rank,
+            path: Some("src/main.rs".to_string()),
+            include_global,
+            ..base_params()
+        };
+
+        // include_global = true → the global memory is folded in.
+        let store = MemoryStore::open(temp_dir.path()).await.unwrap();
+        let merged = compute_query_result(store, false, mk(true), None)
+            .await
+            .unwrap();
+        assert!(
+            merged
+                .memories
+                .iter()
+                .any(|m| m.memory.id == "global-q-001-zzz"),
+            "global memory should be merged when include_global=true"
+        );
+
+        // include_global = false → negative control: it must NOT appear.
+        let store = MemoryStore::open(temp_dir.path()).await.unwrap();
+        let project_only = compute_query_result(store, false, mk(false), None)
+            .await
+            .unwrap();
+        assert!(
+            !project_only
+                .memories
+                .iter()
+                .any(|m| m.memory.id == "global-q-001-zzz"),
+            "global memory must NOT appear when include_global=false"
+        );
     }
 
     #[tokio::test]
@@ -229,7 +329,7 @@ mod tests {
             ..base_params()
         };
 
-        let result = run_query(temp_dir.path(), params, None, &formatter).await;
+        let result = run_query(temp_dir.path(), false, params, None, &formatter).await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(

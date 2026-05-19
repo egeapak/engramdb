@@ -5,6 +5,7 @@
 //! semantic search (when embeddings are available), and keyword search.
 
 use super::filters::{apply_index_filters, SearchFilters};
+use super::reranker::Reranker;
 use crate::embeddings::EmbeddingProvider;
 use crate::nli::{NliProvider, NliResult};
 use crate::scoring::{
@@ -13,9 +14,8 @@ use crate::scoring::{
 use crate::storage::{MemoryStore, Result};
 use crate::types::{EngramConfig, Memory, MemoryType};
 use chrono::Utc;
-use fastembed::TextRerank;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Detail level for retrieved memories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -118,7 +118,7 @@ pub struct RetrievalEngine {
     config: EngramConfig,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     nli_provider: Option<Arc<dyn NliProvider>>,
-    reranker: Option<Arc<Mutex<TextRerank>>>,
+    reranker: Option<Arc<dyn Reranker>>,
     /// Optional runtime stats collector. When `Some`, the engine pushes
     /// stage timings and query outcomes to it. `None` disables all telemetry.
     stats: Option<Arc<crate::telemetry::StatsCollector>>,
@@ -216,8 +216,8 @@ impl RetrievalEngine {
     ///
     /// When configured (and `config.rerank.enabled` is true), retrieved results
     /// are re-scored using the cross-encoder before being returned. The reranker
-    /// is wrapped in `Arc<Mutex<>>` because `TextRerank::rerank()` requires `&mut self`.
-    pub fn with_reranker(mut self, reranker: Arc<Mutex<TextRerank>>) -> Self {
+    /// may run in-process or be delegated to the shared embedding daemon.
+    pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
         self.reranker = Some(reranker);
         self
     }
@@ -439,19 +439,10 @@ impl RetrievalEngine {
             })
             .collect();
 
-        // Run cross-encoder in spawn_blocking since it's CPU-bound
-        let query_owned = query_text.to_string();
-        let rerank_results = tokio::task::spawn_blocking(move || {
-            let mut reranker_guard = reranker
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Failed to acquire reranker lock: {}", e))?;
-            let doc_refs: Vec<&String> = documents.iter().collect();
-            reranker_guard
-                .rerank(&query_owned, doc_refs, false, None)
-                .map_err(|e| anyhow::anyhow!("Reranking failed: {}", e))
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("Rerank task panicked: {}", e))??;
+        // Score query+document pairs with the cross-encoder. The reranker
+        // runs in-process on a blocking thread, or is delegated to the shared
+        // embedding daemon — the engine doesn't care which.
+        let rerank_results = reranker.rerank(query_text, &documents).await?;
 
         // Original scores are already in [0, 1] (from composite_score).
         // Cross-encoder logits are unbounded, so normalize with sigmoid.
@@ -902,8 +893,9 @@ async fn detect_contradictions_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::retrieval::reranker::LocalReranker;
     use crate::storage::InMemoryRegistry;
-    use std::sync::LazyLock;
+    use std::sync::{LazyLock, Mutex};
 
     /// Shared reranker across all tests in this module to avoid loading the
     /// ~100MB ONNX model once per test (which causes OOM when parallel).
@@ -917,8 +909,10 @@ mod tests {
                 .map(|r| Arc::new(Mutex::new(r)))
         });
 
-    fn try_reranker() -> Option<Arc<Mutex<fastembed::TextRerank>>> {
-        SHARED_RERANKER.as_ref().cloned()
+    fn try_reranker() -> Option<Arc<dyn Reranker>> {
+        SHARED_RERANKER
+            .as_ref()
+            .map(|r| LocalReranker::shared(Arc::clone(r)))
     }
 
     /// Filter-mode query with only a text query set, mirroring the shape

@@ -5,7 +5,6 @@ use crate::cli::output::{OutputFormatter, Stats};
 use crate::embeddings::{OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT};
 use crate::embeddings::{OnnxProvider, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT};
 use crate::ops::compute_stats;
-use crate::storage::project_id::compute_project_id;
 use crate::storage::MemoryStore;
 use crate::telemetry::StatsCollector;
 use crate::types::{EmbeddingBackend, Status};
@@ -26,11 +25,21 @@ use std::path::Path;
 /// * `formatter` - Output formatter for displaying statistics
 pub async fn run_stats(
     dir: &Path,
+    global: bool,
+    daemon: bool,
     embedding_backend: Option<EmbeddingBackend>,
     all_projects: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    if daemon {
+        return run_daemon_stats(formatter).await;
+    }
+
+    let store = if global {
+        MemoryStore::open_global().await?
+    } else {
+        MemoryStore::open(dir).await?
+    };
     let store_stats = compute_stats(&store).await?;
 
     // Extract health warning counts before moving data into Stats
@@ -52,12 +61,12 @@ pub async fn run_stats(
     // CLI is process-scoped so we won't see in-flight counters from a running
     // MCP server, but we do see counters that the server has flushed to disk
     // (default flush interval 60s + on shutdown).
-    let cfg = crate::storage::config::load_config(&dir.join(".engramdb/config.toml"))
+    let cfg = crate::storage::config::load_config(&store.project_dir.join(".engramdb/config.toml"))
         .await
         .unwrap_or_default();
     let collector = StatsCollector::new(cfg.stats);
     let _ = crate::telemetry::persistence::hydrate_collector(&collector).await;
-    let project_id = compute_project_id(dir);
+    let project_id = store.project_id.clone();
     let runtime = collector.snapshot(&project_id, all_projects);
     let runtime_present = runtime.view.usage.total_calls > 0
         || runtime.view.queries.total > 0
@@ -80,7 +89,7 @@ pub async fn run_stats(
 
     // Print embeddings status
     println!();
-    let config_path = dir.join(".engramdb/config.toml");
+    let config_path = store.project_dir.join(".engramdb/config.toml");
     let config = crate::storage::config::load_config(&config_path)
         .await
         .unwrap_or_default();
@@ -105,6 +114,60 @@ pub async fn run_stats(
         }
     }
 
+    Ok(())
+}
+
+/// Show the shared embedding daemon's cumulative request metrics.
+///
+/// Prefers a live query to the running daemon (authoritative, includes
+/// in-flight counts); falls back to the last snapshot persisted to the global
+/// LanceDB store when no daemon is currently running.
+async fn run_daemon_stats(formatter: &OutputFormatter) -> Result<()> {
+    let cfg = crate::storage::config::load_config(
+        &std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(".engramdb")
+            .join("config.toml"),
+    )
+    .await
+    .unwrap_or_default();
+    let socket = crate::daemon::resolve_socket(None, &cfg.daemon);
+    if let Some(s) = crate::daemon::query_status(&socket).await? {
+        formatter.print_success(&format!("Embedding daemon: running (pid {})", s.pid));
+        println!("  socket:        {}", socket.display());
+        println!("  protocol:      v{}", s.version);
+        println!("  uptime:        {}s", s.uptime_secs);
+        println!("  idle:          {}s", s.idle_secs);
+        println!("  model bundles: {}", s.bundles_loaded);
+        println!("  requests (cumulative across restarts):");
+        println!("    embed:       {}", s.requests_embed);
+        println!("    classify:    {}", s.requests_classify);
+        println!("    rerank:      {}", s.requests_rerank);
+        println!("    meta:        {}", s.requests_meta);
+        println!("    status:      {}", s.requests_status);
+        println!("    total:       {}", s.requests_total);
+        return Ok(());
+    }
+
+    match crate::daemon::metrics::load_latest().await {
+        Some(p) => {
+            formatter.print_message("Embedding daemon: not running (last persisted snapshot)");
+            let s = p.snapshot;
+            println!("  requests (cumulative across restarts):");
+            println!("    embed:       {}", s.embed);
+            println!("    classify:    {}", s.classify);
+            println!("    rerank:      {}", s.rerank);
+            println!("    meta:        {}", s.meta);
+            println!("    status:      {}", s.status);
+            println!("    total:       {}", s.total());
+        }
+        None => {
+            formatter.print_message("Embedding daemon: not running and no metrics persisted yet.");
+            formatter.print_message(
+                "It is auto-spawned on demand by the next MCP run when [daemon] is enabled.",
+            );
+        }
+    }
     Ok(())
 }
 

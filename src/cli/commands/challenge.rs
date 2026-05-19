@@ -16,10 +16,15 @@ pub struct ChallengeParams {
 /// Challenge a memory by providing counter-evidence.
 pub async fn run_challenge(
     dir: &Path,
+    global: bool,
     params: ChallengeParams,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = if global {
+        MemoryStore::open_global().await?
+    } else {
+        MemoryStore::open(dir).await?
+    };
     let result = challenge_memory(
         &store,
         &params.id,

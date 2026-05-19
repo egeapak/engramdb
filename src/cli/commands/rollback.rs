@@ -16,6 +16,7 @@ use std::path::Path;
 /// With `--dry-run`, only reports what would be rolled back without changing files.
 pub async fn run_rollback(
     dir: &Path,
+    global: bool,
     target_version: Option<u32>,
     dry_run: bool,
     formatter: &OutputFormatter,
@@ -37,12 +38,19 @@ pub async fn run_rollback(
 
     let shared_dir = paths::memories_dir(dir);
 
-    let manifest_path = engramdb_dir.join("manifest.toml");
-    let personal_dir = if manifest_path.exists() {
-        let manifest = crate::storage::manifest::load_manifest(&manifest_path).await?;
-        paths::personal_memories_dir(&manifest.project).ok()
+    // Personal memories live under the store's project_id. The global store
+    // uses GLOBAL_PROJECT_ID (its manifest name is "global", which is *not*
+    // the id); projects keep the pre-existing manifest-name resolution.
+    let personal_dir = if global {
+        paths::personal_memories_dir(paths::GLOBAL_PROJECT_ID).ok()
     } else {
-        None
+        let manifest_path = engramdb_dir.join("manifest.toml");
+        if manifest_path.exists() {
+            let manifest = crate::storage::manifest::load_manifest(&manifest_path).await?;
+            paths::personal_memories_dir(&manifest.project).ok()
+        } else {
+            None
+        }
     };
 
     let mut rolled_back = 0u32;

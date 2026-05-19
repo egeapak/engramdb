@@ -23,6 +23,7 @@ use std::path::Path;
 #[allow(clippy::too_many_arguments)]
 pub async fn run_list(
     dir: &Path,
+    global: bool,
     type_filter: Vec<String>,
     tags_filter: Vec<String>,
     status_filter: Option<String>,
@@ -33,7 +34,11 @@ pub async fn run_list(
     verbose: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = MemoryStore::open(dir).await?;
+    let store = if global {
+        MemoryStore::open_global().await?
+    } else {
+        MemoryStore::open(dir).await?
+    };
     if let Ok(Some(warning)) = store.check_staleness().await {
         formatter.print_warning(&warning);
     }
@@ -151,6 +156,7 @@ mod tests {
 
         let result = run_list(
             temp_dir.path(),
+            false,
             vec![],
             vec![],
             None,
@@ -173,6 +179,7 @@ mod tests {
 
         let result = run_list(
             temp_dir.path(),
+            false,
             vec![],
             vec![],
             None,
@@ -195,6 +202,7 @@ mod tests {
 
         let result = run_list(
             temp_dir.path(),
+            false,
             vec![],
             vec![],
             None,
@@ -230,6 +238,7 @@ mod tests {
 
         let result = run_list(
             temp_dir.path(),
+            false,
             vec![],
             vec![],
             None,
@@ -252,6 +261,7 @@ mod tests {
 
         let result = run_list(
             temp_dir.path(),
+            false,
             vec![],
             vec![],
             None,
@@ -274,6 +284,7 @@ mod tests {
 
         let result = run_list(
             temp_dir.path(),
+            false,
             vec![],
             vec![],
             None,
@@ -296,6 +307,7 @@ mod tests {
 
         let result = run_list(
             temp_dir.path(),
+            false,
             vec![],
             vec![],
             None,
@@ -322,6 +334,7 @@ mod tests {
 
         let result = run_list(
             temp_dir.path(),
+            false,
             vec![],
             vec![],
             None,
@@ -344,6 +357,7 @@ mod tests {
 
         let result = run_list(
             temp_dir.path(),
+            false,
             vec![],
             vec![],
             None,
@@ -366,6 +380,7 @@ mod tests {
 
         let result = run_list(
             temp_dir.path(),
+            false,
             vec![],
             vec![],
             None,

@@ -366,6 +366,14 @@ pub async fn doctor_environment(
         subsections: vec![],
     });
 
+    // --- Daemon section (informational; the daemon is optional and
+    // auto-spawned, so these never count as failures) ---
+    sections.push(DoctorSection {
+        name: "Daemon".to_string(),
+        checks: vec![check_daemon(dir).await],
+        subsections: vec![],
+    });
+
     let all_passed = sections
         .iter()
         .flat_map(|s| {
@@ -379,6 +387,56 @@ pub async fn doctor_environment(
         sections,
         all_passed,
         store_check,
+    }
+}
+
+/// Inspect the shared embedding daemon: configured? reachable? Informational
+/// only — the daemon is optional and auto-spawned by the next MCP run, so a
+/// stopped daemon is never a failure.
+async fn check_daemon(dir: &Path) -> EnvironmentCheck {
+    let config = crate::storage::config::load_config(&dir.join(".engramdb").join("config.toml"))
+        .await
+        .unwrap_or_default();
+    let socket = crate::daemon::resolve_socket(None, &config.daemon);
+    let mut details = vec![
+        format!("socket: {}", socket.display()),
+        format!(
+            "config: enabled={}, idle_timeout_secs={}",
+            config.daemon.enabled, config.daemon.idle_timeout_secs
+        ),
+    ];
+
+    if !config.daemon.enabled {
+        return EnvironmentCheck {
+            name: "Embedding daemon".to_string(),
+            passed: true,
+            message: "disabled in config (models load in-process per MCP)".to_string(),
+            suggestion: None,
+            details,
+            status: Some(CheckStatus::Info),
+        };
+    }
+
+    let (message, suggestion) = match crate::daemon::query_status(&socket).await {
+        Ok(Some(s)) => {
+            details.push(format!(
+                "pid {}, uptime {}s, {} model bundle(s), {} requests served (cumulative)",
+                s.pid, s.uptime_secs, s.bundles_loaded, s.requests_total
+            ));
+            (format!("running (protocol v{})", s.version), None)
+        }
+        _ => (
+            "not running (auto-spawned on the next MCP run)".to_string(),
+            Some("Run `engramdb daemon status` or `engramdb daemon restart`.".to_string()),
+        ),
+    };
+    EnvironmentCheck {
+        name: "Embedding daemon".to_string(),
+        passed: true,
+        message,
+        suggestion,
+        details,
+        status: Some(CheckStatus::Info),
     }
 }
 
@@ -1826,7 +1884,7 @@ mod tests {
 
         assert_eq!(
             section_names,
-            vec!["System", "Project", "Agent", "Embeddings"]
+            vec!["System", "Project", "Agent", "Embeddings", "Daemon"]
         );
     }
 
