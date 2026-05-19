@@ -52,6 +52,61 @@ pub struct EmbeddingFingerprint {
     pub dimensions: usize,
 }
 
+/// How a store's stored embedding fingerprint compares to the embedding
+/// model currently in use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmbeddingModelStatus {
+    /// Stored vectors were produced by the model currently in use.
+    Match,
+    /// A different model is in use — search would mix/stale-compare vectors.
+    Mismatch { stored: String, current: String },
+    /// Embedding dimensionality changed (writes would fail the Arrow schema).
+    DimensionMismatch { stored: usize, current: usize },
+    /// Legacy store with no fingerprint — model identity unknown/unverified.
+    Untracked { current: String },
+}
+
+impl EmbeddingModelStatus {
+    /// Whether stored vectors are safe to search with the current model.
+    pub fn is_consistent(&self) -> bool {
+        matches!(self, EmbeddingModelStatus::Match)
+    }
+}
+
+impl EmbeddingFingerprint {
+    /// Compare this stored fingerprint against the model currently in use.
+    pub fn status(&self, current_model: &str, current_dims: usize) -> EmbeddingModelStatus {
+        if self.dimensions != current_dims {
+            EmbeddingModelStatus::DimensionMismatch {
+                stored: self.dimensions,
+                current: current_dims,
+            }
+        } else if self.model != current_model {
+            EmbeddingModelStatus::Mismatch {
+                stored: self.model.clone(),
+                current: current_model.to_string(),
+            }
+        } else {
+            EmbeddingModelStatus::Match
+        }
+    }
+}
+
+/// Status of `stored` (the manifest fingerprint, or `None` for a legacy
+/// store) against the model currently in use.
+pub fn embedding_status(
+    stored: Option<&EmbeddingFingerprint>,
+    current_model: &str,
+    current_dims: usize,
+) -> EmbeddingModelStatus {
+    match stored {
+        Some(fp) => fp.status(current_model, current_dims),
+        None => EmbeddingModelStatus::Untracked {
+            current: current_model.to_string(),
+        },
+    }
+}
+
 /// Statistics tracked in the manifest.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ManifestStats {

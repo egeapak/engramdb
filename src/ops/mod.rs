@@ -47,14 +47,15 @@ pub use stats::{compute_stats, StoreStats};
 pub use update::{update_memory, UpdateParams};
 
 use crate::embeddings::{
-    EmbeddingProvider, OnnxProvider, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT,
+    EmbeddingProvider, OnnxProvider, DEFAULT_ONNX_EMBEDDING, ONNX_MXBAI_EMBED_LARGE,
+    ONNX_NOMIC_EMBED_TEXT,
 };
 #[cfg(feature = "ollama")]
 use crate::embeddings::{OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT};
 use crate::nli::{NliProvider, OnnxNliProvider};
 use crate::retrieval::engine::RetrievalEngine;
-use crate::storage::MemoryStore;
-use crate::types::EmbeddingBackend;
+use crate::storage::{EmbeddingFingerprint, MemoryStore};
+use crate::types::{EmbeddingBackend, EngramConfig};
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -79,6 +80,41 @@ pub fn resolve_backend(
         );
     }
     config_backend
+}
+
+/// The embedding fingerprint `config` *would* produce, computed WITHOUT
+/// loading the model — mirrors [`resolve_provider`]'s model→spec map and
+/// backend preference. Used by `doctor` and the open-time check (cheap);
+/// the enforcement guard uses the live provider's `model_id()` instead.
+/// Returns `None` for an unknown provider string (embeddings disabled).
+pub fn expected_embedding_fingerprint(config: &EngramConfig) -> Option<EmbeddingFingerprint> {
+    let backend = resolve_backend(config.embeddings.backend, None);
+    let provider = config.embeddings.provider.as_str();
+
+    #[cfg(feature = "ollama")]
+    if backend == EmbeddingBackend::Ollama {
+        let spec = match provider {
+            "onnx" | "all-minilm" => ALL_MINILM,
+            "nomic-embed-text" => NOMIC_EMBED_TEXT,
+            "mxbai-embed-large" => MXBAI_EMBED_LARGE,
+            _ => return None,
+        };
+        return Some(EmbeddingFingerprint {
+            model: format!("ollama/{}", spec.model_name),
+            dimensions: spec.dimensions,
+        });
+    }
+
+    let spec = match provider {
+        "onnx" | "all-minilm" => DEFAULT_ONNX_EMBEDDING,
+        "nomic-embed-text" => ONNX_NOMIC_EMBED_TEXT,
+        "mxbai-embed-large" => ONNX_MXBAI_EMBED_LARGE,
+        _ => return None,
+    };
+    Some(EmbeddingFingerprint {
+        model: format!("onnx/{}", spec.name),
+        dimensions: spec.dimensions,
+    })
 }
 
 /// Try to create an embedding provider for the given model name and backend.
