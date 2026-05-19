@@ -572,9 +572,11 @@ mod provider_cache_tests {
         assert_ne!(k, provider_cache_key(&c, None, 2));
 
         // Title strategy is folded in: T5 pulls a cached generator into the
-        // bundle, so it is a distinct signature from keyword/none.
+        // bundle, so it is a distinct signature from keyword/none. (The
+        // default is now T5, so flip to keyword to prove sensitivity.)
+        assert_eq!(base.title.strategy, crate::title::TitleStrategy::T5);
         let mut c = base.clone();
-        c.title.strategy = crate::title::TitleStrategy::T5;
+        c.title.strategy = crate::title::TitleStrategy::Keyword;
         assert_ne!(k, provider_cache_key(&c, None, 2));
 
         // A daemon-only config change does NOT change the model signature.

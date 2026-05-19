@@ -585,10 +585,21 @@ impl Default for RerankConfig {
 ///
 /// This is the deployment default; the MCP `create` tool's per-call
 /// `title_strategy` still overrides it.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// Defaults to `t5`: the shared daemon loads (and pools) the
+/// encoder+decoder **once machine-wide**, so the historical per-`create`
+/// cost that made keyword the default no longer applies. The one-shot CLI
+/// is unaffected — `engramdb add` uses [`TitleStrategy::default`]
+/// (`keyword`) so a single command never pays a cold T5 load.
+fn default_title_strategy() -> crate::title::TitleStrategy {
+    crate::title::TitleStrategy::T5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TitleConfig {
-    /// Title-generation strategy. Default `keyword`.
-    #[serde(default)]
+    /// Title-generation strategy. Default `t5` (daemon-amortized; see
+    /// [`default_title_strategy`]).
+    #[serde(default = "default_title_strategy")]
     pub strategy: crate::title::TitleStrategy,
 
     /// Number of independent T5 sessions to pool when `strategy = "t5"`.
@@ -600,6 +611,15 @@ pub struct TitleConfig {
     /// `intra_threads` to keep `pool_size × intra_threads ≤ cores`.
     #[serde(default)]
     pub pool_size: Option<usize>,
+}
+
+impl Default for TitleConfig {
+    fn default() -> Self {
+        Self {
+            strategy: default_title_strategy(),
+            pool_size: None,
+        }
+    }
 }
 
 impl TitleConfig {
@@ -1534,10 +1554,18 @@ weight = 0.7
     fn title_config_serde_default_and_roundtrip() {
         use crate::title::TitleStrategy;
 
-        // Absent `[title]` ⇒ keyword (unchanged behavior for old configs).
+        // Absent `[title]` ⇒ t5: the daemon loads/pools it once, so it is
+        // the deployment default. (The one-shot CLI is unaffected — it uses
+        // `TitleStrategy::default()`, which is still `Keyword`.)
         let cfg: EngramConfig = toml::from_str("").unwrap();
-        assert_eq!(cfg.title.strategy, TitleStrategy::Keyword);
-        assert_eq!(TitleConfig::default().strategy, TitleStrategy::Keyword);
+        assert_eq!(cfg.title.strategy, TitleStrategy::T5);
+        assert_eq!(TitleConfig::default().strategy, TitleStrategy::T5);
+        // A `[title]` table present but without `strategy` also ⇒ t5
+        // (field serde-default matches the struct default — no drift).
+        let cfg: EngramConfig = toml::from_str("[title]\n").unwrap();
+        assert_eq!(cfg.title.strategy, TitleStrategy::T5);
+        // The CLI literal default is deliberately still keyword.
+        assert_eq!(TitleStrategy::default(), TitleStrategy::Keyword);
 
         // Each strategy parses by its lowercase name.
         for (name, want) in [
