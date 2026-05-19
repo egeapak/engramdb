@@ -63,6 +63,20 @@ pub fn default_backend() -> Backend {
     }
 }
 
+/// Intra-op thread count for the directly-built `ort` sessions (NLI, T5).
+///
+/// Defaults to 1 — the historical hardcoded value, so production behavior
+/// is unchanged — and is overridable via `ENGRAMDB_ONNX_INTRA_THREADS` to
+/// benchmark the single-call-latency vs concurrency tradeoff. The embedding
+/// path (fastembed) manages its own thread pool and is unaffected.
+pub fn intra_threads() -> usize {
+    std::env::var("ENGRAMDB_ONNX_INTRA_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n != 0)
+        .unwrap_or(1)
+}
+
 #[cfg(all(feature = "coreml", target_os = "macos"))]
 fn coreml_eps() -> Vec<ExecutionProviderDispatch> {
     use ort::ep::{coreml::ComputeUnits, CoreML};

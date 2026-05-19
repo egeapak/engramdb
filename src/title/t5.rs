@@ -121,13 +121,13 @@ impl T5TitleGenerator {
 
         let encoder = crate::onnx_ep::apply_backend(Session::builder()?, backend)?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(1)?
+            .with_intra_threads(crate::onnx_ep::intra_threads())?
             .commit_from_file(&encoder_path)
             .context("Failed to load T5 encoder ONNX model")?;
 
         let decoder = crate::onnx_ep::apply_backend(Session::builder()?, backend)?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(1)?
+            .with_intra_threads(crate::onnx_ep::intra_threads())?
             .commit_from_file(&decoder_path)
             .context("Failed to load T5 decoder ONNX model")?;
 

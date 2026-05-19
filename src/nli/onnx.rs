@@ -61,7 +61,7 @@ impl OnnxNliProvider {
         let builder = crate::onnx_ep::apply_backend(Session::builder()?, backend)?;
         let session = builder
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(1)?
+            .with_intra_threads(crate::onnx_ep::intra_threads())?
             .commit_from_file(&model_path)
             .context("Failed to load NLI ONNX model")?;
 

@@ -207,80 +207,97 @@ async fn report(workload: &str, backend_label: &str, fut: impl Future<Output = R
     }
 }
 
+/// Workload filter via `ENGRAMDB_BENCH_WORKLOADS` (comma list); all if unset.
+fn enabled(workload: &str) -> bool {
+    match std::env::var("ENGRAMDB_BENCH_WORKLOADS") {
+        Ok(list) => list.split(',').any(|w| w.trim() == workload),
+        Err(_) => true,
+    }
+}
+
 async fn run_backend(backend_label: &str, backend: Backend) {
     println!("\n=== backend: {backend_label} ===");
     let nli_repo = EngramConfig::default().nli.model;
 
-    let base_rss = rss_kib();
-    if let Some(provider) = OnnxProvider::try_new_on(backend) {
-        report(
-            "embed_single",
-            backend_label,
-            bench("embed_single", backend_label, base_rss, 300, 60, |t| {
-                let p = &provider;
-                async move {
-                    p.embed(t).await?;
-                    Ok(())
-                }
-            }),
-        )
-        .await;
-
-        let batch: Vec<&str> = INPUTS
-            .iter()
-            .flat_map(|s| std::iter::repeat_n(*s, 6))
-            .collect();
-        report(
-            "embed_batch",
-            backend_label,
-            bench("embed_batch", backend_label, base_rss, 120, 30, |_| {
-                let p = &provider;
-                let batch = &batch;
-                async move {
-                    p.embed_batch(batch).await?;
-                    Ok(())
-                }
-            }),
-        )
-        .await;
-    } else {
-        println!("  embedding model unavailable, skipping");
+    if enabled("embed_single") || enabled("embed_batch") {
+        let base_rss = rss_kib();
+        if let Some(provider) = OnnxProvider::try_new_on(backend) {
+            if enabled("embed_single") {
+                report(
+                    "embed_single",
+                    backend_label,
+                    bench("embed_single", backend_label, base_rss, 300, 60, |t| {
+                        let p = &provider;
+                        async move {
+                            p.embed(t).await?;
+                            Ok(())
+                        }
+                    }),
+                )
+                .await;
+            }
+            if enabled("embed_batch") {
+                let batch: Vec<&str> = INPUTS
+                    .iter()
+                    .flat_map(|s| std::iter::repeat_n(*s, 6))
+                    .collect();
+                report(
+                    "embed_batch",
+                    backend_label,
+                    bench("embed_batch", backend_label, base_rss, 120, 30, |_| {
+                        let p = &provider;
+                        let batch = &batch;
+                        async move {
+                            p.embed_batch(batch).await?;
+                            Ok(())
+                        }
+                    }),
+                )
+                .await;
+            }
+        } else {
+            println!("  embedding model unavailable, skipping");
+        }
     }
 
-    let base_rss = rss_kib();
-    if let Some(provider) = OnnxNliProvider::try_new_on(&nli_repo, backend) {
-        report(
-            "nli_classify",
-            backend_label,
-            bench("nli_classify", backend_label, base_rss, 80, 25, |t| {
-                let p = &provider;
-                async move {
-                    p.classify("The database uses PostgreSQL.", t).await?;
-                    Ok(())
-                }
-            }),
-        )
-        .await;
-    } else {
-        println!("  NLI model unavailable, skipping");
+    if enabled("nli_classify") {
+        let base_rss = rss_kib();
+        if let Some(provider) = OnnxNliProvider::try_new_on(&nli_repo, backend) {
+            report(
+                "nli_classify",
+                backend_label,
+                bench("nli_classify", backend_label, base_rss, 80, 25, |t| {
+                    let p = &provider;
+                    async move {
+                        p.classify("The database uses PostgreSQL.", t).await?;
+                        Ok(())
+                    }
+                }),
+            )
+            .await;
+        } else {
+            println!("  NLI model unavailable, skipping");
+        }
     }
 
-    let base_rss = rss_kib();
-    if let Some(generator) = T5TitleGenerator::try_new_on(backend) {
-        report(
-            "t5_title",
-            backend_label,
-            bench("t5_title", backend_label, base_rss, 24, 10, |t| {
-                let g = &generator;
-                async move {
-                    g.generate(t).await?;
-                    Ok(())
-                }
-            }),
-        )
-        .await;
-    } else {
-        println!("  T5 model unavailable, skipping");
+    if enabled("t5_title") {
+        let base_rss = rss_kib();
+        if let Some(generator) = T5TitleGenerator::try_new_on(backend) {
+            report(
+                "t5_title",
+                backend_label,
+                bench("t5_title", backend_label, base_rss, 24, 10, |t| {
+                    let g = &generator;
+                    async move {
+                        g.generate(t).await?;
+                        Ok(())
+                    }
+                }),
+            )
+            .await;
+        } else {
+            println!("  T5 model unavailable, skipping");
+        }
     }
 }
 
@@ -288,9 +305,10 @@ async fn run_backend(backend_label: &str, backend: Backend) {
 async fn main() -> Result<()> {
     println!("EngramDB ONNX backend benchmark");
     println!(
-        "Core ML compiled in: {} | XNNPACK compiled in: {}",
+        "Core ML: {} | XNNPACK: {} | NLI/T5 intra_threads: {}",
         engramdb::onnx_ep::coreml_available(),
-        engramdb::onnx_ep::xnnpack_available()
+        engramdb::onnx_ep::xnnpack_available(),
+        engramdb::onnx_ep::intra_threads()
     );
 
     run_backend("cpu", Backend::Cpu).await;
