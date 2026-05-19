@@ -1,12 +1,13 @@
 //! T5-Small ONNX-based title generator for abstractive summarization.
 //!
-//! Downloads the T5-small model from HuggingFace Hub on first use (~60MB quantized),
-//! caches it in the unified EngramDB model cache directory, and runs inference
-//! via ONNX Runtime. All inference is wrapped in `spawn_blocking` for async
+//! Downloads the T5-small ONNX model from HuggingFace Hub on first use
+//! ([`DEFAULT_T5_MODEL`] = `Xenova/t5-small` int8, ~74 MB), caches it in the
+//! unified EngramDB model cache directory, and runs inference via ONNX
+//! Runtime. All inference is wrapped in `spawn_blocking` for async
 //! compatibility since ONNX inference is CPU-bound.
 //!
-//! The model generates a short abstractive summary from the input text,
-//! which is then truncated to a few words for use as a title.
+//! The model produces a short summary of the input text, which is then
+//! truncated to a few words for use as a title.
 
 use super::TitleGenerator;
 use anyhow::{Context, Result};
@@ -16,17 +17,51 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokenizers::Tokenizer;
 
-/// HuggingFace repository for quantized T5-small ONNX model.
-const MODEL_REPO: &str = "ArsenyParamonov/t5-small-onnx";
+/// Location of a T5-small ONNX model on HuggingFace Hub.
+///
+/// The encoder/decoder must be the standard Optimum-style export with the
+/// non-merged, no-KV-cache decoder (inputs `input_ids`,
+/// `encoder_hidden_states`, `encoder_attention_mask`) — that is what
+/// [`greedy_decode`] feeds.
+#[derive(Debug, Clone, Copy)]
+pub struct T5ModelSpec {
+    /// HuggingFace repo id (e.g. `"optimum/t5-small"`).
+    pub repo: &'static str,
+    /// Encoder ONNX path within the repo.
+    pub encoder_file: &'static str,
+    /// Decoder ONNX path within the repo (non-merged, no past).
+    pub decoder_file: &'static str,
+    /// Tokenizer JSON path within the repo.
+    pub tokenizer_file: &'static str,
+}
 
-/// Encoder model file within the repository.
-const ENCODER_FILE: &str = "encoder_model.onnx";
+/// `optimum/t5-small` — official HF Optimum fp32 export. Files live at the
+/// repo root, full precision (~376 MB total), reference output quality.
+pub const T5_OPTIMUM: T5ModelSpec = T5ModelSpec {
+    repo: "optimum/t5-small",
+    encoder_file: "encoder_model.onnx",
+    decoder_file: "decoder_model.onnx",
+    tokenizer_file: "tokenizer.json",
+};
 
-/// Decoder model file within the repository.
-const DECODER_FILE: &str = "decoder_model.onnx";
+/// `Xenova/t5-small` — int8 dynamic-quantized export (canonical
+/// transformers.js repo). ONNX files under `onnx/` (~74 MB total),
+/// near-fp32 quality with a much smaller footprint.
+pub const T5_XENOVA_Q: T5ModelSpec = T5ModelSpec {
+    repo: "Xenova/t5-small",
+    encoder_file: "onnx/encoder_model_quantized.onnx",
+    decoder_file: "onnx/decoder_model_quantized.onnx",
+    tokenizer_file: "tokenizer.json",
+};
 
-/// Tokenizer file within the repository.
-const TOKENIZER_FILE: &str = "tokenizer.json";
+/// Default T5-small model used by [`T5TitleGenerator::new`].
+///
+/// [`T5_XENOVA_Q`] (int8, ~74 MB). Chosen over [`T5_OPTIMUM`] (fp32,
+/// ~376 MB) after an A/B run (`examples/t5_compare.rs`): equivalent title
+/// quality, comparable/steadier latency, 5x smaller footprint. This
+/// replaced the historical `ArsenyParamonov/t5-small-onnx` repo, which is
+/// now gated (HTTP 401).
+pub const DEFAULT_T5_MODEL: T5ModelSpec = T5_XENOVA_Q;
 
 /// Maximum number of input tokens.
 const MAX_INPUT_TOKENS: usize = 128;
@@ -45,16 +80,17 @@ pub struct T5TitleGenerator {
 }
 
 impl T5TitleGenerator {
-    /// Create a new T5 title generator.
+    /// Create a new T5 title generator using [`DEFAULT_T5_MODEL`] and the
+    /// build-selected default execution backend.
     ///
     /// Downloads the model and tokenizer from HuggingFace Hub if not cached.
     pub fn new() -> Result<Self> {
-        Self::with_repo(MODEL_REPO)
+        Self::with_spec(&DEFAULT_T5_MODEL)
     }
 
-    /// Create the default model on an explicit execution backend.
+    /// Create [`DEFAULT_T5_MODEL`] on an explicit execution backend.
     pub fn new_on(backend: crate::onnx_ep::Backend) -> Result<Self> {
-        Self::with_repo_on(MODEL_REPO, backend)
+        Self::with_spec_on(&DEFAULT_T5_MODEL, backend)
     }
 
     /// Try to create the default model on an explicit backend, returning
@@ -63,19 +99,25 @@ impl T5TitleGenerator {
         Self::new_on(backend).ok()
     }
 
-    /// Create with a custom HuggingFace repository, using the build-selected
+    /// Create from an explicit [`T5ModelSpec`] using the build-selected
     /// default execution backend.
-    pub fn with_repo(repo: &str) -> Result<Self> {
-        Self::with_repo_on(repo, crate::onnx_ep::default_backend())
+    pub fn with_spec(spec: &T5ModelSpec) -> Result<Self> {
+        Self::with_spec_on(spec, crate::onnx_ep::default_backend())
     }
 
-    /// Create with a custom HuggingFace repository on an explicit execution
+    /// Try to create from an explicit [`T5ModelSpec`] on an explicit
+    /// backend, returning None if unavailable.
+    pub fn try_with_spec_on(spec: &T5ModelSpec, backend: crate::onnx_ep::Backend) -> Option<Self> {
+        Self::with_spec_on(spec, backend).ok()
+    }
+
+    /// Create from an explicit [`T5ModelSpec`] on an explicit execution
     /// backend.
     ///
-    /// Used by the benchmark suite to compare CPU vs Core ML on identical
-    /// workloads; production code should use [`T5TitleGenerator::with_repo`].
-    pub fn with_repo_on(repo: &str, backend: crate::onnx_ep::Backend) -> Result<Self> {
-        let (encoder_path, decoder_path, tokenizer_path) = download_model_files(repo)?;
+    /// Used by the benchmark/comparison harnesses to A/B model sources and
+    /// backends; production code should use [`T5TitleGenerator::new`].
+    pub fn with_spec_on(spec: &T5ModelSpec, backend: crate::onnx_ep::Backend) -> Result<Self> {
+        let (encoder_path, decoder_path, tokenizer_path) = download_model_files(spec)?;
 
         let encoder = crate::onnx_ep::apply_backend(Session::builder()?, backend)?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
@@ -111,8 +153,8 @@ impl T5TitleGenerator {
     }
 }
 
-/// Download T5 model files from HuggingFace Hub.
-fn download_model_files(model_repo: &str) -> Result<(PathBuf, PathBuf, PathBuf)> {
+/// Download T5 model files from HuggingFace Hub for the given spec.
+fn download_model_files(spec: &T5ModelSpec) -> Result<(PathBuf, PathBuf, PathBuf)> {
     let cache_dir =
         crate::storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -120,16 +162,16 @@ fn download_model_files(model_repo: &str) -> Result<(PathBuf, PathBuf, PathBuf)>
         .with_cache_dir(cache_dir)
         .build()
         .context("Failed to initialize HuggingFace API for T5")?;
-    let repo = api.model(model_repo.to_string());
+    let repo = api.model(spec.repo.to_string());
 
     let encoder_path = repo
-        .get(ENCODER_FILE)
+        .get(spec.encoder_file)
         .context("Failed to download T5 encoder model")?;
     let decoder_path = repo
-        .get(DECODER_FILE)
+        .get(spec.decoder_file)
         .context("Failed to download T5 decoder model")?;
     let tokenizer_path = repo
-        .get(TOKENIZER_FILE)
+        .get(spec.tokenizer_file)
         .context("Failed to download T5 tokenizer")?;
 
     Ok((encoder_path, decoder_path, tokenizer_path))
@@ -173,11 +215,15 @@ fn encode(
 
     let outputs = encoder.run(inputs)?;
 
-    // Extract encoder hidden states (batch=1, seq_len, hidden_dim)
+    // Extract encoder hidden states. The tensor is [1, seq_len, hidden_dim];
+    // recover hidden_dim from the flat length so the decoder receives the
+    // correct 3D shape (previously this returned [1, seq_len], dropping the
+    // hidden dimension and making every decode fail).
     let (_shape, hidden_slice) = outputs[0].try_extract_tensor::<f32>()?;
     let data = hidden_slice.to_vec();
+    let hidden_dim = data.len() / length.max(1);
 
-    Ok((data, vec![1, length]))
+    Ok((data, vec![1, length, hidden_dim]))
 }
 
 /// Greedy decode: generate tokens one at a time using the decoder.
