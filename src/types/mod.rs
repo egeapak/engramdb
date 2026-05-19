@@ -21,8 +21,8 @@ mod provenance;
 pub use challenge::Challenge;
 pub use config::{
     DaemonConfig, EmbeddingBackend, EmbeddingsConfig, EngramConfig, LogicalBonusConfig, NliConfig,
-    RerankConfig, RetrievalConfig, ScopeProximityConfig, ScoringConfig, ScoringWeights,
-    SearchConfig, ThresholdsConfig, TrustWeights,
+    ReindexOnModelChange, RerankConfig, RetrievalConfig, ScopeProximityConfig, ScoringConfig,
+    ScoringWeights, SearchConfig, ThresholdsConfig, TrustWeights,
 };
 pub use decay::{Decay, DecayStrategy};
 pub use memory::{Memory, MemoryType, MemoryUpdate, Status, Visibility};

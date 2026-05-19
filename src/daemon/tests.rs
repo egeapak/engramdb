@@ -478,6 +478,7 @@ async fn remote_embedding_maps_daemon_error() {
         DaemonOp::Meta => DaemonResponse::Meta {
             dimensions: 8,
             max_tokens: 128,
+            model_id: "onnx/stub".to_string(),
         },
         DaemonOp::Embed { .. } => DaemonResponse::Error {
             message: "boom".to_string(),
@@ -720,6 +721,7 @@ async fn remote_providers_wire_nli_and_reranker_per_config() {
         DaemonOp::Meta => DaemonResponse::Meta {
             dimensions: 4,
             max_tokens: 64,
+            model_id: "onnx/stub".to_string(),
         },
         DaemonOp::Classify { pairs } => DaemonResponse::Classified {
             results: pairs

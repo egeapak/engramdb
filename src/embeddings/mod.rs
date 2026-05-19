@@ -13,7 +13,10 @@ pub use chunking::chunk_text;
 pub use ollama::{
     OllamaModelSpec, OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT,
 };
-pub use onnx::{OnnxModelSpec, OnnxProvider, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT};
+pub use onnx::{
+    OnnxModelSpec, OnnxProvider, DEFAULT_ONNX_EMBEDDING, ONNX_ALL_MINILM, ONNX_ALL_MINILM_Q,
+    ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT,
+};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -68,4 +71,12 @@ pub trait EmbeddingProvider: Send + Sync {
     /// Text longer than this will be silently truncated by the model.
     /// Use this to chunk text before embedding.
     fn max_tokens(&self) -> usize;
+
+    /// Stable identifier of the embedding model (e.g. `onnx/all-MiniLM-L6-v2`
+    /// vs `onnx/all-MiniLM-L6-v2-q`, or `ollama/<model>`).
+    ///
+    /// Persisted with the store's embeddings so a later model swap is
+    /// detectable; distinct fp32 vs int8 ids are required so quantization
+    /// changes are caught.
+    fn model_id(&self) -> String;
 }

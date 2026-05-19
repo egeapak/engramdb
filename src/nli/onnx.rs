@@ -17,11 +17,47 @@ use tokenizers::Tokenizer;
 #[cfg(test)]
 const DEFAULT_MODEL_REPO: &str = "cross-encoder/nli-deberta-v3-xsmall";
 
-/// ONNX model file path within the repository.
+/// Default ONNX model file path within the repository (fp32).
 const MODEL_FILE: &str = "onnx/model.onnx";
 
 /// Tokenizer file path within the repository.
 const TOKENIZER_FILE: &str = "tokenizer.json";
+
+/// Location of an NLI cross-encoder ONNX model on HuggingFace Hub. The
+/// label ordering must be {0: contradiction, 1: entailment, 2: neutral}
+/// (matches the [`IDX_*`](IDX_CONTRADICTION) constants); the Xenova mirror
+/// preserves the original `cross-encoder` ordering.
+#[derive(Debug, Clone, Copy)]
+pub struct NliModelSpec {
+    /// HuggingFace repo id.
+    pub repo: &'static str,
+    /// ONNX model path within the repo.
+    pub model_file: &'static str,
+    /// Tokenizer JSON path within the repo.
+    pub tokenizer_file: &'static str,
+}
+
+/// `cross-encoder/nli-deberta-v3-xsmall` fp32 (the historical default,
+/// ~271 MB on disk).
+pub const NLI_DEBERTA_XSMALL: NliModelSpec = NliModelSpec {
+    repo: "cross-encoder/nli-deberta-v3-xsmall",
+    model_file: "onnx/model.onnx",
+    tokenizer_file: "tokenizer.json",
+};
+
+/// `Xenova/nli-deberta-v3-xsmall` int8-quantized (~83 MB vs ~271 MB;
+/// identical id2label ordering). ~2× faster, ~3.7× less RAM.
+pub const NLI_DEBERTA_XSMALL_Q: NliModelSpec = NliModelSpec {
+    repo: "Xenova/nli-deberta-v3-xsmall",
+    model_file: "onnx/model_quantized.onnx",
+    tokenizer_file: "tokenizer.json",
+};
+
+/// Default NLI model (single source of truth, mirrors `DEFAULT_T5_MODEL`).
+/// int8 chosen after the Lever D A/B: ~2× faster, ~3.7× less RAM, same
+/// label ordering, no quality regression. `NliConfig::default().model`
+/// must equal `DEFAULT_NLI_MODEL.repo`.
+pub const DEFAULT_NLI_MODEL: NliModelSpec = NLI_DEBERTA_XSMALL_Q;
 
 /// Model output label ordering:
 /// - Index 0: contradiction
@@ -48,11 +84,59 @@ impl OnnxNliProvider {
     /// The files are cached in the unified EngramDB model cache directory
     /// (`<cache_dir>/engramdb/models/`).
     pub fn new(model_repo: &str) -> Result<Self> {
-        let (model_path, tokenizer_path) = download_model_files(model_repo)?;
+        Self::new_on(model_repo, crate::onnx_ep::default_backend())
+    }
 
-        let session = Session::builder()?
+    /// Create a new ONNX NLI provider on an explicit execution backend.
+    ///
+    /// Used by the benchmark suite to compare CPU vs Core ML on identical
+    /// workloads; production code should use [`OnnxNliProvider::new`].
+    pub fn new_on(model_repo: &str, backend: crate::onnx_ep::Backend) -> Result<Self> {
+        // Map known repos to the right ONNX file so the string-based
+        // config API still selects the int8 model for the default repo.
+        // Unknown (user-custom) repos keep the historical fp32 defaults.
+        let (model_file, tokenizer_file) = if model_repo == NLI_DEBERTA_XSMALL_Q.repo {
+            (
+                NLI_DEBERTA_XSMALL_Q.model_file,
+                NLI_DEBERTA_XSMALL_Q.tokenizer_file,
+            )
+        } else if model_repo == NLI_DEBERTA_XSMALL.repo {
+            (
+                NLI_DEBERTA_XSMALL.model_file,
+                NLI_DEBERTA_XSMALL.tokenizer_file,
+            )
+        } else {
+            (MODEL_FILE, TOKENIZER_FILE)
+        };
+        Self::build(model_repo, model_file, tokenizer_file, backend)
+    }
+
+    /// Create from an explicit [`NliModelSpec`] on an explicit backend.
+    ///
+    /// Used by the benchmark suite to A/B model sources (fp32 vs int8) and
+    /// backends; production code should use [`OnnxNliProvider::new`].
+    pub fn with_spec_on(spec: &NliModelSpec, backend: crate::onnx_ep::Backend) -> Result<Self> {
+        Self::build(spec.repo, spec.model_file, spec.tokenizer_file, backend)
+    }
+
+    /// Try to create from an explicit [`NliModelSpec`] on an explicit
+    /// backend, returning None if unavailable.
+    pub fn try_with_spec_on(spec: &NliModelSpec, backend: crate::onnx_ep::Backend) -> Option<Self> {
+        Self::with_spec_on(spec, backend).ok()
+    }
+
+    fn build(
+        repo: &str,
+        model_file: &str,
+        tokenizer_file: &str,
+        backend: crate::onnx_ep::Backend,
+    ) -> Result<Self> {
+        let (model_path, tokenizer_path) = download_model_files(repo, model_file, tokenizer_file)?;
+
+        let builder = crate::onnx_ep::apply_backend(Session::builder()?, backend)?;
+        let session = builder
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(1)?
+            .with_intra_threads(crate::onnx_ep::intra_threads())?
             .commit_from_file(&model_path)
             .context("Failed to load NLI ONNX model")?;
 
@@ -77,6 +161,12 @@ impl OnnxNliProvider {
             }
         }
     }
+
+    /// Try to create a provider on an explicit backend, returning None if
+    /// unavailable.
+    pub fn try_new_on(model_repo: &str, backend: crate::onnx_ep::Backend) -> Option<Self> {
+        Self::new_on(model_repo, backend).ok()
+    }
 }
 
 /// Download model and tokenizer files from HuggingFace Hub.
@@ -84,7 +174,11 @@ impl OnnxNliProvider {
 /// Returns `(model_path, tokenizer_path)`. Files are cached in the unified
 /// EngramDB model cache directory (`<cache_dir>/engramdb/models/`) and reused
 /// on subsequent calls.
-fn download_model_files(model_repo: &str) -> Result<(PathBuf, PathBuf)> {
+fn download_model_files(
+    model_repo: &str,
+    model_file: &str,
+    tokenizer_file: &str,
+) -> Result<(PathBuf, PathBuf)> {
     let cache_dir =
         crate::storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -95,10 +189,10 @@ fn download_model_files(model_repo: &str) -> Result<(PathBuf, PathBuf)> {
     let repo = api.model(model_repo.to_string());
 
     let model_path = repo
-        .get(MODEL_FILE)
+        .get(model_file)
         .context("Failed to download NLI ONNX model")?;
     let tokenizer_path = repo
-        .get(TOKENIZER_FILE)
+        .get(tokenizer_file)
         .context("Failed to download NLI tokenizer")?;
 
     Ok((model_path, tokenizer_path))

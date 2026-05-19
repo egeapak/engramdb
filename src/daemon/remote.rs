@@ -57,6 +57,7 @@ pub struct RemoteEmbeddingProvider {
     ctx: Arc<RemoteCtx>,
     dimensions: usize,
     max_tokens: usize,
+    model_id: String,
 }
 
 #[async_trait]
@@ -85,6 +86,10 @@ impl EmbeddingProvider for RemoteEmbeddingProvider {
 
     fn max_tokens(&self) -> usize {
         self.max_tokens
+    }
+
+    fn model_id(&self) -> String {
+        self.model_id.clone()
     }
 }
 
@@ -167,11 +172,12 @@ pub async fn remote_providers(
         backend,
     });
 
-    let (dimensions, max_tokens) = match ctx.send(DaemonOp::Meta).await {
+    let (dimensions, max_tokens, model_id) = match ctx.send(DaemonOp::Meta).await {
         Ok(DaemonResponse::Meta {
             dimensions,
             max_tokens,
-        }) => (dimensions, max_tokens),
+            model_id,
+        }) => (dimensions, max_tokens, model_id),
         Ok(DaemonResponse::Error { message }) => {
             tracing::warn!("daemon has no embedding model ({message}); using in-process models");
             return None;
@@ -193,6 +199,7 @@ pub async fn remote_providers(
         ctx: Arc::clone(&ctx),
         dimensions,
         max_tokens,
+        model_id,
     }) as Arc<dyn EmbeddingProvider>);
 
     let nli = config.nli.enabled.then(|| {

@@ -66,6 +66,10 @@ pub enum DaemonResponse {
     Meta {
         dimensions: usize,
         max_tokens: usize,
+        /// Stable id of the embedding model the daemon actually loaded
+        /// (`EmbeddingProvider::model_id`), so remote providers report the
+        /// daemon's true model identity for model-change detection.
+        model_id: String,
     },
     /// Reply to [`DaemonOp::Embed`], one vector per input text in order.
     Embedded { vectors: Vec<Vec<f32>> },

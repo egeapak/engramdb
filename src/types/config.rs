@@ -371,6 +371,25 @@ impl std::str::FromStr for EmbeddingBackend {
     }
 }
 
+/// Policy when the store's stored embedding model differs from the one in
+/// use (e.g. after an upgrade that changes the default embedding model).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReindexOnModelChange {
+    /// Don't detect or act (legacy silent behavior; accept mixed vectors).
+    Off,
+    /// Surface a warning on MCP connect / daemon startup / `doctor`;
+    /// keep serving (mildly degraded) — the agent prompts the user to
+    /// `engramdb reindex --embeddings-only`.
+    #[default]
+    Warn,
+    /// Surface, and automatically reindex at daemon startup before serving.
+    Auto,
+    /// Hard-error embedding-dependent operations until the store is
+    /// reindexed (strict; guarantees no degraded search).
+    Error,
+}
+
 /// Embeddings provider configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingsConfig {
@@ -385,6 +404,10 @@ pub struct EmbeddingsConfig {
     pub dimensions: usize,
     /// Maximum input tokens before truncation (256 for MiniLM)
     pub max_tokens: usize,
+    /// What to do when the store's embeddings were produced by a
+    /// different model than the one now in use (default: warn).
+    #[serde(default)]
+    pub reindex_on_model_change: ReindexOnModelChange,
 }
 
 impl Default for EmbeddingsConfig {
@@ -394,6 +417,7 @@ impl Default for EmbeddingsConfig {
             provider: "onnx".to_string(),
             dimensions: 384,
             max_tokens: 256,
+            reindex_on_model_change: ReindexOnModelChange::default(),
         }
     }
 }
@@ -443,7 +467,12 @@ impl Default for NliConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            model: "cross-encoder/nli-deberta-v3-xsmall".to_string(),
+            // Single source of truth: derive from `nli::DEFAULT_NLI_MODEL`
+            // rather than a literal so the default can never drift from the
+            // model the NLI loader actually selects (int8-quantized mirror:
+            // ~2× faster, ~3.7× less RAM, identical id2label). Custom repos
+            // keep the fp32 defaults.
+            model: crate::nli::DEFAULT_NLI_MODEL.repo.to_string(),
             contradiction_threshold: 0.7,
             max_comparisons: 10,
             similarity_threshold: 0.3,
@@ -798,6 +827,58 @@ impl EngramConfig {
 mod tests {
     use super::*;
 
+    /// Guards the single-source-of-truth: `NliConfig::default().model` is
+    /// derived from `nli::DEFAULT_NLI_MODEL.repo`, never a hand-copied
+    /// literal that could silently drift from the model the NLI loader
+    /// actually selects (review follow-up item).
+    #[test]
+    fn nli_default_model_tracks_default_nli_model_spec() {
+        assert_eq!(
+            NliConfig::default().model.as_str(),
+            crate::nli::DEFAULT_NLI_MODEL.repo
+        );
+    }
+
+    #[test]
+    fn reindex_on_model_change_serde_and_backward_compat() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct W {
+            v: ReindexOnModelChange,
+        }
+        // Every variant round-trips by its lowercase name.
+        for (variant, name) in [
+            (ReindexOnModelChange::Off, "off"),
+            (ReindexOnModelChange::Warn, "warn"),
+            (ReindexOnModelChange::Auto, "auto"),
+            (ReindexOnModelChange::Error, "error"),
+        ] {
+            let toml_str = toml::to_string(&W { v: variant }).unwrap();
+            assert!(
+                toml_str.contains(&format!("v = \"{name}\"")),
+                "{variant:?} must serialize as {name:?}; got {toml_str:?}"
+            );
+            let back: W = toml::from_str(&format!("v = \"{name}\"\n")).unwrap();
+            assert_eq!(back.v, variant);
+        }
+
+        // Backward-compat: an `[embeddings]` table written before this field
+        // existed must still parse, defaulting to `Warn` — otherwise every
+        // pre-lifecycle deployment fails to start after upgrade.
+        let legacy: EmbeddingsConfig =
+            toml::from_str("provider = \"onnx\"\ndimensions = 384\nmax_tokens = 256\n").unwrap();
+        assert_eq!(legacy.reindex_on_model_change, ReindexOnModelChange::Warn);
+
+        // And the in-code defaults agree.
+        assert_eq!(
+            EmbeddingsConfig::default().reindex_on_model_change,
+            ReindexOnModelChange::Warn
+        );
+        assert_eq!(
+            EngramConfig::default().embeddings.reindex_on_model_change,
+            ReindexOnModelChange::Warn
+        );
+    }
+
     #[test]
     fn test_config_defaults() {
         let config = EngramConfig::default();
@@ -870,7 +951,7 @@ mod tests {
 
         // NLI config
         assert!(!config.nli.enabled);
-        assert_eq!(config.nli.model, "cross-encoder/nli-deberta-v3-xsmall");
+        assert_eq!(config.nli.model, "Xenova/nli-deberta-v3-xsmall");
         assert_eq!(config.nli.contradiction_threshold, 0.7);
         assert_eq!(config.nli.max_comparisons, 10);
         assert_eq!(config.nli.similarity_threshold, 0.3);
@@ -1031,7 +1112,7 @@ threshold = 0.25
     fn test_nli_config_defaults() {
         let config = NliConfig::default();
         assert!(!config.enabled);
-        assert_eq!(config.model, "cross-encoder/nli-deberta-v3-xsmall");
+        assert_eq!(config.model, "Xenova/nli-deberta-v3-xsmall");
         assert_eq!(config.contradiction_threshold, 0.7);
         assert_eq!(config.max_comparisons, 10);
         assert_eq!(config.similarity_threshold, 0.3);
@@ -1054,7 +1135,7 @@ threshold = 0.25
         assert_eq!(loaded.nli.contradiction_threshold, 0.85);
         assert_eq!(loaded.nli.max_comparisons, 20);
         assert_eq!(loaded.nli.similarity_threshold, 0.5);
-        assert_eq!(loaded.nli.model, "cross-encoder/nli-deberta-v3-xsmall");
+        assert_eq!(loaded.nli.model, "Xenova/nli-deberta-v3-xsmall");
     }
 
     #[test]

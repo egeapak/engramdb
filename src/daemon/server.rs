@@ -256,6 +256,7 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                 Some(p) => DaemonResponse::Meta {
                     dimensions: p.dimensions(),
                     max_tokens: p.max_tokens(),
+                    model_id: p.model_id(),
                 },
                 None => DaemonResponse::Error {
                     message: "embedding model unavailable".to_string(),

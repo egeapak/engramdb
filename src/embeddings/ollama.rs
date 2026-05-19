@@ -215,6 +215,10 @@ impl EmbeddingProvider for OllamaProvider {
     fn max_tokens(&self) -> usize {
         self.spec.max_tokens
     }
+
+    fn model_id(&self) -> String {
+        format!("ollama/{}", self.spec.model_name)
+    }
 }
 
 #[cfg(test)]

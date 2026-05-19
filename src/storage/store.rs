@@ -702,6 +702,27 @@ impl MemoryStore {
 
         Ok(())
     }
+
+    /// Read the persisted embedding-model fingerprint, if any. `None` on
+    /// legacy stores created before model tracking (treated as untracked).
+    pub async fn embedding_fingerprint(&self) -> Result<Option<manifest::EmbeddingFingerprint>> {
+        let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
+        let manifest = manifest::load_manifest(&manifest_path).await?;
+        Ok(manifest.embedding)
+    }
+
+    /// Stamp the store with the embedding-model fingerprint its vectors
+    /// were produced with. Called after a successful full (re)embed.
+    pub async fn set_embedding_fingerprint(
+        &self,
+        fingerprint: manifest::EmbeddingFingerprint,
+    ) -> Result<()> {
+        let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
+        let mut manifest = manifest::load_manifest(&manifest_path).await?;
+        manifest.embedding = Some(fingerprint);
+        manifest::save_manifest(&manifest_path, &manifest).await?;
+        Ok(())
+    }
 }
 
 /// Write content atomically using write-to-temp-then-rename.
