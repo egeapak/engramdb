@@ -883,11 +883,43 @@ impl EngramDbServer {
                 }));
             }
         }
-        let engine = ops::assemble_engine(store, config, providers);
-        Ok(engine
+        Ok(self.finish_engine(store, config, providers, pid))
+    }
+
+    /// Build a retrieval engine **bypassing** the `error`-mode model-mismatch
+    /// gate in [`Self::build_engine_for`].
+    ///
+    /// Remediation paths (`reindex`, `auto`-reindex at startup) must run
+    /// precisely when the store is flagged mismatched — going through the
+    /// enforcing chokepoint would make `error` mode refuse the one operation
+    /// that fixes the mismatch. A genuine engine-build failure (store not
+    /// initialized, model load error) is still returned as `Err` so callers
+    /// surface it instead of silently degrading to an index-only reindex.
+    async fn assemble_engine_for(&self, project: Option<&str>) -> Result<RetrievalEngine, String> {
+        let dir = self.resolve_dir(project).await?;
+        let store = self.open_store_for(project).await?;
+        let config_path = dir.join(".engramdb").join("config.toml");
+        let pid = self.project_id_for_dir(&dir, project);
+        let config = load_config(&config_path).await.unwrap_or_default();
+        let providers = self.cached_providers(&config).await;
+        Ok(self.finish_engine(store, config, providers, pid))
+    }
+
+    /// Shared tail of [`Self::build_engine_for`] (enforcing) and
+    /// [`Self::assemble_engine_for`] (non-enforcing remediation path): wire
+    /// the per-store engine from already-resolved pieces. Kept as one place
+    /// so the two construction paths can never drift apart.
+    fn finish_engine(
+        &self,
+        store: MemoryStore,
+        config: crate::types::EngramConfig,
+        providers: ops::EngineProviders,
+        pid: String,
+    ) -> RetrievalEngine {
+        ops::assemble_engine(store, config, providers)
             .with_stats(self.stats.clone())
             .with_project_id(pid)
-            .with_session_id(Some(self.session_id.clone())))
+            .with_session_id(Some(self.session_id.clone()))
     }
 
     /// Evaluate the primary project's embedding-model identity for the
@@ -899,8 +931,29 @@ impl EngramDbServer {
         crate::types::ReindexOnModelChange,
         ops::EmbeddingModelReport,
     )> {
-        let dir = self.resolve_dir(None).await.ok()?;
-        let store = self.open_store_for(None).await.ok()?;
+        // Best-effort, but never *silently* skipped: a transient I/O failure
+        // resolving the project or opening the store would otherwise drop the
+        // model-change warning with no trace at all. Log and bail instead.
+        let dir = match self.resolve_dir(None).await {
+            Ok(dir) => dir,
+            Err(e) => {
+                tracing::warn!(
+                    "EngramDB: skipping embedding model-change check \
+                     (cannot resolve project dir): {e}"
+                );
+                return None;
+            }
+        };
+        let store = match self.open_store_for(None).await {
+            Ok(store) => store,
+            Err(e) => {
+                tracing::warn!(
+                    "EngramDB: skipping embedding model-change check \
+                     (cannot open store): {e}"
+                );
+                return None;
+            }
+        };
         let config_path = dir.join(".engramdb").join("config.toml");
         let config = load_config(&config_path).await.unwrap_or_default();
         let mode = config.embeddings.reindex_on_model_change;
@@ -926,7 +979,7 @@ impl EngramDbServer {
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
         let engine = self
-            .build_engine_for(None)
+            .assemble_engine_for(None)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
         ops::reindex(&store, Some(&engine), true).await?;
@@ -1768,9 +1821,19 @@ impl EngramDbServer {
         let embeddings_only = input.embeddings_only.unwrap_or(false);
         let index_only = input.index_only.unwrap_or(false);
 
-        // Build engine outside conditional so it stays alive for the reference
+        // Build engine outside conditional so it stays alive for the
+        // reference. `reindex` is the remediation path for an embedding
+        // model mismatch, so it must NOT go through the `error`-mode gate
+        // in `build_engine_for` (that would refuse the very operation that
+        // fixes the mismatch). A genuine build failure is surfaced rather
+        // than silently downgrading to an index-only reindex reported as
+        // success.
         let engine = if !index_only {
-            self.build_engine_for(input.project.as_deref()).await.ok()
+            Some(
+                self.assemble_engine_for(input.project.as_deref())
+                    .await
+                    .map_err(|e| error_response(ErrorCode::InternalError, &e))?,
+            )
         } else {
             None
         };
@@ -2409,19 +2472,53 @@ pub async fn run_sse(
 
     // Resolve hierarchy eagerly once: subsequent per-connection server
     // instances share the registry, so registration only happens once.
-    {
-        let warmup = EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())?;
+    //
+    // The embedding-model-change policy is evaluated here as well. The
+    // per-connection servers built by the factory closure below are
+    // short-lived and never run startup logic, so without this every SSE
+    // connection would silently skip the check (`embedding_warning: None`)
+    // and `auto` mode would never re-embed. Mirror `run_stdio`: compute the
+    // warning (and auto-reindex if requested) exactly once, then seed every
+    // per-connection server with the resulting warning.
+    let embedding_warning = {
+        let mut warmup =
+            EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())?;
         warmup.ensure_hierarchy().await?;
-    }
+        if let Some((mode, report)) = warmup.embedding_startup_report().await {
+            if !report.status.is_consistent() {
+                if let Some(w) = &report.warning {
+                    tracing::warn!("{w}");
+                }
+                warmup.embedding_warning = report.warning.clone();
+                if mode == crate::types::ReindexOnModelChange::Auto {
+                    tracing::warn!(
+                        "EngramDB: reindex_on_model_change=auto — re-embedding before serving…"
+                    );
+                    match warmup.auto_reindex_default().await {
+                        Ok(()) => {
+                            tracing::warn!("EngramDB: auto-reindex complete.");
+                            warmup.embedding_warning = None;
+                        }
+                        Err(e) => tracing::warn!("EngramDB: auto-reindex failed: {e}"),
+                    }
+                }
+            }
+        }
+        warmup.embedding_warning
+    };
 
     let config = StreamableHttpServerConfig::default();
     let ct = config.cancellation_token.clone();
     let service = StreamableHttpService::new(
         {
             let stats = stats.clone();
+            let embedding_warning = embedding_warning.clone();
             move || {
-                EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())
-                    .map_err(|e| std::io::Error::other(e.to_string()))
+                let mut server =
+                    EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                server.embedding_warning = embedding_warning.clone();
+                Ok(server)
             }
         },
         Arc::new(LocalSessionManager::default()),

@@ -47,11 +47,13 @@ pub use stats::{compute_stats, StoreStats};
 pub use update::{update_memory, UpdateParams};
 
 use crate::embeddings::{
-    EmbeddingProvider, OnnxProvider, DEFAULT_ONNX_EMBEDDING, ONNX_MXBAI_EMBED_LARGE,
+    EmbeddingProvider, OnnxModelSpec, OnnxProvider, DEFAULT_ONNX_EMBEDDING, ONNX_MXBAI_EMBED_LARGE,
     ONNX_NOMIC_EMBED_TEXT,
 };
 #[cfg(feature = "ollama")]
-use crate::embeddings::{OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT};
+use crate::embeddings::{
+    OllamaModelSpec, OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT,
+};
 use crate::nli::{NliProvider, OnnxNliProvider};
 use crate::retrieval::engine::RetrievalEngine;
 use crate::storage::{embedding_status, EmbeddingFingerprint, EmbeddingModelStatus, MemoryStore};
@@ -82,38 +84,66 @@ pub fn resolve_backend(
     config_backend
 }
 
+/// The model specs a configured `provider` string maps to.
+///
+/// **Single source of truth** for the provider→model table. Both
+/// [`expected_embedding_fingerprint`] (cheap, no model load) and
+/// [`resolve_provider`] (loads the model) derive from this one map, so the
+/// fingerprint recorded for a store and the provider that actually runs can
+/// never disagree on *which* model a config selects — adding a provider in
+/// one place but not the other was a silent-vector-corruption footgun
+/// flagged in branch review.
+struct ProviderSpecs {
+    onnx: OnnxModelSpec,
+    #[cfg(feature = "ollama")]
+    ollama: OllamaModelSpec,
+}
+
+/// Map a configured provider string to its ONNX (and, when compiled in,
+/// Ollama) model spec. `None` ⇒ unknown provider string (embeddings
+/// disabled). The ONE place the provider→spec table lives.
+fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
+    Some(match provider {
+        "onnx" | "all-minilm" => ProviderSpecs {
+            onnx: DEFAULT_ONNX_EMBEDDING,
+            #[cfg(feature = "ollama")]
+            ollama: ALL_MINILM,
+        },
+        "nomic-embed-text" => ProviderSpecs {
+            onnx: ONNX_NOMIC_EMBED_TEXT,
+            #[cfg(feature = "ollama")]
+            ollama: NOMIC_EMBED_TEXT,
+        },
+        "mxbai-embed-large" => ProviderSpecs {
+            onnx: ONNX_MXBAI_EMBED_LARGE,
+            #[cfg(feature = "ollama")]
+            ollama: MXBAI_EMBED_LARGE,
+        },
+        _ => return None,
+    })
+}
+
 /// The embedding fingerprint `config` *would* produce, computed WITHOUT
-/// loading the model — mirrors [`resolve_provider`]'s model→spec map and
-/// backend preference. Used by `doctor` and the open-time check (cheap);
-/// the enforcement guard uses the live provider's `model_id()` instead.
-/// Returns `None` for an unknown provider string (embeddings disabled).
+/// loading the model — derived from the same [`provider_specs`] table and
+/// backend preference [`resolve_provider`] uses. Used by `doctor` and the
+/// open-time check (cheap); the enforcement guard uses the live provider's
+/// `model_id()` instead. Returns `None` for an unknown provider string
+/// (embeddings disabled).
 pub fn expected_embedding_fingerprint(config: &EngramConfig) -> Option<EmbeddingFingerprint> {
     let backend = resolve_backend(config.embeddings.backend, None);
-    let provider = config.embeddings.provider.as_str();
+    let specs = provider_specs(config.embeddings.provider.as_str())?;
 
     #[cfg(feature = "ollama")]
     if backend == EmbeddingBackend::Ollama {
-        let spec = match provider {
-            "onnx" | "all-minilm" => ALL_MINILM,
-            "nomic-embed-text" => NOMIC_EMBED_TEXT,
-            "mxbai-embed-large" => MXBAI_EMBED_LARGE,
-            _ => return None,
-        };
         return Some(EmbeddingFingerprint {
-            model: format!("ollama/{}", spec.model_name),
-            dimensions: spec.dimensions,
+            model: format!("ollama/{}", specs.ollama.model_name),
+            dimensions: specs.ollama.dimensions,
         });
     }
-
-    let spec = match provider {
-        "onnx" | "all-minilm" => DEFAULT_ONNX_EMBEDDING,
-        "nomic-embed-text" => ONNX_NOMIC_EMBED_TEXT,
-        "mxbai-embed-large" => ONNX_MXBAI_EMBED_LARGE,
-        _ => return None,
-    };
+    let _ = backend; // onnx/auto both record the ONNX identity
     Some(EmbeddingFingerprint {
-        model: format!("onnx/{}", spec.name),
-        dimensions: spec.dimensions,
+        model: format!("onnx/{}", specs.onnx.name),
+        dimensions: specs.onnx.dimensions,
     })
 }
 
@@ -161,6 +191,10 @@ pub async fn embedding_model_report(
 }
 
 /// Try to create an embedding provider for the given model name and backend.
+///
+/// Goes through [`provider_specs`] — the same table
+/// [`expected_embedding_fingerprint`] uses — so the loaded model's identity
+/// always matches the fingerprint recorded for the store.
 fn resolve_provider(model: &str, backend: EmbeddingBackend) -> Option<Arc<dyn EmbeddingProvider>> {
     #[cfg(not(feature = "ollama"))]
     if backend == EmbeddingBackend::Ollama {
@@ -170,33 +204,19 @@ fn resolve_provider(model: &str, backend: EmbeddingBackend) -> Option<Arc<dyn Em
         return None;
     }
 
-    match model {
-        "onnx" | "all-minilm" => try_onnx_then_ollama(
-            backend,
-            || OnnxProvider::try_new().map(|p| Arc::new(p) as _),
-            #[cfg(feature = "ollama")]
-            || OllamaProvider::try_new(ALL_MINILM).map(|p| Arc::new(p) as _),
-        ),
-        "nomic-embed-text" => try_onnx_then_ollama(
-            backend,
-            || OnnxProvider::try_with_model(ONNX_NOMIC_EMBED_TEXT).map(|p| Arc::new(p) as _),
-            #[cfg(feature = "ollama")]
-            || OllamaProvider::try_new(NOMIC_EMBED_TEXT).map(|p| Arc::new(p) as _),
-        ),
-        "mxbai-embed-large" => try_onnx_then_ollama(
-            backend,
-            || OnnxProvider::try_with_model(ONNX_MXBAI_EMBED_LARGE).map(|p| Arc::new(p) as _),
-            #[cfg(feature = "ollama")]
-            || OllamaProvider::try_new(MXBAI_EMBED_LARGE).map(|p| Arc::new(p) as _),
-        ),
-        other => {
-            eprintln!(
-                "Warning: unknown embedding model '{}', embeddings disabled",
-                other
-            );
-            None
-        }
-    }
+    let Some(specs) = provider_specs(model) else {
+        eprintln!(
+            "Warning: unknown embedding model '{}', embeddings disabled",
+            model
+        );
+        return None;
+    };
+    try_onnx_then_ollama(
+        backend,
+        || OnnxProvider::try_with_model(specs.onnx).map(|p| Arc::new(p) as _),
+        #[cfg(feature = "ollama")]
+        || OllamaProvider::try_new(specs.ollama).map(|p| Arc::new(p) as _),
+    )
 }
 
 /// Shared logic: try ONNX and/or Ollama based on the backend preference.
