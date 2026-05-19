@@ -230,6 +230,17 @@ impl RetrievalEngine {
         self.embedding_provider.is_some()
     }
 
+    /// Identity of the embedding model in use, for stamping the store
+    /// after a (re)embed. `None` when embeddings are disabled.
+    pub fn embedding_fingerprint(&self) -> Option<crate::storage::EmbeddingFingerprint> {
+        self.embedding_provider
+            .as_ref()
+            .map(|p| crate::storage::EmbeddingFingerprint {
+                model: p.model_id(),
+                dimensions: p.dimensions(),
+            })
+    }
+
     /// Add an NLI provider to the retrieval engine.
     ///
     /// Enables automatic contradiction detection between memories.

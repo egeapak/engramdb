@@ -39,6 +39,20 @@ pub async fn reindex(
                     Err(e) => errors.push(format!("{}: {}", id, e)),
                 }
             }
+
+            // Stamp the store with the embedding model identity once every
+            // memory re-embedded cleanly. On partial failure we leave the
+            // fingerprint as-is so the store stays honestly flagged.
+            if errors.is_empty() {
+                if let Some(fingerprint) = engine.embedding_fingerprint() {
+                    store
+                        .set_embedding_fingerprint(fingerprint)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!("failed to stamp embedding fingerprint: {}", e)
+                        })?;
+                }
+            }
         }
     }
 
