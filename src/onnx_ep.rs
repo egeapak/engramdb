@@ -63,18 +63,30 @@ pub fn default_backend() -> Backend {
     }
 }
 
+/// Default intra-op thread count for the directly-built `ort` sessions:
+/// `min(4, cores/2)`. The benchmark sweep found 4 the sweet spot on an
+/// 8-core machine (≈2× faster NLI/T5 vs 1), 8 worse than 4, and gains
+/// scaling down on smaller machines; the cap at 4 avoids the oversubscription
+/// regression. The embedding path (fastembed) manages its own pool and is
+/// unaffected by this.
+fn default_intra_threads() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    (cores / 2).clamp(1, 4)
+}
+
 /// Intra-op thread count for the directly-built `ort` sessions (NLI, T5).
 ///
-/// Defaults to 1 — the historical hardcoded value, so production behavior
-/// is unchanged — and is overridable via `ENGRAMDB_ONNX_INTRA_THREADS` to
-/// benchmark the single-call-latency vs concurrency tradeoff. The embedding
-/// path (fastembed) manages its own thread pool and is unaffected.
+/// Defaults to [`default_intra_threads`]; overridable via
+/// `ENGRAMDB_ONNX_INTRA_THREADS` (e.g. `=1` to restore the old serial
+/// behavior, or higher to experiment).
 pub fn intra_threads() -> usize {
     std::env::var("ENGRAMDB_ONNX_INTRA_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n != 0)
-        .unwrap_or(1)
+        .unwrap_or_else(default_intra_threads)
 }
 
 #[cfg(all(feature = "coreml", target_os = "macos"))]
