@@ -366,3 +366,60 @@ pub async fn build_engine(
     let providers = resolve_engine_providers(&config, backend_override);
     assemble_engine(store, config, providers)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn onnx_config(provider: &str) -> EngramConfig {
+        let mut config = EngramConfig::default();
+        provider.clone_into(&mut config.embeddings.provider);
+        // Pin the backend so the expected fingerprint is deterministic
+        // regardless of the `ollama` feature / backend auto-resolution.
+        config.embeddings.backend = EmbeddingBackend::Onnx;
+        config
+    }
+
+    #[test]
+    fn provider_specs_table_resolves_known_and_rejects_unknown() {
+        assert!(provider_specs("onnx").is_some());
+        assert!(provider_specs("all-minilm").is_some());
+        assert!(provider_specs("nomic-embed-text").is_some());
+        assert!(provider_specs("mxbai-embed-large").is_some());
+        assert!(provider_specs("definitely-not-a-model").is_none());
+    }
+
+    #[test]
+    fn expected_fingerprint_matches_spec_for_every_provider_string() {
+        for (name, spec) in [
+            ("onnx", DEFAULT_ONNX_EMBEDDING),
+            ("all-minilm", DEFAULT_ONNX_EMBEDDING),
+            ("nomic-embed-text", ONNX_NOMIC_EMBED_TEXT),
+            ("mxbai-embed-large", ONNX_MXBAI_EMBED_LARGE),
+        ] {
+            let fp = expected_embedding_fingerprint(&onnx_config(name))
+                .unwrap_or_else(|| panic!("known provider {name} must resolve"));
+            assert_eq!(fp.model, format!("onnx/{}", spec.name));
+            assert_eq!(fp.dimensions, spec.dimensions);
+        }
+    }
+
+    #[test]
+    fn expected_fingerprint_is_none_for_unknown_provider() {
+        assert!(expected_embedding_fingerprint(&onnx_config("nope")).is_none());
+    }
+
+    /// The actual safety property the `provider_specs` unification
+    /// protects: the cheap, model-load-free `expected_embedding_fingerprint`
+    /// must equal what the *live* provider reports via `model_id()`. If they
+    /// ever diverge, model-change detection silently passes mismatched
+    /// vectors (the footgun flagged by 3 review agents). Locks the
+    /// fingerprint path and the resolve path to the same table.
+    #[test]
+    fn expected_fingerprint_matches_live_default_provider() {
+        let provider = OnnxProvider::try_new().expect("default ONNX model available in test env");
+        let fp = expected_embedding_fingerprint(&onnx_config("onnx")).unwrap();
+        assert_eq!(fp.model, provider.model_id());
+        assert_eq!(fp.dimensions, provider.dimensions());
+    }
+}

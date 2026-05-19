@@ -763,6 +763,18 @@ impl EngramConfig {
 mod tests {
     use super::*;
 
+    /// Guards the single-source-of-truth: `NliConfig::default().model` is
+    /// derived from `nli::DEFAULT_NLI_MODEL.repo`, never a hand-copied
+    /// literal that could silently drift from the model the NLI loader
+    /// actually selects (review follow-up item).
+    #[test]
+    fn nli_default_model_tracks_default_nli_model_spec() {
+        assert_eq!(
+            NliConfig::default().model.as_str(),
+            crate::nli::DEFAULT_NLI_MODEL.repo
+        );
+    }
+
     #[test]
     fn test_config_defaults() {
         let config = EngramConfig::default();

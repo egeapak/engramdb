@@ -3712,6 +3712,68 @@ mod tests {
         assert!(val["indexed"].as_u64().unwrap() >= 1);
     }
 
+    /// Regression for PR-blocker bug #2: `reindex` is the remediation path
+    /// for an embedding model mismatch, so it must keep working even under
+    /// the strict `error` policy — where `build_engine_for` (the enforcing
+    /// chokepoint) deliberately refuses. Before the fix, `memory_reindex`
+    /// did `build_engine_for(...).ok()` → `None` in `error` mode and
+    /// silently ran an index-only reindex, reporting `embedded: 0` as
+    /// success while leaving the store unfixable.
+    #[tokio::test]
+    async fn reindex_re_embeds_in_error_mode_despite_mismatch() {
+        let (dir, server) = setup().await;
+        let _ = create_and_get_id(&server, "decision", "To reindex", "Content").await;
+
+        // Force an unambiguous model mismatch.
+        let store = server.open_store_for(None).await.unwrap();
+        store
+            .set_embedding_fingerprint(crate::storage::EmbeddingFingerprint {
+                model: "onnx/bogus-old-model".to_string(),
+                dimensions: 384,
+            })
+            .await
+            .unwrap();
+
+        // Strictest policy: refuse degraded embedding work.
+        let mut config = crate::types::EngramConfig::default();
+        config.embeddings.reindex_on_model_change = crate::types::ReindexOnModelChange::Error;
+        tokio::fs::write(
+            dir.path().join(".engramdb").join("config.toml"),
+            toml::to_string(&config).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // The enforcing chokepoint must refuse on the mismatch...
+        assert!(
+            server.build_engine_for(None).await.is_err(),
+            "error mode must gate the normal embedding path"
+        );
+        // ...but the remediation builder must bypass the gate...
+        assert!(
+            server.assemble_engine_for(None).await.is_ok(),
+            "reindex's engine builder must not be gated by error mode"
+        );
+
+        // ...and `reindex` must actually re-embed, not silently no-op.
+        let result = server
+            .memory_reindex(Parameters(ReindexInput {
+                embeddings_only: Some(true),
+                index_only: None,
+                project: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(
+            val["embedded"].as_u64().unwrap() >= 1,
+            "reindex must re-embed in error mode (bug #2); got {val}"
+        );
+
+        // The store is consistent again (fingerprint re-stamped, not bogus).
+        let fp = store.embedding_fingerprint().await.unwrap().unwrap();
+        assert_ne!(fp.model, "onnx/bogus-old-model");
+    }
+
     // -----------------------------------------------------------------------
     // memory_compress_candidates
     // -----------------------------------------------------------------------
