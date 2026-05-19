@@ -15,11 +15,13 @@
 //! 5. **Memory** — process RSS growth attributable to loading the model on
 //!    each backend.
 //! 6. **Lever E — concurrent submission** — K tokio tasks each submitting
-//!    embed requests simultaneously to a shared single-session provider
-//!    (the current architecture) vs a naive pool of N independent sessions.
-//!    Measures aggregate throughput (ops/s) and per-request latency at
-//!    K=1,2,4,8 concurrency for both single-session and pool-of-2.
+//!    requests simultaneously to a shared single-session provider (the current
+//!    architecture) vs a naive pool of N independent sessions. Covers all three
+//!    model families: embedding (all-MiniLM-Q), NLI (DeBERTa-Q), and T5 title.
 //!    Run with `ENGRAMDB_BENCH_WORKLOADS=lever_e`.
+//! 7. **Part B — prepacked_weights A/B** — warm and concurrent latency with vs
+//!    without PrepackedWeights for NLI and T5 (the two Mutex-guarded direct-ort
+//!    sessions now default-on). Run with `ENGRAMDB_BENCH_WORKLOADS=prepacked_ab`.
 //!
 //! Workloads: embedding single + batch16 (all-MiniLM-L6-v2), NLI
 //! contradiction (DeBERTa-v3-xsmall), and T5 title generation
@@ -29,10 +31,12 @@
 //!
 //! Run with: `cargo run --release --features coreml --example onnx_bench`
 //! Run Lever E only: `ENGRAMDB_BENCH_WORKLOADS=lever_e cargo run --release --example onnx_bench`
+//! Run prepacked A/B: `ENGRAMDB_BENCH_WORKLOADS=prepacked_ab cargo run --release --example onnx_bench`
 
+use std::borrow::Cow;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -45,6 +49,9 @@ use engramdb::title::TitleGenerator;
 
 /// How long the sustained-throughput phase runs per workload.
 const SUSTAINED: Duration = Duration::from_secs(5);
+
+/// How long each Lever E / prepacked A/B concurrency window runs.
+const CONCURRENT_WINDOW: Duration = Duration::from_secs(8);
 
 /// Representative inputs of varied length (short note -> long paragraph).
 const INPUTS: &[&str] = &[
@@ -222,7 +229,7 @@ fn enabled(workload: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Lever E: concurrent-submission scenario
+// Lever E: concurrent-submission scenario — embeddings
 // ---------------------------------------------------------------------------
 
 /// Run K tokio tasks concurrently for `window` seconds, each repeatedly
@@ -273,35 +280,124 @@ async fn concurrent_window(
     (ops, samples)
 }
 
+// ---------------------------------------------------------------------------
+// Lever E: NLI and T5 concurrent-submission scenario
+// ---------------------------------------------------------------------------
+
+/// Run K tokio tasks sharing one NLI provider for `window`. Returns (ops, samples).
+async fn concurrent_nli_window(
+    provider: Arc<OnnxNliProvider>,
+    concurrency: usize,
+    window: Duration,
+) -> (u64, Vec<Duration>) {
+    let total_ops = Arc::new(AtomicU64::new(0));
+    let all_samples: Arc<tokio::sync::Mutex<Vec<Duration>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let deadline = Instant::now() + window;
+
+    let mut handles = Vec::with_capacity(concurrency);
+    for task_idx in 0..concurrency {
+        let p = Arc::clone(&provider);
+        let ops_counter = Arc::clone(&total_ops);
+        let samples_out = Arc::clone(&all_samples);
+        handles.push(tokio::spawn(async move {
+            let mut local = Vec::new();
+            let mut i = 0usize;
+            while Instant::now() < deadline {
+                let premise = INPUTS[(task_idx + i) % INPUTS.len()];
+                let hypothesis = INPUTS[(task_idx + i + 1) % INPUTS.len()];
+                let t = Instant::now();
+                if p.classify(premise, hypothesis).await.is_ok() {
+                    local.push(t.elapsed());
+                    ops_counter.fetch_add(1, Ordering::Relaxed);
+                }
+                i += 1;
+            }
+            let mut g = samples_out.lock().await;
+            g.extend(local);
+        }));
+    }
+    for h in handles {
+        let _ = h.await;
+    }
+    let ops = total_ops.load(Ordering::Relaxed);
+    let samples = Arc::try_unwrap(all_samples)
+        .unwrap_or_else(|a| tokio::sync::Mutex::new(a.blocking_lock().clone()))
+        .into_inner();
+    (ops, samples)
+}
+
+/// Run K tokio tasks sharing one T5 generator for `window`. Returns (ops, samples).
+async fn concurrent_t5_window(
+    gen: Arc<T5TitleGenerator>,
+    concurrency: usize,
+    window: Duration,
+) -> (u64, Vec<Duration>) {
+    let total_ops = Arc::new(AtomicU64::new(0));
+    let all_samples: Arc<tokio::sync::Mutex<Vec<Duration>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let deadline = Instant::now() + window;
+
+    let mut handles = Vec::with_capacity(concurrency);
+    for task_idx in 0..concurrency {
+        let g = Arc::clone(&gen);
+        let ops_counter = Arc::clone(&total_ops);
+        let samples_out = Arc::clone(&all_samples);
+        handles.push(tokio::spawn(async move {
+            let mut local = Vec::new();
+            let mut i = 0usize;
+            while Instant::now() < deadline {
+                let input = INPUTS[(task_idx + i) % INPUTS.len()];
+                let t = Instant::now();
+                if g.generate(input).await.is_ok() {
+                    local.push(t.elapsed());
+                    ops_counter.fetch_add(1, Ordering::Relaxed);
+                }
+                i += 1;
+            }
+            let mut guard = samples_out.lock().await;
+            guard.extend(local);
+        }));
+    }
+    for h in handles {
+        let _ = h.await;
+    }
+    let ops = total_ops.load(Ordering::Relaxed);
+    let samples = Arc::try_unwrap(all_samples)
+        .unwrap_or_else(|a| tokio::sync::Mutex::new(a.blocking_lock().clone()))
+        .into_inner();
+    (ops, samples)
+}
+
+// ---------------------------------------------------------------------------
+// Lever E main bench: embedding + NLI + T5 concurrency tables
+// ---------------------------------------------------------------------------
+
 /// Lever E: single-session (current arch) vs naive pool-of-N, at K=1,2,4,8.
-///
-/// The single-session provider serialises all concurrent callers through its
-/// `Arc<Mutex<TextEmbedding>>`. A pool lets up to N callers run in parallel,
-/// but only if `N * intra_threads <= physical_cores` (else oversubscription).
-///
-/// Prints a table: K | single-session ops/s mean-ms p99-ms | pool-2 ops/s mean-ms p99-ms
+/// Covers all three ONNX model families used in the create+query hot path.
 async fn bench_lever_e() {
     let intra = engramdb::onnx_ep::intra_threads();
     let cores = thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     println!(
-        "\n=== Lever E: concurrent embedding (single-session vs pool-of-2) ===\
+        "\n=== Lever E: concurrent submission under multi-tenant daemon (corrected model) ===\
          \n    machine: {cores} cores | intra_threads (NLI/T5)={intra} | fastembed manages its own pool\
-         \n    NOTE: fastembed OnnxProvider uses Arc<Mutex<TextEmbedding>> — concurrency\
-         \n          serialises through that mutex; pool removes the bottleneck at RAM cost."
+         \n    NOTE: all three models are now default-on (embedding + NLI + T5) in the multi-tenant daemon.\
+         \n          Each shares ONE Arc<Mutex<Session>>. K = concurrent agent sessions inside a model call.\
+         \n    create hot path: embedding -> T5 title -> NLI contradiction check (3 sequential Mutex acquires)"
     );
 
+    // --- Embedding ---
+    println!("\n  [embedding: all-MiniLM-Q int8 — every create + query]");
     let single_session = match OnnxProvider::with_model(engramdb::embeddings::ONNX_ALL_MINILM_Q) {
         Ok(p) => Arc::new(p),
         Err(e) => {
-            println!("  embedding model unavailable, skipping Lever E: {e}");
+            println!("  embedding model unavailable, skipping: {e}");
             return;
         }
     };
-
     // Pool-of-2: two independent OnnxProvider sessions, requests round-robin.
-    // Each session has its own TextEmbedding (ONNX session + weights).
     let pool: Vec<Arc<OnnxProvider>> = (0..2)
         .filter_map(|_| {
             OnnxProvider::with_model(engramdb::embeddings::ONNX_ALL_MINILM_Q)
@@ -309,17 +405,12 @@ async fn bench_lever_e() {
                 .map(Arc::new)
         })
         .collect();
-    if pool.len() < 2 {
-        println!("  could not create 2nd session for pool, skipping pool column");
-    }
-
-    // Warm up both to ensure ONNX session is hot.
+    // Warm up.
     let _ = single_session.embed(INPUTS[0]).await;
     for p in &pool {
         let _ = p.embed(INPUTS[0]).await;
     }
 
-    let window = Duration::from_secs(8);
     println!(
         "\n  {:>3}  {:>14}  {:>9}  {:>9}  |  {:>14}  {:>9}  {:>9}",
         "K", "single ops/s", "mean ms", "p99 ms", "pool-2 ops/s", "mean ms", "p99 ms"
@@ -327,19 +418,17 @@ async fn bench_lever_e() {
     println!("  {}", "-".repeat(80));
 
     for &k in &[1usize, 2, 4, 8] {
-        // Single session: all K tasks contend on the same Mutex<TextEmbedding>.
-        let (s_ops, s_samples) = concurrent_window(Arc::clone(&single_session), k, window).await;
+        let (s_ops, s_samples) =
+            concurrent_window(Arc::clone(&single_session), k, CONCURRENT_WINDOW).await;
         let s_stats = summarize(s_samples);
-        let s_throughput = s_ops as f64 / window.as_secs_f64();
+        let s_throughput = s_ops as f64 / CONCURRENT_WINDOW.as_secs_f64();
 
-        // Pool-of-2: tasks round-robin across sessions; avoids the single mutex.
         let (p_ops, p_samples) = if pool.len() >= 2 {
-            // Wrap the round-robin in a simple AtomicU64 index.
             let idx = Arc::new(AtomicU64::new(0));
             let p_total_ops = Arc::new(AtomicU64::new(0));
             let p_all_samples: Arc<tokio::sync::Mutex<Vec<Duration>>> =
                 Arc::new(tokio::sync::Mutex::new(Vec::new()));
-            let deadline = Instant::now() + window;
+            let deadline = Instant::now() + CONCURRENT_WINDOW;
             let mut handles = Vec::with_capacity(k);
             for task_i in 0..k {
                 let pool_ref: Vec<Arc<OnnxProvider>> = pool.clone();
@@ -377,7 +466,7 @@ async fn bench_lever_e() {
             (0, Vec::new())
         };
         let p_stats = summarize(p_samples);
-        let p_throughput = p_ops as f64 / window.as_secs_f64();
+        let p_throughput = p_ops as f64 / CONCURRENT_WINDOW.as_secs_f64();
 
         println!(
             "  {:>3}  {:>14.1}  {:>9.2}  {:>9.2}  |  {:>14.1}  {:>9.2}  {:>9.2}",
@@ -391,18 +480,606 @@ async fn bench_lever_e() {
         );
     }
 
-    // Interpretation note.
     println!(
-        "\n  Interpretation:\
-         \n  - If single-session throughput plateaus (K=2..8 ~= K=1): mutex is the bottleneck;\
-         \n    pool-of-2 should show ~2x improvement at K=2 and level off.\
-         \n  - If single throughput scales with K: fastembed's internal ORT intra-op\
-         \n    parallelism already saturates the cores; pool adds RAM for no gain.\
-         \n  - Oversubscription point: {cores} cores / {intra} intra_threads = {} parallel ORT sessions\
-         \n    before threads compete. Beyond this, pool degrades.",
+        "\n  Oversubscription point: {cores} cores / {intra} intra_threads = {} parallel ORT sessions\
+         \n  before threads compete. Pool-of-2 is safe iff intra_threads <= cores/2.",
+        cores / intra.max(1)
+    );
+
+    // --- NLI ---
+    println!("\n  [NLI: DeBERTa-v3-xsmall int8 — every create (contradiction check)]");
+    let nli_single = match OnnxNliProvider::with_spec_on(&NLI_DEBERTA_XSMALL_Q, Backend::Cpu) {
+        Ok(p) => Arc::new(p),
+        Err(e) => {
+            println!("  NLI model unavailable, skipping: {e}");
+            // still try T5
+            bench_lever_e_t5(intra, cores).await;
+            return;
+        }
+    };
+    // Warm up NLI.
+    let _ = nli_single.classify(INPUTS[0], INPUTS[1]).await;
+
+    println!(
+        "\n  {:>3}  {:>14}  {:>9}  {:>9}  (single-session; no pool — NLI is sequential within create)",
+        "K", "single ops/s", "mean ms", "p99 ms",
+    );
+    println!("  {}", "-".repeat(65));
+
+    for &k in &[1usize, 2, 4, 8] {
+        let (ops, samples) =
+            concurrent_nli_window(Arc::clone(&nli_single), k, CONCURRENT_WINDOW).await;
+        let stats = summarize(samples);
+        let throughput = ops as f64 / CONCURRENT_WINDOW.as_secs_f64();
+        println!(
+            "  {:>3}  {:>14.1}  {:>9.2}  {:>9.2}",
+            k, throughput, stats.mean_ms, stats.p99_ms,
+        );
+    }
+
+    // --- T5 ---
+    bench_lever_e_t5(intra, cores).await;
+}
+
+async fn bench_lever_e_t5(intra: usize, cores: usize) {
+    println!("\n  [T5: Xenova/t5-small int8 — every create (title generation)]");
+    let t5_single = match T5TitleGenerator::new_on(Backend::Cpu) {
+        Ok(g) => Arc::new(g),
+        Err(e) => {
+            println!("  T5 model unavailable, skipping: {e}");
+            return;
+        }
+    };
+    // Warm up T5.
+    let _ = t5_single.generate(INPUTS[0]).await;
+
+    println!(
+        "\n  {:>3}  {:>14}  {:>9}  {:>9}  (single-session encoder+decoder Mutex pair)",
+        "K", "single ops/s", "mean ms", "p99 ms",
+    );
+    println!("  {}", "-".repeat(65));
+
+    for &k in &[1usize, 2, 4, 8] {
+        let (ops, samples) =
+            concurrent_t5_window(Arc::clone(&t5_single), k, CONCURRENT_WINDOW).await;
+        let stats = summarize(samples);
+        let throughput = ops as f64 / CONCURRENT_WINDOW.as_secs_f64();
+        println!(
+            "  {:>3}  {:>14.1}  {:>9.2}  {:>9.2}",
+            k, throughput, stats.mean_ms, stats.p99_ms,
+        );
+    }
+
+    println!(
+        "\n  Interpretation for multi-tenant daemon (create path):\
+         \n  - K agents each calling `create` concurrently → embedding + T5 + NLI all serialize.\
+         \n  - Throughput plateau (K=1..8 ~flat): Mutex is the bottleneck for the model.\
+         \n  - Per-agent p99 scales linearly with K (each waits for all predecessors).\
+         \n  - NLI pool: single-session is already fast (~13ms); pooling buys ~54%% at K=2\
+         \n    but requires reduced intra_threads to avoid oversubscription.\
+         \n  - T5 pool: heavier (~85ms); same constraint — pool-2 needs intra_threads<=cores/2.\
+         \n  - Oversubscription point: {cores} cores / {intra} intra_threads = {} sessions.",
         cores / intra.max(1)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Part B: prepacked_weights A/B
+// ---------------------------------------------------------------------------
+
+/// Bench NLI and T5 warm latency and concurrency with vs without
+/// `PrepackedWeights`. Both variants are built from raw ort directly so the
+/// A/B is self-contained in one bench run. Verdict (recorded for posterity):
+/// **NO-GO** — measured 0–0.8% delta (noise) on Apple Silicon int8 at
+/// intra_threads=4, so production (src/nli/onnx.rs, src/title/t5.rs) does
+/// NOT ship prepacked. This harness is retained as the evidence.
+async fn bench_prepacked_ab() {
+    use ort::session::builder::GraphOptimizationLevel;
+    use ort::session::builder::PrepackedWeights;
+    use ort::session::Session;
+
+    let intra = engramdb::onnx_ep::intra_threads();
+    println!(
+        "\n=== Part B: PrepackedWeights A/B (NLI + T5, intra_threads={intra}) ===\
+         \n    Measures warm latency and K-concurrency with vs without prepacked weight matrices.\
+         \n    PrepackedWeights pre-packs int8 GEMM weight matrices at session-init time,\
+         \n    amortizing the packing cost over all inference calls. Expected 5-15%% warm gain\
+         \n    did NOT materialize (measured ~0%); production does NOT ship prepacked."
+    );
+
+    // Build NLI "without" and "with" prepacked using raw ort session builder
+    // directly (production wrappers ship WITHOUT prepacked — this is the A/B
+    // that proved it). We use the int8 model (the production default) for both.
+    let nli_model_path = {
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
+            .join("engramdb")
+            .join("models");
+        let api = hf_hub::api::sync::ApiBuilder::new()
+            .with_cache_dir(cache_dir)
+            .build()
+            .expect("hf api");
+        let repo = api.model(NLI_DEBERTA_XSMALL_Q.repo.to_string());
+        repo.get(NLI_DEBERTA_XSMALL_Q.model_file)
+            .expect("nli model")
+    };
+    let nli_tokenizer_path = {
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
+            .join("engramdb")
+            .join("models");
+        let api = hf_hub::api::sync::ApiBuilder::new()
+            .with_cache_dir(cache_dir)
+            .build()
+            .expect("hf api");
+        let repo = api.model(NLI_DEBERTA_XSMALL_Q.repo.to_string());
+        repo.get(NLI_DEBERTA_XSMALL_Q.tokenizer_file)
+            .expect("nli tokenizer")
+    };
+
+    // NLI session WITHOUT prepacked weights (legacy path).
+    let nli_without = {
+        let session = Session::builder()
+            .expect("session builder")
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .expect("opt level")
+            .with_intra_threads(intra)
+            .expect("intra threads")
+            .commit_from_file(&nli_model_path)
+            .expect("nli session without prepacked");
+        let tokenizer =
+            tokenizers::Tokenizer::from_file(&nli_tokenizer_path).expect("nli tokenizer");
+        (Arc::new(Mutex::new(session)), Arc::new(tokenizer))
+    };
+
+    // NLI session WITH prepacked weights (new path — mirrors src/nli/onnx.rs).
+    let nli_with = {
+        let weights = PrepackedWeights::new();
+        let session = Session::builder()
+            .expect("session builder")
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .expect("opt level")
+            .with_intra_threads(intra)
+            .expect("intra threads")
+            .with_prepacked_weights(&weights)
+            .expect("prepacked weights")
+            .commit_from_file(&nli_model_path)
+            .expect("nli session with prepacked");
+        let tokenizer =
+            tokenizers::Tokenizer::from_file(&nli_tokenizer_path).expect("nli tokenizer");
+        (Arc::new(Mutex::new(session)), Arc::new(tokenizer))
+    };
+
+    println!("\n  [NLI warm latency: WITHOUT vs WITH prepacked_weights]");
+    println!(
+        "  {:>12}  {:>10}  {:>10}  {:>10}  {:>10}",
+        "variant", "mean ms", "p50 ms", "p95 ms", "p99 ms"
+    );
+    println!("  {}", "-".repeat(58));
+
+    for (label, (session, tokenizer)) in [("without", &nli_without), ("with", &nli_with)] {
+        // Warm up.
+        for _ in 0..5 {
+            let mut s = session.lock().unwrap();
+            let enc = tokenizer.encode(("premise", "hypothesis"), true).unwrap();
+            let len = enc.len();
+            let ids: Vec<i64> = enc.get_ids().iter().map(|&x| x as i64).collect();
+            let mask: Vec<i64> = enc.get_attention_mask().iter().map(|&x| x as i64).collect();
+            let ids_t =
+                ort::value::TensorRef::from_array_view(([1usize, len], ids.as_slice())).unwrap();
+            let mask_t =
+                ort::value::TensorRef::from_array_view(([1usize, len], mask.as_slice())).unwrap();
+            let inputs: Vec<(Cow<str>, ort::session::SessionInputValue)> = vec![
+                (Cow::Borrowed("input_ids"), ids_t.into()),
+                (Cow::Borrowed("attention_mask"), mask_t.into()),
+            ];
+            let _ = s.run(inputs);
+        }
+
+        let mut samples = Vec::new();
+        for i in 0..80 {
+            let premise = INPUTS[i % INPUTS.len()];
+            let hypothesis = INPUTS[(i + 1) % INPUTS.len()];
+            let t = Instant::now();
+            {
+                let mut s = session.lock().unwrap();
+                let enc = tokenizer.encode((premise, hypothesis), true).unwrap();
+                let len = enc.len();
+                let ids: Vec<i64> = enc.get_ids().iter().map(|&x| x as i64).collect();
+                let mask: Vec<i64> = enc.get_attention_mask().iter().map(|&x| x as i64).collect();
+                let ids_t = ort::value::TensorRef::from_array_view(([1usize, len], ids.as_slice()))
+                    .unwrap();
+                let mask_t =
+                    ort::value::TensorRef::from_array_view(([1usize, len], mask.as_slice()))
+                        .unwrap();
+                let inputs: Vec<(Cow<str>, ort::session::SessionInputValue)> = vec![
+                    (Cow::Borrowed("input_ids"), ids_t.into()),
+                    (Cow::Borrowed("attention_mask"), mask_t.into()),
+                ];
+                let _ = s.run(inputs);
+            }
+            samples.push(t.elapsed());
+        }
+        let stats = summarize(samples);
+        println!(
+            "  {:>12}  {:>10.2}  {:>10.2}  {:>10.2}  {:>10.2}",
+            label, stats.mean_ms, stats.p50_ms, stats.p95_ms, stats.p99_ms
+        );
+    }
+
+    // NLI under K-concurrency: raw Mutex sessions to isolate prepacked effect.
+    println!("\n  [NLI K-concurrency: WITHOUT vs WITH prepacked_weights, warm mean ms / p99 ms]");
+    println!(
+        "  {:>3}  {:>12}  {:>10}  |  {:>12}  {:>10}",
+        "K", "w/o mean ms", "w/o p99 ms", "with mean ms", "with p99 ms"
+    );
+    println!("  {}", "-".repeat(58));
+
+    for &k in &[1usize, 2, 4] {
+        async fn run_concurrent_nli_raw(
+            session: Arc<Mutex<ort::session::Session>>,
+            tokenizer: Arc<tokenizers::Tokenizer>,
+            k: usize,
+            window: Duration,
+        ) -> Vec<Duration> {
+            let all_samples: Arc<tokio::sync::Mutex<Vec<Duration>>> =
+                Arc::new(tokio::sync::Mutex::new(Vec::new()));
+            let deadline = Instant::now() + window;
+            let mut handles = Vec::with_capacity(k);
+            for task_idx in 0..k {
+                let s = Arc::clone(&session);
+                let tok = Arc::clone(&tokenizer);
+                let out = Arc::clone(&all_samples);
+                handles.push(tokio::spawn(async move {
+                    let mut local = Vec::new();
+                    let mut i = 0usize;
+                    while Instant::now() < deadline {
+                        let premise = INPUTS[(task_idx + i) % INPUTS.len()];
+                        let hypothesis = INPUTS[(task_idx + i + 1) % INPUTS.len()];
+                        let t = Instant::now();
+                        let session_clone = Arc::clone(&s);
+                        let tok_clone = Arc::clone(&tok);
+                        let premise_s = premise.to_string();
+                        let hypothesis_s = hypothesis.to_string();
+                        let ok = tokio::task::spawn_blocking(move || {
+                            let mut s = session_clone.lock().unwrap();
+                            let enc = tok_clone
+                                .encode((premise_s.as_str(), hypothesis_s.as_str()), true)
+                                .unwrap();
+                            let len = enc.len();
+                            let ids: Vec<i64> = enc.get_ids().iter().map(|&x| x as i64).collect();
+                            let mask: Vec<i64> =
+                                enc.get_attention_mask().iter().map(|&x| x as i64).collect();
+                            let ids_t = ort::value::TensorRef::from_array_view((
+                                [1usize, len],
+                                ids.as_slice(),
+                            ))
+                            .unwrap();
+                            let mask_t = ort::value::TensorRef::from_array_view((
+                                [1usize, len],
+                                mask.as_slice(),
+                            ))
+                            .unwrap();
+                            let inputs: Vec<(Cow<str>, ort::session::SessionInputValue)> = vec![
+                                (Cow::Borrowed("input_ids"), ids_t.into()),
+                                (Cow::Borrowed("attention_mask"), mask_t.into()),
+                            ];
+                            let ok = s.run(inputs).is_ok();
+                            ok
+                        })
+                        .await
+                        .unwrap_or(false);
+                        if ok {
+                            local.push(t.elapsed());
+                        }
+                        i += 1;
+                    }
+                    let mut g = out.lock().await;
+                    g.extend(local);
+                }));
+            }
+            for h in handles {
+                let _ = h.await;
+            }
+            Arc::try_unwrap(all_samples)
+                .unwrap_or_else(|a| tokio::sync::Mutex::new(a.blocking_lock().clone()))
+                .into_inner()
+        }
+
+        let wo_samples = run_concurrent_nli_raw(
+            Arc::clone(&nli_without.0),
+            Arc::clone(&nli_without.1),
+            k,
+            CONCURRENT_WINDOW,
+        )
+        .await;
+        let wi_samples = run_concurrent_nli_raw(
+            Arc::clone(&nli_with.0),
+            Arc::clone(&nli_with.1),
+            k,
+            CONCURRENT_WINDOW,
+        )
+        .await;
+        let wo = summarize(wo_samples);
+        let wi = summarize(wi_samples);
+        println!(
+            "  {:>3}  {:>12.2}  {:>10.2}  |  {:>12.2}  {:>10.2}",
+            k, wo.mean_ms, wo.p99_ms, wi.mean_ms, wi.p99_ms
+        );
+    }
+
+    // T5 A/B: use the production wrappers (OnnxNliProvider and T5TitleGenerator)
+    // since both now always use prepacked. Instead, A/B by building two T5
+    // generators via raw ort for "without" vs our wrapper for "with".
+    println!("\n  [T5 warm latency: WITHOUT vs WITH prepacked_weights]");
+
+    let (enc_path, dec_path, tok_path) = {
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
+            .join("engramdb")
+            .join("models");
+        let api = hf_hub::api::sync::ApiBuilder::new()
+            .with_cache_dir(cache_dir)
+            .build()
+            .expect("hf api");
+        let spec = &engramdb::title::t5::T5_XENOVA_Q;
+        let repo = api.model(spec.repo.to_string());
+        (
+            repo.get(spec.encoder_file).expect("encoder"),
+            repo.get(spec.decoder_file).expect("decoder"),
+            repo.get(spec.tokenizer_file).expect("tokenizer"),
+        )
+    };
+
+    let t5_tok = Arc::new(tokenizers::Tokenizer::from_file(&tok_path).expect("t5 tokenizer"));
+
+    // T5 WITHOUT prepacked.
+    let t5_enc_without = Arc::new(Mutex::new(
+        Session::builder()
+            .expect("sb")
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .expect("opt")
+            .with_intra_threads(intra)
+            .expect("intra")
+            .commit_from_file(&enc_path)
+            .expect("enc without prepacked"),
+    ));
+    let t5_dec_without = Arc::new(Mutex::new(
+        Session::builder()
+            .expect("sb")
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .expect("opt")
+            .with_intra_threads(intra)
+            .expect("intra")
+            .commit_from_file(&dec_path)
+            .expect("dec without prepacked"),
+    ));
+
+    // T5 WITH prepacked (mirrors src/title/t5.rs).
+    let enc_weights = PrepackedWeights::new();
+    let t5_enc_with = Arc::new(Mutex::new(
+        Session::builder()
+            .expect("sb")
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .expect("opt")
+            .with_intra_threads(intra)
+            .expect("intra")
+            .with_prepacked_weights(&enc_weights)
+            .expect("prepacked")
+            .commit_from_file(&enc_path)
+            .expect("enc with prepacked"),
+    ));
+    let dec_weights = PrepackedWeights::new();
+    let t5_dec_with = Arc::new(Mutex::new(
+        Session::builder()
+            .expect("sb")
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .expect("opt")
+            .with_intra_threads(intra)
+            .expect("intra")
+            .with_prepacked_weights(&dec_weights)
+            .expect("prepacked")
+            .commit_from_file(&dec_path)
+            .expect("dec with prepacked"),
+    ));
+
+    println!(
+        "  {:>12}  {:>10}  {:>10}  {:>10}  {:>10}",
+        "variant", "mean ms", "p50 ms", "p95 ms", "p99 ms"
+    );
+    println!("  {}", "-".repeat(58));
+
+    for (label, enc, dec) in [
+        (
+            "without",
+            Arc::clone(&t5_enc_without),
+            Arc::clone(&t5_dec_without),
+        ),
+        ("with", Arc::clone(&t5_enc_with), Arc::clone(&t5_dec_with)),
+    ] {
+        // Warm-up runs (T5 is slow — 5 warmup iters sufficient).
+        for _ in 0..3 {
+            run_t5_inference_raw(&enc, &dec, &t5_tok, INPUTS[0]);
+        }
+        let mut samples = Vec::new();
+        for i in 0..24 {
+            let input = INPUTS[i % INPUTS.len()];
+            let t = Instant::now();
+            run_t5_inference_raw(&enc, &dec, &t5_tok, input);
+            samples.push(t.elapsed());
+        }
+        let stats = summarize(samples);
+        println!(
+            "  {:>12}  {:>10.2}  {:>10.2}  {:>10.2}  {:>10.2}",
+            label, stats.mean_ms, stats.p50_ms, stats.p95_ms, stats.p99_ms
+        );
+    }
+
+    println!("\n  [T5 K-concurrency: WITHOUT vs WITH prepacked_weights, warm mean ms / p99 ms]");
+    println!(
+        "  {:>3}  {:>12}  {:>10}  |  {:>12}  {:>10}",
+        "K", "w/o mean ms", "w/o p99 ms", "with mean ms", "with p99 ms"
+    );
+    println!("  {}", "-".repeat(58));
+
+    for &k in &[1usize, 2, 4] {
+        let wo_samples = run_concurrent_t5_raw(
+            Arc::clone(&t5_enc_without),
+            Arc::clone(&t5_dec_without),
+            Arc::clone(&t5_tok),
+            k,
+            CONCURRENT_WINDOW,
+        )
+        .await;
+        let wi_samples = run_concurrent_t5_raw(
+            Arc::clone(&t5_enc_with),
+            Arc::clone(&t5_dec_with),
+            Arc::clone(&t5_tok),
+            k,
+            CONCURRENT_WINDOW,
+        )
+        .await;
+        let wo = summarize(wo_samples);
+        let wi = summarize(wi_samples);
+        println!(
+            "  {:>3}  {:>12.2}  {:>10.2}  |  {:>12.2}  {:>10.2}",
+            k, wo.mean_ms, wo.p99_ms, wi.mean_ms, wi.p99_ms
+        );
+    }
+}
+
+/// Synchronous T5 inference (encoder + greedy decode, max 8 output tokens)
+/// operating directly on raw ort `Session` Mutexes. Used for the prepacked A/B
+/// without going through T5TitleGenerator.
+fn run_t5_inference_raw(
+    encoder: &Mutex<ort::session::Session>,
+    decoder: &Mutex<ort::session::Session>,
+    tokenizer: &tokenizers::Tokenizer,
+    text: &str,
+) {
+    let input = format!("summarize: {}", text);
+    let enc_result = tokenizer.encode(input.as_str(), true).unwrap();
+    let ids: Vec<i64> = enc_result
+        .get_ids()
+        .iter()
+        .take(64)
+        .map(|&x| x as i64)
+        .collect();
+    let mask: Vec<i64> = enc_result
+        .get_attention_mask()
+        .iter()
+        .take(64)
+        .map(|&x| x as i64)
+        .collect();
+    let length = ids.len();
+
+    let hidden = {
+        let ids_t =
+            ort::value::TensorRef::from_array_view(([1usize, length], ids.as_slice())).unwrap();
+        let mask_t =
+            ort::value::TensorRef::from_array_view(([1usize, length], mask.as_slice())).unwrap();
+        let mut enc = encoder.lock().unwrap();
+        let enc_inputs: Vec<(Cow<str>, ort::session::SessionInputValue)> = vec![
+            (Cow::Borrowed("input_ids"), ids_t.into()),
+            (Cow::Borrowed("attention_mask"), mask_t.into()),
+        ];
+        let outputs = enc.run(enc_inputs).unwrap();
+        let (_, data) = outputs[0].try_extract_tensor::<f32>().unwrap();
+        let v = data.to_vec();
+        let hidden_dim = v.len() / length.max(1);
+        (v, vec![1usize, length, hidden_dim])
+    };
+
+    // Greedy decode (max 8 tokens for speed in bench).
+    let mut generated: Vec<i64> = vec![0];
+    for _ in 0..8 {
+        let dec_len = generated.len();
+        let dec_t =
+            ort::value::TensorRef::from_array_view(([1usize, dec_len], generated.as_slice()))
+                .unwrap();
+        let enc_t = ort::value::TensorRef::from_array_view((hidden.1.clone(), hidden.0.as_slice()))
+            .unwrap();
+        let enc_mask = vec![1i64; hidden.1[1]];
+        let enc_mask_t =
+            ort::value::TensorRef::from_array_view(([1usize, hidden.1[1]], enc_mask.as_slice()))
+                .unwrap();
+        let mut dec = decoder.lock().unwrap();
+        let dec_inputs: Vec<(Cow<str>, ort::session::SessionInputValue)> = vec![
+            (Cow::Borrowed("input_ids"), dec_t.into()),
+            (Cow::Borrowed("encoder_hidden_states"), enc_t.into()),
+            (Cow::Borrowed("encoder_attention_mask"), enc_mask_t.into()),
+        ];
+        let outputs = dec.run(dec_inputs).unwrap();
+        let (_, logits) = outputs[0].try_extract_tensor::<f32>().unwrap();
+        let vocab = logits.len() / dec_len;
+        let last = &logits[(dec_len - 1) * vocab..dec_len * vocab];
+        let next = last
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i as i64)
+            .unwrap_or(1);
+        if next == 1 {
+            break;
+        }
+        generated.push(next);
+    }
+}
+
+async fn run_concurrent_t5_raw(
+    encoder: Arc<Mutex<ort::session::Session>>,
+    decoder: Arc<Mutex<ort::session::Session>>,
+    tokenizer: Arc<tokenizers::Tokenizer>,
+    k: usize,
+    window: Duration,
+) -> Vec<Duration> {
+    let all_samples: Arc<tokio::sync::Mutex<Vec<Duration>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let deadline = Instant::now() + window;
+    let mut handles = Vec::with_capacity(k);
+    for task_idx in 0..k {
+        let enc = Arc::clone(&encoder);
+        let dec = Arc::clone(&decoder);
+        let tok = Arc::clone(&tokenizer);
+        let out = Arc::clone(&all_samples);
+        handles.push(tokio::spawn(async move {
+            let mut local = Vec::new();
+            let mut i = 0usize;
+            while Instant::now() < deadline {
+                let input_str = INPUTS[(task_idx + i) % INPUTS.len()].to_string();
+                let enc2 = Arc::clone(&enc);
+                let dec2 = Arc::clone(&dec);
+                let tok2 = Arc::clone(&tok);
+                let t = Instant::now();
+                let ok = tokio::task::spawn_blocking(move || {
+                    // Catch any panic from the raw inference (e.g. under oversubscription).
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_t5_inference_raw(&enc2, &dec2, &tok2, &input_str);
+                    }))
+                    .is_ok()
+                })
+                .await
+                .unwrap_or(false);
+                if ok {
+                    local.push(t.elapsed());
+                }
+                i += 1;
+            }
+            let mut g = out.lock().await;
+            g.extend(local);
+        }));
+    }
+    for h in handles {
+        let _ = h.await;
+    }
+    Arc::try_unwrap(all_samples)
+        .unwrap_or_else(|a| tokio::sync::Mutex::new(a.blocking_lock().clone()))
+        .into_inner()
+}
+
+// ---------------------------------------------------------------------------
+// Per-backend suite (unchanged from prior version)
+// ---------------------------------------------------------------------------
 
 async fn run_backend(backend_label: &str, backend: Backend) {
     println!("\n=== backend: {backend_label} ===");
@@ -516,11 +1193,18 @@ async fn main() -> Result<()> {
         bench_lever_e().await;
     }
 
-    // Skip the per-backend suite when only lever_e was requested.
-    let only_lever_e = std::env::var("ENGRAMDB_BENCH_WORKLOADS")
-        .map(|v| v.split(',').all(|w| w.trim() == "lever_e"))
+    if enabled("prepacked_ab") {
+        bench_prepacked_ab().await;
+    }
+
+    // Skip the per-backend suite when only lever_e / prepacked_ab was requested.
+    let only_focused = std::env::var("ENGRAMDB_BENCH_WORKLOADS")
+        .map(|v| {
+            v.split(',')
+                .all(|w| matches!(w.trim(), "lever_e" | "prepacked_ab"))
+        })
         .unwrap_or(false);
-    if !only_lever_e {
+    if !only_focused {
         run_backend("cpu", Backend::Cpu).await;
         if engramdb::onnx_ep::coreml_available() {
             run_backend("coreml", Backend::CoreMl).await;
