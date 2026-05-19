@@ -31,11 +31,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use engramdb::embeddings::{EmbeddingProvider, OnnxProvider, ONNX_ALL_MINILM, ONNX_ALL_MINILM_Q};
-use engramdb::nli::{NliProvider, OnnxNliProvider};
+use engramdb::nli::{NliProvider, OnnxNliProvider, NLI_DEBERTA_XSMALL, NLI_DEBERTA_XSMALL_Q};
 use engramdb::onnx_ep::Backend;
 use engramdb::title::t5::T5TitleGenerator;
 use engramdb::title::TitleGenerator;
-use engramdb::types::EngramConfig;
 
 /// How long the sustained-throughput phase runs per workload.
 const SUSTAINED: Duration = Duration::from_secs(5);
@@ -217,7 +216,6 @@ fn enabled(workload: &str) -> bool {
 
 async fn run_backend(backend_label: &str, backend: Backend) {
     println!("\n=== backend: {backend_label} ===");
-    let nli_repo = EngramConfig::default().nli.model;
 
     // fp32 vs int8 all-MiniLM A/B (Lever B). "_q" = int8 quantized.
     for (suffix, spec) in [("", ONNX_ALL_MINILM), ("_q", ONNX_ALL_MINILM_Q)] {
@@ -267,23 +265,29 @@ async fn run_backend(backend_label: &str, backend: Backend) {
         }
     }
 
-    if enabled("nli_classify") {
+    // fp32 vs int8 NLI cross-encoder A/B (Lever D). "_q" = int8 quantized.
+    for (suffix, spec) in [("", NLI_DEBERTA_XSMALL), ("_q", NLI_DEBERTA_XSMALL_Q)] {
+        let w = format!("nli_classify{suffix}");
+        if !enabled(&w) {
+            continue;
+        }
         let base_rss = rss_kib();
-        if let Some(provider) = OnnxNliProvider::try_new_on(&nli_repo, backend) {
-            report(
-                "nli_classify",
-                backend_label,
-                bench("nli_classify", backend_label, base_rss, 80, 25, |t| {
-                    let p = &provider;
-                    async move {
-                        p.classify("The database uses PostgreSQL.", t).await?;
-                        Ok(())
-                    }
-                }),
-            )
-            .await;
-        } else {
-            println!("  NLI model unavailable, skipping");
+        match OnnxNliProvider::with_spec_on(&spec, backend) {
+            Ok(provider) => {
+                report(
+                    &w,
+                    backend_label,
+                    bench(&w, backend_label, base_rss, 80, 25, |t| {
+                        let p = &provider;
+                        async move {
+                            p.classify("The database uses PostgreSQL.", t).await?;
+                            Ok(())
+                        }
+                    }),
+                )
+                .await;
+            }
+            Err(_) => println!("  NLI model '{w}' unavailable, skipping"),
         }
     }
 
