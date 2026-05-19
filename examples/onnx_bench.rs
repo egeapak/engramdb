@@ -14,6 +14,12 @@
 //!    offload wins when the CPU is busy (the realistic hook/daemon case).
 //! 5. **Memory** — process RSS growth attributable to loading the model on
 //!    each backend.
+//! 6. **Lever E — concurrent submission** — K tokio tasks each submitting
+//!    embed requests simultaneously to a shared single-session provider
+//!    (the current architecture) vs a naive pool of N independent sessions.
+//!    Measures aggregate throughput (ops/s) and per-request latency at
+//!    K=1,2,4,8 concurrency for both single-session and pool-of-2.
+//!    Run with `ENGRAMDB_BENCH_WORKLOADS=lever_e`.
 //!
 //! Workloads: embedding single + batch16 (all-MiniLM-L6-v2), NLI
 //! contradiction (DeBERTa-v3-xsmall), and T5 title generation
@@ -22,9 +28,10 @@
 //! `--features coreml` on macOS.
 //!
 //! Run with: `cargo run --release --features coreml --example onnx_bench`
+//! Run Lever E only: `ENGRAMDB_BENCH_WORKLOADS=lever_e cargo run --release --example onnx_bench`
 
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -214,6 +221,189 @@ fn enabled(workload: &str) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Lever E: concurrent-submission scenario
+// ---------------------------------------------------------------------------
+
+/// Run K tokio tasks concurrently for `window` seconds, each repeatedly
+/// calling `embed` on a shared provider. Returns (total_ops, latency_samples).
+async fn concurrent_window(
+    provider: Arc<OnnxProvider>,
+    concurrency: usize,
+    window: Duration,
+) -> (u64, Vec<Duration>) {
+    let total_ops = Arc::new(AtomicU64::new(0));
+    let all_samples: Arc<tokio::sync::Mutex<Vec<Duration>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let deadline = Instant::now() + window;
+
+    let mut handles = Vec::with_capacity(concurrency);
+    for task_idx in 0..concurrency {
+        let p = Arc::clone(&provider);
+        let ops_counter = Arc::clone(&total_ops);
+        let samples_out = Arc::clone(&all_samples);
+        handles.push(tokio::spawn(async move {
+            let mut local_samples = Vec::new();
+            let mut i = 0usize;
+            while Instant::now() < deadline {
+                let input = INPUTS[(task_idx + i) % INPUTS.len()];
+                let t = Instant::now();
+                // Ignore errors — the session mutex may be contended; we count
+                // only successful calls in throughput.
+                if p.embed(input).await.is_ok() {
+                    local_samples.push(t.elapsed());
+                    ops_counter.fetch_add(1, Ordering::Relaxed);
+                }
+                i += 1;
+            }
+            let mut guard = samples_out.lock().await;
+            guard.extend(local_samples);
+        }));
+    }
+    for h in handles {
+        let _ = h.await;
+    }
+    let ops = total_ops.load(Ordering::Relaxed);
+    let samples = Arc::try_unwrap(all_samples)
+        .unwrap_or_else(|a| {
+            // Arc still shared — shouldn't happen after all tasks joined
+            tokio::sync::Mutex::new(a.blocking_lock().clone())
+        })
+        .into_inner();
+    (ops, samples)
+}
+
+/// Lever E: single-session (current arch) vs naive pool-of-N, at K=1,2,4,8.
+///
+/// The single-session provider serialises all concurrent callers through its
+/// `Arc<Mutex<TextEmbedding>>`. A pool lets up to N callers run in parallel,
+/// but only if `N * intra_threads <= physical_cores` (else oversubscription).
+///
+/// Prints a table: K | single-session ops/s mean-ms p99-ms | pool-2 ops/s mean-ms p99-ms
+async fn bench_lever_e() {
+    let intra = engramdb::onnx_ep::intra_threads();
+    let cores = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    println!(
+        "\n=== Lever E: concurrent embedding (single-session vs pool-of-2) ===\
+         \n    machine: {cores} cores | intra_threads (NLI/T5)={intra} | fastembed manages its own pool\
+         \n    NOTE: fastembed OnnxProvider uses Arc<Mutex<TextEmbedding>> — concurrency\
+         \n          serialises through that mutex; pool removes the bottleneck at RAM cost."
+    );
+
+    let single_session = match OnnxProvider::with_model(engramdb::embeddings::ONNX_ALL_MINILM_Q) {
+        Ok(p) => Arc::new(p),
+        Err(e) => {
+            println!("  embedding model unavailable, skipping Lever E: {e}");
+            return;
+        }
+    };
+
+    // Pool-of-2: two independent OnnxProvider sessions, requests round-robin.
+    // Each session has its own TextEmbedding (ONNX session + weights).
+    let pool: Vec<Arc<OnnxProvider>> = (0..2)
+        .filter_map(|_| {
+            OnnxProvider::with_model(engramdb::embeddings::ONNX_ALL_MINILM_Q)
+                .ok()
+                .map(Arc::new)
+        })
+        .collect();
+    if pool.len() < 2 {
+        println!("  could not create 2nd session for pool, skipping pool column");
+    }
+
+    // Warm up both to ensure ONNX session is hot.
+    let _ = single_session.embed(INPUTS[0]).await;
+    for p in &pool {
+        let _ = p.embed(INPUTS[0]).await;
+    }
+
+    let window = Duration::from_secs(8);
+    println!(
+        "\n  {:>3}  {:>14}  {:>9}  {:>9}  |  {:>14}  {:>9}  {:>9}",
+        "K", "single ops/s", "mean ms", "p99 ms", "pool-2 ops/s", "mean ms", "p99 ms"
+    );
+    println!("  {}", "-".repeat(80));
+
+    for &k in &[1usize, 2, 4, 8] {
+        // Single session: all K tasks contend on the same Mutex<TextEmbedding>.
+        let (s_ops, s_samples) = concurrent_window(Arc::clone(&single_session), k, window).await;
+        let s_stats = summarize(s_samples);
+        let s_throughput = s_ops as f64 / window.as_secs_f64();
+
+        // Pool-of-2: tasks round-robin across sessions; avoids the single mutex.
+        let (p_ops, p_samples) = if pool.len() >= 2 {
+            // Wrap the round-robin in a simple AtomicU64 index.
+            let idx = Arc::new(AtomicU64::new(0));
+            let p_total_ops = Arc::new(AtomicU64::new(0));
+            let p_all_samples: Arc<tokio::sync::Mutex<Vec<Duration>>> =
+                Arc::new(tokio::sync::Mutex::new(Vec::new()));
+            let deadline = Instant::now() + window;
+            let mut handles = Vec::with_capacity(k);
+            for task_i in 0..k {
+                let pool_ref: Vec<Arc<OnnxProvider>> = pool.clone();
+                let counter = Arc::clone(&p_total_ops);
+                let samples_out = Arc::clone(&p_all_samples);
+                let idx_ref = Arc::clone(&idx);
+                handles.push(tokio::spawn(async move {
+                    let mut local = Vec::new();
+                    let mut i = task_i;
+                    while Instant::now() < deadline {
+                        let slot =
+                            idx_ref.fetch_add(1, Ordering::Relaxed) as usize % pool_ref.len();
+                        let p = &pool_ref[slot];
+                        let input = INPUTS[i % INPUTS.len()];
+                        let t = Instant::now();
+                        if p.embed(input).await.is_ok() {
+                            local.push(t.elapsed());
+                            counter.fetch_add(1, Ordering::Relaxed);
+                        }
+                        i += 1;
+                    }
+                    let mut g = samples_out.lock().await;
+                    g.extend(local);
+                }));
+            }
+            for h in handles {
+                let _ = h.await;
+            }
+            let total = p_total_ops.load(Ordering::Relaxed);
+            let samples = Arc::try_unwrap(p_all_samples)
+                .map(|m| m.into_inner())
+                .unwrap_or_default();
+            (total, samples)
+        } else {
+            (0, Vec::new())
+        };
+        let p_stats = summarize(p_samples);
+        let p_throughput = p_ops as f64 / window.as_secs_f64();
+
+        println!(
+            "  {:>3}  {:>14.1}  {:>9.2}  {:>9.2}  |  {:>14.1}  {:>9.2}  {:>9.2}",
+            k,
+            s_throughput,
+            s_stats.mean_ms,
+            s_stats.p99_ms,
+            p_throughput,
+            p_stats.mean_ms,
+            p_stats.p99_ms,
+        );
+    }
+
+    // Interpretation note.
+    println!(
+        "\n  Interpretation:\
+         \n  - If single-session throughput plateaus (K=2..8 ~= K=1): mutex is the bottleneck;\
+         \n    pool-of-2 should show ~2x improvement at K=2 and level off.\
+         \n  - If single throughput scales with K: fastembed's internal ORT intra-op\
+         \n    parallelism already saturates the cores; pool adds RAM for no gain.\
+         \n  - Oversubscription point: {cores} cores / {intra} intra_threads = {} parallel ORT sessions\
+         \n    before threads compete. Beyond this, pool degrades.",
+        cores / intra.max(1)
+    );
+}
+
 async fn run_backend(backend_label: &str, backend: Backend) {
     println!("\n=== backend: {backend_label} ===");
 
@@ -322,12 +512,22 @@ async fn main() -> Result<()> {
         engramdb::onnx_ep::intra_threads()
     );
 
-    run_backend("cpu", Backend::Cpu).await;
-    if engramdb::onnx_ep::coreml_available() {
-        run_backend("coreml", Backend::CoreMl).await;
+    if enabled("lever_e") {
+        bench_lever_e().await;
     }
-    if engramdb::onnx_ep::xnnpack_available() {
-        run_backend("xnnpack", Backend::Xnnpack).await;
+
+    // Skip the per-backend suite when only lever_e was requested.
+    let only_lever_e = std::env::var("ENGRAMDB_BENCH_WORKLOADS")
+        .map(|v| v.split(',').all(|w| w.trim() == "lever_e"))
+        .unwrap_or(false);
+    if !only_lever_e {
+        run_backend("cpu", Backend::Cpu).await;
+        if engramdb::onnx_ep::coreml_available() {
+            run_backend("coreml", Backend::CoreMl).await;
+        }
+        if engramdb::onnx_ep::xnnpack_available() {
+            run_backend("xnnpack", Backend::Xnnpack).await;
+        }
     }
 
     println!("\nDone. Compare warm vs contended, sustained ops/s, and RSS across backends.");
