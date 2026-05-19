@@ -54,7 +54,7 @@ use crate::embeddings::{
 use crate::embeddings::{OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT};
 use crate::nli::{NliProvider, OnnxNliProvider};
 use crate::retrieval::engine::RetrievalEngine;
-use crate::storage::{EmbeddingFingerprint, MemoryStore};
+use crate::storage::{embedding_status, EmbeddingFingerprint, EmbeddingModelStatus, MemoryStore};
 use crate::types::{EmbeddingBackend, EngramConfig};
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 use std::path::PathBuf;
@@ -115,6 +115,49 @@ pub fn expected_embedding_fingerprint(config: &EngramConfig) -> Option<Embedding
         model: format!("onnx/{}", spec.name),
         dimensions: spec.dimensions,
     })
+}
+
+/// Comparison of a store's stored embedding fingerprint vs the model in use.
+pub struct EmbeddingModelReport {
+    pub status: EmbeddingModelStatus,
+    /// Actionable, user-facing message when not consistent (else `None`).
+    pub warning: Option<String>,
+}
+
+/// Evaluate a store's stored embedding fingerprint against `current` (the
+/// live provider's fingerprint, or `None` when embeddings are disabled).
+/// One cheap manifest read; `status` is `Match` when embeddings are off.
+pub async fn embedding_model_report(
+    store: &MemoryStore,
+    current: Option<EmbeddingFingerprint>,
+) -> EmbeddingModelReport {
+    let Some(current) = current else {
+        return EmbeddingModelReport {
+            status: EmbeddingModelStatus::Match,
+            warning: None,
+        };
+    };
+    let stored = store.embedding_fingerprint().await.ok().flatten();
+    let status = embedding_status(stored.as_ref(), &current.model, current.dimensions);
+    let warning = match &status {
+        EmbeddingModelStatus::Match => None,
+        EmbeddingModelStatus::Untracked { current } => Some(format!(
+            "EngramDB: this store has no recorded embedding model (legacy store; \
+             current model {current}). Memory search may use stale vectors — run \
+             `engramdb reindex --embeddings-only` to re-embed and stamp it."
+        )),
+        EmbeddingModelStatus::Mismatch { stored, current } => Some(format!(
+            "EngramDB: the embedding model changed (stored {stored}, current {current}). \
+             Memory search is degraded until you run \
+             `engramdb reindex --embeddings-only`."
+        )),
+        EmbeddingModelStatus::DimensionMismatch { stored, current } => Some(format!(
+            "EngramDB: embedding dimensionality changed (stored {stored}, current \
+             {current}). Run `engramdb reindex --embeddings-only` before using \
+             memory search."
+        )),
+    };
+    EmbeddingModelReport { status, warning }
 }
 
 /// Try to create an embedding provider for the given model name and backend.

@@ -571,6 +571,11 @@ pub struct EngramDbServer {
     /// builds so the model loads exactly once.
     provider_cache:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, ops::EngineProviders>>>,
+    /// Embedding-model-change warning computed once at daemon startup for
+    /// the primary project, appended to `get_info` instructions so the
+    /// connecting agent surfaces it to the user. `None` = no mismatch /
+    /// not yet evaluated.
+    embedding_warning: Option<String>,
     #[allow(dead_code)]
     tool_router: rmcp::handler::server::tool::ToolRouter<Self>,
 }
@@ -616,6 +621,7 @@ impl EngramDbServer {
             session_id,
             pid_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             provider_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            embedding_warning: None,
             tool_router: Self::tool_router(),
         })
     }
@@ -640,6 +646,7 @@ impl EngramDbServer {
             session_id,
             pid_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             provider_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            embedding_warning: None,
             tool_router: Self::tool_router(),
         }
     }
@@ -854,12 +861,76 @@ impl EngramDbServer {
         let config_path = dir.join(".engramdb").join("config.toml");
         let pid = self.project_id_for_dir(&dir, project);
         let config = load_config(&config_path).await.unwrap_or_default();
+        let mode = config.embeddings.reindex_on_model_change;
         let providers = self.cached_providers(&config).await;
+        // Strict mode: refuse embedding-dependent work on a model mismatch
+        // so the agent gets an actionable error instead of degraded search.
+        if mode == crate::types::ReindexOnModelChange::Error {
+            let current =
+                providers
+                    .embedding
+                    .as_ref()
+                    .map(|p| crate::storage::EmbeddingFingerprint {
+                        model: p.model_id(),
+                        dimensions: p.dimensions(),
+                    });
+            let report = ops::embedding_model_report(&store, current).await;
+            if !report.status.is_consistent() {
+                return Err(report.warning.unwrap_or_else(|| {
+                    "EngramDB: embedding model mismatch; run \
+                     `engramdb reindex --embeddings-only`"
+                        .to_string()
+                }));
+            }
+        }
         let engine = ops::assemble_engine(store, config, providers);
         Ok(engine
             .with_stats(self.stats.clone())
             .with_project_id(pid)
             .with_session_id(Some(self.session_id.clone())))
+    }
+
+    /// Evaluate the primary project's embedding-model identity for the
+    /// startup warning. Best-effort: any failure or `off` mode → `None`
+    /// (never blocks startup). Returns `(mode, report)`.
+    async fn embedding_startup_report(
+        &self,
+    ) -> Option<(
+        crate::types::ReindexOnModelChange,
+        ops::EmbeddingModelReport,
+    )> {
+        let dir = self.resolve_dir(None).await.ok()?;
+        let store = self.open_store_for(None).await.ok()?;
+        let config_path = dir.join(".engramdb").join("config.toml");
+        let config = load_config(&config_path).await.unwrap_or_default();
+        let mode = config.embeddings.reindex_on_model_change;
+        if mode == crate::types::ReindexOnModelChange::Off {
+            return None;
+        }
+        let providers = self.cached_providers(&config).await;
+        let current = providers
+            .embedding
+            .as_ref()
+            .map(|p| crate::storage::EmbeddingFingerprint {
+                model: p.model_id(),
+                dimensions: p.dimensions(),
+            });
+        Some((mode, ops::embedding_model_report(&store, current).await))
+    }
+
+    /// Re-embed the primary project's memories and stamp the model
+    /// fingerprint (used by `reindex_on_model_change = auto` at startup).
+    async fn auto_reindex_default(&self) -> anyhow::Result<()> {
+        let store = self
+            .open_store_for(None)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let engine = self
+            .build_engine_for(None)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        ops::reindex(&store, Some(&engine), true).await?;
+        Ok(())
     }
 
     /// Resolve the model-backed providers for `config`, building them at most
@@ -1937,8 +2008,8 @@ impl ServerHandler for EngramDbServer {
                 icons: None,
                 website_url: None,
             },
-            instructions: Some(
-                "Project-scoped persistent memory store for coding agents. \
+            instructions: Some({
+                let mut s = "Project-scoped persistent memory store for coding agents. \
                  Stores decisions, hazards, conventions, and context about the codebase. \
                  IMPORTANT: Query memories (query) before answering project questions, \
                  investigating workflows, or researching how things work — not only before \
@@ -1951,8 +2022,14 @@ impl ServerHandler for EngramDbServer {
                  coding conventions, or knowledge that applies everywhere. \
                  Use include_global=true on query to merge global memories into results. \
                  Omit `project` to use the current project."
-                    .to_string(),
-            ),
+                    .to_string();
+                if let Some(w) = &self.embedding_warning {
+                    s.push_str("\n\nIMPORTANT — ACTION NEEDED: ");
+                    s.push_str(w);
+                    s.push_str(" Tell the user.");
+                }
+                s
+            }),
         }
     }
 
@@ -2254,9 +2331,31 @@ pub async fn run_stdio(
         )
     });
 
-    let server = EngramDbServer::new_with_stats(dir, embedding_backend, stats.clone())?;
+    let mut server = EngramDbServer::new_with_stats(dir, embedding_backend, stats.clone())?;
     // Detect git worktrees and register/init the main project if needed.
     server.ensure_hierarchy().await?;
+    // Embedding-model-change check: warn (default), auto-reindex, or — in
+    // `error` mode — leave the warning so embedding tools hard-fail.
+    if let Some((mode, report)) = server.embedding_startup_report().await {
+        if !report.status.is_consistent() {
+            if let Some(w) = &report.warning {
+                tracing::warn!("{w}");
+            }
+            server.embedding_warning = report.warning.clone();
+            if mode == crate::types::ReindexOnModelChange::Auto {
+                tracing::warn!(
+                    "EngramDB: reindex_on_model_change=auto — re-embedding before serving…"
+                );
+                match server.auto_reindex_default().await {
+                    Ok(()) => {
+                        tracing::warn!("EngramDB: auto-reindex complete.");
+                        server.embedding_warning = None;
+                    }
+                    Err(e) => tracing::warn!("EngramDB: auto-reindex failed: {e}"),
+                }
+            }
+        }
+    }
     // Load the embedding model in the background now so the first tool call
     // doesn't pay the ~240ms ONNX session init synchronously.
     server.spawn_provider_warmup();

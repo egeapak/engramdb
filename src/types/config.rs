@@ -371,6 +371,25 @@ impl std::str::FromStr for EmbeddingBackend {
     }
 }
 
+/// Policy when the store's stored embedding model differs from the one in
+/// use (e.g. after an upgrade that changes the default embedding model).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReindexOnModelChange {
+    /// Don't detect or act (legacy silent behavior; accept mixed vectors).
+    Off,
+    /// Surface a warning on MCP connect / daemon startup / `doctor`;
+    /// keep serving (mildly degraded) — the agent prompts the user to
+    /// `engramdb reindex --embeddings-only`.
+    #[default]
+    Warn,
+    /// Surface, and automatically reindex at daemon startup before serving.
+    Auto,
+    /// Hard-error embedding-dependent operations until the store is
+    /// reindexed (strict; guarantees no degraded search).
+    Error,
+}
+
 /// Embeddings provider configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingsConfig {
@@ -385,6 +404,10 @@ pub struct EmbeddingsConfig {
     pub dimensions: usize,
     /// Maximum input tokens before truncation (256 for MiniLM)
     pub max_tokens: usize,
+    /// What to do when the store's embeddings were produced by a
+    /// different model than the one now in use (default: warn).
+    #[serde(default)]
+    pub reindex_on_model_change: ReindexOnModelChange,
 }
 
 impl Default for EmbeddingsConfig {
@@ -394,6 +417,7 @@ impl Default for EmbeddingsConfig {
             provider: "onnx".to_string(),
             dimensions: 384,
             max_tokens: 256,
+            reindex_on_model_change: ReindexOnModelChange::default(),
         }
     }
 }
