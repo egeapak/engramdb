@@ -127,3 +127,54 @@ pub async fn run_daemon_cmd(command: DaemonCommand, formatter: &OutputFormatter)
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::app::OutputFormat;
+    use tempfile::TempDir;
+
+    fn fmt() -> OutputFormatter {
+        OutputFormatter::new(Some(OutputFormat::Json), false, false)
+    }
+
+    #[test]
+    fn fmt_dur_uses_largest_unit() {
+        // The fmt_dur switch is one of the simpler branches inside this
+        // file, but it has 4 cases and zero direct tests today.
+        assert_eq!(fmt_dur(0), "0s");
+        assert_eq!(fmt_dur(45), "45s");
+        assert_eq!(fmt_dur(125), "2m 5s");
+        assert_eq!(fmt_dur(3725), "1h 2m 5s");
+        assert_eq!(fmt_dur(90_061), "1d 1h 1m");
+    }
+
+    /// `daemon status` against a socket no daemon owns: must print
+    /// "not running" and return Ok. This is the larger of the two
+    /// Status branches at run_daemon_cmd:51-80.
+    #[tokio::test]
+    async fn run_daemon_cmd_status_with_missing_socket_is_graceful() {
+        let tmp = TempDir::new().unwrap();
+        let socket = tmp.path().join("no-such.sock");
+
+        let cmd = DaemonCommand::Status {
+            socket: Some(socket),
+        };
+        // Result must be Ok and must not panic.
+        run_daemon_cmd(cmd, &fmt()).await.unwrap();
+    }
+
+    /// `daemon stop` against a socket no daemon owns: must print
+    /// "not running" and return Ok. Exercises the False branch of the
+    /// `request_shutdown` check at run_daemon_cmd:84.
+    #[tokio::test]
+    async fn run_daemon_cmd_stop_with_missing_socket_is_graceful() {
+        let tmp = TempDir::new().unwrap();
+        let socket = tmp.path().join("no-such-stop.sock");
+
+        let cmd = DaemonCommand::Stop {
+            socket: Some(socket),
+        };
+        run_daemon_cmd(cmd, &fmt()).await.unwrap();
+    }
+}

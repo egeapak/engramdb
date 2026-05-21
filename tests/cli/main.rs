@@ -11,6 +11,7 @@ mod gc;
 mod global_flags;
 mod init;
 mod list;
+mod output_renderers;
 mod projects;
 mod query;
 mod reindex;
