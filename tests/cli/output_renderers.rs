@@ -14,6 +14,7 @@
 
 use super::helpers;
 use predicates::prelude::*;
+use std::path::Path;
 use tempfile::TempDir;
 
 // =====================================================================
@@ -429,4 +430,213 @@ fn doctor_environment_against_uninitialized_dir_runs() {
     // The Project section's "Store initialized" check should report not-init.
     // We don't assert specific text — just that the report renders fully.
     assert!(stdout.contains("Project"), "Project section missing");
+}
+
+// =====================================================================
+// `engramdb projects link|unlink|prune` — exercises the larger uncovered
+// branches of `run_projects` (CRAP 394). Both Link and Unlink hit the
+// success path; Prune runs against an empty registry to exercise the
+// "nothing to prune" early return. Delete with cascade is already
+// covered indirectly via the existing tests/cli/projects.rs delete test.
+//
+// These tests can't use `helpers::cmd()` directly because that hands out
+// a process-wide shared registry — concurrent projects mutations cause
+// cross-test pollution and flakes (same root cause as CLAUDE.md-flagged
+// `test_doctor_many_memories_healthy`). Instead, each test gets a fresh
+// per-test registry / data dir / config dir via `isolated_cmd()`.
+// =====================================================================
+
+/// A `helpers::cmd()` analog with per-test isolated env so registry
+/// mutations don't leak between tests.
+#[allow(deprecated)]
+fn isolated_cmd(env: &IsolatedEnv) -> assert_cmd::Command {
+    let mut c = assert_cmd::Command::cargo_bin("engramdb").expect("engramdb binary missing");
+    c.env(
+        "ENGRAMDB_REGISTRY_PATH",
+        env.registry_dir.path().join("registry.json"),
+    );
+    c.env("ENGRAMDB_DATA_DIR", env.data_dir.path());
+    c.env("ENGRAMDB_CONFIG_DIR", env.config_dir.path());
+    c
+}
+
+struct IsolatedEnv {
+    registry_dir: TempDir,
+    data_dir: TempDir,
+    config_dir: TempDir,
+}
+
+impl IsolatedEnv {
+    fn new() -> Self {
+        Self {
+            registry_dir: TempDir::new().unwrap(),
+            data_dir: TempDir::new().unwrap(),
+            config_dir: TempDir::new().unwrap(),
+        }
+    }
+}
+
+fn init_isolated(env: &IsolatedEnv, dir: &Path) {
+    isolated_cmd(env)
+        .args(["--dir", dir.to_str().unwrap(), "init", "--no-embeddings"])
+        .assert()
+        .success();
+}
+
+fn project_id_of(env: &IsolatedEnv, dir: &Path) -> String {
+    let output = isolated_cmd(env)
+        .args(["--dir", dir.to_str().unwrap(), "--json", "projects", "info"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    v["project_id"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn projects_link_and_unlink_round_trip() {
+    let env = IsolatedEnv::new();
+    let parent_dir = TempDir::new().unwrap();
+    let child_dir = TempDir::new().unwrap();
+    init_isolated(&env, parent_dir.path());
+    init_isolated(&env, child_dir.path());
+
+    let parent_id = project_id_of(&env, parent_dir.path());
+    let child_id = project_id_of(&env, child_dir.path());
+    assert_ne!(parent_id, child_id);
+
+    // Link child → parent. Drives ProjectsCommand::Link branch of
+    // run_projects (src/cli/commands/projects.rs:107-113).
+    isolated_cmd(&env)
+        .args(["projects", "link", &child_id, "--parent", &parent_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Linked"));
+
+    // Verify the link via `projects list --json` (the registry, not the
+    // per-project manifest — `link_project` updates the registry only).
+    let entries = list_projects_json(&env);
+    let child_entry = entries
+        .iter()
+        .find(|e| e["project_id"].as_str() == Some(child_id.as_str()))
+        .expect("child must appear in projects list");
+    assert_eq!(
+        child_entry["parent_project_id"].as_str(),
+        Some(parent_id.as_str()),
+        "child entry must report parent after link: {child_entry}"
+    );
+
+    // Now unlink. Drives ProjectsCommand::Unlink branch (line 114-120).
+    isolated_cmd(&env)
+        .args(["projects", "unlink", &child_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Unlinked"));
+
+    let entries = list_projects_json(&env);
+    let child_entry = entries
+        .iter()
+        .find(|e| e["project_id"].as_str() == Some(child_id.as_str()))
+        .expect("child must still be registered after unlink");
+    assert!(
+        child_entry.get("parent_project_id").is_none()
+            || child_entry["parent_project_id"].is_null(),
+        "parent link must be gone after unlink: {child_entry}"
+    );
+}
+
+fn list_projects_json(env: &IsolatedEnv) -> Vec<serde_json::Value> {
+    let out = isolated_cmd(env)
+        .args(["--json", "projects", "list"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    v.as_array().cloned().unwrap_or_default()
+}
+
+#[test]
+fn projects_prune_when_nothing_stale_prints_nothing_to_prune() {
+    let env = IsolatedEnv::new();
+    let dir = TempDir::new().unwrap();
+    init_isolated(&env, dir.path());
+
+    // The project exists, registry has it, no orphan dirs → Prune's
+    // early-return branch (src/cli/commands/projects.rs:139-142).
+    isolated_cmd(&env)
+        .args(["projects", "prune", "--force"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Nothing to prune"));
+}
+
+#[test]
+fn projects_delete_with_descendants_no_cascade_warns_and_aborts() {
+    // Set up a parent + child, then attempt to delete parent without
+    // --cascade. Drives the "has sub-projects" early-return branch
+    // (src/cli/commands/projects.rs:61-69).
+    let env = IsolatedEnv::new();
+    let parent_dir = TempDir::new().unwrap();
+    let child_dir = TempDir::new().unwrap();
+    init_isolated(&env, parent_dir.path());
+    init_isolated(&env, child_dir.path());
+    let parent_id = project_id_of(&env, parent_dir.path());
+    let child_id = project_id_of(&env, child_dir.path());
+
+    isolated_cmd(&env)
+        .args(["projects", "link", &child_id, "--parent", &parent_id])
+        .assert()
+        .success();
+
+    let output = isolated_cmd(&env)
+        .args(["projects", "delete", &parent_id, "--force"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "expected graceful abort, not error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("sub-project") || combined.contains("cascade"),
+        "warning about sub-projects expected: {combined}"
+    );
+}
+
+#[test]
+fn projects_link_with_unknown_parent_fails_cleanly() {
+    let env = IsolatedEnv::new();
+    let dir = TempDir::new().unwrap();
+    init_isolated(&env, dir.path());
+    let child_id = project_id_of(&env, dir.path());
+
+    // Drives the error path of `projects::link_project` and surfaces it
+    // through run_projects without panicking.
+    let output = isolated_cmd(&env)
+        .args([
+            "projects",
+            "link",
+            &child_id,
+            "--parent",
+            "does-not-exist-1234",
+        ])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.to_lowercase().contains("not found")
+            || combined.to_lowercase().contains("unknown")
+            || combined.to_lowercase().contains("does not exist")
+            || combined.contains("Error"),
+        "expected error message for unknown parent: {combined}"
+    );
 }
