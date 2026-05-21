@@ -221,6 +221,14 @@ Run tests:
 cargo nextest run
 ```
 
+## Documentation
+
+Comprehensive docs live in [`docs/`](./docs/), organized by audience:
+
+- [`docs/users/`](./docs/users/) — install, CLI reference, configuration, Claude Code integration, projects/worktrees, embeddings, daemon, troubleshooting.
+- [`docs/agents/`](./docs/agents/) — MCP tool reference and workflows for AI agents using engramdb.
+- [`docs/contributors/`](./docs/contributors/) — architecture, code organization, testing conventions, extension recipes.
+
 ## Contributing
 
 Contributions are welcome. Please open an issue to discuss significant changes before submitting a PR.
