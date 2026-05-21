@@ -1,22 +1,10 @@
 # Projects, the Global Store, and Worktrees
 
-EngramDB is project-scoped by default — every memory belongs to a specific project, identified by a 16-character hex ID derived from the project's canonical path. This page explains how that maps to disk, how the global cross-project store works, and how engramdb handles git worktrees transparently.
+A project is any directory containing `.engramdb/`, identified by a deterministic 16-char hex ID (SHA-256 of the canonical path).
 
-## What a "project" is
+## What `engramdb init` creates
 
-A project is any directory containing `<dir>/.engramdb/`. It's created by:
-
-```bash
-engramdb init
-```
-
-This:
-- creates `.engramdb/` with `manifest.toml`, `memories/`, and an empty `config.toml`,
-- computes a deterministic project ID (SHA-256 over the canonical path, first 16 hex chars),
-- registers the project in the global registry (`<global_data_dir>/registry.toml`),
-- creates the LanceDB vector index under `<global_data_dir>/projects/<id>/lancedb/`.
-
-The on-disk layout for project `xyz` (hypothetical 16-char ID):
+For project `xyz` (a hypothetical 16-char ID):
 
 ```
 <project>/.engramdb/
@@ -28,6 +16,8 @@ The on-disk layout for project `xyz` (hypothetical 16-char ID):
   lancedb/                  # vector index (metadata + embeddings)
   personal/memories/        # personal-visibility memories (not in project tree)
 ```
+
+The registry lives at `<global_data_dir>/registry.toml`.
 
 ## Project IDs
 
@@ -90,19 +80,16 @@ engramdb projects prune [-f]                           # remove stale registry e
 - **Stale** entries: registered projects whose path no longer exists on disk.
 - **Orphan** data: data directories under `<global_data_dir>/projects/` that no registry entry points to.
 
-## Git worktrees (the magic)
+## Git worktrees
 
-Linked git worktrees (created with `git worktree add`) share a `.git` but live at separate paths. EngramDB handles this transparently: when you run a memory operation inside a non-main worktree, it **routes the operation to the main worktree's project**.
+When you run a memory operation inside a linked git worktree, EngramDB **routes the operation to the main worktree's project**:
 
-Specifically:
+1. Detects the linked worktree via the `.git` file pointing to `<main>/.git/worktrees/<name>`.
+2. Ensures the main worktree's project is registered.
+3. Registers the current worktree as a sub-project (parent = main).
+4. Consolidates any memories previously written to a stray worktree-local `.engramdb/` into the main store.
 
-1. The CLI detects you're in a linked worktree via the `.git` file pointing to `<main>/.git/worktrees/<name>`.
-2. It ensures the main worktree's project is registered (initializing it if needed).
-3. It registers the current worktree as a **sub-project** (parent = main).
-4. If you've previously written memories to the worktree's own stray `.engramdb/` (a common pre-fix mistake), it consolidates them into the main project's store.
-5. Then it runs the operation against the main project.
-
-This means `engramdb add`, `query`, `update`, etc. all "just work" — they target one consistent store no matter which worktree you're sitting in.
+`add`, `query`, `update`, etc. target one consistent store regardless of which worktree you're in.
 
 **Exceptions.** A few commands deliberately do **not** route to the main worktree:
 
@@ -114,11 +101,9 @@ This means `engramdb add`, `query`, `update`, etc. all "just work" — they targ
 | `setup` | Writes per-directory `.claude/` config; routing would silently target the wrong dir. |
 | `daemon` | Process-wide model host, ignores `--dir` entirely. |
 
-If you actually want the worktree to be a separate project, run `engramdb projects unlink <worktree_id>` after init. Then it becomes a root project on its own.
+To make a worktree a standalone project: `engramdb projects unlink <worktree_id>` after init.
 
 ## Multi-project workflows
-
-`--all-projects` / `--include-global` and the MCP `project` parameter let you operate across projects:
 
 ```bash
 # Stats across every registered project
@@ -133,9 +118,7 @@ engramdb query --dir ~/code/other-project --mode rank --path src/bar.rs
 # From an agent (MCP): pass project="<id-or-path-or-global>" on any tool call
 ```
 
-## Tips
+## Notes
 
-- **Use stable, canonical paths.** The project ID is derived from the canonical path. Symlinks resolve before hashing, but moving the project directory will produce a new ID (run `engramdb projects prune` afterwards to clean up the orphan).
-- **Worktrees should share a project.** Auto-routing makes this the default — don't fight it unless you have a specific reason.
-- **`--global` and `--include-global` are different.** `--global` operates against the global store **instead of** the current project. `--include-global` operates against the current project **plus** the global store.
-- **Personal memories don't follow the project on git push.** They live in your global data dir. Don't store team-critical info as personal — it dies with your laptop.
+- **`--global` vs `--include-global`.** `--global` operates against the global store **instead of** the current project. `--include-global` operates against the current project **plus** the global store.
+- **Project IDs are path-stable.** Moving the project directory produces a new ID — run `engramdb projects prune` after to clean up the orphan.

@@ -1,6 +1,6 @@
 # CLI Reference
 
-Every subcommand and flag exposed by the `engramdb` binary. Run `engramdb <command> --help` for the same information inline.
+`engramdb <command> --help` produces the same info inline.
 
 ## Global flags
 
@@ -16,15 +16,13 @@ These apply to every subcommand and must appear **before** the subcommand:
 | `-v, --verbose` | off | Verbose output. |
 | `--embedding-backend <auto\|onnx\|ollama>` | (from config) | Override the embedding backend for this invocation. |
 
-The `--dir` flag is important when scripting: every subsequent path resolves relative to it, and the worktree-routing logic uses it.
-
 ## `init` — initialize a store
 
 ```bash
 engramdb init [--no-embeddings] [--template <path>]
 ```
 
-Creates `<dir>/.engramdb/`, writes a manifest and an empty config, registers the project, and initializes the LanceDB vector index. The embedding model isn't downloaded until first use unless `--no-embeddings` is set.
+Creates `<dir>/.engramdb/` and registers the project. Embeddings download on first use unless `--no-embeddings`.
 
 ## `add` — create a memory
 
@@ -133,7 +131,7 @@ For type/content/summary/scope/tags, the value **replaces** existing. Use `--tag
 engramdb delete <id> [-f] [--global]
 ```
 
-`-f, --force` skips the confirmation prompt. Prefer `supersedes` over deletion when a memory becomes wrong but still has historical value.
+`-f, --force` skips the confirmation prompt.
 
 ## `challenge` — flag a memory
 
@@ -141,7 +139,7 @@ engramdb delete <id> [-f] [--global]
 engramdb challenge <id> --evidence <text> [--source-file <path>] [--global]
 ```
 
-Doesn't delete the memory — sets its status to `Challenged` and records the evidence. Surface it later with `engramdb review --challenged-only`.
+Sets the memory's status to `Challenged` and records the evidence. Surface it later with `engramdb review --challenged-only`.
 
 ## `review` — interactive review
 
@@ -162,7 +160,7 @@ engramdb stats [--all-projects] [--global] [--daemon]
 | (no flag) | Counts by type/scope/status for the current project. |
 | `--all-projects` | Cross-project runtime telemetry breakdown. |
 | `--global` | Stats for the global store. |
-| `--daemon` | Embedding-daemon request metrics (works even if no daemon is running — last persisted snapshot). |
+| `--daemon` | Embedding-daemon request metrics (see [daemon.md](./daemon.md)). |
 
 ## `doctor` — health check
 
@@ -196,8 +194,6 @@ Reports candidates only. The actual merge happens via the MCP `compress_apply` t
 engramdb reindex [--embeddings-only|--index-only] [--global]
 ```
 
-Run after changing the embedding model, after migrating files, or if you suspect index drift.
-
 | Flag | What runs |
 |------|-----------|
 | (no flag) | Re-embed everything + rebuild the LanceDB index. |
@@ -211,7 +207,7 @@ engramdb migrate [--dry-run] [--global]
 engramdb rollback --target-version <N> [--dry-run] [--global]
 ```
 
-Move memory files between format versions. Always run `--dry-run` first.
+Move memory files between format versions.
 
 ## `serve` — start the MCP server
 
@@ -223,8 +219,6 @@ engramdb serve [--transport stdio|sse] [--port <N>]
 
 ## `daemon` — shared embedding daemon
 
-Normally auto-spawned by MCP. Use these for inspection or unusual setups.
-
 ```bash
 engramdb daemon run     [--socket <path>] [--idle-timeout <secs>]
 engramdb daemon status  [--socket <path>]
@@ -232,7 +226,7 @@ engramdb daemon stop    [--socket <path>]
 engramdb daemon restart [--socket <path>] [--idle-timeout <secs>]
 ```
 
-See [daemon.md](./daemon.md) for the full picture.
+Normally auto-spawned by MCP. See [daemon.md](./daemon.md).
 
 ## `setup` — Claude Code integration
 
@@ -240,22 +234,23 @@ See [daemon.md](./daemon.md) for the full picture.
 engramdb setup [--global] [--no-plugin] [--dry-run]
 ```
 
-Writes hooks, MCP server entry, ENGRAM.md, and a `@ENGRAM.md` reference into the project's (or user's) `CLAUDE.md`. Without `--global`, writes to `<project>/.claude/`. With `--global`, writes to `~/.claude/`.
+| Flag | Effect |
+|------|--------|
+| (none) | Writes to `<project>/.claude/`. |
+| `--global` | Writes to `~/.claude/`. |
+| `--no-plugin` | Global only. Forces direct `settings.json` writes instead of using the marketplace plugin. |
+| `--dry-run` | Prints the diff without writing. |
 
-`--no-plugin` (global only) forces direct `settings.json` writes instead of relying on the marketplace plugin.
-
-`--dry-run` prints the diff without writing.
+See [claude-code.md](./claude-code.md).
 
 ## `hook` — Claude Code hook handlers
-
-Not invoked manually — Claude Code runs these in response to events.
 
 ```bash
 engramdb hook pre-tool-use                            # PreToolUse for Read/Write/Edit
 engramdb hook session-start [--min-criticality <0..1>] # SessionStart, default 0.6
 ```
 
-Both read event JSON from stdin and emit `additionalContext` JSON to stdout.
+Invoked by Claude Code, not manually.
 
 ## `projects` — registry management
 
@@ -269,7 +264,7 @@ engramdb projects unlink <project_id>
 engramdb projects prune [-f]
 ```
 
-`prune` removes registry entries whose project dir no longer exists, plus orphan data directories. `link` / `unlink` manage parent-child relationships used by worktree routing and cascade deletes.
+See [projects-and-worktrees.md](./projects-and-worktrees.md).
 
 ## `completions` — shell completions
 
@@ -277,8 +272,4 @@ engramdb projects prune [-f]
 engramdb completions <bash|zsh|fish|powershell|elvish>
 ```
 
-Emits the completion script on stdout. Pipe to the location your shell expects.
-
----
-
-For programmatic use, prefer `--format json` everywhere — it produces stable, parseable output.
+Emits the completion script on stdout.

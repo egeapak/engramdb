@@ -1,13 +1,9 @@
 # Testing
 
-EngramDB uses `cargo-nextest` for tests, not `cargo test`. There are CI-mandated reasons.
+EngramDB requires `cargo-nextest`. Two reasons:
 
-## Why nextest
-
-Two things matter:
-
-1. **Test isolation via process-per-test.** `src/lib.rs` installs a `#[ctor::ctor]` that points `ENGRAMDB_DATA_DIR` and `ENGRAMDB_CONFIG_DIR` at per-process temp dirs. This keeps tests from touching the real `~/Library/Application Support/engramdb/` (or Linux equivalent). Nextest's process-per-test model is **load-bearing** — `cargo test` runs tests in the same process and the ctor only fires once, breaking isolation.
-2. **Per-test-group thread caps.** `.config/nextest.toml` declares an `ml-models` group with `max-threads = 1`. Tests that load ONNX models are in that group. They share heavyweight model state; running them in parallel either thrashes RAM or fails outright.
+1. **Process-per-test isolation.** `src/lib.rs` installs a `#[ctor::ctor]` that points `ENGRAMDB_DATA_DIR` / `ENGRAMDB_CONFIG_DIR` at per-process temp dirs. With `cargo test`, the ctor fires once for the whole process and isolation breaks.
+2. **Per-group thread caps.** `.config/nextest.toml`'s `ml-models` group runs ONNX-model tests serially (`max-threads = 1`) so they don't thrash RAM.
 
 ## Running tests
 
@@ -28,44 +24,9 @@ cargo nextest run --all-features -E 'test(=retrieval::engine::tests::test_search
 cargo test --doc
 ```
 
-The `-E` flag is nextest's filter expression. Useful patterns:
+See nextest's docs for the full filter-expression grammar.
 
-| Filter | Meaning |
-|--------|---------|
-| `'test(=foo::bar)'` | Exact test name match. |
-| `'test(foo::bar::)'` | Tests in module `foo::bar`. |
-| `'test(/test_.*/)'` | Regex over test names. |
-| `'kind(test)'` | Only integration tests. |
-| `'kind(lib)'` | Only unit tests. |
-| `'not test(slow)'` | Negation. |
-
-Combine with `&` / `|` / `not`. Full grammar in nextest's docs.
-
-## Test isolation
-
-```rust
-// src/lib.rs
-#[cfg(test)]
-mod test_isolation {
-    static TEST_DATA_DIR: LazyLock<tempfile::TempDir> = LazyLock::new(...);
-    static TEST_CONFIG_DIR: LazyLock<tempfile::TempDir> = LazyLock::new(...);
-
-    #[ctor::ctor]
-    fn init() {
-        std::env::set_var("ENGRAMDB_DATA_DIR", TEST_DATA_DIR.path());
-        std::env::set_var("ENGRAMDB_CONFIG_DIR", TEST_CONFIG_DIR.path());
-    }
-}
-```
-
-This runs once per process, **before** main. With nextest, every test gets its own process, so every test gets its own temp dirs. The `TempDir` is held in a static so it persists for the process lifetime and is cleaned up at exit.
-
-**Don't run `cargo test --lib`** on this codebase — it shares one process across all tests and the isolation breaks. Two specific tests fail flakily under that mode:
-
-- `ops::doctor::tests::test_doctor_many_memories_healthy`
-- `ops::projects::tests::test_get_project_info_with_memories`
-
-These pass in isolation and fail identically on a clean base. They are **not** regression signals.
+**Don't run `cargo test --lib`** — isolation breaks (see above). The two flaky tests under that mode (`ops::doctor::tests::test_doctor_many_memories_healthy`, `ops::projects::tests::test_get_project_info_with_memories`) are documented in CLAUDE.md as not regression signals.
 
 ## ML-model tests
 
@@ -88,26 +49,7 @@ These tests:
 
 When adding a new test that loads a real model, **add it to the `ml-models` group** in `nextest.toml`. Otherwise it'll race with the existing model tests and explode.
 
-## Restricted-egress test environments
-
-If you're running tests in a sandbox that can't pull from `cdn.pyke.io` or `huggingface.co` (e.g. Claude Code on the web), you need the pre-staging workarounds documented in `.claude/CLAUDE.md`. The short version:
-
-```bash
-# 1. ONNX Runtime binary
-curl -sS -o /tmp/ort.tar.lzma2 "https://cdn.pyke.io/0/pyke:ort-rs/ms@1.23.2/x86_64-unknown-linux-gnu.tar.lzma2"
-python3 -c "import lzma; open('/tmp/ort.tar','wb').write(lzma.decompress(open('/tmp/ort.tar.lzma2','rb').read(), format=lzma.FORMAT_RAW, filters=[{'id':lzma.FILTER_LZMA2,'dict_size':1<<26}]))"
-mkdir -p /tmp/ort-lib && tar -xf /tmp/ort.tar -C /tmp/ort-lib
-export ORT_STRATEGY=system ORT_LIB_LOCATION=/tmp/ort-lib
-
-# 2. Embedding model into the hf-hub cache layout
-# (Qdrant/all-MiniLM-L6-v2-onnx into ~/.cache/engramdb/models/...)
-# Full layout in .claude/CLAUDE.md
-
-# 3. protoc for LanceDB
-apt-get install -y protobuf-compiler
-```
-
-After that, `cargo nextest run --all-features` should pass offline.
+For restricted-egress sandboxes (no `cdn.pyke.io` / `huggingface.co`), see the pre-staging workarounds in [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) under "Building & testing in Claude Code on the web".
 
 ## Where tests live
 
@@ -127,28 +69,7 @@ After that, `cargo nextest run --all-features` should pass offline.
 
 ### Snapshot/golden tests
 
-There are none. Output assertions are inline. If you find yourself wanting snapshots, propose it on a PR before adding the dependency.
-
-## Coverage
-
-There's no enforced coverage threshold. Aim for "every code path that can go wrong has at least one test." For shared `src/ops/` functions, test both:
-
-- the success path (a memory was created/queried/etc.), and
-- the failure path (validation rejects bad input).
-
-For storage code (`MemoryStore`, `LanceIndex`), test concurrency: spawn two tasks doing the same op against the same store and verify the flock serializes them correctly.
-
-## CI
-
-`.github/workflows/ci.yml` runs:
-
-```
-- cargo fmt --all -- --check
-- cargo clippy --all-targets --all-features -- -D warnings
-- cargo nextest run --all-features
-```
-
-All three must pass for the PR to merge. The clippy step uses `-D warnings` — every warning is an error. Run these locally before pushing.
+There are none. Output assertions are inline. Propose on a PR before adding a snapshot dependency.
 
 ## Adding tests for ML-backed code
 

@@ -1,6 +1,6 @@
 # Query Modes: `filter` vs `rank`
 
-The `query` tool has one parameter that decides almost everything else: `mode`. Get this right and the rest is detail.
+The `mode` parameter on `query` is the most important decision.
 
 ## TL;DR
 
@@ -145,21 +145,5 @@ Example: user asks "how does auth work" while pointed at `src/api/auth/oauth.rs`
 ## Common mistakes
 
 - **`mode: "filter"` with no signal.** Errors out. Switch to `rank`, or supply a signal.
-- **`mode: "rank"` with no path or query.** Technically works but returns whatever has the highest criticality × decay — usually not what you want. Add a `path` or `query` to make it useful.
-- **Treating `path` as a filter.** It's a scoring signal in both modes — memories without a matching `physical` scope still score against it (just lower). If you literally want to require a path match, you'll need to post-filter the results yourself.
-- **Asking too narrow a query.** "How do we handle JWT refresh in user_service.rs in the v2 endpoint" — too specific, will return nothing. Broaden to `"jwt refresh"`.
-- **Asking too broad a query.** `"auth"` returns 50 things. Either narrow (`"oauth pkce flow"`) or use `rank` with a path so scoring picks the relevant ones.
-
-## How the scoring decides
-
-(For background — you don't need to compute this yourself.)
-
-- The four scoring weight sets in `[retrieval.scoring]` are selected by mode and what's present:
-  - `with_query` when both query and scope present.
-  - `with_keyword` when keyword search active.
-  - `scope_only` when no query but scope is present.
-  - `degraded` when embeddings are unavailable.
-- Final: `base * scope_multiplier * trust_multiplier − challenge_penalty`, clamped to `[0, 1]`.
-- The top `[retrieval].relevance_threshold` (default 0.45) cutoff applies to filter mode; rank mode returns top `max_results` regardless of threshold.
-
-If you want to tune behavior, the user can edit those weights in `<project>/.engramdb/config.toml` — but defaults are sensible.
+- **`mode: "rank"` with no path or query.** Works, but ranks by raw criticality × decay only — usually not what you want.
+- **Treating `path` as a filter.** It's a scoring signal in both modes; memories without a matching scope still score against it, just lower.

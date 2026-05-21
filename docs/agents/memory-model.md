@@ -17,17 +17,6 @@ The `type` field is one of these eight. They differ in **default decay** and in 
 | `debug` | A debugging insight or investigation result. Expected to fade. | exponential, half-life 30 days |
 | `preference` | User or agent preference. | none |
 
-Rule of thumb:
-
-- **Use `decision`** when there was a choice made between alternatives.
-- **Use `convention`** when there's a rule being followed (not a one-time decision).
-- **Use `hazard`** when the memory is "don't do X" or "X will silently break Y".
-- **Use `context`** when the memory is general background.
-- **Use `intent`** when the memory describes work in progress.
-- **Use `relationship`** when describing how two components interact.
-- **Use `debug`** for ephemeral investigation notes.
-- **Use `preference`** for cross-cutting preferences (often in the global store).
-
 ## Fields
 
 ```toml
@@ -105,21 +94,8 @@ Set `physical` and `logical` accurately — they're how PreToolUse hooks find re
 
 ### `criticality` and `confidence`
 
-- **`criticality`** (0..1, default 0.5) — how important is this memory? High criticality:
-  - Survives GC.
-  - Appears in session-start hook (`--min-criticality 0.6` default).
-  - Boosts the relevance score.
-
-  Rough scale:
-  - `0.95` — production data loss / security risk. Read this every session.
-  - `0.8` — important architectural decision or hazard.
-  - `0.6` — convention or context worth knowing.
-  - `0.5` — default. Useful to remember.
-  - `0.3` — minor. Probably should be a doc comment instead.
-
-- **`confidence`** (0..1, default 0.8) — how sure are you that this memory is correct?
-  - Doesn't currently affect scoring directly, but informs the human reading later.
-  - Use `0.6` or below if you're recording an inference rather than a directly-observed fact.
+- **`criticality`** (0..1, default 0.5) — importance. High criticality survives GC, appears in session-start hook (default threshold 0.6), and boosts relevance score. For choosing a value, see [best-practices.md](./best-practices.md#how-to-set-criticality).
+- **`confidence`** (0..1, default 0.8) — how sure you are. Doesn't affect scoring directly; use ≤0.6 for inferences rather than directly-observed facts.
 
 ### `decay`
 
@@ -132,10 +108,7 @@ Decay reduces a memory's effective relevance over time. The `composite_score` fo
 | `exponential` | Exponential half-life decay; `decay_factor = max(floor, 0.5^(age/half_life))`. |
 | `step` | Step function; full relevance until `ttl`, then `floor`. |
 
-Defaults by type are sensible — don't override unless you have a reason. Override when:
-
-- Creating a memory you know will be wrong in N days (an upcoming migration, a temporary workaround): set `decay_strategy: "exponential"`, `decay_half_life: 1209600` (14 days).
-- Creating a memory that should hard-expire (an experiment running until a date): set `decay_strategy: "step"`, `decay_ttl: <secs>`.
+Defaults by type are sensible — don't override unless you have a reason (e.g. a temporary workaround that should fade, or an experiment with a hard expiry).
 
 ### `provenance`
 

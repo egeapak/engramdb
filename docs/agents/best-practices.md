@@ -1,6 +1,6 @@
 # Best Practices
 
-Concrete rules of thumb for using EngramDB well as an agent. These are derived from how the scoring, storage, and hooks actually behave.
+Rules of thumb for using EngramDB well.
 
 ## What to remember
 
@@ -74,52 +74,6 @@ Build a consistent vocabulary inside a project. If you've used `database.migrati
 
 Logical scoring is hierarchical: a memory tagged `database` matches a query in `database.connection` (parent bonus). A memory tagged `database.migrations` does not match `database.connection` (siblings — smaller bonus).
 
-## When to update vs create-new vs supersede
-
-**Update** when the original framing is still useful and you're refining details:
-
-```jsonc
-{ "tool": "update", "arguments": { "id": "...", "summary": "...", "content": "..." } }
-```
-
-**Create new + `supersedes`** when the decision flipped or the conclusion changed:
-
-```jsonc
-{
-  "tool": "create",
-  "arguments": {
-    "summary": "Use SQLite for persistence (reverses ADR-007 PostgreSQL choice)",
-    "supersedes": ["<old_id>"],
-    "...": "..."
-  }
-}
-```
-
-This preserves the audit trail — useful when someone (or future you) is wondering "why did we change?".
-
-**Delete** only when the memory was never valid. If it was true at one point, supersede instead.
-
-## When to challenge
-
-If you find something that disagrees with an existing memory, **always challenge — don't silently update or delete**. The challenge:
-
-- Records both the original claim and your evidence.
-- Doesn't lose the original information.
-- Surfaces the conflict for the next person to review.
-
-```jsonc
-{
-  "tool": "challenge",
-  "arguments": {
-    "id": "<id>",
-    "evidence": "src/db/connection.rs:42 now uses SQLite as of PR #432",
-    "source_file": "src/db/connection.rs"
-  }
-}
-```
-
-After challenging, either `resolve` it immediately if you're confident, or leave it for human review.
-
 ## Sizing content
 
 - **`summary`** ≤ 100 chars. Hard limit.
@@ -151,33 +105,14 @@ query "oauth authentication flow" → 10 results
 
 Semantic similarity catches the variants. Trust it.
 
-## Cross-project memories
+## What goes in the global store
 
-The global store is for things that genuinely apply across projects:
-
-- Your own workflow preferences (`type: preference`).
-- Cross-cutting hazards in tools you use everywhere (`"never run npm audit fix --force"`).
-- Reference cards (`"git rebase -i flow we use"`).
-
-Project-specific memories should stay in their project. Don't pollute the global store with stuff that only matters in one place.
+The global store (`project: "global"`) is for things that apply across projects: workflow preferences, cross-cutting hazards in tools you use everywhere, reference cards. Project-specific memories stay in the project. See [workflows.md](./workflows.md#cross-project-queries) for the mechanics.
 
 ## Hook interaction
 
-If the agent is hooked into Claude Code:
-
-- **SessionStart** auto-injects high-criticality memories. Don't re-query the same memories at the start of the session.
-- **PreToolUse** auto-runs rank mode against the file path on Read/Write/Edit. You don't need to also call `query` before the same file op — the hook already did.
-
-If you need **more** detail than the hook surfaced (longer content, more results, different scope), explicit `query` calls are fine. Just don't duplicate what the hook handed you already.
-
-## The contradiction-detection bonus
-
-If `[nli].enabled = true` is set in the project's config, `create` automatically checks the new memory against semantically-similar existing ones using an NLI model. Contradictions above the threshold (default 0.7) auto-challenge the conflicting memory.
-
-Two implications:
-
-1. You can `create` more freely — the system will catch some accidental contradictions for you.
-2. Watch for auto-challenges in the response of `create`. They contain useful information you should action.
+- **SessionStart** auto-injects high-criticality memories. Don't re-query the same memories at session start.
+- **PreToolUse** auto-runs rank mode against the file path on Read/Write/Edit. Don't redundantly call `query` for the same file op — the hook already did. Explicit calls are fine when you need more detail or a different scope.
 
 ## Anti-patterns to avoid
 

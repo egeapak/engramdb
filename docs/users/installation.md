@@ -1,7 +1,5 @@
 # Installation
 
-EngramDB is a single Rust binary. Once installed, it covers the CLI, the MCP server, the embedding daemon, and the Claude Code hook handlers.
-
 ## Prerequisites
 
 - **Rust 1.75 or later** to build from source. Get it from <https://rustup.rs>.
@@ -10,8 +8,6 @@ EngramDB is a single Rust binary. Once installed, it covers the CLI, the MCP ser
   - Debian/Ubuntu: `sudo apt-get install -y protobuf-compiler`
   - Fedora: `sudo dnf install protobuf-compiler`
 - Outbound network access on first run to download the embedding model (~90 MB). After that, engramdb is fully offline.
-
-A reasonably recent x86_64 or aarch64 Linux/macOS/Windows machine. No GPU needed — the default embedding model runs on CPU via ONNX Runtime.
 
 ## Install
 
@@ -53,11 +49,11 @@ engramdb --version
 engramdb doctor
 ```
 
-`doctor` runs an environment check: it reports which embedding backend is available, where models are cached, whether the daemon is reachable, and platform-specific paths. If you see warnings about missing models, that's normal before your first store is created — the model downloads when first used.
+`doctor` reports the embedding backend, model cache path, daemon reachability, and platform paths. Missing-model warnings before your first store are normal — models download on first use.
 
 ## What gets installed where
 
-EngramDB writes to platform-standard locations via the `dirs` crate. None of these are configurable through the CLI, but they all honor environment variables for tests / unusual setups.
+EngramDB writes to platform-standard locations via the `dirs` crate. Each respects an environment-variable override:
 
 | Purpose | macOS | Linux | Env override |
 |---------|-------|-------|--------------|
@@ -66,12 +62,7 @@ EngramDB writes to platform-standard locations via the `dirs` crate. None of the
 | Global data + project registry | `~/Library/Application Support/engramdb/` | `~/.local/share/engramdb/` | `ENGRAMDB_DATA_DIR` |
 | Daemon socket | `$XDG_RUNTIME_DIR/engramdb/daemon.sock` (Linux) or the cache dir (macOS) | same | `ENGRAMDB_DAEMON_SOCKET` |
 
-Per-project state lives in `<project>/.engramdb/`:
-- `manifest.toml` — project name, embedding fingerprint
-- `config.toml` — scoring/retrieval/daemon config (optional)
-- `memories/` — TOML-frontmatter markdown files (one per memory)
-
-Personal-visibility memories and the LanceDB vector index live under `<global_data_dir>/projects/<project_id>/{personal,lancedb}/`. The project ID is a 16-char SHA-256-derived hex string. See [projects-and-worktrees.md](./projects-and-worktrees.md).
+Per-project state lives in `<project>/.engramdb/`. The vector index and personal-visibility memories live under `<global_data_dir>/projects/<project_id>/`. See [projects-and-worktrees.md](./projects-and-worktrees.md) for the full layout.
 
 ## Uninstall
 
@@ -82,9 +73,4 @@ rm -rf ~/.local/share/engramdb ~/.config/engramdb ~/.cache/engramdb   # Linux
 rm -rf "~/Library/Application Support/engramdb" "~/Library/Caches/engramdb"   # macOS
 ```
 
-Per-project `.engramdb/` directories must be removed manually from each project.
-
-## Next steps
-
-- **[quickstart.md](./quickstart.md)** — set up your first store and add a memory.
-- **[claude-code.md](./claude-code.md)** — wire engramdb into Claude Code via the plugin or `engramdb setup`.
+Per-project `.engramdb/` directories are not touched — remove them manually.

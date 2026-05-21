@@ -1,8 +1,6 @@
 # Quickstart
 
-This walks you through creating your first EngramDB store, adding a memory, and querying it. Five minutes from a fresh install to a working store.
-
-If you haven't installed yet, see [installation.md](./installation.md).
+From install to a working store in five minutes. Prerequisites: [installation.md](./installation.md).
 
 ## 1. Initialize a store
 
@@ -12,11 +10,7 @@ From the root of any project:
 engramdb init
 ```
 
-This creates `<project>/.engramdb/` with `manifest.toml`, an empty `memories/` directory, and a `config.toml`. It also registers the project in the global registry and downloads the default embedding model the first time you actually need vectors (e.g. on the first `add` or `query`).
-
-Flags:
-- `--no-embeddings` — skip embedding initialization (storage works, semantic search is degraded).
-- `--template <path>` — start from a config template.
+Creates `<project>/.engramdb/` and registers the project. The embedding model downloads on first `add` / `query`. Flags: `--no-embeddings` (skip), `--template <path>` (start from a template).
 
 ## 2. Add a memory
 
@@ -72,11 +66,9 @@ For when to use each mode, see [agents/query-modes.md](../agents/query-modes.md)
 engramdb list                              # all memories
 engramdb list --type hazard                # hazards only
 engramdb list --sort created --reverse     # newest first
-engramdb get <id>                          # full details for one memory (prefix-match OK)
+engramdb get <id>                          # full details (ID prefix-match OK)
 engramdb get <id> --raw                    # raw markdown file
 ```
-
-ID prefix matching means you rarely need the full UUID — `engramdb get abc` works if there's no ambiguity.
 
 ## 5. Update, challenge, delete
 
@@ -86,26 +78,11 @@ engramdb challenge <id> --evidence "ADR-007 reverses this; we moved back to SQLi
 engramdb delete <id>          # asks for confirmation; use --force to skip
 ```
 
-`challenge` doesn't delete the memory; it marks it `Challenged` for `engramdb review` to surface later.
-
 ## 6. Hook it into Claude Code
 
 ```bash
-engramdb setup                  # writes hooks + MCP to <project>/.claude/
-# or
-engramdb setup --global         # writes to ~/.claude/
+engramdb setup           # project-scoped: writes to <project>/.claude/
+engramdb setup --global  # writes to ~/.claude/
 ```
 
-After that, Claude Code automatically:
-- runs `engramdb hook session-start` at the start of every session (injects high-criticality memories);
-- runs `engramdb hook pre-tool-use` when the agent reads/writes/edits a file (surfaces relevant memories);
-- starts `engramdb serve` as an MCP server so the agent can query, create, and challenge memories directly.
-
-Or use the plugin — see [claude-code.md](./claude-code.md).
-
-## What's next
-
-- **Configure**: tune scoring, GC thresholds, daemon, NLI/reranker — see [configuration.md](./configuration.md).
-- **Browse all commands**: [cli-reference.md](./cli-reference.md).
-- **Understand the daemon**: [daemon.md](./daemon.md).
-- **Worktrees and the global store**: [projects-and-worktrees.md](./projects-and-worktrees.md).
+Or install the plugin — see [claude-code.md](./claude-code.md) for the full picture.

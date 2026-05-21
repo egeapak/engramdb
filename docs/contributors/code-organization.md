@@ -1,6 +1,6 @@
 # Code Organization
 
-What lives where, and why. For the conceptual layering see [architecture.md](./architecture.md).
+For the conceptual layering see [architecture.md](./architecture.md).
 
 ## Top-level layout
 
@@ -156,22 +156,6 @@ src/
 | Add a daemon RPC | `src/daemon/protocol.rs` (wire) + `src/daemon/server.rs` (handler) + `src/daemon/remote.rs` (client) + bump `PROTOCOL_VERSION` if breaking |
 | Touch the LanceDB schema | `src/storage/lance_index.rs` (Arrow schema) + a migration in `src/cli/commands/migrate.rs` |
 
-## File-size heuristics
+## Intentionally big files
 
-A few files are big on purpose:
-
-- `src/mcp/server.rs` (~225 KB) — all MCP tool surface code lives here, derived from one large `#[tool_router]` macro. Splitting would fight the macro.
-- `src/cli/app.rs` (~58 KB) — every Clap struct. Splitting hurts auto-generated `--help` cohesion.
-- `src/retrieval/engine.rs` (~88 KB) — the retrieval pipeline is one connected algorithm; the seams are between stages, not across files.
-- `src/ops/doctor.rs` (~98 KB) — environment diagnostics are inherently many small checks. Each check is small; the file is the union.
-- `src/types/config.rs` (~48 KB) — config schema with `default_*` functions, validation, and inline docs.
-
-Resist the urge to split these prophylactically. If a file truly needs splitting, split along **invariants** (e.g. by config section), not arbitrary line counts.
-
-## What's intentionally not here
-
-- **No separate metadata DB.** Filtering and vector search share one LanceDB table.
-- **No web/UI code.** EngramDB is a daemon and a CLI — agents are the UI.
-- **No telemetry transmission.** The `telemetry/` module is local-only — it persists stats to your own LanceDB store, never phones home.
-- **No async runtime abstraction.** Tokio is hard-wired. The async surface is consistent everywhere.
-- **No multi-tenancy in the daemon.** The socket is per-user (`runtime_base()` resolves to `$XDG_RUNTIME_DIR` or per-user cache dir), so a daemon serves exactly one user's MCP processes.
+`src/mcp/server.rs`, `src/cli/app.rs`, `src/retrieval/engine.rs`, `src/ops/doctor.rs`, `src/types/config.rs` are large by design — macros, connected algorithms, or `default_*` schemas that lose cohesion when split. If a split is unavoidable, split along invariants (e.g. config section), not line count.

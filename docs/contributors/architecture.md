@@ -1,7 +1,5 @@
 # Architecture
 
-The big picture: how EngramDB's pieces fit together and the invariants that hold across them.
-
 ## The layered design
 
 ```
@@ -118,36 +116,15 @@ Five commands are exempt: `init`, `serve`, `completions`, `setup`, `daemon`. The
 
 ## The model-fingerprint invariant
 
-Every store records a fingerprint of the embedding model it was built with: `model_id()` + `dimensions`, stored in `.engramdb/manifest.toml`. This is checked against the live provider on every store open.
-
-The fingerprint table (`expected_embedding_fingerprint(config)`) and the provider resolver (`resolve_provider(config, backend)`) **both derive from one map**: `provider_specs(provider_str) -> Option<ProviderSpecs>` in `src/ops/mod.rs`. This unification is mandatory.
-
-A "two-map" design — one for fingerprint-to-record, another for what-actually-loads — is a footgun: if they diverge, you can store vectors under one model identity while a different model serves queries. Vectors silently mismatch; search quality degrades; nothing visibly breaks. This was flagged by branch reviewers and fixed by collapsing to one table. Adding a new provider requires updating exactly one place.
-
-## The shared embedding daemon
-
-`engramdb serve` (the MCP server) is one process per agent session. Without coordination, every concurrent session would load its own copy of the embedding (and optional NLI / reranker) models — hundreds of MB each, ~240 ms ONNX init each.
-
-`src/daemon/` solves this:
-
-- **`server.rs`** runs a Unix-domain-socket server that loads each model once and serves inference requests.
-- **`remote.rs`** provides `EmbeddingProvider` / `NliProvider` / `Reranker` trait impls that call the daemon over the socket — so the MCP server uses identical seams whether models are local or remote.
-- **Auto-spawn.** When MCP needs the daemon and none is reachable, it spawns one (`engramdb daemon run`) detached. Concurrent spawns are race-coordinated by an advisory file lock — only one binds the socket; the others retry.
-- **Idle exit.** The daemon exits after `idle_timeout_secs` (default 15 min) with no active connections. The next MCP run spawns a fresh one. **Users never start it manually.**
-- **Graceful fallback.** If the daemon is disabled (`enabled = false`) or unreachable for any reason, the MCP server loads models in-process. Daemon failures must never break operations. This is a contract — make sure your daemon changes preserve it.
-- **Metrics persistence.** Request counts and latencies are persisted to the global LanceDB store (`src/daemon/metrics.rs`) so `engramdb stats --daemon` reports figures even when no daemon is running and counts stay cumulative across restarts.
-
-Socket resolution (`daemon::resolve_socket`) has fixed precedence: `--socket` flag > `ENGRAMDB_DAEMON_SOCKET` env > `[daemon].socket_path` config > default per-user path. **Every** client/server site must use this helper so they agree on the socket.
+Every store records a fingerprint of the embedding model it was built with: `model_id()` + `dimensions`, stored in `.engramdb/manifest.toml`. The fingerprint table and the provider resolver **both derive from one map**, `provider_specs(provider_str)` in `src/ops/mod.rs`. Adding a new provider requires updating exactly one place — see [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) for the silent-vector-corruption footgun this prevents.
 
 ## Provider caching
 
-`ProviderCache` (in `src/ops/mod.rs`) caches the loaded model bundles for the life of a process. The cache key is computed by `provider_cache_key`:
+`ProviderCache` in `src/ops/mod.rs` keys loaded model bundles by `provider_cache_key = backend|provider|dimensions|nli.enabled|nli.model|rerank.enabled|rerank.model`. Daemon-only fields (`idle_timeout_secs`, `socket_path`) deliberately don't affect the key. **If you add a model-affecting config field, extend this key** — the `cache_key_is_deterministic_and_signature_sensitive` test will fail if you forget.
 
-```
-backend|provider|dimensions|nli.enabled|nli.model|rerank.enabled|rerank.model
-```
+## Shared embedding daemon
 
-Daemon-only config fields (`idle_timeout_secs`, `socket_path`) deliberately do **not** affect the key — they don't change the loaded models. If you add a new model-affecting config field, you must extend this key, or the cache will serve stale bundles after a config change. There's a test for this in `provider_cache_tests`.
+See [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) ("Shared embedding daemon" section) for the full design. The contract you must not break: **daemon failures never break operations** — when disabled or unreachable, the MCP process loads models in-process. Every client/server site uses `daemon::resolve_socket` so they agree on the socket path.
 
 ## Retrieval pipeline
 
@@ -160,19 +137,7 @@ Daemon-only config fields (`idle_timeout_secs`, `socket_path`) deliberately do *
 5. **Rerank (optional)** — if `[rerank].enabled`, the top-`top_n` results are re-scored by a cross-encoder model and blended with the original score.
 6. **Threshold + truncate** — apply `relevance_threshold` (filter mode only) and `max_results`.
 
-Two modes, `Filter` and `Rank`, gate stage 1's signal requirement: `Filter` requires at least one of `query`/`path`/`logical`/`tags`; `Rank` does not. The downstream stages are identical.
-
-## Hook handlers
-
-`src/cli/commands/hook.rs` implements `engramdb hook pre-tool-use` and `engramdb hook session-start`. Each reads event JSON from stdin and emits `additionalContext` JSON to stdout. The `SESSION_CONTEXT_BUDGET` constant (2000 chars) caps the SessionStart injection so the prompt doesn't explode.
-
-The hooks are deliberately thin — they're just CLI commands that call into `src/ops/` like everything else. The "magic" is in the plugin (`.claude-plugin/`) and `engramdb setup`, which wire Claude Code's hook system to invoke them.
-
-## Configuration loading
-
-`src/storage/config.rs::load_config` reads `<project>/.engramdb/config.toml` and merges it with the hard-coded defaults from `src/types/config.rs`. Every section uses `#[serde(default)]` so omitting any field falls back to the default. Validation happens during deserialization — invalid values are rejected at load time, not at use time, so a malformed config fails fast.
-
-Env-var overrides (`ENGRAMDB_*`) are read at the call site, not in `load_config`. CLI flag overrides are passed through explicit parameters (`backend_override: Option<EmbeddingBackend>`).
+Two modes, `Filter` and `Rank`, gate stage 1's signal requirement: `Filter` requires at least one of `query`/`path`/`logical`/`tags`; `Rank` does not. Downstream stages are identical.
 
 ## Open invariants worth knowing
 
@@ -184,5 +149,3 @@ Env-var overrides (`ENGRAMDB_*`) are read at the call site, not in `load_config`
 | All model downloads cache to `dirs::cache_dir() / "engramdb" / "models"` | `src/storage/paths.rs::model_cache_dir` | Restricted-egress environments pre-stage models into one known location. |
 | `provider_specs` keys are stable on disk via `model_id()` | `EmbeddingProvider::model_id` | Manifests written today must keep meaning the same model tomorrow. |
 | Mutating ops take `flock`, reads are lock-free | `src/storage/write_lock.rs`, `MemoryStore` impls | Cross-process write safety without read penalty. |
-
-If you find yourself wanting to violate one of these, that's the moment to escalate or re-think.

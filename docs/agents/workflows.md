@@ -1,24 +1,6 @@
 # Workflows
 
-When and how to use EngramDB's tools as an AI coding agent. If you only read one page in this folder, read this one.
-
-## The core loop
-
-EngramDB has one loop, repeated whenever you do work:
-
-```
-              ┌───────────────────────────────────┐
-              │                                   │
-   ┌──────────▼───────────┐         ┌─────────────┴────────────┐
-   │  query  before doing │         │  create  after learning  │
-   │  anything project-   │         │  something durable about │
-   │  specific            │         │  the project             │
-   └──────────┬───────────┘         └─────────────▲────────────┘
-              │                                   │
-              └────► do the work, learn ──────────┘
-```
-
-The two halves are independent — each one stands on its own. Get the query side right first; the create side is the easier half.
+When and how to use EngramDB's tools as an AI coding agent. The core loop: **query before doing project-specific work, create after learning something durable.** Both halves are independent.
 
 ## Before answering a project question — `query` with mode `filter`
 
@@ -87,21 +69,9 @@ Why use rank here:
 
 ## After learning something — `create`
 
-Triggers:
+Create when you discover a non-obvious convention, hazard, decision, or piece of context that'll help next time. For what counts as worth storing vs noise, see [best-practices.md](./best-practices.md).
 
-- You discovered a non-obvious convention (`"this codebase always uses ?Sized in generic bounds"`).
-- You hit a hazard (`"upserting via the LanceDB connector with a conflicting schema corrupts the table"`).
-- A decision was made (`"we chose PostgreSQL over SQLite for concurrent writes"`).
-- A piece of context you'll want to remember next session (`"the e2e tests require Docker Desktop running"`).
-
-Don't create memories for:
-
-- One-off facts that won't help next time.
-- Information already in code comments or docstrings — those are version-controlled and won't drift from the code.
-- Speculation or "we should probably …" — wait until the decision is real.
-- Your own thought process. Memories are for **discoveries**, not narration.
-
-A good `create`:
+Example:
 
 ```jsonc
 {
@@ -118,14 +88,7 @@ A good `create`:
 }
 ```
 
-Notes on the parameters:
-
-- **`summary`** is the most-searched field. Make it read like a search query: subject + verb + object.
-- **`content`** is what you'd say to a teammate in one paragraph. Be specific about the trigger and the fix.
-- **`physical`** lists file paths or globs the memory is about. The PreToolUse hook uses this to find relevant memories when a file is touched. Default `"/"` means "anywhere in the project".
-- **`logical`** is dot-notation domain (`storage.lancedb`, `auth.oauth.refresh`). Logical proximity gives a scoring bonus to memories in nearby domains.
-- **`criticality`** — see [memory-model.md](./memory-model.md). Use 0.9 for "do not violate", 0.7 for "important to know", 0.5 default, lower for hints.
-- **`tags`** — freeform; useful for filter mode later.
+Field semantics are in [memory-model.md](./memory-model.md); judgment on what makes a memory useful is in [best-practices.md](./best-practices.md).
 
 ## Before/after editing — `update` and `supersedes`
 
@@ -191,18 +154,6 @@ Use the global store for cross-cutting preferences and workflows that aren't tie
 
 ## Lifecycle: `gc`, `compress_candidates`, `compress_apply`, `review`
 
-Periodically — once per session is plenty, only when relevant — clean up:
+Don't run these unprompted. They're maintenance — driven by the user or the system, not your default behavior. See [mcp-tools.md](./mcp-tools.md) for the parameters.
 
-- **`review`** with `challenged_only: true` or `stale_only: true` to find memories needing attention.
-- **`compress_candidates`** to find low-criticality memories that could be merged. Then **`compress_apply`** to merge them by summarizing.
-- **`gc`** with `dry_run: true` to see what would be GC'd. Then run with `dry_run: false` if it's sensible.
-
-Don't do these unprompted. They're maintenance — the user or the system should drive them, not your default behavior.
-
-## Things to avoid
-
-- **Don't query in rank mode without a path or query.** It returns everything scored against nothing, sorted only by relevance (= criticality × decay). It's noise.
-- **Don't store the user's question as a memory.** Memories are durable knowledge about the project, not session ephemera.
-- **Don't store the same fact in five forms.** Search before creating — if there's already a memory, `update` it.
-- **Don't `delete` to fix a mistake.** Use `update` or `supersedes`. Deletion is for memories that were never valid in the first place.
-- **Don't pass huge `content` strings.** Soft limit ~500 tokens. If it's longer, split it: high-level fact in `content`, detail in `details` (which is lazy-loaded).
+For things to avoid (rank-mode-with-no-context, storing ephemera, delete-vs-supersede), see [best-practices.md](./best-practices.md#anti-patterns-to-avoid).

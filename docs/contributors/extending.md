@@ -1,98 +1,26 @@
 # Extending EngramDB
 
-Recipes for common extensions: adding embedding providers, MCP tools, CLI commands, memory types, and scoring tweaks. Each recipe lists every file you need to touch.
+Each recipe lists which files to touch. Use an existing implementation as the template.
+
+> When you change anything user-facing, also update the relevant pages in `docs/users/`, `docs/agents/`, or `docs/contributors/`.
 
 ## Add a new embedding provider
 
-**Critical invariant.** The fingerprint table and the provider resolver derive from **one map**: `provider_specs` in `src/ops/mod.rs`. Adding a provider in one place but not the other is the silent-vector-corruption footgun that the unification fixed. Always update `provider_specs` — don't shortcut.
+`OnnxProvider` (`src/embeddings/onnx.rs`) is the template.
 
-Steps:
-
-1. **Implement the `EmbeddingProvider` trait.** Add `src/embeddings/<name>.rs`:
-   ```rust
-   pub struct MyProvider { /* ... */ }
-
-   #[async_trait::async_trait]
-   impl EmbeddingProvider for MyProvider {
-       async fn embed(&self, text: &str) -> Result<Vec<f32>> { ... }
-       async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> { ... }
-       fn dimensions(&self) -> usize { ... }
-       fn max_tokens(&self) -> usize { ... }
-       fn model_id(&self) -> String { /* e.g. "myprovider/some-model" */ ... }
-   }
-   ```
-   Pay attention to `model_id()` — it's what gets persisted to the manifest. Distinct quantization (fp32 vs int8) **must** produce distinct ids so swaps are detected.
-
-2. **Add a `ModelSpec` constant.** In the same file:
-   ```rust
-   pub const MY_MODEL: MyModelSpec = MyModelSpec {
-       name: "my-model",
-       dimensions: 768,
-       /* ... */
-   };
-   ```
-
-3. **Export it.** In `src/embeddings/mod.rs`:
-   ```rust
-   mod my_provider;
-   pub use my_provider::{MyProvider, MY_MODEL};
-   ```
-
-4. **Wire it into `provider_specs`** (`src/ops/mod.rs`). Add a match arm for the config provider string:
-   ```rust
-   fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
-       Some(match provider {
-           ...,
-           "my-model" => ProviderSpecs {
-               onnx: MY_ONNX_SPEC,        // ALSO add an ONNX variant if you want ONNX backend
-               #[cfg(feature = "ollama")]
-               ollama: MY_OLLAMA_SPEC,    // if Ollama supports it
-           },
-           _ => return None,
-       })
-   }
-   ```
-
-5. **Add to `try_onnx_then_ollama`** if backend selection needs anything custom (usually not).
-
-6. **Update config validation** in `src/types/config.rs` if you want the new provider name to validate against an enum (currently the provider string is freeform; unknown strings disable embeddings).
-
-7. **Test.** Add a unit test in `src/embeddings/<name>.rs::tests`. Add it to the `ml-models` nextest group (`.config/nextest.toml`) so it doesn't race with other model tests.
-
-8. **Document.** Mention the new provider in `docs/users/embeddings.md` and the provider table in `docs/users/configuration.md`.
+1. Implement `EmbeddingProvider` in `src/embeddings/<name>.rs`. **`model_id()` is persisted to the manifest** — distinct quantization (fp32 vs int8) MUST produce distinct IDs.
+2. Add a `ModelSpec` constant and export it from `src/embeddings/mod.rs`.
+3. Wire the provider string into `provider_specs` in `src/ops/mod.rs`. This is the **single source of truth** the fingerprint check and the resolver both use — don't shortcut it.
+4. Add a test in `src/embeddings/<name>.rs::tests` and add it to the `ml-models` nextest group.
 
 ## Add a new MCP tool (or CLI subcommand)
 
-The ops layer is shared — implement once, expose twice.
+Existing tools (`create_memory`, `query`) are the template — implement once in `src/ops/`, expose twice.
 
-1. **Implement the operation in `src/ops/<name>.rs`.** Typed `Params` struct in, typed `Result` struct out. No formatting, no MCP serialization.
-   ```rust
-   pub struct MyOpParams { /* ... */ }
-   pub struct MyOpResult { /* ... */ }
-
-   pub async fn my_op(store: &MemoryStore, params: MyOpParams) -> Result<MyOpResult> { ... }
-   ```
-
-2. **Re-export from `src/ops/mod.rs`.**
-
-3. **Add the CLI subcommand:**
-   - `src/cli/app.rs` — add a `Command::MyOp { ... }` variant with Clap derive.
-   - `src/cli/commands/<name>.rs` — `pub async fn run_my_op(dir, params, formatter) -> Result<()>` that parses CLI args into `MyOpParams`, calls `ops::my_op`, and formats via `OutputFormatter`.
-   - `src/cli/commands/mod.rs` — re-export `run_my_op`.
-   - `src/cli/mod.rs` — add a match arm in the dispatch.
-
-4. **Add the MCP tool:**
-   - In `src/mcp/server.rs`, add a `#[tool(name = "...", description = "...")]` method on `EngramDbServer`.
-   - Define a `MyOpRequest` struct with `#[derive(Deserialize, JsonSchema)]` for the MCP input parameters.
-   - Inside the tool method: resolve the target store (handle the `project` parameter), build `MyOpParams`, call `ops::my_op`, serialize the result to `CallToolResult`.
-   - The existing tools (`create_memory`, `query`, etc.) are the template — copy structure from one of them.
-
-5. **If the tool mutates state**, document that in its description so agents know.
-
-6. **Test it.**
-   - Unit test the op in `src/ops/<name>.rs::tests`.
-   - Integration test the CLI in `tests/cli/<name>.rs`.
-   - Document in `docs/agents/mcp-tools.md` (parameter table) and `docs/users/cli-reference.md`.
+1. Implement `MyOpParams` / `MyOpResult` and the async function in `src/ops/<name>.rs`. Re-export from `src/ops/mod.rs`.
+2. CLI surface: add a `Command::MyOp` variant in `src/cli/app.rs`, a `run_my_op` handler in `src/cli/commands/<name>.rs`, re-export from `commands/mod.rs`, dispatch in `cli/mod.rs`.
+3. MCP surface: add a `#[tool(...)]` method on `EngramDbServer` in `src/mcp/server.rs` with a `MyOpRequest` input struct. Resolve the target store (handle the `project` parameter), call `ops::my_op`, serialize the result.
+4. Test the op in `src/ops/<name>.rs::tests` and the CLI in `tests/cli/<name>.rs`.
 
 ## Add a new memory type variant
 
@@ -171,8 +99,3 @@ The ops layer is shared — implement once, expose twice.
 
 5. **Test.** Pipe a fixture event JSON into the new subcommand and assert the output.
 
-## When the answer doesn't fit a recipe
-
-If your change spans many files (e.g. "rework the scoring pipeline", "switch storage backend"), open a design doc on the PR before writing code. The architecture invariants (one-binary, ops-layer, provider_specs, model fingerprint, daemon-as-optimization-not-dependency) are the constraints — work with them, not against them.
-
-When in doubt, search `CLAUDE.md` and `docs/contributors/architecture.md` for the invariant; the code comment near the affected place usually explains why it is the way it is.

@@ -1,27 +1,12 @@
 # The Shared Embedding Daemon
 
-EngramDB's MCP server is launched once per Claude Code session — stdio MCP is fundamentally one-process-per-agent. Without coordination, every concurrent session would load its own copy of the embedding model (and optional NLI / reranker models). That's hundreds of MB of RAM and a ~240 ms ONNX initialization **per session**.
+stdio MCP runs one process per agent session. Without coordination, every concurrent session loads its own copy of the embedding (and optional NLI / reranker) models — hundreds of MB and a ~240 ms ONNX init each. The daemon loads each model **once** machine-wide and serves inference to every MCP process over a per-user Unix socket. Storage stays in the MCP process; only inference is delegated.
 
-The daemon solves this by being a single long-lived process that loads each model **once** and serves inference to every MCP process over a per-user Unix domain socket. The MCP processes still own storage (LanceDB is already cross-process safe via advisory locks) — only inference is delegated.
+## Lifecycle
 
-You almost never interact with the daemon directly. This page is for when you want to.
+MCP auto-spawns the daemon when needed (race-coordinated by an advisory file lock; concurrent spawns are safe). It exits after `idle_timeout_secs` (default 15 minutes) of inactivity; the next MCP run spawns a fresh one. **You never start it manually.**
 
-## Lifecycle (the short version)
-
-1. The MCP server starts and reads `[daemon]` from `config.toml`.
-2. If `enabled = true` (default), it tries to connect to the daemon socket.
-3. If no daemon is reachable, the MCP server spawns one (`engramdb daemon run`) detached, waits briefly, and connects. Concurrent spawns are race-safe — only one process binds the socket; others retry the connection.
-4. The daemon serves inference until `idle_timeout_secs` (default 15 minutes) elapses with no active connections. Then it exits.
-5. The next MCP run spawns a fresh daemon. There is **no daemon to keep running manually.**
-
-If the daemon is disabled (`enabled = false`) or unreachable for any reason, the MCP server loads models in-process and continues — operations never fail because of the daemon. This graceful fallback is part of the contract.
-
-## When you'd want to touch it
-
-- **Inspecting it.** Check whether it's running, what it's been doing, who's connected.
-- **Forcing a reload.** You changed `[embeddings].provider`; you want the next MCP call to use the new model immediately.
-- **Disabling it.** You want every MCP process self-contained — useful for debugging or for hermetic test environments.
-- **Relocating the socket.** The default `sun_path` (~104 bytes) is too long for your home directory layout, or you want to isolate two daemons for testing.
+If the daemon is disabled (`enabled = false`) or unreachable for any reason, the MCP server loads models in-process. **Operations never fail because of the daemon** — that's the contract.
 
 ## Commands
 
@@ -53,8 +38,6 @@ Highest priority wins:
 3. `[daemon].socket_path` in `config.toml`
 4. The default per-user path: `$XDG_RUNTIME_DIR/engramdb/daemon.sock` (Linux) or under the per-user cache dir (macOS)
 
-Every component — clients, the server itself, `doctor`, `stats` — uses the same resolution helper, so they always agree on which socket the daemon lives at.
-
 ## Disabling
 
 In `<project>/.engramdb/config.toml`:
@@ -64,29 +47,12 @@ In `<project>/.engramdb/config.toml`:
 enabled = false
 ```
 
-The MCP server will load models in-process and never attempt to spawn or contact a daemon. Existing daemons keep running for other projects.
+The MCP server will load models in-process and never contact a daemon.
 
 ## Metrics
 
-`engramdb stats --daemon` reports:
-- whether a daemon is currently running, with PID and uptime,
-- cumulative request counts per operation (embed / nli / rerank),
-- p50/p95/p99 latencies per operation,
-- bytes transferred,
-- model load counts.
-
-Metrics are persisted to the global LanceDB store on every flush (`[stats].flush_interval_secs`), so figures stay accurate **across daemon restarts** and the command shows the last persisted snapshot even when no daemon is currently running.
-
-`engramdb doctor` includes a "Daemon" section that reports whether it's enabled, whether it's running, and how long it's been up.
+`engramdb stats --daemon` reports request counts and p50/p95/p99 latencies per operation (embed / nli / rerank), plus uptime and model-load counts. Metrics are persisted to the global LanceDB store, so figures stay accurate **across daemon restarts** and the command shows the last persisted snapshot even when no daemon is running.
 
 ## Troubleshooting
 
-**`status` reports "not running" but `ps` shows a daemon process.** The daemon you see is probably bound to a different socket. Use `--socket` or check `ENGRAMDB_DAEMON_SOCKET`.
-
-**Daemon fails to start on macOS.** Default socket paths can exceed the 104-byte `sun_path` limit if your home directory is deeply nested or contains spaces. Move the socket: `export ENGRAMDB_DAEMON_SOCKET=/tmp/engramdb-$USER.sock`.
-
-**Daemon won't pick up new model config.** A long-running daemon caches loaded models forever. After changing `[embeddings].provider`, `[nli].model`, or `[rerank].model`, run `engramdb daemon restart`. The next request will load the new model.
-
-**Inference seems slow.** Check `engramdb stats --daemon` for the latency histograms. If they look normal but startup is slow, you're likely paying the cold-start cost on every MCP call — confirm the daemon is staying up (`engramdb daemon status` between calls) and not being killed.
-
-**Want to see what the daemon is doing in real time.** Stop the auto-spawned one (`engramdb daemon stop`) and run `engramdb daemon run` in a terminal — you'll see request logs on stderr. Configure log verbosity with `RUST_LOG=engramdb=debug`.
+See [troubleshooting.md](./troubleshooting.md#daemon).

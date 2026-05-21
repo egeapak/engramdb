@@ -1,28 +1,22 @@
 # User Documentation
 
-For humans operating EngramDB: install it, configure it, run it, hook it into Claude Code, manage projects, swap embedding models, troubleshoot.
-
 ## Start here
 
-1. **[installation.md](./installation.md)** — install the binary, verify, understand where files live.
-2. **[quickstart.md](./quickstart.md)** — initialize a store, add a memory, query it. Five minutes end-to-end.
-3. **[claude-code.md](./claude-code.md)** — wire EngramDB into Claude Code so it activates automatically.
+1. [installation.md](./installation.md) — install and verify.
+2. [quickstart.md](./quickstart.md) — first store in five minutes.
+3. [claude-code.md](./claude-code.md) — plugin and hooks.
 
 ## Reference
 
-- **[cli-reference.md](./cli-reference.md)** — every subcommand and flag of the `engramdb` binary.
-- **[configuration.md](./configuration.md)** — the full `config.toml` schema with defaults.
+- [cli-reference.md](./cli-reference.md) — every subcommand and flag.
+- [configuration.md](./configuration.md) — `config.toml` schema.
 
 ## Concepts
 
-- **[projects-and-worktrees.md](./projects-and-worktrees.md)** — what a project is, the global store, how git worktrees route transparently to the main project.
-- **[embeddings.md](./embeddings.md)** — available models, backends, the model-fingerprint guard, how to reindex.
-- **[daemon.md](./daemon.md)** — the shared embedding daemon: when it runs, when you'd interact with it, how to disable it.
+- [projects-and-worktrees.md](./projects-and-worktrees.md) — project IDs, global store, worktree routing.
+- [embeddings.md](./embeddings.md) — models, backends, fingerprinting, reindex.
+- [daemon.md](./daemon.md) — shared embedding daemon.
 
-## When something's wrong
+## [troubleshooting.md](./troubleshooting.md)
 
-- **[troubleshooting.md](./troubleshooting.md)** — symptom-to-fix index. `engramdb doctor` covers most of it automatically.
-
----
-
-If you're an AI agent using the MCP tools rather than the CLI, go to [../agents/](../agents/). If you're hacking on EngramDB itself, see [../contributors/](../contributors/).
+Symptom → fix.

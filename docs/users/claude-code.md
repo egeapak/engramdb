@@ -1,12 +1,11 @@
 # Claude Code Integration
 
-EngramDB plugs into Claude Code in three ways, all of which run automatically once installed:
+Once wired up, EngramDB exposes its MCP tool surface and runs two hooks automatically:
 
-1. **MCP server** — Claude Code talks to `engramdb serve` and gets a suite of memory tools.
-2. **SessionStart hook** — at the start of every session, high-criticality memories are injected as `additionalContext`.
-3. **PreToolUse hook** — when Claude reads, writes, or edits a file, relevant memories are surfaced as `additionalContext`.
+- **SessionStart** injects high-criticality memories as `additionalContext`.
+- **PreToolUse (Read|Write|Edit)** surfaces memories relevant to the file being touched.
 
-There are two ways to wire this up: the plugin (recommended) or `engramdb setup`.
+Two ways to wire this up: the plugin (recommended) or `engramdb setup`.
 
 ## Option A: the plugin (recommended)
 
@@ -32,13 +31,7 @@ engramdb setup --global
 
 When the plugin is detected, `setup --global` writes the correct `mcp__plugin_engram_memory__*` permission entries instead of duplicating hooks.
 
-### What the plugin includes
-
-- `mcpServers.memory` — runs `engramdb serve --dir .`.
-- `hooks.PreToolUse` — matcher `Read|Write|Edit`, runs `engramdb hook pre-tool-use --dir .`.
-- `hooks.SessionStart` — runs `engramdb hook session-start --dir .`.
-
-The plugin manifest is at `.claude-plugin/plugin.json` if you want to inspect it.
+The plugin manifest is at `.claude-plugin/plugin.json` — inspect it to see exactly what gets wired.
 
 ## Option B: `engramdb setup` (no plugin)
 
@@ -116,17 +109,7 @@ If the file path can't be relativized to the project root, the absolute path is 
 
 ## Troubleshooting
 
-**Plugin not loading.** Make sure `engramdb` is on Claude Code's `PATH`. Run `engramdb doctor` — if it doesn't run, fix that first.
-
-**"Tool requires approval" prompts every time.** Permissions aren't set. Run `engramdb setup --global` once to register the `mcp__*` permission entries in `~/.claude/settings.json`.
-
-**Duplicate hook output.** You installed the plugin **and** ran `engramdb setup` (which wrote hooks to `settings.json`). Remove the `engramdb` entries under `hooks` and `mcpServers` in `~/.claude/settings.json` — the plugin manages them now.
-
-**No memories surfaced even though the store has data.** The hook needs the working directory passed via `--dir`. The plugin uses `--dir .` so Claude Code's CWD matters. If you've changed working directory mid-session, the hook may be querying a different project. Run `engramdb projects info` in the session to confirm which project is being targeted.
-
-**Stale permissions after update.** Run `engramdb setup --global` again — it refreshes the entries.
-
-**MCP server fails to start.** Run `engramdb serve --dir <project>` manually to see the error. The most common cause is a missing protoc or a corrupted model cache. `engramdb doctor` will pinpoint it.
+See [troubleshooting.md](./troubleshooting.md#claude-code).
 
 ## Disabling
 

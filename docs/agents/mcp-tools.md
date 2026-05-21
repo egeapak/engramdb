@@ -1,8 +1,6 @@
 # MCP Tool Reference
 
-Every tool exposed by `engramdb serve`. This is the canonical parameter reference.
-
-For when to use which tool, see [workflows.md](./workflows.md) and [query-modes.md](./query-modes.md). For what the fields mean, see [memory-model.md](./memory-model.md).
+Every tool exposed by `engramdb serve`. For when to use which tool, see [workflows.md](./workflows.md) and [query-modes.md](./query-modes.md); for field semantics, see [memory-model.md](./memory-model.md).
 
 ## Conventions used here
 
@@ -121,7 +119,7 @@ If NLI contradiction detection is enabled, the response may include auto-challen
 
 ### `delete` (mutates)
 
-**Permanently delete a memory.** Prefer `supersedes` for corrections.
+**Permanently delete a memory.**
 
 | Param | Type | Description |
 |-------|------|-------------|
@@ -134,7 +132,7 @@ If NLI contradiction detection is enabled, the response may include auto-challen
 
 ### `challenge` (mutates)
 
-**Flag a memory as potentially incorrect.** Records evidence; does not delete. The memory's status becomes `challenged`.
+**Flag a memory as potentially incorrect.** Status becomes `challenged`.
 
 | Param | Type | Description |
 |-------|------|-------------|
@@ -168,8 +166,6 @@ If NLI contradiction detection is enabled, the response may include auto-challen
 | `updated_summary?` | `string` | Optional with `action: "update"`. |
 | `project?` | `string` | See conventions. |
 
-`keep` re-affirms (status → `active`, `verified_at` bumped). `update` rewrites. `delete` removes.
-
 ---
 
 ## Lifecycle tools
@@ -186,7 +182,7 @@ If NLI contradiction detection is enabled, the response may include auto-challen
 
 ### `compress_apply` (mutates)
 
-**Merge multiple memories into one summary.** Call `compress_candidates` first.
+**Merge multiple memories into one summary.** Source memories are deleted; the new compressed memory `supersedes` them.
 
 | Param | Type | Description |
 |-------|------|-------------|
@@ -197,11 +193,9 @@ If NLI contradiction detection is enabled, the response may include auto-challen
 | `tags?` | `array[string]` | Tags for the new memory. |
 | `project?` | `string` | See conventions. |
 
-Source memories are deleted; the new compressed memory `supersedes` them.
-
 ### `gc` (mutates)
 
-**Garbage-collect decayed memories.** Always run with `dry_run: true` first.
+**Garbage-collect decayed memories.**
 
 | Param | Type | Description |
 |-------|------|-------------|
@@ -211,7 +205,7 @@ Source memories are deleted; the new compressed memory `supersedes` them.
 
 ### `reindex` (mutates)
 
-**Rebuild the search index and embedding vectors.** Rarely needed by agents — usually a maintenance operation.
+**Rebuild the search index and embedding vectors.**
 
 | Param | Type | Description |
 |-------|------|-------------|
@@ -234,7 +228,7 @@ Source memories are deleted; the new compressed memory `supersedes` them.
 
 ### `doctor` (read-only)
 
-**Fast store health check** (index vs disk consistency). For full environment diagnostics, the user runs `engramdb doctor` from the CLI.
+**Fast store health check** (index vs disk consistency).
 
 | Param | Type | Description |
 |-------|------|-------------|
@@ -248,7 +242,7 @@ These manage the cross-project registry rather than individual memories. Useful 
 
 ### `projects_list` (read-only)
 
-**List all registered EngramDB projects**, including parent-child hierarchy. Use this to discover the 16-char project IDs you can pass as `project` to other tools.
+**List all registered projects** with hierarchy. Discovers 16-char project IDs.
 
 No parameters.
 
