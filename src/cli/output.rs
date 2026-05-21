@@ -1232,4 +1232,193 @@ mod tests {
         formatter_pretty.print_memory_list(&empty, true);
         formatter_plain.print_memory_list(&empty, false);
     }
+
+    // ========================================
+    // 6. JSON serialization assertions
+    //
+    // The existing print_* tests above only assert "doesn't panic"; the JSON
+    // format branch is `serde_json::to_string_pretty(...)` so we can assert
+    // the actual shape via serde without needing stdout capture. These tests
+    // lock down the public JSON contract — clients (LLM agents, scripts)
+    // parsing this output should not silently break on field rename / removal.
+    // ========================================
+
+    fn test_environment_doctor_result() -> crate::ops::EnvironmentDoctorResult {
+        use crate::ops::{DoctorSection, EnvironmentCheck};
+        crate::ops::EnvironmentDoctorResult {
+            sections: vec![DoctorSection {
+                name: "System".to_string(),
+                checks: vec![EnvironmentCheck {
+                    name: "binary".to_string(),
+                    passed: true,
+                    message: "ok".to_string(),
+                    suggestion: None,
+                    details: vec![],
+                    status: None,
+                }],
+                subsections: vec![],
+            }],
+            all_passed: true,
+            store_check: None,
+        }
+    }
+
+    #[test]
+    fn environment_doctor_json_round_trips() {
+        // The JSON branch of print_environment_doctor uses
+        // serde_json::to_string_pretty(result). Lock the field names down so
+        // any client parsing `doctor --json` keeps working across renames.
+        let result = test_environment_doctor_result();
+        let v = serde_json::to_value(&result).unwrap();
+        assert!(v.get("sections").is_some(), "must serialize 'sections'");
+        assert_eq!(v["all_passed"], serde_json::Value::Bool(true));
+        let sections = v["sections"].as_array().unwrap();
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0]["name"], "System");
+        let checks = sections[0]["checks"].as_array().unwrap();
+        assert_eq!(checks[0]["name"], "binary");
+        assert_eq!(checks[0]["passed"], serde_json::Value::Bool(true));
+        assert_eq!(checks[0]["message"], "ok");
+        // skip_serializing_if attributes hold: optional fields are absent.
+        assert!(checks[0].get("suggestion").is_none());
+        assert!(checks[0].get("details").is_none());
+        assert!(checks[0].get("status").is_none());
+    }
+
+    #[test]
+    fn environment_check_status_serializes_snake_case() {
+        // The status enum carries #[serde(rename_all = "snake_case")].
+        // If that ever changes, every JSON consumer dispatching on this
+        // field breaks silently. Pin the on-wire form.
+        use crate::ops::{CheckStatus, EnvironmentCheck};
+        let check = EnvironmentCheck {
+            name: "n".to_string(),
+            passed: false,
+            message: "m".to_string(),
+            suggestion: Some("try X".to_string()),
+            details: vec!["d1".to_string()],
+            status: Some(CheckStatus::Warn),
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["status"], "warn");
+        assert_eq!(v["suggestion"], "try X");
+        assert_eq!(v["details"], serde_json::json!(["d1"]));
+    }
+
+    #[test]
+    fn project_info_output_json_includes_required_fields() {
+        let info = ProjectInfoOutput {
+            project_id: "pid-123".to_string(),
+            project_name: "demo".to_string(),
+            project_path: "/tmp/demo".to_string(),
+            memory_count: 7,
+            logical_scopes: vec!["db".to_string(), "ui".to_string()],
+            created_at: chrono::Utc::now(),
+            parent_project_id: None,
+        };
+        let v = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["project_id"], "pid-123");
+        assert_eq!(v["project_name"], "demo");
+        assert_eq!(v["memory_count"], 7);
+        assert_eq!(v["logical_scopes"], serde_json::json!(["db", "ui"]));
+        // parent_project_id is skipped when None.
+        assert!(v.get("parent_project_id").is_none());
+    }
+
+    #[test]
+    fn project_info_output_includes_parent_when_set() {
+        let info = ProjectInfoOutput {
+            project_id: "child".to_string(),
+            project_name: "demo".to_string(),
+            project_path: "/tmp/demo".to_string(),
+            memory_count: 0,
+            logical_scopes: vec![],
+            created_at: chrono::Utc::now(),
+            parent_project_id: Some("parent-pid".to_string()),
+        };
+        let v = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["parent_project_id"], "parent-pid");
+    }
+
+    #[test]
+    fn project_list_output_json_round_trip() {
+        let entries = vec![
+            ProjectListOutput {
+                project_id: "a".to_string(),
+                project_path: "/p/a".to_string(),
+                exists: true,
+                parent_project_id: None,
+            },
+            ProjectListOutput {
+                project_id: "b".to_string(),
+                project_path: "/p/b".to_string(),
+                exists: false,
+                parent_project_id: Some("a".to_string()),
+            },
+        ];
+        let v = serde_json::to_value(&entries).unwrap();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["exists"], serde_json::Value::Bool(true));
+        assert!(arr[0].get("parent_project_id").is_none());
+        assert_eq!(arr[1]["exists"], serde_json::Value::Bool(false));
+        assert_eq!(arr[1]["parent_project_id"], "a");
+    }
+
+    #[test]
+    fn aggregate_stats_output_json_round_trip() {
+        let stats = AggregateStatsOutput {
+            total_projects: 3,
+            reachable_projects: 2,
+            total_memories: 42,
+            by_type: vec![(MemoryType::Decision, 30), (MemoryType::Hazard, 12)],
+        };
+        let v = serde_json::to_value(&stats).unwrap();
+        assert_eq!(v["total_projects"], 3);
+        assert_eq!(v["reachable_projects"], 2);
+        assert_eq!(v["total_memories"], 42);
+        let by_type = v["by_type"].as_array().unwrap();
+        assert_eq!(by_type.len(), 2);
+        // by_type is `Vec<(MemoryType, usize)>` — serializes as `[[..., 30], [..., 12]]`.
+        assert_eq!(by_type[0][1], 30);
+    }
+
+    #[test]
+    fn stats_json_includes_core_fields() {
+        let stats = Stats {
+            total: 10,
+            by_type: vec![(MemoryType::Decision, 4)],
+            by_status: vec![(Status::Active, 8), (Status::Challenged, 2)],
+            by_scope: vec![("api".to_string(), 3)],
+            expired: 1,
+            oldest: None,
+            newest: None,
+            avg_criticality: 0.62,
+            runtime: None,
+        };
+        let v = serde_json::to_value(&stats).unwrap();
+        assert_eq!(v["total"], 10);
+        assert_eq!(v["expired"], 1);
+        // f64 equality via serde — within float epsilon.
+        let avg = v["avg_criticality"].as_f64().unwrap();
+        assert!((avg - 0.62).abs() < 1e-9);
+        assert_eq!(v["by_status"].as_array().unwrap().len(), 2);
+    }
+
+    /// `no_color=true` must produce a formatter that doesn't emit ANSI
+    /// escapes — relevant for piped output and CI logs. We can't observe
+    /// stdout here without a refactor, but we can lock the internal flag.
+    #[test]
+    fn formatter_no_color_disables_color() {
+        let f = OutputFormatter::new(Some(OutputFormat::Pretty), false, true);
+        assert!(!f.use_color, "no_color must zero out use_color");
+    }
+
+    /// JSON format mode forces use_color off (colors don't apply to JSON).
+    #[test]
+    fn formatter_json_mode_has_no_color() {
+        let f = OutputFormatter::new(None, true, false);
+        assert!(matches!(f.format, OutputFormat::Json));
+        assert!(!f.use_color, "JSON mode must never use color");
+    }
 }

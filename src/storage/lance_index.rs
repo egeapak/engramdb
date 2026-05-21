@@ -1292,4 +1292,91 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].visibility, Visibility::Personal);
     }
+
+    /// SQL-injection / quote-escaping guard: every site that interpolates a
+    /// memory id into a LanceDB `only_if` filter (delete, find_by_prefix,
+    /// chunks_for_memory, delete_chunks) calls `replace('\'', "''")`. If
+    /// that escaping ever regresses, an id like `foo'bar` either errors at
+    /// the SQL layer or silently matches the wrong row. These tests drive
+    /// every quote-escape site with a literal quote in the id.
+    #[tokio::test]
+    async fn test_delete_with_quote_in_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        let quoted = "foo'bar'baz";
+        let entry = create_test_entry(quoted);
+        lance.upsert(&entry).await.unwrap();
+        assert_eq!(lance.count().await.unwrap(), 1);
+
+        lance.delete(quoted).await.unwrap();
+        assert_eq!(lance.count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_chunks_with_quote_in_id_round_trip() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        let quoted = "abc'def";
+        let entry = create_test_entry(quoted);
+        lance.upsert(&entry).await.unwrap();
+
+        let v = vec![0.5f32; 384];
+        lance.upsert_chunks(quoted, vec![v.clone()]).await.unwrap();
+
+        let read = lance.chunks_for_memory(quoted).await.unwrap();
+        assert_eq!(
+            read.len(),
+            1,
+            "must read the chunk back through quote-escape"
+        );
+        assert_eq!(read[0].len(), 384);
+
+        // Delete chunks via quote-escape path as well.
+        lance.delete_chunks(quoted).await.unwrap();
+        let after = lance.chunks_for_memory(quoted).await.unwrap();
+        assert!(after.is_empty(), "delete_chunks must round-trip the escape");
+    }
+
+    #[tokio::test]
+    async fn test_find_ids_by_prefix_with_quote() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        // Two ids that share a quote-bearing prefix.
+        let a = "x'a";
+        let b = "x'b";
+        lance.upsert(&create_test_entry(a)).await.unwrap();
+        lance.upsert(&create_test_entry(b)).await.unwrap();
+        // A control row that must NOT match.
+        lance
+            .upsert(&create_test_entry("y-no-match"))
+            .await
+            .unwrap();
+
+        let hits = lance.find_ids_by_prefix("x'").await.unwrap();
+        let set: std::collections::HashSet<_> = hits.into_iter().collect();
+        assert!(set.contains(a));
+        assert!(set.contains(b));
+        assert!(!set.contains("y-no-match"));
+    }
+
+    /// `vector_search` bails when the query dimension doesn't match the
+    /// index dimension. Lock that early-exit since it's the one place that
+    /// catches caller dimension bugs before they corrupt search results.
+    #[tokio::test]
+    async fn test_vector_search_dimension_mismatch_errors() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        let result = lance.vector_search(vec![0.1f32; 16], 5).await;
+        assert!(result.is_err(), "wrong-dim query must error");
+        let msg = format!("{:?}", result.err().unwrap());
+        assert!(
+            msg.contains("dimension"),
+            "error must mention dimension: {}",
+            msg
+        );
+    }
 }

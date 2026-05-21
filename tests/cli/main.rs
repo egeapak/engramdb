@@ -5,6 +5,7 @@ mod challenge;
 mod completions;
 mod compress;
 mod delete;
+mod doctor;
 mod error_cases;
 mod gc;
 mod global_flags;

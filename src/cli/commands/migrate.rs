@@ -177,3 +177,180 @@ async fn migrate_dir(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::app::OutputFormat;
+    use crate::storage::memory_file::{
+        parse_memory_file, parser_for_version, MemoryWriter as _, V1Writer, CURRENT_FORMAT_VERSION,
+    };
+    use crate::types::{Memory, MemoryType, Provenance};
+    use tempfile::TempDir;
+
+    fn json_formatter() -> OutputFormatter {
+        OutputFormatter::new(Some(OutputFormat::Json), false, false)
+    }
+
+    fn engramdb_layout(root: &std::path::Path) -> std::path::PathBuf {
+        let engramdb = root.join(".engramdb");
+        std::fs::create_dir_all(engramdb.join("memories")).unwrap();
+        // Intentionally no manifest.toml: migrate's personal_dir resolution
+        // returns None on missing manifest (rollback.rs:47-54 / migrate.rs:37-44)
+        // and migrate_dir tolerates a missing personal dir. Tests stay focused
+        // on the shared-memories rewrite path.
+        engramdb.join("memories")
+    }
+
+    fn make_memory() -> Memory {
+        Memory::new(
+            MemoryType::Decision,
+            "A migrate fixture summary",
+            "Body content that survives a round trip",
+            Provenance::human(),
+        )
+    }
+
+    #[tokio::test]
+    async fn migrate_no_engramdb_dir_is_noop() {
+        let tmp = TempDir::new().unwrap();
+        // No .engramdb subdir — early return, no error.
+        run_migrate(tmp.path(), false, false, &json_formatter())
+            .await
+            .unwrap();
+        assert!(!tmp.path().join(".engramdb").exists());
+    }
+
+    #[tokio::test]
+    async fn migrate_skips_non_md_files() {
+        let tmp = TempDir::new().unwrap();
+        let memories_dir = engramdb_layout(tmp.path());
+        let stray = memories_dir.join("readme.txt");
+        let original = "hello, not a memory\n";
+        std::fs::write(&stray, original).unwrap();
+
+        run_migrate(tmp.path(), false, false, &json_formatter())
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&stray).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn migrate_dry_run_does_not_modify_files() {
+        let tmp = TempDir::new().unwrap();
+        let memories_dir = engramdb_layout(tmp.path());
+
+        // Write a v1 (legacy) fixture
+        let mem = make_memory();
+        let v1_content = V1Writer.write(&mem).unwrap();
+        let file = memories_dir.join(format!("{}.md", mem.id));
+        std::fs::write(&file, &v1_content).unwrap();
+
+        run_migrate(tmp.path(), false, true, &json_formatter())
+            .await
+            .unwrap();
+
+        // Byte-identical after dry-run
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), v1_content);
+    }
+
+    #[tokio::test]
+    async fn migrate_v1_file_is_rewritten_to_current_version() {
+        let tmp = TempDir::new().unwrap();
+        let memories_dir = engramdb_layout(tmp.path());
+
+        let mem = make_memory();
+        let v1_content = V1Writer.write(&mem).unwrap();
+        let file = memories_dir.join(format!("{}.md", mem.id));
+        std::fs::write(&file, &v1_content).unwrap();
+
+        run_migrate(tmp.path(), false, false, &json_formatter())
+            .await
+            .unwrap();
+
+        let after = std::fs::read_to_string(&file).unwrap();
+        let detected = detect_format_version(&after);
+        assert_eq!(detected, Some(CURRENT_FORMAT_VERSION));
+        assert!(after.contains(&format!("version: {}", CURRENT_FORMAT_VERSION)));
+    }
+
+    #[tokio::test]
+    async fn migrate_round_trips_memory_data() {
+        let tmp = TempDir::new().unwrap();
+        let memories_dir = engramdb_layout(tmp.path());
+
+        let original = make_memory();
+        let v1_content = V1Writer.write(&original).unwrap();
+        let file = memories_dir.join(format!("{}.md", original.id));
+        std::fs::write(&file, &v1_content).unwrap();
+
+        run_migrate(tmp.path(), false, false, &json_formatter())
+            .await
+            .unwrap();
+
+        let after = std::fs::read_to_string(&file).unwrap();
+        let reparsed = parse_memory_file(&after).unwrap();
+
+        assert_eq!(reparsed.id, original.id);
+        assert_eq!(reparsed.type_, original.type_);
+        assert_eq!(reparsed.summary, original.summary);
+        assert_eq!(reparsed.content, original.content);
+    }
+
+    #[tokio::test]
+    async fn migrate_already_current_is_noop() {
+        let tmp = TempDir::new().unwrap();
+        let memories_dir = engramdb_layout(tmp.path());
+
+        // Write a current-version (v2) file directly.
+        let mem = make_memory();
+        let current = latest_writer().write(&mem).unwrap();
+        let file = memories_dir.join(format!("{}.md", mem.id));
+        std::fs::write(&file, &current).unwrap();
+
+        run_migrate(tmp.path(), false, false, &json_formatter())
+            .await
+            .unwrap();
+
+        // Byte-identical: nothing to migrate, nothing rewritten.
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), current);
+    }
+
+    #[tokio::test]
+    async fn migrate_unparseable_file_is_reported_not_panic() {
+        let tmp = TempDir::new().unwrap();
+        let memories_dir = engramdb_layout(tmp.path());
+
+        // .md file that's not a valid memory file at all.
+        let file = memories_dir.join("garbage.md");
+        std::fs::write(&file, "this is not a valid memory file\n").unwrap();
+
+        // Must not panic. The error is collected internally and printed
+        // via the formatter; the returned Result is still Ok(()).
+        run_migrate(tmp.path(), false, false, &json_formatter())
+            .await
+            .unwrap();
+
+        // The file should be left as-is on parse failure.
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "this is not a valid memory file\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrate_uses_correct_version_parser() {
+        // Sanity: a v1 file's detected version is None, and parser_for_version(None)
+        // must hand back V1Parser — otherwise migrate would try to parse a v1
+        // file with V2Parser and fail. This locks down the dispatch table that
+        // migrate_dir relies on.
+        let mem = make_memory();
+        let v1_content = V1Writer.write(&mem).unwrap();
+
+        assert_eq!(detect_format_version(&v1_content), None);
+        let parser = parser_for_version(None);
+        let parsed = parser.parse(&v1_content).unwrap();
+        assert_eq!(parsed.id, mem.id);
+    }
+}
