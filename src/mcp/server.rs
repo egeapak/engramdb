@@ -1258,6 +1258,11 @@ impl EngramDbServer {
         let _scope = self.scope("create", input.project.as_deref());
         let store = self.open_store_for(input.project.as_deref()).await?;
         let engine = self.build_engine_for(input.project.as_deref()).await?;
+        // The configured strategy is the deployment default; an explicit
+        // per-call `title_strategy` still overrides it. This is what makes
+        // `[title] strategy = "t5"` actually take effect for agent creates
+        // (and thus exercise the cached/pooled T5 generator).
+        let config = self.load_config_for(input.project.as_deref()).await?;
         let type_ = ops::parse_memory_type(&input.type_)
             .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
@@ -1303,7 +1308,7 @@ impl EngramDbServer {
                     .map(|s| TitleStrategy::parse(&s))
                     .transpose()
                     .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?
-                    .unwrap_or_default(),
+                    .unwrap_or(config.title.strategy),
                 // Run embedding + contradiction detection in the background so the
                 // agent isn't blocked on embedding-model inference.
                 embed_async: true,

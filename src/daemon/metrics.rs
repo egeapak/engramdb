@@ -34,6 +34,7 @@ pub struct Counters {
     rerank: AtomicU64,
     meta: AtomicU64,
     status: AtomicU64,
+    title: AtomicU64,
 }
 
 /// A point-in-time view of the cumulative counters.
@@ -44,11 +45,12 @@ pub struct MetricsSnapshot {
     pub rerank: u64,
     pub meta: u64,
     pub status: u64,
+    pub title: u64,
 }
 
 impl MetricsSnapshot {
     pub fn total(&self) -> u64 {
-        self.embed + self.classify + self.rerank + self.meta + self.status
+        self.embed + self.classify + self.rerank + self.meta + self.status + self.title
     }
 }
 
@@ -62,6 +64,7 @@ impl Counters {
             rerank: AtomicU64::new(base.rerank),
             meta: AtomicU64::new(base.meta),
             status: AtomicU64::new(base.status),
+            title: AtomicU64::new(base.title),
         }
     }
 
@@ -80,6 +83,9 @@ impl Counters {
     pub fn incr_status(&self) {
         self.status.fetch_add(1, Ordering::Relaxed);
     }
+    pub fn incr_title(&self) {
+        self.title.fetch_add(1, Ordering::Relaxed);
+    }
 
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
@@ -88,6 +94,7 @@ impl Counters {
             rerank: self.rerank.load(Ordering::Relaxed),
             meta: self.meta.load(Ordering::Relaxed),
             status: self.status.load(Ordering::Relaxed),
+            title: self.title.load(Ordering::Relaxed),
         }
     }
 }
@@ -106,6 +113,7 @@ fn schema() -> Arc<Schema> {
         Field::new("rerank", DataType::Int64, false),
         Field::new("meta", DataType::Int64, false),
         Field::new("status", DataType::Int64, false),
+        Field::new("title", DataType::Int64, false),
         Field::new("total", DataType::Int64, false),
     ]))
 }
@@ -120,7 +128,33 @@ async fn open_table_at(dir: &std::path::Path) -> Result<lancedb::Table> {
         .await
         .context("opening LanceDB connection")?;
     match conn.open_table(TABLE_NAME).execute().await {
-        Ok(t) => Ok(t),
+        Ok(t) => {
+            // One-time migration: a table created before a counter column
+            // (e.g. `title`) was added has a narrower row shape, so the
+            // batch we append would fail the schema check and metrics would
+            // silently stop persisting. These are non-critical cumulative
+            // daemon counters, so drop & recreate rather than do an Arrow
+            // column migration — the daemon simply re-seeds from 0.
+            let want = schema();
+            let have = t.schema().await.context("reading daemon_metrics schema")?;
+            let compatible = have.fields().len() == want.fields().len()
+                && have
+                    .fields()
+                    .iter()
+                    .zip(want.fields().iter())
+                    .all(|(a, b)| a.name() == b.name());
+            if compatible {
+                Ok(t)
+            } else {
+                conn.drop_table(TABLE_NAME, &[])
+                    .await
+                    .context("dropping stale daemon_metrics table")?;
+                conn.create_empty_table(TABLE_NAME, want)
+                    .execute()
+                    .await
+                    .context("recreating daemon_metrics table")
+            }
+        }
         Err(_) => conn
             .create_empty_table(TABLE_NAME, schema())
             .execute()
@@ -165,6 +199,7 @@ pub(crate) async fn persist_at(
         Arc::new(Int64Array::from(vec![snap.rerank as i64])),
         Arc::new(Int64Array::from(vec![snap.meta as i64])),
         Arc::new(Int64Array::from(vec![snap.status as i64])),
+        Arc::new(Int64Array::from(vec![snap.title as i64])),
         Arc::new(Int64Array::from(vec![snap.total() as i64])),
     ];
     let batch =
@@ -244,6 +279,13 @@ pub(crate) async fn load_latest_at(dir: &std::path::Path) -> Result<Option<Persi
             col("status")?,
             col("uptime_secs")?,
         );
+        // `title` was added after the first release. A snapshot row written
+        // by an older daemon has no such column; treat it as 0 rather than
+        // erroring (back-compat — `stats --daemon` reads this directly,
+        // without the table-migration that `open_table_at` does on write).
+        let title = b
+            .column_by_name("title")
+            .and_then(|c| c.as_any().downcast_ref::<Int64Array>().cloned());
         for i in 0..b.num_rows() {
             let t = ts.value(i);
             if best.map(|p| t > p.ts_micros).unwrap_or(true) {
@@ -256,6 +298,10 @@ pub(crate) async fn load_latest_at(dir: &std::path::Path) -> Result<Option<Persi
                         rerank: rerank.value(i).max(0) as u64,
                         meta: meta.value(i).max(0) as u64,
                         status: status.value(i).max(0) as u64,
+                        title: title
+                            .as_ref()
+                            .map(|a| a.value(i).max(0) as u64)
+                            .unwrap_or(0),
                     },
                 });
             }

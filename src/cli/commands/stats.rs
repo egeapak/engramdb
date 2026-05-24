@@ -145,6 +145,7 @@ async fn run_daemon_stats(formatter: &OutputFormatter) -> Result<()> {
         println!("    rerank:      {}", s.requests_rerank);
         println!("    meta:        {}", s.requests_meta);
         println!("    status:      {}", s.requests_status);
+        println!("    title:       {}", s.requests_title);
         println!("    total:       {}", s.requests_total);
         return Ok(());
     }

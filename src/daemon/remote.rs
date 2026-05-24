@@ -27,6 +27,7 @@ fn response_kind(resp: &DaemonResponse) -> &'static str {
         DaemonResponse::Embedded { .. } => "embedded",
         DaemonResponse::Classified { .. } => "classified",
         DaemonResponse::Reranked { .. } => "reranked",
+        DaemonResponse::Title { .. } => "title",
         DaemonResponse::Status(_) => "status",
         DaemonResponse::ShuttingDown => "shutting_down",
         DaemonResponse::Error { .. } => "error",
@@ -151,6 +152,28 @@ impl Reranker for RemoteReranker {
     }
 }
 
+/// Title generator that forwards abstractive (T5) generation to the daemon.
+pub struct RemoteTitleProvider {
+    ctx: Arc<RemoteCtx>,
+}
+
+#[async_trait]
+impl crate::title::TitleGenerator for RemoteTitleProvider {
+    async fn generate(&self, text: &str) -> Result<String> {
+        let op = DaemonOp::Title {
+            text: text.to_string(),
+        };
+        match self.ctx.send(op).await? {
+            DaemonResponse::Title { title } => Ok(title),
+            DaemonResponse::Error { message } => Err(anyhow::anyhow!(message)),
+            other => Err(anyhow::anyhow!(
+                "unexpected daemon response: {}",
+                response_kind(&other)
+            )),
+        }
+    }
+}
+
 /// Build the [`EngineProviders`] bundle backed by the daemon for the store at
 /// `dir` under `config`.
 ///
@@ -214,9 +237,19 @@ pub async fn remote_providers(
         }) as Arc<dyn Reranker>
     });
 
+    // T5 titling is delegated only when it's the configured strategy, so the
+    // daemon loads (and pools) the heavy encoder+decoder once machine-wide
+    // instead of every MCP process rebuilding it per `create`.
+    let title = (config.title.strategy == crate::title::TitleStrategy::T5).then(|| {
+        Arc::new(RemoteTitleProvider {
+            ctx: Arc::clone(&ctx),
+        }) as Arc<dyn crate::title::TitleGenerator>
+    });
+
     Some(EngineProviders {
         embedding,
         nli,
         reranker,
+        title,
     })
 }

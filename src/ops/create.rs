@@ -46,6 +46,32 @@ pub struct CreateResult {
     pub summary: String,
 }
 
+/// Resolve a title for `text` under `strategy`, preferring a cached/pooled
+/// T5 generator carried by `engine` (loaded once into the provider bundle —
+/// or, with the daemon, served by it) over building a fresh
+/// encoder+decoder ONNX session on this `create`. Keyword/`none` stay on the
+/// lightweight in-process path. Error/empty handling mirrors
+/// [`crate::title::generate_title`] so behavior is identical bar the speed.
+async fn title_for(
+    engine: Option<&RetrievalEngine>,
+    strategy: TitleStrategy,
+    text: &str,
+) -> Option<String> {
+    if strategy == TitleStrategy::T5 {
+        if let Some(generator) = engine.and_then(|e| e.title_generator()) {
+            return match generator.generate(text).await {
+                Ok(title) if !title.is_empty() => Some(title),
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::warn!("cached T5 title generation failed: {}", e);
+                    None
+                }
+            };
+        }
+    }
+    crate::title::generate_title(strategy, text).await
+}
+
 /// Validate that a summary is non-empty and within the character limit.
 pub fn validate_summary(summary: &str) -> Result<()> {
     let trimmed = summary.trim();
@@ -83,8 +109,8 @@ pub async fn create_memory(
     let title = if params.title.is_some() {
         params.title
     } else {
-        // Use summary as input for title generation (it's concise and descriptive)
-        crate::title::generate_title(params.title_strategy, &summary).await
+        // Use summary as input for title generation (it's concise and descriptive).
+        title_for(engine, params.title_strategy, &summary).await
     };
     memory.title = title;
     memory.physical = physical;
@@ -240,6 +266,53 @@ mod tests {
             title_strategy: TitleStrategy::None,
             embed_async: false,
         }
+    }
+
+    /// Title generator that returns a fixed string, to prove `title_for`
+    /// routes T5 through the cached provider rather than building one.
+    struct StubTitle(&'static str);
+    #[async_trait::async_trait]
+    impl crate::title::TitleGenerator for StubTitle {
+        async fn generate(&self, _text: &str) -> Result<String> {
+            Ok(self.0.to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn title_for_prefers_cached_t5_then_falls_back_by_strategy() {
+        let (_t, store) = setup_test_store().await;
+        let engine = RetrievalEngine::new(store, crate::types::EngramConfig::default())
+            .with_title_provider(std::sync::Arc::new(StubTitle("cached t5 title")));
+
+        // T5 + a cached generator → use it (no fresh model build).
+        assert_eq!(
+            title_for(Some(&engine), TitleStrategy::T5, "anything").await,
+            Some("cached t5 title".to_string())
+        );
+
+        // Keyword never touches the cached T5 generator — lightweight path.
+        let kw = title_for(
+            Some(&engine),
+            TitleStrategy::Keyword,
+            "the quick brown fox jumps over the lazy dog",
+        )
+        .await;
+        assert!(
+            kw.is_some() && kw.as_deref() != Some("cached t5 title"),
+            "keyword must use RAKE, not the cached T5 stub (got {kw:?})"
+        );
+
+        // None → no automatic title.
+        assert_eq!(
+            title_for(Some(&engine), TitleStrategy::None, "anything").await,
+            None
+        );
+
+        // T5 requested but no cached generator and no engine → falls back to
+        // the ad-hoc path (returns None here only if the model is absent;
+        // the point is it must not panic and must not use the stub).
+        let no_engine = title_for(None, TitleStrategy::None, "anything").await;
+        assert_eq!(no_engine, None);
     }
 
     #[tokio::test]

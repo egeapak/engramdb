@@ -73,6 +73,7 @@ pub async fn run_daemon_cmd(command: DaemonCommand, formatter: &OutputFormatter)
                     println!("    rerank:        {}", s.requests_rerank);
                     println!("    meta:          {}", s.requests_meta);
                     println!("    status:        {}", s.requests_status);
+                    println!("    title:         {}", s.requests_title);
                     println!("    total:         {}", s.requests_total);
                 }
             }

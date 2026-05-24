@@ -119,6 +119,10 @@ pub struct RetrievalEngine {
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     nli_provider: Option<Arc<dyn NliProvider>>,
     reranker: Option<Arc<dyn Reranker>>,
+    /// Cached abstractive (T5) title generator. `Some` only when
+    /// `title.strategy = "t5"`; the model session (or pool) is loaded once
+    /// into the provider bundle so `create` doesn't rebuild it per call.
+    title_provider: Option<Arc<dyn crate::title::TitleGenerator>>,
     /// Optional runtime stats collector. When `Some`, the engine pushes
     /// stage timings and query outcomes to it. `None` disables all telemetry.
     stats: Option<Arc<crate::telemetry::StatsCollector>>,
@@ -143,6 +147,7 @@ impl RetrievalEngine {
             embedding_provider: None,
             nli_provider: None,
             reranker: None,
+            title_provider: None,
             stats: None,
             project_id: None,
             session_id: None,
@@ -220,6 +225,23 @@ impl RetrievalEngine {
     pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
         self.reranker = Some(reranker);
         self
+    }
+
+    /// Attach a cached abstractive (T5) title generator.
+    ///
+    /// Wired only when `title.strategy = "t5"`. The create path uses this
+    /// pre-loaded session/pool instead of rebuilding T5 per call; keyword
+    /// and `none` titling never reach here.
+    pub fn with_title_provider(mut self, provider: Arc<dyn crate::title::TitleGenerator>) -> Self {
+        self.title_provider = Some(provider);
+        self
+    }
+
+    /// The cached abstractive title generator, if one is wired (i.e.
+    /// `title.strategy = "t5"` and the model loaded). `None` ⇒ the create
+    /// path falls back to building the configured strategy ad hoc.
+    pub fn title_generator(&self) -> Option<&Arc<dyn crate::title::TitleGenerator>> {
+        self.title_provider.as_ref()
     }
 
     /// Check if embeddings are available.
