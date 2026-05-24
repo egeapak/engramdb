@@ -45,6 +45,11 @@ cargo bench
 # Examples (under examples/)
 cargo run --example onnx_bench
 cargo run --example embed_quality
+
+# Fuzzing (nightly + cargo-fuzz; targets live in fuzz/)
+cargo install cargo-fuzz
+cargo +nightly fuzz list
+cargo +nightly fuzz run memory_file -- -max_total_time=60
 ```
 
 Feature flags from `Cargo.toml`:
@@ -62,6 +67,23 @@ Feature flags from `Cargo.toml`:
 `src/lib.rs` installs a `#[ctor::ctor]` that points `ENGRAMDB_DATA_DIR` and `ENGRAMDB_CONFIG_DIR` at per-process temp dirs so tests never touch the real `~/Library/Application Support/engramdb/` or registry. Nextest's process-per-test model is load-bearing here — `cargo test` would not isolate these globals correctly.
 
 Note: `cargo test --lib` has two pre-existing flaky failures under full parallelism (`ops::doctor::tests::test_doctor_many_memories_healthy`, `ops::projects::tests::test_get_project_info_with_memories`) — they pass in isolation and fail identically on a clean base, so they are not a regression signal.
+
+### Fuzzing
+
+`fuzz/` is a standalone `cargo-fuzz` crate (its own `[workspace]`, excluded from
+default builds). Targets live in `fuzz/fuzz_targets/` and exercise the
+hand-written parsers that consume untrusted input: `memory_file` and
+`memory_file_roundtrip` (TOML/YAML frontmatter + V2 markdown via
+`storage::memory_file::parse_memory_file` / `write_memory_file`), `scope_logical`
+and `scope_physical` (dot-notation LCA math and runtime glob compilation). Each
+target only calls already-`pub` pure functions — no API was widened for fuzzing.
+
+Run with `cargo +nightly fuzz run <target> -- -max_total_time=60`. In the web
+sandbox, building requires the same `ORT_STRATEGY=system ORT_LIB_LOCATION=/tmp/ort-lib`
+workaround below. Seed inputs are committed under `fuzz/corpus/<target>/`; when a
+crash is found, commit the failing input from `fuzz/artifacts/` as a new corpus
+seed so it becomes a permanent regression case. CI runs these on a schedule via
+`.github/workflows/fuzz.yml`, not on every PR.
 
 ## Building & testing in Claude Code on the web (restricted egress)
 

@@ -1,0 +1,49 @@
+[package]
+name = "engramdb-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.engramdb]
+path = ".."
+
+# Prevent this crate from interfering with normal `cargo` workspace resolution.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "memory_file"
+path = "fuzz_targets/memory_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "memory_file_roundtrip"
+path = "fuzz_targets/memory_file_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scope_logical"
+path = "fuzz_targets/scope_logical.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scope_physical"
+path = "fuzz_targets/scope_physical.rs"
+test = false
+doc = false
+bench = false

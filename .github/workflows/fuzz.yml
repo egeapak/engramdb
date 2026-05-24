@@ -1,0 +1,57 @@
+name: Fuzz
+
+# Fuzzing links the whole crate (lancedb/ort native deps) and needs a nightly
+# toolchain, so it runs on a schedule and on demand rather than on every PR.
+on:
+  schedule:
+    - cron: "0 4 * * 1" # Mondays 04:00 UTC
+  workflow_dispatch:
+    inputs:
+      max_total_time:
+        description: "Seconds to run each fuzz target"
+        required: false
+        default: "120"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: Fuzz targets
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - memory_file
+          - memory_file_roundtrip
+          - scope_logical
+          - scope_physical
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target\nfuzz -> target"
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run ${{ matrix.target }}
+        run: |
+          cargo +nightly fuzz run ${{ matrix.target }} -- \
+            -max_total_time=${{ github.event.inputs.max_total_time || '120' }}
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
