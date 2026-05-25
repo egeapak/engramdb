@@ -50,10 +50,21 @@ pub async fn run_init(
     // Initialize the store
     let store = MemoryStore::init(dir, registry).await?;
 
-    // If we're in a worktree, register the worktree as a child of this main project.
+    // If we're in a worktree, consolidate any memories that were written
+    // under the worktree's own stray store into this main project, then
+    // register the worktree as a sub-project.
     if let Some(origin) = &worktree_origin {
         let child_id = project_id::compute_project_id(origin);
         let parent_id = store.project_id.clone();
+        let migrated =
+            crate::storage::worktree::consolidate_worktree_into_main(origin, dir).await?;
+        if migrated > 0 {
+            formatter.print_message(&format!(
+                "Consolidated {} memor{} from this worktree into the main project.",
+                migrated,
+                if migrated == 1 { "y" } else { "ies" }
+            ));
+        }
         registry
             .update_with_parent(origin, &child_id, Some(&parent_id))
             .await?;

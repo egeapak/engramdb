@@ -1,0 +1,7 @@
+target/
+artifacts/
+coverage/
+
+# Auto-grown fuzzer corpus state — keep only curated .md seeds.
+corpus/*/*
+!corpus/*/*.md

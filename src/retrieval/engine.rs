@@ -5,6 +5,7 @@
 //! semantic search (when embeddings are available), and keyword search.
 
 use super::filters::{apply_index_filters, SearchFilters};
+use super::reranker::Reranker;
 use crate::embeddings::EmbeddingProvider;
 use crate::nli::{NliProvider, NliResult};
 use crate::scoring::{
@@ -13,9 +14,8 @@ use crate::scoring::{
 use crate::storage::{MemoryStore, Result};
 use crate::types::{EngramConfig, Memory, MemoryType};
 use chrono::Utc;
-use fastembed::TextRerank;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Detail level for retrieved memories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -118,7 +118,11 @@ pub struct RetrievalEngine {
     config: EngramConfig,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     nli_provider: Option<Arc<dyn NliProvider>>,
-    reranker: Option<Arc<Mutex<TextRerank>>>,
+    reranker: Option<Arc<dyn Reranker>>,
+    /// Cached abstractive (T5) title generator. `Some` only when
+    /// `title.strategy = "t5"`; the model session (or pool) is loaded once
+    /// into the provider bundle so `create` doesn't rebuild it per call.
+    title_provider: Option<Arc<dyn crate::title::TitleGenerator>>,
     /// Optional runtime stats collector. When `Some`, the engine pushes
     /// stage timings and query outcomes to it. `None` disables all telemetry.
     stats: Option<Arc<crate::telemetry::StatsCollector>>,
@@ -143,6 +147,7 @@ impl RetrievalEngine {
             embedding_provider: None,
             nli_provider: None,
             reranker: None,
+            title_provider: None,
             stats: None,
             project_id: None,
             session_id: None,
@@ -216,10 +221,27 @@ impl RetrievalEngine {
     ///
     /// When configured (and `config.rerank.enabled` is true), retrieved results
     /// are re-scored using the cross-encoder before being returned. The reranker
-    /// is wrapped in `Arc<Mutex<>>` because `TextRerank::rerank()` requires `&mut self`.
-    pub fn with_reranker(mut self, reranker: Arc<Mutex<TextRerank>>) -> Self {
+    /// may run in-process or be delegated to the shared embedding daemon.
+    pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
         self.reranker = Some(reranker);
         self
+    }
+
+    /// Attach a cached abstractive (T5) title generator.
+    ///
+    /// Wired only when `title.strategy = "t5"`. The create path uses this
+    /// pre-loaded session/pool instead of rebuilding T5 per call; keyword
+    /// and `none` titling never reach here.
+    pub fn with_title_provider(mut self, provider: Arc<dyn crate::title::TitleGenerator>) -> Self {
+        self.title_provider = Some(provider);
+        self
+    }
+
+    /// The cached abstractive title generator, if one is wired (i.e.
+    /// `title.strategy = "t5"` and the model loaded). `None` ⇒ the create
+    /// path falls back to building the configured strategy ad hoc.
+    pub fn title_generator(&self) -> Option<&Arc<dyn crate::title::TitleGenerator>> {
+        self.title_provider.as_ref()
     }
 
     /// Check if embeddings are available.
@@ -228,6 +250,17 @@ impl RetrievalEngine {
     /// is always available via the MemoryStore's LanceDB.
     pub fn embeddings_available(&self) -> bool {
         self.embedding_provider.is_some()
+    }
+
+    /// Identity of the embedding model in use, for stamping the store
+    /// after a (re)embed. `None` when embeddings are disabled.
+    pub fn embedding_fingerprint(&self) -> Option<crate::storage::EmbeddingFingerprint> {
+        self.embedding_provider
+            .as_ref()
+            .map(|p| crate::storage::EmbeddingFingerprint {
+                model: p.model_id(),
+                dimensions: p.dimensions(),
+            })
     }
 
     /// Add an NLI provider to the retrieval engine.
@@ -428,19 +461,10 @@ impl RetrievalEngine {
             })
             .collect();
 
-        // Run cross-encoder in spawn_blocking since it's CPU-bound
-        let query_owned = query_text.to_string();
-        let rerank_results = tokio::task::spawn_blocking(move || {
-            let mut reranker_guard = reranker
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Failed to acquire reranker lock: {}", e))?;
-            let doc_refs: Vec<&String> = documents.iter().collect();
-            reranker_guard
-                .rerank(&query_owned, doc_refs, false, None)
-                .map_err(|e| anyhow::anyhow!("Reranking failed: {}", e))
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("Rerank task panicked: {}", e))??;
+        // Score query+document pairs with the cross-encoder. The reranker
+        // runs in-process on a blocking thread, or is delegated to the shared
+        // embedding daemon — the engine doesn't care which.
+        let rerank_results = reranker.rerank(query_text, &documents).await?;
 
         // Original scores are already in [0, 1] (from composite_score).
         // Cross-encoder logits are unbounded, so normalize with sigmoid.
@@ -891,8 +915,9 @@ async fn detect_contradictions_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::retrieval::reranker::LocalReranker;
     use crate::storage::InMemoryRegistry;
-    use std::sync::LazyLock;
+    use std::sync::{LazyLock, Mutex};
 
     /// Shared reranker across all tests in this module to avoid loading the
     /// ~100MB ONNX model once per test (which causes OOM when parallel).
@@ -906,8 +931,10 @@ mod tests {
                 .map(|r| Arc::new(Mutex::new(r)))
         });
 
-    fn try_reranker() -> Option<Arc<Mutex<fastembed::TextRerank>>> {
-        SHARED_RERANKER.as_ref().cloned()
+    fn try_reranker() -> Option<Arc<dyn Reranker>> {
+        SHARED_RERANKER
+            .as_ref()
+            .map(|r| LocalReranker::shared(Arc::clone(r)))
     }
 
     /// Filter-mode query with only a text query set, mirroring the shape
@@ -1887,6 +1914,159 @@ mod tests {
             result.is_empty(),
             "detect_contradictions should return empty when config.nli.enabled is false"
         );
+    }
+
+    /// End-to-end exercise of `detect_contradictions_with` (engine.rs:842):
+    /// real ONNX embedding provider + real NLI provider + a contradicting
+    /// memory in the store. Skips cleanly if either model is unavailable.
+    /// Before this test the entire `detect_contradictions_with` body
+    /// (vector_search + classify_batch + threshold filter) was at 0%
+    /// coverage despite CRAP 110.
+    #[tokio::test]
+    async fn test_detect_contradictions_end_to_end_finds_real_contradiction() {
+        use crate::embeddings::OnnxProvider;
+        use crate::nli::OnnxNliProvider;
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let Some(embedding) = OnnxProvider::try_new() else {
+            eprintln!("skipping: ONNX embedding model unavailable");
+            return;
+        };
+        let Some(nli) = OnnxNliProvider::try_new("cross-encoder/nli-deberta-v3-xsmall") else {
+            eprintln!("skipping: NLI model unavailable");
+            return;
+        };
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        // Seed an existing memory whose summary directly contradicts the
+        // probe summary below.
+        let mut existing = Memory::new(
+            MemoryType::Decision,
+            "The restaurant is open",
+            "Body content for the existing memory",
+            Provenance::human(),
+        );
+        existing.visibility = Visibility::Shared;
+        store.create(&existing).await.unwrap();
+
+        // Embed the existing memory so vector_search has something to find.
+        let embed_arc: Arc<dyn EmbeddingProvider> = Arc::new(embedding);
+        embed_memory_with(embed_arc.as_ref(), &store, &existing, None)
+            .await
+            .unwrap();
+
+        // Make a probe memory not yet in the store.
+        let mut probe = Memory::new(
+            MemoryType::Decision,
+            "The restaurant is closed",
+            "Body content for the probe memory",
+            Provenance::human(),
+        );
+        probe.visibility = Visibility::Shared;
+
+        let mut config = EngramConfig::default();
+        config.nli.enabled = true;
+        // Lenient thresholds: this test must reach the NLI step, not get
+        // gated out by an unrelated default.
+        config.nli.similarity_threshold = 0.0;
+        config.nli.contradiction_threshold = 0.5;
+
+        let engine = RetrievalEngine::new(store, config)
+            .with_embedding_provider(Arc::clone(&embed_arc))
+            .with_nli_provider(Arc::new(nli));
+
+        let result = engine.detect_contradictions(&probe).await.unwrap();
+        // The cross-encoder reliably flags "open" vs "closed" as a
+        // contradiction at >0.5 — this is the antonym pair already
+        // covered by nli::onnx::tests::test_antonym_contradiction.
+        assert!(
+            !result.is_empty(),
+            "expected at least one contradiction for open vs closed"
+        );
+        let (id, nli_res) = &result[0];
+        assert_eq!(id, &existing.id, "wrong memory flagged");
+        assert!(
+            nli_res.contradiction > 0.5,
+            "contradiction prob too low: {}",
+            nli_res.contradiction
+        );
+    }
+
+    /// Drive the early-return at detect_contradictions_with where no
+    /// candidates pass the similarity_threshold. Locks the threshold
+    /// filter so it can't regress into returning all vector neighbours.
+    #[tokio::test]
+    async fn test_detect_contradictions_returns_empty_when_no_similar_candidates() {
+        use crate::embeddings::OnnxProvider;
+        use crate::nli::{NliProvider, NliResult};
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let Some(embedding) = OnnxProvider::try_new() else {
+            eprintln!("skipping: ONNX embedding model unavailable");
+            return;
+        };
+
+        // NLI shouldn't be called — we route through the similarity
+        // threshold gate first. Use a dummy provider that panics if hit.
+        struct ShouldNotBeCalled;
+        #[async_trait::async_trait]
+        impl NliProvider for ShouldNotBeCalled {
+            async fn classify(&self, _p: &str, _h: &str) -> anyhow::Result<NliResult> {
+                panic!("NLI must not be called when candidates are filtered out");
+            }
+            async fn classify_batch(
+                &self,
+                _pairs: &[(&str, &str)],
+            ) -> anyhow::Result<Vec<NliResult>> {
+                panic!("NLI must not be called when candidates are filtered out");
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        // Seed a memory so vector_search returns at least one match.
+        let existing = Memory {
+            visibility: Visibility::Shared,
+            ..Memory::new(
+                MemoryType::Decision,
+                "Persisted memory",
+                "stored body",
+                Provenance::human(),
+            )
+        };
+        store.create(&existing).await.unwrap();
+        let embed_arc: Arc<dyn EmbeddingProvider> = Arc::new(embedding);
+        embed_memory_with(embed_arc.as_ref(), &store, &existing, None)
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.nli.enabled = true;
+        // Impossible threshold: nothing can pass → empty candidate set →
+        // NLI never invoked → ShouldNotBeCalled.classify_batch unreached.
+        config.nli.similarity_threshold = 10.0;
+
+        let engine = RetrievalEngine::new(store, config)
+            .with_embedding_provider(Arc::clone(&embed_arc))
+            .with_nli_provider(Arc::new(ShouldNotBeCalled));
+
+        let probe = Memory::new(
+            MemoryType::Decision,
+            "probe summary",
+            "probe body",
+            Provenance::human(),
+        );
+        let result = engine.detect_contradictions(&probe).await.unwrap();
+        assert!(result.is_empty(), "no candidate survived → empty result");
     }
 
     #[tokio::test]

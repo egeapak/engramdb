@@ -39,7 +39,7 @@ pub use parsing::{
     parse_decay_strategy, parse_detail_level, parse_memory_type, parse_status, parse_visibility,
     validate_score,
 };
-pub use query::query_memories;
+pub use query::{merge_scored_memories, query_memories};
 pub use reindex::{reindex, ReindexResult};
 pub use resolve::{resolve_memory, ResolveAction, ResolveParams, ResolveResult};
 pub use review::{review_memories, ReviewParams};
@@ -47,14 +47,18 @@ pub use stats::{compute_stats, StoreStats};
 pub use update::{update_memory, UpdateParams};
 
 use crate::embeddings::{
-    EmbeddingProvider, OnnxProvider, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT,
+    EmbeddingProvider, OnnxModelSpec, OnnxProvider, DEFAULT_ONNX_EMBEDDING, ONNX_MXBAI_EMBED_LARGE,
+    ONNX_NOMIC_EMBED_TEXT,
 };
 #[cfg(feature = "ollama")]
-use crate::embeddings::{OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT};
-use crate::nli::OnnxNliProvider;
+use crate::embeddings::{
+    OllamaModelSpec, OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT,
+};
+use crate::nli::{NliProvider, OnnxNliProvider};
 use crate::retrieval::engine::RetrievalEngine;
-use crate::storage::MemoryStore;
-use crate::types::EmbeddingBackend;
+use crate::retrieval::reranker::{LocalReranker, Reranker};
+use crate::storage::{embedding_status, EmbeddingFingerprint, EmbeddingModelStatus, MemoryStore};
+use crate::types::{EmbeddingBackend, EngramConfig};
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -81,7 +85,117 @@ pub fn resolve_backend(
     config_backend
 }
 
+/// The model specs a configured `provider` string maps to.
+///
+/// **Single source of truth** for the provider→model table. Both
+/// [`expected_embedding_fingerprint`] (cheap, no model load) and
+/// [`resolve_provider`] (loads the model) derive from this one map, so the
+/// fingerprint recorded for a store and the provider that actually runs can
+/// never disagree on *which* model a config selects — adding a provider in
+/// one place but not the other was a silent-vector-corruption footgun
+/// flagged in branch review.
+struct ProviderSpecs {
+    onnx: OnnxModelSpec,
+    #[cfg(feature = "ollama")]
+    ollama: OllamaModelSpec,
+}
+
+/// Map a configured provider string to its ONNX (and, when compiled in,
+/// Ollama) model spec. `None` ⇒ unknown provider string (embeddings
+/// disabled). The ONE place the provider→spec table lives.
+fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
+    Some(match provider {
+        "onnx" | "all-minilm" => ProviderSpecs {
+            onnx: DEFAULT_ONNX_EMBEDDING,
+            #[cfg(feature = "ollama")]
+            ollama: ALL_MINILM,
+        },
+        "nomic-embed-text" => ProviderSpecs {
+            onnx: ONNX_NOMIC_EMBED_TEXT,
+            #[cfg(feature = "ollama")]
+            ollama: NOMIC_EMBED_TEXT,
+        },
+        "mxbai-embed-large" => ProviderSpecs {
+            onnx: ONNX_MXBAI_EMBED_LARGE,
+            #[cfg(feature = "ollama")]
+            ollama: MXBAI_EMBED_LARGE,
+        },
+        _ => return None,
+    })
+}
+
+/// The embedding fingerprint `config` *would* produce, computed WITHOUT
+/// loading the model — derived from the same [`provider_specs`] table and
+/// backend preference [`resolve_provider`] uses. Used by `doctor` and the
+/// open-time check (cheap); the enforcement guard uses the live provider's
+/// `model_id()` instead. Returns `None` for an unknown provider string
+/// (embeddings disabled).
+pub fn expected_embedding_fingerprint(config: &EngramConfig) -> Option<EmbeddingFingerprint> {
+    let backend = resolve_backend(config.embeddings.backend, None);
+    let specs = provider_specs(config.embeddings.provider.as_str())?;
+
+    #[cfg(feature = "ollama")]
+    if backend == EmbeddingBackend::Ollama {
+        return Some(EmbeddingFingerprint {
+            model: format!("ollama/{}", specs.ollama.model_name),
+            dimensions: specs.ollama.dimensions,
+        });
+    }
+    let _ = backend; // onnx/auto both record the ONNX identity
+    Some(EmbeddingFingerprint {
+        model: format!("onnx/{}", specs.onnx.name),
+        dimensions: specs.onnx.dimensions,
+    })
+}
+
+/// Comparison of a store's stored embedding fingerprint vs the model in use.
+pub struct EmbeddingModelReport {
+    pub status: EmbeddingModelStatus,
+    /// Actionable, user-facing message when not consistent (else `None`).
+    pub warning: Option<String>,
+}
+
+/// Evaluate a store's stored embedding fingerprint against `current` (the
+/// live provider's fingerprint, or `None` when embeddings are disabled).
+/// One cheap manifest read; `status` is `Match` when embeddings are off.
+pub async fn embedding_model_report(
+    store: &MemoryStore,
+    current: Option<EmbeddingFingerprint>,
+) -> EmbeddingModelReport {
+    let Some(current) = current else {
+        return EmbeddingModelReport {
+            status: EmbeddingModelStatus::Match,
+            warning: None,
+        };
+    };
+    let stored = store.embedding_fingerprint().await.ok().flatten();
+    let status = embedding_status(stored.as_ref(), &current.model, current.dimensions);
+    let warning = match &status {
+        EmbeddingModelStatus::Match => None,
+        EmbeddingModelStatus::Untracked { current } => Some(format!(
+            "EngramDB: this store has no recorded embedding model (legacy store; \
+             current model {current}). Memory search may use stale vectors — run \
+             `engramdb reindex --embeddings-only` to re-embed and stamp it."
+        )),
+        EmbeddingModelStatus::Mismatch { stored, current } => Some(format!(
+            "EngramDB: the embedding model changed (stored {stored}, current {current}). \
+             Memory search is degraded until you run \
+             `engramdb reindex --embeddings-only`."
+        )),
+        EmbeddingModelStatus::DimensionMismatch { stored, current } => Some(format!(
+            "EngramDB: embedding dimensionality changed (stored {stored}, current \
+             {current}). Run `engramdb reindex --embeddings-only` before using \
+             memory search."
+        )),
+    };
+    EmbeddingModelReport { status, warning }
+}
+
 /// Try to create an embedding provider for the given model name and backend.
+///
+/// Goes through [`provider_specs`] — the same table
+/// [`expected_embedding_fingerprint`] uses — so the loaded model's identity
+/// always matches the fingerprint recorded for the store.
 fn resolve_provider(model: &str, backend: EmbeddingBackend) -> Option<Arc<dyn EmbeddingProvider>> {
     #[cfg(not(feature = "ollama"))]
     if backend == EmbeddingBackend::Ollama {
@@ -91,33 +205,19 @@ fn resolve_provider(model: &str, backend: EmbeddingBackend) -> Option<Arc<dyn Em
         return None;
     }
 
-    match model {
-        "onnx" | "all-minilm" => try_onnx_then_ollama(
-            backend,
-            || OnnxProvider::try_new().map(|p| Arc::new(p) as _),
-            #[cfg(feature = "ollama")]
-            || OllamaProvider::try_new(ALL_MINILM).map(|p| Arc::new(p) as _),
-        ),
-        "nomic-embed-text" => try_onnx_then_ollama(
-            backend,
-            || OnnxProvider::try_with_model(ONNX_NOMIC_EMBED_TEXT).map(|p| Arc::new(p) as _),
-            #[cfg(feature = "ollama")]
-            || OllamaProvider::try_new(NOMIC_EMBED_TEXT).map(|p| Arc::new(p) as _),
-        ),
-        "mxbai-embed-large" => try_onnx_then_ollama(
-            backend,
-            || OnnxProvider::try_with_model(ONNX_MXBAI_EMBED_LARGE).map(|p| Arc::new(p) as _),
-            #[cfg(feature = "ollama")]
-            || OllamaProvider::try_new(MXBAI_EMBED_LARGE).map(|p| Arc::new(p) as _),
-        ),
-        other => {
-            eprintln!(
-                "Warning: unknown embedding model '{}', embeddings disabled",
-                other
-            );
-            None
-        }
-    }
+    let Some(specs) = provider_specs(model) else {
+        eprintln!(
+            "Warning: unknown embedding model '{}', embeddings disabled",
+            model
+        );
+        return None;
+    };
+    try_onnx_then_ollama(
+        backend,
+        || OnnxProvider::try_with_model(specs.onnx).map(|p| Arc::new(p) as _),
+        #[cfg(feature = "ollama")]
+        || OllamaProvider::try_new(specs.ollama).map(|p| Arc::new(p) as _),
+    )
 }
 
 /// Shared logic: try ONNX and/or Ollama based on the backend preference.
@@ -151,12 +251,171 @@ fn resolve_reranker_model(name: &str) -> RerankerModel {
     }
 }
 
+/// The model-backed providers a [`RetrievalEngine`] is wired with.
+///
+/// Each field is an `Arc` over an in-memory model session (ONNX embedding
+/// model, NLI classifier, cross-encoder reranker). Building these is the
+/// expensive part of engine construction — loading the embedding model alone
+/// is a ~240ms ONNX session init. The providers carry no per-store state, so
+/// a single bundle is safely shared across every project and every tool call
+/// for the lifetime of a process. The MCP server caches one bundle per
+/// distinct config signature so models load once instead of once per call.
+#[derive(Clone, Default)]
+pub struct EngineProviders {
+    pub embedding: Option<Arc<dyn EmbeddingProvider>>,
+    pub nli: Option<Arc<dyn NliProvider>>,
+    pub reranker: Option<Arc<dyn Reranker>>,
+    /// Abstractive (T5) title generator, when `title.strategy = "t5"`.
+    /// Keyword titling is in-process and cheap so it is never cached here;
+    /// caching exists precisely because building T5 is an
+    /// encoder+decoder ONNX init that otherwise ran on *every* `create`.
+    pub title: Option<Arc<dyn crate::title::TitleGenerator>>,
+}
+
+/// Load the model-backed providers selected by `config`.
+///
+/// This is the heavyweight step: it initializes ONNX Runtime sessions for the
+/// embedding model (always attempted) and, when enabled, the NLI and reranker
+/// models. It performs blocking model loading and is intended to be called at
+/// most once per process per distinct config (the MCP server caches the
+/// result; the CLI calls it once and exits).
+pub fn resolve_engine_providers(
+    config: &crate::types::EngramConfig,
+    backend_override: Option<EmbeddingBackend>,
+    embedding_pool_size: usize,
+) -> EngineProviders {
+    let mut providers = EngineProviders::default();
+
+    let backend = resolve_backend(config.embeddings.backend, backend_override);
+    // Build up to `embedding_pool_size` independent sessions of the *same*
+    // model and round-robin across them, so concurrent callers (the daemon
+    // serving N agent sessions) don't all serialize behind one session's
+    // mutex. A first-load failure leaves the pool empty → embeddings
+    // disabled, exactly as a single-load failure behaved before; a later
+    // session failing just yields a smaller pool (graceful degradation).
+    let mut sessions = Vec::with_capacity(embedding_pool_size.max(1));
+    for _ in 0..embedding_pool_size.max(1) {
+        match resolve_provider(config.embeddings.provider.as_str(), backend) {
+            Some(p) => sessions.push(p),
+            None => break,
+        }
+    }
+    if let Some(provider) = crate::embeddings::PooledEmbeddingProvider::build(sessions) {
+        if provider.dimensions() != config.embeddings.dimensions {
+            eprintln!(
+                "Warning: provider dimensions ({}) != config dimensions ({})",
+                provider.dimensions(),
+                config.embeddings.dimensions
+            );
+        }
+        providers.embedding = Some(provider);
+    }
+
+    if config.nli.enabled {
+        match OnnxNliProvider::try_new(&config.nli.model) {
+            Some(provider) => providers.nli = Some(Arc::new(provider)),
+            None => {
+                eprintln!("Warning: NLI contradiction detection enabled but model unavailable")
+            }
+        }
+    }
+
+    if config.rerank.enabled {
+        let cache_dir = crate::storage::paths::model_cache_dir()
+            .unwrap_or_else(|_| PathBuf::from(".cache/engramdb/models"));
+
+        let model = resolve_reranker_model(&config.rerank.model);
+        let mut options = RerankInitOptions::new(model)
+            .with_cache_dir(cache_dir)
+            .with_show_download_progress(false);
+        let eps = crate::onnx_ep::execution_providers();
+        if !eps.is_empty() {
+            options = options.with_execution_providers(eps);
+        }
+
+        match TextRerank::try_new(options) {
+            Ok(reranker) => {
+                providers.reranker = Some(LocalReranker::shared(Arc::new(Mutex::new(reranker))))
+            }
+            Err(e) => eprintln!("Warning: reranker init failed, continuing without: {}", e),
+        }
+    }
+
+    // Only T5 is worth caching: keyword titling is in-process and cheap, and
+    // `none` builds nothing. Loading T5 here (an encoder+decoder ONNX init)
+    // means the long-lived daemon / MCP server loads it once into the bundle
+    // instead of rebuilding it on every single `create` — and, under
+    // concurrency, pooling it cuts the dominant create-path tail latency.
+    if config.title.strategy == crate::title::TitleStrategy::T5 {
+        let cores = crate::types::config::available_cores();
+        // The CLI passes `embedding_pool_size == 1` (one-shot, no
+        // concurrency) — don't pay N× the heavy T5 load there. Long-lived
+        // daemon / MCP (pool > 1) pool T5 too. Each session's intra_threads
+        // is reduced so `pool × intra ≤ cores` (T5 sessions are direct ORT
+        // sessions, unlike fastembed), capped at the Lever A sweet spot.
+        let title_pool = if embedding_pool_size <= 1 {
+            1
+        } else {
+            config.title.resolved_pool_size(cores)
+        };
+        let intra = (cores / title_pool.max(1))
+            .min(crate::onnx_ep::intra_threads())
+            .max(1);
+        let mut generators: Vec<Arc<dyn crate::title::TitleGenerator>> =
+            Vec::with_capacity(title_pool);
+        for _ in 0..title_pool {
+            match crate::title::t5::T5TitleGenerator::try_new_with_intra(intra) {
+                Some(gen) => generators.push(Arc::new(gen)),
+                None => break,
+            }
+        }
+        match crate::title::PooledTitleGenerator::build(generators) {
+            Some(t) => providers.title = Some(t),
+            None => {
+                eprintln!("Warning: title strategy 't5' configured but the T5 model is unavailable")
+            }
+        }
+    }
+
+    providers
+}
+
+/// Assemble a [`RetrievalEngine`] from a store, config, and pre-built
+/// providers. This is the cheap part of engine construction — it just wires
+/// already-loaded model sessions onto the per-store engine, doing no I/O or
+/// model loading.
+pub fn assemble_engine(
+    store: MemoryStore,
+    config: crate::types::EngramConfig,
+    providers: EngineProviders,
+) -> RetrievalEngine {
+    let mut engine = RetrievalEngine::new(store, config);
+    if let Some(p) = providers.embedding {
+        engine = engine.with_embedding_provider(p);
+    }
+    if let Some(p) = providers.nli {
+        engine = engine.with_nli_provider(p);
+    }
+    if let Some(r) = providers.reranker {
+        engine = engine.with_reranker(r);
+    }
+    if let Some(t) = providers.title {
+        engine = engine.with_title_provider(t);
+    }
+    engine
+}
+
 /// Build a `RetrievalEngine` with optional embeddings and reranker from a store + config path.
 ///
 /// This is the shared helper that CLI and MCP callers use so they don't duplicate
 /// the provider wiring.  Returns an engine that always works for storage operations;
 /// embeddings and reranking are attached on a best-effort basis.  Vector storage is
 /// handled by the MemoryStore's integrated LanceDB.
+///
+/// This rebuilds the model providers on every call. Long-lived callers that
+/// invoke this per request (the MCP server) should instead cache
+/// [`resolve_engine_providers`] and use [`assemble_engine`] so the embedding
+/// model isn't reloaded on every tool call.
 pub async fn build_engine(
     store: MemoryStore,
     config_path: &std::path::Path,
@@ -165,51 +424,227 @@ pub async fn build_engine(
     let config = crate::storage::config::load_config(config_path)
         .await
         .unwrap_or_default();
-    let mut engine = RetrievalEngine::new(store, config.clone());
+    // The CLI is one-shot (one op, then exit) with no concurrency, so a pool
+    // would only pay N× the ~240ms model load for no throughput gain. Force
+    // a single embedding session here regardless of config; pool auto-sizing
+    // is for the long-lived daemon / MCP server.
+    let providers = resolve_engine_providers(&config, backend_override, 1);
+    assemble_engine(store, config, providers)
+}
 
+/// Signature of the provider-relevant config fields.
+///
+/// Two configs with the same key resolve to interchangeable model sessions, so
+/// the bundle can be shared. The resolved embedding backend is folded in so a
+/// CLI/env backend override doesn't collide with the config-default backend.
+pub fn provider_cache_key(
+    config: &EngramConfig,
+    backend_override: Option<EmbeddingBackend>,
+    embedding_pool_size: usize,
+) -> String {
     let backend = resolve_backend(config.embeddings.backend, backend_override);
-    if let Some(provider) = resolve_provider(config.embeddings.provider.as_str(), backend) {
-        if provider.dimensions() != config.embeddings.dimensions {
-            eprintln!(
-                "Warning: provider dimensions ({}) != config dimensions ({})",
-                provider.dimensions(),
-                config.embeddings.dimensions
-            );
-        }
-        engine = engine.with_embedding_provider(provider);
+    format!(
+        "{backend}|{}|{}|{}|{}|{}|{}|{}|{:?}",
+        config.embeddings.provider,
+        config.embeddings.dimensions,
+        embedding_pool_size,
+        config.nli.enabled,
+        config.nli.model,
+        config.rerank.enabled,
+        config.rerank.model,
+        config.title.strategy,
+    )
+}
+
+/// Process-wide cache of model-backed [`EngineProviders`], keyed by
+/// [`provider_cache_key`].
+///
+/// Loading the ONNX embedding model is a ~240ms session init (NLI / reranker
+/// add more). This cache makes the models load at most once per distinct
+/// config for the life of the process. It backs both the in-process MCP
+/// fallback path and the shared embedding daemon, so both share identical
+/// load-once semantics. `providers` carry no per-store state, so one bundle is
+/// reused across every project and call.
+#[derive(Clone, Default)]
+pub struct ProviderCache {
+    inner: Arc<tokio::sync::Mutex<std::collections::HashMap<String, EngineProviders>>>,
+}
+
+impl ProviderCache {
+    /// Create an empty cache.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    // Initialize NLI provider if enabled
-    if config.nli.enabled {
-        match OnnxNliProvider::try_new(&config.nli.model) {
-            Some(provider) => {
-                engine = engine.with_nli_provider(Arc::new(provider));
-            }
-            None => {
-                eprintln!("Warning: NLI contradiction detection enabled but model unavailable");
-            }
+    /// Number of distinct provider bundles (config signatures) resident.
+    pub async fn loaded_count(&self) -> usize {
+        self.inner.lock().await.len()
+    }
+
+    /// Resolve providers for `config`, building them at most once per signature.
+    ///
+    /// The blocking model load runs on a blocking thread; the async mutex is
+    /// held across it so concurrent first callers collapse into a single load
+    /// instead of each loading the model. Note this serializes the *first*
+    /// build of every distinct signature process-wide (a cold load for one
+    /// config briefly blocks a cache lookup for another). That's acceptable
+    /// here: a process almost always uses a single signature, and with the
+    /// daemon enabled (the default) this in-process path is only the fallback.
+    /// Cached lookups are not serialized beyond the brief map lock.
+    pub async fn get(
+        &self,
+        config: &EngramConfig,
+        backend_override: Option<EmbeddingBackend>,
+    ) -> EngineProviders {
+        // The cache backs the long-lived daemon / in-process MCP fallback —
+        // both serve many concurrent callers — so honor the configured (or
+        // auto `cores/2`) embedding pool size. The size is folded into the
+        // cache key so a config change re-resolves instead of handing back a
+        // wrong-sized pool.
+        let pool_size = config
+            .embeddings
+            .resolved_pool_size(crate::types::config::available_cores());
+        let key = provider_cache_key(config, backend_override, pool_size);
+        let mut guard = self.inner.lock().await;
+        if let Some(p) = guard.get(&key) {
+            return p.clone();
+        }
+        let cfg = config.clone();
+        let providers = tokio::task::spawn_blocking(move || {
+            resolve_engine_providers(&cfg, backend_override, pool_size)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("engine provider init task panicked: {e}");
+            EngineProviders::default()
+        });
+        guard.insert(key, providers.clone());
+        providers
+    }
+}
+
+#[cfg(test)]
+mod provider_cache_tests {
+    use super::*;
+
+    #[test]
+    fn cache_key_is_deterministic_and_signature_sensitive() {
+        let base = EngramConfig::default();
+        let k = provider_cache_key(&base, None, 2);
+        // Deterministic.
+        assert_eq!(k, provider_cache_key(&base, None, 2));
+
+        // Backend override is folded in.
+        assert_ne!(
+            k,
+            provider_cache_key(&base, Some(EmbeddingBackend::Onnx), 2)
+        );
+
+        // Pool size is folded in: two pools of different sizes are NOT
+        // interchangeable model bundles (handing back a wrong-sized pool
+        // would silently under- or over-provision the daemon).
+        assert_ne!(k, provider_cache_key(&base, None, 4));
+        assert_eq!(k, provider_cache_key(&base, None, 2));
+
+        // Each provider-relevant field changes the key.
+        let mut c = base.clone();
+        c.embeddings.provider = "mxbai-embed-large".to_string();
+        assert_ne!(k, provider_cache_key(&c, None, 2));
+
+        let mut c = base.clone();
+        c.embeddings.dimensions += 1;
+        assert_ne!(k, provider_cache_key(&c, None, 2));
+
+        let mut c = base.clone();
+        c.nli.enabled = !c.nli.enabled;
+        assert_ne!(k, provider_cache_key(&c, None, 2));
+
+        let mut c = base.clone();
+        c.nli.model = "other-nli".to_string();
+        assert_ne!(k, provider_cache_key(&c, None, 2));
+
+        let mut c = base.clone();
+        c.rerank.enabled = !c.rerank.enabled;
+        assert_ne!(k, provider_cache_key(&c, None, 2));
+
+        let mut c = base.clone();
+        c.rerank.model = "other-reranker".to_string();
+        assert_ne!(k, provider_cache_key(&c, None, 2));
+
+        // Title strategy is folded in: T5 pulls a cached generator into the
+        // bundle, so it is a distinct signature from keyword/none. (The
+        // default is now T5, so flip to keyword to prove sensitivity.)
+        assert_eq!(base.title.strategy, crate::title::TitleStrategy::T5);
+        let mut c = base.clone();
+        c.title.strategy = crate::title::TitleStrategy::Keyword;
+        assert_ne!(k, provider_cache_key(&c, None, 2));
+
+        // A daemon-only config change does NOT change the model signature.
+        let mut c = base.clone();
+        c.daemon.idle_timeout_secs += 1;
+        assert_eq!(k, provider_cache_key(&c, None, 2));
+    }
+
+    #[tokio::test]
+    async fn provider_cache_starts_empty() {
+        let cache = ProviderCache::new();
+        assert_eq!(cache.loaded_count().await, 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn onnx_config(provider: &str) -> EngramConfig {
+        let mut config = EngramConfig::default();
+        provider.clone_into(&mut config.embeddings.provider);
+        // Pin the backend so the expected fingerprint is deterministic
+        // regardless of the `ollama` feature / backend auto-resolution.
+        config.embeddings.backend = EmbeddingBackend::Onnx;
+        config
+    }
+
+    #[test]
+    fn provider_specs_table_resolves_known_and_rejects_unknown() {
+        assert!(provider_specs("onnx").is_some());
+        assert!(provider_specs("all-minilm").is_some());
+        assert!(provider_specs("nomic-embed-text").is_some());
+        assert!(provider_specs("mxbai-embed-large").is_some());
+        assert!(provider_specs("definitely-not-a-model").is_none());
+    }
+
+    #[test]
+    fn expected_fingerprint_matches_spec_for_every_provider_string() {
+        for (name, spec) in [
+            ("onnx", DEFAULT_ONNX_EMBEDDING),
+            ("all-minilm", DEFAULT_ONNX_EMBEDDING),
+            ("nomic-embed-text", ONNX_NOMIC_EMBED_TEXT),
+            ("mxbai-embed-large", ONNX_MXBAI_EMBED_LARGE),
+        ] {
+            let fp = expected_embedding_fingerprint(&onnx_config(name))
+                .unwrap_or_else(|| panic!("known provider {name} must resolve"));
+            assert_eq!(fp.model, format!("onnx/{}", spec.name));
+            assert_eq!(fp.dimensions, spec.dimensions);
         }
     }
 
-    // Initialize cross-encoder reranker if enabled
-    if config.rerank.enabled {
-        let cache_dir = crate::storage::paths::model_cache_dir()
-            .unwrap_or_else(|_| PathBuf::from(".cache/engramdb/models"));
-
-        let model = resolve_reranker_model(&config.rerank.model);
-        let options = RerankInitOptions::new(model)
-            .with_cache_dir(cache_dir)
-            .with_show_download_progress(false);
-
-        match TextRerank::try_new(options) {
-            Ok(reranker) => {
-                engine = engine.with_reranker(Arc::new(Mutex::new(reranker)));
-            }
-            Err(e) => {
-                eprintln!("Warning: reranker init failed, continuing without: {}", e);
-            }
-        }
+    #[test]
+    fn expected_fingerprint_is_none_for_unknown_provider() {
+        assert!(expected_embedding_fingerprint(&onnx_config("nope")).is_none());
     }
 
-    engine
+    /// The actual safety property the `provider_specs` unification
+    /// protects: the cheap, model-load-free `expected_embedding_fingerprint`
+    /// must equal what the *live* provider reports via `model_id()`. If they
+    /// ever diverge, model-change detection silently passes mismatched
+    /// vectors (the footgun flagged by 3 review agents). Locks the
+    /// fingerprint path and the resolve path to the same table.
+    #[test]
+    fn expected_fingerprint_matches_live_default_provider() {
+        let provider = OnnxProvider::try_new().expect("default ONNX model available in test env");
+        let fp = expected_embedding_fingerprint(&onnx_config("onnx")).unwrap();
+        assert_eq!(fp.model, provider.model_id());
+        assert_eq!(fp.dimensions, provider.dimensions());
+    }
 }

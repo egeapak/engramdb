@@ -17,6 +17,14 @@ path = "src/lib.rs"
 [features]
 default = ["ollama"]
 ollama = ["reqwest"]
+# Apple Core ML (GPU / Neural Engine) acceleration for all ONNX models.
+# Enable on macOS only: `cargo build --features coreml`. Off by default so
+# the Linux/CI build and prebuilt-binary download are unchanged.
+coreml = ["ort/coreml"]
+# XNNPACK portable CPU-kernel EP (per-node MLAS fallback). Off by default;
+# the provider ships in the prebuilt `ort` binary so only this feature is
+# needed (no source build, same downloaded binary). For A/B benchmarking.
+xnnpack = ["ort/xnnpack"]
 
 [dependencies]
 # MCP Server
@@ -39,7 +47,7 @@ ndarray = { version = "0.17", default-features = false }
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yml = "0.0"
+serde_yaml_ng = "0.10"
 toml = "0.8"
 
 # CLI
@@ -83,6 +91,10 @@ predicates = "3"
 rand = "0.9"
 regex = "1"
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
+# Enables the rmcp `client` feature for in-process duplex transport tests
+# (mcp::server::tests round-trips get_prompt / read_resource). Production
+# builds keep the server-only feature set from [dependencies].
+rmcp = { version = "0.15", features = ["client"] }
 
 [[bench]]
 name = "benchmarks"

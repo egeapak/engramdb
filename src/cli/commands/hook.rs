@@ -285,20 +285,21 @@ pub async fn run_hook_pre_tool_use(
     Ok(())
 }
 
-/// Run the SessionStart hook handler.
-///
-/// Retrieves high-criticality active memories and prints them as
-/// additionalContext JSON to stdout so they are surfaced at session start.
-pub async fn run_hook_session_start(
+/// Core SessionStart logic: returns the JSON to print, or `None` if nothing
+/// should be surfaced (store not initialized, no memories above threshold,
+/// retrieval failed). Split from [`run_hook_session_start`] so the body is
+/// unit-testable without stdout capture — mirrors how `process_hook_input`
+/// backs `run_hook_pre_tool_use`.
+async fn process_session_start(
     dir: &Path,
     embedding_backend: Option<EmbeddingBackend>,
     min_criticality: f64,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let store = match MemoryStore::open(dir).await {
         Ok(s) => s,
         Err(e) => {
             tracing::debug!("Hook store open failed (non-fatal): {}", e);
-            return Ok(());
+            return Ok(None);
         }
     };
 
@@ -322,7 +323,7 @@ pub async fn run_hook_session_start(
         Ok(r) => r,
         Err(e) => {
             tracing::debug!("Hook retrieval failed (non-fatal): {}", e);
-            return Ok(());
+            return Ok(None);
         }
     };
 
@@ -330,8 +331,21 @@ pub async fn run_hook_session_start(
     // yet — the agent should still be reminded to capture durable learnings.
     let context = build_session_start_context(&result.memories);
     let json = build_hook_response("SessionStart", &context)?;
-    println!("{}", json);
+    Ok(Some(json))
+}
 
+/// Run the SessionStart hook handler.
+///
+/// Retrieves high-criticality active memories and prints them as
+/// additionalContext JSON to stdout so they are surfaced at session start.
+pub async fn run_hook_session_start(
+    dir: &Path,
+    embedding_backend: Option<EmbeddingBackend>,
+    min_criticality: f64,
+) -> Result<()> {
+    if let Some(json) = process_session_start(dir, embedding_backend, min_criticality).await? {
+        println!("{}", json);
+    }
     Ok(())
 }
 
@@ -1098,5 +1112,127 @@ mod tests {
             },
             _ => panic!("Expected Hook command"),
         }
+    }
+
+    // --- run_hook_session_start integration tests (via process_session_start) ---
+
+    async fn store_with_criticality(crit_values: &[(f64, &str)]) -> TempDir {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        for (crit, summary) in crit_values {
+            let mut mem = Memory::new(
+                MemoryType::Decision,
+                *summary,
+                "body content",
+                Provenance::human(),
+            );
+            mem.criticality = *crit;
+            store.create(&mem).await.unwrap();
+        }
+        temp_dir
+    }
+
+    #[tokio::test]
+    async fn session_start_uninitialized_store_is_silent() {
+        let temp_dir = TempDir::new().unwrap();
+        // No init — `MemoryStore::open` will fail and the hook must
+        // swallow it (we don't want a missing store to break Claude Code).
+        let out = process_session_start(temp_dir.path(), None, 0.5)
+            .await
+            .unwrap();
+        assert!(out.is_none(), "missing store must return None silently");
+    }
+
+    #[tokio::test]
+    async fn session_start_empty_store_returns_none() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let _ = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        let out = process_session_start(temp_dir.path(), None, 0.5)
+            .await
+            .unwrap();
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn session_start_below_threshold_returns_none() {
+        // Only low-criticality memories — must not be surfaced at session
+        // start when min_criticality is above all of them.
+        let dir = store_with_criticality(&[(0.2, "low"), (0.3, "lower")]).await;
+
+        let out = process_session_start(dir.path(), None, 0.9).await.unwrap();
+        assert!(
+            out.is_none(),
+            "no memory above threshold → no session-start surface"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_start_surfaces_high_criticality_memories() {
+        let dir =
+            store_with_criticality(&[(0.95, "Critical decision A"), (0.10, "Low-priority B")])
+                .await;
+
+        let out = process_session_start(dir.path(), None, 0.7)
+            .await
+            .unwrap()
+            .expect("high-criticality memory should surface");
+
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"],
+            "SessionStart"
+        );
+        let ctx = parsed["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(ctx.contains("[EngramDB]"));
+        assert!(
+            ctx.contains("Critical decision A"),
+            "above-threshold memory must appear in context: {}",
+            ctx
+        );
+    }
+
+    #[tokio::test]
+    async fn session_start_min_criticality_filters_correctly() {
+        // Exercise the min_criticality parameter directly: same store, two
+        // different thresholds — high threshold filters out the mid memory.
+        let dir = store_with_criticality(&[
+            (0.95, "High criticality keeper"),
+            (0.55, "Mid criticality maybe"),
+        ])
+        .await;
+
+        // Lower threshold: both included.
+        let permissive = process_session_start(dir.path(), None, 0.5)
+            .await
+            .unwrap()
+            .expect("permissive threshold should surface at least one");
+        let permissive_parsed: serde_json::Value = serde_json::from_str(&permissive).unwrap();
+        let permissive_ctx = permissive_parsed["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(permissive_ctx.contains("High criticality"));
+        assert!(permissive_ctx.contains("Mid criticality"));
+
+        // Higher threshold: only the top one survives.
+        let strict = process_session_start(dir.path(), None, 0.9)
+            .await
+            .unwrap()
+            .expect("strict threshold should still surface the top memory");
+        let strict_parsed: serde_json::Value = serde_json::from_str(&strict).unwrap();
+        let strict_ctx = strict_parsed["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(strict_ctx.contains("High criticality"));
+        assert!(
+            !strict_ctx.contains("Mid criticality"),
+            "min_criticality must drop mid-level memories: {}",
+            strict_ctx
+        );
     }
 }

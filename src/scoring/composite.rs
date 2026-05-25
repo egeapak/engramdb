@@ -300,8 +300,16 @@ fn composite_score_inner(
         score -= config.retrieval.scoring.challenge_penalty;
     }
 
-    // Safety clamp to [0, 1]
-    score = score.clamp(0.0, 1.0);
+    // Safety clamp to [0, 1]. `f64::clamp` propagates NaN, and `criticality`
+    // is parsed from untrusted files with `f64::parse` (which accepts "NaN" /
+    // "inf"), so a non-finite value would otherwise corrupt ranking order.
+    // Treat any non-finite score as 0.0 so a malformed memory sinks to the
+    // bottom rather than comparing Equal to everything during the sort.
+    score = if score.is_finite() {
+        score.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
 
     ScoreBreakdown {
         final_score: score,
@@ -1214,6 +1222,30 @@ mod tests {
             "score should be ~0.4, got {}",
             breakdown.final_score,
         );
+    }
+
+    #[test]
+    fn test_non_finite_criticality_yields_finite_score() {
+        // Regression (found by `cargo fuzz run composite_score`): criticality is
+        // parsed from untrusted files via `f64::parse`, which accepts "NaN" and
+        // "inf". `f64::clamp` propagates NaN, so such a memory used to produce a
+        // non-finite final_score and corrupt ranking order. It must now sink to 0.0.
+        let logical: Vec<String> = vec![];
+        let context = ScoringContext::scope_only(None, &logical);
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut memory = create_test_memory();
+            memory.criticality = bad;
+            let breakdown = composite_score(&memory, &context, &config, now);
+            assert!(
+                breakdown.final_score.is_finite(),
+                "criticality {bad} produced non-finite final_score {}",
+                breakdown.final_score,
+            );
+            assert_eq!(breakdown.final_score, 0.0);
+        }
     }
 
     #[test]

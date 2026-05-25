@@ -458,28 +458,6 @@ struct MemoryOutput {
     status: String,
 }
 
-/// Merge global scored memories into the project results, re-sort by score,
-/// deduplicate by ID, and truncate to `max`.
-fn merge_scored_memories(
-    project: &mut Vec<crate::retrieval::engine::ScoredMemory>,
-    global: Vec<crate::retrieval::engine::ScoredMemory>,
-    max: usize,
-) {
-    use std::collections::HashSet;
-    let existing_ids: HashSet<String> = project.iter().map(|sm| sm.memory.id.clone()).collect();
-    for sm in global {
-        if !existing_ids.contains(&sm.memory.id) {
-            project.push(sm);
-        }
-    }
-    project.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    project.truncate(max);
-}
-
 fn memory_to_output(m: &crate::types::Memory, include_details: bool) -> MemoryOutput {
     MemoryOutput {
         id: m.id.clone(),
@@ -561,6 +539,20 @@ pub struct EngramDbServer {
     /// entry. Project IDs are deterministic, so the cache never needs
     /// invalidation.
     pid_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+    /// Process-wide in-process provider cache used when the daemon is
+    /// disabled or unreachable. Keyed by the provider-relevant config
+    /// signature so each model loads at most once per process (PR #35).
+    provider_cache: ops::ProviderCache,
+    /// Process-wide handle to the shared embedding daemon, established (and
+    /// the daemon auto-spawned) at most once. An inner `None` means a prior
+    /// connect/spawn attempt failed and this process uses in-process models
+    /// for its lifetime — cached so we don't spawn-storm.
+    daemon: Arc<tokio::sync::OnceCell<Option<Arc<crate::daemon::DaemonHandle>>>>,
+    /// Embedding-model-change warning computed once at daemon startup for
+    /// the primary project, appended to `get_info` instructions so the
+    /// connecting agent surfaces it to the user. `None` = no mismatch /
+    /// not yet evaluated.
+    embedding_warning: Option<String>,
     #[allow(dead_code)]
     tool_router: rmcp::handler::server::tool::ToolRouter<Self>,
 }
@@ -605,8 +597,30 @@ impl EngramDbServer {
             stats,
             session_id,
             pid_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            provider_cache: ops::ProviderCache::new(),
+            daemon: Arc::new(tokio::sync::OnceCell::new()),
+            embedding_warning: None,
             tool_router: Self::tool_router(),
         })
+    }
+
+    /// Replace this server's model caches with process-shared ones.
+    ///
+    /// The SSE transport builds a fresh `EngramDbServer` per connection. Each
+    /// default-constructed server has its own empty [`ops::ProviderCache`] and
+    /// daemon `OnceCell`, so without sharing every HTTP connection would reload
+    /// the embedding model (or re-probe/auto-spawn the daemon) on its first
+    /// tool call — defeating the load-once-per-process intent. Injecting one
+    /// process-wide cache + daemon handle restores it on SSE the same way
+    /// stdio gets it for free (single server instance).
+    fn with_shared_model_caches(
+        mut self,
+        provider_cache: ops::ProviderCache,
+        daemon: Arc<tokio::sync::OnceCell<Option<Arc<crate::daemon::DaemonHandle>>>>,
+    ) -> Self {
+        self.provider_cache = provider_cache;
+        self.daemon = daemon;
+        self
     }
 
     #[cfg(test)]
@@ -628,6 +642,9 @@ impl EngramDbServer {
             stats,
             session_id,
             pid_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            provider_cache: ops::ProviderCache::new(),
+            daemon: Arc::new(tokio::sync::OnceCell::new()),
+            embedding_warning: None,
             tool_router: Self::tool_router(),
         }
     }
@@ -667,6 +684,13 @@ impl EngramDbServer {
                     )
                 })?;
         }
+
+        // Consolidate any memories that were written under the worktree's
+        // own stray store (e.g. by a CLI invocation before this fix) into
+        // the main project so nothing is left stranded.
+        crate::storage::worktree::consolidate_worktree_into_main(&self.dir, &self.effective_dir)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to consolidate worktree memories: {}", e))?;
 
         let child_id = crate::storage::project_id::compute_project_id(&self.dir);
         let parent_id = crate::storage::project_id::compute_project_id(&self.effective_dir);
@@ -825,16 +849,259 @@ impl EngramDbServer {
     }
 
     /// Build a RetrievalEngine for the given project override.
+    ///
+    /// Model-backed providers come from the shared embedding daemon when
+    /// `daemon.enabled` and a daemon is reachable (so this process loads no
+    /// models), otherwise from the process-wide in-process cache so the model
+    /// still loads at most once per process. Only the cheap per-store wiring
+    /// happens here.
     async fn build_engine_for(&self, project: Option<&str>) -> Result<RetrievalEngine, String> {
         let dir = self.resolve_dir(project).await?;
         let store = self.open_store_for(project).await?;
         let config_path = dir.join(".engramdb").join("config.toml");
         let pid = self.project_id_for_dir(&dir, project);
-        let engine = ops::build_engine(store, &config_path, self.embedding_backend).await;
-        Ok(engine
+        let config = load_config(&config_path).await.unwrap_or_default();
+        let mode = config.embeddings.reindex_on_model_change;
+        let providers = Self::resolve_providers(
+            &self.provider_cache,
+            &self.daemon,
+            self.embedding_backend,
+            &config,
+            &dir,
+        )
+        .await;
+        // Strict mode: refuse embedding-dependent work on a model mismatch
+        // so the agent gets an actionable error instead of degraded search.
+        if mode == crate::types::ReindexOnModelChange::Error {
+            let current =
+                providers
+                    .embedding
+                    .as_ref()
+                    .map(|p| crate::storage::EmbeddingFingerprint {
+                        model: p.model_id(),
+                        dimensions: p.dimensions(),
+                    });
+            let report = ops::embedding_model_report(&store, current).await;
+            if !report.status.is_consistent() {
+                return Err(report.warning.unwrap_or_else(|| {
+                    "EngramDB: embedding model mismatch; run \
+                     `engramdb reindex --embeddings-only`"
+                        .to_string()
+                }));
+            }
+        }
+        Ok(self.finish_engine(store, config, providers, pid))
+    }
+
+    /// Build a retrieval engine **bypassing** the `error`-mode model-mismatch
+    /// gate in [`Self::build_engine_for`].
+    ///
+    /// Remediation paths (`reindex`, `auto`-reindex at startup) must run
+    /// precisely when the store is flagged mismatched — going through the
+    /// enforcing chokepoint would make `error` mode refuse the one operation
+    /// that fixes the mismatch. A genuine engine-build failure (store not
+    /// initialized, model load error) is still returned as `Err` so callers
+    /// surface it instead of silently degrading to an index-only reindex.
+    async fn assemble_engine_for(&self, project: Option<&str>) -> Result<RetrievalEngine, String> {
+        let dir = self.resolve_dir(project).await?;
+        let store = self.open_store_for(project).await?;
+        let config_path = dir.join(".engramdb").join("config.toml");
+        let pid = self.project_id_for_dir(&dir, project);
+        let config = load_config(&config_path).await.unwrap_or_default();
+        let providers = Self::resolve_providers(
+            &self.provider_cache,
+            &self.daemon,
+            self.embedding_backend,
+            &config,
+            &dir,
+        )
+        .await;
+        Ok(self.finish_engine(store, config, providers, pid))
+    }
+
+    /// Shared tail of [`Self::build_engine_for`] (enforcing) and
+    /// [`Self::assemble_engine_for`] (non-enforcing remediation path): wire
+    /// the per-store engine from already-resolved pieces. Kept as one place
+    /// so the two construction paths can never drift apart.
+    fn finish_engine(
+        &self,
+        store: MemoryStore,
+        config: crate::types::EngramConfig,
+        providers: ops::EngineProviders,
+        pid: String,
+    ) -> RetrievalEngine {
+        ops::assemble_engine(store, config, providers)
             .with_stats(self.stats.clone())
             .with_project_id(pid)
-            .with_session_id(Some(self.session_id.clone())))
+            .with_session_id(Some(self.session_id.clone()))
+    }
+
+    /// Evaluate the primary project's embedding-model identity for the
+    /// startup warning. Best-effort: any failure or `off` mode → `None`
+    /// (never blocks startup). Returns `(mode, report)`.
+    async fn embedding_startup_report(
+        &self,
+    ) -> Option<(
+        crate::types::ReindexOnModelChange,
+        ops::EmbeddingModelReport,
+    )> {
+        // Best-effort, but never *silently* skipped: a transient I/O failure
+        // resolving the project or opening the store would otherwise drop the
+        // model-change warning with no trace at all. Log and bail instead.
+        let dir = match self.resolve_dir(None).await {
+            Ok(dir) => dir,
+            Err(e) => {
+                tracing::warn!(
+                    "EngramDB: skipping embedding model-change check \
+                     (cannot resolve project dir): {e}"
+                );
+                return None;
+            }
+        };
+        let store = match self.open_store_for(None).await {
+            Ok(store) => store,
+            Err(e) => {
+                tracing::warn!(
+                    "EngramDB: skipping embedding model-change check \
+                     (cannot open store): {e}"
+                );
+                return None;
+            }
+        };
+        let config_path = dir.join(".engramdb").join("config.toml");
+        let config = load_config(&config_path).await.unwrap_or_default();
+        let mode = config.embeddings.reindex_on_model_change;
+        if mode == crate::types::ReindexOnModelChange::Off {
+            return None;
+        }
+        let providers = Self::resolve_providers(
+            &self.provider_cache,
+            &self.daemon,
+            self.embedding_backend,
+            &config,
+            &dir,
+        )
+        .await;
+        let current = providers
+            .embedding
+            .as_ref()
+            .map(|p| crate::storage::EmbeddingFingerprint {
+                model: p.model_id(),
+                dimensions: p.dimensions(),
+            });
+        Some((mode, ops::embedding_model_report(&store, current).await))
+    }
+
+    /// Re-embed the primary project's memories and stamp the model
+    /// fingerprint (used by `reindex_on_model_change = auto` at startup).
+    async fn auto_reindex_default(&self) -> anyhow::Result<()> {
+        let store = self
+            .open_store_for(None)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let engine = self
+            .assemble_engine_for(None)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        ops::reindex(&store, Some(&engine), true).await?;
+        Ok(())
+    }
+
+    /// Whether the shared-daemon path should be taken. Always disabled under
+    /// the crate's own `cargo test --lib` (see [`Self::resolve_providers`]).
+    #[cfg(not(test))]
+    fn daemon_path_enabled(config: &crate::types::EngramConfig) -> bool {
+        config.daemon.enabled
+    }
+
+    #[cfg(test)]
+    fn daemon_path_enabled(_config: &crate::types::EngramConfig) -> bool {
+        false
+    }
+
+    /// Resolve the model-backed providers for `config` at `dir`.
+    ///
+    /// When `daemon.enabled`, delegates every model (embedding / NLI /
+    /// reranker) to the shared daemon — this process loads none. On any
+    /// failure (disabled, daemon unreachable, or the daemon lacks the model)
+    /// it falls back to the in-process [`ops::ProviderCache`], which still
+    /// loads each model at most once per process (PR #35). Associated rather
+    /// than a `&self` method so the warmup task can call it with cloned
+    /// handles.
+    ///
+    /// The daemon branch is compiled out under `cfg(test)`: the crate's own
+    /// `cargo test --lib` would otherwise auto-spawn the *test* binary as a
+    /// daemon (it isn't the CLI), stalling every server test on the
+    /// connect/retry budget. The daemon path has dedicated coverage in
+    /// [`crate::daemon::tests`]; integration tests build the lib without
+    /// `cfg(test)` so they exercise it normally.
+    async fn resolve_providers(
+        provider_cache: &ops::ProviderCache,
+        daemon: &Arc<tokio::sync::OnceCell<Option<Arc<crate::daemon::DaemonHandle>>>>,
+        backend_override: Option<EmbeddingBackend>,
+        config: &crate::types::EngramConfig,
+        dir: &Path,
+    ) -> ops::EngineProviders {
+        if Self::daemon_path_enabled(config) {
+            if let Some(handle) = Self::daemon_handle(daemon, config).await {
+                // Send the resolved concrete backend so the daemon's provider
+                // key matches ours regardless of the daemon's environment.
+                let backend = Some(ops::resolve_backend(
+                    config.embeddings.backend,
+                    backend_override,
+                ));
+                if let Some(p) = crate::daemon::remote_providers(
+                    handle,
+                    dir.to_string_lossy().into_owned(),
+                    backend,
+                    config,
+                )
+                .await
+                {
+                    return p;
+                }
+            }
+        }
+        provider_cache.get(config, backend_override).await
+    }
+
+    /// Process-wide daemon handle, established (and the daemon auto-spawned)
+    /// at most once. The result — including a `None` failure — is cached for
+    /// the process lifetime so a one-time connect/spawn failure doesn't
+    /// trigger a spawn storm.
+    async fn daemon_handle(
+        daemon: &Arc<tokio::sync::OnceCell<Option<Arc<crate::daemon::DaemonHandle>>>>,
+        config: &crate::types::EngramConfig,
+    ) -> Option<Arc<crate::daemon::DaemonHandle>> {
+        let idle = config.daemon.idle_timeout_secs;
+        let socket = crate::daemon::resolve_socket(None, &config.daemon);
+        daemon
+            .get_or_init(|| async move {
+                crate::daemon::DaemonHandle::connect_or_spawn(socket, idle).await
+            })
+            .await
+            .clone()
+    }
+
+    /// Preload the embedding model *before* the first tool call so it isn't
+    /// paid on it. With the daemon enabled this spawns/connects the daemon and
+    /// warms its model; otherwise it warms the in-process cache.
+    ///
+    /// Non-blocking: spawns a task and returns immediately. Best-effort —
+    /// failures are logged, never fatal. If a tool call races this warmup the
+    /// daemon's lock / the cache's async mutex make the model load exactly
+    /// once.
+    pub fn spawn_provider_warmup(&self) {
+        let provider_cache = self.provider_cache.clone();
+        let daemon = Arc::clone(&self.daemon);
+        let backend = self.embedding_backend;
+        let dir = self.effective_dir.clone();
+        let config_path = self.effective_dir.join(".engramdb").join("config.toml");
+        tokio::spawn(async move {
+            let config = load_config(&config_path).await.unwrap_or_default();
+            let _ = Self::resolve_providers(&provider_cache, &daemon, backend, &config, &dir).await;
+            tracing::debug!("engine provider warmup complete");
+        });
     }
 
     /// Compute the project ID used as the telemetry partition key for the
@@ -991,6 +1258,11 @@ impl EngramDbServer {
         let _scope = self.scope("create", input.project.as_deref());
         let store = self.open_store_for(input.project.as_deref()).await?;
         let engine = self.build_engine_for(input.project.as_deref()).await?;
+        // The configured strategy is the deployment default; an explicit
+        // per-call `title_strategy` still overrides it. This is what makes
+        // `[title] strategy = "t5"` actually take effect for agent creates
+        // (and thus exercise the cached/pooled T5 generator).
+        let config = self.load_config_for(input.project.as_deref()).await?;
         let type_ = ops::parse_memory_type(&input.type_)
             .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
@@ -1036,7 +1308,7 @@ impl EngramDbServer {
                     .map(|s| TitleStrategy::parse(&s))
                     .transpose()
                     .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?
-                    .unwrap_or_default(),
+                    .unwrap_or(config.title.strategy),
                 // Run embedding + contradiction detection in the background so the
                 // agent isn't blocked on embedding-model inference.
                 embed_async: true,
@@ -1125,7 +1397,7 @@ impl EngramDbServer {
             if let Ok(global_engine) = self.build_engine_for(Some("global")).await {
                 if let Ok(global_result) = ops::query_memories(&global_engine, &query).await {
                     let max = query.max_results.unwrap_or(10);
-                    merge_scored_memories(&mut result.memories, global_result.memories, max);
+                    ops::merge_scored_memories(&mut result.memories, global_result.memories, max);
                     result.total += global_result.total;
                 }
             }
@@ -1593,9 +1865,19 @@ impl EngramDbServer {
         let embeddings_only = input.embeddings_only.unwrap_or(false);
         let index_only = input.index_only.unwrap_or(false);
 
-        // Build engine outside conditional so it stays alive for the reference
+        // Build engine outside conditional so it stays alive for the
+        // reference. `reindex` is the remediation path for an embedding
+        // model mismatch, so it must NOT go through the `error`-mode gate
+        // in `build_engine_for` (that would refuse the very operation that
+        // fixes the mismatch). A genuine build failure is surfaced rather
+        // than silently downgrading to an index-only reindex reported as
+        // success.
         let engine = if !index_only {
-            self.build_engine_for(input.project.as_deref()).await.ok()
+            Some(
+                self.assemble_engine_for(input.project.as_deref())
+                    .await
+                    .map_err(|e| error_response(ErrorCode::InternalError, &e))?,
+            )
         } else {
             None
         };
@@ -1833,8 +2115,8 @@ impl ServerHandler for EngramDbServer {
                 icons: None,
                 website_url: None,
             },
-            instructions: Some(
-                "Project-scoped persistent memory store for coding agents. \
+            instructions: Some({
+                let mut s = "Project-scoped persistent memory store for coding agents. \
                  Stores decisions, hazards, conventions, and context about the codebase. \
                  IMPORTANT: Query memories (query) before answering project questions, \
                  investigating workflows, or researching how things work — not only before \
@@ -1851,8 +2133,14 @@ impl ServerHandler for EngramDbServer {
                  about the project, the environment/tooling, or the user's preferences came \
                  up (not task minutiae), query existing memories, then create the new ones \
                  and challenge contradictions. Suggested, not required."
-                    .to_string(),
-            ),
+                    .to_string();
+                if let Some(w) = &self.embedding_warning {
+                    s.push_str("\n\nIMPORTANT — ACTION NEEDED: ");
+                    s.push_str(w);
+                    s.push_str(" Tell the user.");
+                }
+                s
+            }),
         }
     }
 
@@ -2154,9 +2442,34 @@ pub async fn run_stdio(
         )
     });
 
-    let server = EngramDbServer::new_with_stats(dir, embedding_backend, stats.clone())?;
+    let mut server = EngramDbServer::new_with_stats(dir, embedding_backend, stats.clone())?;
     // Detect git worktrees and register/init the main project if needed.
     server.ensure_hierarchy().await?;
+    // Embedding-model-change check: warn (default), auto-reindex, or — in
+    // `error` mode — leave the warning so embedding tools hard-fail.
+    if let Some((mode, report)) = server.embedding_startup_report().await {
+        if !report.status.is_consistent() {
+            if let Some(w) = &report.warning {
+                tracing::warn!("{w}");
+            }
+            server.embedding_warning = report.warning.clone();
+            if mode == crate::types::ReindexOnModelChange::Auto {
+                tracing::warn!(
+                    "EngramDB: reindex_on_model_change=auto — re-embedding before serving…"
+                );
+                match server.auto_reindex_default().await {
+                    Ok(()) => {
+                        tracing::warn!("EngramDB: auto-reindex complete.");
+                        server.embedding_warning = None;
+                    }
+                    Err(e) => tracing::warn!("EngramDB: auto-reindex failed: {e}"),
+                }
+            }
+        }
+    }
+    // Load the embedding model in the background now so the first tool call
+    // doesn't pay the ~240ms ONNX session init synchronously.
+    server.spawn_provider_warmup();
     // `serve` consumes the server; the running service owns the remaining
     // `Arc<StatsCollector>` baked into it. Wait on the service, then drop
     // both it and the local `stats` so the channel closes and the flush
@@ -2205,21 +2518,72 @@ pub async fn run_sse(
         )
     });
 
+    // One process-wide model cache + daemon handle shared across every
+    // per-connection server, so the embedding model loads once (or the
+    // daemon is probed/spawned once) for the whole process rather than per
+    // HTTP connection.
+    let provider_cache = ops::ProviderCache::new();
+    let daemon: Arc<tokio::sync::OnceCell<Option<Arc<crate::daemon::DaemonHandle>>>> =
+        Arc::new(tokio::sync::OnceCell::new());
+
     // Resolve hierarchy eagerly once: subsequent per-connection server
     // instances share the registry, so registration only happens once.
-    {
-        let warmup = EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())?;
+    //
+    // The embedding-model-change policy is evaluated here as well. The
+    // per-connection servers built by the factory closure below are
+    // short-lived and never run startup logic, so without this every SSE
+    // connection would silently skip the check (`embedding_warning: None`)
+    // and `auto` mode would never re-embed. Mirror `run_stdio`: compute the
+    // warning (and auto-reindex if requested) exactly once, then seed every
+    // per-connection server with the resulting warning. The warmup server
+    // shares the process-wide model cache / daemon so the check (and any
+    // auto-reindex) reuse the same providers the connections will.
+    let embedding_warning = {
+        let mut warmup =
+            EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())?
+                .with_shared_model_caches(provider_cache.clone(), daemon.clone());
         warmup.ensure_hierarchy().await?;
-    }
+        if let Some((mode, report)) = warmup.embedding_startup_report().await {
+            if !report.status.is_consistent() {
+                if let Some(w) = &report.warning {
+                    tracing::warn!("{w}");
+                }
+                warmup.embedding_warning = report.warning.clone();
+                if mode == crate::types::ReindexOnModelChange::Auto {
+                    tracing::warn!(
+                        "EngramDB: reindex_on_model_change=auto — re-embedding before serving…"
+                    );
+                    match warmup.auto_reindex_default().await {
+                        Ok(()) => {
+                            tracing::warn!("EngramDB: auto-reindex complete.");
+                            warmup.embedding_warning = None;
+                        }
+                        Err(e) => tracing::warn!("EngramDB: auto-reindex failed: {e}"),
+                    }
+                }
+            }
+        }
+        // Warm the shared model cache / daemon once (after any auto-reindex)
+        // so the first connection's first tool call doesn't pay the load.
+        warmup.spawn_provider_warmup();
+        warmup.embedding_warning
+    };
 
     let config = StreamableHttpServerConfig::default();
     let ct = config.cancellation_token.clone();
     let service = StreamableHttpService::new(
         {
             let stats = stats.clone();
+            let embedding_warning = embedding_warning.clone();
+            let provider_cache = provider_cache.clone();
+            let daemon = daemon.clone();
             move || {
-                EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())
-                    .map_err(|e| std::io::Error::other(e.to_string()))
+                let mut server =
+                    EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())
+                        .map(|s| s.with_shared_model_caches(provider_cache.clone(), daemon.clone()))
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                server.embedding_warning = embedding_warning.clone();
+                Ok(server)
             }
         },
         Arc::new(LocalSessionManager::default()),
@@ -3411,6 +3775,68 @@ mod tests {
             .await;
         let val = parse_ok(&result);
         assert!(val["indexed"].as_u64().unwrap() >= 1);
+    }
+
+    /// Regression for PR-blocker bug #2: `reindex` is the remediation path
+    /// for an embedding model mismatch, so it must keep working even under
+    /// the strict `error` policy — where `build_engine_for` (the enforcing
+    /// chokepoint) deliberately refuses. Before the fix, `memory_reindex`
+    /// did `build_engine_for(...).ok()` → `None` in `error` mode and
+    /// silently ran an index-only reindex, reporting `embedded: 0` as
+    /// success while leaving the store unfixable.
+    #[tokio::test]
+    async fn reindex_re_embeds_in_error_mode_despite_mismatch() {
+        let (dir, server) = setup().await;
+        let _ = create_and_get_id(&server, "decision", "To reindex", "Content").await;
+
+        // Force an unambiguous model mismatch.
+        let store = server.open_store_for(None).await.unwrap();
+        store
+            .set_embedding_fingerprint(crate::storage::EmbeddingFingerprint {
+                model: "onnx/bogus-old-model".to_string(),
+                dimensions: 384,
+            })
+            .await
+            .unwrap();
+
+        // Strictest policy: refuse degraded embedding work.
+        let mut config = crate::types::EngramConfig::default();
+        config.embeddings.reindex_on_model_change = crate::types::ReindexOnModelChange::Error;
+        tokio::fs::write(
+            dir.path().join(".engramdb").join("config.toml"),
+            toml::to_string(&config).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // The enforcing chokepoint must refuse on the mismatch...
+        assert!(
+            server.build_engine_for(None).await.is_err(),
+            "error mode must gate the normal embedding path"
+        );
+        // ...but the remediation builder must bypass the gate...
+        assert!(
+            server.assemble_engine_for(None).await.is_ok(),
+            "reindex's engine builder must not be gated by error mode"
+        );
+
+        // ...and `reindex` must actually re-embed, not silently no-op.
+        let result = server
+            .memory_reindex(Parameters(ReindexInput {
+                embeddings_only: Some(true),
+                index_only: None,
+                project: None,
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(
+            val["embedded"].as_u64().unwrap() >= 1,
+            "reindex must re-embed in error mode (bug #2); got {val}"
+        );
+
+        // The store is consistent again (fingerprint re-stamped, not bogus).
+        let fp = store.embedding_fingerprint().await.unwrap().unwrap();
+        assert_ne!(fp.model, "onnx/bogus-old-model");
     }
 
     // -----------------------------------------------------------------------
@@ -5644,5 +6070,241 @@ mod tests {
             instructions.contains("challenge"),
             "MCP instructions nudge should reference MCP tools, got: {instructions}"
         );
+    }
+
+    // =================================================================
+    // Prompt and resource transport coverage.
+    //
+    // `get_prompt` (CRAP 182, was 0% covered) and `read_resource` (CRAP
+    // 90, was 0% covered) live behind `ServerHandler` trait impls — they
+    // can't be called directly from a test because their `_context`
+    // parameter is `RequestContext<RoleServer>` and the `Peer` inside
+    // requires a real transport. The standard rmcp pattern (used in the
+    // upstream `tests/test_message_protocol.rs`) is to wire a duplex
+    // transport in process: spawn the server on one end, drive a tiny
+    // `()` client on the other, and round-trip the request.
+    // =================================================================
+
+    async fn duplex_serve(
+        server: EngramDbServer,
+    ) -> (
+        rmcp::service::RunningService<rmcp::RoleClient, ()>,
+        tokio::task::JoinHandle<anyhow::Result<()>>,
+    ) {
+        let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+        let server_handle: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+            let svc = server.serve(server_io).await?;
+            svc.waiting().await?;
+            Ok(())
+        });
+        let client = rmcp::serve_client((), client_io)
+            .await
+            .expect("client must hand-shake against the in-process server");
+        (client, server_handle)
+    }
+
+    /// `get_prompt("memory-session-start")` against an empty store →
+    /// fallback "No relevant memories found." branch (server.rs:2342)
+    /// + the standard prompt template.
+    #[tokio::test]
+    async fn get_prompt_session_start_empty_store_returns_fallback() {
+        let (_dir, server) = setup().await;
+        let (client, server_handle) = duplex_serve(server).await;
+
+        let result = client
+            .peer()
+            .get_prompt(GetPromptRequestParams {
+                meta: None,
+                name: "memory-session-start".to_string(),
+                arguments: None,
+            })
+            .await
+            .expect("get_prompt must succeed");
+
+        assert_eq!(
+            result.description.as_deref(),
+            Some("Session start briefing")
+        );
+        assert_eq!(result.messages.len(), 1);
+        let text = match &result.messages[0].content {
+            PromptMessageContent::Text { text } => text.clone(),
+            other => panic!("expected text content, got {other:?}"),
+        };
+        assert!(text.contains("EngramDB"), "missing EngramDB header: {text}");
+        assert!(
+            text.contains("No relevant memories found."),
+            "empty-store fallback missing: {text}"
+        );
+
+        // Clean shutdown so the join handle resolves.
+        client.cancel().await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+    }
+
+    /// `get_prompt("memory-session-end")` against an empty store → the
+    /// `compute_stats` Ok branch with zero memories and zero
+    /// review_count.
+    #[tokio::test]
+    async fn get_prompt_session_end_reports_zero_memory_store() {
+        let (_dir, server) = setup().await;
+        let (client, server_handle) = duplex_serve(server).await;
+
+        let result = client
+            .peer()
+            .get_prompt(GetPromptRequestParams {
+                meta: None,
+                name: "memory-session-end".to_string(),
+                arguments: None,
+            })
+            .await
+            .expect("get_prompt must succeed");
+
+        assert_eq!(result.description.as_deref(), Some("Session end review"));
+        let text = match &result.messages[0].content {
+            PromptMessageContent::Text { text } => text.clone(),
+            other => panic!("expected text content, got {other:?}"),
+        };
+        assert!(
+            text.contains("Current store has 0 memories"),
+            "stats line missing: {text}"
+        );
+        assert!(
+            text.contains("create"),
+            "session-end template body missing: {text}"
+        );
+
+        client.cancel().await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+    }
+
+    /// Unknown prompt name → `invalid_params` error branch
+    /// (server.rs:2397-2401).
+    #[tokio::test]
+    async fn get_prompt_with_unknown_name_returns_error() {
+        let (_dir, server) = setup().await;
+        let (client, server_handle) = duplex_serve(server).await;
+
+        let err = client
+            .peer()
+            .get_prompt(GetPromptRequestParams {
+                meta: None,
+                name: "this-prompt-does-not-exist".to_string(),
+                arguments: None,
+            })
+            .await
+            .expect_err("unknown prompt must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.to_lowercase().contains("unknown")
+                || msg.to_lowercase().contains("not found")
+                || msg.to_lowercase().contains("invalid"),
+            "unexpected error message: {msg}"
+        );
+
+        client.cancel().await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+    }
+
+    /// `read_resource("memory://index")` → list_filterable branch.
+    /// Empty store → empty JSON array in the contents text.
+    #[tokio::test]
+    async fn read_resource_memory_index_returns_serialized_filterables() {
+        let (_dir, server) = setup().await;
+        let (client, server_handle) = duplex_serve(server).await;
+
+        let result = client
+            .peer()
+            .read_resource(ReadResourceRequestParams {
+                meta: None,
+                uri: "memory://index".to_string(),
+            })
+            .await
+            .expect("read_resource must succeed");
+
+        assert_eq!(result.contents.len(), 1);
+        let text = match &result.contents[0] {
+            ResourceContents::TextResourceContents { text, .. } => text.clone(),
+            other => panic!("expected text contents, got {other:?}"),
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text).expect("contents must be JSON array");
+        assert!(parsed.is_array(), "expected array, got {parsed}");
+        assert_eq!(parsed.as_array().unwrap().len(), 0);
+
+        client.cancel().await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+    }
+
+    /// `read_resource("memory://context/<path>")` → build_engine + query
+    /// branch (server.rs:2227-2263). Empty store → empty memories array.
+    #[tokio::test]
+    async fn read_resource_memory_context_returns_serialized_query_result() {
+        let (_dir, server) = setup().await;
+        let (client, server_handle) = duplex_serve(server).await;
+
+        let result = client
+            .peer()
+            .read_resource(ReadResourceRequestParams {
+                meta: None,
+                uri: "memory://context/src/lib.rs".to_string(),
+            })
+            .await
+            .expect("read_resource must succeed");
+
+        let text = match &result.contents[0] {
+            ResourceContents::TextResourceContents { text, .. } => text.clone(),
+            other => panic!("expected text contents, got {other:?}"),
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(parsed.is_array(), "expected array, got {parsed}");
+
+        client.cancel().await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+    }
+
+    /// Unknown URI → `invalid_params` error branch (server.rs:2264-2268).
+    #[tokio::test]
+    async fn read_resource_with_unknown_uri_returns_error() {
+        let (_dir, server) = setup().await;
+        let (client, server_handle) = duplex_serve(server).await;
+
+        let err = client
+            .peer()
+            .read_resource(ReadResourceRequestParams {
+                meta: None,
+                uri: "memory://nope/whatever".to_string(),
+            })
+            .await
+            .expect_err("unknown URI must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Unknown resource URI") || msg.to_lowercase().contains("invalid"),
+            "unexpected error message: {msg}"
+        );
+
+        client.cancel().await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+    }
+
+    /// Sanity check: list_prompts returns the two prompts the server
+    /// claims to support (server.rs:2273-2302). This also exercises the
+    /// list_prompts handler which had no direct test.
+    #[tokio::test]
+    async fn list_prompts_returns_both_session_prompts() {
+        let (_dir, server) = setup().await;
+        let (client, server_handle) = duplex_serve(server).await;
+
+        let result = client
+            .peer()
+            .list_prompts(None)
+            .await
+            .expect("list_prompts must succeed");
+        let names: std::collections::HashSet<String> =
+            result.prompts.iter().map(|p| p.name.clone()).collect();
+        assert!(names.contains("memory-session-start"));
+        assert!(names.contains("memory-session-end"));
+
+        client.cancel().await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
     }
 }

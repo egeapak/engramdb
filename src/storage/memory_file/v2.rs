@@ -128,7 +128,7 @@ fn split_frontmatter(content: &str) -> Result<(&str, &str)> {
 }
 
 fn parse_v2(frontmatter: &str, body: &str) -> Result<Memory> {
-    let fm: MinimalFrontmatter = serde_yml::from_str(frontmatter)?;
+    let fm: MinimalFrontmatter = serde_yaml_ng::from_str(frontmatter)?;
 
     let sections = parse_body_sections(body);
 
@@ -202,7 +202,7 @@ fn write_v2(memory: &Memory) -> Result<String> {
         status: memory.status,
         title: memory.title.clone(),
     };
-    let yaml = serde_yml::to_string(&fm)?;
+    let yaml = serde_yaml_ng::to_string(&fm)?;
     out.push_str(&yaml);
     out.push_str("---\n\n");
 
@@ -283,7 +283,7 @@ fn write_v2(memory: &Memory) -> Result<String> {
         supersedes: memory.supersedes.clone(),
         challenges: memory.challenges.clone(),
     };
-    let hidden_yaml = serde_yml::to_string(&hidden)?;
+    let hidden_yaml = serde_yaml_ng::to_string(&hidden)?;
     out.push_str(&format!("\n<!-- engramdb\n{hidden_yaml}-->\n"));
 
     Ok(out)
@@ -313,7 +313,7 @@ fn parse_hidden_meta(body: &str) -> HiddenMeta {
         let after_marker = &body[start_idx + start_marker.len()..];
         if let Some(end_idx) = after_marker.find(end_marker) {
             let yaml_content = after_marker[..end_idx].trim();
-            if let Ok(meta) = serde_yml::from_str(yaml_content) {
+            if let Ok(meta) = serde_yaml_ng::from_str(yaml_content) {
                 return meta;
             }
         }

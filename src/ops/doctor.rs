@@ -354,6 +354,7 @@ pub async fn doctor_environment(
     // --- Embeddings section ---
     let mut embeddings_checks = Vec::new();
     embeddings_checks.push(check_embedding_backend(dir).await);
+    embeddings_checks.push(check_embedding_model_identity(dir).await);
     let cache_dir = crate::storage::paths::model_cache_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from(".cache/engramdb/models"));
     embeddings_checks.push(check_embedding_model_cached(dir, &cache_dir).await);
@@ -362,6 +363,14 @@ pub async fn doctor_environment(
     sections.push(DoctorSection {
         name: "Embeddings".to_string(),
         checks: embeddings_checks,
+        subsections: vec![],
+    });
+
+    // --- Daemon section (informational; the daemon is optional and
+    // auto-spawned, so these never count as failures) ---
+    sections.push(DoctorSection {
+        name: "Daemon".to_string(),
+        checks: vec![check_daemon(dir).await],
         subsections: vec![],
     });
 
@@ -378,6 +387,56 @@ pub async fn doctor_environment(
         sections,
         all_passed,
         store_check,
+    }
+}
+
+/// Inspect the shared embedding daemon: configured? reachable? Informational
+/// only — the daemon is optional and auto-spawned by the next MCP run, so a
+/// stopped daemon is never a failure.
+async fn check_daemon(dir: &Path) -> EnvironmentCheck {
+    let config = crate::storage::config::load_config(&dir.join(".engramdb").join("config.toml"))
+        .await
+        .unwrap_or_default();
+    let socket = crate::daemon::resolve_socket(None, &config.daemon);
+    let mut details = vec![
+        format!("socket: {}", socket.display()),
+        format!(
+            "config: enabled={}, idle_timeout_secs={}",
+            config.daemon.enabled, config.daemon.idle_timeout_secs
+        ),
+    ];
+
+    if !config.daemon.enabled {
+        return EnvironmentCheck {
+            name: "Embedding daemon".to_string(),
+            passed: true,
+            message: "disabled in config (models load in-process per MCP)".to_string(),
+            suggestion: None,
+            details,
+            status: Some(CheckStatus::Info),
+        };
+    }
+
+    let (message, suggestion) = match crate::daemon::query_status(&socket).await {
+        Ok(Some(s)) => {
+            details.push(format!(
+                "pid {}, uptime {}s, {} model bundle(s), {} requests served (cumulative)",
+                s.pid, s.uptime_secs, s.bundles_loaded, s.requests_total
+            ));
+            (format!("running (protocol v{})", s.version), None)
+        }
+        _ => (
+            "not running (auto-spawned on the next MCP run)".to_string(),
+            Some("Run `engramdb daemon status` or `engramdb daemon restart`.".to_string()),
+        ),
+    };
+    EnvironmentCheck {
+        name: "Embedding daemon".to_string(),
+        passed: true,
+        message,
+        suggestion,
+        details,
+        status: Some(CheckStatus::Info),
     }
 }
 
@@ -597,6 +656,66 @@ fn check_hook_config() -> EnvironmentCheck {
         },
         details: vec![],
         status: if found { None } else { Some(CheckStatus::Warn) },
+    }
+}
+
+/// Check whether the store's stored embedding fingerprint matches the
+/// model the current config would use. A mismatch/untracked store means
+/// search is served from stale or mixed vectors until a reindex.
+async fn check_embedding_model_identity(dir: &Path) -> EnvironmentCheck {
+    use crate::storage::{embedding_status, EmbeddingModelStatus};
+
+    let name = "Embedding model identity".to_string();
+    let config_path = dir.join(".engramdb").join("config.toml");
+    let config = crate::storage::config::load_config(&config_path)
+        .await
+        .unwrap_or_default();
+    let manifest_path = dir.join(".engramdb").join("manifest.toml");
+    let stored = crate::storage::manifest::load_manifest(&manifest_path)
+        .await
+        .ok()
+        .and_then(|m| m.embedding);
+
+    let Some(expected) = super::expected_embedding_fingerprint(&config) else {
+        return EnvironmentCheck {
+            name,
+            passed: true,
+            message: "no ONNX/Ollama embedding model resolved from config".to_string(),
+            suggestion: None,
+            details: vec![],
+            status: None,
+        };
+    };
+
+    let reindex = "run `engramdb reindex --embeddings-only` to re-embed and stamp the store";
+    let (passed, message, suggestion) =
+        match embedding_status(stored.as_ref(), &expected.model, expected.dimensions) {
+            EmbeddingModelStatus::Match => (true, format!("ok: {}", expected.model), None),
+            EmbeddingModelStatus::Untracked { current } => (
+                false,
+                format!("untracked (legacy store); current model {current}"),
+                Some(reindex.to_string()),
+            ),
+            EmbeddingModelStatus::Mismatch { stored, current } => (
+                false,
+                format!(
+                "MISMATCH: stored {stored}, current {current} — search uses stale/mixed vectors"
+            ),
+                Some(reindex.to_string()),
+            ),
+            EmbeddingModelStatus::DimensionMismatch { stored, current } => (
+                false,
+                format!("DIMENSION MISMATCH: stored {stored}d vs current {current}d"),
+                Some(reindex.to_string()),
+            ),
+        };
+    EnvironmentCheck {
+        name,
+        passed,
+        message,
+        suggestion,
+        details: vec![],
+        status: None,
     }
 }
 
@@ -1765,7 +1884,7 @@ mod tests {
 
         assert_eq!(
             section_names,
-            vec!["System", "Project", "Agent", "Embeddings"]
+            vec!["System", "Project", "Agent", "Embeddings", "Daemon"]
         );
     }
 

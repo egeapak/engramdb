@@ -549,6 +549,19 @@ impl MemoryStore {
         })
     }
 
+    /// Read every embedding chunk for `memory_id`, ordered by chunk index.
+    ///
+    /// Empty when the memory was never embedded. Used to relocate vectors
+    /// during worktree consolidation so migrated memories stay searchable.
+    pub async fn export_chunks(&self, memory_id: &str) -> Result<Vec<Vec<f32>>> {
+        self.lance_index
+            .chunks_for_memory(memory_id)
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB chunks_for_memory failed: {}", e))
+            })
+    }
+
     /// Perform vector similarity search.
     pub async fn vector_search(&self, query: Vec<f32>, limit: usize) -> Result<Vec<VectorMatch>> {
         self.lance_index
@@ -687,6 +700,27 @@ impl MemoryStore {
         manifest::update_stats(&mut manifest, memory_count, logical_scopes);
         manifest::save_manifest(&manifest_path, &manifest).await?;
 
+        Ok(())
+    }
+
+    /// Read the persisted embedding-model fingerprint, if any. `None` on
+    /// legacy stores created before model tracking (treated as untracked).
+    pub async fn embedding_fingerprint(&self) -> Result<Option<manifest::EmbeddingFingerprint>> {
+        let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
+        let manifest = manifest::load_manifest(&manifest_path).await?;
+        Ok(manifest.embedding)
+    }
+
+    /// Stamp the store with the embedding-model fingerprint its vectors
+    /// were produced with. Called after a successful full (re)embed.
+    pub async fn set_embedding_fingerprint(
+        &self,
+        fingerprint: manifest::EmbeddingFingerprint,
+    ) -> Result<()> {
+        let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
+        let mut manifest = manifest::load_manifest(&manifest_path).await?;
+        manifest.embedding = Some(fingerprint);
+        manifest::save_manifest(&manifest_path, &manifest).await?;
         Ok(())
     }
 }

@@ -371,6 +371,25 @@ impl std::str::FromStr for EmbeddingBackend {
     }
 }
 
+/// Policy when the store's stored embedding model differs from the one in
+/// use (e.g. after an upgrade that changes the default embedding model).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReindexOnModelChange {
+    /// Don't detect or act (legacy silent behavior; accept mixed vectors).
+    Off,
+    /// Surface a warning on MCP connect / daemon startup / `doctor`;
+    /// keep serving (mildly degraded) — the agent prompts the user to
+    /// `engramdb reindex --embeddings-only`.
+    #[default]
+    Warn,
+    /// Surface, and automatically reindex at daemon startup before serving.
+    Auto,
+    /// Hard-error embedding-dependent operations until the store is
+    /// reindexed (strict; guarantees no degraded search).
+    Error,
+}
+
 /// Embeddings provider configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingsConfig {
@@ -385,6 +404,49 @@ pub struct EmbeddingsConfig {
     pub dimensions: usize,
     /// Maximum input tokens before truncation (256 for MiniLM)
     pub max_tokens: usize,
+    /// What to do when the store's embeddings were produced by a
+    /// different model than the one now in use (default: warn).
+    #[serde(default)]
+    pub reindex_on_model_change: ReindexOnModelChange,
+
+    /// Number of independent embedding model sessions to load and
+    /// round-robin across.
+    ///
+    /// One session serializes all inference behind its mutex, so under
+    /// concurrent load (the shared daemon serving N agent sessions)
+    /// throughput is mutex-bound. `None` (the default) auto-sizes via
+    /// [`EmbeddingsConfig::resolved_pool_size`] to `cores/2` for long-lived
+    /// multi-tenant contexts (daemon / MCP server); one-shot CLI runs pass
+    /// `1` explicitly regardless. `Some(1)` forces a single session;
+    /// `Some(n)` pins the pool to `n`. Embedding uses fastembed's own
+    /// internal threadpool, so the `pool_size × intra_threads ≤ cores`
+    /// constraint that bounds the NLI/T5 sessions does not apply here.
+    #[serde(default)]
+    pub pool_size: Option<usize>,
+}
+
+impl EmbeddingsConfig {
+    /// Resolve the configured embedding pool size for a machine with
+    /// `cores` logical CPUs: the configured value (only floored at 1 so it
+    /// can never disable embeddings), else auto `cores/2` (also ≥ 1).
+    ///
+    /// `cores` is passed in (not read from the machine here) so the policy
+    /// is deterministically unit-testable. Callers in one-shot contexts
+    /// (the CLI) bypass this and pass `1` directly — auto-sizing is for the
+    /// long-lived multi-tenant daemon / MCP server, where extra sessions
+    /// pay back across many concurrent callers.
+    pub fn resolved_pool_size(&self, cores: usize) -> usize {
+        self.pool_size.unwrap_or((cores / 2).max(1)).max(1)
+    }
+}
+
+/// Logical CPU count for auto-sizing pools, or `1` if it can't be queried.
+/// The single place the machine is consulted, kept out of the pure
+/// `resolved_pool_size` policy functions so those stay testable.
+pub fn available_cores() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
 }
 
 impl Default for EmbeddingsConfig {
@@ -394,6 +456,8 @@ impl Default for EmbeddingsConfig {
             provider: "onnx".to_string(),
             dimensions: 384,
             max_tokens: 256,
+            reindex_on_model_change: ReindexOnModelChange::default(),
+            pool_size: None,
         }
     }
 }
@@ -443,7 +507,12 @@ impl Default for NliConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            model: "cross-encoder/nli-deberta-v3-xsmall".to_string(),
+            // Single source of truth: derive from `nli::DEFAULT_NLI_MODEL`
+            // rather than a literal so the default can never drift from the
+            // model the NLI loader actually selects (int8-quantized mirror:
+            // ~2× faster, ~3.7× less RAM, identical id2label). Custom repos
+            // keep the fp32 defaults.
+            model: crate::nli::DEFAULT_NLI_MODEL.repo.to_string(),
             contradiction_threshold: 0.7,
             max_comparisons: 10,
             similarity_threshold: 0.3,
@@ -502,6 +571,67 @@ impl Default for RerankConfig {
     }
 }
 
+/// Automatic title-generation configuration.
+///
+/// `strategy` selects how a memory's title is derived when the caller
+/// doesn't supply one explicitly:
+/// - `keyword` (default): RAKE keyword extraction — in-process, no model,
+///   negligible cost; never cached/pooled.
+/// - `t5`: abstractive T5-small summarization. The model session is
+///   expensive (encoder + decoder ONNX init), so when this is configured
+///   the daemon / MCP server loads it **once** into the provider bundle
+///   (and pools it) instead of rebuilding it on every `create`.
+/// - `none`: no automatic title.
+///
+/// This is the deployment default; the MCP `create` tool's per-call
+/// `title_strategy` still overrides it.
+///
+/// Defaults to `t5`: the shared daemon loads (and pools) the
+/// encoder+decoder **once machine-wide**, so the historical per-`create`
+/// cost that made keyword the default no longer applies. The one-shot CLI
+/// is unaffected — `engramdb add` uses [`TitleStrategy::default`]
+/// (`keyword`) so a single command never pays a cold T5 load.
+fn default_title_strategy() -> crate::title::TitleStrategy {
+    crate::title::TitleStrategy::T5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TitleConfig {
+    /// Title-generation strategy. Default `t5` (daemon-amortized; see
+    /// [`default_title_strategy`]).
+    #[serde(default = "default_title_strategy")]
+    pub strategy: crate::title::TitleStrategy,
+
+    /// Number of independent T5 sessions to pool when `strategy = "t5"`.
+    /// `None` (default) auto-sizes to 2 — the bench-optimal for the heavy
+    /// encoder+decoder pair — clamped to the core count, and only in
+    /// long-lived multi-tenant contexts (the one-shot CLI always uses 1).
+    /// Unlike embedding, T5 sessions are direct ORT sessions with an
+    /// explicit `intra_threads`, so the builder reduces each member's
+    /// `intra_threads` to keep `pool_size × intra_threads ≤ cores`.
+    #[serde(default)]
+    pub pool_size: Option<usize>,
+}
+
+impl Default for TitleConfig {
+    fn default() -> Self {
+        Self {
+            strategy: default_title_strategy(),
+            pool_size: None,
+        }
+    }
+}
+
+impl TitleConfig {
+    /// Resolve the T5 title pool size: configured value, else auto `2`
+    /// (bench-optimal), never exceeding the core count. Paired with a
+    /// reduced per-session `intra_threads` by the caller so the pool does
+    /// not oversubscribe the CPU.
+    pub fn resolved_pool_size(&self, cores: usize) -> usize {
+        self.pool_size.unwrap_or(2).clamp(1, cores.max(1))
+    }
+}
+
 /// Top-level EngramDB configuration
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EngramConfig {
@@ -544,6 +674,73 @@ pub struct EngramConfig {
     /// Runtime telemetry / statistics collection settings
     #[serde(default)]
     pub stats: StatsConfig,
+
+    /// Shared embedding daemon settings
+    #[serde(default)]
+    pub daemon: DaemonConfig,
+
+    /// Automatic title-generation settings
+    #[serde(default)]
+    pub title: TitleConfig,
+}
+
+/// Shared embedding-daemon settings.
+///
+/// stdio MCP is one process per agent session, so without a daemon every
+/// concurrent session loads its own copy of the embedding (and optional
+/// NLI / reranker) models. When `enabled`, MCP processes delegate all model
+/// inference to a single long-lived daemon over a Unix domain socket, so the
+/// models load exactly once machine-wide. When disabled — or when the daemon
+/// is unreachable — each process falls back to loading the models in-process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonConfig {
+    /// Master switch. When `true` (default) MCP delegates embedding / NLI /
+    /// rerank to the shared daemon (auto-spawning it if needed). When `false`
+    /// the daemon is never contacted and models load in-process.
+    #[serde(default = "default_daemon_enabled")]
+    pub enabled: bool,
+
+    /// Seconds the daemon stays alive with no active connections before
+    /// exiting. A fresh daemon is auto-spawned on demand by the next MCP
+    /// process, so a low value just trades a one-time respawn for not keeping
+    /// idle model memory resident.
+    #[serde(default = "default_daemon_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+
+    /// Override the Unix socket path. When unset the per-user default is
+    /// used. Resolution precedence (highest first): an explicit `--socket`
+    /// CLI flag, the `ENGRAMDB_DAEMON_SOCKET` env var, this config value,
+    /// then the default per-user runtime path.
+    #[serde(default)]
+    pub socket_path: Option<String>,
+}
+
+fn default_daemon_enabled() -> bool {
+    true
+}
+
+fn default_daemon_idle_timeout_secs() -> u64 {
+    900
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_daemon_enabled(),
+            idle_timeout_secs: default_daemon_idle_timeout_secs(),
+            socket_path: None,
+        }
+    }
+}
+
+impl DaemonConfig {
+    /// Validate that daemon configuration values are within acceptable ranges.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if self.idle_timeout_secs == 0 {
+            anyhow::bail!("daemon.idle_timeout_secs must be > 0");
+        }
+        Ok(())
+    }
 }
 
 /// Runtime telemetry / statistics collection settings.
@@ -655,6 +852,7 @@ impl EngramConfig {
         self.nli.validate()?;
         self.rerank.validate()?;
         self.stats.validate()?;
+        self.daemon.validate()?;
 
         if !(0.0..=1.0).contains(&self.retrieval.scoring.scope_multiplier_floor) {
             anyhow::bail!("scoring.scope_multiplier_floor must be in [0.0, 1.0]");
@@ -734,6 +932,58 @@ impl EngramConfig {
 mod tests {
     use super::*;
 
+    /// Guards the single-source-of-truth: `NliConfig::default().model` is
+    /// derived from `nli::DEFAULT_NLI_MODEL.repo`, never a hand-copied
+    /// literal that could silently drift from the model the NLI loader
+    /// actually selects (review follow-up item).
+    #[test]
+    fn nli_default_model_tracks_default_nli_model_spec() {
+        assert_eq!(
+            NliConfig::default().model.as_str(),
+            crate::nli::DEFAULT_NLI_MODEL.repo
+        );
+    }
+
+    #[test]
+    fn reindex_on_model_change_serde_and_backward_compat() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct W {
+            v: ReindexOnModelChange,
+        }
+        // Every variant round-trips by its lowercase name.
+        for (variant, name) in [
+            (ReindexOnModelChange::Off, "off"),
+            (ReindexOnModelChange::Warn, "warn"),
+            (ReindexOnModelChange::Auto, "auto"),
+            (ReindexOnModelChange::Error, "error"),
+        ] {
+            let toml_str = toml::to_string(&W { v: variant }).unwrap();
+            assert!(
+                toml_str.contains(&format!("v = \"{name}\"")),
+                "{variant:?} must serialize as {name:?}; got {toml_str:?}"
+            );
+            let back: W = toml::from_str(&format!("v = \"{name}\"\n")).unwrap();
+            assert_eq!(back.v, variant);
+        }
+
+        // Backward-compat: an `[embeddings]` table written before this field
+        // existed must still parse, defaulting to `Warn` — otherwise every
+        // pre-lifecycle deployment fails to start after upgrade.
+        let legacy: EmbeddingsConfig =
+            toml::from_str("provider = \"onnx\"\ndimensions = 384\nmax_tokens = 256\n").unwrap();
+        assert_eq!(legacy.reindex_on_model_change, ReindexOnModelChange::Warn);
+
+        // And the in-code defaults agree.
+        assert_eq!(
+            EmbeddingsConfig::default().reindex_on_model_change,
+            ReindexOnModelChange::Warn
+        );
+        assert_eq!(
+            EngramConfig::default().embeddings.reindex_on_model_change,
+            ReindexOnModelChange::Warn
+        );
+    }
+
     #[test]
     fn test_config_defaults() {
         let config = EngramConfig::default();
@@ -806,7 +1056,7 @@ mod tests {
 
         // NLI config
         assert!(!config.nli.enabled);
-        assert_eq!(config.nli.model, "cross-encoder/nli-deberta-v3-xsmall");
+        assert_eq!(config.nli.model, "Xenova/nli-deberta-v3-xsmall");
         assert_eq!(config.nli.contradiction_threshold, 0.7);
         assert_eq!(config.nli.max_comparisons, 10);
         assert_eq!(config.nli.similarity_threshold, 0.3);
@@ -967,7 +1217,7 @@ threshold = 0.25
     fn test_nli_config_defaults() {
         let config = NliConfig::default();
         assert!(!config.enabled);
-        assert_eq!(config.model, "cross-encoder/nli-deberta-v3-xsmall");
+        assert_eq!(config.model, "Xenova/nli-deberta-v3-xsmall");
         assert_eq!(config.contradiction_threshold, 0.7);
         assert_eq!(config.max_comparisons, 10);
         assert_eq!(config.similarity_threshold, 0.3);
@@ -990,7 +1240,7 @@ threshold = 0.25
         assert_eq!(loaded.nli.contradiction_threshold, 0.85);
         assert_eq!(loaded.nli.max_comparisons, 20);
         assert_eq!(loaded.nli.similarity_threshold, 0.5);
-        assert_eq!(loaded.nli.model, "cross-encoder/nli-deberta-v3-xsmall");
+        assert_eq!(loaded.nli.model, "Xenova/nli-deberta-v3-xsmall");
     }
 
     #[test]
@@ -1273,5 +1523,127 @@ weight = 0.7
         let config: EngramConfig = toml::from_str("").unwrap();
         assert_eq!(config.retrieval.scoring.depth_decay_base, 0.82);
         assert_eq!(config.retrieval.scoring.depth_decay_floor, 0.3);
+    }
+
+    #[test]
+    fn test_daemon_config_defaults() {
+        let d = DaemonConfig::default();
+        assert!(d.enabled);
+        assert_eq!(d.idle_timeout_secs, 900);
+        assert_eq!(d.socket_path, None);
+        // Absent `[daemon]` section ⇒ defaults (enabled by default).
+        let cfg: EngramConfig = toml::from_str("").unwrap();
+        assert!(cfg.daemon.enabled);
+        assert_eq!(cfg.daemon.idle_timeout_secs, 900);
+        assert_eq!(cfg.daemon.socket_path, None);
+    }
+
+    #[test]
+    fn test_daemon_config_validate() {
+        let mut d = DaemonConfig::default();
+        assert!(d.validate().is_ok());
+        d.idle_timeout_secs = 0;
+        assert!(d.validate().is_err());
+        // Surfaced through the top-level config validate too.
+        let mut cfg = EngramConfig::default();
+        cfg.daemon.idle_timeout_secs = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn title_config_serde_default_and_roundtrip() {
+        use crate::title::TitleStrategy;
+
+        // Absent `[title]` ⇒ t5: the daemon loads/pools it once, so it is
+        // the deployment default. (The one-shot CLI is unaffected — it uses
+        // `TitleStrategy::default()`, which is still `Keyword`.)
+        let cfg: EngramConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.title.strategy, TitleStrategy::T5);
+        assert_eq!(TitleConfig::default().strategy, TitleStrategy::T5);
+        // A `[title]` table present but without `strategy` also ⇒ t5
+        // (field serde-default matches the struct default — no drift).
+        let cfg: EngramConfig = toml::from_str("[title]\n").unwrap();
+        assert_eq!(cfg.title.strategy, TitleStrategy::T5);
+        // The CLI literal default is deliberately still keyword.
+        assert_eq!(TitleStrategy::default(), TitleStrategy::Keyword);
+
+        // Each strategy parses by its lowercase name.
+        for (name, want) in [
+            ("keyword", TitleStrategy::Keyword),
+            ("t5", TitleStrategy::T5),
+            ("none", TitleStrategy::None),
+        ] {
+            let cfg: EngramConfig =
+                toml::from_str(&format!("[title]\nstrategy = \"{name}\"\n")).unwrap();
+            assert_eq!(cfg.title.strategy, want, "strategy = {name:?}");
+        }
+
+        // Round-trips through the file writer.
+        let mut cfg = EngramConfig::default();
+        cfg.title.strategy = TitleStrategy::T5;
+        let temp_path = std::env::temp_dir().join("test_title_config_roundtrip.toml");
+        cfg.to_toml_file(&temp_path).unwrap();
+        let loaded = EngramConfig::from_toml_file(&temp_path).unwrap();
+        std::fs::remove_file(&temp_path).ok();
+        assert_eq!(loaded.title.strategy, TitleStrategy::T5);
+    }
+
+    #[test]
+    fn title_pool_size_resolution() {
+        // Unset ⇒ auto 2, but never more than the core count.
+        let t = TitleConfig::default();
+        assert_eq!(t.pool_size, None);
+        assert_eq!(t.resolved_pool_size(8), 2);
+        assert_eq!(t.resolved_pool_size(1), 1); // clamped to cores
+        assert_eq!(t.resolved_pool_size(0), 1); // cores.max(1) guard
+
+        // Explicit value parses and is clamped to [1, cores].
+        let cfg: EngramConfig =
+            toml::from_str("[title]\nstrategy = \"t5\"\npool_size = 3\n").unwrap();
+        assert_eq!(cfg.title.pool_size, Some(3));
+        assert_eq!(cfg.title.resolved_pool_size(8), 3);
+        assert_eq!(cfg.title.resolved_pool_size(2), 2); // clamp down to cores
+    }
+
+    #[test]
+    fn embeddings_pool_size_serde_and_resolved() {
+        // Unset ⇒ None; resolver auto-sizes to cores/2, floored at 1.
+        // `cores` is passed explicitly so the assertion is identical on any
+        // machine / CI runner (not derived from the host CPU count).
+        let cfg: EngramConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.embeddings.pool_size, None);
+        assert_eq!(cfg.embeddings.resolved_pool_size(8), 4);
+        assert_eq!(cfg.embeddings.resolved_pool_size(1), 1); // cores/2 floored at 1
+        assert_eq!(cfg.embeddings.resolved_pool_size(0), 1); // (cores/2).max(1) guard
+
+        // Explicit value is honored verbatim regardless of cores (only a
+        // floor of 1 so it can't disable embeddings).
+        let cfg: EngramConfig =
+            toml::from_str("[embeddings]\nprovider = \"onnx\"\ndimensions = 384\nmax_tokens = 256\npool_size = 3\n")
+                .unwrap();
+        assert_eq!(cfg.embeddings.pool_size, Some(3));
+        assert_eq!(cfg.embeddings.resolved_pool_size(2), 3);
+        assert_eq!(cfg.embeddings.resolved_pool_size(64), 3);
+
+        // Legacy `[embeddings]` without the field still parses (back-compat).
+        let legacy: EmbeddingsConfig =
+            toml::from_str("provider = \"onnx\"\ndimensions = 384\nmax_tokens = 256\n").unwrap();
+        assert_eq!(legacy.pool_size, None);
+    }
+
+    #[test]
+    fn test_daemon_config_partial_toml() {
+        // Only one field set; the rest fall back to defaults.
+        let cfg: EngramConfig = toml::from_str("[daemon]\nenabled = false\n").unwrap();
+        assert!(!cfg.daemon.enabled);
+        assert_eq!(cfg.daemon.idle_timeout_secs, 900);
+        assert_eq!(cfg.daemon.socket_path, None);
+
+        let cfg: EngramConfig =
+            toml::from_str("[daemon]\nidle_timeout_secs = 30\nsocket_path = \"/run/x.sock\"\n")
+                .unwrap();
+        assert!(cfg.daemon.enabled);
+        assert_eq!(cfg.daemon.idle_timeout_secs, 30);
+        assert_eq!(cfg.daemon.socket_path.as_deref(), Some("/run/x.sock"));
     }
 }

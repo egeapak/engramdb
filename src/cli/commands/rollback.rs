@@ -16,6 +16,7 @@ use std::path::Path;
 /// With `--dry-run`, only reports what would be rolled back without changing files.
 pub async fn run_rollback(
     dir: &Path,
+    global: bool,
     target_version: Option<u32>,
     dry_run: bool,
     formatter: &OutputFormatter,
@@ -37,12 +38,19 @@ pub async fn run_rollback(
 
     let shared_dir = paths::memories_dir(dir);
 
-    let manifest_path = engramdb_dir.join("manifest.toml");
-    let personal_dir = if manifest_path.exists() {
-        let manifest = crate::storage::manifest::load_manifest(&manifest_path).await?;
-        paths::personal_memories_dir(&manifest.project).ok()
+    // Personal memories live under the store's project_id. The global store
+    // uses GLOBAL_PROJECT_ID (its manifest name is "global", which is *not*
+    // the id); projects keep the pre-existing manifest-name resolution.
+    let personal_dir = if global {
+        paths::personal_memories_dir(paths::GLOBAL_PROJECT_ID).ok()
     } else {
-        None
+        let manifest_path = engramdb_dir.join("manifest.toml");
+        if manifest_path.exists() {
+            let manifest = crate::storage::manifest::load_manifest(&manifest_path).await?;
+            paths::personal_memories_dir(&manifest.project).ok()
+        } else {
+            None
+        }
     };
 
     let mut rolled_back = 0u32;
@@ -172,5 +180,135 @@ fn rollback_dir(
                 errors.push(format!("{}: parse error: {e}", path.display()));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::app::OutputFormat;
+    use crate::storage::memory_file::{parser_for_version, MemoryWriter as _, V2Writer};
+    use crate::types::{Memory, MemoryType, Provenance};
+    use tempfile::TempDir;
+
+    fn json_formatter() -> OutputFormatter {
+        OutputFormatter::new(Some(OutputFormat::Json), false, false)
+    }
+
+    fn engramdb_layout(root: &std::path::Path) -> std::path::PathBuf {
+        let engramdb = root.join(".engramdb");
+        std::fs::create_dir_all(engramdb.join("memories")).unwrap();
+        // No manifest.toml: matches migrate.rs test layout and exercises only
+        // the shared-memories rewrite path.
+        engramdb.join("memories")
+    }
+
+    fn make_memory() -> Memory {
+        Memory::new(
+            MemoryType::Convention,
+            "Rollback fixture summary",
+            "Body content preserved across rollback",
+            Provenance::human(),
+        )
+    }
+
+    #[tokio::test]
+    async fn rollback_no_engramdb_dir_is_noop() {
+        let tmp = TempDir::new().unwrap();
+        run_rollback(tmp.path(), false, None, false, &json_formatter())
+            .await
+            .unwrap();
+        assert!(!tmp.path().join(".engramdb").exists());
+    }
+
+    /// CRITICAL guard at rollback.rs:32-37: rolling back *to* the current
+    /// version must be rejected (use `migrate` instead). Without this guard,
+    /// users could "rollback" a v2 file to v2 — a no-op masquerading as work
+    /// — and the message would lie.
+    #[tokio::test]
+    async fn rollback_to_current_version_is_rejected_and_does_not_touch_files() {
+        let tmp = TempDir::new().unwrap();
+        let memories_dir = engramdb_layout(tmp.path());
+
+        // A v2 file we'd expect to be left untouched.
+        let mem = make_memory();
+        let content = V2Writer.write(&mem).unwrap();
+        let file = memories_dir.join(format!("{}.md", mem.id));
+        std::fs::write(&file, &content).unwrap();
+
+        run_rollback(
+            tmp.path(),
+            false,
+            Some(CURRENT_FORMAT_VERSION),
+            false,
+            &json_formatter(),
+        )
+        .await
+        .unwrap();
+
+        // Guard kicked in: file is byte-identical.
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn rollback_dry_run_does_not_modify_files() {
+        let tmp = TempDir::new().unwrap();
+        let memories_dir = engramdb_layout(tmp.path());
+
+        let mem = make_memory();
+        let content = V2Writer.write(&mem).unwrap();
+        let file = memories_dir.join(format!("{}.md", mem.id));
+        std::fs::write(&file, &content).unwrap();
+
+        // Roll back to v1 (None) in dry-run.
+        run_rollback(tmp.path(), false, None, true, &json_formatter())
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn rollback_v2_to_v1_round_trips() {
+        let tmp = TempDir::new().unwrap();
+        let memories_dir = engramdb_layout(tmp.path());
+
+        let original = make_memory();
+        let v2_content = V2Writer.write(&original).unwrap();
+        let file = memories_dir.join(format!("{}.md", original.id));
+        std::fs::write(&file, &v2_content).unwrap();
+
+        run_rollback(tmp.path(), false, None, false, &json_formatter())
+            .await
+            .unwrap();
+
+        let after = std::fs::read_to_string(&file).unwrap();
+        // Version stripped: detect returns None for legacy v1.
+        assert_eq!(detect_format_version(&after), None);
+
+        // Re-parse with v1 parser and verify Memory data survived.
+        let reparsed = parser_for_version(None).parse(&after).unwrap();
+        assert_eq!(reparsed.id, original.id);
+        assert_eq!(reparsed.type_, original.type_);
+        assert_eq!(reparsed.summary, original.summary);
+        assert_eq!(reparsed.content, original.content);
+    }
+
+    #[tokio::test]
+    async fn rollback_already_at_target_is_noop() {
+        let tmp = TempDir::new().unwrap();
+        let memories_dir = engramdb_layout(tmp.path());
+
+        // A v1 file with target = None: already at target, nothing to do.
+        let mem = make_memory();
+        let v1 = crate::storage::memory_file::V1Writer.write(&mem).unwrap();
+        let file = memories_dir.join(format!("{}.md", mem.id));
+        std::fs::write(&file, &v1).unwrap();
+
+        run_rollback(tmp.path(), false, None, false, &json_formatter())
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), v1);
     }
 }

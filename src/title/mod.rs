@@ -7,13 +7,18 @@
 //!   Requires ~60MB model download on first use.
 
 pub mod keyword;
+mod pool;
 pub mod t5;
+
+pub use pool::PooledTitleGenerator;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 /// Strategy for automatic title generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TitleStrategy {
     /// Use keyword extraction (RAKE algorithm). Lightweight, no model needed.
     #[default]

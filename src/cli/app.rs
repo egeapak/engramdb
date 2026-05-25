@@ -26,6 +26,44 @@ pub enum DoctorCommand {
     Store,
 }
 
+/// Subcommands for `engramdb daemon`.
+#[derive(Subcommand)]
+pub enum DaemonCommand {
+    /// Run the daemon event loop (this is what MCP auto-spawns).
+    Run {
+        /// Unix socket to bind. Defaults to the shared per-user path
+        /// (also overridable via ENGRAMDB_DAEMON_SOCKET).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+
+        /// Seconds to stay alive with no active connections before exiting.
+        #[arg(long)]
+        idle_timeout: Option<u64>,
+    },
+    /// Show whether a daemon is running and its request metrics.
+    Status {
+        /// Socket to target. Overrides ENGRAMDB_DAEMON_SOCKET and config.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Ask a running daemon to exit gracefully.
+    Stop {
+        /// Socket to target. Overrides ENGRAMDB_DAEMON_SOCKET and config.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Stop a running daemon (if any) and start a fresh one.
+    Restart {
+        /// Socket to target. Overrides ENGRAMDB_DAEMON_SOCKET and config.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+
+        /// Idle timeout for the newly started daemon.
+        #[arg(long)]
+        idle_timeout: Option<u64>,
+    },
+}
+
 /// Subcommands for `engramdb projects`.
 #[derive(Subcommand)]
 pub enum ProjectsCommand {
@@ -220,6 +258,10 @@ pub enum Command {
         /// Read details from file
         #[arg(long)]
         details_file: Option<PathBuf>,
+
+        /// Operate on the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
     },
 
     /// Get a memory by ID
@@ -238,6 +280,10 @@ pub enum Command {
         /// Print the memory's file path instead of content
         #[arg(long)]
         path: bool,
+
+        /// Operate on the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
     },
 
     /// Query memories (unified ranked / filtered retrieval).
@@ -294,6 +340,18 @@ pub enum Command {
         /// Show relevance scores alongside results.
         #[arg(long)]
         show_scores: bool,
+
+        /// Also merge global (cross-project) memories into the results.
+        ///
+        /// Runs the same query against the global store and folds its hits
+        /// into the project results (deduplicated, re-sorted, truncated).
+        /// Ignored when `--global` is set (already querying the global store).
+        #[arg(long)]
+        include_global: bool,
+
+        /// Query the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
     },
 
     /// List all memories
@@ -325,6 +383,10 @@ pub enum Command {
         /// Maximum number of results to display
         #[arg(long, short = 'n')]
         limit: Option<usize>,
+
+        /// List the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
     },
 
     /// Update an existing memory
@@ -415,6 +477,10 @@ pub enum Command {
         /// Open memory file in $EDITOR
         #[arg(long, short = 'e')]
         editor: bool,
+
+        /// Operate on the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
     },
 
     /// Delete a memory
@@ -425,6 +491,10 @@ pub enum Command {
         /// Skip confirmation prompt
         #[arg(long, short = 'f')]
         force: bool,
+
+        /// Operate on the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
     },
 
     /// Show statistics
@@ -432,12 +502,24 @@ pub enum Command {
         /// Include the cross-project telemetry breakdown.
         #[arg(long)]
         all_projects: bool,
+
+        /// Show statistics for the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
+
+        /// Show the shared embedding daemon's metrics instead of memory-store stats
+        #[arg(long)]
+        daemon: bool,
     },
 
     /// Check environment and store health
     Doctor {
         #[command(subcommand)]
         command: Option<DoctorCommand>,
+
+        /// Check the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
     },
 
     /// Manage registered EngramDB projects
@@ -458,6 +540,10 @@ pub enum Command {
         /// Source file that contradicts this memory
         #[arg(long)]
         source_file: Option<String>,
+
+        /// Operate on the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
     },
 
     /// Run garbage collection on low-relevance memories
@@ -469,6 +555,10 @@ pub enum Command {
         /// Score threshold for GC (default from config)
         #[arg(long)]
         threshold: Option<f64>,
+
+        /// Operate on the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
     },
 
     /// List compression candidates (actual compression requires MCP mode)
@@ -480,6 +570,10 @@ pub enum Command {
         /// Criticality threshold for candidates (default 0.4)
         #[arg(long)]
         threshold: Option<f64>,
+
+        /// Operate on the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
     },
 
     /// Start the MCP server
@@ -491,6 +585,12 @@ pub enum Command {
         /// Port for SSE transport
         #[arg(long)]
         port: Option<u16>,
+    },
+
+    /// Run the shared embedding daemon (normally auto-spawned by MCP)
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
     },
 
     /// Generate shell completions
@@ -505,6 +605,10 @@ pub enum Command {
         /// Only report what would be migrated, don't change files
         #[arg(long)]
         dry_run: bool,
+
+        /// Migrate the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
     },
 
     /// Roll back memory files to a previous format version
@@ -516,6 +620,10 @@ pub enum Command {
         /// Only report what would be rolled back, don't change files
         #[arg(long)]
         dry_run: bool,
+
+        /// Roll back the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
     },
 
     /// Rebuild index and re-embed memories
@@ -527,6 +635,10 @@ pub enum Command {
         /// Only rebuild index, don't re-embed
         #[arg(long)]
         index_only: bool,
+
+        /// Reindex the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
     },
 
     /// Claude Code plugin hook handler
@@ -571,6 +683,10 @@ pub enum Command {
         /// Only show Status::NeedsReview memories
         #[arg(long)]
         stale_only: bool,
+
+        /// Review the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
     },
 }
 
@@ -702,7 +818,9 @@ mod tests {
         let cli =
             Cli::try_parse_from(["engramdb", "gc", "--confirm", "--threshold", "0.1"]).unwrap();
         match cli.command {
-            Command::Gc { confirm, threshold } => {
+            Command::Gc {
+                confirm, threshold, ..
+            } => {
                 assert!(confirm);
                 assert_eq!(threshold, Some(0.1));
             }
@@ -719,6 +837,120 @@ mod tests {
                 assert_eq!(port, None);
             }
             _ => panic!("Expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_daemon_run_command_parsing() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "daemon",
+            "run",
+            "--socket",
+            "/tmp/x.sock",
+            "--idle-timeout",
+            "42",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Daemon {
+                command:
+                    DaemonCommand::Run {
+                        socket,
+                        idle_timeout,
+                    },
+            } => {
+                assert_eq!(socket, Some(PathBuf::from("/tmp/x.sock")));
+                assert_eq!(idle_timeout, Some(42));
+            }
+            _ => panic!("Expected Daemon Run subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_daemon_status_stop_restart_parsing() {
+        // Bare status.
+        match Cli::try_parse_from(["engramdb", "daemon", "status"])
+            .unwrap()
+            .command
+        {
+            Command::Daemon {
+                command: DaemonCommand::Status { socket },
+            } => assert_eq!(socket, None),
+            _ => panic!("Expected Daemon Status"),
+        }
+        // Status with --socket override.
+        match Cli::try_parse_from(["engramdb", "daemon", "status", "--socket", "/s.sock"])
+            .unwrap()
+            .command
+        {
+            Command::Daemon {
+                command: DaemonCommand::Status { socket },
+            } => assert_eq!(socket, Some(PathBuf::from("/s.sock"))),
+            _ => panic!("Expected Daemon Status --socket"),
+        }
+        // Stop.
+        match Cli::try_parse_from(["engramdb", "daemon", "stop"])
+            .unwrap()
+            .command
+        {
+            Command::Daemon {
+                command: DaemonCommand::Stop { socket },
+            } => assert_eq!(socket, None),
+            _ => panic!("Expected Daemon Stop"),
+        }
+        // Restart with both options.
+        match Cli::try_parse_from([
+            "engramdb",
+            "daemon",
+            "restart",
+            "--socket",
+            "/r.sock",
+            "--idle-timeout",
+            "7",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Daemon {
+                command:
+                    DaemonCommand::Restart {
+                        socket,
+                        idle_timeout,
+                    },
+            } => {
+                assert_eq!(socket, Some(PathBuf::from("/r.sock")));
+                assert_eq!(idle_timeout, Some(7));
+            }
+            _ => panic!("Expected Daemon Restart"),
+        }
+    }
+
+    #[test]
+    fn test_daemon_requires_subcommand() {
+        // `daemon` with no subcommand is an error (it's a subcommand group).
+        assert!(Cli::try_parse_from(["engramdb", "daemon"]).is_err());
+    }
+
+    #[test]
+    fn test_stats_daemon_flag() {
+        let cli = Cli::try_parse_from(["engramdb", "stats", "--daemon"]).unwrap();
+        match cli.command {
+            Command::Stats {
+                daemon,
+                global,
+                all_projects,
+            } => {
+                assert!(daemon);
+                assert!(!global);
+                assert!(!all_projects);
+            }
+            _ => panic!("Expected Stats command"),
+        }
+        // Defaults: --daemon off.
+        match Cli::try_parse_from(["engramdb", "stats"]).unwrap().command {
+            Command::Stats { daemon, .. } => assert!(!daemon),
+            _ => panic!("Expected Stats command"),
         }
     }
 
@@ -1295,7 +1527,9 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Command::Compress { scope, threshold } => {
+            Command::Compress {
+                scope, threshold, ..
+            } => {
                 assert_eq!(scope, Some("app.core".to_string()));
                 assert_eq!(threshold, Some(0.3));
             }
@@ -1322,6 +1556,7 @@ mod tests {
                 type_,
                 challenged_only,
                 stale_only,
+                ..
             } => {
                 assert_eq!(scope, Some("x".to_string()));
                 assert_eq!(type_, Some("decision".to_string()));
@@ -1384,6 +1619,80 @@ mod tests {
                 assert_eq!(parent, "parent-id");
             }
             _ => panic!("Expected Projects Link command"),
+        }
+    }
+
+    #[test]
+    fn test_global_flag_parses_for_single_store_commands() {
+        let cli = Cli::try_parse_from(["engramdb", "list", "--global"]).unwrap();
+        match cli.command {
+            Command::List { global, .. } => assert!(global),
+            _ => panic!("Expected List command"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "engramdb", "add", "-t", "decision", "-c", "x", "-s", "y", "--global",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add { global, .. } => assert!(global),
+            _ => panic!("Expected Add command"),
+        }
+
+        let cli = Cli::try_parse_from(["engramdb", "query", "--mode", "rank", "--global"]).unwrap();
+        match cli.command {
+            Command::Query { global, .. } => assert!(global),
+            _ => panic!("Expected Query command"),
+        }
+
+        let cli = Cli::try_parse_from(["engramdb", "migrate", "--global"]).unwrap();
+        match cli.command {
+            Command::Migrate { global, .. } => assert!(global),
+            _ => panic!("Expected Migrate command"),
+        }
+    }
+
+    #[test]
+    fn test_global_flag_defaults_false() {
+        let cli = Cli::try_parse_from(["engramdb", "stats"]).unwrap();
+        match cli.command {
+            Command::Stats { global, .. } => assert!(!global),
+            _ => panic!("Expected Stats command"),
+        }
+    }
+
+    #[test]
+    fn test_query_include_global_flag_parses() {
+        let cli = Cli::try_parse_from(["engramdb", "query", "--mode", "rank", "--include-global"])
+            .unwrap();
+        match cli.command {
+            Command::Query {
+                include_global,
+                global,
+                ..
+            } => {
+                assert!(include_global);
+                assert!(!global, "--include-global must not imply --global");
+            }
+            _ => panic!("Expected Query command"),
+        }
+
+        // Defaults to false when omitted.
+        let cli = Cli::try_parse_from(["engramdb", "query", "--mode", "rank"]).unwrap();
+        match cli.command {
+            Command::Query { include_global, .. } => assert!(!include_global),
+            _ => panic!("Expected Query command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_global_flag_remains_independent() {
+        // `setup --global` predates the store-targeting flag and means
+        // "install to ~/.claude/" — it must keep parsing on its own.
+        let cli = Cli::try_parse_from(["engramdb", "setup", "--global"]).unwrap();
+        match cli.command {
+            Command::Setup { global, .. } => assert!(global),
+            _ => panic!("Expected Setup command"),
         }
     }
 
@@ -1643,7 +1952,7 @@ mod tests {
     fn test_doctor_no_subcommand() {
         let cli = Cli::try_parse_from(["engramdb", "doctor"]).unwrap();
         match cli.command {
-            Command::Doctor { command } => {
+            Command::Doctor { command, .. } => {
                 assert!(command.is_none());
             }
             _ => panic!("Expected Doctor command"),
@@ -1656,6 +1965,7 @@ mod tests {
         match cli.command {
             Command::Doctor {
                 command: Some(DoctorCommand::Store),
+                ..
             } => {} // expected
             _ => panic!("Expected Doctor Store subcommand"),
         }
