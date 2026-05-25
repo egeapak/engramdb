@@ -56,6 +56,22 @@ fn format_additional_context(header: &str, memories: &[ScoredMemory]) -> String 
 /// Maximum character budget for the SessionStart additional context.
 const SESSION_CONTEXT_BUDGET: usize = 2000;
 
+/// Standing reflection nudge appended to SessionStart context.
+///
+/// Suggested (never required) prompt asking the agent to capture durable
+/// project / environment / user-preference learnings when it finishes the
+/// task it was assigned. Deliberately excludes task minutiae.
+///
+/// Intentionally MCP-agnostic: the SessionStart hook can run in a
+/// hooks-only install with no MCP server, so this must not name MCP tools
+/// or assume MCP is available. The MCP-aware variant lives in the server's
+/// `instructions` string.
+const REFLECTION_NUDGE: &str =
+    "[EngramDB] When you finish the task you were assigned, before handing back: did anything \
+durable about the project, the environment/tooling, or the user's preferences come up — not task \
+minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything \
+that contradicts a memory. Suggested, not required.";
+
 /// Format scored memories with full metadata (for SessionStart).
 ///
 /// Groups memories by type, includes tags/scope/content preview, and
@@ -64,6 +80,21 @@ const SESSION_CONTEXT_BUDGET: usize = 2000;
 /// `search` for more.
 fn format_detailed_context(header: &str, memories: &[ScoredMemory]) -> String {
     format_detailed_context_with_budget(header, memories, SESSION_CONTEXT_BUDGET)
+}
+
+/// Build the full SessionStart additional context: project memories (if any)
+/// followed by the reflection nudge. When the store has no memories the nudge
+/// is still emitted on its own so the agent always receives it.
+fn build_session_start_context(memories: &[ScoredMemory]) -> String {
+    if memories.is_empty() {
+        REFLECTION_NUDGE.to_string()
+    } else {
+        format!(
+            "{}\n\n{}",
+            format_detailed_context("[EngramDB] Key project memories:", memories),
+            REFLECTION_NUDGE
+        )
+    }
 }
 
 /// Budget-aware implementation (extracted for testability).
@@ -296,11 +327,9 @@ async fn process_session_start(
         }
     };
 
-    if result.memories.is_empty() {
-        return Ok(None);
-    }
-
-    let context = format_detailed_context("[EngramDB] Key project memories:", &result.memories);
+    // Always emit the reflection nudge, even when the store has no memories
+    // yet — the agent should still be reminded to capture durable learnings.
+    let context = build_session_start_context(&result.memories);
     let json = build_hook_response("SessionStart", &context)?;
     Ok(Some(json))
 }
@@ -755,6 +784,49 @@ mod tests {
         assert!(lines[0].contains("tags: ci"));
         assert!(lines[0].contains("scope: workflow.lint"));
         assert!(lines[1].starts_with("  "));
+    }
+
+    // --- Unit tests for build_session_start_context (reflection nudge) ---
+
+    #[test]
+    fn test_session_start_context_appends_reflection_nudge() {
+        let mem = Memory::new(
+            MemoryType::Decision,
+            "Use async everywhere",
+            "All I/O operations should use async/await",
+            Provenance::human(),
+        );
+        let scored = vec![ScoredMemory {
+            memory: mem,
+            score: 0.9,
+            score_breakdown: Default::default(),
+        }];
+        let ctx = build_session_start_context(&scored);
+        assert!(ctx.contains("[EngramDB] Key project memories:"));
+        assert!(ctx.contains("Use async everywhere"));
+        assert!(ctx.contains("When you finish the task"));
+    }
+
+    #[test]
+    fn test_session_start_context_nudge_only_when_no_memories() {
+        let ctx = build_session_start_context(&[]);
+        assert!(ctx.contains("When you finish the task"));
+        assert!(!ctx.contains("Key project memories"));
+    }
+
+    #[test]
+    fn test_session_start_nudge_is_mcp_agnostic() {
+        // The SessionStart hook can run in a hooks-only install with no MCP
+        // server connected, so the nudge must not reference MCP tool names
+        // or assume MCP is available.
+        let lower = REFLECTION_NUDGE.to_lowercase();
+        for forbidden in ["query", "create", "challenge", "mcp"] {
+            assert!(
+                !lower.contains(forbidden),
+                "hook nudge must be MCP-agnostic; found '{forbidden}' in: {REFLECTION_NUDGE}"
+            );
+        }
+        assert!(REFLECTION_NUDGE.contains("EngramDB"));
     }
 
     // --- Unit tests for truncate_content ---

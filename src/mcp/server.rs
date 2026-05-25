@@ -2128,7 +2128,11 @@ impl ServerHandler for EngramDbServer {
                  Use project=\"global\" for cross-project memories like personal preferences, \
                  coding conventions, or knowledge that applies everywhere. \
                  Use include_global=true on query to merge global memories into results. \
-                 Omit `project` to use the current project."
+                 Omit `project` to use the current project. \
+                 When you finish the task you were assigned, reflect: if anything durable \
+                 about the project, the environment/tooling, or the user's preferences came \
+                 up (not task minutiae), query existing memories, then create the new ones \
+                 and challenge contradictions. Suggested, not required."
                     .to_string();
                 if let Some(w) = &self.embedding_warning {
                     s.push_str("\n\nIMPORTANT — ACTION NEEDED: ");
@@ -6044,6 +6048,27 @@ mod tests {
                 .as_u64()
                 .unwrap(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn get_info_instructions_includes_reflection_nudge() {
+        let tmp = TempDir::new().unwrap();
+        let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+        let server = new_server_at(tmp.path(), registry);
+        let info = server.get_info();
+        let instructions = info.instructions.expect("server exposes instructions");
+        assert!(
+            instructions.contains("When you finish"),
+            "instructions should nudge end-of-task reflection, got: {instructions}"
+        );
+        assert!(instructions.contains("reflect"));
+        // The MCP-aware variant should explicitly push the MCP tools
+        // ("challenge" only appears in the reflection nudge, not the base
+        // instructions), unlike the MCP-agnostic SessionStart hook copy.
+        assert!(
+            instructions.contains("challenge"),
+            "MCP instructions nudge should reference MCP tools, got: {instructions}"
         );
     }
 
