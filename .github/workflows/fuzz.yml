@@ -27,6 +27,9 @@ jobs:
           - memory_file_roundtrip
           - scope_logical
           - scope_physical
+          - scope_proximity
+          - decay
+          - composite_score
     steps:
       - uses: actions/checkout@v4
 

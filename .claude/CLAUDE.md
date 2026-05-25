@@ -87,13 +87,34 @@ inputs originate from on-disk memory files:
   finite even for `NaN`/`inf` criticality (parsed from files via `f64::parse`).
 
 Each target only calls already-`pub` pure functions — no API was widened for
-fuzzing.
+fuzzing. If the surface you want to fuzz is behind a private `mod`, prefer an
+existing public entry point that exercises it transitively (e.g. the field
+parsers in `storage::memory_file::helpers` are covered through
+`parse_memory_file`) rather than making the module `pub`.
+
+**Adding a target:** create `fuzz/fuzz_targets/<name>.rs` *and* register a
+matching `[[bin]]` block in `fuzz/Cargo.toml` with `test/doc/bench = false` —
+`cargo fuzz build` (no target arg) builds every `[[bin]]`, so a block pointing
+at a missing file, or a target file with no block, breaks the whole build.
+Drive the target from libfuzzer's `Arbitrary` inputs (tuples of
+`String`/`Vec`/`Option`/`i64`/`f64`/`u8` all work out of the box) and construct
+domain types from those primitives in the body. For score math, assert the
+weakest invariant that must always hold — `is_finite()` — because the fuzzer
+ignores config validation; only assert tighter bounds like `[0,1]` when you
+first clamp/guard the inputs into their valid domain (see the `floor` guard in
+`decay.rs`). When a degenerate input (e.g. a literal `NaN` config field) is an
+input-validation concern rather than the arithmetic under test, `return` early
+on it so the assertion stays meaningful.
 
 Run with `cargo +nightly fuzz run <target> -- -max_total_time=60`. In the web
 sandbox, building requires the same `ORT_STRATEGY=system ORT_LIB_LOCATION=/tmp/ort-lib`
-workaround below. Seed inputs are committed under `fuzz/corpus/<target>/`; when a
-crash is found, commit the failing input from `fuzz/artifacts/` as a new corpus
-seed so it becomes a permanent regression case. CI runs these on a schedule via
+workaround below. A full `fuzz/target` is ~14 GB on top of the main `target`, so
+on the web sandbox watch `df -h` and reclaim space with `rm -rf fuzz/target`
+(and `cargo clean`) if a build fails with `No space left on device`. Seed inputs
+are committed under `fuzz/corpus/<target>/`; the `.gitignore` keeps only curated
+`*.md` seeds (the auto-grown binary corpus is ignored). When a crash is found,
+commit the failing input from `fuzz/artifacts/` as a new corpus seed so it
+becomes a permanent regression case. CI runs these on a schedule via
 `.github/workflows/fuzz.yml`, not on every PR.
 
 ## Building & testing in Claude Code on the web (restricted egress)
