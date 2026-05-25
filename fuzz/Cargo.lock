@@ -1964,6 +1964,7 @@ dependencies = [
 name = "engramdb-fuzz"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "engramdb",
  "libfuzzer-sys",
 ]

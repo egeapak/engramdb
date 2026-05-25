@@ -71,12 +71,23 @@ Note: `cargo test --lib` has two pre-existing flaky failures under full parallel
 ### Fuzzing
 
 `fuzz/` is a standalone `cargo-fuzz` crate (its own `[workspace]`, excluded from
-default builds). Targets live in `fuzz/fuzz_targets/` and exercise the
-hand-written parsers that consume untrusted input: `memory_file` and
-`memory_file_roundtrip` (TOML/YAML frontmatter + V2 markdown via
-`storage::memory_file::parse_memory_file` / `write_memory_file`), `scope_logical`
-and `scope_physical` (dot-notation LCA math and runtime glob compilation). Each
-target only calls already-`pub` pure functions — no API was widened for fuzzing.
+default builds). Targets live in `fuzz/fuzz_targets/` and exercise code that
+consumes untrusted input — either hand-written parsers or score math whose
+inputs originate from on-disk memory files:
+
+- `memory_file` / `memory_file_roundtrip` — TOML/YAML frontmatter + V2 markdown
+  via `storage::memory_file::parse_memory_file` / `write_memory_file`.
+- `scope_logical` / `scope_physical` / `scope_proximity` — dot-notation LCA math,
+  runtime glob compilation, and the top-level physical+logical combiner. All
+  assert the score is finite (the [0,1] bound only holds for config-validated
+  decay constants, which the fuzzer doesn't respect).
+- `decay` — `scoring::decay_factor` age/TTL/half-life arithmetic; asserts a
+  finite factor for arbitrary durations and timestamps (finite floor only).
+- `composite_score` — the core ranking formula; asserts `final_score` is always
+  finite even for `NaN`/`inf` criticality (parsed from files via `f64::parse`).
+
+Each target only calls already-`pub` pure functions — no API was widened for
+fuzzing.
 
 Run with `cargo +nightly fuzz run <target> -- -max_total_time=60`. In the web
 sandbox, building requires the same `ORT_STRATEGY=system ORT_LIB_LOCATION=/tmp/ort-lib`
