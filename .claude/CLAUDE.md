@@ -45,6 +45,11 @@ cargo bench
 # Examples (under examples/)
 cargo run --example onnx_bench
 cargo run --example embed_quality
+
+# Fuzzing (nightly + cargo-fuzz; targets live in fuzz/)
+cargo install cargo-fuzz
+cargo +nightly fuzz list
+cargo +nightly fuzz run memory_file -- -max_total_time=60
 ```
 
 Feature flags from `Cargo.toml`:
@@ -64,6 +69,55 @@ Feature flags from `Cargo.toml`:
 Note: `cargo test --lib` has two pre-existing flaky failures under full parallelism (`ops::doctor::tests::test_doctor_many_memories_healthy`, `ops::projects::tests::test_get_project_info_with_memories`) — they pass in isolation and fail identically on a clean base, so they are not a regression signal.
 
 Note: `mcp::server::tests::global_retrieve_with_semantic_query` is similarly flaky under a full-parallel `cargo nextest run --all-features` in a resource-constrained sandbox. The daemon path is disabled under `#[cfg(test)]`, so every embedding test loads ONNX in-process; when many processes lose the model-load race at once, the embedding provider resolves to `None`, the memory is stored without a vector, and the semantic query returns empty. It passes in isolation and on adequately-resourced CI, so it is not a regression signal.
+
+### Fuzzing
+
+`fuzz/` is a standalone `cargo-fuzz` crate (its own `[workspace]`, excluded from
+default builds). Targets live in `fuzz/fuzz_targets/` and exercise code that
+consumes untrusted input — either hand-written parsers or score math whose
+inputs originate from on-disk memory files:
+
+- `memory_file` / `memory_file_roundtrip` — TOML/YAML frontmatter + V2 markdown
+  via `storage::memory_file::parse_memory_file` / `write_memory_file`.
+- `scope_logical` / `scope_physical` / `scope_proximity` — dot-notation LCA math,
+  runtime glob compilation, and the top-level physical+logical combiner. All
+  assert the score is finite (the [0,1] bound only holds for config-validated
+  decay constants, which the fuzzer doesn't respect).
+- `decay` — `scoring::decay_factor` age/TTL/half-life arithmetic; asserts a
+  finite factor for arbitrary durations and timestamps (finite floor only).
+- `composite_score` — the core ranking formula; asserts `final_score` is always
+  finite even for `NaN`/`inf` criticality (parsed from files via `f64::parse`).
+
+Each target only calls already-`pub` pure functions — no API was widened for
+fuzzing. If the surface you want to fuzz is behind a private `mod`, prefer an
+existing public entry point that exercises it transitively (e.g. the field
+parsers in `storage::memory_file::helpers` are covered through
+`parse_memory_file`) rather than making the module `pub`.
+
+**Adding a target:** create `fuzz/fuzz_targets/<name>.rs` *and* register a
+matching `[[bin]]` block in `fuzz/Cargo.toml` with `test/doc/bench = false` —
+`cargo fuzz build` (no target arg) builds every `[[bin]]`, so a block pointing
+at a missing file, or a target file with no block, breaks the whole build.
+Drive the target from libfuzzer's `Arbitrary` inputs (tuples of
+`String`/`Vec`/`Option`/`i64`/`f64`/`u8` all work out of the box) and construct
+domain types from those primitives in the body. For score math, assert the
+weakest invariant that must always hold — `is_finite()` — because the fuzzer
+ignores config validation; only assert tighter bounds like `[0,1]` when you
+first clamp/guard the inputs into their valid domain (see the `floor` guard in
+`decay.rs`). When a degenerate input (e.g. a literal `NaN` config field) is an
+input-validation concern rather than the arithmetic under test, `return` early
+on it so the assertion stays meaningful.
+
+Run with `cargo +nightly fuzz run <target> -- -max_total_time=60`. In the web
+sandbox, building requires the same `ORT_STRATEGY=system ORT_LIB_LOCATION=/tmp/ort-lib`
+workaround below. A full `fuzz/target` is ~14 GB on top of the main `target`, so
+on the web sandbox watch `df -h` and reclaim space with `rm -rf fuzz/target`
+(and `cargo clean`) if a build fails with `No space left on device`. Seed inputs
+are committed under `fuzz/corpus/<target>/`; the `.gitignore` keeps only curated
+`*.md` seeds (the auto-grown binary corpus is ignored). When a crash is found,
+commit the failing input from `fuzz/artifacts/` as a new corpus seed so it
+becomes a permanent regression case. CI runs these on a schedule via
+`.github/workflows/fuzz.yml`, not on every PR.
 
 ## Building & testing in Claude Code on the web (restricted egress)
 
