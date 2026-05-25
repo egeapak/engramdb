@@ -67,7 +67,7 @@ fn split_frontmatter(content: &str) -> Result<(&str, &str)> {
 }
 
 fn parse_v1(frontmatter: &str, body: &str) -> Result<Memory> {
-    let mut memory: Memory = serde_yml::from_str(frontmatter)?;
+    let mut memory: Memory = serde_yaml_ng::from_str(frontmatter)?;
     let sections = parse_body_sections(body);
 
     // H1 title in body overrides frontmatter title
@@ -94,7 +94,7 @@ fn write_v1(memory: &Memory) -> Result<String> {
     let mut yaml_memory = memory.clone();
     yaml_memory.content = String::new();
     yaml_memory.details = None;
-    let yaml = serde_yml::to_string(&yaml_memory)?;
+    let yaml = serde_yaml_ng::to_string(&yaml_memory)?;
     out.push_str(&yaml);
     out.push_str("---\n\n");
 
