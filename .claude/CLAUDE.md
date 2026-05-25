@@ -68,6 +68,8 @@ Feature flags from `Cargo.toml`:
 
 Note: `cargo test --lib` has two pre-existing flaky failures under full parallelism (`ops::doctor::tests::test_doctor_many_memories_healthy`, `ops::projects::tests::test_get_project_info_with_memories`) — they pass in isolation and fail identically on a clean base, so they are not a regression signal.
 
+Note: `mcp::server::tests::global_retrieve_with_semantic_query` is similarly flaky under a full-parallel `cargo nextest run --all-features` in a resource-constrained sandbox. The daemon path is disabled under `#[cfg(test)]`, so every embedding test loads ONNX in-process; when many processes lose the model-load race at once, the embedding provider resolves to `None`, the memory is stored without a vector, and the semantic query returns empty. It passes in isolation and on adequately-resourced CI, so it is not a regression signal.
+
 ### Fuzzing
 
 `fuzz/` is a standalone `cargo-fuzz` crate (its own `[workspace]`, excluded from
@@ -129,7 +131,10 @@ The web sandbox's egress gateway uses a custom CA that rustls/webpki-based downl
    mkdir -p /tmp/ort-lib && tar -xf /tmp/ort.tar -C /tmp/ort-lib
    ```
    Export `ORT_STRATEGY=system` and `ORT_LIB_LOCATION=/tmp/ort-lib` for all `cargo build/clippy/test` commands.
-3. **Embedding model** (fastembed download fails the same way): pre-stage `Qdrant/all-MiniLM-L6-v2-onnx` into the hf-hub cache layout under `~/.cache/engramdb/models/models--Qdrant--all-MiniLM-L6-v2-onnx/` with `refs/main` containing `main` and `snapshots/main/<file>` for `model.onnx`, `tokenizer.json`, `config.json`, `special_tokens_map.json`, `tokenizer_config.json` (curl from `https://huggingface.co/<repo>/resolve/main/<file>`). `hf-hub` serves cached files without any network call, so embedding tests then pass offline.
+3. **Embedding model** (fastembed download fails the same way): the default embedding is the **int8-quantized** `DEFAULT_ONNX_EMBEDDING = ONNX_ALL_MINILM_Q` (fastembed `AllMiniLML6V2Q` → repo `Xenova/all-MiniLM-L6-v2`, file `onnx/model_quantized.onnx`), **not** the fp32 `Qdrant/all-MiniLM-L6-v2-onnx`. Stage the quantized repo into `~/.cache/engramdb/models/models--Xenova--all-MiniLM-L6-v2/` with `refs/main` containing `main` and `snapshots/main/<file>` for `onnx/model_quantized.onnx`, `tokenizer.json`, `config.json`, `special_tokens_map.json`, `tokenizer_config.json` (curl from `https://huggingface.co/<repo>/resolve/main/<file>`). If you also exercise the fp32 path, stage `Qdrant/all-MiniLM-L6-v2-onnx` (file `model.onnx`) the same way. `hf-hub` serves cached files without any network call, so embedding tests then pass offline.
+
+   ⚠️ If only the fp32 `Qdrant` repo is staged, `OnnxProvider::try_new()` (the default-quantized path) returns `None`: embeddings appear unavailable, the `Auto` backend silently falls back to Ollama (unreachable in the sandbox), and ~100 tests fail with `Failed to send embed request to Ollama`. Staging the quantized repo is what fixes that.
+4. **T5 title model** (master makes `title.strategy = "t5"` the default; same download failure): pre-stage `DEFAULT_T5_MODEL = T5_XENOVA_Q` (repo `Xenova/t5-small`) into `~/.cache/engramdb/models/models--Xenova--t5-small/` with `refs/main` → `main` and `snapshots/main/<file>` for `onnx/encoder_model_quantized.onnx`, `onnx/decoder_model_quantized.onnx`, `tokenizer.json`. Without it, `create`-path title generation can't build T5.
 
 ## Architecture
 

@@ -431,4 +431,83 @@ mod title_integration {
         let loaded = store.get(&id).await.unwrap();
         assert_eq!(loaded.title, Some("My Important Decision".to_string()));
     }
+
+    // -----------------------------------------------------------------------
+    // 6. T5 strategy end-to-end
+    //
+    // Before this branch, every other test in this file used
+    // TitleStrategy::None — meaning the entire T5 inference pipeline
+    // (encode + greedy_decode + truncate) was never integration-tested.
+    // The cached model lives at
+    // ~/.cache/engramdb/models/models--Xenova--t5-small/snapshots/main/.
+    // If the cache is missing (e.g. plain `cargo test` in a fresh sandbox
+    // with no network), `T5TitleGenerator::new()` errors and we skip the
+    // assertion rather than fail — keeping CI honest about what's loaded.
+    // -----------------------------------------------------------------------
+
+    fn t5_model_available() -> bool {
+        engramdb::title::t5::T5TitleGenerator::try_new().is_some()
+    }
+
+    #[tokio::test]
+    async fn t5_strategy_generates_non_empty_title() {
+        if !t5_model_available() {
+            eprintln!("skipping: T5 model not staged in cache");
+            return;
+        }
+        let (_temp_dir, store) = setup().await;
+
+        let mut params = test_params();
+        params.title = None;
+        params.title_strategy = TitleStrategy::T5;
+        params.summary = "Database backend for the production deployment".to_string();
+        params.content = "We picked PostgreSQL over SQLite because the concurrency model and \
+            transaction guarantees match the production workload better."
+            .to_string();
+
+        let result = create_memory(&store, params, None).await.unwrap();
+        let id = result.id.clone();
+        let loaded = store.get(&id).await.unwrap();
+
+        let title = loaded.title.expect("T5 strategy should populate a title");
+        assert!(!title.is_empty(), "T5 title must not be empty");
+        assert!(
+            title.split_whitespace().count() <= 6,
+            "T5 title should be a few words at most, got: '{}'",
+            title
+        );
+    }
+
+    /// Input longer than `MAX_INPUT_TOKENS` (128) must be truncated and
+    /// still produce a title — the bug pre-fix was that the encoder dropped
+    /// `hidden_dim`, breaking every decode. Long input is the most likely
+    /// real-world case.
+    #[tokio::test]
+    async fn t5_strategy_handles_long_text() {
+        if !t5_model_available() {
+            eprintln!("skipping: T5 model not staged in cache");
+            return;
+        }
+        let (_temp_dir, store) = setup().await;
+
+        // Build a >128-token input by repeating sentences.
+        let long_text =
+            "The system caches embedding vectors per memory and serves them via LanceDB. "
+                .repeat(20);
+
+        let mut params = test_params();
+        params.title = None;
+        params.title_strategy = TitleStrategy::T5;
+        params.summary = "Long input handling".to_string();
+        params.content = long_text;
+
+        let result = create_memory(&store, params, None).await.unwrap();
+        let loaded = store.get(&result.id).await.unwrap();
+        // The bug this guards: long input → encoder produced a 2D shape →
+        // decode silently failed and title came back None.
+        assert!(
+            loaded.title.is_some(),
+            "T5 must still produce a title for >MAX_INPUT_TOKENS input"
+        );
+    }
 }

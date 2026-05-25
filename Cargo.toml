@@ -91,6 +91,10 @@ predicates = "3"
 rand = "0.9"
 regex = "1"
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
+# Enables the rmcp `client` feature for in-process duplex transport tests
+# (mcp::server::tests round-trips get_prompt / read_resource). Production
+# builds keep the server-only feature set from [dependencies].
+rmcp = { version = "0.15", features = ["client"] }
 
 [[bench]]
 name = "benchmarks"
