@@ -50,8 +50,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "memory_helpers"
-path = "fuzz_targets/memory_helpers.rs"
+name = "composite_score"
+path = "fuzz_targets/composite_score.rs"
 test = false
 doc = false
 bench = false
