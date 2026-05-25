@@ -1232,4 +1232,540 @@ mod tests {
         formatter_pretty.print_memory_list(&empty, true);
         formatter_plain.print_memory_list(&empty, false);
     }
+
+    // ========================================
+    // 6. JSON serialization assertions
+    //
+    // The existing print_* tests above only assert "doesn't panic"; the JSON
+    // format branch is `serde_json::to_string_pretty(...)` so we can assert
+    // the actual shape via serde without needing stdout capture. These tests
+    // lock down the public JSON contract — clients (LLM agents, scripts)
+    // parsing this output should not silently break on field rename / removal.
+    // ========================================
+
+    fn test_environment_doctor_result() -> crate::ops::EnvironmentDoctorResult {
+        use crate::ops::{DoctorSection, EnvironmentCheck};
+        crate::ops::EnvironmentDoctorResult {
+            sections: vec![DoctorSection {
+                name: "System".to_string(),
+                checks: vec![EnvironmentCheck {
+                    name: "binary".to_string(),
+                    passed: true,
+                    message: "ok".to_string(),
+                    suggestion: None,
+                    details: vec![],
+                    status: None,
+                }],
+                subsections: vec![],
+            }],
+            all_passed: true,
+            store_check: None,
+        }
+    }
+
+    #[test]
+    fn environment_doctor_json_round_trips() {
+        // The JSON branch of print_environment_doctor uses
+        // serde_json::to_string_pretty(result). Lock the field names down so
+        // any client parsing `doctor --json` keeps working across renames.
+        let result = test_environment_doctor_result();
+        let v = serde_json::to_value(&result).unwrap();
+        assert!(v.get("sections").is_some(), "must serialize 'sections'");
+        assert_eq!(v["all_passed"], serde_json::Value::Bool(true));
+        let sections = v["sections"].as_array().unwrap();
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0]["name"], "System");
+        let checks = sections[0]["checks"].as_array().unwrap();
+        assert_eq!(checks[0]["name"], "binary");
+        assert_eq!(checks[0]["passed"], serde_json::Value::Bool(true));
+        assert_eq!(checks[0]["message"], "ok");
+        // skip_serializing_if attributes hold: optional fields are absent.
+        assert!(checks[0].get("suggestion").is_none());
+        assert!(checks[0].get("details").is_none());
+        assert!(checks[0].get("status").is_none());
+    }
+
+    #[test]
+    fn environment_check_status_serializes_snake_case() {
+        // The status enum carries #[serde(rename_all = "snake_case")].
+        // If that ever changes, every JSON consumer dispatching on this
+        // field breaks silently. Pin the on-wire form.
+        use crate::ops::{CheckStatus, EnvironmentCheck};
+        let check = EnvironmentCheck {
+            name: "n".to_string(),
+            passed: false,
+            message: "m".to_string(),
+            suggestion: Some("try X".to_string()),
+            details: vec!["d1".to_string()],
+            status: Some(CheckStatus::Warn),
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["status"], "warn");
+        assert_eq!(v["suggestion"], "try X");
+        assert_eq!(v["details"], serde_json::json!(["d1"]));
+    }
+
+    #[test]
+    fn project_info_output_json_includes_required_fields() {
+        let info = ProjectInfoOutput {
+            project_id: "pid-123".to_string(),
+            project_name: "demo".to_string(),
+            project_path: "/tmp/demo".to_string(),
+            memory_count: 7,
+            logical_scopes: vec!["db".to_string(), "ui".to_string()],
+            created_at: chrono::Utc::now(),
+            parent_project_id: None,
+        };
+        let v = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["project_id"], "pid-123");
+        assert_eq!(v["project_name"], "demo");
+        assert_eq!(v["memory_count"], 7);
+        assert_eq!(v["logical_scopes"], serde_json::json!(["db", "ui"]));
+        // parent_project_id is skipped when None.
+        assert!(v.get("parent_project_id").is_none());
+    }
+
+    #[test]
+    fn project_info_output_includes_parent_when_set() {
+        let info = ProjectInfoOutput {
+            project_id: "child".to_string(),
+            project_name: "demo".to_string(),
+            project_path: "/tmp/demo".to_string(),
+            memory_count: 0,
+            logical_scopes: vec![],
+            created_at: chrono::Utc::now(),
+            parent_project_id: Some("parent-pid".to_string()),
+        };
+        let v = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["parent_project_id"], "parent-pid");
+    }
+
+    #[test]
+    fn project_list_output_json_round_trip() {
+        let entries = vec![
+            ProjectListOutput {
+                project_id: "a".to_string(),
+                project_path: "/p/a".to_string(),
+                exists: true,
+                parent_project_id: None,
+            },
+            ProjectListOutput {
+                project_id: "b".to_string(),
+                project_path: "/p/b".to_string(),
+                exists: false,
+                parent_project_id: Some("a".to_string()),
+            },
+        ];
+        let v = serde_json::to_value(&entries).unwrap();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["exists"], serde_json::Value::Bool(true));
+        assert!(arr[0].get("parent_project_id").is_none());
+        assert_eq!(arr[1]["exists"], serde_json::Value::Bool(false));
+        assert_eq!(arr[1]["parent_project_id"], "a");
+    }
+
+    #[test]
+    fn aggregate_stats_output_json_round_trip() {
+        let stats = AggregateStatsOutput {
+            total_projects: 3,
+            reachable_projects: 2,
+            total_memories: 42,
+            by_type: vec![(MemoryType::Decision, 30), (MemoryType::Hazard, 12)],
+        };
+        let v = serde_json::to_value(&stats).unwrap();
+        assert_eq!(v["total_projects"], 3);
+        assert_eq!(v["reachable_projects"], 2);
+        assert_eq!(v["total_memories"], 42);
+        let by_type = v["by_type"].as_array().unwrap();
+        assert_eq!(by_type.len(), 2);
+        // by_type is `Vec<(MemoryType, usize)>` — serializes as `[[..., 30], [..., 12]]`.
+        assert_eq!(by_type[0][1], 30);
+    }
+
+    #[test]
+    fn stats_json_includes_core_fields() {
+        let stats = Stats {
+            total: 10,
+            by_type: vec![(MemoryType::Decision, 4)],
+            by_status: vec![(Status::Active, 8), (Status::Challenged, 2)],
+            by_scope: vec![("api".to_string(), 3)],
+            expired: 1,
+            oldest: None,
+            newest: None,
+            avg_criticality: 0.62,
+            runtime: None,
+        };
+        let v = serde_json::to_value(&stats).unwrap();
+        assert_eq!(v["total"], 10);
+        assert_eq!(v["expired"], 1);
+        // f64 equality via serde — within float epsilon.
+        let avg = v["avg_criticality"].as_f64().unwrap();
+        assert!((avg - 0.62).abs() < 1e-9);
+        assert_eq!(v["by_status"].as_array().unwrap().len(), 2);
+    }
+
+    /// `no_color=true` must produce a formatter that doesn't emit ANSI
+    /// escapes — relevant for piped output and CI logs. We can't observe
+    /// stdout here without a refactor, but we can lock the internal flag.
+    #[test]
+    fn formatter_no_color_disables_color() {
+        let f = OutputFormatter::new(Some(OutputFormat::Pretty), false, true);
+        assert!(!f.use_color, "no_color must zero out use_color");
+    }
+
+    /// JSON format mode forces use_color off (colors don't apply to JSON).
+    #[test]
+    fn formatter_json_mode_has_no_color() {
+        let f = OutputFormatter::new(None, true, false);
+        assert!(matches!(f.format, OutputFormat::Json));
+        assert!(!f.use_color, "JSON mode must never use color");
+    }
+
+    // ========================================
+    // 7. print_environment_doctor pretty/plain rendering
+    //
+    // Builds a maximally exhaustive EnvironmentDoctorResult — pass, fail,
+    // warn, info checks, with/without suggestions, with details, with a
+    // subsection — and drives the formatter through Pretty, Plain, and
+    // colorless variants. These tests don't capture stdout (the formatter
+    // writes via println!) so they're asserting "covers every branch
+    // without panicking". The pre-existing JSON test still locks the wire
+    // contract on top of this.
+    // ========================================
+
+    fn doctor_result_with_all_statuses() -> crate::ops::EnvironmentDoctorResult {
+        use crate::ops::doctor::DoctorSubSection;
+        use crate::ops::{CheckStatus, DoctorSection, EnvironmentCheck, EnvironmentDoctorResult};
+        EnvironmentDoctorResult {
+            sections: vec![
+                DoctorSection {
+                    name: "System".to_string(),
+                    checks: vec![
+                        EnvironmentCheck {
+                            name: "pass-check".to_string(),
+                            passed: true,
+                            message: "ok".to_string(),
+                            suggestion: None,
+                            details: vec![],
+                            status: Some(CheckStatus::Pass),
+                        },
+                        EnvironmentCheck {
+                            name: "fail-check".to_string(),
+                            passed: false,
+                            message: "broken".to_string(),
+                            suggestion: Some("try the fix".to_string()),
+                            details: vec!["line 1".to_string(), "line 2".to_string()],
+                            status: Some(CheckStatus::Fail),
+                        },
+                        EnvironmentCheck {
+                            name: "warn-check".to_string(),
+                            passed: false,
+                            message: "soft warning".to_string(),
+                            suggestion: None,
+                            details: vec![],
+                            status: Some(CheckStatus::Warn),
+                        },
+                        EnvironmentCheck {
+                            name: "info-check".to_string(),
+                            passed: true,
+                            message: "informational".to_string(),
+                            suggestion: None,
+                            details: vec![],
+                            status: Some(CheckStatus::Info),
+                        },
+                        // status: None + passed: true → icon resolved from `passed`
+                        EnvironmentCheck {
+                            name: "implicit-pass".to_string(),
+                            passed: true,
+                            message: "implicit".to_string(),
+                            suggestion: None,
+                            details: vec![],
+                            status: None,
+                        },
+                        EnvironmentCheck {
+                            name: "implicit-fail".to_string(),
+                            passed: false,
+                            message: "implicit fail".to_string(),
+                            suggestion: None,
+                            details: vec![],
+                            status: None,
+                        },
+                    ],
+                    subsections: vec![DoctorSubSection {
+                        name: "Sub group".to_string(),
+                        checks: vec![
+                            EnvironmentCheck {
+                                name: "sub-pass".to_string(),
+                                passed: true,
+                                message: "fine".to_string(),
+                                suggestion: None,
+                                details: vec![],
+                                status: Some(CheckStatus::Pass),
+                            },
+                            EnvironmentCheck {
+                                name: "sub-warn".to_string(),
+                                passed: false,
+                                message: "watch out".to_string(),
+                                suggestion: Some("look here".to_string()),
+                                details: vec!["dim line".to_string()],
+                                status: Some(CheckStatus::Warn),
+                            },
+                            EnvironmentCheck {
+                                name: "sub-info".to_string(),
+                                passed: true,
+                                message: "fyi".to_string(),
+                                suggestion: None,
+                                details: vec![],
+                                status: Some(CheckStatus::Info),
+                            },
+                            EnvironmentCheck {
+                                name: "sub-fail".to_string(),
+                                passed: false,
+                                message: "down".to_string(),
+                                suggestion: None,
+                                details: vec![],
+                                status: Some(CheckStatus::Fail),
+                            },
+                        ],
+                    }],
+                },
+                // Second section with only a passed check — exercises the
+                // section-loop with multiple sections.
+                DoctorSection {
+                    name: "Other".to_string(),
+                    checks: vec![EnvironmentCheck {
+                        name: "trivial".to_string(),
+                        passed: true,
+                        message: "trivial ok".to_string(),
+                        suggestion: None,
+                        details: vec![],
+                        status: None,
+                    }],
+                    subsections: vec![],
+                },
+            ],
+            all_passed: false,
+            store_check: None,
+        }
+    }
+
+    #[test]
+    fn print_environment_doctor_pretty_with_color_covers_all_statuses() {
+        let formatter = OutputFormatter::new(Some(OutputFormat::Pretty), false, false);
+        let result = doctor_result_with_all_statuses();
+        formatter.print_environment_doctor(&result);
+    }
+
+    #[test]
+    fn print_environment_doctor_pretty_without_color_covers_all_statuses() {
+        let formatter = OutputFormatter::new(Some(OutputFormat::Pretty), false, true);
+        let result = doctor_result_with_all_statuses();
+        formatter.print_environment_doctor(&result);
+    }
+
+    #[test]
+    fn print_environment_doctor_plain_covers_all_statuses() {
+        let formatter = OutputFormatter::new(Some(OutputFormat::Plain), false, false);
+        let result = doctor_result_with_all_statuses();
+        formatter.print_environment_doctor(&result);
+    }
+
+    #[test]
+    fn print_environment_doctor_json_serializes_full_tree() {
+        let formatter = OutputFormatter::new(Some(OutputFormat::Json), false, false);
+        let result = doctor_result_with_all_statuses();
+        // Drives the JSON branch (cli/output.rs:147).
+        formatter.print_environment_doctor(&result);
+        // Also assert the underlying serialization shape so the JSON
+        // branch's wire contract stays locked.
+        let v = serde_json::to_value(&result).unwrap();
+        let sections = v["sections"].as_array().unwrap();
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0]["subsections"].as_array().unwrap().len(), 1);
+        // Multiple status values present.
+        let statuses: std::collections::HashSet<_> = sections[0]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c.get("status").and_then(|s| s.as_str()))
+            .collect();
+        assert!(statuses.contains("pass"));
+        assert!(statuses.contains("fail"));
+        assert!(statuses.contains("warn"));
+        assert!(statuses.contains("info"));
+    }
+
+    #[test]
+    fn print_environment_doctor_empty_sections_does_not_panic() {
+        let formatter = OutputFormatter::new(Some(OutputFormat::Pretty), false, false);
+        let result = crate::ops::EnvironmentDoctorResult {
+            sections: vec![],
+            all_passed: true,
+            store_check: None,
+        };
+        formatter.print_environment_doctor(&result);
+    }
+
+    // ========================================
+    // 8. print_runtime_pretty via print_stats with a hand-built snapshot
+    //
+    // print_runtime_pretty (cli/output.rs:902) has CRAP 182 and was at 0%
+    // coverage — its 5 inner-loop branches (by_tool with/without errors,
+    // queries with/without quality bucket, tool/stage timings, by_project
+    // overlay) never executed in tests. Construct a Stats that drives every
+    // branch and call print_stats. We deliberately route through the public
+    // `print_stats` to also nudge `print_stats_pretty`'s "if let Some(rt)"
+    // branch (cli/output.rs:731).
+    // ========================================
+
+    fn fully_populated_runtime_snapshot() -> crate::telemetry::RuntimeSnapshot {
+        use crate::telemetry::{
+            ProjectView, QueriesView, RuntimeSnapshot, TimingStats, TimingsView, UsageView,
+        };
+        use std::collections::BTreeMap;
+
+        let mut by_tool = BTreeMap::new();
+        by_tool.insert("query".to_string(), 12);
+        by_tool.insert("create".to_string(), 4);
+        let mut errors_by_tool = BTreeMap::new();
+        // One tool with errors → "{n} errors" branch, the other without.
+        errors_by_tool.insert("query".to_string(), 2);
+
+        let mut by_quality: BTreeMap<&'static str, u64> = BTreeMap::new();
+        by_quality.insert("full", 5);
+        by_quality.insert("keyword_only", 1);
+
+        let mut tool_timings = BTreeMap::new();
+        tool_timings.insert(
+            "query".to_string(),
+            TimingStats {
+                count: 12,
+                avg: 42.5,
+                p50: 38.0,
+                p95: 80.0,
+            },
+        );
+        let mut stage_timings = BTreeMap::new();
+        stage_timings.insert(
+            "embed".to_string(),
+            TimingStats {
+                count: 16,
+                avg: 8.1,
+                p50: 7.0,
+                p95: 14.0,
+            },
+        );
+
+        let view = ProjectView {
+            usage: UsageView {
+                total_calls: 16,
+                unique_sessions: 3,
+                by_tool,
+                errors_by_tool,
+            },
+            queries: QueriesView {
+                total: 6,
+                hits: 5,
+                zero_results: 1,
+                hit_rate: 0.833,
+                followups: 2,
+                followup_rate: 0.333,
+                by_quality,
+            },
+            timings_ms: TimingsView {
+                tool: tool_timings,
+                stages: stage_timings,
+            },
+        };
+
+        let mut by_project = std::collections::BTreeMap::new();
+        by_project.insert("project-a".to_string(), view.clone());
+        by_project.insert("project-b".to_string(), ProjectView::default());
+
+        RuntimeSnapshot {
+            since: chrono::Utc::now(),
+            project_id: "project-a".to_string(),
+            persistence_failures: 0,
+            view,
+            by_project: Some(by_project),
+        }
+    }
+
+    fn empty_runtime_snapshot() -> crate::telemetry::RuntimeSnapshot {
+        crate::telemetry::RuntimeSnapshot {
+            since: chrono::Utc::now(),
+            project_id: "project-empty".to_string(),
+            persistence_failures: 0,
+            view: crate::telemetry::ProjectView::default(),
+            by_project: None,
+        }
+    }
+
+    fn stats_with_runtime(rt: crate::telemetry::RuntimeSnapshot) -> Stats {
+        Stats {
+            total: 3,
+            by_type: vec![(MemoryType::Decision, 2), (MemoryType::Convention, 1)],
+            by_status: vec![(Status::Active, 3)],
+            by_scope: vec![("services/api".to_string(), 2)],
+            expired: 0,
+            oldest: None,
+            newest: None,
+            avg_criticality: 0.75,
+            runtime: Some(rt),
+        }
+    }
+
+    #[test]
+    fn print_runtime_pretty_drives_all_branches_via_stats_pretty() {
+        let formatter = OutputFormatter::new(Some(OutputFormat::Pretty), false, false);
+        let stats = stats_with_runtime(fully_populated_runtime_snapshot());
+        formatter.print_stats(&stats);
+    }
+
+    #[test]
+    fn print_runtime_pretty_empty_snapshot_skips_optional_blocks() {
+        // No by_tool, no queries, no timings, no by_project → every `if !x.is_empty()`
+        // branch in print_runtime_pretty takes the False path.
+        let formatter = OutputFormatter::new(Some(OutputFormat::Pretty), false, false);
+        let stats = stats_with_runtime(empty_runtime_snapshot());
+        formatter.print_stats(&stats);
+    }
+
+    #[test]
+    fn print_runtime_plain_with_runtime_does_not_panic() {
+        // print_stats_plain has its own runtime branch (cli/output.rs:741).
+        let formatter = OutputFormatter::new(Some(OutputFormat::Plain), false, false);
+        let stats = stats_with_runtime(fully_populated_runtime_snapshot());
+        formatter.print_stats(&stats);
+    }
+
+    #[test]
+    fn print_stats_json_serializes_runtime_payload() {
+        let formatter = OutputFormatter::new(Some(OutputFormat::Json), false, false);
+        let stats = stats_with_runtime(fully_populated_runtime_snapshot());
+        // Lock the JSON output shape — the Stats `runtime` field carries
+        // `#[serde(flatten)]`, so RuntimeSnapshot fields appear at the top
+        // level of the Stats JSON. Dashboards reading `stats --json` see
+        // since/project_id/usage/queries/timings_ms next to the static
+        // memory counters.
+        let json = serde_json::to_value(&stats).unwrap();
+        assert!(json["since"].is_string(), "since must be at top level");
+        assert!(
+            json["project_id"].is_string(),
+            "project_id must be at top level"
+        );
+        // ProjectView fields are doubly flattened via RuntimeSnapshot.
+        assert!(json["usage"].is_object(), "usage must be top-level");
+        assert!(json["queries"].is_object(), "queries must be top-level");
+        assert!(
+            json["timings_ms"].is_object(),
+            "timings_ms must be top-level"
+        );
+        // Static stats fields still present.
+        assert_eq!(json["total"], 3);
+        // Drive the print path as well so the JSON branch of print_stats
+        // executes.
+        formatter.print_stats(&stats);
+    }
 }

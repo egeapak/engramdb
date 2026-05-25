@@ -6046,4 +6046,240 @@ mod tests {
             1
         );
     }
+
+    // =================================================================
+    // Prompt and resource transport coverage.
+    //
+    // `get_prompt` (CRAP 182, was 0% covered) and `read_resource` (CRAP
+    // 90, was 0% covered) live behind `ServerHandler` trait impls — they
+    // can't be called directly from a test because their `_context`
+    // parameter is `RequestContext<RoleServer>` and the `Peer` inside
+    // requires a real transport. The standard rmcp pattern (used in the
+    // upstream `tests/test_message_protocol.rs`) is to wire a duplex
+    // transport in process: spawn the server on one end, drive a tiny
+    // `()` client on the other, and round-trip the request.
+    // =================================================================
+
+    async fn duplex_serve(
+        server: EngramDbServer,
+    ) -> (
+        rmcp::service::RunningService<rmcp::RoleClient, ()>,
+        tokio::task::JoinHandle<anyhow::Result<()>>,
+    ) {
+        let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+        let server_handle: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+            let svc = server.serve(server_io).await?;
+            svc.waiting().await?;
+            Ok(())
+        });
+        let client = rmcp::serve_client((), client_io)
+            .await
+            .expect("client must hand-shake against the in-process server");
+        (client, server_handle)
+    }
+
+    /// `get_prompt("memory-session-start")` against an empty store →
+    /// fallback "No relevant memories found." branch (server.rs:2342)
+    /// + the standard prompt template.
+    #[tokio::test]
+    async fn get_prompt_session_start_empty_store_returns_fallback() {
+        let (_dir, server) = setup().await;
+        let (client, server_handle) = duplex_serve(server).await;
+
+        let result = client
+            .peer()
+            .get_prompt(GetPromptRequestParams {
+                meta: None,
+                name: "memory-session-start".to_string(),
+                arguments: None,
+            })
+            .await
+            .expect("get_prompt must succeed");
+
+        assert_eq!(
+            result.description.as_deref(),
+            Some("Session start briefing")
+        );
+        assert_eq!(result.messages.len(), 1);
+        let text = match &result.messages[0].content {
+            PromptMessageContent::Text { text } => text.clone(),
+            other => panic!("expected text content, got {other:?}"),
+        };
+        assert!(text.contains("EngramDB"), "missing EngramDB header: {text}");
+        assert!(
+            text.contains("No relevant memories found."),
+            "empty-store fallback missing: {text}"
+        );
+
+        // Clean shutdown so the join handle resolves.
+        client.cancel().await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+    }
+
+    /// `get_prompt("memory-session-end")` against an empty store → the
+    /// `compute_stats` Ok branch with zero memories and zero
+    /// review_count.
+    #[tokio::test]
+    async fn get_prompt_session_end_reports_zero_memory_store() {
+        let (_dir, server) = setup().await;
+        let (client, server_handle) = duplex_serve(server).await;
+
+        let result = client
+            .peer()
+            .get_prompt(GetPromptRequestParams {
+                meta: None,
+                name: "memory-session-end".to_string(),
+                arguments: None,
+            })
+            .await
+            .expect("get_prompt must succeed");
+
+        assert_eq!(result.description.as_deref(), Some("Session end review"));
+        let text = match &result.messages[0].content {
+            PromptMessageContent::Text { text } => text.clone(),
+            other => panic!("expected text content, got {other:?}"),
+        };
+        assert!(
+            text.contains("Current store has 0 memories"),
+            "stats line missing: {text}"
+        );
+        assert!(
+            text.contains("create"),
+            "session-end template body missing: {text}"
+        );
+
+        client.cancel().await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+    }
+
+    /// Unknown prompt name → `invalid_params` error branch
+    /// (server.rs:2397-2401).
+    #[tokio::test]
+    async fn get_prompt_with_unknown_name_returns_error() {
+        let (_dir, server) = setup().await;
+        let (client, server_handle) = duplex_serve(server).await;
+
+        let err = client
+            .peer()
+            .get_prompt(GetPromptRequestParams {
+                meta: None,
+                name: "this-prompt-does-not-exist".to_string(),
+                arguments: None,
+            })
+            .await
+            .expect_err("unknown prompt must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.to_lowercase().contains("unknown")
+                || msg.to_lowercase().contains("not found")
+                || msg.to_lowercase().contains("invalid"),
+            "unexpected error message: {msg}"
+        );
+
+        client.cancel().await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+    }
+
+    /// `read_resource("memory://index")` → list_filterable branch.
+    /// Empty store → empty JSON array in the contents text.
+    #[tokio::test]
+    async fn read_resource_memory_index_returns_serialized_filterables() {
+        let (_dir, server) = setup().await;
+        let (client, server_handle) = duplex_serve(server).await;
+
+        let result = client
+            .peer()
+            .read_resource(ReadResourceRequestParams {
+                meta: None,
+                uri: "memory://index".to_string(),
+            })
+            .await
+            .expect("read_resource must succeed");
+
+        assert_eq!(result.contents.len(), 1);
+        let text = match &result.contents[0] {
+            ResourceContents::TextResourceContents { text, .. } => text.clone(),
+            other => panic!("expected text contents, got {other:?}"),
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text).expect("contents must be JSON array");
+        assert!(parsed.is_array(), "expected array, got {parsed}");
+        assert_eq!(parsed.as_array().unwrap().len(), 0);
+
+        client.cancel().await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+    }
+
+    /// `read_resource("memory://context/<path>")` → build_engine + query
+    /// branch (server.rs:2227-2263). Empty store → empty memories array.
+    #[tokio::test]
+    async fn read_resource_memory_context_returns_serialized_query_result() {
+        let (_dir, server) = setup().await;
+        let (client, server_handle) = duplex_serve(server).await;
+
+        let result = client
+            .peer()
+            .read_resource(ReadResourceRequestParams {
+                meta: None,
+                uri: "memory://context/src/lib.rs".to_string(),
+            })
+            .await
+            .expect("read_resource must succeed");
+
+        let text = match &result.contents[0] {
+            ResourceContents::TextResourceContents { text, .. } => text.clone(),
+            other => panic!("expected text contents, got {other:?}"),
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(parsed.is_array(), "expected array, got {parsed}");
+
+        client.cancel().await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+    }
+
+    /// Unknown URI → `invalid_params` error branch (server.rs:2264-2268).
+    #[tokio::test]
+    async fn read_resource_with_unknown_uri_returns_error() {
+        let (_dir, server) = setup().await;
+        let (client, server_handle) = duplex_serve(server).await;
+
+        let err = client
+            .peer()
+            .read_resource(ReadResourceRequestParams {
+                meta: None,
+                uri: "memory://nope/whatever".to_string(),
+            })
+            .await
+            .expect_err("unknown URI must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Unknown resource URI") || msg.to_lowercase().contains("invalid"),
+            "unexpected error message: {msg}"
+        );
+
+        client.cancel().await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+    }
+
+    /// Sanity check: list_prompts returns the two prompts the server
+    /// claims to support (server.rs:2273-2302). This also exercises the
+    /// list_prompts handler which had no direct test.
+    #[tokio::test]
+    async fn list_prompts_returns_both_session_prompts() {
+        let (_dir, server) = setup().await;
+        let (client, server_handle) = duplex_serve(server).await;
+
+        let result = client
+            .peer()
+            .list_prompts(None)
+            .await
+            .expect("list_prompts must succeed");
+        let names: std::collections::HashSet<String> =
+            result.prompts.iter().map(|p| p.name.clone()).collect();
+        assert!(names.contains("memory-session-start"));
+        assert!(names.contains("memory-session-end"));
+
+        client.cancel().await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+    }
 }

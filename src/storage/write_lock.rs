@@ -75,4 +75,68 @@ mod tests {
         let guard2 = acquire_write_lock_at(temp_dir.path()).await.unwrap();
         drop(guard2);
     }
+
+    /// The core safety property: two tasks racing for the SAME lock must
+    /// serialize. We measure this by holding the lock for a known interval
+    /// in one task and starting another mid-hold — the second's acquire
+    /// must not return until the first releases. Without this guarantee
+    /// the write lock is useless as a cross-process serialization point.
+    #[tokio::test]
+    async fn concurrent_acquisitions_serialize() {
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let temp_dir = Arc::new(TempDir::new().unwrap());
+        let hold_ms = 150u64;
+
+        let dir1 = Arc::clone(&temp_dir);
+        let holder = tokio::spawn(async move {
+            let guard = acquire_write_lock_at(dir1.path()).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(hold_ms)).await;
+            drop(guard);
+        });
+
+        // Give the holder a head start so it definitely owns the lock first.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let dir2 = Arc::clone(&temp_dir);
+        let start = Instant::now();
+        let waiter = tokio::spawn(async move {
+            let guard = acquire_write_lock_at(dir2.path()).await.unwrap();
+            drop(guard);
+        });
+
+        waiter.await.unwrap();
+        holder.await.unwrap();
+        let elapsed = start.elapsed();
+
+        // The waiter cannot have acquired before the holder released. Allow
+        // ample slack (CI scheduling) but assert clearly above the headstart.
+        assert!(
+            elapsed >= Duration::from_millis(hold_ms - 30),
+            "waiter returned in {:?}; lock did not serialize",
+            elapsed
+        );
+    }
+
+    /// Dropping the guard releases the lock — required for `?`-on-error or
+    /// panic-in-critical-section recovery.
+    #[tokio::test]
+    async fn dropped_guard_releases_lock() {
+        let temp_dir = TempDir::new().unwrap();
+
+        {
+            let _g = acquire_write_lock_at(temp_dir.path()).await.unwrap();
+            // guard dropped at end of this scope
+        }
+
+        // Must succeed immediately — guard from previous block was released.
+        let started = std::time::Instant::now();
+        let guard = acquire_write_lock_at(temp_dir.path()).await.unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "second acquire should be ~instant after drop"
+        );
+        drop(guard);
+    }
 }

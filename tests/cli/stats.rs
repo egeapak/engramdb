@@ -1,5 +1,6 @@
 use super::helpers;
 use predicates::prelude::*;
+use std::fs;
 use tempfile::TempDir;
 
 #[test]
@@ -85,4 +86,87 @@ fn stats_json_has_expected_keys() {
         val.get("by_status").is_some(),
         "JSON should have 'by_status' key"
     );
+}
+
+// =====================================================================
+// `print_embeddings_status` branch coverage (src/cli/commands/stats.rs).
+//
+// The status line at the bottom of `engramdb stats` runs through
+// `print_embeddings_status`, which dispatches on the configured provider
+// name and backend (CRAP 157, was ~30% covered). We drive its branches
+// by writing different `[embeddings]` sections into the project config
+// and asserting on the rendered status line.
+// =====================================================================
+
+/// Overwrite the project's config.toml with the given `[embeddings]` body.
+fn write_embeddings_config(dir: &std::path::Path, body: &str) {
+    let config_path = dir.join(".engramdb").join("config.toml");
+    fs::write(&config_path, body).expect("failed to write config.toml");
+}
+
+#[test]
+fn stats_embeddings_status_unknown_provider() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    write_embeddings_config(
+        dir.path(),
+        "[embeddings]\nprovider = \"bogus-provider-xyz\"\ndimensions = 384\nmax_tokens = 256\n",
+    );
+
+    helpers::cmd()
+        .args(["--dir", dir.path().to_str().unwrap(), "stats"])
+        .assert()
+        .success()
+        // Drives the `other => { ... return; }` early-return arm.
+        .stdout(predicate::str::contains(
+            "Not available (unknown provider 'bogus-provider-xyz')",
+        ));
+}
+
+#[test]
+fn stats_embeddings_status_onnx_backend_model_missing() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    // nomic isn't staged in the test environment, and forcing the ONNX
+    // backend disables any Ollama fallback → the "run 'engramdb init'"
+    // branch (backend == Onnx, not available).
+    write_embeddings_config(
+        dir.path(),
+        "[embeddings]\nprovider = \"nomic-embed-text\"\ndimensions = 768\nmax_tokens = 8192\n",
+    );
+
+    helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--embedding-backend",
+            "onnx",
+            "stats",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Not available (run 'engramdb init' to download model)",
+        ));
+}
+
+#[test]
+fn stats_embeddings_status_all_minilm_available_via_onnx() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    // The default all-MiniLM model is pre-staged in the test cache, so the
+    // ONNX-available branch ("Available (... via ONNX)") fires.
+    write_embeddings_config(dir.path(), "[embeddings]\nprovider = \"all-minilm\"\n");
+
+    helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--embedding-backend",
+            "onnx",
+            "stats",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Available (all-minilm via ONNX)"));
 }

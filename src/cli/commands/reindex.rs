@@ -74,3 +74,68 @@ pub async fn run_reindex(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::app::OutputFormat;
+    use crate::storage::InMemoryRegistry;
+    use crate::types::{Memory, MemoryType, Provenance};
+    use tempfile::TempDir;
+
+    fn fmt() -> OutputFormatter {
+        OutputFormatter::new(Some(OutputFormat::Json), false, false)
+    }
+
+    /// Both `embeddings_only` and `index_only` set: engine = None branch
+    /// (engine.is_some() is false), no re-embedding happens, and `reindex`
+    /// is called with `embeddings_only=true` so it also skips the index
+    /// rebuild. Net effect: nothing happens but no error.
+    #[tokio::test]
+    async fn run_reindex_with_index_only_is_safe_when_no_memories() {
+        let tmp = TempDir::new().unwrap();
+        let _ = crate::storage::MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        run_reindex(tmp.path(), false, false, true, None, &fmt())
+            .await
+            .unwrap();
+    }
+
+    /// `index_only=true` skips engine construction entirely (the
+    /// `if !index_only` branch). This is the path that doesn't try to
+    /// load any embedding model — safe to run in test envs without ONNX.
+    #[tokio::test]
+    async fn run_reindex_index_only_rebuilds_index_without_engine() {
+        let tmp = TempDir::new().unwrap();
+        let store = crate::storage::MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        // Create a memory so reindex has something to count.
+        let mem = Memory::new(
+            MemoryType::Decision,
+            "summary",
+            "content",
+            Provenance::human(),
+        );
+        store.create(&mem).await.unwrap();
+
+        // index_only=true → engine is None → no embedding load attempted.
+        run_reindex(tmp.path(), false, false, true, None, &fmt())
+            .await
+            .unwrap();
+    }
+
+    /// Open-uninitialized-store path: must surface the error rather than
+    /// panic. Exercises the very first branch of run_reindex (the
+    /// MemoryStore::open call before any further dispatch).
+    #[tokio::test]
+    async fn run_reindex_against_uninitialized_dir_errors() {
+        let tmp = TempDir::new().unwrap();
+        // Note: NO init.
+        let result = run_reindex(tmp.path(), false, false, true, None, &fmt()).await;
+        assert!(result.is_err(), "uninitialized store must error");
+    }
+}
