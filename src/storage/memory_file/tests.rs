@@ -678,6 +678,16 @@ fn test_parse_memory_file_empty_input() {
     }
 }
 
+#[test]
+fn test_parse_memory_file_malformed_yaml_does_not_panic() {
+    // Regression (found by `cargo fuzz run memory_file`): this input panicked
+    // inside the old serde_yml/libyml scanner ("String join would overflow
+    // memory bounds"), which aborts the process under panic=abort. After
+    // moving to serde_yaml_ng it must surface as an error, never a panic.
+    let content = std::str::from_utf8(b"---d\t\t\t\t\t\t\t\t\t\t\t\t\t\t  @---").unwrap();
+    assert!(parse_memory_file(content).is_err());
+}
+
 // ===========================================================================
 // write_memory_file convenience function
 // ===========================================================================
