@@ -10,7 +10,7 @@
 
 use super::error::{Result, StorageError};
 use super::paths;
-use fs4::fs_std::FileExt;
+use fs4::FileExt;
 use std::fs::File;
 use std::path::Path;
 
@@ -21,7 +21,7 @@ pub struct WriteLockGuard {
 
 impl Drop for WriteLockGuard {
     fn drop(&mut self) {
-        let _ = self._file.unlock();
+        let _ = FileExt::unlock(&self._file);
     }
 }
 
@@ -46,7 +46,7 @@ pub(crate) async fn acquire_write_lock_at(lock_dir: &Path) -> Result<WriteLockGu
             .truncate(false)
             .write(true)
             .open(&lock_path)?;
-        file.lock_exclusive()?;
+        FileExt::lock(&file)?;
         Ok(WriteLockGuard { _file: file })
     })
     .await

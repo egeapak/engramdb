@@ -1049,15 +1049,16 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
     }
 
     // Try to acquire an exclusive lock (non-blocking)
-    use fs4::fs_std::FileExt;
+    use fs4::FileExt;
+    use fs4::TryLockError;
     match std::fs::File::options()
         .read(true)
         .write(true)
         .open(&lock_path)
     {
-        Ok(file) => match file.try_lock_exclusive() {
+        Ok(file) => match FileExt::try_lock(&file) {
             Ok(()) => {
-                let _ = file.unlock();
+                let _ = FileExt::unlock(&file);
                 EnvironmentCheck {
                     name: "Write lock".to_string(),
                     passed: true,
@@ -1067,7 +1068,7 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
                     status: None,
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => EnvironmentCheck {
+            Err(TryLockError::WouldBlock) => EnvironmentCheck {
                 name: "Write lock".to_string(),
                 passed: true,
                 message: "write lock held by active process".to_string(),
@@ -1077,7 +1078,7 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
                 details: vec![],
                 status: Some(CheckStatus::Warn),
             },
-            Err(e) => EnvironmentCheck {
+            Err(TryLockError::Error(e)) => EnvironmentCheck {
                 name: "Write lock".to_string(),
                 passed: false,
                 message: format!("lock check failed: {}", e),
@@ -2412,7 +2413,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dir_stats_counts_and_sizes_with_extension_filter() {
-        use rand::Rng;
+        use rand::RngExt;
 
         let temp_dir = TempDir::new().unwrap();
         let mut rng = rand::rng();
@@ -2448,7 +2449,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dir_stats_nested_directories() {
-        use rand::Rng;
+        use rand::RngExt;
 
         let temp_dir = TempDir::new().unwrap();
         let mut rng = rand::rng();
@@ -2482,7 +2483,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_subdir_sizes_reports_per_directory() {
-        use rand::Rng;
+        use rand::RngExt;
 
         let temp_dir = TempDir::new().unwrap();
         let mut rng = rand::rng();
@@ -2595,7 +2596,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_write_lock_held_warns() {
-        use fs4::fs_std::FileExt;
+        use fs4::FileExt;
 
         let project_id = "lock-test-project";
         let lock_dir = crate::storage::paths::global_data_dir()
@@ -2613,7 +2614,7 @@ mod tests {
             .truncate(false)
             .open(&lock_path)
             .unwrap();
-        lock_file.lock_exclusive().unwrap();
+        FileExt::lock(&lock_file).unwrap();
 
         let result = check_write_lock(project_id).await;
         assert_eq!(result.name, "Write lock");
@@ -2621,7 +2622,7 @@ mod tests {
         assert!(result.message.contains("held by active process"));
 
         // Clean up
-        lock_file.unlock().unwrap();
+        FileExt::unlock(&lock_file).unwrap();
         let _ = std::fs::remove_dir_all(&lock_dir);
     }
 

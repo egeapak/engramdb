@@ -34,26 +34,26 @@ axum = { version = "0.8", default-features = false, features = ["tokio"] }
 # Vector DB & Embeddings
 lancedb = { version = "0.26", default-features = false }
 fastembed = { version = "5", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
 arrow-array = "57"
 arrow-schema = "57"
 
 # NLI (contradiction detection)
 ort = { version = "2.0.0-rc.11", default-features = false, features = ["download-binaries", "ndarray", "std"] }
-tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
-hf-hub = { version = "0.4", default-features = false, features = ["rustls-tls", "tokio", "ureq"] }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+hf-hub = { version = "0.5", default-features = false, features = ["rustls-tls", "tokio", "ureq"] }
 ndarray = { version = "0.17", default-features = false }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
-toml = "0.8"
+toml = "1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
-inquire = "0.7"
+inquire = "0.9"
 owo-colors = { version = "4", features = ["supports-colors"] }
 indicatif = "0.18"
 rayon = "1"
@@ -66,7 +66,7 @@ sha2 = "0.10"
 shell-words = "1"
 dirs = "6"
 jwalk = "0.8"
-fs4 = { version = "0.12", features = ["sync"] }
+fs4 = { version = "1", features = ["sync"] }
 
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net", "process"] }
@@ -86,9 +86,9 @@ tempfile = "3"
 
 [dev-dependencies]
 assert_cmd = "2"
-ctor = "0.4"
+ctor = "1"
 predicates = "3"
-rand = "0.9"
+rand = "0.10"
 regex = "1"
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 # Enables the rmcp `client` feature for in-process duplex transport tests
