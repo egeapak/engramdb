@@ -3,7 +3,6 @@ pub mod daemon;
 pub mod embeddings;
 pub mod mcp;
 pub mod nli;
-pub mod onnx_ep;
 pub mod ops;
 pub mod retrieval;
 pub mod scope;
@@ -12,7 +11,12 @@ pub mod search;
 pub mod storage;
 pub mod telemetry;
 pub mod title;
-pub mod types;
+
+// Extracted workspace crates, re-exported under their historical module paths so
+// every `crate::<module>::…` / `engramdb::<module>::…` reference keeps resolving
+// unchanged after the extraction.
+pub use engram_onnx as onnx_ep;
+pub use engram_types as types;
 
 /// Test isolation: redirect global data and config dirs to per-process temp directories.
 ///

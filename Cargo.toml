@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/*"]
+
 [package]
 name = "engramdb"
 version = "0.6.0"
@@ -19,14 +22,20 @@ default = ["ollama"]
 ollama = ["reqwest"]
 # Apple Core ML (GPU / Neural Engine) acceleration for all ONNX models.
 # Enable on macOS only: `cargo build --features coreml`. Off by default so
-# the Linux/CI build and prebuilt-binary download are unchanged.
-coreml = ["ort/coreml"]
+# the Linux/CI build and prebuilt-binary download are unchanged. Forwarded to
+# the `engram-onnx` crate, which owns the `ort` EP wiring.
+coreml = ["ort/coreml", "engram-onnx/coreml"]
 # XNNPACK portable CPU-kernel EP (per-node MLAS fallback). Off by default;
 # the provider ships in the prebuilt `ort` binary so only this feature is
 # needed (no source build, same downloaded binary). For A/B benchmarking.
-xnnpack = ["ort/xnnpack"]
+xnnpack = ["ort/xnnpack", "engram-onnx/xnnpack"]
 
 [dependencies]
+# Workspace sub-crates (extracted foundations; re-exported from lib.rs so the
+# `engramdb::<module>` and `crate::<module>` paths stay stable everywhere).
+engram-types = { path = "crates/engram-types" }
+engram-onnx = { path = "crates/engram-onnx" }
+
 # MCP Server
 rmcp = { version = "0.15", features = ["macros", "server", "transport-io", "transport-streamable-http-server"] }
 axum = { version = "0.8", default-features = false, features = ["tokio"] }
