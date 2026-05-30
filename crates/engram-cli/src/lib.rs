@@ -23,6 +23,18 @@ pub mod output;
 pub mod prompter;
 pub mod validation;
 
+// Test isolation: link `engram-test-support` so its `#[ctor]` redirects
+// `ENGRAMDB_DATA_DIR` / `ENGRAMDB_CONFIG_DIR` to per-process temp dirs before
+// any test runs. The in-crate command unit tests (e.g. `commands::get` /
+// `commands::doctor` global-store cases) build real `MemoryStore`s; without
+// this they would touch the *real* global data dir under nextest. The explicit
+// `arm()` reference keeps the linker from dead-stripping the constructor.
+#[cfg(test)]
+#[ctor::ctor]
+fn arm_test_isolation() {
+    engram_test_support::arm();
+}
+
 use anyhow::Result;
 use std::env;
 use std::path::PathBuf;

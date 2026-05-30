@@ -1146,27 +1146,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_start_empty_store_returns_none() {
+    async fn session_start_empty_store_emits_nudge_only() {
         let temp_dir = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();
         let _ = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
+        // An empty store still emits the reflection nudge on its own, but no
+        // "Key project memories" block.
         let out = process_session_start(temp_dir.path(), None, 0.5)
             .await
+            .unwrap()
+            .expect("empty store still surfaces the reflection nudge");
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let ctx = parsed["hookSpecificOutput"]["additionalContext"]
+            .as_str()
             .unwrap();
-        assert!(out.is_none());
+        assert!(
+            ctx.contains(REFLECTION_NUDGE),
+            "empty store must still emit the reflection nudge: {ctx}"
+        );
+        assert!(
+            !ctx.contains("Key project memories"),
+            "empty store must not emit a memories block: {ctx}"
+        );
     }
 
     #[tokio::test]
-    async fn session_start_below_threshold_returns_none() {
-        // Only low-criticality memories — must not be surfaced at session
-        // start when min_criticality is above all of them.
+    async fn session_start_below_threshold_emits_nudge_only() {
+        // Only low-criticality memories — none are surfaced at session start
+        // when min_criticality is above all of them, but the nudge still fires.
         let dir = store_with_criticality(&[(0.2, "low"), (0.3, "lower")]).await;
 
-        let out = process_session_start(dir.path(), None, 0.9).await.unwrap();
+        let out = process_session_start(dir.path(), None, 0.9)
+            .await
+            .unwrap()
+            .expect("below-threshold store still surfaces the reflection nudge");
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let ctx = parsed["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
         assert!(
-            out.is_none(),
-            "no memory above threshold → no session-start surface"
+            ctx.contains(REFLECTION_NUDGE),
+            "below-threshold store must still emit the reflection nudge: {ctx}"
+        );
+        assert!(
+            !ctx.contains("Key project memories"),
+            "no memory above threshold → no memories block: {ctx}"
+        );
+        assert!(
+            !ctx.contains("low") && !ctx.contains("lower"),
+            "below-threshold memories must not appear: {ctx}"
         );
     }
 

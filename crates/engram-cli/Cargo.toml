@@ -51,6 +51,10 @@ anyhow = "1"
 
 [dev-dependencies]
 engramdb = { path = "../..", default-features = false, features = ["test-support"] }
+# `arm()`s the per-process data/config-dir isolation (#[ctor] in src/lib.rs) so
+# in-crate command unit tests don't touch the real global dir under nextest.
+engram-test-support = { path = "../engram-test-support" }
+ctor = "0.4"
 assert_cmd = "2"
 predicates = "3"
 regex = "1"
