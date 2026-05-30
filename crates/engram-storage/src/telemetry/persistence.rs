@@ -58,7 +58,7 @@ use lancedb::query::ExecutableQuery;
 use lancedb::{connect, Connection, Table};
 use tokio::sync::mpsc;
 
-use crate::storage::paths::{global_data_dir, global_lancedb_dir, lancedb_dir, GLOBAL_PROJECT_ID};
+use crate::paths::{global_data_dir, global_lancedb_dir, lancedb_dir, GLOBAL_PROJECT_ID};
 use crate::telemetry::collector::{EventRow, EventType, StatsCollector};
 
 const TABLE_NAME: &str = "stats_events";
@@ -619,7 +619,7 @@ async fn optimize_table(project_id: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::telemetry::collector::{EventRow, EventType, StatsCollector};
-    use crate::types::config::StatsConfig;
+    use engram_types::config::StatsConfig;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn unique_pid(prefix: &str) -> String {

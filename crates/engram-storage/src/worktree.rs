@@ -157,8 +157,8 @@ pub async fn resolve_project_root(dir: &Path, registry: &dyn RegistryBackend) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{InMemoryRegistry, RegistryBackend};
-    use crate::types::{Memory, MemoryType, Provenance};
+    use crate::{InMemoryRegistry, RegistryBackend};
+    use engram_types::{Memory, MemoryType, Provenance};
     use std::fs;
     use tempfile::TempDir;
 

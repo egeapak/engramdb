@@ -19,8 +19,8 @@
 
 use super::helpers::parse_body_sections;
 use super::{MemoryParser, MemoryWriter};
-use crate::storage::error::{Result, StorageError};
-use crate::types::Memory;
+use crate::error::{Result, StorageError};
+use engram_types::Memory;
 
 /// Parser for the V1 (legacy) full-YAML-frontmatter format.
 pub struct V1Parser;

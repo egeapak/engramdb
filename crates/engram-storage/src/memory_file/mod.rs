@@ -18,7 +18,7 @@ pub mod v2;
 mod tests;
 
 use super::error::{Result, StorageError};
-use crate::types::Memory;
+use engram_types::Memory;
 
 pub use v1::{V1Parser, V1Writer};
 pub use v2::{V2Parser, V2Writer};

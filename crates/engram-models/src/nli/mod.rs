@@ -118,6 +118,6 @@ mod tests {
     /// `[nli].model` default. The config half is asserted in `types::config`.
     #[test]
     fn default_nli_model_tracks_config_default_repo() {
-        assert_eq!(DEFAULT_NLI_MODEL.repo, crate::types::DEFAULT_NLI_MODEL_REPO);
+        assert_eq!(DEFAULT_NLI_MODEL.repo, engram_types::DEFAULT_NLI_MODEL_REPO);
     }
 }

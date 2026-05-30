@@ -89,25 +89,25 @@ impl T5TitleGenerator {
     }
 
     /// Create [`DEFAULT_T5_MODEL`] on an explicit execution backend.
-    pub fn new_on(backend: crate::onnx_ep::Backend) -> Result<Self> {
+    pub fn new_on(backend: engram_onnx::Backend) -> Result<Self> {
         Self::with_spec_on(&DEFAULT_T5_MODEL, backend)
     }
 
     /// Try to create the default model on an explicit backend, returning
     /// None if unavailable.
-    pub fn try_new_on(backend: crate::onnx_ep::Backend) -> Option<Self> {
+    pub fn try_new_on(backend: engram_onnx::Backend) -> Option<Self> {
         Self::new_on(backend).ok()
     }
 
     /// Create from an explicit [`T5ModelSpec`] using the build-selected
     /// default execution backend.
     pub fn with_spec(spec: &T5ModelSpec) -> Result<Self> {
-        Self::with_spec_on(spec, crate::onnx_ep::default_backend())
+        Self::with_spec_on(spec, engram_onnx::default_backend())
     }
 
     /// Try to create from an explicit [`T5ModelSpec`] on an explicit
     /// backend, returning None if unavailable.
-    pub fn try_with_spec_on(spec: &T5ModelSpec, backend: crate::onnx_ep::Backend) -> Option<Self> {
+    pub fn try_with_spec_on(spec: &T5ModelSpec, backend: engram_onnx::Backend) -> Option<Self> {
         Self::with_spec_on(spec, backend).ok()
     }
 
@@ -116,8 +116,8 @@ impl T5TitleGenerator {
     ///
     /// Used by the benchmark/comparison harnesses to A/B model sources and
     /// backends; production code should use [`T5TitleGenerator::new`].
-    pub fn with_spec_on(spec: &T5ModelSpec, backend: crate::onnx_ep::Backend) -> Result<Self> {
-        Self::with_spec_on_intra(spec, backend, crate::onnx_ep::intra_threads())
+    pub fn with_spec_on(spec: &T5ModelSpec, backend: engram_onnx::Backend) -> Result<Self> {
+        Self::with_spec_on_intra(spec, backend, engram_onnx::intra_threads())
     }
 
     /// Create from an explicit spec/backend with an explicit
@@ -130,19 +130,19 @@ impl T5TitleGenerator {
     /// through here.
     pub fn with_spec_on_intra(
         spec: &T5ModelSpec,
-        backend: crate::onnx_ep::Backend,
+        backend: engram_onnx::Backend,
         intra_threads: usize,
     ) -> Result<Self> {
         let (encoder_path, decoder_path, tokenizer_path) = download_model_files(spec)?;
         let intra = intra_threads.max(1);
 
-        let encoder = crate::onnx_ep::apply_backend(Session::builder()?, backend)?
+        let encoder = engram_onnx::apply_backend(Session::builder()?, backend)?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(intra)?
             .commit_from_file(&encoder_path)
             .context("Failed to load T5 encoder ONNX model")?;
 
-        let decoder = crate::onnx_ep::apply_backend(Session::builder()?, backend)?
+        let decoder = engram_onnx::apply_backend(Session::builder()?, backend)?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(intra)?
             .commit_from_file(&decoder_path)
@@ -175,7 +175,7 @@ impl T5TitleGenerator {
     pub fn try_new_with_intra(intra_threads: usize) -> Option<Self> {
         match Self::with_spec_on_intra(
             &DEFAULT_T5_MODEL,
-            crate::onnx_ep::default_backend(),
+            engram_onnx::default_backend(),
             intra_threads,
         ) {
             Ok(gen) => Some(gen),
@@ -190,7 +190,7 @@ impl T5TitleGenerator {
 /// Download T5 model files from HuggingFace Hub for the given spec.
 fn download_model_files(spec: &T5ModelSpec) -> Result<(PathBuf, PathBuf, PathBuf)> {
     let cache_dir =
-        crate::storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
+        engram_storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let api = hf_hub::api::sync::ApiBuilder::new()
         .with_cache_dir(cache_dir)

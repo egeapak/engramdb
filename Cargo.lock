@@ -2049,10 +2049,73 @@ dependencies = [
 ]
 
 [[package]]
+name = "engram-models"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "ctor",
+ "engram-onnx",
+ "engram-storage",
+ "engram-test-support",
+ "engram-types",
+ "fastembed",
+ "hf-hub",
+ "ndarray 0.17.2",
+ "ort",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokenizers",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "engram-onnx"
 version = "0.6.0"
 dependencies = [
  "ort",
+]
+
+[[package]]
+name = "engram-storage"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "arrow-array",
+ "arrow-schema",
+ "async-trait",
+ "chrono",
+ "ctor",
+ "dirs",
+ "engram-test-support",
+ "engram-types",
+ "fs4 0.12.0",
+ "futures-util",
+ "jwalk",
+ "lancedb",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2",
+ "shell-words",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "engram-test-support"
+version = "0.6.0"
+dependencies = [
+ "ctor",
+ "tempfile",
 ]
 
 [[package]]
@@ -2084,7 +2147,9 @@ dependencies = [
  "criterion",
  "ctor",
  "dirs",
+ "engram-models",
  "engram-onnx",
+ "engram-storage",
  "engram-types",
  "fastembed",
  "fs4 0.12.0",

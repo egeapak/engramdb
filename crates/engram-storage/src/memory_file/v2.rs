@@ -40,8 +40,8 @@ use super::helpers::{
     parse_provenance_section, parse_score_field,
 };
 use super::{MemoryParser, MemoryWriter, CURRENT_FORMAT_VERSION};
-use crate::storage::error::{Result, StorageError};
-use crate::types::{Challenge, Decay, Memory, MemoryType, Status, Visibility};
+use crate::error::{Result, StorageError};
+use engram_types::{Challenge, Decay, Memory, MemoryType, Status, Visibility};
 
 // ---------------------------------------------------------------------------
 // Frontmatter structs

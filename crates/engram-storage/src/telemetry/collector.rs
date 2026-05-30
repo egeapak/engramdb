@@ -23,7 +23,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::types::config::StatsConfig;
+use engram_types::config::StatsConfig;
 
 /// One of the four `retrieval_quality` labels emitted by `RetrievalEngine::query`.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]

@@ -84,14 +84,14 @@ impl OnnxNliProvider {
     /// The files are cached in the unified EngramDB model cache directory
     /// (`<cache_dir>/engramdb/models/`).
     pub fn new(model_repo: &str) -> Result<Self> {
-        Self::new_on(model_repo, crate::onnx_ep::default_backend())
+        Self::new_on(model_repo, engram_onnx::default_backend())
     }
 
     /// Create a new ONNX NLI provider on an explicit execution backend.
     ///
     /// Used by the benchmark suite to compare CPU vs Core ML on identical
     /// workloads; production code should use [`OnnxNliProvider::new`].
-    pub fn new_on(model_repo: &str, backend: crate::onnx_ep::Backend) -> Result<Self> {
+    pub fn new_on(model_repo: &str, backend: engram_onnx::Backend) -> Result<Self> {
         // Map known repos to the right ONNX file so the string-based
         // config API still selects the int8 model for the default repo.
         // Unknown (user-custom) repos keep the historical fp32 defaults.
@@ -115,13 +115,13 @@ impl OnnxNliProvider {
     ///
     /// Used by the benchmark suite to A/B model sources (fp32 vs int8) and
     /// backends; production code should use [`OnnxNliProvider::new`].
-    pub fn with_spec_on(spec: &NliModelSpec, backend: crate::onnx_ep::Backend) -> Result<Self> {
+    pub fn with_spec_on(spec: &NliModelSpec, backend: engram_onnx::Backend) -> Result<Self> {
         Self::build(spec.repo, spec.model_file, spec.tokenizer_file, backend)
     }
 
     /// Try to create from an explicit [`NliModelSpec`] on an explicit
     /// backend, returning None if unavailable.
-    pub fn try_with_spec_on(spec: &NliModelSpec, backend: crate::onnx_ep::Backend) -> Option<Self> {
+    pub fn try_with_spec_on(spec: &NliModelSpec, backend: engram_onnx::Backend) -> Option<Self> {
         Self::with_spec_on(spec, backend).ok()
     }
 
@@ -129,14 +129,14 @@ impl OnnxNliProvider {
         repo: &str,
         model_file: &str,
         tokenizer_file: &str,
-        backend: crate::onnx_ep::Backend,
+        backend: engram_onnx::Backend,
     ) -> Result<Self> {
         let (model_path, tokenizer_path) = download_model_files(repo, model_file, tokenizer_file)?;
 
-        let builder = crate::onnx_ep::apply_backend(Session::builder()?, backend)?;
+        let builder = engram_onnx::apply_backend(Session::builder()?, backend)?;
         let session = builder
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(crate::onnx_ep::intra_threads())?
+            .with_intra_threads(engram_onnx::intra_threads())?
             .commit_from_file(&model_path)
             .context("Failed to load NLI ONNX model")?;
 
@@ -164,7 +164,7 @@ impl OnnxNliProvider {
 
     /// Try to create a provider on an explicit backend, returning None if
     /// unavailable.
-    pub fn try_new_on(model_repo: &str, backend: crate::onnx_ep::Backend) -> Option<Self> {
+    pub fn try_new_on(model_repo: &str, backend: engram_onnx::Backend) -> Option<Self> {
         Self::new_on(model_repo, backend).ok()
     }
 }
@@ -180,7 +180,7 @@ fn download_model_files(
     tokenizer_file: &str,
 ) -> Result<(PathBuf, PathBuf)> {
     let cache_dir =
-        crate::storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
+        engram_storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let api = hf_hub::api::sync::ApiBuilder::new()
         .with_cache_dir(cache_dir)

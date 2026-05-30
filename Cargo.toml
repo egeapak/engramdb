@@ -19,22 +19,24 @@ path = "src/lib.rs"
 
 [features]
 default = ["ollama"]
-ollama = ["reqwest"]
+ollama = ["reqwest", "engram-models/ollama"]
 # Apple Core ML (GPU / Neural Engine) acceleration for all ONNX models.
 # Enable on macOS only: `cargo build --features coreml`. Off by default so
 # the Linux/CI build and prebuilt-binary download are unchanged. Forwarded to
 # the `engram-onnx` crate, which owns the `ort` EP wiring.
-coreml = ["ort/coreml", "engram-onnx/coreml"]
+coreml = ["ort/coreml", "engram-onnx/coreml", "engram-models/coreml"]
 # XNNPACK portable CPU-kernel EP (per-node MLAS fallback). Off by default;
 # the provider ships in the prebuilt `ort` binary so only this feature is
 # needed (no source build, same downloaded binary). For A/B benchmarking.
-xnnpack = ["ort/xnnpack", "engram-onnx/xnnpack"]
+xnnpack = ["ort/xnnpack", "engram-onnx/xnnpack", "engram-models/xnnpack"]
 
 [dependencies]
 # Workspace sub-crates (extracted foundations; re-exported from lib.rs so the
 # `engramdb::<module>` and `crate::<module>` paths stay stable everywhere).
 engram-types = { path = "crates/engram-types" }
 engram-onnx = { path = "crates/engram-onnx" }
+engram-storage = { path = "crates/engram-storage" }
+engram-models = { path = "crates/engram-models", default-features = false }
 
 # MCP Server
 rmcp = { version = "0.15", features = ["macros", "server", "transport-io", "transport-streamable-http-server"] }
@@ -94,6 +96,9 @@ anyhow = "1"
 tempfile = "3"
 
 [dev-dependencies]
+# Enable storage's `test-support` module (global-store serialization lock) for
+# this crate's tests; `#[cfg(test)]` items don't cross crate boundaries.
+engram-storage = { path = "crates/engram-storage", features = ["test-support"] }
 assert_cmd = "2"
 ctor = "0.4"
 predicates = "3"

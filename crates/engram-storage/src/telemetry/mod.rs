@@ -19,9 +19,15 @@
 //! `ToolCounters` aren't part of the library API.
 
 pub(crate) mod collector;
-pub(crate) mod persistence;
+// `persistence` is `pub` (not `pub(crate)`) because the top-level `engramdb`
+// crate's `ops` / `mcp` / `cli` layers drive flush/hydrate directly across the
+// crate boundary.
+pub mod persistence;
 
 pub use collector::{
     ProjectView, QueriesView, QueryQualityBucket, RingHistogram, RuntimeSnapshot, StatsCollector,
     StatsScope, TimingStats, TimingsView, UsageView,
 };
+// `EventRow` appears in `persistence::spawn_flush_task`'s receiver type, which
+// the top-level crate drives across the boundary, so it must be public too.
+pub use collector::EventRow;

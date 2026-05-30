@@ -3,7 +3,7 @@
 
 use super::helpers::{parse_list_field, parse_score_field};
 use super::*;
-use crate::types::{Decay, Memory, MemoryType, Provenance, ProvenanceSource, Status, Visibility};
+use engram_types::{Decay, Memory, MemoryType, Provenance, ProvenanceSource, Status, Visibility};
 
 // ===========================================================================
 // Test helpers
@@ -671,7 +671,7 @@ fn test_parse_memory_file_empty_input() {
     let result = parse_memory_file("");
     assert!(result.is_err());
     match result {
-        Err(crate::storage::error::StorageError::InvalidFormat(msg)) => {
+        Err(crate::error::StorageError::InvalidFormat(msg)) => {
             assert!(msg.contains("Missing frontmatter"));
         }
         _ => panic!("Expected InvalidFormat error for empty input"),

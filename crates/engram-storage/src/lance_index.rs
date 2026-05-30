@@ -19,7 +19,7 @@ use futures_util::stream::StreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::{connect, Connection, Table};
 
-use crate::types::{Memory, MemoryType, ProvenanceSource, Status, Visibility};
+use engram_types::{Memory, MemoryType, ProvenanceSource, Status, Visibility};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -1078,7 +1078,7 @@ fn parse_visibility(s: &str) -> Result<Visibility> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Memory, MemoryType, Provenance};
+    use engram_types::{Memory, MemoryType, Provenance};
     use tempfile::TempDir;
 
     fn create_test_entry(id: &str) -> IndexEntry {

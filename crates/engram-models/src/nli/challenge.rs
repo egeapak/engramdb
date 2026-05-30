@@ -7,8 +7,8 @@
 //! `ops::challenge_*` call sites (CLI/MCP) are unchanged.
 
 use crate::nli::NliResult;
-use crate::storage::MemoryStore;
-use crate::types::{Challenge, Memory, MemoryUpdate, Status};
+use engram_storage::MemoryStore;
+use engram_types::{Challenge, Memory, MemoryUpdate, Status};
 use anyhow::Result;
 
 /// Result of a challenge operation.
@@ -82,8 +82,8 @@ pub async fn challenge_for_contradictions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{InMemoryRegistry, MemoryStore};
-    use crate::types::{MemoryType, Provenance};
+    use engram_storage::{InMemoryRegistry, MemoryStore};
+    use engram_types::{MemoryType, Provenance};
     use tempfile::TempDir;
 
     async fn setup_test_store() -> (TempDir, MemoryStore) {

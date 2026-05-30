@@ -19,7 +19,7 @@ use async_trait::async_trait;
 // (see `types::title_strategy`) so `types::config` can reference it without
 // depending "upward" on this ONNX-backed module. Re-exported here for ergonomic
 // `crate::title::TitleStrategy` access at the call sites that drive generation.
-pub use crate::types::TitleStrategy;
+pub use engram_types::TitleStrategy;
 
 /// Trait for title generators.
 ///

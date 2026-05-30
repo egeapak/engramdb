@@ -28,9 +28,9 @@
 //! the guard into a handle so callers don't have to thread it through their
 //! return tuples.
 //!
-//! This module is compiled only under `#[cfg(test)]`.
-
-#![cfg(test)]
+//! Compiled for this crate's own tests (`#[cfg(test)]`) and, for downstream
+//! crates that need the same global-store serialization in *their* tests, when
+//! the `test-support` feature is enabled.
 
 use std::sync::{Arc, LazyLock};
 use tokio::sync::{Mutex, OwnedMutexGuard};
@@ -60,7 +60,7 @@ pub struct GlobalTestLock {
 pub async fn acquire_global_test_lock() -> GlobalTestLock {
     let guard = Arc::clone(&GLOBAL_TEST_LOCK).lock_owned().await;
 
-    if let Ok(global) = crate::storage::paths::global_store_dir() {
+    if let Ok(global) = crate::paths::global_store_dir() {
         let _ = tokio::fs::remove_dir_all(&global).await;
     }
 

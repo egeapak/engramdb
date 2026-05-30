@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 
-use crate::types::{Provenance, ProvenanceSource};
+use engram_types::{Provenance, ProvenanceSource};
 
 /// Parse the body into named sections. Recognizes:
 /// - `# heading` → stored under key `__h1__`

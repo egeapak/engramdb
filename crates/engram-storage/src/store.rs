@@ -23,8 +23,8 @@ use super::lance_index::{
 };
 use super::registry::RegistryBackend;
 use super::{manifest, memory_file, paths, project_id, write_lock};
-use crate::storage::config::load_config;
-use crate::types::{Memory, MemoryUpdate, Visibility};
+use crate::config::load_config;
+use engram_types::{Memory, MemoryUpdate, Visibility};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::fs as async_fs;
@@ -100,7 +100,7 @@ impl MemoryStore {
                     config_path.display(),
                     e
                 );
-                crate::types::EngramConfig::default()
+                engram_types::EngramConfig::default()
             }
         };
 
@@ -160,7 +160,7 @@ impl MemoryStore {
         let lance_path = paths::global_lancedb_dir()?;
         async_fs::create_dir_all(&lance_path).await?;
 
-        let config: crate::types::EngramConfig =
+        let config: engram_types::EngramConfig =
             load_config(&config_path).await.unwrap_or_default();
 
         let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
@@ -188,7 +188,7 @@ impl MemoryStore {
         async_fs::create_dir_all(&lance_path).await?;
 
         let config_path = engramdb_dir.join("config.toml");
-        let config: crate::types::EngramConfig =
+        let config: engram_types::EngramConfig =
             load_config(&config_path).await.unwrap_or_default();
 
         let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
@@ -228,7 +228,7 @@ impl MemoryStore {
                     config_path.display(),
                     e
                 );
-                crate::types::EngramConfig::default()
+                engram_types::EngramConfig::default()
             }
         };
 
@@ -804,8 +804,8 @@ async fn collect_stems(dir: &Path, stems: &mut HashSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::registry::InMemoryRegistry;
-    use crate::types::{Memory, MemoryType, Provenance, Visibility};
+    use crate::registry::InMemoryRegistry;
+    use engram_types::{Memory, MemoryType, Provenance, Visibility};
     use tempfile::TempDir;
 
     fn create_test_memory(id: &str, visibility: Visibility) -> Memory {
@@ -1244,7 +1244,7 @@ mod tests {
     /// store.create(...)`) keep working without change.
     struct GlobalStoreHandle {
         store: MemoryStore,
-        _lock: crate::storage::test_support::GlobalTestLock,
+        _lock: crate::test_support::GlobalTestLock,
     }
 
     impl std::ops::Deref for GlobalStoreHandle {
@@ -1260,7 +1260,7 @@ mod tests {
     /// layout before each test, so concurrent `cargo test` runs don't race
     /// on LanceDB table creation or leak state across tests.
     async fn setup_global_store() -> GlobalStoreHandle {
-        let lock = crate::storage::test_support::acquire_global_test_lock().await;
+        let lock = crate::test_support::acquire_global_test_lock().await;
         let store = MemoryStore::init_global().await.unwrap();
         GlobalStoreHandle { store, _lock: lock }
     }
@@ -1349,7 +1349,7 @@ mod tests {
         // Global store should NOT contain project memories and vice versa.
         // Hold the global-test lock for the whole test; otherwise a parallel
         // global test can mutate `global_store`'s on-disk state mid-assertion.
-        let _lock = crate::storage::test_support::acquire_global_test_lock().await;
+        let _lock = crate::test_support::acquire_global_test_lock().await;
         let temp_dir = TempDir::new().unwrap();
         let project_store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
             .await

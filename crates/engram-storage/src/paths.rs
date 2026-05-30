@@ -138,7 +138,7 @@ pub async fn memory_path(dir: &Path, id: &str) -> Option<PathBuf> {
     // Try personal memories
     // We need to compute project_id to find personal dir
     // For simplicity, we'll use the compute_project_id from project_id module
-    use crate::storage::project_id::compute_project_id;
+    use crate::project_id::compute_project_id;
     let project_id = compute_project_id(dir);
     if let Ok(personal_dir) = personal_memories_dir(&project_id) {
         return find_memory_in_dir(&personal_dir, id).await;
