@@ -77,7 +77,8 @@ async fn run_environment_check(
         .as_ref()
         .map(|s| s.project_dir.clone())
         .unwrap_or_else(|| dir.to_path_buf());
-    let result = doctor_environment(&check_dir, store.as_ref()).await;
+    let daemon_check = crate::daemon::check_daemon(&check_dir).await;
+    let result = doctor_environment(&check_dir, store.as_ref(), daemon_check).await;
     formatter.print_environment_doctor(&result);
     Ok(())
 }

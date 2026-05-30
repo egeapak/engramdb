@@ -14,6 +14,18 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use super::title_strategy::TitleStrategy;
+
+/// Default HuggingFace repo for the NLI contradiction-detection model.
+///
+/// Single source of truth for the `[nli].model` default. The ONNX NLI loader's
+/// `DEFAULT_NLI_MODEL.repo` (in `crate::nli`) must equal this value; a unit test
+/// in that module asserts the two never drift. It lives here, in the `types`
+/// foundation, so `NliConfig::default` can reference it without depending
+/// "upward" on the ONNX-backed `nli` module (int8-quantized mirror: ~2× faster,
+/// ~3.7× less RAM, identical id2label).
+pub const DEFAULT_NLI_MODEL_REPO: &str = "Xenova/nli-deberta-v3-xsmall";
+
 /// Weights for scoring components.
 ///
 /// Trust and scope are applied as multipliers on the entire score,
@@ -507,12 +519,13 @@ impl Default for NliConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            // Single source of truth: derive from `nli::DEFAULT_NLI_MODEL`
-            // rather than a literal so the default can never drift from the
-            // model the NLI loader actually selects (int8-quantized mirror:
-            // ~2× faster, ~3.7× less RAM, identical id2label). Custom repos
-            // keep the fp32 defaults.
-            model: crate::nli::DEFAULT_NLI_MODEL.repo.to_string(),
+            // Single source of truth: derive from `DEFAULT_NLI_MODEL_REPO`
+            // (asserted equal to `nli::DEFAULT_NLI_MODEL.repo` by a test in the
+            // nli module) rather than a hand-copied literal, so the default can
+            // never drift from the model the NLI loader actually selects
+            // (int8-quantized mirror: ~2× faster, ~3.7× less RAM, identical
+            // id2label). Custom repos keep the fp32 defaults.
+            model: DEFAULT_NLI_MODEL_REPO.to_string(),
             contradiction_threshold: 0.7,
             max_comparisons: 10,
             similarity_threshold: 0.3,
@@ -591,8 +604,8 @@ impl Default for RerankConfig {
 /// cost that made keyword the default no longer applies. The one-shot CLI
 /// is unaffected — `engramdb add` uses [`TitleStrategy::default`]
 /// (`keyword`) so a single command never pays a cold T5 load.
-fn default_title_strategy() -> crate::title::TitleStrategy {
-    crate::title::TitleStrategy::T5
+fn default_title_strategy() -> TitleStrategy {
+    TitleStrategy::T5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -600,7 +613,7 @@ pub struct TitleConfig {
     /// Title-generation strategy. Default `t5` (daemon-amortized; see
     /// [`default_title_strategy`]).
     #[serde(default = "default_title_strategy")]
-    pub strategy: crate::title::TitleStrategy,
+    pub strategy: TitleStrategy,
 
     /// Number of independent T5 sessions to pool when `strategy = "t5"`.
     /// `None` (default) auto-sizes to 2 — the bench-optimal for the heavy
@@ -933,15 +946,13 @@ mod tests {
     use super::*;
 
     /// Guards the single-source-of-truth: `NliConfig::default().model` is
-    /// derived from `nli::DEFAULT_NLI_MODEL.repo`, never a hand-copied
-    /// literal that could silently drift from the model the NLI loader
-    /// actually selects (review follow-up item).
+    /// derived from [`DEFAULT_NLI_MODEL_REPO`], never a hand-copied literal.
+    /// The complementary half — that `nli::DEFAULT_NLI_MODEL.repo` equals
+    /// `DEFAULT_NLI_MODEL_REPO` — is asserted by a test in the `nli` module,
+    /// so neither the config default nor the loader spec can silently drift.
     #[test]
-    fn nli_default_model_tracks_default_nli_model_spec() {
-        assert_eq!(
-            NliConfig::default().model.as_str(),
-            crate::nli::DEFAULT_NLI_MODEL.repo
-        );
+    fn nli_default_model_tracks_default_nli_model_repo() {
+        assert_eq!(NliConfig::default().model.as_str(), DEFAULT_NLI_MODEL_REPO);
     }
 
     #[test]
@@ -1552,7 +1563,7 @@ weight = 0.7
 
     #[test]
     fn title_config_serde_default_and_roundtrip() {
-        use crate::title::TitleStrategy;
+        use super::TitleStrategy;
 
         // Absent `[title]` ⇒ t5: the daemon loads/pools it once, so it is
         // the deployment default. (The one-shot CLI is unaffected — it uses

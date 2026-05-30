@@ -150,6 +150,11 @@ MCP (src/mcp/) ─┘                  └─► scoring  ─► scope
 ```
 
 - **`src/ops/`** — typed input/output for every memory operation (`create`, `query`, `update`, `delete`, `challenge`, `gc`, `compress`, `reindex`, `doctor`, `stats`, `projects`, …). No CLI formatting, no MCP serialization. Both surfaces call into this same code.
+
+**The module graph is a DAG — keep it that way.** Lower layers must never `use crate::<higher>`. Three back-edges were removed to enforce this and must not be reintroduced:
+  - The NLI-contradiction challenge flow lives in **`src/nli/challenge.rs`** (`challenge_memory`, `challenge_for_contradictions`), not in `ops`, so `retrieval::engine` can drive it without depending up on `ops`. `ops::challenge` is a thin re-export that keeps the `ops::challenge_*` API stable for CLI/MCP.
+  - `TitleStrategy` and the `DEFAULT_NLI_MODEL_REPO` default constant live in **`src/types/`** (config values), not in `title`/`nli`. `title` re-exports `TitleStrategy`; a paired test in each of `types::config` and `nli` asserts the NLI repo default never drifts from `nli::DEFAULT_NLI_MODEL.repo`.
+  - The daemon health probe is **`daemon::doctor::check_daemon`** (daemon may depend on `ops`, not vice-versa). The CLI builds it and injects it into `ops::doctor_environment(dir, store, daemon_check)`; `ops` tests pass a synthetic check.
 - **`src/cli/`** — Clap definitions (`app.rs`), per-command handlers (`commands/<name>.rs`), and `output.rs` which formats results per `--format pretty|json|plain`. `cli/mod.rs::run` is the dispatch entry; `main.rs` is a 9-line `tokio::main` wrapper.
 - **`src/mcp/server.rs`** — single large file implementing the MCP tool surface via `rmcp` macros. Same tool set as CLI subcommands. It owns a `ProviderCache` so the embedding model loads once per process; if the shared daemon is enabled (default), it instead routes inference there via `daemon::remote`.
 

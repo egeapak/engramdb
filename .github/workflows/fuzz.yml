@@ -36,8 +36,8 @@ jobs:
       - name: Install nightly toolchain
         run: rustup toolchain install nightly --profile minimal
 
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protobuf compiler and lld linker
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
       - uses: Swatinem/rust-cache@v2
         with:

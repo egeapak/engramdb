@@ -15,12 +15,14 @@
 //! unreachable, callers fall back to loading models in-process.
 
 pub mod client;
+pub mod doctor;
 pub mod metrics;
 pub mod protocol;
 pub mod remote;
 pub mod server;
 
 pub use client::{query_status, request_shutdown, DaemonHandle};
+pub use doctor::check_daemon;
 pub use protocol::{DaemonStatus, PROTOCOL_VERSION};
 pub use remote::remote_providers;
 pub use server::run_daemon;

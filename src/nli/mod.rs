@@ -4,8 +4,10 @@
 //! that classifies sentence pairs as entailment, neutral, or contradiction.
 //! It is used to automatically detect contradictions between new and existing memories.
 
+pub mod challenge;
 pub mod onnx;
 
+pub use challenge::{challenge_for_contradictions, challenge_memory, ChallengeResult};
 pub use onnx::{
     NliModelSpec, OnnxNliProvider, DEFAULT_NLI_MODEL, NLI_DEBERTA_XSMALL, NLI_DEBERTA_XSMALL_Q,
 };
@@ -109,5 +111,13 @@ mod tests {
         assert_eq!(NliLabel::Entailment.to_string(), "entailment");
         assert_eq!(NliLabel::Neutral.to_string(), "neutral");
         assert_eq!(NliLabel::Contradiction.to_string(), "contradiction");
+    }
+
+    /// Single-source-of-truth guard (the loader half): the model the NLI loader
+    /// selects by default must equal the repo `types::config` uses for the
+    /// `[nli].model` default. The config half is asserted in `types::config`.
+    #[test]
+    fn default_nli_model_tracks_config_default_repo() {
+        assert_eq!(DEFAULT_NLI_MODEL.repo, crate::types::DEFAULT_NLI_MODEL_REPO);
     }
 }

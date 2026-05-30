@@ -19,8 +19,8 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
 
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protobuf compiler and lld linker
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
       - uses: Swatinem/rust-cache@v2
 
@@ -39,8 +39,8 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install stable --profile minimal
 
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protobuf compiler and lld linker
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
       - uses: Swatinem/rust-cache@v2
 

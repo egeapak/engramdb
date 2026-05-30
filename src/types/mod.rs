@@ -16,14 +16,16 @@ pub mod config;
 mod decay;
 mod memory;
 mod provenance;
+mod title_strategy;
 
 // Re-export all public types
 pub use challenge::Challenge;
 pub use config::{
     DaemonConfig, EmbeddingBackend, EmbeddingsConfig, EngramConfig, LogicalBonusConfig, NliConfig,
     ReindexOnModelChange, RerankConfig, RetrievalConfig, ScopeProximityConfig, ScoringConfig,
-    ScoringWeights, SearchConfig, ThresholdsConfig, TrustWeights,
+    ScoringWeights, SearchConfig, ThresholdsConfig, TrustWeights, DEFAULT_NLI_MODEL_REPO,
 };
 pub use decay::{Decay, DecayStrategy};
 pub use memory::{Memory, MemoryType, MemoryUpdate, Status, Visibility};
 pub use provenance::{Provenance, ProvenanceSource};
+pub use title_strategy::TitleStrategy;

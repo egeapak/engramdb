@@ -14,35 +14,12 @@ pub use pool::PooledTitleGenerator;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 
-/// Strategy for automatic title generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TitleStrategy {
-    /// Use keyword extraction (RAKE algorithm). Lightweight, no model needed.
-    #[default]
-    Keyword,
-    /// Use T5-Small ONNX model for abstractive summarization.
-    T5,
-    /// Disable automatic title generation.
-    None,
-}
-
-impl TitleStrategy {
-    /// Parse a strategy name from a string.
-    pub fn parse(s: &str) -> Result<Self> {
-        match s.to_lowercase().as_str() {
-            "keyword" | "keywords" | "rake" => Ok(Self::Keyword),
-            "t5" | "t5-small" | "model" => Ok(Self::T5),
-            "none" | "off" | "disabled" => Ok(Self::None),
-            _ => anyhow::bail!(
-                "Invalid title strategy '{}'. Valid options: keyword, t5, none",
-                s
-            ),
-        }
-    }
-}
+// `TitleStrategy` is a configuration value and lives in the `types` foundation
+// (see `types::title_strategy`) so `types::config` can reference it without
+// depending "upward" on this ONNX-backed module. Re-exported here for ergonomic
+// `crate::title::TitleStrategy` access at the call sites that drive generation.
+pub use crate::types::TitleStrategy;
 
 /// Trait for title generators.
 ///

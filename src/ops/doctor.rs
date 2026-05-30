@@ -185,6 +185,7 @@ impl EnvironmentDoctorResult {
 pub async fn doctor_environment(
     dir: &Path,
     store: Option<&MemoryStore>,
+    daemon_check: EnvironmentCheck,
 ) -> EnvironmentDoctorResult {
     let mut sections = Vec::new();
 
@@ -368,9 +369,12 @@ pub async fn doctor_environment(
 
     // --- Daemon section (informational; the daemon is optional and
     // auto-spawned, so these never count as failures) ---
+    //
+    // The daemon probe is built by the caller (`daemon::doctor::check_daemon`)
+    // and injected here so that `ops` does not depend "upward" on `daemon`.
     sections.push(DoctorSection {
         name: "Daemon".to_string(),
-        checks: vec![check_daemon(dir).await],
+        checks: vec![daemon_check],
         subsections: vec![],
     });
 
@@ -387,56 +391,6 @@ pub async fn doctor_environment(
         sections,
         all_passed,
         store_check,
-    }
-}
-
-/// Inspect the shared embedding daemon: configured? reachable? Informational
-/// only — the daemon is optional and auto-spawned by the next MCP run, so a
-/// stopped daemon is never a failure.
-async fn check_daemon(dir: &Path) -> EnvironmentCheck {
-    let config = crate::storage::config::load_config(&dir.join(".engramdb").join("config.toml"))
-        .await
-        .unwrap_or_default();
-    let socket = crate::daemon::resolve_socket(None, &config.daemon);
-    let mut details = vec![
-        format!("socket: {}", socket.display()),
-        format!(
-            "config: enabled={}, idle_timeout_secs={}",
-            config.daemon.enabled, config.daemon.idle_timeout_secs
-        ),
-    ];
-
-    if !config.daemon.enabled {
-        return EnvironmentCheck {
-            name: "Embedding daemon".to_string(),
-            passed: true,
-            message: "disabled in config (models load in-process per MCP)".to_string(),
-            suggestion: None,
-            details,
-            status: Some(CheckStatus::Info),
-        };
-    }
-
-    let (message, suggestion) = match crate::daemon::query_status(&socket).await {
-        Ok(Some(s)) => {
-            details.push(format!(
-                "pid {}, uptime {}s, {} model bundle(s), {} requests served (cumulative)",
-                s.pid, s.uptime_secs, s.bundles_loaded, s.requests_total
-            ));
-            (format!("running (protocol v{})", s.version), None)
-        }
-        _ => (
-            "not running (auto-spawned on the next MCP run)".to_string(),
-            Some("Run `engramdb daemon status` or `engramdb daemon restart`.".to_string()),
-        ),
-    };
-    EnvironmentCheck {
-        name: "Embedding daemon".to_string(),
-        passed: true,
-        message,
-        suggestion,
-        details,
-        status: Some(CheckStatus::Info),
     }
 }
 
@@ -1569,6 +1523,20 @@ mod tests {
     use crate::types::{Memory, MemoryType, Provenance};
     use tempfile::TempDir;
 
+    /// Synthetic daemon check injected into `doctor_environment` in tests, so the
+    /// `ops` test suite does not depend "upward" on `daemon` (the real probe is
+    /// `daemon::doctor::check_daemon`, exercised from the CLI layer's tests).
+    fn test_daemon_check() -> EnvironmentCheck {
+        EnvironmentCheck {
+            name: "Embedding daemon".to_string(),
+            passed: true,
+            message: "disabled in config (models load in-process per MCP)".to_string(),
+            suggestion: None,
+            details: vec![],
+            status: Some(CheckStatus::Info),
+        }
+    }
+
     #[tokio::test]
     async fn test_doctor_healthy_store() {
         let temp_dir = TempDir::new().unwrap();
@@ -1850,7 +1818,7 @@ mod tests {
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let result = doctor_environment(temp_dir.path(), Some(&store)).await;
+        let result = doctor_environment(temp_dir.path(), Some(&store), test_daemon_check()).await;
         let names: Vec<&str> = result
             .all_checks()
             .iter()
@@ -1879,7 +1847,7 @@ mod tests {
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let result = doctor_environment(temp_dir.path(), Some(&store)).await;
+        let result = doctor_environment(temp_dir.path(), Some(&store), test_daemon_check()).await;
         let section_names: Vec<&str> = result.sections.iter().map(|s| s.name.as_str()).collect();
 
         assert_eq!(
@@ -1892,7 +1860,7 @@ mod tests {
     async fn test_environment_store_not_initialized() {
         let temp_dir = TempDir::new().unwrap();
 
-        let result = doctor_environment(temp_dir.path(), None).await;
+        let result = doctor_environment(temp_dir.path(), None, test_daemon_check()).await;
         let store_check = result
             .all_checks()
             .into_iter()
@@ -1909,7 +1877,7 @@ mod tests {
         let registry = InMemoryRegistry::new();
         MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let result = doctor_environment(temp_dir.path(), None).await;
+        let result = doctor_environment(temp_dir.path(), None, test_daemon_check()).await;
         let store_check = result
             .all_checks()
             .into_iter()
@@ -1929,7 +1897,7 @@ mod tests {
         let mem = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
         store.create(&mem).await.unwrap();
 
-        let result = doctor_environment(temp_dir.path(), Some(&store)).await;
+        let result = doctor_environment(temp_dir.path(), Some(&store), test_daemon_check()).await;
         let health_check = result
             .all_checks()
             .into_iter()
@@ -1963,7 +1931,7 @@ mod tests {
         .await
         .unwrap();
 
-        let result = doctor_environment(temp_dir.path(), Some(&store)).await;
+        let result = doctor_environment(temp_dir.path(), Some(&store), test_daemon_check()).await;
         let health_check = result
             .all_checks()
             .into_iter()
@@ -1981,7 +1949,7 @@ mod tests {
     async fn test_environment_no_store_skips_health() {
         let temp_dir = TempDir::new().unwrap();
 
-        let result = doctor_environment(temp_dir.path(), None).await;
+        let result = doctor_environment(temp_dir.path(), None, test_daemon_check()).await;
         let health_check = result
             .all_checks()
             .into_iter()
@@ -1999,7 +1967,7 @@ mod tests {
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let result = doctor_environment(temp_dir.path(), Some(&store)).await;
+        let result = doctor_environment(temp_dir.path(), Some(&store), test_daemon_check()).await;
         let expected = result.all_checks().iter().all(|c| c.passed);
         assert_eq!(result.all_passed, expected);
     }
@@ -2009,7 +1977,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         // No init — "Store initialized" will fail
 
-        let result = doctor_environment(temp_dir.path(), None).await;
+        let result = doctor_environment(temp_dir.path(), None, test_daemon_check()).await;
         assert!(!result.all_passed);
     }
 
@@ -2019,7 +1987,7 @@ mod tests {
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let result = doctor_environment(temp_dir.path(), Some(&store)).await;
+        let result = doctor_environment(temp_dir.path(), Some(&store), test_daemon_check()).await;
         let json = serde_json::to_string(&result).unwrap();
 
         assert!(json.contains("\"sections\""));
@@ -2341,7 +2309,7 @@ mod tests {
     async fn test_project_section_skipped_when_not_initialized() {
         let temp_dir = TempDir::new().unwrap();
 
-        let result = doctor_environment(temp_dir.path(), None).await;
+        let result = doctor_environment(temp_dir.path(), None, test_daemon_check()).await;
         let project_section = result
             .sections
             .iter()
@@ -2705,7 +2673,7 @@ mod tests {
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let result = doctor_environment(temp_dir.path(), Some(&store)).await;
+        let result = doctor_environment(temp_dir.path(), Some(&store), test_daemon_check()).await;
         let names: Vec<&str> = result
             .all_checks()
             .iter()
@@ -2730,7 +2698,7 @@ mod tests {
     async fn test_environment_no_store_skips_gated_checks() {
         let temp_dir = TempDir::new().unwrap();
 
-        let result = doctor_environment(temp_dir.path(), None).await;
+        let result = doctor_environment(temp_dir.path(), None, test_daemon_check()).await;
         let names: Vec<&str> = result
             .all_checks()
             .iter()
@@ -2803,7 +2771,7 @@ mod tests {
     #[tokio::test]
     async fn test_environment_has_gitignore_subsection() {
         let temp_dir = TempDir::new().unwrap();
-        let result = doctor_environment(temp_dir.path(), None).await;
+        let result = doctor_environment(temp_dir.path(), None, test_daemon_check()).await;
         let system = result.sections.iter().find(|s| s.name == "System").unwrap();
         let subsection_names: Vec<&str> =
             system.subsections.iter().map(|s| s.name.as_str()).collect();
