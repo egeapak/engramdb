@@ -19,8 +19,8 @@ use futures_util::stream::StreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::{connect, Connection, Table};
 
-use engram_types::{Memory, MemoryType, ProvenanceSource, Status, Visibility};
 use chrono::{DateTime, Utc};
+use engram_types::{Memory, MemoryType, ProvenanceSource, Status, Visibility};
 use serde::{Deserialize, Serialize};
 
 /// Full metadata entry stored in LanceDB (all 14 columns).

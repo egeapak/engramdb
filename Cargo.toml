@@ -9,10 +9,6 @@ license = "MIT"
 description = "Project-scoped persistent memory for coding agents"
 repository = "https://github.com/egeapak/engramdb"
 
-[[bin]]
-name = "engramdb"
-path = "src/main.rs"
-
 [lib]
 name = "engramdb"
 path = "src/lib.rs"
@@ -23,37 +19,30 @@ ollama = ["reqwest", "engram-models/ollama"]
 # Apple Core ML (GPU / Neural Engine) acceleration for all ONNX models.
 # Enable on macOS only: `cargo build --features coreml`. Off by default so
 # the Linux/CI build and prebuilt-binary download are unchanged. Forwarded to
-# the `engram-onnx` crate, which owns the `ort` EP wiring.
-coreml = ["ort/coreml", "engram-onnx/coreml", "engram-models/coreml"]
+# the model crates, which own the `ort` EP wiring.
+coreml = ["engram-onnx/coreml", "engram-models/coreml"]
 # XNNPACK portable CPU-kernel EP (per-node MLAS fallback). Off by default;
 # the provider ships in the prebuilt `ort` binary so only this feature is
 # needed (no source build, same downloaded binary). For A/B benchmarking.
-xnnpack = ["ort/xnnpack", "engram-onnx/xnnpack", "engram-models/xnnpack"]
+xnnpack = ["engram-onnx/xnnpack", "engram-models/xnnpack"]
+# Re-exports `engram-storage`'s `test_support` (global-store serialization lock)
+# so downstream crates (engram-mcp, engram-cli) can use it in their test builds.
+test-support = ["engram-storage/test-support"]
 
 [dependencies]
-# Workspace sub-crates (extracted foundations; re-exported from lib.rs so the
-# `engramdb::<module>` and `crate::<module>` paths stay stable everywhere).
+# Workspace sub-crates (extracted layers; re-exported from lib.rs so the
+# `engramdb::<module>` and `crate::<module>` paths stay stable in the core).
 engram-types = { path = "crates/engram-types" }
 engram-onnx = { path = "crates/engram-onnx" }
 engram-storage = { path = "crates/engram-storage" }
 engram-models = { path = "crates/engram-models", default-features = false }
 
-# MCP Server
-rmcp = { version = "0.15", features = ["macros", "server", "transport-io", "transport-streamable-http-server"] }
-axum = { version = "0.8", default-features = false, features = ["tokio"] }
-
-# Vector DB & Embeddings
+# Vector DB & Embeddings (the core's daemon metrics + reranker selection)
 lancedb = { version = "0.26", default-features = false }
 fastembed = { version = "5", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 arrow-array = "57"
 arrow-schema = "57"
-
-# NLI (contradiction detection)
-ort = { version = "2.0.0-rc.11", default-features = false, features = ["download-binaries", "ndarray", "std"] }
-tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
-hf-hub = { version = "0.4", default-features = false, features = ["rustls-tls", "tokio", "ureq"] }
-ndarray = { version = "0.17", default-features = false }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -61,23 +50,15 @@ serde_json = "1"
 serde_yaml_ng = "0.10"
 toml = "0.8"
 
-# CLI
-clap = { version = "4", features = ["derive"] }
-clap_complete = "4"
-inquire = "0.7"
-owo-colors = { version = "4", features = ["supports-colors"] }
-indicatif = "0.18"
-rayon = "1"
-
 # Utilities
 uuid = { version = "1", features = ["v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 globset = "0.4"
 sha2 = "0.10"
-shell-words = "1"
 dirs = "6"
 jwalk = "0.8"
 fs4 = { version = "0.12", features = ["sync"] }
+rayon = "1"
 
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net", "process"] }
@@ -86,7 +67,6 @@ async-trait = "0.1"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Error handling
 thiserror = "2"
@@ -99,16 +79,19 @@ tempfile = "3"
 # Enable storage's `test-support` module (global-store serialization lock) for
 # this crate's tests; `#[cfg(test)]` items don't cross crate boundaries.
 engram-storage = { path = "crates/engram-storage", features = ["test-support"] }
-assert_cmd = "2"
+engram-test-support = { path = "crates/engram-test-support" }
 ctor = "0.4"
-predicates = "3"
 rand = "0.9"
-regex = "1"
+# Criterion benches live in this core crate (`benches/`); they exercise the
+# re-exported model/ops/scoring APIs.
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
-# Enables the rmcp `client` feature for in-process duplex transport tests
-# (mcp::server::tests round-trips get_prompt / read_resource). Production
-# builds keep the server-only feature set from [dependencies].
-rmcp = { version = "0.15", features = ["client"] }
+# The `examples/` are low-level ONNX/model benchmarks that drive `ort` /
+# `tokenizers` / `hf-hub` / `fastembed` directly (alongside the re-exported
+# engramdb model APIs), so they need those crates at dev time.
+ort = { version = "2.0.0-rc.11", default-features = false, features = ["download-binaries", "ndarray", "std"] }
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+hf-hub = { version = "0.4", default-features = false, features = ["rustls-tls", "tokio", "ureq"] }
+toml = "0.8"
 
 [[bench]]
 name = "benchmarks"

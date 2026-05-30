@@ -7,9 +7,9 @@
 //! `ops::challenge_*` call sites (CLI/MCP) are unchanged.
 
 use crate::nli::NliResult;
+use anyhow::Result;
 use engram_storage::MemoryStore;
 use engram_types::{Challenge, Memory, MemoryUpdate, Status};
-use anyhow::Result;
 
 /// Result of a challenge operation.
 pub struct ChallengeResult {

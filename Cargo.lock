@@ -2049,6 +2049,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "engram-cli"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "chrono",
+ "clap",
+ "clap_complete",
+ "dirs",
+ "engram-mcp",
+ "engramdb",
+ "indicatif 0.18.4",
+ "inquire",
+ "owo-colors",
+ "predicates",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "shell-words",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "engram-mcp"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "engramdb",
+ "rmcp",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "engram-models"
 version = "0.6.0"
 dependencies = [
@@ -2138,49 +2185,37 @@ dependencies = [
  "anyhow",
  "arrow-array",
  "arrow-schema",
- "assert_cmd",
  "async-trait",
- "axum",
  "chrono",
- "clap",
- "clap_complete",
  "criterion",
  "ctor",
  "dirs",
  "engram-models",
  "engram-onnx",
  "engram-storage",
+ "engram-test-support",
  "engram-types",
  "fastembed",
  "fs4 0.12.0",
  "futures-util",
  "globset",
  "hf-hub",
- "indicatif 0.18.4",
- "inquire",
  "jwalk",
  "lancedb",
- "ndarray 0.17.2",
  "ort",
- "owo-colors",
- "predicates",
  "rand 0.9.2",
  "rayon",
- "regex",
  "reqwest",
- "rmcp",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "sha2",
- "shell-words",
  "tempfile",
  "thiserror 2.0.18",
  "tokenizers",
  "tokio",
  "toml",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 

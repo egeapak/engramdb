@@ -34,7 +34,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --release --bin engramdb
 
       - name: Package binary
         run: |
@@ -82,7 +82,7 @@ jobs:
           ORT_LIB_LOCATION: /tmp/onnxruntime-osx-x86_64-1.23.2/lib
           ORT_PREFER_DYNAMIC_LINK: "1"
           RUSTFLAGS: "-C link-arg=-Wl,-rpath,@executable_path"
-        run: cargo build --release
+        run: cargo build --release --bin engramdb
 
       - name: Package binary with ONNX Runtime
         run: |
