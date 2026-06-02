@@ -1,39 +1,27 @@
-pub mod cli;
 pub mod daemon;
-pub mod embeddings;
-pub mod mcp;
-pub mod nli;
-pub mod onnx_ep;
 pub mod ops;
 pub mod retrieval;
 pub mod scope;
 pub mod scoring;
 pub mod search;
-pub mod storage;
-pub mod telemetry;
-pub mod title;
-pub mod types;
 
-/// Test isolation: redirect global data and config dirs to per-process temp directories.
-///
-/// Since nextest runs each test in its own process, this ensures no test
-/// pollutes the real `~/Library/Application Support/engramdb/` directory
-/// or reads the user's real config/registry.
-///
-/// The `TempDir` handles are held in statics so they persist (and are cleaned
-/// up) when the process exits.
+// Extracted workspace crates, re-exported under their historical module paths so
+// every `crate::<module>::…` / `engramdb::<module>::…` reference keeps resolving
+// unchanged. The `cli` and `mcp` front-ends are their own crates
+// (`engram-cli`, `engram-mcp`) that depend on this core, so they are not
+// re-exported here (that would invert the dependency).
+pub use engram_models::{embeddings, nli, title};
+pub use engram_onnx as onnx_ep;
+pub use engram_storage as storage;
+pub use engram_storage::telemetry;
+pub use engram_types as types;
+
+// Test isolation: link `engram-test-support` so its `#[ctor]` redirects
+// `ENGRAMDB_DATA_DIR` / `ENGRAMDB_CONFIG_DIR` to per-process temp dirs before
+// any test runs (nextest's process-per-test makes this load-bearing). The
+// `arm()` reference keeps the linker from dead-stripping the constructor.
 #[cfg(test)]
-mod test_isolation {
-    use std::sync::LazyLock;
-
-    static TEST_DATA_DIR: LazyLock<tempfile::TempDir> =
-        LazyLock::new(|| tempfile::TempDir::new().expect("failed to create test data dir"));
-    static TEST_CONFIG_DIR: LazyLock<tempfile::TempDir> =
-        LazyLock::new(|| tempfile::TempDir::new().expect("failed to create test config dir"));
-
-    #[ctor::ctor]
-    fn init() {
-        std::env::set_var("ENGRAMDB_DATA_DIR", TEST_DATA_DIR.path());
-        std::env::set_var("ENGRAMDB_CONFIG_DIR", TEST_CONFIG_DIR.path());
-    }
+#[ctor::ctor]
+fn arm_test_isolation() {
+    engram_test_support::arm();
 }

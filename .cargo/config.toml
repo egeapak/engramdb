@@ -1,0 +1,15 @@
+# Use the LLD linker on Linux. Linking the `engramdb` binary pulls in ~691
+# crates' worth of objects (lance/datafusion/arrow + the ONNX stack), and the
+# release profile (`lto = true`, `strip = true`, `codegen-units = 1`) makes the
+# link a heavy serial phase. LLD is substantially faster than the default BFD
+# linker on a target this large, with no behavior change. It is passed through
+# the default `cc` driver via `-fuse-ld=lld`, so no compiler swap is required.
+#
+# Scoped to Linux only: macOS uses its own (already fast) default linker, and
+# the `coreml` build path is unaffected. Requires `lld` on the host
+# (`apt-get install -y lld`); CI installs it explicitly.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]

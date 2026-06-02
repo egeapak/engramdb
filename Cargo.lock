@@ -2049,39 +2049,105 @@ dependencies = [
 ]
 
 [[package]]
-name = "engramdb"
+name = "engram-cli"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "chrono",
+ "clap",
+ "clap_complete",
+ "ctor",
+ "dirs",
+ "engram-mcp",
+ "engram-test-support",
+ "engramdb",
+ "indicatif 0.18.4",
+ "inquire",
+ "owo-colors",
+ "predicates",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "shell-words",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "engram-mcp"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "ctor",
+ "engram-test-support",
+ "engramdb",
+ "rmcp",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "engram-models"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "ctor",
+ "engram-onnx",
+ "engram-storage",
+ "engram-test-support",
+ "engram-types",
+ "fastembed",
+ "hf-hub",
+ "ndarray 0.17.2",
+ "ort",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokenizers",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "engram-onnx"
+version = "0.6.0"
+dependencies = [
+ "ort",
+]
+
+[[package]]
+name = "engram-storage"
 version = "0.6.0"
 dependencies = [
  "anyhow",
  "arrow-array",
  "arrow-schema",
- "assert_cmd",
  "async-trait",
- "axum",
  "chrono",
- "clap",
- "clap_complete",
- "criterion",
  "ctor",
  "dirs",
- "fastembed",
+ "engram-test-support",
+ "engram-types",
  "fs4 0.12.0",
  "futures-util",
- "globset",
- "hf-hub",
- "indicatif 0.18.4",
- "inquire",
  "jwalk",
  "lancedb",
- "ndarray 0.17.2",
- "ort",
- "owo-colors",
- "predicates",
- "rand 0.9.2",
- "rayon",
- "regex",
- "reqwest",
- "rmcp",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -2089,11 +2155,71 @@ dependencies = [
  "shell-words",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "engram-test-support"
+version = "0.6.0"
+dependencies = [
+ "ctor",
+ "tempfile",
+]
+
+[[package]]
+name = "engram-types"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "toml",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "engramdb"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "arrow-array",
+ "arrow-schema",
+ "async-trait",
+ "chrono",
+ "criterion",
+ "ctor",
+ "dirs",
+ "engram-models",
+ "engram-onnx",
+ "engram-storage",
+ "engram-test-support",
+ "engram-types",
+ "fastembed",
+ "fs4 0.12.0",
+ "futures-util",
+ "globset",
+ "hf-hub",
+ "jwalk",
+ "lancedb",
+ "ort",
+ "rand 0.9.2",
+ "rayon",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
  "tokenizers",
  "tokio",
  "toml",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 

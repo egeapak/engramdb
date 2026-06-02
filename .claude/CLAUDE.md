@@ -5,16 +5,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 EngramDB is a project-scoped persistent memory store for coding agents.
 Tech stack: Rust (edition 2021), LanceDB (vector index), ONNX Runtime via `fastembed` / raw `ort` (all-MiniLM-L6-v2 embeddings, BGE reranker, NLI), MCP protocol via `rmcp`, Tokio.
 
-The repo ships **one binary** (`engramdb`, `src/main.rs`) that does everything — CLI, `serve` for the MCP server, `daemon` for the shared embedding host, and `hook` for Claude Code hook handlers. The same binary is what the Claude Code plugin in `.claude-plugin/` wires up.
+The repo ships **one binary** (`engramdb`, `crates/engram-cli/src/main.rs`) that does everything — CLI, `serve` for the MCP server, `daemon` for the shared embedding host, and `hook` for Claude Code hook handlers. The same binary is what the Claude Code plugin in `.claude-plugin/` wires up.
+
+This is a **Cargo workspace** (`[workspace] members = ["crates/*"]`). The per-layer crates under `crates/` are, in dependency order:
+
+- `engram-types` — config + shared domain types (leaf, no heavy deps; `cargo check -p engram-types` is ~seconds).
+- `engram-onnx` — `ort` execution-provider wiring (re-exported as `engramdb::onnx_ep`).
+- `engram-storage` — `MemoryStore`, LanceDB index, paths/registry, telemetry (re-exported as `engramdb::storage` / `::telemetry`).
+- `engram-models` — `embeddings` / `nli` / `title` providers.
+- `engram-test-support` — the `#[ctor]` test-isolation arm (dev-only).
+- `engram-mcp` — the `rmcp` MCP server surface; depends on the core.
+- `engram-cli` — Clap CLI + the `engramdb` binary; depends on the core and `engram-mcp`.
+
+The residual **core** is the top-level `engramdb` lib crate (`src/lib.rs`): `daemon`, `ops`, `retrieval`, `scope`, `scoring`, `search`. It re-exports the extracted crates under their historical module paths (`engramdb::storage`, `::embeddings`, `::types`, …) so every `crate::<module>` / `engramdb::<module>` reference keeps resolving unchanged. **The dependency edges only point inward**: the extracted leaf crates must never `use` the core, and `engram-cli`/`engram-mcp` are front-ends that depend on the core (never re-exported from it — that would invert the DAG).
 
 ## Code Quality (mandatory)
 
 Before marking ANY task as complete, you MUST run and pass both:
 
 1. **`cargo fmt --all`** — format all code. Run this first.
-2. **`cargo clippy --all-targets --all-features -- -D warnings`** — all clippy warnings are treated as errors. Fix every warning before proceeding.
+2. **`cargo clippy --workspace --all-targets --all-features -- -D warnings`** — all clippy warnings are treated as errors. Fix every warning before proceeding.
 
-No task is done until both commands succeed with zero warnings and zero errors. This applies to all agents and subagents. CI (`.github/workflows/ci.yml`) runs the exact same two commands plus `cargo nextest run --all-features`.
+Always pass `--workspace` so clippy/nextest cover every crate, not just the one in the current directory. No task is done until both commands succeed with zero warnings and zero errors. This applies to all agents and subagents. CI (`.github/workflows/ci.yml`) runs the exact same two commands plus `cargo nextest run --workspace --all-features`.
 
 ## Common commands
 
@@ -23,21 +35,26 @@ No task is done until both commands succeed with zero warnings and zero errors. 
 cargo build
 cargo build --release
 
-# Run the full test suite — nextest is required, not `cargo test`
-cargo nextest run --all-features
+# Run the full test suite — nextest is required, not `cargo test`.
+# Always `--workspace`, or only the crate in the cwd is tested.
+cargo nextest run --workspace --all-features
 
-# Library tests only (matches the flaky-test caveat below)
-cargo nextest run --lib
+# A single crate in isolation (fast iteration; engram-types has no heavy deps)
+cargo nextest run -p engram-types
+cargo check -p engram-types
+
+# Core-lib tests only (matches the flaky-test caveat below)
+cargo nextest run -p engramdb --lib
 
 # Run a single test by exact name
-cargo nextest run --all-features -E 'test(=retrieval::engine::tests::test_search_with_real)'
+cargo nextest run --workspace --all-features -E 'test(=retrieval::engine::tests::test_search_with_real)'
 
 # Run all tests in one module
-cargo nextest run --all-features -E 'test(retrieval::engine::tests::)'
+cargo nextest run --workspace --all-features -E 'test(retrieval::engine::tests::)'
 
 # Format / lint (CI gates)
 cargo fmt --all
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # Benches (Criterion)
 cargo bench
@@ -64,7 +81,12 @@ Feature flags from `Cargo.toml`:
 
 ### Test isolation
 
-`src/lib.rs` installs a `#[ctor::ctor]` that points `ENGRAMDB_DATA_DIR` and `ENGRAMDB_CONFIG_DIR` at per-process temp dirs so tests never touch the real `~/Library/Application Support/engramdb/` or registry. Nextest's process-per-test model is load-bearing here — `cargo test` would not isolate these globals correctly.
+The `engram-test-support` crate provides the `#[ctor::ctor]` arm that points `ENGRAMDB_DATA_DIR` and `ENGRAMDB_CONFIG_DIR` at per-process temp dirs so tests never touch the real `~/Library/Application Support/engramdb/` or registry. Each crate's test build links it (the core's `src/lib.rs` calls `engram_test_support::arm()` under `#[cfg(test)]`; downstream crates pull it in as a dev-dependency). Nextest's process-per-test model is load-bearing here — `cargo test` would not isolate these globals correctly.
+
+The **model cache** is separate from the data dir and is *not* redirected by the `#[ctor]` arm (model-loading tests need the real shared cache). Two env vars (both resolved in `engram_storage::paths`) make model *presence* deterministic for the tests that assert a model is missing/available:
+
+- `ENGRAMDB_MODEL_CACHE_DIR` — overrides `model_cache_dir()` (mirrors `ENGRAMDB_DATA_DIR`). Point it at an empty temp dir to simulate an unstaged cache.
+- `ENGRAMDB_OFFLINE` (truthy: `1`/`true`/`yes`/`on`) — makes the embedding/NLI/T5 loaders refuse to download an uncached model, failing fast instead. An empty cache alone is *not* enough on a networked machine (fastembed would just download); pair it with offline. Example: `stats_embeddings_status_onnx_backend_model_missing` sets both so it passes regardless of what the developer has cached.
 
 Note: `cargo test --lib` has two pre-existing flaky failures under full parallelism (`ops::doctor::tests::test_doctor_many_memories_healthy`, `ops::projects::tests::test_get_project_info_with_memories`) — they pass in isolation and fail identically on a clean base, so they are not a regression signal.
 
@@ -143,17 +165,22 @@ The web sandbox's egress gateway uses a custom CA that rustls/webpki-based downl
 The codebase is layered so that CLI and MCP share one operations core:
 
 ```
-CLI (src/cli/)  ─┐
+CLI (engram-cli)  ─┐
                  ├─► ops (src/ops/) ─► retrieval (engine) ─► storage (MemoryStore + LanceDB)
-MCP (src/mcp/) ─┘                  └─► scoring  ─► scope
+MCP (engram-mcp)  ─┘                  └─► scoring  ─► scope
                                    └─► embeddings / nli / retrieval::reranker
 ```
 
 - **`src/ops/`** — typed input/output for every memory operation (`create`, `query`, `update`, `delete`, `challenge`, `gc`, `compress`, `reindex`, `doctor`, `stats`, `projects`, …). No CLI formatting, no MCP serialization. Both surfaces call into this same code.
-- **`src/cli/`** — Clap definitions (`app.rs`), per-command handlers (`commands/<name>.rs`), and `output.rs` which formats results per `--format pretty|json|plain`. `cli/mod.rs::run` is the dispatch entry; `main.rs` is a 9-line `tokio::main` wrapper.
-- **`src/mcp/server.rs`** — single large file implementing the MCP tool surface via `rmcp` macros. Same tool set as CLI subcommands. It owns a `ProviderCache` so the embedding model loads once per process; if the shared daemon is enabled (default), it instead routes inference there via `daemon::remote`.
 
-### Storage (`src/storage/`)
+**The module graph is a DAG — keep it that way.** Lower layers must never `use crate::<higher>`. Three back-edges were removed to enforce this and must not be reintroduced:
+  - The NLI-contradiction challenge flow lives in **`crates/engram-models/src/nli/challenge.rs`** (`challenge_memory`, `challenge_for_contradictions`), not in `ops`, so `retrieval::engine` can drive it without depending up on `ops`. `ops::challenge` is a thin re-export that keeps the `ops::challenge_*` API stable for CLI/MCP.
+  - `TitleStrategy` and the `DEFAULT_NLI_MODEL_REPO` default constant live in **`crates/engram-types/src/`** (config values), not in `title`/`nli`. `title` re-exports `TitleStrategy`; a paired test in each of `types::config` and `nli` asserts the NLI repo default never drifts from `nli::DEFAULT_NLI_MODEL.repo`.
+  - The daemon health probe is **`daemon::doctor::check_daemon`** (daemon may depend on `ops`, not vice-versa). The CLI builds it and injects it into `ops::doctor_environment(dir, store, daemon_check)`; `ops` tests pass a synthetic check.
+- **`crates/engram-cli/`** (crate `engram-cli`, lib `engram_cli`) — Clap definitions (`app.rs`), per-command handlers (`commands/<name>.rs`), and `output.rs` which formats results per `--format pretty|json|plain`. `lib.rs::run` is the dispatch entry; `main.rs` is the `tokio::main` wrapper that owns the `engramdb` binary. Depends on the core (`engramdb`) and `engram-mcp`.
+- **`crates/engram-mcp/src/server.rs`** (crate `engram-mcp`, lib `engram_mcp`) — single large file implementing the MCP tool surface via `rmcp` macros. Same tool set as CLI subcommands. It owns a `ProviderCache` so the embedding model loads once per process; if the shared daemon is enabled (default), it instead routes inference there via `daemon::remote`.
+
+### Storage (`crates/engram-storage/src/`, crate `engram-storage`, re-exported as `engramdb::storage`)
 
 - **`MemoryStore`** (`store.rs`) is the orchestrator. Memories live on disk as TOML-frontmatter markdown files in `.engramdb/memories/`. A single LanceDB table (`lance_index.rs`) holds both metadata-for-filtering and (optional) embedding vectors — there is no separate metadata DB.
 - **Concurrency:** mutating ops acquire a per-project advisory `flock(2)` (`write_lock.rs`); reads are lock-free and rely on LanceDB MVCC. File writes are atomic temp-then-rename.
@@ -167,8 +194,8 @@ MCP (src/mcp/) ─┘                  └─► scoring  ─► scope
 - **`src/retrieval/engine.rs`** — the `RetrievalEngine` runs queries in two modes: `Filter` (narrow by query/path/logical/tags, query signal required) and `Rank` (rank everything by relevance to a context). Pipeline: index-level filter → optional vector search via LanceDB → composite scoring → optional cross-encoder rerank.
 - **`src/scoring/`** — composite score formula depends on mode (see `scoring/mod.rs` doc-comment). Final = `base * scope_multiplier * trust_multiplier - challenge_penalty`, clamped to `[0,1]`. Decay strategies are `None | Linear | Exponential | Step`.
 - **`src/scope/`** — physical (file path with depth-decay) + logical (dot-notation hierarchy, max bonus 0.3). Combined score is capped at 1.0.
-- **`src/embeddings/`** — `EmbeddingProvider` trait, implemented by `OnnxProvider` (fastembed; default) and `OllamaProvider` (gated by the `ollama` feature). The `model_id()` method is what gets persisted to the manifest — distinct fp32 vs int8 IDs are required so quantization swaps are detected.
-- **`src/nli/onnx.rs`** + **`src/retrieval/reranker.rs`** — optional ONNX NLI for contradiction detection (`challenge` flow) and a cross-encoder reranker (BGE family by default). Both are loaded only when `[nli].enabled` / `[rerank].enabled` are true in `config.toml`.
+- **`crates/engram-models/src/embeddings/`** — `EmbeddingProvider` trait, implemented by `OnnxProvider` (fastembed; default) and `OllamaProvider` (gated by the `ollama` feature). The `model_id()` method is what gets persisted to the manifest — distinct fp32 vs int8 IDs are required so quantization swaps are detected.
+- **`crates/engram-models/src/nli/onnx.rs`** + **`src/retrieval/reranker.rs`** — optional ONNX NLI for contradiction detection (`challenge` flow) and a cross-encoder reranker (BGE family by default). Both are loaded only when `[nli].enabled` / `[rerank].enabled` are true in `config.toml`.
 
 ### Shared embedding daemon (`src/daemon/`)
 
@@ -180,7 +207,7 @@ stdio MCP is one process per agent session, so without coordination every concur
 - **Socket resolution** (`daemon/mod.rs::resolve_socket`) has fixed precedence: `--socket` flag → `ENGRAMDB_DAEMON_SOCKET` env → `[daemon].socket_path` config → default per-user path under `$XDG_RUNTIME_DIR`/cache dir. **Every** client/server site must use this helper so they agree on the socket.
 - **Graceful fallback** is the contract: if the daemon is disabled or unreachable, the MCP process loads models in-process exactly as before. Daemon failures must never break operations.
 
-### Claude Code integration (`src/cli/commands/hook.rs`, `setup.rs`)
+### Claude Code integration (`crates/engram-cli/src/commands/hook.rs`, `setup.rs`)
 
 - The `engramdb hook pre-tool-use` / `engramdb hook session-start` subcommands are what Claude Code invokes. They read hook event JSON from stdin and emit `additionalContext` JSON to stdout. `SESSION_CONTEXT_BUDGET` (2000 chars) caps the SessionStart injection.
 - `engramdb setup` writes the hook + MCP entries into `settings.json` (or under `.claude/` for project scope). The `.claude-plugin/` directory is the marketplace plugin that does the same thing automatically.

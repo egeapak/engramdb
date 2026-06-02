@@ -392,7 +392,7 @@ impl RetrievalEngine {
                         count = contradictions.len(),
                         "NLI detected contradictions with existing memories"
                     );
-                    crate::ops::challenge_for_contradictions(
+                    crate::nli::challenge_for_contradictions(
                         &store,
                         &memory.summary,
                         &contradictions,
