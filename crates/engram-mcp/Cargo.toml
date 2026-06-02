@@ -1,6 +1,6 @@
 [package]
 name = "engram-mcp"
-version = "0.6.0"
+version.workspace = true
 edition = "2021"
 license = "MIT"
 description = "MCP (Model Context Protocol) server surface for EngramDB"
