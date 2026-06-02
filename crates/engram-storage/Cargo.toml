@@ -1,6 +1,6 @@
 [package]
 name = "engram-storage"
-version = "0.6.0"
+version.workspace = true
 edition = "2021"
 license = "MIT"
 description = "Storage + telemetry layer (MemoryStore, LanceDB index) for EngramDB"

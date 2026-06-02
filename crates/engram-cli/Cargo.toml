@@ -1,6 +1,6 @@
 [package]
 name = "engram-cli"
-version = "0.6.0"
+version.workspace = true
 edition = "2021"
 license = "MIT"
 description = "Command-line interface and `engramdb` binary for EngramDB"
