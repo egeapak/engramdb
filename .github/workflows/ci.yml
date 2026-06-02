@@ -55,7 +55,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install nextest
-        run: cargo install cargo-nextest --locked
+        # Use the prebuilt binary instead of `cargo install cargo-nextest`,
+        # which compiles nextest from source (~7 min on a cache miss). This
+        # downloads a prebuilt release in seconds, every run, regardless of
+        # cache state.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
 
       - name: Run tests
         run: cargo nextest run --workspace --all-features
