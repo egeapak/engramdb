@@ -7,6 +7,16 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Keep the build under the runner's ~30 GB disk and speed it up. The layered
+  # workspace produces ~8 heavy test binaries that each statically link the
+  # lancedb/arrow/datafusion/onnx stack; full debuginfo on every one is the bulk
+  # of `target/` and a chunk of compile time. CI never attaches a debugger, and
+  # nextest still reports the failing test name + assertion message without it,
+  # so we drop debuginfo entirely (`debug=0`). Incremental compilation is dead
+  # weight on a clean checkout. (~38 GB -> well under 10 GB.)
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   check:
