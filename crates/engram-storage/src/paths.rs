@@ -61,16 +61,60 @@ pub fn global_data_dir() -> Result<PathBuf> {
         .map(|p| p.join("engramdb"))
 }
 
-/// Returns the model cache directory (platform-specific).
+/// Returns the model cache directory.
 ///
-/// - macOS: `~/Library/Caches/engramdb/models/`
-/// - Linux: `$XDG_CACHE_HOME/engramdb/models/` (default `~/.cache/engramdb/models/`)
+/// Resolution order:
+/// 1. `ENGRAMDB_MODEL_CACHE_DIR` if set (used verbatim — lets tests point at a
+///    throwaway dir so model-presence assertions don't depend on whatever the
+///    developer happens to have cached, mirroring `ENGRAMDB_DATA_DIR`).
+/// 2. Platform cache dir otherwise:
+///    - macOS: `~/Library/Caches/engramdb/models/`
+///    - Linux: `$XDG_CACHE_HOME/engramdb/models/` (default `~/.cache/engramdb/models/`)
 ///
 /// Used for embedding models, reranker models, and NLI models.
 pub fn model_cache_dir() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("ENGRAMDB_MODEL_CACHE_DIR") {
+        return Ok(PathBuf::from(path));
+    }
     dirs::cache_dir()
         .ok_or_else(|| StorageError::Validation("Could not determine cache directory".to_string()))
         .map(|p| p.join("engramdb").join("models"))
+}
+
+/// Whether EngramDB is in offline mode (`ENGRAMDB_OFFLINE` set to a truthy
+/// value: `1`, `true`, `yes`, or `on`, case-insensitive).
+///
+/// In offline mode the model loaders refuse to hit the network: a model that
+/// isn't already in [`model_cache_dir`] fails fast instead of being downloaded.
+/// Combined with `ENGRAMDB_MODEL_CACHE_DIR` this makes model *presence*
+/// deterministic in tests regardless of what the developer has cached.
+pub fn offline_enabled() -> bool {
+    matches!(
+        std::env::var("ENGRAMDB_OFFLINE")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Whether a HuggingFace Hub repo is already present in [`model_cache_dir`].
+///
+/// Checks the hf-hub cache layout (`<cache>/models--<org>--<repo>/snapshots/`),
+/// which is the same layout both `fastembed` and raw `hf-hub` write. Used by the
+/// model loaders to decide, in [`offline_enabled`] mode, whether a load can be
+/// served from cache or would require a (forbidden) download.
+pub fn hf_repo_cached(repo_id: &str) -> bool {
+    let Ok(cache_dir) = model_cache_dir() else {
+        return false;
+    };
+    let repo_dir = cache_dir.join(format!("models--{}", repo_id.replace('/', "--")));
+    // A fully-pulled repo has at least one snapshot revision with files in it.
+    match std::fs::read_dir(repo_dir.join("snapshots")) {
+        Ok(mut entries) => entries.any(|e| e.is_ok()),
+        Err(_) => false,
+    }
 }
 
 /// Returns the personal project directory for a given project ID
@@ -230,6 +274,62 @@ mod tests {
     fn test_global_data_dir() {
         let result = global_data_dir().unwrap();
         assert!(result.exists() || !result.to_string_lossy().is_empty());
+    }
+
+    #[test]
+    fn test_model_cache_dir_env_override() {
+        // `ENGRAMDB_MODEL_CACHE_DIR` wins over the platform cache dir and is used
+        // verbatim. Safe to mutate the process env here: nextest runs each test
+        // in its own process, and the var is unset elsewhere.
+        std::env::set_var("ENGRAMDB_MODEL_CACHE_DIR", "/tmp/engramdb-override");
+        assert_eq!(
+            model_cache_dir().unwrap(),
+            PathBuf::from("/tmp/engramdb-override")
+        );
+        std::env::remove_var("ENGRAMDB_MODEL_CACHE_DIR");
+    }
+
+    #[test]
+    fn test_model_cache_dir_default_when_unset() {
+        std::env::remove_var("ENGRAMDB_MODEL_CACHE_DIR");
+        let result = model_cache_dir().unwrap();
+        assert!(result.ends_with("engramdb/models"));
+    }
+
+    #[test]
+    fn test_offline_enabled_truthy_and_falsy() {
+        for truthy in ["1", "true", "TRUE", "Yes", "on", " on "] {
+            std::env::set_var("ENGRAMDB_OFFLINE", truthy);
+            assert!(offline_enabled(), "{truthy:?} should be offline");
+        }
+        for falsy in ["0", "false", "no", "off", ""] {
+            std::env::set_var("ENGRAMDB_OFFLINE", falsy);
+            assert!(!offline_enabled(), "{falsy:?} should not be offline");
+        }
+        std::env::remove_var("ENGRAMDB_OFFLINE");
+        assert!(!offline_enabled(), "unset should not be offline");
+    }
+
+    #[test]
+    fn test_hf_repo_cached_detects_snapshot_layout() {
+        use tempfile::TempDir;
+        let cache = TempDir::new().unwrap();
+        std::env::set_var("ENGRAMDB_MODEL_CACHE_DIR", cache.path());
+
+        // Absent → not cached.
+        assert!(!hf_repo_cached("Some/Repo"));
+
+        // hf-hub layout: <cache>/models--Some--Repo/snapshots/<rev>/file
+        let snap = cache
+            .path()
+            .join("models--Some--Repo")
+            .join("snapshots")
+            .join("abc123");
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join("model.onnx"), b"x").unwrap();
+        assert!(hf_repo_cached("Some/Repo"));
+
+        std::env::remove_var("ENGRAMDB_MODEL_CACHE_DIR");
     }
 
     #[tokio::test]

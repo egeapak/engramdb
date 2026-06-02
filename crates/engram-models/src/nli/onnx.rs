@@ -182,6 +182,17 @@ fn download_model_files(
     let cache_dir =
         engram_storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
 
+    // Offline mode: refuse to download an uncached NLI model (see
+    // `engram_storage::paths::offline_enabled`).
+    if engram_storage::paths::offline_enabled()
+        && !engram_storage::paths::hf_repo_cached(model_repo)
+    {
+        anyhow::bail!(
+            "offline mode (ENGRAMDB_OFFLINE) and NLI model '{}' is not cached",
+            model_repo
+        );
+    }
+
     let api = hf_hub::api::sync::ApiBuilder::new()
         .with_cache_dir(cache_dir)
         .build()

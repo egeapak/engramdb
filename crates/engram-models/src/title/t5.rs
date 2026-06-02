@@ -192,6 +192,16 @@ fn download_model_files(spec: &T5ModelSpec) -> Result<(PathBuf, PathBuf, PathBuf
     let cache_dir =
         engram_storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
 
+    // Offline mode: refuse to download an uncached T5 model (see
+    // `engram_storage::paths::offline_enabled`).
+    if engram_storage::paths::offline_enabled() && !engram_storage::paths::hf_repo_cached(spec.repo)
+    {
+        anyhow::bail!(
+            "offline mode (ENGRAMDB_OFFLINE) and T5 model '{}' is not cached",
+            spec.repo
+        );
+    }
+
     let api = hf_hub::api::sync::ApiBuilder::new()
         .with_cache_dir(cache_dir)
         .build()

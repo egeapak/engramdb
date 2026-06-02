@@ -83,6 +83,11 @@ Feature flags from `Cargo.toml`:
 
 The `engram-test-support` crate provides the `#[ctor::ctor]` arm that points `ENGRAMDB_DATA_DIR` and `ENGRAMDB_CONFIG_DIR` at per-process temp dirs so tests never touch the real `~/Library/Application Support/engramdb/` or registry. Each crate's test build links it (the core's `src/lib.rs` calls `engram_test_support::arm()` under `#[cfg(test)]`; downstream crates pull it in as a dev-dependency). Nextest's process-per-test model is load-bearing here — `cargo test` would not isolate these globals correctly.
 
+The **model cache** is separate from the data dir and is *not* redirected by the `#[ctor]` arm (model-loading tests need the real shared cache). Two env vars (both resolved in `engram_storage::paths`) make model *presence* deterministic for the tests that assert a model is missing/available:
+
+- `ENGRAMDB_MODEL_CACHE_DIR` — overrides `model_cache_dir()` (mirrors `ENGRAMDB_DATA_DIR`). Point it at an empty temp dir to simulate an unstaged cache.
+- `ENGRAMDB_OFFLINE` (truthy: `1`/`true`/`yes`/`on`) — makes the embedding/NLI/T5 loaders refuse to download an uncached model, failing fast instead. An empty cache alone is *not* enough on a networked machine (fastembed would just download); pair it with offline. Example: `stats_embeddings_status_onnx_backend_model_missing` sets both so it passes regardless of what the developer has cached.
+
 Note: `cargo test --lib` has two pre-existing flaky failures under full parallelism (`ops::doctor::tests::test_doctor_many_memories_healthy`, `ops::projects::tests::test_get_project_info_with_memories`) — they pass in isolation and fail identically on a clean base, so they are not a regression signal.
 
 Note: `mcp::server::tests::global_retrieve_with_semantic_query` is similarly flaky under a full-parallel `cargo nextest run --all-features` in a resource-constrained sandbox. The daemon path is disabled under `#[cfg(test)]`, so every embedding test loads ONNX in-process; when many processes lose the model-load race at once, the embedding provider resolves to `None`, the memory is stored without a vector, and the semantic query returns empty. It passes in isolation and on adequately-resourced CI, so it is not a regression signal.

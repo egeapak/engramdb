@@ -97,6 +97,21 @@ impl OnnxProvider {
         let cache_dir =
             engram_storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
 
+        // Offline mode: don't let fastembed reach the network. If the model
+        // isn't already cached, fail fast rather than downloading it.
+        if engram_storage::paths::offline_enabled() {
+            let repo = TextEmbedding::get_model_info(&spec.fastembed_model)
+                .map(|info| info.model_code.clone())
+                .unwrap_or_default();
+            if !engram_storage::paths::hf_repo_cached(&repo) {
+                anyhow::bail!(
+                    "offline mode (ENGRAMDB_OFFLINE) and model '{}' ({}) is not cached",
+                    spec.name,
+                    repo
+                );
+            }
+        }
+
         let mut options = InitOptions::new(spec.fastembed_model).with_cache_dir(cache_dir);
         let eps = engram_onnx::providers_for(backend);
         if !eps.is_empty() {

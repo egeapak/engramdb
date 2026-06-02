@@ -127,15 +127,20 @@ fn stats_embeddings_status_unknown_provider() {
 fn stats_embeddings_status_onnx_backend_model_missing() {
     let dir = TempDir::new().unwrap();
     helpers::init_store(dir.path());
-    // nomic isn't staged in the test environment, and forcing the ONNX
-    // backend disables any Ollama fallback → the "run 'engramdb init'"
-    // branch (backend == Onnx, not available).
+    // Point the model cache at an empty temp dir AND force offline mode so nomic
+    // is *guaranteed* unstaged regardless of what the developer has cached
+    // locally (an empty cache alone isn't enough — fastembed would just download
+    // it). Forcing the ONNX backend disables any Ollama fallback → the "run
+    // 'engramdb init'" branch (backend == Onnx, not available).
+    let empty_cache = TempDir::new().unwrap();
     write_embeddings_config(
         dir.path(),
         "[embeddings]\nprovider = \"nomic-embed-text\"\ndimensions = 768\nmax_tokens = 8192\n",
     );
 
     helpers::cmd()
+        .env("ENGRAMDB_MODEL_CACHE_DIR", empty_cache.path())
+        .env("ENGRAMDB_OFFLINE", "1")
         .args([
             "--dir",
             dir.path().to_str().unwrap(),
