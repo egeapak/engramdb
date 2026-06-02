@@ -100,9 +100,42 @@ impl T5TitleGenerator {
     }
 
     /// Create from an explicit [`T5ModelSpec`] using the build-selected
-    /// default execution backend.
+    /// default execution backend, falling back to CPU if that backend cannot
+    /// actually run the model (see [`Self::with_spec_default_intra`]).
     pub fn with_spec(spec: &T5ModelSpec) -> Result<Self> {
-        Self::with_spec_on(spec, engram_onnx::default_backend())
+        Self::with_spec_default_intra(spec, engram_onnx::intra_threads())
+    }
+
+    /// Build on the build-selected [`default_backend`](engram_onnx::default_backend),
+    /// but transparently fall back to CPU if that backend commits the T5 graph
+    /// yet fails to *execute* it.
+    ///
+    /// The Core ML EP accepts (partitions) the T5 encoder/decoder at load time
+    /// but errors at execute time on some quantized T5 graphs, which would
+    /// otherwise make `create`-path title generation silently return no title.
+    /// A one-token warmup decode surfaces that here so we can rebuild on CPU.
+    /// Only the *default* constructors use this; the explicit `with_spec_on*`
+    /// paths stay strict so the benchmark harness measures the backend it asks
+    /// for. The warmup runs only off-CPU, so default CPU builds pay nothing.
+    fn with_spec_default_intra(spec: &T5ModelSpec, intra_threads: usize) -> Result<Self> {
+        let backend = engram_onnx::default_backend();
+        let generator = Self::with_spec_on_intra(spec, backend, intra_threads)?;
+        if backend != engram_onnx::Backend::Cpu {
+            if let Err(e) = generate_sync(
+                &generator.encoder,
+                &generator.decoder,
+                &generator.tokenizer,
+                "warmup",
+            ) {
+                tracing::warn!(
+                    "T5 title generator failed to execute on {:?} ({}); falling back to CPU",
+                    backend,
+                    e
+                );
+                return Self::with_spec_on_intra(spec, engram_onnx::Backend::Cpu, intra_threads);
+            }
+        }
+        Ok(generator)
     }
 
     /// Try to create from an explicit [`T5ModelSpec`] on an explicit
@@ -173,11 +206,7 @@ impl T5TitleGenerator {
     /// explicit `intra_threads`, returning `None` (and logging) if
     /// unavailable. Used to build pooled members at a reduced thread count.
     pub fn try_new_with_intra(intra_threads: usize) -> Option<Self> {
-        match Self::with_spec_on_intra(
-            &DEFAULT_T5_MODEL,
-            engram_onnx::default_backend(),
-            intra_threads,
-        ) {
+        match Self::with_spec_default_intra(&DEFAULT_T5_MODEL, intra_threads) {
             Ok(gen) => Some(gen),
             Err(e) => {
                 tracing::warn!("T5 title generator unavailable: {}", e);
