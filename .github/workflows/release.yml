@@ -34,6 +34,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
+        # `--bin engramdb` resolves to the `engram-cli` crate via the workspace's
+        # `default-members` (the binary is not in the root core-lib package).
         run: cargo build --release --bin engramdb
 
       - name: Package binary
@@ -82,6 +84,7 @@ jobs:
           ORT_LIB_LOCATION: /tmp/onnxruntime-osx-x86_64-1.23.2/lib
           ORT_PREFER_DYNAMIC_LINK: "1"
           RUSTFLAGS: "-C link-arg=-Wl,-rpath,@executable_path"
+        # `--bin engramdb` resolves via workspace `default-members` (see build-arm).
         run: cargo build --release --bin engramdb
 
       - name: Package binary with ONNX Runtime

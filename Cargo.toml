@@ -1,5 +1,11 @@
 [workspace]
 members = ["crates/*"]
+# Treat the workspace as a whole: bare root commands (`cargo build`, `test`,
+# `clippy`, `run`) act on every member, matching the `--workspace`-everywhere
+# convention and letting `cargo build --bin engramdb` resolve the binary (which
+# lives in `engram-cli`) without `-p`. Hand-pick a single crate with `-p` when
+# you want a faster, narrower build.
+default-members = [".", "crates/*"]
 
 [package]
 name = "engramdb"
