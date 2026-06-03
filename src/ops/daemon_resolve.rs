@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use crate::daemon::DaemonHandle;
+use crate::ops::{resolve_backend, resolve_engine_providers, EngineProviders};
+use crate::types::{EmbeddingBackend, EngramConfig};
 
 /// How a front-end may obtain model providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,4 +129,47 @@ impl Default for DaemonCell {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Resolve model-backed providers for a retrieval engine, routing through the
+/// daemon when available and `policy` permits, or loading in-process as a
+/// fallback.
+///
+/// This is the **single shared resolver** for both the MCP server and the CLI.
+/// The `policy` parameter is the only behavioral difference between front-ends:
+/// - MCP uses `ConnectOrSpawn` (auto-spawns the daemon when absent).
+/// - CLI uses `ConnectOnly` by default (uses a live daemon, else in-process).
+/// - Either front-end can be overridden to `InProcess` to skip the daemon.
+///
+/// Graceful fallback is the contract: if the daemon is disabled in config,
+/// the policy is `InProcess`, or the daemon is unreachable, this returns
+/// in-process providers exactly as `resolve_engine_providers(config, backend, 1)`.
+pub async fn resolve_providers(
+    cell: &DaemonCell,
+    config: &EngramConfig,
+    backend: Option<EmbeddingBackend>,
+    dir: &Path,
+    policy: DaemonPolicy,
+) -> EngineProviders {
+    if config.daemon.enabled && policy != DaemonPolicy::InProcess {
+        let idle = config.daemon.idle_timeout_secs;
+        let socket = crate::daemon::resolve_socket(None, &config.daemon);
+        if let Some(handle) = cell.get(&socket, idle, policy).await {
+            let resolved_backend = Some(resolve_backend(config.embeddings.backend, backend));
+            if let Some(providers) = crate::daemon::remote_providers(
+                handle,
+                dir.to_string_lossy().into_owned(),
+                resolved_backend,
+                config,
+            )
+            .await
+            {
+                return providers;
+            }
+        }
+    }
+    // In-process fallback: identical to the original CLI path.
+    // pool=1 because one-shot callers (CLI) have no concurrency, and the
+    // MCP server uses its own ProviderCache for pooled in-process providers.
+    resolve_engine_providers(config, backend, 1)
 }

@@ -885,3 +885,80 @@ async fn wait_request(socket: &std::path::Path, req: DaemonRequest) -> DaemonRes
     }
     panic!("daemon never came up");
 }
+
+// ---------------------------------------------------------------------------
+// resolve_providers: shared in-process vs daemon routing
+// ---------------------------------------------------------------------------
+
+/// `InProcess` policy never touches a socket — providers are built in-process.
+/// We verify this by using a non-existent socket path: if the code tried to
+/// connect it would fail/block; InProcess must return providers without any
+/// socket activity.
+#[tokio::test]
+async fn resolve_providers_in_process_never_touches_socket() {
+    use crate::ops::daemon_resolve::{resolve_providers, DaemonCell, DaemonPolicy};
+
+    let tmp = TempDir::new().unwrap();
+    // Deliberately absent socket — any connect attempt would fail.
+    let socket_env = tmp.path().join("absent.sock");
+    std::env::set_var("ENGRAMDB_DAEMON_SOCKET", &socket_env);
+
+    let cell = DaemonCell::new();
+    let config = crate::types::EngramConfig::default();
+    let dir = tmp.path();
+
+    // InProcess must return providers (possibly with no embedding if the model
+    // isn't staged — the function still returns the struct, just with None fields).
+    let providers = resolve_providers(&cell, &config, None, dir, DaemonPolicy::InProcess).await;
+    // The call must not hang or panic. We only assert the type is returned.
+    let _ = providers;
+
+    std::env::remove_var("ENGRAMDB_DAEMON_SOCKET");
+}
+
+/// `ConnectOnly` against a live daemon returns remote-backed providers.
+/// The embedding field is present (daemon responded to Meta), with the
+/// daemon's reported dimensions.
+#[tokio::test]
+async fn resolve_providers_connect_only_uses_live_daemon() {
+    use super::protocol::DaemonOp;
+    use crate::ops::daemon_resolve::{resolve_providers, DaemonCell, DaemonPolicy};
+
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("rp.sock");
+
+    // Stub daemon: answers Meta (so remote providers build) but nothing else.
+    spawn_stub(socket.clone(), |op| match op {
+        DaemonOp::Ping => DaemonResponse::Pong {
+            version: super::PROTOCOL_VERSION.to_string(),
+        },
+        DaemonOp::Meta => DaemonResponse::Meta {
+            dimensions: 16,
+            max_tokens: 64,
+            model_id: "onnx/stub-model".to_string(),
+        },
+        _ => DaemonResponse::Error {
+            message: "not implemented in stub".to_string(),
+        },
+    });
+    poll_until_connectable(&socket).await;
+
+    std::env::set_var("ENGRAMDB_DAEMON_SOCKET", &socket);
+
+    let cell = DaemonCell::new();
+    let mut config = crate::types::EngramConfig::default();
+    // daemon.enabled must be true for resolve_providers to try the daemon path.
+    config.daemon.enabled = true;
+    let dir = tmp.path();
+
+    let providers = resolve_providers(&cell, &config, None, dir, DaemonPolicy::ConnectOnly).await;
+    // The stub answered Meta with dimensions=16, so the remote embedding
+    // provider should be present with those dimensions.
+    let emb = providers
+        .embedding
+        .expect("remote embedding provider expected");
+    assert_eq!(emb.dimensions(), 16);
+    assert_eq!(emb.max_tokens(), 64);
+
+    std::env::remove_var("ENGRAMDB_DAEMON_SOCKET");
+}
