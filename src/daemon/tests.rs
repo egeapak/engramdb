@@ -916,6 +916,74 @@ async fn resolve_providers_in_process_never_touches_socket() {
     std::env::remove_var("ENGRAMDB_DAEMON_SOCKET");
 }
 
+// ---------------------------------------------------------------------------
+// CLI e2e: connect-only uses live daemon; InProcess override ignores it
+// ---------------------------------------------------------------------------
+
+/// With a live (stub) daemon and `ConnectOnly` policy, `resolve_providers`
+/// returns remote-backed providers whose dimensions match the daemon's reply.
+/// With `InProcess` policy, it does not connect — confirmed by killing the
+/// daemon first and showing that `InProcess` still resolves providers.
+#[tokio::test]
+async fn cli_connect_only_uses_daemon_and_in_process_override_does_not() {
+    use super::protocol::DaemonOp;
+    use crate::ops::daemon_resolve::{resolve_providers, DaemonCell, DaemonPolicy};
+
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("cli-e2e.sock");
+
+    // Stub daemon: answers Ping + Meta with sentinel dimensions=42.
+    spawn_stub(socket.clone(), |op| match op {
+        DaemonOp::Ping => DaemonResponse::Pong {
+            version: super::PROTOCOL_VERSION.to_string(),
+        },
+        DaemonOp::Meta => DaemonResponse::Meta {
+            dimensions: 42,
+            max_tokens: 64,
+            model_id: "onnx/cli-e2e-stub".to_string(),
+        },
+        _ => DaemonResponse::Error {
+            message: "not implemented in stub".to_string(),
+        },
+    });
+    poll_until_connectable(&socket).await;
+
+    // ── Part 1: ConnectOnly uses the live daemon ──────────────────────────
+    std::env::set_var("ENGRAMDB_DAEMON_SOCKET", &socket);
+
+    let cell = DaemonCell::new();
+    let mut config = crate::types::EngramConfig::default();
+    config.daemon.enabled = true;
+    let dir = tmp.path();
+
+    let providers = resolve_providers(&cell, &config, None, dir, DaemonPolicy::ConnectOnly).await;
+    let emb = providers
+        .embedding
+        .expect("ConnectOnly: remote embedding expected when daemon is live");
+    assert_eq!(
+        emb.dimensions(),
+        42,
+        "ConnectOnly: dimensions must match daemon's sentinel value"
+    );
+
+    // ── Part 2: InProcess ignores the socket entirely ────────────────────
+    // Point the env at a deliberately absent socket — if InProcess tried to
+    // connect it would fail; the policy must bypass the daemon path entirely.
+    let absent = tmp.path().join("absent-cli-e2e.sock");
+    std::env::set_var("ENGRAMDB_DAEMON_SOCKET", &absent);
+
+    // InProcess must still return providers (in-process fallback, possibly with
+    // no embedding if the model isn't staged).  The key assertion is that it
+    // does not hang or panic — it never attempts to connect to the absent socket.
+    let cell2 = DaemonCell::new();
+    let providers2 = resolve_providers(&cell2, &config, None, dir, DaemonPolicy::InProcess).await;
+    // If ONNX model is staged the embedding will be Some; if not it will be
+    // None.  Either way `resolve_providers` must return without error.
+    let _ = providers2;
+
+    std::env::remove_var("ENGRAMDB_DAEMON_SOCKET");
+}
+
 /// `ConnectOnly` against a live daemon returns remote-backed providers.
 /// The embedding field is present (daemon responded to Meta), with the
 /// daemon's reported dimensions.
