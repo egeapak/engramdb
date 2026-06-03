@@ -103,10 +103,15 @@ The change everything else hangs off.
 - The daemon `Ctx` gains `ping_count: AtomicU64` and
   `last_ping: Mutex<Option<Instant>>`, incremented/stamped in `dispatch` on
   `DaemonOp::Ping`.
-- `DaemonResponse::Status` gains `ping_count: u64` and
-  `last_ping_secs_ago: Option<u64>`.
-- `ping_count` persists across restarts like the other counters (`metrics.rs`);
-  `last_ping_secs_ago` is current-daemon-only (it is relative to "now").
+- `DaemonStatus` gains `ping_count: u64` and `last_ping_secs_ago: Option<u64>`.
+- **Both are in-memory / current-daemon-only** — *not* added to the persisted
+  `Counters` / `MetricsSnapshot`. Rationale: the metrics table is a fixed-schema
+  LanceDB table, so persisting `ping` would force a column migration for a
+  cumulative count that has little cross-restart meaning; and `last_ping_secs_ago`
+  is inherently relative to "now". Ping info therefore appears only when a live
+  daemon answers `Status` (which is the only context where "last ping ago" is
+  meaningful). When no daemon runs, `stats --daemon` shows the persisted request
+  counters as before, with no ping line.
 - The CLI status formatter prints, e.g. `pings: 42 (last 12s ago)`.
 
 ### Cross-cutting
