@@ -2,10 +2,13 @@
 
 use crate::output::OutputFormatter;
 use anyhow::Result;
-use engramdb::ops::{parse_detail_level, parse_memory_type, validate_score};
+use engramdb::ops::{
+    parse_detail_level, parse_memory_type, validate_score, DaemonCell, DaemonPolicy,
+};
 use engramdb::retrieval::engine::{RetrievalMode, RetrievalQuery, RetrievalResult};
 use engramdb::storage::MemoryStore;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Parameters for the query command.
 pub struct QueryParams {
@@ -37,6 +40,49 @@ pub async fn run_query(
     embedding_backend: Option<engramdb::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
+    run_query_with_cell(
+        dir,
+        global,
+        params,
+        embedding_backend,
+        formatter,
+        None,
+        DaemonPolicy::InProcess,
+    )
+    .await
+}
+
+/// Like [`run_query`] but routes model resolution through the shared daemon cell.
+pub async fn run_query_with_daemon(
+    dir: &Path,
+    global: bool,
+    params: QueryParams,
+    embedding_backend: Option<engramdb::types::EmbeddingBackend>,
+    formatter: &OutputFormatter,
+    cell: &Arc<DaemonCell>,
+    policy: DaemonPolicy,
+) -> Result<()> {
+    run_query_with_cell(
+        dir,
+        global,
+        params,
+        embedding_backend,
+        formatter,
+        Some(cell),
+        policy,
+    )
+    .await
+}
+
+async fn run_query_with_cell(
+    dir: &Path,
+    global: bool,
+    params: QueryParams,
+    embedding_backend: Option<engramdb::types::EmbeddingBackend>,
+    formatter: &OutputFormatter,
+    cell: Option<&Arc<DaemonCell>>,
+    policy: DaemonPolicy,
+) -> Result<()> {
     let store = if global {
         MemoryStore::open_global().await?
     } else {
@@ -47,7 +93,9 @@ pub async fn run_query(
     }
 
     let show_scores = params.show_scores;
-    let result = compute_query_result(store, global, params, embedding_backend).await?;
+    let result =
+        compute_query_result_with_cell(store, global, params, embedding_backend, cell, policy)
+            .await?;
 
     formatter.print_retrieval_result(&result, show_scores);
 
@@ -59,14 +107,47 @@ pub async fn run_query(
 /// global store) merge in global-store hits — mirroring the MCP
 /// `include_global` option. Returned separately from rendering so the merge
 /// behavior is unit-testable offline.
+///
+/// Used from tests; production callers go through [`compute_query_result_with_cell`].
+#[cfg(test)]
 pub(crate) async fn compute_query_result(
     store: MemoryStore,
     global: bool,
     params: QueryParams,
     embedding_backend: Option<engramdb::types::EmbeddingBackend>,
 ) -> Result<RetrievalResult> {
+    compute_query_result_with_cell(
+        store,
+        global,
+        params,
+        embedding_backend,
+        None,
+        DaemonPolicy::InProcess,
+    )
+    .await
+}
+
+async fn compute_query_result_with_cell(
+    store: MemoryStore,
+    global: bool,
+    params: QueryParams,
+    embedding_backend: Option<engramdb::types::EmbeddingBackend>,
+    cell: Option<&Arc<DaemonCell>>,
+    policy: DaemonPolicy,
+) -> Result<RetrievalResult> {
     let config_path = store.project_dir.join(".engramdb").join("config.toml");
-    let engine = engramdb::ops::build_engine(store, &config_path, embedding_backend).await;
+    let engine = if let Some(c) = cell {
+        let config = engramdb::storage::config::load_config(&config_path)
+            .await
+            .unwrap_or_default();
+        let project_dir = store.project_dir.clone();
+        let providers =
+            engramdb::ops::resolve_providers(c, &config, embedding_backend, &project_dir, policy)
+                .await;
+        engramdb::ops::assemble_engine(store, config, providers)
+    } else {
+        engramdb::ops::build_engine(store, &config_path, embedding_backend).await
+    };
 
     let types = if !params.type_filter.is_empty() {
         let parsed_types: Result<Vec<_>> = params
@@ -114,12 +195,23 @@ pub(crate) async fn compute_query_result(
     // querying the global store (`--global`) — nothing extra to merge.
     if params.include_global && !global {
         if let Ok(global_store) = MemoryStore::open_global().await {
-            let global_config = global_store
+            let global_config_path = global_store
                 .project_dir
                 .join(".engramdb")
                 .join("config.toml");
-            let global_engine =
-                engramdb::ops::build_engine(global_store, &global_config, embedding_backend).await;
+            let global_engine = if let Some(c) = cell {
+                let gcfg = engramdb::storage::config::load_config(&global_config_path)
+                    .await
+                    .unwrap_or_default();
+                let gdir = global_store.project_dir.clone();
+                let gproviders =
+                    engramdb::ops::resolve_providers(c, &gcfg, embedding_backend, &gdir, policy)
+                        .await;
+                engramdb::ops::assemble_engine(global_store, gcfg, gproviders)
+            } else {
+                engramdb::ops::build_engine(global_store, &global_config_path, embedding_backend)
+                    .await
+            };
             if let Ok(global_result) = engramdb::ops::query_memories(&global_engine, &query).await {
                 let max = query.max_results.unwrap_or(params.max_results);
                 engramdb::ops::merge_scored_memories(
