@@ -796,6 +796,81 @@ async fn remote_providers_wire_nli_and_reranker_per_config() {
     assert_eq!(scores[0].index, 0);
 }
 
+/// Poll until a daemon on `socket` stops accepting new connections (has shut down).
+async fn poll_until_unconnectable(socket: &std::path::Path) {
+    for _ in 0..200 {
+        if UnixStream::connect(socket).await.is_err() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("daemon on {:?} never stopped accepting connections", socket);
+}
+
+/// Poll until a daemon on `socket` starts accepting connections.
+async fn poll_until_connectable(socket: &std::path::Path) {
+    for _ in 0..200 {
+        if UnixStream::connect(socket).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("daemon on {:?} never became connectable", socket);
+}
+
+// ---------------------------------------------------------------------------
+// DaemonCell: re-resolvable cell with spawn backoff
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn daemon_cell_respawns_after_handle_lost() {
+    use crate::ops::daemon_resolve::{DaemonCell, DaemonPolicy};
+
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("cell.sock");
+    let cell = DaemonCell::new();
+
+    // No daemon running yet → ConnectOnly yields None (nothing to connect to).
+    assert!(cell
+        .get(&socket, 3600, DaemonPolicy::ConnectOnly)
+        .await
+        .is_none());
+
+    // Also ConnectOrSpawn yields None here because the test binary doesn't
+    // have the `daemon run` subcommand. We test cell caching + re-connect by
+    // starting a daemon in-process and calling `connect_only` via the cell.
+    // Start a daemon in-process.
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    poll_until_connectable(&socket).await;
+
+    // ConnectOnly now resolves the live in-process daemon.
+    let h1 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
+    assert!(h1.is_some(), "ConnectOnly should find the running daemon");
+
+    // Calling again hits the cached handle (still healthy).
+    let h2 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
+    assert!(h2.is_some(), "Second call should return cached handle");
+
+    // Kill the daemon.
+    super::request_shutdown(&socket).await.unwrap();
+    poll_until_unconnectable(&socket).await;
+
+    // Cell detects the dead handle and returns None (ConnectOnly, no respawn).
+    let h3 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
+    assert!(h3.is_none(), "Dead daemon: ConnectOnly should yield None");
+
+    // Start a fresh daemon on the same socket (simulates re-spawn).
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    poll_until_connectable(&socket).await;
+
+    // Cell re-connects to the new daemon without poisoning.
+    let h4 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
+    assert!(
+        h4.is_some(),
+        "DaemonCell should re-connect after new daemon starts"
+    );
+}
+
 /// Send one request over a fresh connection, retrying connect until the
 /// daemon is up.
 async fn wait_request(socket: &std::path::Path, req: DaemonRequest) -> DaemonResponse {

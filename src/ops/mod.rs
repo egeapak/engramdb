@@ -28,7 +28,7 @@ pub use compress::{
     CompressCandidatesResult,
 };
 pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
-pub use daemon_resolve::DaemonPolicy;
+pub use daemon_resolve::{DaemonCell, DaemonPolicy};
 pub use delete::delete_memory;
 pub use doctor::{
     doctor, doctor_environment, CheckStatus, DoctorResult, DoctorSection, EnvironmentCheck,

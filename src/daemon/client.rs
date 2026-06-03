@@ -106,7 +106,24 @@ impl DaemonHandle {
         None
     }
 
+    /// Connect to an already-running daemon without spawning. Returns `None`
+    /// if no daemon is listening on `socket` or if it fails the protocol
+    /// version check. Used by [`DaemonCell`] to probe liveness before
+    /// deciding whether to spawn.
+    pub(crate) async fn connect_only(socket: PathBuf) -> Option<Arc<Self>> {
+        let handle = Self { socket };
+        if handle.healthy().await {
+            Some(Arc::new(handle))
+        } else {
+            None
+        }
+    }
+
     /// True if a daemon answers `Ping` with a matching protocol version.
+    pub(crate) async fn check_health(&self) -> bool {
+        self.healthy().await
+    }
+
     async fn healthy(&self) -> bool {
         match self
             .request(DaemonRequest {
@@ -161,12 +178,6 @@ impl DaemonHandle {
     #[cfg(test)]
     pub(crate) fn connect_existing(socket: PathBuf) -> Arc<Self> {
         Arc::new(Self { socket })
-    }
-
-    /// Test-only accessor for the private liveness/version probe.
-    #[cfg(test)]
-    pub(crate) async fn check_health(&self) -> bool {
-        self.healthy().await
     }
 
     /// Send one request and read its response over a fresh connection.
