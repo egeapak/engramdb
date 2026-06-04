@@ -108,6 +108,10 @@ toml = "0.8"
 name = "benchmarks"
 harness = false
 
+[[bench]]
+name = "daemon_lifecycle"
+harness = false
+
 [profile.release]
 lto = true
 opt-level = "z"
