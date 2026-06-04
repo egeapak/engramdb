@@ -1087,6 +1087,70 @@ async fn heartbeat_pings_keep_daemon_alive_past_idle() {
     hb.abort();
 }
 
+/// The heartbeat mechanism the MCP server actually uses — repeated
+/// `DaemonCell::get` — keeps a daemon alive past its idle timeout, because each
+/// `get` health-checks the handle with a `Ping` that refreshes the daemon's
+/// idle clock. This is the cell-level analogue of
+/// `heartbeat_pings_keep_daemon_alive_past_idle` (which pings the socket
+/// directly). `ConnectOnly` is used so a missed keepalive surfaces as a failed
+/// assertion rather than spawning the test binary as a daemon.
+#[tokio::test]
+async fn daemon_cell_get_keeps_daemon_alive_past_idle() {
+    use crate::ops::daemon_resolve::{DaemonCell, DaemonPolicy};
+
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("hbcell.sock");
+
+    // 1-second idle timeout; the daemon is already running so each `get` just
+    // health-checks (no spawn path is taken).
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(1)));
+    poll_until_connectable(&socket).await;
+
+    let cell = DaemonCell::new();
+    // 6 resolves spaced ~330ms span ~2s, well past the 1s idle timeout.
+    for _ in 0..6 {
+        let h = cell.get(&socket, 1, DaemonPolicy::ConnectOnly).await;
+        assert!(h.is_some(), "cell.get should keep returning a live handle");
+        tokio::time::sleep(Duration::from_millis(330)).await;
+    }
+
+    assert!(
+        UnixStream::connect(&socket).await.is_ok(),
+        "DaemonCell::get heartbeat should keep the daemon alive past idle"
+    );
+}
+
+/// Each `DaemonCell::get` resolve sends exactly one `Ping` (via the handle
+/// health check) — which is what lets the heartbeat refresh the daemon's idle
+/// clock. Two resolves ⇒ the daemon's `Status` reports `ping_count == 2`.
+/// (`poll_until_connectable` only opens a socket; it does not send a `Ping`.)
+#[tokio::test]
+async fn daemon_cell_get_pings_the_daemon() {
+    use crate::ops::daemon_resolve::{DaemonCell, DaemonPolicy};
+
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("cellping.sock");
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    poll_until_connectable(&socket).await;
+
+    let cell = DaemonCell::new();
+    // First get: bare connect → 1 ping. Second get: cached health-check → 1 ping.
+    assert!(cell
+        .get(&socket, 3600, DaemonPolicy::ConnectOnly)
+        .await
+        .is_some());
+    assert!(cell
+        .get(&socket, 3600, DaemonPolicy::ConnectOnly)
+        .await
+        .is_some());
+
+    let st = super::query_status(&socket).await.unwrap().unwrap();
+    assert_eq!(
+        st.ping_count, 2,
+        "each DaemonCell::get should ping the daemon exactly once"
+    );
+}
+
 /// The daemon tracks how many Pings it has received and when the last one
 /// arrived. After two pings, `Status` must report `ping_count == 2` and
 /// `last_ping_secs_ago` must be `Some`.

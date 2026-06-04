@@ -543,11 +543,11 @@ pub struct EngramDbServer {
     /// disabled or unreachable. Keyed by the provider-relevant config
     /// signature so each model loads at most once per process (PR #35).
     provider_cache: ops::ProviderCache,
-    /// Process-wide handle to the shared embedding daemon, established (and
-    /// the daemon auto-spawned) at most once. An inner `None` means a prior
-    /// connect/spawn attempt failed and this process uses in-process models
-    /// for its lifetime — cached so we don't spawn-storm.
-    daemon: Arc<tokio::sync::OnceCell<Option<Arc<engramdb::daemon::DaemonHandle>>>>,
+    /// Process-wide re-resolvable handle to the shared embedding daemon. Unlike
+    /// a one-shot cache, it re-validates the daemon on each resolve and
+    /// re-spawns a dead one (rate-limited), so a session self-heals when the
+    /// daemon idle-exits or is replaced. The heartbeat task keeps it warm.
+    daemon: Arc<ops::DaemonCell>,
     /// Embedding-model-change warning computed once at daemon startup for
     /// the primary project, appended to `get_info` instructions so the
     /// connecting agent surfaces it to the user. `None` = no mismatch /
@@ -599,7 +599,7 @@ impl EngramDbServer {
             session_id,
             pid_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             provider_cache: ops::ProviderCache::new(),
-            daemon: Arc::new(tokio::sync::OnceCell::new()),
+            daemon: Arc::new(ops::DaemonCell::new()),
             embedding_warning: None,
             tool_router: Self::tool_router(),
         })
@@ -609,15 +609,15 @@ impl EngramDbServer {
     ///
     /// The SSE transport builds a fresh `EngramDbServer` per connection. Each
     /// default-constructed server has its own empty [`ops::ProviderCache`] and
-    /// daemon `OnceCell`, so without sharing every HTTP connection would reload
+    /// daemon cell, so without sharing every HTTP connection would reload
     /// the embedding model (or re-probe/auto-spawn the daemon) on its first
     /// tool call — defeating the load-once-per-process intent. Injecting one
-    /// process-wide cache + daemon handle restores it on SSE the same way
+    /// process-wide cache + daemon cell restores it on SSE the same way
     /// stdio gets it for free (single server instance).
     fn with_shared_model_caches(
         mut self,
         provider_cache: ops::ProviderCache,
-        daemon: Arc<tokio::sync::OnceCell<Option<Arc<engramdb::daemon::DaemonHandle>>>>,
+        daemon: Arc<ops::DaemonCell>,
     ) -> Self {
         self.provider_cache = provider_cache;
         self.daemon = daemon;
@@ -645,7 +645,7 @@ impl EngramDbServer {
             session_id,
             pid_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             provider_cache: ops::ProviderCache::new(),
-            daemon: Arc::new(tokio::sync::OnceCell::new()),
+            daemon: Arc::new(ops::DaemonCell::new()),
             embedding_warning: None,
             tool_router: Self::tool_router(),
         }
@@ -1041,13 +1041,21 @@ impl EngramDbServer {
     /// `cfg(test)` so they exercise it normally.
     async fn resolve_providers(
         provider_cache: &ops::ProviderCache,
-        daemon: &Arc<tokio::sync::OnceCell<Option<Arc<engramdb::daemon::DaemonHandle>>>>,
+        daemon: &Arc<ops::DaemonCell>,
         backend_override: Option<EmbeddingBackend>,
         config: &engramdb::types::EngramConfig,
         dir: &Path,
     ) -> ops::EngineProviders {
         if Self::daemon_path_enabled(config) {
-            if let Some(handle) = Self::daemon_handle(daemon, config).await {
+            let idle = config.daemon.idle_timeout_secs;
+            let socket = engramdb::daemon::resolve_socket(None, &config.daemon);
+            // The re-resolvable cell health-checks a cached handle and
+            // re-spawns a dead daemon, so a session that outlived its daemon
+            // heals here instead of degrading to in-process forever.
+            if let Some(handle) = daemon
+                .get(&socket, idle, ops::DaemonPolicy::ConnectOrSpawn)
+                .await
+            {
                 // Send the resolved concrete backend so the daemon's provider
                 // key matches ours regardless of the daemon's environment.
                 let backend = Some(ops::resolve_backend(
@@ -1069,24 +1077,6 @@ impl EngramDbServer {
         provider_cache.get(config, backend_override).await
     }
 
-    /// Process-wide daemon handle, established (and the daemon auto-spawned)
-    /// at most once. The result — including a `None` failure — is cached for
-    /// the process lifetime so a one-time connect/spawn failure doesn't
-    /// trigger a spawn storm.
-    async fn daemon_handle(
-        daemon: &Arc<tokio::sync::OnceCell<Option<Arc<engramdb::daemon::DaemonHandle>>>>,
-        config: &engramdb::types::EngramConfig,
-    ) -> Option<Arc<engramdb::daemon::DaemonHandle>> {
-        let idle = config.daemon.idle_timeout_secs;
-        let socket = engramdb::daemon::resolve_socket(None, &config.daemon);
-        daemon
-            .get_or_init(|| async move {
-                engramdb::daemon::DaemonHandle::connect_or_spawn(socket, idle).await
-            })
-            .await
-            .clone()
-    }
-
     /// Preload the embedding model *before* the first tool call so it isn't
     /// paid on it. With the daemon enabled this spawns/connects the daemon and
     /// warms its model; otherwise it warms the in-process cache.
@@ -1105,6 +1095,40 @@ impl EngramDbServer {
             let config = load_config(&config_path).await.unwrap_or_default();
             let _ = Self::resolve_providers(&provider_cache, &daemon, backend, &config, &dir).await;
             tracing::debug!("engine provider warmup complete");
+        });
+    }
+
+    /// Keep the shared daemon alive while this session runs, and self-heal it
+    /// if it dies or is replaced.
+    ///
+    /// A background task resolves the daemon via the re-resolvable
+    /// [`ops::DaemonCell`] every `idle_timeout/3` (min 30s). Each resolve sends
+    /// a `Ping` — refreshing the daemon's idle clock so it does not reap while
+    /// any session is connected (session-aware idle) — and re-spawns a dead
+    /// daemon, updating the shared cell so subsequent tool calls pick up the new
+    /// one. Best-effort and non-blocking; a `None` resolve just means the next
+    /// tick retries. No-op under `cfg(test)` (the daemon path is disabled there,
+    /// mirroring [`Self::resolve_providers`]).
+    pub fn spawn_daemon_heartbeat(&self) {
+        let daemon = Arc::clone(&self.daemon);
+        let config_path = self.effective_dir.join(".engramdb").join("config.toml");
+        tokio::spawn(async move {
+            loop {
+                let config = load_config(&config_path).await.unwrap_or_default();
+                if !Self::daemon_path_enabled(&config) {
+                    // Daemon disabled (or test build): re-check periodically in
+                    // case the config is edited to enable it.
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    continue;
+                }
+                let idle = config.daemon.idle_timeout_secs;
+                let socket = engramdb::daemon::resolve_socket(None, &config.daemon);
+                let _ = daemon
+                    .get(&socket, idle, ops::DaemonPolicy::ConnectOrSpawn)
+                    .await;
+                let interval = std::time::Duration::from_secs((idle / 3).max(30));
+                tokio::time::sleep(interval).await;
+            }
         });
     }
 
@@ -2474,6 +2498,9 @@ pub async fn run_stdio(
     // Load the embedding model in the background now so the first tool call
     // doesn't pay the ~240ms ONNX session init synchronously.
     server.spawn_provider_warmup();
+    // Keep the shared daemon resident while this session runs and self-heal it
+    // if it dies/restarts.
+    server.spawn_daemon_heartbeat();
     // `serve` consumes the server; the running service owns the remaining
     // `Arc<StatsCollector>` baked into it. Wait on the service, then drop
     // both it and the local `stats` so the channel closes and the flush
@@ -2527,8 +2554,7 @@ pub async fn run_sse(
     // daemon is probed/spawned once) for the whole process rather than per
     // HTTP connection.
     let provider_cache = ops::ProviderCache::new();
-    let daemon: Arc<tokio::sync::OnceCell<Option<Arc<engramdb::daemon::DaemonHandle>>>> =
-        Arc::new(tokio::sync::OnceCell::new());
+    let daemon: Arc<ops::DaemonCell> = Arc::new(ops::DaemonCell::new());
 
     // Resolve hierarchy eagerly once: subsequent per-connection server
     // instances share the registry, so registration only happens once.
@@ -2570,6 +2596,7 @@ pub async fn run_sse(
         // Warm the shared model cache / daemon once (after any auto-reindex)
         // so the first connection's first tool call doesn't pay the load.
         warmup.spawn_provider_warmup();
+        warmup.spawn_daemon_heartbeat();
         warmup.embedding_warning
     };
 
