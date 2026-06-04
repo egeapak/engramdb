@@ -2,9 +2,10 @@
 
 use crate::output::OutputFormatter;
 use anyhow::Result;
-use engramdb::ops::reindex;
+use engramdb::ops::{reindex, DaemonCell, DaemonPolicy};
 use engramdb::storage::MemoryStore;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Run reindex operation.
 ///
@@ -23,6 +24,31 @@ pub async fn run_reindex(
     embedding_backend: Option<engramdb::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
+    run_reindex_with_daemon(
+        dir,
+        global,
+        embeddings_only,
+        index_only,
+        embedding_backend,
+        formatter,
+        None,
+        DaemonPolicy::InProcess,
+    )
+    .await
+}
+
+/// Like [`run_reindex`] but routes model resolution through the shared daemon cell.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_reindex_with_daemon(
+    dir: &Path,
+    global: bool,
+    embeddings_only: bool,
+    index_only: bool,
+    embedding_backend: Option<engramdb::types::EmbeddingBackend>,
+    formatter: &OutputFormatter,
+    cell: Option<&Arc<DaemonCell>>,
+    policy: DaemonPolicy,
+) -> Result<()> {
     let store = if global {
         MemoryStore::open_global().await?
     } else {
@@ -37,7 +63,27 @@ pub async fn run_reindex(
         } else {
             MemoryStore::open(dir).await?
         };
-        Some(engramdb::ops::build_engine(engine_store, &config_path, embedding_backend).await)
+        if let Some(c) = cell {
+            let config = engramdb::storage::config::load_config(&config_path)
+                .await
+                .unwrap_or_default();
+            let project_dir = engine_store.project_dir.clone();
+            let providers = engramdb::ops::resolve_providers(
+                c,
+                &config,
+                embedding_backend,
+                &project_dir,
+                policy,
+            )
+            .await;
+            Some(engramdb::ops::assemble_engine(
+                engine_store,
+                config,
+                providers,
+            ))
+        } else {
+            Some(engramdb::ops::build_engine(engine_store, &config_path, embedding_backend).await)
+        }
     } else {
         None
     };

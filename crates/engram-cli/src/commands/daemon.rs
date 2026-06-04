@@ -1,7 +1,7 @@
 //! `engramdb daemon` subcommands: run / status / stop / restart.
 
 use crate::app::DaemonCommand;
-use crate::output::OutputFormatter;
+use crate::output::{format_ping_line, OutputFormatter};
 use anyhow::Result;
 use engramdb::daemon;
 use engramdb::types::DaemonConfig;
@@ -67,6 +67,7 @@ pub async fn run_daemon_cmd(command: DaemonCommand, formatter: &OutputFormatter)
                     println!("  uptime:          {}", fmt_dur(s.uptime_secs));
                     println!("  idle:            {}", fmt_dur(s.idle_secs));
                     println!("  model bundles:   {}", s.bundles_loaded);
+                    println!("  {}", format_ping_line(s.ping_count, s.last_ping_secs_ago));
                     println!("  requests (cumulative across restarts):");
                     println!("    embed:         {}", s.requests_embed);
                     println!("    classify:      {}", s.requests_classify);

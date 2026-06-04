@@ -7,6 +7,7 @@
 pub mod challenge;
 pub mod compress;
 pub mod create;
+pub mod daemon_resolve;
 pub mod delete;
 pub mod doctor;
 pub mod gc;
@@ -27,6 +28,7 @@ pub use compress::{
     CompressCandidatesResult,
 };
 pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
+pub use daemon_resolve::{resolve_providers, DaemonCell, DaemonPolicy};
 pub use delete::delete_memory;
 pub use doctor::{
     doctor, doctor_environment, CheckStatus, DoctorResult, DoctorSection, EnvironmentCheck,

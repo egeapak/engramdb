@@ -165,6 +165,17 @@ pub struct Cli {
     /// Embedding backend: auto, onnx, or ollama
     #[arg(long = "embedding-backend", global = true)]
     pub embedding_backend: Option<engramdb::types::EmbeddingBackend>,
+
+    /// Force in-process model loading — never contact the shared embedding
+    /// daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1.
+    #[arg(long = "in-process", global = true)]
+    pub in_process: bool,
+
+    /// Spawn the shared embedding daemon if it is not already running, then
+    /// route through it. By default the CLI only uses a daemon that is already
+    /// running (connect-only).
+    #[arg(long = "spawn-daemon", global = true)]
+    pub spawn_daemon: bool,
 }
 
 /// Available CLI commands.

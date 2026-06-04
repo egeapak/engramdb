@@ -726,6 +726,13 @@ pub struct DaemonConfig {
     /// then the default per-user runtime path.
     #[serde(default)]
     pub socket_path: Option<String>,
+
+    /// Whether CLI model-needing ops route through the daemon when one is
+    /// reachable. Default `true`. When `false` (or when `enabled = false`),
+    /// the CLI always loads models in-process. Override ladder:
+    /// `--in-process` flag > `ENGRAMDB_IN_PROCESS` env > this config value.
+    #[serde(default = "default_daemon_use_for_cli")]
+    pub use_for_cli: bool,
 }
 
 fn default_daemon_enabled() -> bool {
@@ -736,12 +743,17 @@ fn default_daemon_idle_timeout_secs() -> u64 {
     900
 }
 
+fn default_daemon_use_for_cli() -> bool {
+    true
+}
+
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             enabled: default_daemon_enabled(),
             idle_timeout_secs: default_daemon_idle_timeout_secs(),
             socket_path: None,
+            use_for_cli: default_daemon_use_for_cli(),
         }
     }
 }
@@ -1640,6 +1652,14 @@ weight = 0.7
         let legacy: EmbeddingsConfig =
             toml::from_str("provider = \"onnx\"\ndimensions = 384\nmax_tokens = 256\n").unwrap();
         assert_eq!(legacy.pool_size, None);
+    }
+
+    #[test]
+    fn daemon_use_for_cli_defaults_true_and_is_overridable() {
+        let cfg: EngramConfig = toml::from_str("").unwrap();
+        assert!(cfg.daemon.use_for_cli);
+        let cfg: EngramConfig = toml::from_str("[daemon]\nuse_for_cli = false\n").unwrap();
+        assert!(!cfg.daemon.use_for_cli);
     }
 
     #[test]

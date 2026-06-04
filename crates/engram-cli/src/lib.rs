@@ -23,6 +23,42 @@ pub mod output;
 pub mod prompter;
 pub mod validation;
 
+/// Determine the `DaemonPolicy` for a CLI invocation based on the flag ladder.
+///
+/// Precedence (highest first):
+/// 1. `daemon.enabled == false` → `InProcess` (master switch).
+/// 2. `in_process` flag (or `ENGRAMDB_IN_PROCESS` env var, checked before this
+///    call) → `InProcess`.
+/// 3. `daemon.use_for_cli == false` **and** `spawn` not set → `InProcess`.
+/// 4. `spawn` flag → `ConnectOrSpawn`.
+/// 5. Otherwise → `ConnectOnly` (use a live daemon, else in-process fallback).
+pub fn cli_daemon_policy(
+    in_process: bool,
+    spawn: bool,
+    config: &engramdb::types::EngramConfig,
+) -> engramdb::ops::DaemonPolicy {
+    use engramdb::ops::DaemonPolicy;
+
+    // Master switch: daemon globally disabled → always in-process.
+    if !config.daemon.enabled {
+        return DaemonPolicy::InProcess;
+    }
+    // --in-process flag (or ENGRAMDB_IN_PROCESS env) → in-process.
+    if in_process {
+        return DaemonPolicy::InProcess;
+    }
+    // use_for_cli=false and no explicit --spawn-daemon → in-process.
+    if !config.daemon.use_for_cli && !spawn {
+        return DaemonPolicy::InProcess;
+    }
+    // --spawn-daemon → promote to ConnectOrSpawn.
+    if spawn {
+        return DaemonPolicy::ConnectOrSpawn;
+    }
+    // Default CLI policy: use a live daemon if one exists, else in-process.
+    DaemonPolicy::ConnectOnly
+}
+
 // Test isolation: link `engram-test-support` so its `#[ctor]` redirects
 // `ENGRAMDB_DATA_DIR` / `ENGRAMDB_CONFIG_DIR` to per-process temp dirs before
 // any test runs. The in-crate command unit tests (e.g. `commands::get` /
@@ -38,11 +74,13 @@ fn arm_test_isolation() {
 use anyhow::Result;
 use std::env;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use app::{Cli, Command, HookCommand};
 use commands::{AddParams, ChallengeParams, QueryParams, UpdateParams};
 use output::OutputFormatter;
 
+use engramdb::ops::DaemonCell;
 use engramdb::storage::FileRegistry;
 use prompter::InquirePrompter;
 
@@ -77,6 +115,19 @@ pub async fn run(cli: Cli) -> Result<()> {
     // Capture embedding backend override before moving cli fields
     let backend = cli.embedding_backend;
 
+    // Resolve the in-process flag: --in-process CLI flag OR ENGRAMDB_IN_PROCESS
+    // env var (any truthy string: "1", "true", "yes", "on").
+    let in_process_flag = cli.in_process
+        || std::env::var("ENGRAMDB_IN_PROCESS")
+            .ok()
+            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+    let spawn_daemon_flag = cli.spawn_daemon;
+
+    // One process-wide DaemonCell — model-needing ops share it so the daemon
+    // handle is cached and health-checked once per process, not per command.
+    let daemon_cell = Arc::new(DaemonCell::new());
+
     // Create output formatter
     let formatter = OutputFormatter::new(cli.format, cli.json, cli.no_color);
 
@@ -103,6 +154,19 @@ pub async fn run(cli: Cli) -> Result<()> {
     } else {
         engramdb::storage::worktree::resolve_project_root(&dir, &registry).await?
     };
+
+    // Compute the daemon policy once per process using the project config.
+    // Best-effort: if the config file is absent/unreadable, use defaults
+    // (daemon.enabled=true, use_for_cli=true → ConnectOnly by default).
+    let config_path = dir.join(".engramdb").join("config.toml");
+    let daemon_config_for_policy = engramdb::storage::config::load_config(&config_path)
+        .await
+        .unwrap_or_default();
+    let daemon_policy = cli_daemon_policy(
+        in_process_flag,
+        spawn_daemon_flag,
+        &daemon_config_for_policy,
+    );
 
     // Create production prompter for interactive commands
     let prompter = InquirePrompter;
@@ -145,7 +209,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             details_file,
             global,
         } => {
-            commands::run_add(
+            commands::add::run_add_with_daemon(
                 &dir,
                 global,
                 &registry,
@@ -173,6 +237,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 backend,
                 &formatter,
                 &prompter,
+                Some(&daemon_cell),
+                daemon_policy,
             )
             .await
         }
@@ -213,7 +279,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             // Explicit --query wins over positional.
             let query_text = query.or(query_pos);
 
-            commands::run_query(
+            commands::query::run_query_with_daemon(
                 &dir,
                 global,
                 QueryParams {
@@ -232,6 +298,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 },
                 backend,
                 &formatter,
+                &daemon_cell,
+                daemon_policy,
             )
             .await
         }
@@ -285,7 +353,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             editor,
             global,
         } => {
-            commands::run_update(
+            commands::update::run_update_with_daemon(
                 &dir,
                 global,
                 UpdateParams {
@@ -314,6 +382,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 },
                 backend,
                 &formatter,
+                Some(&daemon_cell),
+                daemon_policy,
             )
             .await
         }
@@ -395,13 +465,15 @@ pub async fn run(cli: Cli) -> Result<()> {
             index_only,
             global,
         } => {
-            commands::run_reindex(
+            commands::reindex::run_reindex_with_daemon(
                 &dir,
                 global,
                 embeddings_only,
                 index_only,
                 backend,
                 &formatter,
+                Some(&daemon_cell),
+                daemon_policy,
             )
             .await
         }
@@ -449,5 +521,35 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Projects { command } => {
             commands::run_projects(&dir, &registry, command, &formatter, &prompter).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engramdb::ops::DaemonPolicy;
+    use engramdb::types::EngramConfig;
+
+    #[test]
+    fn cli_policy_precedence() {
+        let mut c = EngramConfig::default();
+        // Default: use_for_cli=true, enabled=true → ConnectOnly.
+        assert_eq!(
+            cli_daemon_policy(false, false, &c),
+            DaemonPolicy::ConnectOnly
+        );
+        // --in-process → InProcess regardless of use_for_cli.
+        assert_eq!(cli_daemon_policy(true, false, &c), DaemonPolicy::InProcess);
+        // --spawn-daemon → ConnectOrSpawn.
+        assert_eq!(
+            cli_daemon_policy(false, true, &c),
+            DaemonPolicy::ConnectOrSpawn
+        );
+        // use_for_cli=false + no --spawn-daemon → InProcess.
+        c.daemon.use_for_cli = false;
+        assert_eq!(cli_daemon_policy(false, false, &c), DaemonPolicy::InProcess);
+        // daemon.enabled=false is the master switch — wins over --spawn-daemon.
+        c.daemon.enabled = false;
+        assert_eq!(cli_daemon_policy(false, true, &c), DaemonPolicy::InProcess);
     }
 }

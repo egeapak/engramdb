@@ -14,7 +14,7 @@ EngramDB gives your AI coding agent a memory layer that persists between convers
 - **Contradiction detection** — NLI-based challenge system flags conflicting information
 - **Memory lifecycle** — criticality scoring, garbage collection, compression of stale memories
 - **MCP server** — full Model Context Protocol integration (stdio and SSE transports)
-- **Shared embedding daemon** — auto-spawned; loads models once machine-wide instead of once per agent session, with graceful in-process fallback
+- **Shared embedding daemon** — auto-spawned and self-healing; loads models once machine-wide instead of once per agent session, stays resident while sessions are connected, and is usable from the CLI too, with graceful in-process fallback
 - **Claude Code plugin** — one-command install with hooks, MCP, and permissions
 - **Offline-first** — all embeddings run locally via ONNX Runtime (or optionally Ollama)
 - **Multiple output formats** — pretty, JSON, or plain text for scripting
@@ -157,7 +157,8 @@ threshold = 0.1    # Minimum criticality to keep
 
 [daemon]
 enabled = true            # Delegate embedding/NLI/rerank to the shared daemon
-idle_timeout_secs = 900   # Daemon exits after this long with no activity
+use_for_cli = true        # Also use the daemon from model-needing CLI commands
+idle_timeout_secs = 900   # Daemon reaps this long after the last session disconnects
 # socket_path = "/run/user/1000/engramdb/daemon.sock"  # optional override
 ```
 
@@ -183,11 +184,21 @@ process (it is already cross-process safe), so only inference is delegated.
 - **Auto-spawned on demand.** You never start it manually. When an MCP process
   needs the daemon and none is reachable, it spawns one (`engramdb daemon run`)
   detached, waits briefly, and connects. Concurrent spawns are race-safe (only
-  one binds the socket). The daemon exits after `idle_timeout_secs` with no
-  activity; **the next MCP run simply spawns a fresh one**.
-- **Graceful fallback.** If the daemon is disabled or unreachable, the MCP
-  process loads models in-process exactly as before — operations never fail
-  because of the daemon.
+  one binds the socket).
+- **Stays alive while sessions are connected, then reaps.** Each `serve` process
+  runs a background heartbeat that pings the daemon every `idle_timeout_secs / 3`
+  (min 30 s), keeping it resident as long as any session is running. It exits
+  `idle_timeout_secs` after the **last** session disconnects.
+- **Self-healing.** If the daemon idle-exits, crashes, or is replaced, the
+  heartbeat re-spawns a fresh one and live sessions route to it on their next
+  request — no agent restart needed.
+- **Usable from the CLI.** Model-needing CLI commands use a *running* daemon when
+  reachable (connect-only by default — they don't spawn one). Override with
+  `--in-process` / `ENGRAMDB_IN_PROCESS=1` / `[daemon].use_for_cli = false`, or
+  let the CLI spawn one with `--spawn-daemon`.
+- **Graceful fallback.** If the daemon is disabled or unreachable, MCP and the
+  CLI load models in-process exactly as before — operations never fail because
+  of the daemon.
 - **Manage it directly** (rarely needed):
 
   ```bash

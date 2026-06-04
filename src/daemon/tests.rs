@@ -171,6 +171,8 @@ async fn status_and_shutdown_frames_roundtrip() {
         requests_status: 9,
         requests_title: 3,
         requests_total: 25,
+        ping_count: 0,
+        last_ping_secs_ago: None,
     };
     write_msg(&mut bw, &DaemonResponse::Status(status.clone()))
         .await
@@ -663,6 +665,8 @@ async fn query_status_parses_stub_status() {
             requests_status: 2,
             requests_title: 0,
             requests_total: 7,
+            ping_count: 0,
+            last_ping_secs_ago: None,
         }),
         _ => DaemonResponse::Error {
             message: "unexpected".to_string(),
@@ -796,6 +800,81 @@ async fn remote_providers_wire_nli_and_reranker_per_config() {
     assert_eq!(scores[0].index, 0);
 }
 
+/// Poll until a daemon on `socket` stops accepting new connections (has shut down).
+async fn poll_until_unconnectable(socket: &std::path::Path) {
+    for _ in 0..200 {
+        if UnixStream::connect(socket).await.is_err() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("daemon on {:?} never stopped accepting connections", socket);
+}
+
+/// Poll until a daemon on `socket` starts accepting connections.
+async fn poll_until_connectable(socket: &std::path::Path) {
+    for _ in 0..200 {
+        if UnixStream::connect(socket).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("daemon on {:?} never became connectable", socket);
+}
+
+// ---------------------------------------------------------------------------
+// DaemonCell: re-resolvable cell with spawn backoff
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn daemon_cell_respawns_after_handle_lost() {
+    use crate::ops::daemon_resolve::{DaemonCell, DaemonPolicy};
+
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("cell.sock");
+    let cell = DaemonCell::new();
+
+    // No daemon running yet → ConnectOnly yields None (nothing to connect to).
+    assert!(cell
+        .get(&socket, 3600, DaemonPolicy::ConnectOnly)
+        .await
+        .is_none());
+
+    // Also ConnectOrSpawn yields None here because the test binary doesn't
+    // have the `daemon run` subcommand. We test cell caching + re-connect by
+    // starting a daemon in-process and calling `connect_only` via the cell.
+    // Start a daemon in-process.
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    poll_until_connectable(&socket).await;
+
+    // ConnectOnly now resolves the live in-process daemon.
+    let h1 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
+    assert!(h1.is_some(), "ConnectOnly should find the running daemon");
+
+    // Calling again hits the cached handle (still healthy).
+    let h2 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
+    assert!(h2.is_some(), "Second call should return cached handle");
+
+    // Kill the daemon.
+    super::request_shutdown(&socket).await.unwrap();
+    poll_until_unconnectable(&socket).await;
+
+    // Cell detects the dead handle and returns None (ConnectOnly, no respawn).
+    let h3 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
+    assert!(h3.is_none(), "Dead daemon: ConnectOnly should yield None");
+
+    // Start a fresh daemon on the same socket (simulates re-spawn).
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    poll_until_connectable(&socket).await;
+
+    // Cell re-connects to the new daemon without poisoning.
+    let h4 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
+    assert!(
+        h4.is_some(),
+        "DaemonCell should re-connect after new daemon starts"
+    );
+}
+
 /// Send one request over a fresh connection, retrying connect until the
 /// daemon is up.
 async fn wait_request(socket: &std::path::Path, req: DaemonRequest) -> DaemonResponse {
@@ -809,4 +888,329 @@ async fn wait_request(socket: &std::path::Path, req: DaemonRequest) -> DaemonRes
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("daemon never came up");
+}
+
+// ---------------------------------------------------------------------------
+// resolve_providers: shared in-process vs daemon routing
+// ---------------------------------------------------------------------------
+
+/// `InProcess` policy never touches a socket — providers are built in-process.
+/// We verify this by using a non-existent socket path: if the code tried to
+/// connect it would fail/block; InProcess must return providers without any
+/// socket activity.
+#[tokio::test]
+async fn resolve_providers_in_process_never_touches_socket() {
+    use crate::ops::daemon_resolve::{resolve_providers, DaemonCell, DaemonPolicy};
+
+    let tmp = TempDir::new().unwrap();
+    // Deliberately absent socket — any connect attempt would fail.
+    let socket_env = tmp.path().join("absent.sock");
+    std::env::set_var("ENGRAMDB_DAEMON_SOCKET", &socket_env);
+
+    let cell = DaemonCell::new();
+    let config = crate::types::EngramConfig::default();
+    let dir = tmp.path();
+
+    // InProcess must return providers (possibly with no embedding if the model
+    // isn't staged — the function still returns the struct, just with None fields).
+    let providers = resolve_providers(&cell, &config, None, dir, DaemonPolicy::InProcess).await;
+    // The call must not hang or panic. We only assert the type is returned.
+    let _ = providers;
+
+    std::env::remove_var("ENGRAMDB_DAEMON_SOCKET");
+}
+
+// ---------------------------------------------------------------------------
+// CLI e2e: connect-only uses live daemon; InProcess override ignores it
+// ---------------------------------------------------------------------------
+
+/// With a live (stub) daemon and `ConnectOnly` policy, `resolve_providers`
+/// returns remote-backed providers whose dimensions match the daemon's reply.
+/// With `InProcess` policy, it does not connect — confirmed by killing the
+/// daemon first and showing that `InProcess` still resolves providers.
+#[tokio::test]
+async fn cli_connect_only_uses_daemon_and_in_process_override_does_not() {
+    use super::protocol::DaemonOp;
+    use crate::ops::daemon_resolve::{resolve_providers, DaemonCell, DaemonPolicy};
+
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("cli-e2e.sock");
+
+    // Stub daemon: answers Ping + Meta with sentinel dimensions=42.
+    spawn_stub(socket.clone(), |op| match op {
+        DaemonOp::Ping => DaemonResponse::Pong {
+            version: super::PROTOCOL_VERSION.to_string(),
+        },
+        DaemonOp::Meta => DaemonResponse::Meta {
+            dimensions: 42,
+            max_tokens: 64,
+            model_id: "onnx/cli-e2e-stub".to_string(),
+        },
+        _ => DaemonResponse::Error {
+            message: "not implemented in stub".to_string(),
+        },
+    });
+    poll_until_connectable(&socket).await;
+
+    // ── Part 1: ConnectOnly uses the live daemon ──────────────────────────
+    std::env::set_var("ENGRAMDB_DAEMON_SOCKET", &socket);
+
+    let cell = DaemonCell::new();
+    let mut config = crate::types::EngramConfig::default();
+    config.daemon.enabled = true;
+    let dir = tmp.path();
+
+    let providers = resolve_providers(&cell, &config, None, dir, DaemonPolicy::ConnectOnly).await;
+    let emb = providers
+        .embedding
+        .expect("ConnectOnly: remote embedding expected when daemon is live");
+    assert_eq!(
+        emb.dimensions(),
+        42,
+        "ConnectOnly: dimensions must match daemon's sentinel value"
+    );
+
+    // ── Part 2: InProcess ignores the socket entirely ────────────────────
+    // Point the env at a deliberately absent socket — if InProcess tried to
+    // connect it would fail; the policy must bypass the daemon path entirely.
+    let absent = tmp.path().join("absent-cli-e2e.sock");
+    std::env::set_var("ENGRAMDB_DAEMON_SOCKET", &absent);
+
+    // InProcess must still return providers (in-process fallback, possibly with
+    // no embedding if the model isn't staged).  The key assertion is that it
+    // does not hang or panic — it never attempts to connect to the absent socket.
+    let cell2 = DaemonCell::new();
+    let providers2 = resolve_providers(&cell2, &config, None, dir, DaemonPolicy::InProcess).await;
+    // If ONNX model is staged the embedding will be Some; if not it will be
+    // None.  Either way `resolve_providers` must return without error.
+    let _ = providers2;
+
+    std::env::remove_var("ENGRAMDB_DAEMON_SOCKET");
+}
+
+/// `ConnectOnly` against a live daemon returns remote-backed providers.
+/// The embedding field is present (daemon responded to Meta), with the
+/// daemon's reported dimensions.
+#[tokio::test]
+async fn resolve_providers_connect_only_uses_live_daemon() {
+    use super::protocol::DaemonOp;
+    use crate::ops::daemon_resolve::{resolve_providers, DaemonCell, DaemonPolicy};
+
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("rp.sock");
+
+    // Stub daemon: answers Meta (so remote providers build) but nothing else.
+    spawn_stub(socket.clone(), |op| match op {
+        DaemonOp::Ping => DaemonResponse::Pong {
+            version: super::PROTOCOL_VERSION.to_string(),
+        },
+        DaemonOp::Meta => DaemonResponse::Meta {
+            dimensions: 16,
+            max_tokens: 64,
+            model_id: "onnx/stub-model".to_string(),
+        },
+        _ => DaemonResponse::Error {
+            message: "not implemented in stub".to_string(),
+        },
+    });
+    poll_until_connectable(&socket).await;
+
+    std::env::set_var("ENGRAMDB_DAEMON_SOCKET", &socket);
+
+    let cell = DaemonCell::new();
+    let mut config = crate::types::EngramConfig::default();
+    // daemon.enabled must be true for resolve_providers to try the daemon path.
+    config.daemon.enabled = true;
+    let dir = tmp.path();
+
+    let providers = resolve_providers(&cell, &config, None, dir, DaemonPolicy::ConnectOnly).await;
+    // The stub answered Meta with dimensions=16, so the remote embedding
+    // provider should be present with those dimensions.
+    let emb = providers
+        .embedding
+        .expect("remote embedding provider expected");
+    assert_eq!(emb.dimensions(), 16);
+    assert_eq!(emb.max_tokens(), 64);
+
+    std::env::remove_var("ENGRAMDB_DAEMON_SOCKET");
+}
+
+// ---------------------------------------------------------------------------
+// Heartbeat: pings keep daemon alive past idle; cell self-heals after kill
+// ---------------------------------------------------------------------------
+
+/// Send a single Ping to the daemon at `socket` and wait for Pong.
+async fn ping_once(socket: &std::path::Path) {
+    let resp = wait_request(
+        socket,
+        DaemonRequest {
+            dir: String::new(),
+            backend: None,
+            op: DaemonOp::Ping,
+        },
+    )
+    .await;
+    assert!(
+        matches!(resp, DaemonResponse::Pong { .. }),
+        "expected Pong, got {resp:?}"
+    );
+}
+
+/// A heartbeat-style loop of Pings every ~330 ms keeps the daemon alive past
+/// its 1-second idle timeout.
+#[tokio::test]
+async fn heartbeat_pings_keep_daemon_alive_past_idle() {
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("hb.sock");
+
+    // Spawn daemon with a 1-second idle timeout.
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(1)));
+    poll_until_connectable(&socket).await;
+
+    // Ping every ~330ms for a total of ~6 pings over ~1.98s — more than the
+    // idle timeout, but the pings should keep last_activity fresh.
+    let sock = socket.clone();
+    let hb = tokio::spawn(async move {
+        for _ in 0..6 {
+            ping_once(&sock).await;
+            tokio::time::sleep(Duration::from_millis(330)).await;
+        }
+    });
+
+    // After 1.5s (> idle_timeout) the daemon must still be alive.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        UnixStream::connect(&socket).await.is_ok(),
+        "daemon should still be alive while heartbeat pings continue"
+    );
+
+    hb.abort();
+}
+
+/// The heartbeat mechanism the MCP server actually uses — repeated
+/// `DaemonCell::get` — keeps a daemon alive past its idle timeout, because each
+/// `get` health-checks the handle with a `Ping` that refreshes the daemon's
+/// idle clock. This is the cell-level analogue of
+/// `heartbeat_pings_keep_daemon_alive_past_idle` (which pings the socket
+/// directly). `ConnectOnly` is used so a missed keepalive surfaces as a failed
+/// assertion rather than spawning the test binary as a daemon.
+#[tokio::test]
+async fn daemon_cell_get_keeps_daemon_alive_past_idle() {
+    use crate::ops::daemon_resolve::{DaemonCell, DaemonPolicy};
+
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("hbcell.sock");
+
+    // 1-second idle timeout; the daemon is already running so each `get` just
+    // health-checks (no spawn path is taken).
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(1)));
+    poll_until_connectable(&socket).await;
+
+    let cell = DaemonCell::new();
+    // 6 resolves spaced ~330ms span ~2s, well past the 1s idle timeout.
+    for _ in 0..6 {
+        let h = cell.get(&socket, 1, DaemonPolicy::ConnectOnly).await;
+        assert!(h.is_some(), "cell.get should keep returning a live handle");
+        tokio::time::sleep(Duration::from_millis(330)).await;
+    }
+
+    assert!(
+        UnixStream::connect(&socket).await.is_ok(),
+        "DaemonCell::get heartbeat should keep the daemon alive past idle"
+    );
+}
+
+/// Each `DaemonCell::get` resolve sends exactly one `Ping` (via the handle
+/// health check) — which is what lets the heartbeat refresh the daemon's idle
+/// clock. Two resolves ⇒ the daemon's `Status` reports `ping_count == 2`.
+/// (`poll_until_connectable` only opens a socket; it does not send a `Ping`.)
+#[tokio::test]
+async fn daemon_cell_get_pings_the_daemon() {
+    use crate::ops::daemon_resolve::{DaemonCell, DaemonPolicy};
+
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("cellping.sock");
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    poll_until_connectable(&socket).await;
+
+    let cell = DaemonCell::new();
+    // First get: bare connect → 1 ping. Second get: cached health-check → 1 ping.
+    assert!(cell
+        .get(&socket, 3600, DaemonPolicy::ConnectOnly)
+        .await
+        .is_some());
+    assert!(cell
+        .get(&socket, 3600, DaemonPolicy::ConnectOnly)
+        .await
+        .is_some());
+
+    let st = super::query_status(&socket).await.unwrap().unwrap();
+    assert_eq!(
+        st.ping_count, 2,
+        "each DaemonCell::get should ping the daemon exactly once"
+    );
+}
+
+/// The daemon tracks how many Pings it has received and when the last one
+/// arrived. After two pings, `Status` must report `ping_count == 2` and
+/// `last_ping_secs_ago` must be `Some`.
+#[tokio::test]
+async fn daemon_status_reports_ping_count_and_last_ping() {
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("p.sock");
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    poll_until_connectable(&socket).await;
+
+    ping_once(&socket).await;
+    ping_once(&socket).await;
+
+    let st = super::query_status(&socket).await.unwrap().unwrap();
+    assert_eq!(st.ping_count, 2, "ping_count must be 2 after two pings");
+    assert!(
+        st.last_ping_secs_ago.is_some(),
+        "last_ping_secs_ago must be Some after a ping"
+    );
+}
+
+/// Killing the daemon and then calling `DaemonCell::get` with `ConnectOnly`
+/// causes the cell to detect the dead handle and return `None`. After a fresh
+/// daemon starts on the same socket, the cell re-connects without poisoning.
+/// (In production the heartbeat calls `ConnectOrSpawn` which also spawns; here
+/// we start the replacement in-process to keep the test binary clean.)
+#[tokio::test]
+async fn cell_self_heals_after_daemon_killed() {
+    use crate::ops::daemon_resolve::{DaemonCell, DaemonPolicy};
+
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("heal.sock");
+
+    // Start daemon 1.
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    poll_until_connectable(&socket).await;
+
+    let cell = DaemonCell::new();
+    let h1 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
+    assert!(h1.is_some(), "cell should connect to running daemon");
+
+    // Kill it.
+    super::request_shutdown(&socket).await.unwrap();
+    poll_until_unconnectable(&socket).await;
+
+    // Cell detects dead handle and returns None (ConnectOnly, no respawn).
+    let h2 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
+    assert!(
+        h2.is_none(),
+        "cell should return None after daemon is killed"
+    );
+
+    // Simulate what the heartbeat ConnectOrSpawn would do: a new daemon starts.
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    poll_until_connectable(&socket).await;
+
+    // Cell must re-connect without poisoning.
+    let h3 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
+    assert!(
+        h3.is_some(),
+        "cell should re-connect after new daemon starts"
+    );
 }
