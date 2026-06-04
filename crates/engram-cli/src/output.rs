@@ -1021,6 +1021,17 @@ pub struct Stats {
     pub runtime: Option<engramdb::telemetry::RuntimeSnapshot>,
 }
 
+/// Format the ping statistics line for `daemon status` output.
+///
+/// When `last_ping_secs_ago` is `Some(n)`, produces `"pings: {count} (last {n}s ago)"`.
+/// When `None` (no ping received yet in this daemon's lifetime), produces `"pings: {count}"`.
+pub fn format_ping_line(ping_count: u64, last_ping_secs_ago: Option<u64>) -> String {
+    match last_ping_secs_ago {
+        Some(n) => format!("pings: {} (last {}s ago)", ping_count, n),
+        None => format!("pings: {}", ping_count),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1769,5 +1780,35 @@ mod tests {
         // Drive the print path as well so the JSON branch of print_stats
         // executes.
         formatter.print_stats(&stats);
+    }
+
+    // ========================================
+    // 9. format_ping_line formatter
+    // ========================================
+
+    #[test]
+    fn format_ping_line_with_last_ping_some() {
+        let line = format_ping_line(2, Some(0));
+        assert_eq!(line, "pings: 2 (last 0s ago)");
+    }
+
+    #[test]
+    fn format_ping_line_with_last_ping_nonzero() {
+        let line = format_ping_line(42, Some(12));
+        assert_eq!(line, "pings: 42 (last 12s ago)");
+    }
+
+    #[test]
+    fn format_ping_line_with_no_ping_yet() {
+        let line = format_ping_line(0, None);
+        assert_eq!(line, "pings: 0");
+    }
+
+    #[test]
+    fn format_ping_line_count_nonzero_no_last() {
+        // Should not happen in practice (last_ping is always set when count >
+        // 0), but the formatter must not panic.
+        let line = format_ping_line(5, None);
+        assert_eq!(line, "pings: 5");
     }
 }
