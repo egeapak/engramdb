@@ -66,6 +66,12 @@ Run `engramdb daemon restart`. A running daemon caches loaded models for its lif
 **Auto-spawn races.** Two MCP processes spawn the daemon at the same time and one fails.
 This is expected and self-recovering — only one process binds the socket. The other(s) get a `connection refused`, retry with backoff, and connect to the winner. If you see persistent errors, run `engramdb daemon status` to confirm a daemon is up.
 
+**A CLI command is slow / doesn't seem to use the daemon.**
+Model-needing CLI commands use a daemon only if one is *already running* (connect-only); they don't spawn one. Start one with `engramdb --spawn-daemon <command> …`, or just let your MCP session's daemon stay up. To force local loading instead, use `--in-process` (or `ENGRAMDB_IN_PROCESS=1`, or `[daemon].use_for_cli = false`).
+
+**The daemon stays running longer than `idle_timeout_secs`.**
+That's intended. Each MCP `serve` session sends a heartbeat that keeps the daemon resident while the session is connected; it reaps `idle_timeout_secs` after the **last** session disconnects, not after the last inference. `engramdb daemon status` shows a `pings: N (last Xs ago)` line so you can see the heartbeat. If the daemon dies mid-session it is re-spawned automatically on the next request.
+
 ## Claude Code
 
 **MCP tools not appearing.**

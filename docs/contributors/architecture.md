@@ -120,7 +120,7 @@ Every store records a fingerprint of the embedding model it was built with: `mod
 
 ## Provider caching
 
-`ProviderCache` in `src/ops/mod.rs` keys loaded model bundles by `provider_cache_key = backend|provider|dimensions|nli.enabled|nli.model|rerank.enabled|rerank.model`. Daemon-only fields (`idle_timeout_secs`, `socket_path`) deliberately don't affect the key. **If you add a model-affecting config field, extend this key** — the `cache_key_is_deterministic_and_signature_sensitive` test will fail if you forget.
+`ProviderCache` in `src/ops/mod.rs` keys loaded model bundles by `provider_cache_key = backend|provider|dimensions|nli.enabled|nli.model|rerank.enabled|rerank.model`. Daemon-only and routing-only fields (`idle_timeout_secs`, `socket_path`, `use_for_cli`) deliberately don't affect the key. **If you add a model-affecting config field, extend this key** — the `cache_key_is_deterministic_and_signature_sensitive` test will fail if you forget.
 
 ## Shared embedding daemon
 

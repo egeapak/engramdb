@@ -49,6 +49,7 @@ src/
 │
 ├── ops/                    # the shared operations layer
 │   ├── mod.rs              # provider_specs, ProviderCache, embedding_model_report
+│   ├── daemon_resolve.rs   # DaemonPolicy, re-resolvable DaemonCell, resolve_providers (CLI+MCP)
 │   ├── create.rs           # CreateParams, create_memory, validate_summary
 │   ├── query.rs            # query_memories, merge_scored_memories
 │   ├── update.rs           # UpdateParams, update_memory
