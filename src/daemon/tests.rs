@@ -171,6 +171,8 @@ async fn status_and_shutdown_frames_roundtrip() {
         requests_status: 9,
         requests_title: 3,
         requests_total: 25,
+        ping_count: 0,
+        last_ping_secs_ago: None,
     };
     write_msg(&mut bw, &DaemonResponse::Status(status.clone()))
         .await
@@ -663,6 +665,8 @@ async fn query_status_parses_stub_status() {
             requests_status: 2,
             requests_title: 0,
             requests_total: 7,
+            ping_count: 0,
+            last_ping_secs_ago: None,
         }),
         _ => DaemonResponse::Error {
             message: "unexpected".to_string(),
@@ -1029,4 +1033,120 @@ async fn resolve_providers_connect_only_uses_live_daemon() {
     assert_eq!(emb.max_tokens(), 64);
 
     std::env::remove_var("ENGRAMDB_DAEMON_SOCKET");
+}
+
+// ---------------------------------------------------------------------------
+// Heartbeat: pings keep daemon alive past idle; cell self-heals after kill
+// ---------------------------------------------------------------------------
+
+/// Send a single Ping to the daemon at `socket` and wait for Pong.
+async fn ping_once(socket: &std::path::Path) {
+    let resp = wait_request(
+        socket,
+        DaemonRequest {
+            dir: String::new(),
+            backend: None,
+            op: DaemonOp::Ping,
+        },
+    )
+    .await;
+    assert!(
+        matches!(resp, DaemonResponse::Pong { .. }),
+        "expected Pong, got {resp:?}"
+    );
+}
+
+/// A heartbeat-style loop of Pings every ~330 ms keeps the daemon alive past
+/// its 1-second idle timeout.
+#[tokio::test]
+async fn heartbeat_pings_keep_daemon_alive_past_idle() {
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("hb.sock");
+
+    // Spawn daemon with a 1-second idle timeout.
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(1)));
+    poll_until_connectable(&socket).await;
+
+    // Ping every ~330ms for a total of ~6 pings over ~1.98s — more than the
+    // idle timeout, but the pings should keep last_activity fresh.
+    let sock = socket.clone();
+    let hb = tokio::spawn(async move {
+        for _ in 0..6 {
+            ping_once(&sock).await;
+            tokio::time::sleep(Duration::from_millis(330)).await;
+        }
+    });
+
+    // After 1.5s (> idle_timeout) the daemon must still be alive.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        UnixStream::connect(&socket).await.is_ok(),
+        "daemon should still be alive while heartbeat pings continue"
+    );
+
+    hb.abort();
+}
+
+/// The daemon tracks how many Pings it has received and when the last one
+/// arrived. After two pings, `Status` must report `ping_count == 2` and
+/// `last_ping_secs_ago` must be `Some`.
+#[tokio::test]
+async fn daemon_status_reports_ping_count_and_last_ping() {
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("p.sock");
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    poll_until_connectable(&socket).await;
+
+    ping_once(&socket).await;
+    ping_once(&socket).await;
+
+    let st = super::query_status(&socket).await.unwrap().unwrap();
+    assert_eq!(st.ping_count, 2, "ping_count must be 2 after two pings");
+    assert!(
+        st.last_ping_secs_ago.is_some(),
+        "last_ping_secs_ago must be Some after a ping"
+    );
+}
+
+/// Killing the daemon and then calling `DaemonCell::get` with `ConnectOnly`
+/// causes the cell to detect the dead handle and return `None`. After a fresh
+/// daemon starts on the same socket, the cell re-connects without poisoning.
+/// (In production the heartbeat calls `ConnectOrSpawn` which also spawns; here
+/// we start the replacement in-process to keep the test binary clean.)
+#[tokio::test]
+async fn cell_self_heals_after_daemon_killed() {
+    use crate::ops::daemon_resolve::{DaemonCell, DaemonPolicy};
+
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("heal.sock");
+
+    // Start daemon 1.
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    poll_until_connectable(&socket).await;
+
+    let cell = DaemonCell::new();
+    let h1 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
+    assert!(h1.is_some(), "cell should connect to running daemon");
+
+    // Kill it.
+    super::request_shutdown(&socket).await.unwrap();
+    poll_until_unconnectable(&socket).await;
+
+    // Cell detects dead handle and returns None (ConnectOnly, no respawn).
+    let h2 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
+    assert!(
+        h2.is_none(),
+        "cell should return None after daemon is killed"
+    );
+
+    // Simulate what the heartbeat ConnectOrSpawn would do: a new daemon starts.
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    poll_until_connectable(&socket).await;
+
+    // Cell must re-connect without poisoning.
+    let h3 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
+    assert!(
+        h3.is_some(),
+        "cell should re-connect after new daemon starts"
+    );
 }

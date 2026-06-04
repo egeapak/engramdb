@@ -12,7 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 /// Bumped on any incompatible wire change. A client that gets a mismatched
 /// `Pong.version` treats the daemon as unusable and falls back in-process
 /// rather than risk decoding garbage from a stale daemon binary.
-pub const PROTOCOL_VERSION: &str = "2";
+pub const PROTOCOL_VERSION: &str = "3";
 
 /// A request frame: which store's config selects the model, the resolved
 /// embedding backend (sent so the daemon's provider key matches the client's
@@ -112,6 +112,12 @@ pub struct DaemonStatus {
     pub requests_status: u64,
     pub requests_title: u64,
     pub requests_total: u64,
+    /// Number of `Ping` requests received since this daemon process started.
+    /// In-memory only — not persisted across restarts.
+    pub ping_count: u64,
+    /// Seconds since the last `Ping` was received, or `None` if no ping has
+    /// arrived yet in this daemon's lifetime. In-memory only.
+    pub last_ping_secs_ago: Option<u64>,
 }
 
 /// NLI class probabilities. The dominant label is recomputed client-side via

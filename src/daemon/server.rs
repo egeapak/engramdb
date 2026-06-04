@@ -2,7 +2,7 @@
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -28,6 +28,10 @@ struct Ctx {
     start: Instant,
     pid: u32,
     last_activity: Mutex<Instant>,
+    /// Total number of `Ping` requests received since this process started.
+    ping_count: AtomicU64,
+    /// Timestamp of the most recent `Ping`, or `None` if no ping yet.
+    last_ping: Mutex<Option<Instant>>,
 }
 
 impl Ctx {
@@ -75,6 +79,8 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
         start: Instant::now(),
         pid: std::process::id(),
         last_activity: Mutex::new(Instant::now()),
+        ping_count: AtomicU64::new(0),
+        last_ping: Mutex::new(None),
     });
     let active = Arc::new(AtomicUsize::new(0));
 
@@ -203,9 +209,15 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
     match req.op {
         DaemonOp::Shutdown => unreachable!("handled in handle_conn"),
         DaemonOp::Ping => {
+            // Stamp ping stats BEFORE returning the Pong so Status queries
+            // issued immediately after a Ping observe the updated counters.
+            ctx.ping_count.fetch_add(1, Ordering::Relaxed);
+            if let Ok(mut t) = ctx.last_ping.lock() {
+                *t = Some(Instant::now());
+            }
             return DaemonResponse::Pong {
                 version: PROTOCOL_VERSION.to_string(),
-            }
+            };
         }
         DaemonOp::Status => {
             ctx.counters.incr_status();
@@ -215,6 +227,13 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                 .lock()
                 .map(|t| t.elapsed().as_secs())
                 .unwrap_or(0);
+            let ping_count = ctx.ping_count.load(Ordering::Relaxed);
+            let last_ping_secs_ago = ctx
+                .last_ping
+                .lock()
+                .ok()
+                .and_then(|guard| *guard)
+                .map(|t| t.elapsed().as_secs());
             return DaemonResponse::Status(DaemonStatus {
                 version: PROTOCOL_VERSION.to_string(),
                 pid: ctx.pid,
@@ -228,6 +247,8 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                 requests_status: s.status,
                 requests_title: s.title,
                 requests_total: s.total(),
+                ping_count,
+                last_ping_secs_ago,
             });
         }
         _ => {}
