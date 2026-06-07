@@ -104,8 +104,76 @@ jobs:
             engramdb-x86_64-apple-darwin.tar.gz
             engramdb-x86_64-apple-darwin.tar.gz.sha256
 
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protobuf compiler and lld linker
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        # `--bin engramdb` resolves via workspace `default-members` (see build-arm).
+        # ONNX Runtime is statically linked via fastembed's `download-binaries`,
+        # so the binary is self-contained (no separate library to ship).
+        run: cargo build --release --bin engramdb
+
+      - name: Package binary
+        run: |
+          cd target/release
+          tar czf ../../engramdb-x86_64-unknown-linux-gnu.tar.gz engramdb
+          cd ../..
+          sha256sum engramdb-x86_64-unknown-linux-gnu.tar.gz > engramdb-x86_64-unknown-linux-gnu.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engramdb-x86_64-unknown-linux-gnu
+          path: |
+            engramdb-x86_64-unknown-linux-gnu.tar.gz
+            engramdb-x86_64-unknown-linux-gnu.tar.gz.sha256
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protobuf compiler
+        run: choco install protoc -y
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        # The shared embedding daemon (Unix-domain-socket only) compiles out on
+        # Windows via `#[cfg(unix)]`; model inference runs in-process. ONNX
+        # Runtime is statically linked, so `engramdb.exe` is self-contained.
+        # The release profile keeps the main thread under Windows' 1 MiB default
+        # stack, so no `/STACK` linker flag is needed.
+        run: cargo build --release --bin engramdb
+
+      - name: Package binary
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target\release\engramdb.exe -DestinationPath engramdb-x86_64-pc-windows-msvc.zip
+          $hash = (Get-FileHash engramdb-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  engramdb-x86_64-pc-windows-msvc.zip" | Out-File -Encoding ascii engramdb-x86_64-pc-windows-msvc.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engramdb-x86_64-pc-windows-msvc
+          path: |
+            engramdb-x86_64-pc-windows-msvc.zip
+            engramdb-x86_64-pc-windows-msvc.zip.sha256
+
   release:
-    needs: [build-arm, build-intel]
+    needs: [build-arm, build-intel, build-linux, build-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -119,3 +187,5 @@ jobs:
           files: |
             engramdb-*.tar.gz
             engramdb-*.tar.gz.sha256
+            engramdb-*.zip
+            engramdb-*.zip.sha256
