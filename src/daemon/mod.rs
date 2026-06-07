@@ -32,10 +32,11 @@ pub use protocol::{DaemonStatus, PROTOCOL_VERSION};
 pub use remote::remote_providers;
 pub use server::run_daemon;
 
-// The daemon tests drive the transport via `UnixStream` directly, so they are
-// Unix-only; named-pipe parity is exercised by the cross-platform client/server
-// paths and end-to-end runs.
-#[cfg(all(test, unix))]
+// The daemon tests drive the transport through the cross-platform `transport`
+// seam, so they build and run on both Unix (domain sockets) and Windows (named
+// pipes). The single Unix-domain-socket-specific case (a stale regular file at
+// the socket path) is `#[cfg(unix)]`-gated within the module.
+#[cfg(test)]
 mod tests;
 
 use std::path::PathBuf;

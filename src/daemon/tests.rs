@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tokio::io::BufReader;
-use tokio::net::UnixStream;
 
 use super::protocol::{read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse};
 use super::server::run_daemon;
@@ -101,7 +100,7 @@ async fn remote_embedding_end_to_end() {
 
     // Wait until the daemon is reachable.
     for _ in 0..50 {
-        if UnixStream::connect(&socket).await.is_ok() {
+        if super::transport::connect(&socket).await.is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -314,7 +313,7 @@ async fn request_shutdown_maps_ack() {
         },
     });
     for _ in 0..100 {
-        if UnixStream::connect(&socket).await.is_ok() {
+        if super::transport::connect(&socket).await.is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -330,7 +329,7 @@ async fn second_daemon_yields_to_live_one() {
     let socket = tmp.path().join("d.sock");
     tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
     for _ in 0..100 {
-        if UnixStream::connect(&socket).await.is_ok() {
+        if super::transport::connect(&socket).await.is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -437,13 +436,16 @@ where
     F: Fn(&DaemonOp) -> DaemonResponse + Send + Sync + 'static,
 {
     tokio::spawn(async move {
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let listener = super::transport::bind_or_yield(&socket)
+            .await
+            .unwrap()
+            .expect("stub owns the address");
         loop {
-            let (stream, _) = match listener.accept().await {
+            let stream = match listener.accept().await {
                 Ok(v) => v,
                 Err(_) => break,
             };
-            let (rh, mut wh) = stream.into_split();
+            let (rh, mut wh) = tokio::io::split(stream);
             let mut r = BufReader::new(rh);
             while let Some(req) = read_msg::<_, DaemonRequest>(&mut r).await.unwrap_or(None) {
                 let resp = reply(&req.op);
@@ -463,7 +465,7 @@ async fn remote_providers_none_when_meta_errors() {
         message: "no model here".to_string(),
     });
     for _ in 0..100 {
-        if UnixStream::connect(&socket).await.is_ok() {
+        if super::transport::connect(&socket).await.is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -498,7 +500,7 @@ async fn remote_embedding_maps_daemon_error() {
         },
     });
     for _ in 0..100 {
-        if UnixStream::connect(&socket).await.is_ok() {
+        if super::transport::connect(&socket).await.is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -623,6 +625,13 @@ async fn dispatch_rejects_missing_dir() {
 
 /// A stale file left at the socket path (crashed daemon) is reclaimed via the
 /// atomic bind-temp + rename path, and the new daemon serves normally.
+///
+/// Unix-specific: a leftover regular file at the socket path is a
+/// Unix-domain-socket scenario. Windows named pipes leave no on-disk state when
+/// their owner dies; the equivalent "a new daemon binds after the old one is
+/// gone" property is covered cross-platform by
+/// `daemon::transport::tests::bind_succeeds_after_owner_drops`.
+#[cfg(unix)]
 #[tokio::test]
 async fn daemon_reclaims_stale_socket() {
     let tmp = TempDir::new().unwrap();
@@ -673,7 +682,7 @@ async fn query_status_parses_stub_status() {
         },
     });
     for _ in 0..100 {
-        if UnixStream::connect(&socket).await.is_ok() {
+        if super::transport::connect(&socket).await.is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -701,7 +710,7 @@ async fn healthy_rejects_protocol_version_mismatch() {
     });
     for s in [&good, &bad] {
         for _ in 0..100 {
-            if UnixStream::connect(s).await.is_ok() {
+            if super::transport::connect(s).await.is_ok() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -758,7 +767,7 @@ async fn remote_providers_wire_nli_and_reranker_per_config() {
         },
     });
     for _ in 0..100 {
-        if UnixStream::connect(&socket).await.is_ok() {
+        if super::transport::connect(&socket).await.is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -803,7 +812,7 @@ async fn remote_providers_wire_nli_and_reranker_per_config() {
 /// Poll until a daemon on `socket` stops accepting new connections (has shut down).
 async fn poll_until_unconnectable(socket: &std::path::Path) {
     for _ in 0..200 {
-        if UnixStream::connect(socket).await.is_err() {
+        if super::transport::connect(socket).await.is_err() {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -814,7 +823,7 @@ async fn poll_until_unconnectable(socket: &std::path::Path) {
 /// Poll until a daemon on `socket` starts accepting connections.
 async fn poll_until_connectable(socket: &std::path::Path) {
     for _ in 0..200 {
-        if UnixStream::connect(socket).await.is_ok() {
+        if super::transport::connect(socket).await.is_ok() {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -879,8 +888,8 @@ async fn daemon_cell_respawns_after_handle_lost() {
 /// daemon is up.
 async fn wait_request(socket: &std::path::Path, req: DaemonRequest) -> DaemonResponse {
     for _ in 0..100 {
-        if let Ok(stream) = UnixStream::connect(socket).await {
-            let (r, mut w) = stream.into_split();
+        if let Ok(stream) = super::transport::connect(socket).await {
+            let (r, mut w) = tokio::io::split(stream);
             write_msg(&mut w, &req).await.unwrap();
             let mut r = BufReader::new(r);
             return read_msg(&mut r).await.unwrap().unwrap();
@@ -1080,7 +1089,7 @@ async fn heartbeat_pings_keep_daemon_alive_past_idle() {
     // After 1.5s (> idle_timeout) the daemon must still be alive.
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert!(
-        UnixStream::connect(&socket).await.is_ok(),
+        super::transport::connect(&socket).await.is_ok(),
         "daemon should still be alive while heartbeat pings continue"
     );
 
@@ -1115,7 +1124,7 @@ async fn daemon_cell_get_keeps_daemon_alive_past_idle() {
     }
 
     assert!(
-        UnixStream::connect(&socket).await.is_ok(),
+        super::transport::connect(&socket).await.is_ok(),
         "DaemonCell::get heartbeat should keep the daemon alive past idle"
     );
 }

@@ -150,13 +150,34 @@ mod windows {
 
     /// Create the first pipe instance, yielding if a live daemon owns the name.
     ///
-    /// `first_pipe_instance(true)` fails with `ERROR_ACCESS_DENIED` when an
-    /// instance already exists, which is exactly the "another daemon owns it"
-    /// signal — translated to `Ok(None)` so the caller yields, mirroring the
-    /// Unix `AddrInUse` path. No stale state is possible: a crashed daemon's
-    /// pipe instances are gone, so a fresh `create` succeeds.
+    /// Two independent checks, so the contract holds even where one mechanism
+    /// is weak:
+    /// 1. **Probe** — try to open the pipe as a client. If an instance is
+    ///    listening (`Ok`) or exists but is busy (`ERROR_PIPE_BUSY`), a live
+    ///    daemon owns the name → `Ok(None)` (yield). This mirrors the Unix
+    ///    connect-probe and is what detects contention on runtimes that don't
+    ///    enforce `FILE_FLAG_FIRST_PIPE_INSTANCE` (e.g. Wine). The probe
+    ///    connection is dropped immediately; the owner sees a connect/disconnect
+    ///    and replenishes its pending instance.
+    /// 2. **`first_pipe_instance`** — the create still sets this flag, so on a
+    ///    genuine startup race (both probes saw no pipe) exactly one `create`
+    ///    wins and the loser gets `ERROR_ACCESS_DENIED` → `Ok(None)`.
+    ///
+    /// No stale state is possible: a crashed daemon's pipe instances are gone,
+    /// so the probe fails with `ERROR_FILE_NOT_FOUND` and a fresh `create`
+    /// succeeds.
     pub async fn bind_or_yield(socket: &Path) -> std::io::Result<Option<Listener>> {
         let name = pipe_name(socket);
+
+        match ClientOptions::new().open(&name) {
+            // A server instance is listening (or exists but busy): yield.
+            Ok(_) => return Ok(None),
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => return Ok(None),
+            // No pipe (`ERROR_FILE_NOT_FOUND`) or any other probe error: fall
+            // through and let `create` decide.
+            Err(_) => {}
+        }
+
         match ServerOptions::new().first_pipe_instance(true).create(&name) {
             Ok(server) => Ok(Some(Listener {
                 name,
@@ -186,5 +207,100 @@ mod windows {
             }
         }
         ClientOptions::new().open(&name)
+    }
+}
+
+// Platform-equivalent behavior tests. These run on *every* platform: the test
+// address is a temp path, which the Unix transport binds as a socket and the
+// Windows transport maps to a uniquely-named pipe, so the same assertions cover
+// both IPC primitives. The Unix-socket-specific scenario (a stale regular file
+// left at the path) lives in `daemon::tests::daemon_reclaims_stale_socket`; its
+// Windows-equivalent coverage is `bind_succeeds_after_owner_drops` below.
+#[cfg(test)]
+mod tests {
+    use super::{bind_or_yield, connect};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A full client↔server byte round-trip over the platform IPC stream:
+    /// bind, accept on a task, connect, write, echo, read back.
+    #[tokio::test]
+    async fn bind_then_connect_roundtrip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let addr = tmp.path().join("rt.sock");
+
+        let listener = bind_or_yield(&addr)
+            .await
+            .unwrap()
+            .expect("first bind owns the address");
+        let server = tokio::spawn(async move {
+            let mut stream = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4];
+            stream.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"ping");
+            stream.write_all(b"pong").await.unwrap();
+            stream.flush().await.unwrap();
+        });
+
+        let mut client = connect(&addr).await.expect("client connects");
+        client.write_all(b"ping").await.unwrap();
+        client.flush().await.unwrap();
+        let mut buf = [0u8; 4];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"pong");
+        server.await.unwrap();
+    }
+
+    /// While one process owns the address, a second bind must yield (so only
+    /// one daemon ever serves a given socket/pipe).
+    #[tokio::test]
+    async fn second_bind_yields_to_live_owner() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let addr = tmp.path().join("yield.sock");
+
+        let _owner = bind_or_yield(&addr)
+            .await
+            .unwrap()
+            .expect("first bind owns the address");
+        let second = bind_or_yield(&addr).await.unwrap();
+        assert!(
+            second.is_none(),
+            "a second bind must yield to the live owner"
+        );
+    }
+
+    /// After the owner goes away (crashed daemon), a fresh bind succeeds: the
+    /// Unix transport reclaims the stale socket file, the Windows transport
+    /// finds the pipe name free. This is the cross-platform analog of stale-
+    /// socket reclamation.
+    #[tokio::test]
+    async fn bind_succeeds_after_owner_drops() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let addr = tmp.path().join("reclaim.sock");
+
+        let owner = bind_or_yield(&addr)
+            .await
+            .unwrap()
+            .expect("first bind owns the address");
+        assert!(
+            bind_or_yield(&addr).await.unwrap().is_none(),
+            "yields while the owner is alive"
+        );
+        drop(owner);
+        assert!(
+            bind_or_yield(&addr).await.unwrap().is_some(),
+            "a new daemon reclaims the address after the owner drops"
+        );
+    }
+
+    /// Connecting with no listener present is an error (mapped by callers to
+    /// "daemon not running"), never a hang.
+    #[tokio::test]
+    async fn connect_to_missing_address_fails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let addr = tmp.path().join("absent.sock");
+        assert!(
+            connect(&addr).await.is_err(),
+            "connecting with no listener must fail"
+        );
     }
 }
