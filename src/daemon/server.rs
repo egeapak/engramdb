@@ -52,10 +52,6 @@ impl Ctx {
 /// process exits after `idle_timeout` with no active connections — the next
 /// MCP process that needs a daemon respawns one.
 pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Result<()> {
-    if let Some(parent) = socket.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
     let listener: super::transport::Listener =
         match super::transport::bind_or_yield(&socket).await? {
             Some(l) => l,

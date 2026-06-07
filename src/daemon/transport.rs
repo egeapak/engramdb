@@ -53,6 +53,12 @@ mod unix {
     /// Returns `Ok(None)` when a *live* daemon already owns the socket (this
     /// process should exit), `Ok(Some(listener))` when we own it.
     pub async fn bind_or_yield(socket: &Path) -> std::io::Result<Option<Listener>> {
+        // The socket is a real filesystem entry, so its directory must exist
+        // before bind. (Windows named pipes have no parent directory, hence
+        // this lives in the Unix transport rather than the shared server loop.)
+        if let Some(parent) = socket.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         match UnixListener::bind(socket) {
             Ok(l) => return Ok(Some(Listener(l))),
             Err(e) if e.kind() != ErrorKind::AddrInUse => return Err(e),
