@@ -2,28 +2,20 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(unix)]
 use std::time::Duration;
 
-#[cfg(unix)]
 use tokio::io::BufReader;
-#[cfg(unix)]
-use tokio::net::UnixStream;
 
-#[cfg(unix)]
-use super::protocol::{read_msg, write_msg};
-use super::protocol::{DaemonOp, DaemonRequest, DaemonResponse, DaemonStatus};
-#[cfg(unix)]
+use super::protocol::{read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, DaemonStatus};
 use super::PROTOCOL_VERSION;
 
 /// One-shot request over a fresh connection to a socket, without spawning.
 /// Used by the `engramdb daemon` CLI subcommands and `doctor`/`stats`, which
 /// only ever talk to an already-running daemon (never auto-spawn).
-#[cfg(unix)]
 async fn oneshot(socket: &Path, op: DaemonOp) -> anyhow::Result<DaemonResponse> {
     let fut = async {
-        let stream = UnixStream::connect(socket).await?;
-        let (read_half, mut write_half) = stream.into_split();
+        let stream = super::transport::connect(socket).await?;
+        let (read_half, mut write_half) = tokio::io::split(stream);
         write_msg(
             &mut write_half,
             &DaemonRequest {
@@ -44,15 +36,6 @@ async fn oneshot(socket: &Path, op: DaemonOp) -> anyhow::Result<DaemonResponse> 
     tokio::time::timeout(Duration::from_secs(10), fut)
         .await
         .unwrap_or_else(|_| Err(anyhow::anyhow!("daemon request timed out")))
-}
-
-/// Non-Unix stub: there is no daemon socket to reach, so every request fails
-/// and `query_status` / `request_shutdown` report "not running".
-#[cfg(not(unix))]
-async fn oneshot(_socket: &Path, _op: DaemonOp) -> anyhow::Result<DaemonResponse> {
-    Err(anyhow::anyhow!(
-        "daemon IPC is not supported on this platform"
-    ))
 }
 
 /// Query a running daemon's status. `Ok(None)` means no daemon is listening
@@ -81,9 +64,6 @@ pub async fn request_shutdown(socket: &Path) -> anyhow::Result<bool> {
 /// sub-millisecond), which keeps the client free of reconnect/pool state — the
 /// daemon, not the handle, is the long-lived thing.
 pub struct DaemonHandle {
-    // On non-Unix targets the daemon transport is stubbed out, so the socket
-    // path is never read there; it is load-bearing on Unix.
-    #[cfg_attr(not(unix), allow(dead_code))]
     socket: PathBuf,
 }
 
@@ -92,7 +72,6 @@ impl DaemonHandle {
     /// cold first call (which triggers the daemon's ~240ms+ model load, plus
     /// inference over a memory's chunks) never trips it; tight enough that a
     /// wedged daemon doesn't hang a tool call indefinitely.
-    #[cfg(unix)]
     const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
     /// Get a handle to a live daemon, spawning one if none is reachable.
@@ -103,7 +82,6 @@ impl DaemonHandle {
     /// one process can bind the socket, so of several concurrently-spawned
     /// daemons one survives and the rest exit; every client converges on the
     /// survivor.
-    #[cfg(unix)]
     pub async fn connect_or_spawn(socket: PathBuf, idle_timeout_secs: u64) -> Option<Arc<Self>> {
         let handle = Self {
             socket: socket.clone(),
@@ -127,13 +105,6 @@ impl DaemonHandle {
         None
     }
 
-    /// Non-Unix stub: there is no daemon socket, so callers always fall back to
-    /// loading models in-process.
-    #[cfg(not(unix))]
-    pub async fn connect_or_spawn(_socket: PathBuf, _idle_timeout_secs: u64) -> Option<Arc<Self>> {
-        None
-    }
-
     /// Connect to an already-running daemon without spawning. Returns `None`
     /// if no daemon is listening on `socket` or if it fails the protocol
     /// version check. Used by [`DaemonCell`] to probe liveness before
@@ -152,7 +123,6 @@ impl DaemonHandle {
         self.healthy().await
     }
 
-    #[cfg(unix)]
     async fn healthy(&self) -> bool {
         match self
             .request(DaemonRequest {
@@ -173,17 +143,10 @@ impl DaemonHandle {
         }
     }
 
-    /// Non-Unix stub: no daemon socket exists, so a handle is never healthy.
-    #[cfg(not(unix))]
-    async fn healthy(&self) -> bool {
-        false
-    }
-
     /// Spawn a detached daemon. Best-effort and non-blocking: the child is
     /// not awaited (it self-terminates on idle-timeout and is reparented to
     /// init if this process exits first). Failures are logged; the retry loop
     /// in [`Self::connect_or_spawn`] surfaces them as the in-process fallback.
-    #[cfg(unix)]
     fn spawn_daemon(socket: &std::path::Path, idle_timeout_secs: u64) {
         let exe = match std::env::current_exe() {
             Ok(p) => p,
@@ -223,11 +186,10 @@ impl DaemonHandle {
     /// must not hang the agent's tool call forever — on timeout this errors so
     /// the caller can fall back to in-process models. The bound is generous
     /// enough for a cold first request that triggers the daemon's model load.
-    #[cfg(unix)]
     pub async fn request(&self, req: DaemonRequest) -> anyhow::Result<DaemonResponse> {
         tokio::time::timeout(Self::REQUEST_TIMEOUT, async {
-            let stream = UnixStream::connect(&self.socket).await?;
-            let (read_half, mut write_half) = stream.into_split();
+            let stream = super::transport::connect(&self.socket).await?;
+            let (read_half, mut write_half) = tokio::io::split(stream);
             write_msg(&mut write_half, &req).await?;
             let mut reader = BufReader::new(read_half);
             match read_msg::<_, DaemonResponse>(&mut reader).await? {
@@ -239,14 +201,5 @@ impl DaemonHandle {
         })
         .await
         .unwrap_or_else(|_| Err(anyhow::anyhow!("daemon request timed out")))
-    }
-
-    /// Non-Unix stub: no daemon socket exists, so requests always fail and the
-    /// remote providers fall back to in-process model loading.
-    #[cfg(not(unix))]
-    pub async fn request(&self, _req: DaemonRequest) -> anyhow::Result<DaemonResponse> {
-        Err(anyhow::anyhow!(
-            "daemon IPC is not supported on this platform"
-        ))
     }
 }

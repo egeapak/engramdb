@@ -4,7 +4,8 @@
 //! concurrent session loads its own copy of the embedding (and optional NLI /
 //! reranker) models — hundreds of MB and a ~240ms ONNX init each. This module
 //! provides a single long-lived daemon that loads each model once and serves
-//! inference to every MCP process over a Unix domain socket.
+//! inference to every MCP process over a local IPC channel — a Unix domain
+//! socket on Unix, a named pipe on Windows (see [`transport`]).
 //!
 //! MCP processes wire [`remote`] providers (behind the existing
 //! `EmbeddingProvider` / `NliProvider` / `Reranker` trait seams) so storage
@@ -19,35 +20,21 @@ pub mod doctor;
 pub mod metrics;
 pub mod protocol;
 pub mod remote;
-// The daemon server is built on a Unix domain socket (`tokio::net::UnixListener`),
-// so it only compiles on Unix targets. On Windows there is no daemon process;
-// callers fall back to in-process model loading (see the `run_daemon` stub below
-// and the no-op client transport in `client.rs`).
-#[cfg(unix)]
 pub mod server;
+// Platform IPC transport: Unix domain sockets on Unix, named pipes on Windows.
+// Both `server` and `client` go through this so the daemon has the same
+// capability on every platform.
+mod transport;
 
 pub use client::{query_status, request_shutdown, DaemonHandle};
 pub use doctor::check_daemon;
 pub use protocol::{DaemonStatus, PROTOCOL_VERSION};
 pub use remote::remote_providers;
-#[cfg(unix)]
 pub use server::run_daemon;
 
-/// Non-Unix fallback for [`run_daemon`]. The shared embedding daemon is built on
-/// a Unix domain socket, so on platforms without one (Windows) there is no
-/// daemon to run — `engramdb daemon run` reports this and callers degrade to
-/// in-process model loading, the same graceful fallback used when the daemon is
-/// disabled or unreachable.
-#[cfg(not(unix))]
-pub async fn run_daemon(
-    _socket: std::path::PathBuf,
-    _idle_timeout: std::time::Duration,
-) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "the shared embedding daemon requires a Unix domain socket and is not supported on this platform; models run in-process instead"
-    )
-}
-
+// The daemon tests drive the transport via `UnixStream` directly, so they are
+// Unix-only; named-pipe parity is exercised by the cross-platform client/server
+// paths and end-to-end runs.
 #[cfg(all(test, unix))]
 mod tests;
 
@@ -70,11 +57,13 @@ fn default_socket_path() -> PathBuf {
     runtime_base().join("daemon.sock")
 }
 
-/// Path to the daemon's Unix domain socket, applying env + default only.
+/// Path to the daemon's IPC endpoint, applying env + default only.
 ///
-/// Overridable via `ENGRAMDB_DAEMON_SOCKET` so tests (and unusual setups where
-/// the default path would exceed the ~104-byte `sun_path` limit) can relocate
-/// it. Prefer [`resolve_socket`] where a config is available.
+/// On Unix this is the Unix-domain-socket path; on Windows [`transport`] maps it
+/// to a named pipe. Overridable via `ENGRAMDB_DAEMON_SOCKET` so tests (and
+/// unusual setups where the default path would exceed the ~104-byte Unix
+/// `sun_path` limit) can relocate it. Prefer [`resolve_socket`] where a config
+/// is available.
 pub fn socket_path() -> PathBuf {
     if let Some(p) = std::env::var_os("ENGRAMDB_DAEMON_SOCKET") {
         return PathBuf::from(p);
