@@ -19,15 +19,36 @@ pub mod doctor;
 pub mod metrics;
 pub mod protocol;
 pub mod remote;
+// The daemon server is built on a Unix domain socket (`tokio::net::UnixListener`),
+// so it only compiles on Unix targets. On Windows there is no daemon process;
+// callers fall back to in-process model loading (see the `run_daemon` stub below
+// and the no-op client transport in `client.rs`).
+#[cfg(unix)]
 pub mod server;
 
 pub use client::{query_status, request_shutdown, DaemonHandle};
 pub use doctor::check_daemon;
 pub use protocol::{DaemonStatus, PROTOCOL_VERSION};
 pub use remote::remote_providers;
+#[cfg(unix)]
 pub use server::run_daemon;
 
-#[cfg(test)]
+/// Non-Unix fallback for [`run_daemon`]. The shared embedding daemon is built on
+/// a Unix domain socket, so on platforms without one (Windows) there is no
+/// daemon to run — `engramdb daemon run` reports this and callers degrade to
+/// in-process model loading, the same graceful fallback used when the daemon is
+/// disabled or unreachable.
+#[cfg(not(unix))]
+pub async fn run_daemon(
+    _socket: std::path::PathBuf,
+    _idle_timeout: std::time::Duration,
+) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "the shared embedding daemon requires a Unix domain socket and is not supported on this platform; models run in-process instead"
+    )
+}
+
+#[cfg(all(test, unix))]
 mod tests;
 
 use std::path::PathBuf;
