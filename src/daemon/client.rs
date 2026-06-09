@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::BufReader;
-use tokio::net::UnixStream;
 
 use super::protocol::{read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, DaemonStatus};
 use super::PROTOCOL_VERSION;
@@ -15,8 +14,8 @@ use super::PROTOCOL_VERSION;
 /// only ever talk to an already-running daemon (never auto-spawn).
 async fn oneshot(socket: &Path, op: DaemonOp) -> anyhow::Result<DaemonResponse> {
     let fut = async {
-        let stream = UnixStream::connect(socket).await?;
-        let (read_half, mut write_half) = stream.into_split();
+        let stream = super::transport::connect(socket).await?;
+        let (read_half, mut write_half) = tokio::io::split(stream);
         write_msg(
             &mut write_half,
             &DaemonRequest {
@@ -189,8 +188,8 @@ impl DaemonHandle {
     /// enough for a cold first request that triggers the daemon's model load.
     pub async fn request(&self, req: DaemonRequest) -> anyhow::Result<DaemonResponse> {
         tokio::time::timeout(Self::REQUEST_TIMEOUT, async {
-            let stream = UnixStream::connect(&self.socket).await?;
-            let (read_half, mut write_half) = stream.into_split();
+            let stream = super::transport::connect(&self.socket).await?;
+            let (read_half, mut write_half) = tokio::io::split(stream);
             write_msg(&mut write_half, &req).await?;
             let mut reader = BufReader::new(read_half);
             match read_msg::<_, DaemonResponse>(&mut reader).await? {

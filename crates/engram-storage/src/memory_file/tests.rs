@@ -457,6 +457,38 @@ fn test_v2_roundtrip() {
     assert_eq!(memory.provenance.source, reparsed.provenance.source);
 }
 
+/// Files saved with Windows line endings (CRLF) — common when an editor or
+/// `git core.autocrlf` rewrites the on-disk file — must parse identically to
+/// the LF form. The writer emits LF; `split_frontmatter` trims the YAML block
+/// and `parse_body_sections` uses `str::lines()`, both of which are line-ending
+/// agnostic. This guards that property explicitly (it is the most likely
+/// cross-platform parsing divergence).
+#[test]
+fn test_v2_parse_is_crlf_tolerant() {
+    let memory = full_memory();
+    let lf = write_memory_file(&memory).unwrap();
+    assert!(
+        lf.contains('\n') && !lf.contains('\r'),
+        "writer must emit LF-only output"
+    );
+
+    let crlf = lf.replace('\n', "\r\n");
+    let from_lf = parse_memory_file(&lf).unwrap();
+    let from_crlf = parse_memory_file(&crlf).unwrap();
+
+    assert_eq!(from_lf.id, from_crlf.id);
+    assert_eq!(from_lf.type_, from_crlf.type_);
+    assert_eq!(from_lf.summary, from_crlf.summary);
+    assert_eq!(from_lf.content, from_crlf.content);
+    assert_eq!(from_lf.details, from_crlf.details);
+    assert_eq!(from_lf.physical, from_crlf.physical);
+    assert_eq!(from_lf.logical, from_crlf.logical);
+    assert_eq!(from_lf.tags, from_crlf.tags);
+    assert_eq!(from_lf.criticality, from_crlf.criticality);
+    assert_eq!(from_lf.visibility, from_crlf.visibility);
+    assert_eq!(from_lf.provenance.source, from_crlf.provenance.source);
+}
+
 #[test]
 fn test_v2_roundtrip_full_fields() {
     let writer = V2Writer;

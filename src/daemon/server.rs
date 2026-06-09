@@ -1,13 +1,11 @@
 //! The daemon process: loads each model once and serves inference.
 
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::io::BufReader;
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 
 use super::metrics::{self, Counters};
 use super::protocol::{
@@ -54,17 +52,14 @@ impl Ctx {
 /// process exits after `idle_timeout` with no active connections — the next
 /// MCP process that needs a daemon respawns one.
 pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Result<()> {
-    if let Some(parent) = socket.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let listener = match bind_or_yield(&socket).await? {
-        Some(l) => l,
-        None => {
-            tracing::debug!("another engramdb daemon already owns {socket:?}; exiting");
-            return Ok(());
-        }
-    };
+    let listener: super::transport::Listener =
+        match super::transport::bind_or_yield(&socket).await? {
+            Some(l) => l,
+            None => {
+                tracing::debug!("another engramdb daemon already owns {socket:?}; exiting");
+                return Ok(());
+            }
+        };
     tracing::info!("engramdb daemon listening on {socket:?}");
 
     // Seed counters from the last persisted snapshot so request totals are
@@ -125,7 +120,7 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
     }
 
     loop {
-        let (stream, _addr) = match listener.accept().await {
+        let stream = match listener.accept().await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("daemon accept failed: {e}");
@@ -151,37 +146,13 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
     }
 }
 
-/// Bind the socket, reclaiming a stale one left by a crashed daemon.
-///
-/// Returns `Ok(None)` when a *live* daemon already owns the socket (this
-/// process should exit), `Ok(Some(listener))` when we own it.
-async fn bind_or_yield(socket: &Path) -> anyhow::Result<Option<UnixListener>> {
-    match UnixListener::bind(socket) {
-        Ok(l) => return Ok(Some(l)),
-        Err(e) if e.kind() != ErrorKind::AddrInUse => return Err(e.into()),
-        Err(_) => {}
-    }
-    // Path is occupied. If something answers, a live daemon owns it.
-    if UnixStream::connect(socket).await.is_ok() {
-        return Ok(None);
-    }
-    // No listener — the socket file is stale. Reclaim it atomically: bind a
-    // private per-pid path, then `rename` it over the target. `rename` is
-    // atomic and replaces the entry in-place, so there's never a window where
-    // the target has no listener, and we can't unlink a socket a competing
-    // daemon just bound at the target (we only ever touch our own temp path).
-    let tmp = socket.with_extension(format!("tmp.{}", std::process::id()));
-    let _ = std::fs::remove_file(&tmp);
-    let listener = UnixListener::bind(&tmp)?;
-    if let Err(e) = std::fs::rename(&tmp, socket) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
-    }
-    Ok(Some(listener))
-}
-
-async fn handle_conn(stream: UnixStream, ctx: &Ctx) -> std::io::Result<()> {
-    let (read_half, mut write_half) = stream.into_split();
+/// Serve a single client connection. Generic over the transport stream so the
+/// same dispatch loop runs over a Unix domain socket or a Windows named pipe.
+async fn handle_conn<S>(stream: S, ctx: &Ctx) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
 
     while let Some(req) = read_msg::<_, DaemonRequest>(&mut reader).await? {

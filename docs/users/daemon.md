@@ -53,6 +53,8 @@ Highest priority wins:
 3. `[daemon].socket_path` in `config.toml`
 4. The default per-user path: `$XDG_RUNTIME_DIR/engramdb/daemon.sock` (Linux) or under the per-user cache dir (macOS)
 
+On Unix the endpoint is a Unix domain socket at the resolved path. On Windows the daemon uses a named pipe instead: the resolved path is mapped to `\\.\pipe\engramdb-<hash>` (an explicit `\\.\pipe\...` value is used as-is).
+
 ## Disabling
 
 In `<project>/.engramdb/config.toml`:

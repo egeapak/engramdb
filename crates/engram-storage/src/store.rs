@@ -808,6 +808,29 @@ mod tests {
     use engram_types::{Memory, MemoryType, Provenance, Visibility};
     use tempfile::TempDir;
 
+    /// `atomic_write` must replace an existing file in place. On Unix this is
+    /// `rename(2)`; on Windows `tempfile::persist` uses `MoveFileEx`-with-
+    /// replace. Guard that overwriting works on every platform (and leaves no
+    /// stray temp file behind).
+    #[tokio::test]
+    async fn atomic_write_overwrites_existing_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("data.md");
+
+        atomic_write(&path, "first").await.unwrap();
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "first");
+
+        atomic_write(&path, "second").await.unwrap();
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "second");
+
+        // Only the target file remains — the temp file was consumed by persist.
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("data.md")]);
+    }
+
     fn create_test_memory(id: &str, visibility: Visibility) -> Memory {
         let mut memory = Memory::new(
             MemoryType::Decision,
