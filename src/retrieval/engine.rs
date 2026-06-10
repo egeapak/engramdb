@@ -517,6 +517,27 @@ impl RetrievalEngine {
     /// Logical scope is always a scoring signal, never a filter: scoping a
     /// query with `logical = ["workflow.git.pr"]` makes unrelated memories
     /// rank lower but does not exclude them.
+    ///
+    /// # Scoring pipeline
+    ///
+    /// Index-level filter → batch load → optional vector search (top-k over
+    /// the whole store) → keyword search → composite scoring → threshold →
+    /// optional cross-encoder rerank. Per memory, the composite weights are
+    /// chosen from the query evidence:
+    ///
+    /// | keyword | semantic                  | weights (defaults)                  |
+    /// |---------|---------------------------|-------------------------------------|
+    /// | yes     | yes (incl. missed top-k)  | `with_keyword`: 0.45kw 0.30sem 0.25rel |
+    /// | yes     | no chunks / no embeddings | `with_keyword`, sem weight renormalized away |
+    /// | no      | yes (incl. missed top-k)  | `with_query`: 0.55sem 0.45rel       |
+    /// | no      | no chunks / no embeddings | `degraded`: 1.0rel                  |
+    /// | — no query text —                   || `scope_only`: 1.0rel               |
+    ///
+    /// "Missed top-k" means vector search ran and the memory has embedding
+    /// chunks but fell outside the over-fetch window: it is scored with
+    /// `sem = 0.0` (weak evidence) so low similarity can never outrank high
+    /// similarity. Only memories with no chunks at all (created while
+    /// embeddings were unavailable) take the no-semantic-evidence paths.
     pub async fn query(&self, query: &RetrievalQuery) -> Result<RetrievalResult> {
         use crate::search::{keyword_search, normalize_keyword_score, query_token_count};
 
@@ -593,6 +614,14 @@ impl RetrievalEngine {
                 self.record_stage("embed", t_embed.elapsed().as_secs_f64() * 1000.0);
 
                 if let Ok(query_vector) = embed_result {
+                    // Over-fetch 3x so the top-k still has headroom after
+                    // memories outside the filter set are discarded. Vector
+                    // search runs over the WHOLE store (no filter pushdown),
+                    // so with narrow filters the window can still be saturated
+                    // by filtered-out memories. That artifact is mild now:
+                    // embedded memories that miss the window are scored as
+                    // sem = 0.0 below instead of jumping to the no-semantic
+                    // weight regime.
                     let limit = query
                         .max_results
                         .unwrap_or(self.config.retrieval.max_results)
@@ -612,6 +641,39 @@ impl RetrievalEngine {
         } else {
             None
         };
+
+        // Step 4.5: When vector search ran, fetch the set of memory ids that
+        // have embedding chunks at all. A memory WITH chunks that merely
+        // missed the top-k over-fetch window must be scored as weak semantic
+        // evidence (sem = 0.0, "checked, found nothing"), not dropped into
+        // the no-semantic weight regime: that regime renormalizes relevance
+        // to full weight, so being LESS similar than the top-k cutoff would
+        // otherwise RAISE a memory's score above genuinely similar in-top-k
+        // memories (whose 1/(1+L2) scores top out well below 1.0). Memories
+        // with no chunks (created while embeddings were unavailable) keep
+        // sem = None — the legacy no-evidence path (see
+        // scoring::composite::tests::test_semantic_none_vs_zero_differ).
+        //
+        // Index entries carry no has-embedding flag, so this costs one extra
+        // LanceDB single-column scan of the chunks table per semantic query —
+        // cheap next to the vector search itself. If the scan fails we fall
+        // back to the legacy no-evidence path rather than failing the query.
+        let embedded_ids: Option<std::collections::HashSet<String>> =
+            if semantic_scores_map.is_some() {
+                match self.store.list_chunk_memory_ids().await {
+                    Ok(ids) => Some(ids.into_iter().collect()),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to list embedded memory ids ({}); memories outside the \
+                             vector top-k will use no-semantic-evidence scoring",
+                            e
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
 
         // Step 5: Run keyword search whenever query text is present. Keyword
         // scores power both the "keyword_only" mode and the filter-mode
@@ -655,13 +717,20 @@ impl RetrievalEngine {
                 None => continue,
             };
 
-            // Build scoring context. Semantic wins when present for this
-            // memory; keyword fills in otherwise; fall back to degraded when
-            // query text is set but nothing matched; scope_only when no query.
+            // Gather query evidence for this memory. Semantic comes from the
+            // vector top-k when present; an embedded memory that missed the
+            // top-k window counts as weak evidence (sem = 0.0); a memory with
+            // no chunks at all keeps sem = None (no evidence). See Step 4.5.
             let sem_score = semantic_scores_map
                 .as_ref()
                 .and_then(|m| m.get(&memory.id))
-                .copied();
+                .copied()
+                .or_else(|| {
+                    embedded_ids
+                        .as_ref()
+                        .is_some_and(|ids| ids.contains(&memory.id))
+                        .then_some(0.0)
+                });
             let kw_score = keyword_map.get(&memory.id).copied();
 
             // Build scoring context. In rank mode the user-supplied path and
@@ -676,13 +745,22 @@ impl RetrievalEngine {
                 RetrievalMode::Filter => (None, &[]),
             };
 
+            // Pick the scoring constructor from the available evidence:
+            //   keyword + semantic → with_keyword(kw, Some(sem)): the
+            //     documented combined formula (0.45*kw + 0.30*sem +
+            //     0.25*relevance);
+            //   keyword only       → with_keyword(kw, None): semantic weight
+            //     drops out and the rest renormalizes;
+            //   semantic only      → with_semantic (0.55*sem + 0.45*relevance);
+            //   neither            → degraded (relevance only);
+            //   no query text      → scope_only.
             let context = if let Some(ref q) = query.query {
-                if let Some(s) = sem_score {
-                    ScoringContext::with_semantic(ctx_path, ctx_logical, q, s)
-                } else if let Some(kw) = kw_score {
-                    ScoringContext::with_keyword(ctx_path, ctx_logical, q, kw, None)
-                } else {
-                    ScoringContext::with_query_degraded(ctx_path, ctx_logical, q)
+                match (kw_score, sem_score) {
+                    (Some(kw), sem) => {
+                        ScoringContext::with_keyword(ctx_path, ctx_logical, q, kw, sem)
+                    }
+                    (None, Some(s)) => ScoringContext::with_semantic(ctx_path, ctx_logical, q, s),
+                    (None, None) => ScoringContext::with_query_degraded(ctx_path, ctx_logical, q),
                 }
             } else {
                 ScoringContext::scope_only(ctx_path, ctx_logical)
@@ -2647,6 +2725,285 @@ mod tests {
             "Cross-encoder should rate migration doc ({}) higher than config doc ({})",
             relevant_rerank,
             keyword_rerank,
+        );
+    }
+
+    // ─── Semantic-evidence regime tests (stub provider, no ONNX) ────────────
+
+    /// Deterministic embedding stub: marker substrings map to fixed vectors so
+    /// vector-search distances are fully controlled without loading any ONNX
+    /// model. Distances from the query marker's vector (e0), whether LanceDB
+    /// reports plain or squared L2 — the ordering is identical:
+    ///   "queryvec" → v[0]=1.0, "closevec" → v[0]=0.4 (near),
+    ///   "fillvec" → v[0]=0.1 (mid), anything else → v[1]=1.0 (orthogonal).
+    struct MarkerEmbeddingProvider;
+
+    fn marker_vector(text: &str) -> Vec<f32> {
+        let mut v = vec![0.0f32; 384];
+        if text.contains("queryvec") {
+            v[0] = 1.0;
+        } else if text.contains("closevec") {
+            v[0] = 0.4;
+        } else if text.contains("fillvec") {
+            v[0] = 0.1;
+        } else {
+            v[1] = 1.0;
+        }
+        v
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for MarkerEmbeddingProvider {
+        async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(marker_vector(text))
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|t| marker_vector(t)).collect())
+        }
+        fn dimensions(&self) -> usize {
+            384
+        }
+        fn max_tokens(&self) -> usize {
+            256
+        }
+        fn model_id(&self) -> String {
+            "stub/marker".to_string()
+        }
+    }
+
+    fn stub_memory(summary: &str, criticality: f64) -> crate::types::Memory {
+        use crate::types::{Memory, MemoryType, Provenance, Visibility};
+        let mut m = Memory::new(MemoryType::Context, summary, "body", Provenance::human());
+        m.visibility = Visibility::Shared;
+        m.criticality = criticality;
+        m
+    }
+
+    /// Regression (Bug A): membership in the vector-search top-k must not
+    /// decide the weight regime. Before the fix, an embedded memory that
+    /// missed the top-k over-fetch window fell to the degraded weights
+    /// (relevance at full weight), so a memory LESS similar to the query
+    /// outranked an equally critical memory that WAS similar — the in-top-k
+    /// memory's 1/(1+L2) semantic score tops out well below 1.0, dragging
+    /// its with_query score under the absent memory's bare criticality.
+    #[tokio::test]
+    async fn test_missed_topk_embedded_memory_scores_as_weak_semantic() {
+        use crate::types::EngramConfig;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        // Semantically close to the query; same criticality as `far`.
+        let close = stub_memory("closevec note", 0.8);
+        // Orthogonal to the query. With max_results = 2 the over-fetch window
+        // is 6, and `close` + 6 fillers are all nearer the query, so `far` is
+        // guaranteed to miss the top-k.
+        let far = stub_memory("unrelated note", 0.8);
+
+        let mut all = vec![close.clone(), far.clone()];
+        for i in 0..6 {
+            all.push(stub_memory(&format!("fillvec note {i}"), 0.0));
+        }
+        for m in &all {
+            store.create(m).await.unwrap();
+        }
+
+        let engine = RetrievalEngine::new(store, config)
+            .with_embedding_provider(Arc::new(MarkerEmbeddingProvider));
+        for m in &all {
+            engine.embed_memory(m).await.unwrap();
+        }
+
+        // "queryvec" appears in no memory text, so keyword evidence is empty
+        // and the semantic regime is isolated.
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Rank,
+                query: Some("queryvec".to_string()),
+                max_results: Some(2),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.retrieval_quality, "full");
+        assert_eq!(result.memories.len(), 2);
+        // Pre-fix order was [far (0.80, degraded), close (~0.70, semantic)].
+        assert_eq!(
+            result.memories[0].memory.id, close.id,
+            "semantically close memory must rank first"
+        );
+        assert_eq!(
+            result.memories[1].memory.id, far.id,
+            "dissimilar memory must rank second (above the zero-criticality fillers)"
+        );
+        // Missed-top-k with chunks = weak evidence, not no evidence.
+        assert_eq!(result.memories[1].score_breakdown.semantic, Some(0.0));
+        assert!(result.memories[0].score_breakdown.semantic.unwrap() > 0.0);
+        assert!(result.memories[0].score > result.memories[1].score);
+    }
+
+    /// A memory with NO embedding chunks (created while embeddings were
+    /// unavailable) must keep the no-evidence degraded path even when vector
+    /// search ran for the query — protecting the `None > Some(0.0)` semantics
+    /// asserted by scoring::composite::tests::test_semantic_none_vs_zero_differ
+    /// end-to-end through the engine.
+    #[tokio::test]
+    async fn test_unembedded_memory_keeps_no_evidence_path() {
+        use crate::types::EngramConfig;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        let embedded = stub_memory("closevec note", 0.8);
+        let unembedded = stub_memory("plain note", 0.8);
+        store.create(&embedded).await.unwrap();
+        store.create(&unembedded).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, config)
+            .with_embedding_provider(Arc::new(MarkerEmbeddingProvider));
+        // Only `embedded` gets chunks; `unembedded` simulates a memory created
+        // while the embedding backend was down.
+        engine.embed_memory(&embedded).await.unwrap();
+
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Rank,
+                query: Some("queryvec".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.retrieval_quality, "full");
+        assert_eq!(result.memories.len(), 2);
+        let by_id = |id: &str| {
+            result
+                .memories
+                .iter()
+                .find(|sm| sm.memory.id == id)
+                .unwrap()
+        };
+
+        let un = by_id(&unembedded.id);
+        assert!(
+            un.score_breakdown.semantic.is_none(),
+            "memory without chunks must keep semantic = None"
+        );
+        // Degraded weights: relevance at full weight → criticality (0.8).
+        assert!(
+            (un.score - 0.8).abs() < 0.01,
+            "no-evidence memory should score ~0.8 (degraded), got {}",
+            un.score
+        );
+
+        let emb = by_id(&embedded.id);
+        assert!(
+            emb.score_breakdown.semantic.unwrap() > 0.0,
+            "embedded memory in the top-k must carry its semantic score"
+        );
+    }
+
+    /// Regression (Bug B): when a memory has BOTH a keyword match and a
+    /// semantic score, both must contribute via the documented combined
+    /// with_keyword weights (0.45*kw + 0.30*sem + 0.25*relevance). Before the
+    /// fix, semantic presence routed scoring to with_semantic and the keyword
+    /// evidence was discarded, so the combined formula could never fire.
+    #[tokio::test]
+    async fn test_keyword_and_semantic_both_contribute() {
+        use crate::types::EngramConfig;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        // Both memories embed to the same vector as the query "zebra" (no
+        // marker substring → orthogonal default vector), so sem = 1.0 for
+        // both; only `both_signals` matches the keyword.
+        let both_signals = stub_memory("zebra protocol decision", 0.8);
+        let sem_only = stub_memory("samevec protocol decision", 0.8);
+        store.create(&both_signals).await.unwrap();
+        store.create(&sem_only).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, config.clone())
+            .with_embedding_provider(Arc::new(MarkerEmbeddingProvider));
+        engine.embed_memory(&both_signals).await.unwrap();
+        engine.embed_memory(&sem_only).await.unwrap();
+
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Rank,
+                query: Some("zebra".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.retrieval_quality, "full");
+        assert_eq!(result.memories.len(), 2);
+        let by_id = |id: &str| {
+            result
+                .memories
+                .iter()
+                .find(|sm| sm.memory.id == id)
+                .unwrap()
+        };
+
+        // Both signals recorded (pre-fix: keyword was None whenever a
+        // semantic score existed).
+        let combined = by_id(&both_signals.id);
+        let kw = combined
+            .score_breakdown
+            .keyword
+            .expect("keyword evidence must be recorded alongside semantic");
+        let sem = combined
+            .score_breakdown
+            .semantic
+            .expect("semantic evidence must be recorded alongside keyword");
+        assert!(kw > 0.0);
+        assert!(sem > 0.9, "identical vectors should give sem ~1.0: {sem}");
+
+        // The final score must follow the combined with_keyword formula
+        // (scope and trust multipliers are 1.0 here: no scope context, human
+        // provenance), proving both signals actually moved the score.
+        let w = &config.retrieval.scoring.with_keyword;
+        let expected = w.keyword.unwrap() * kw
+            + w.semantic.unwrap() * sem
+            + w.relevance * combined.score_breakdown.relevance;
+        assert!(
+            (combined.score - expected).abs() < 0.01,
+            "combined score {} should match 0.45*kw + 0.30*sem + 0.25*rel = {}",
+            combined.score,
+            expected
+        );
+
+        // The semantic-only memory keeps the with_query path.
+        let semantic_only = by_id(&sem_only.id);
+        assert!(semantic_only.score_breakdown.keyword.is_none());
+        assert!(semantic_only.score_breakdown.semantic.unwrap() > 0.9);
+        // And the two regimes produce different scores for the same sem/crit.
+        assert!(
+            (combined.score - semantic_only.score).abs() > 0.05,
+            "keyword evidence must change the score: combined={} sem_only={}",
+            combined.score,
+            semantic_only.score
         );
     }
 }

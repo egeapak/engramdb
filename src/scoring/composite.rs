@@ -148,15 +148,24 @@ impl<'a> ScoringContext<'a> {
 ///
 /// The scoring operates in four modes:
 ///
-/// 1. **With keyword** (keyword_score is Some):
+/// 1. **With keyword** (keyword_score is Some; semantic optional):
 ///    - Uses `config.retrieval.scoring.with_keyword` weights
 ///    - base = 0.45*keyword + 0.30*semantic + 0.25*(criticality*decay)
+///    - When semantic_score is None, the semantic weight drops out and the
+///      remaining weights renormalize (≈ 0.64*keyword + 0.36*relevance).
+///      The retrieval engine passes both signals when both matched, so the
+///      combined formula above is the normal full-evidence path.
 ///
-/// 2. **With query + embeddings** (semantic_score is Some):
+/// 2. **With query + embeddings** (semantic_score is Some, no keyword):
 ///    - Uses `config.retrieval.scoring.with_query` weights
 ///    - base = 0.55*semantic + 0.45*(criticality*decay)
+///    - `semantic_score = Some(0.0)` is valid ("checked, found nothing" —
+///      e.g. an embedded memory that missed the vector-search top-k) and
+///      consumes the semantic weight at zero, scoring strictly lower than
+///      `None` (no evidence, mode 3).
 ///
-/// 3. **With query, no embeddings** (query is Some, semantic_score is None):
+/// 3. **With query, no semantic evidence** (query is Some, both scores None —
+///    embeddings unavailable, or the memory was never embedded):
 ///    - Uses `config.retrieval.scoring.degraded` weights
 ///    - base = 1.0*(criticality*decay)
 ///
