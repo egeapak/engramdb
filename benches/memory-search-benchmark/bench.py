@@ -23,8 +23,10 @@ makes both the latency and the memory consequences visible.
 Output: a JSON results file plus a printed Markdown summary.
 """
 import glob
+import itertools
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -38,6 +40,13 @@ PROJECTS_DIR = Path(os.environ["BENCH_PROJECTS_DIR"])
 DATA_DIR = Path(os.environ["ENGRAMDB_DATA_DIR"])
 OUT = Path(os.environ.get("BENCH_OUT", "results.json"))
 SOCKET = os.environ["ENGRAMDB_DAEMON_SOCKET"]
+
+# Workload: "search" (query + get, lock-free reads) or "save" (create, which
+# takes the per-project write lock and embeds in the background).
+WORKLOAD = os.environ.get("BENCH_WORKLOAD", "search")
+# For the save workload: reset the store to empty before each cell (default), or
+# leave it seeded so creates insert into a pre-populated index (BENCH_SAVE_RESET=0).
+SAVE_RESET = os.environ.get("BENCH_SAVE_RESET", "1") != "0"
 
 LOCAL_PROJECT = "web-api"  # the project used for "local" cells
 ITERS = int(os.environ.get("BENCH_ITERS", "8"))
@@ -207,45 +216,106 @@ class McpSession:
 
 
 # ----------------------------------------------------------------------------
-# Workload definitions (mixed search + lookup)
+# Workload definitions
+#
+# Each op is a zero-arg factory returning (tool, args). Search ops are static;
+# save ops mint fresh unique content per call (so embeds are distinct and there
+# are no id collisions) from a process-global counter.
 # ----------------------------------------------------------------------------
-def workload_ops(target, ids):
-    """Ordered list of (tool, args) — search, lookup, search, lookup."""
+def search_ops(target, ids):
+    """Mixed search + lookup: search, lookup, search, lookup."""
     proj = "global" if target == "global" else None
 
     def q(args):
         a = dict(args)
         if proj:
             a["project"] = proj
-        return ("query", a)
+        return lambda: ("query", a)
 
     def g(mid):
         a = {"id": mid}
         if proj:
             a["project"] = proj
-        return ("get", a)
+        return lambda: ("get", a)
 
     if target == "global":
-        ops = [
+        return [
             q({"mode": "rank", "query": "secret handling and validation",
                "logical": ["org.security"], "max_results": 5}),
             g(ids[0]),
             q({"mode": "filter", "query": "commit message format", "max_results": 5}),
             g(ids[1] if len(ids) > 1 else ids[0]),
         ]
-    else:
-        ops = [
-            q({"mode": "rank", "path": "src/users.rs",
-               "logical": ["api.users"], "max_results": 5}),
-            g(ids[0]),
-            q({"mode": "filter", "query": "pagination cursor", "max_results": 5}),
-            g(ids[1] if len(ids) > 1 else ids[0]),
-        ]
-    return ops
+    return [
+        q({"mode": "rank", "path": "src/users.rs",
+           "logical": ["api.users"], "max_results": 5}),
+        g(ids[0]),
+        q({"mode": "filter", "query": "pagination cursor", "max_results": 5}),
+        g(ids[1] if len(ids) > 1 else ids[0]),
+    ]
+
+
+SAVE_TYPES = ["decision", "convention", "hazard", "context", "intent",
+              "relationship", "debug", "preference"]
+SAVE_SENTENCES = [
+    "Use cursor pagination instead of offset for large list endpoints.",
+    "Validate and sanitize all external input at the service boundary.",
+    "Rotate signing keys every 90 days with a 7-day overlap window.",
+    "Store monetary amounts as integer minor units, never floats.",
+    "Partition fact tables by month and order by event time.",
+    "Reject webhooks whose signature header fails verification.",
+    "Prefer immutable images over patching running containers.",
+    "Treat refresh-token reuse as compromise and revoke the family.",
+    "Index aliases enable zero-downtime reindexing on writes.",
+    "Batch inference for nightly scoring favors throughput over latency.",
+    "Memorize that schema drift upstream silently drops columns on load.",
+    "Constant-time comparison avoids timing leaks on credential checks.",
+]
+_save_seq = itertools.count()
+_save_lock = threading.Lock()
+
+
+def save_ops(target, ops_per_iter):
+    """ops_per_iter create-op factories, each minting unique content."""
+    proj = "global" if target == "global" else None
+
+    def make():
+        with _save_lock:
+            n = next(_save_seq)
+        args = {
+            "type": SAVE_TYPES[n % len(SAVE_TYPES)],
+            "title": f"bench save {n}",
+            "summary": f"benchmark generated memory {n}",
+            "content": f"Record {n}: {SAVE_SENTENCES[n % len(SAVE_SENTENCES)]} (entry {n})",
+            "logical": ["bench.save"],
+            "tags": ["bench", "save"],
+        }
+        if proj:
+            args["project"] = proj
+        return ("create", args)
+
+    return [make] * ops_per_iter
+
+
+def make_workload(target, ids, ops_per_iter):
+    if WORKLOAD == "save":
+        return save_ops(target, ops_per_iter)
+    return search_ops(target, ids)[:ops_per_iter]
+
+
+def reset_save_store():
+    """Wipe the save targets so every cell starts from an empty store (keeps
+    create latency comparable across cells instead of growing with the index)."""
+    shutil.rmtree(PROJECTS_DIR / LOCAL_PROJECT / ".engramdb", ignore_errors=True)
+    shutil.rmtree(DATA_DIR / "global", ignore_errors=True)
+    shutil.rmtree(DATA_DIR / "projects", ignore_errors=True)
+    subprocess.run([BIN, "--quiet", "--dir", str(PROJECTS_DIR / LOCAL_PROJECT),
+                    "init", "--no-embeddings"], capture_output=True)
+    write_daemon_config()
 
 
 def fetch_ids(target, n=2):
-    """Pull a few real memory ids to use for `get` lookups."""
+    """Pull a few real memory ids to use for `get` lookups (search workload)."""
     args = [BIN, "--json"]
     if target == "global":
         args += ["list", "--global", "-n", str(n)]
@@ -265,15 +335,20 @@ def fetch_ids(target, n=2):
 # ----------------------------------------------------------------------------
 def run_cell(execution, target, ops_per_iter, n_sessions, ids):
     in_process = execution == "in_process"
+    # Save workload: optionally start each cell from an empty store so create
+    # latency stays comparable across cells (the index grows within a cell, not
+    # across them). Disable to measure creates into a pre-seeded large store.
+    if WORKLOAD == "save" and SAVE_RESET:
+        reset_save_store()
     sessions = [McpSession(in_process, f"{execution}-{target}-{ops_per_iter}-{n_sessions}-{i}")
                 for i in range(n_sessions)]
     for s in sessions:
         s.initialize()
 
-    ops = workload_ops(target, ids)[:ops_per_iter]
+    ops = make_workload(target, ids, ops_per_iter)
 
     # Warmup: each session runs the full op set once. The embedding model loads
-    # in a background task at serve startup; the first embedding query blocks
+    # in a background task at serve startup; the first model-dependent op blocks
     # until it is ready, so spawn->first-result (ttfr) captures the per-session
     # model-load cost that the daemon amortizes. Cleanest at sessions=1 (no
     # overlap between sessions' concurrent background loads).
@@ -281,7 +356,8 @@ def run_cell(execution, target, ops_per_iter, n_sessions, ids):
     ttfr = []
     for s in sessions:
         first = True
-        for (tool, args) in ops:
+        for op in ops:
+            tool, args = op()
             dt, ok = s.call_tool(tool, args)
             if first:
                 ttfr.append((time.perf_counter() - s._spawn_t0) * 1000)
@@ -305,7 +381,8 @@ def run_cell(execution, target, ops_per_iter, n_sessions, ids):
 
     def session_iter(s, store):
         local = []
-        for (tool, args) in ops:
+        for op in ops:
+            tool, args = op()
             dt, ok = s.call_tool(tool, args)
             local.append(dt)
             if not ok:
@@ -330,6 +407,8 @@ def run_cell(execution, target, ops_per_iter, n_sessions, ids):
     total_ops = ITERS * n_sessions * ops_per_iter
     wall_total = sum(iter_walls)
     return {
+        "workload": WORKLOAD,
+        "save_reset": SAVE_RESET if WORKLOAD == "save" else None,
         "execution": execution,
         "target": target,
         "ops_per_iter": ops_per_iter,
@@ -366,7 +445,8 @@ def main():
                             "-n", "1"], capture_output=True, text=True)
             print(f"==> daemon for daemon-mode cells: pid {pid} (pre-warmed)")
         for target in ["local", "global"]:
-            ids = fetch_ids(target, 2)
+            # Save workload mints its own content; only search needs real ids.
+            ids = None if WORKLOAD == "save" else fetch_ids(target, 2)
             for ops_per_iter in OPS_LEVELS:
                 for n_sessions in SESSIONS_LEVELS:
                     cell = run_cell(execution, target, ops_per_iter, n_sessions, ids)

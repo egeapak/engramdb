@@ -27,16 +27,34 @@ def main():
     if pdir and os.path.exists(os.path.join(pdir, "manifest.json")):
         manifest = json.load(open(os.path.join(pdir, "manifest.json")))
     iters = os.environ.get("BENCH_ITERS")
-    if manifest:
+    workload = rows[0].get("workload", "search") if rows else "search"
+    seeded = rows and rows[0].get("save_reset") is False
+    # Dataset size matters for search (corpus queried) and seeded saves (index
+    # inserted into); for empty-store saves it does not.
+    show_dataset = workload == "search" or (workload == "save" and seeded)
+    iters_note = f"**Timed iterations/cell**: {iters}." if iters else ""
+    if manifest and show_dataset:
         total = (manifest["n_projects"] * manifest["memories_per_project"]
                  + manifest["global_memories"])
-        print(f"**Dataset**: {manifest['n_projects']} projects × "
+        print(f"**Workload**: {workload}. "
+              f"**Store**: {manifest['n_projects']} projects × "
               f"{manifest['memories_per_project']} memories + "
               f"{manifest['global_memories']} global = {total} memories. "
-              + (f"**Timed iterations/cell**: {iters}.\n" if iters else "\n"))
+              f"{iters_note}\n")
+    else:
+        print(f"**Workload**: {workload}. **Store**: reset to empty before each "
+              f"cell. {iters_note}\n")
 
-    print("MCP-driven matrix: real `engramdb serve` sessions over stdio JSON-RPC, "
-          "exercising `query` (search) and `get` (lookup) tools.\n")
+    if workload == "save":
+        store_note = ("creates insert into a pre-seeded store" if seeded
+                      else "each cell starts from an empty store")
+        print("MCP-driven matrix: real `engramdb serve` sessions over stdio "
+              "JSON-RPC, exercising the `create` tool (save a memory). `create` "
+              "takes the per-project write lock and embeds in the background; "
+              f"{store_note}.\n")
+    else:
+        print("MCP-driven matrix: real `engramdb serve` sessions over stdio "
+              "JSON-RPC, exercising `query` (search) and `get` (lookup) tools.\n")
     print("- **execution**: `in_process` (each session loads its own ONNX embedding "
           "model) vs `daemon` (shared embedding host, model resident once)\n"
           "- **target**: `local` project store vs `global` cross-project store\n"
