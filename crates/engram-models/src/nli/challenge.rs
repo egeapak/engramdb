@@ -9,7 +9,7 @@
 use crate::nli::NliResult;
 use anyhow::Result;
 use engram_storage::MemoryStore;
-use engram_types::{Challenge, Memory, MemoryUpdate, Status};
+use engram_types::{Challenge, Memory, Status};
 
 /// Result of a challenge operation.
 pub struct ChallengeResult {
@@ -20,26 +20,29 @@ pub struct ChallengeResult {
 /// Challenge a memory by adding evidence against it.
 ///
 /// Adds a challenge to the memory, sets its status to Challenged,
-/// and persists the change via an in-place update.
+/// and persists the change via an atomic read-modify-write
+/// ([`MemoryStore::update_with`]): the memory is re-read and mutated inside
+/// the per-project write lock, so a challenge written by a background NLI
+/// task can never erase a concurrent user edit, and a concurrent edit can
+/// never wipe a freshly written challenge.
 pub async fn challenge_memory(
     store: &MemoryStore,
     id: &str,
     evidence: &str,
     source_file: Option<&str>,
 ) -> Result<ChallengeResult> {
-    let mut memory = store.get(id).await?;
-
     let mut challenge = Challenge::new(evidence);
     if let Some(sf) = source_file {
         challenge = challenge.with_source_file(sf);
     }
 
-    memory.add_challenge(challenge);
-
-    let mut update = MemoryUpdate::new();
-    update.status = Some(Status::Challenged);
-    update.challenges = Some(memory.challenges.clone());
-    store.update(&memory.id, update).await?;
+    let memory = store
+        .update_with(id, move |memory| {
+            memory.add_challenge(challenge);
+            memory.status = Status::Challenged;
+            Ok(())
+        })
+        .await?;
 
     Ok(ChallengeResult {
         challenged: true,
@@ -54,11 +57,10 @@ pub async fn challenge_memory(
 /// propagate. Intended to run inside a `tokio::spawn`ed task or as the tail
 /// of one.
 ///
-/// Note: if two new memories are created concurrently and both contradict
-/// the same existing memory, one challenge may be lost due to a
-/// read-modify-write race on the challenges vec inside `challenge_memory`.
-/// This is acceptable since NLI contradiction detection is advisory, not
-/// transactional.
+/// Note: `challenge_memory` performs an atomic read-modify-write under the
+/// per-project write lock, so concurrent challenges against the same memory
+/// (or a challenge racing a user edit) all survive — no challenge or edit is
+/// lost to a stale-snapshot overwrite.
 pub async fn challenge_for_contradictions(
     store: &MemoryStore,
     new_memory_summary: &str,
@@ -149,6 +151,44 @@ mod tests {
         // Verify both survive a roundtrip
         let reloaded = store.get(&id).await.unwrap();
         assert_eq!(reloaded.challenges.len(), 2);
+    }
+
+    /// Concurrent challenges against the same memory must all survive —
+    /// `challenge_memory` uses `update_with`, so each challenge re-reads the
+    /// challenges vec inside the per-project write lock instead of racing on
+    /// a stale snapshot.
+    #[tokio::test]
+    async fn test_concurrent_challenges_all_persist() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
+
+        let tasks: Vec<_> = (0..4)
+            .map(|i| {
+                let store = store.clone();
+                let id = id.clone();
+                tokio::spawn(async move {
+                    challenge_memory(&store, &id, &format!("Evidence {}", i), None)
+                        .await
+                        .unwrap();
+                })
+            })
+            .collect();
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        let reloaded = store.get(&id).await.unwrap();
+        assert_eq!(
+            reloaded.challenges.len(),
+            4,
+            "a concurrent challenge was lost: {:?}",
+            reloaded
+                .challenges
+                .iter()
+                .map(|c| c.evidence.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(reloaded.status, Status::Challenged);
     }
 
     #[tokio::test]

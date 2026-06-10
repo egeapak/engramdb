@@ -376,16 +376,66 @@ impl MemoryStore {
     }
 
     /// Update a memory.
+    ///
+    /// Note: callers that first read the memory to compute the update perform
+    /// an unlocked read-modify-write — a concurrent update can be lost. Use
+    /// [`MemoryStore::update_with`] to make read-modify-write atomic.
     pub async fn update(&self, id: &str, updates: MemoryUpdate) -> Result<()> {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
 
-        // Get existing memory
+        // Get existing memory (inside the lock)
         let mut memory = self.get(id).await?;
         let old_visibility = memory.visibility;
 
         // Apply updates
         updates.apply_to(&mut memory);
 
+        self.write_updated_locked(id, &memory, old_visibility).await
+    }
+
+    /// Atomically read-modify-write a memory.
+    ///
+    /// Acquires the per-project write lock, re-reads the memory inside the
+    /// lock, applies `f` to it, then persists via the same write path as
+    /// [`MemoryStore::update`]. This makes the whole read-merge-write sequence
+    /// one critical section, so two concurrent `update_with` calls (or an
+    /// `update_with` racing an `update`) cannot silently erase each other's
+    /// changes.
+    ///
+    /// The memory's `updated_at` is bumped after `f` succeeds, matching the
+    /// `MemoryUpdate::apply_to` behavior of `update`. If `f` returns an error,
+    /// nothing is written and the error is surfaced as a validation error.
+    ///
+    /// Returns the memory exactly as persisted.
+    pub async fn update_with<F>(&self, id: &str, f: F) -> Result<Memory>
+    where
+        F: FnOnce(&mut Memory) -> anyhow::Result<()>,
+    {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
+        // Re-read inside the lock so `f` sees the latest persisted state.
+        let mut memory = self.get(id).await?;
+        let old_visibility = memory.visibility;
+
+        f(&mut memory).map_err(|e| StorageError::Validation(format!("{:#}", e)))?;
+        memory.mark_updated();
+
+        self.write_updated_locked(id, &memory, old_visibility)
+            .await?;
+
+        Ok(memory)
+    }
+
+    /// Shared write path for `update` / `update_with`. Callers MUST hold the
+    /// per-project write lock — this helper does not (re-)acquire it, because
+    /// one acquisition must span the entire read-modify-write critical
+    /// section.
+    async fn write_updated_locked(
+        &self,
+        id: &str,
+        memory: &Memory,
+        old_visibility: Visibility,
+    ) -> Result<()> {
         // Always delete the old file first (filename may have changed due to title update)
         let old_dir = self.get_memories_dir(&old_visibility)?;
         self.delete_file_from_dir(id, &old_dir).await?;
@@ -393,13 +443,13 @@ impl MemoryStore {
         // Write to (possibly new) location atomically
         let memories_dir = self.get_memories_dir(&memory.visibility)?;
         async_fs::create_dir_all(&memories_dir).await?;
-        let filename = memory_file::memory_filename(&memory);
+        let filename = memory_file::memory_filename(memory);
         let file_path = memories_dir.join(&filename);
-        let content = memory_file::write_memory_file(&memory)?;
+        let content = memory_file::write_memory_file(memory)?;
         atomic_write(&file_path, &content).await?;
 
         // Upsert metadata to LanceDB (chunks are managed separately)
-        let entry = IndexEntry::from(&memory);
+        let entry = IndexEntry::from(memory);
         self.lance_index
             .upsert(&entry)
             .await
@@ -1007,6 +1057,104 @@ mod tests {
         let retrieved = store.get("test-update-123").await.unwrap();
         assert_eq!(retrieved.summary, "Updated summary");
         assert_eq!(retrieved.content, "Test content");
+    }
+
+    /// The core atomicity property of `update_with`: N concurrent
+    /// read-modify-write updates must all survive. Each task appends one
+    /// distinct tag inside the closure; because the memory is re-read under
+    /// the per-project write lock, no task can snapshot stale state and
+    /// overwrite another task's tag. (The old unlocked get-merge-update flow
+    /// would lose tags here.)
+    #[tokio::test]
+    async fn test_update_with_serializes_concurrent_updates() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let memory = create_test_memory("test-update-with-race", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        let tasks: Vec<_> = (0..8)
+            .map(|i| {
+                let store = store.clone();
+                tokio::spawn(async move {
+                    store
+                        .update_with("test-update-with-race", move |m| {
+                            m.tags.push(format!("tag-{}", i));
+                            Ok(())
+                        })
+                        .await
+                        .unwrap();
+                })
+            })
+            .collect();
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        let final_memory = store.get("test-update-with-race").await.unwrap();
+        for i in 0..8 {
+            assert!(
+                final_memory.tags.contains(&format!("tag-{}", i)),
+                "tag-{} was lost; tags = {:?} — update_with did not serialize",
+                i,
+                final_memory.tags
+            );
+        }
+        assert_eq!(final_memory.tags.len(), 8);
+    }
+
+    /// `update_with` returns the memory exactly as persisted (closure applied,
+    /// `updated_at` bumped), and the same state is readable back from disk.
+    #[tokio::test]
+    async fn test_update_with_returns_persisted_memory() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let memory = create_test_memory("test-update-with-ret", Visibility::Shared);
+        let created_at = memory.updated_at;
+        store.create(&memory).await.unwrap();
+
+        let returned = store
+            .update_with("test-update-with-ret", |m| {
+                m.summary = "Closure summary".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(returned.summary, "Closure summary");
+        assert!(returned.updated_at >= created_at);
+
+        let reloaded = store.get("test-update-with-ret").await.unwrap();
+        assert_eq!(reloaded.summary, "Closure summary");
+        assert_eq!(reloaded.updated_at, returned.updated_at);
+    }
+
+    /// A failing closure must abort the update: nothing is written and the
+    /// error surfaces to the caller.
+    #[tokio::test]
+    async fn test_update_with_closure_error_writes_nothing() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let memory = create_test_memory("test-update-with-err", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        let result = store
+            .update_with("test-update-with-err", |m| {
+                m.summary = "Should not persist".to_string();
+                anyhow::bail!("merge failed")
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("merge failed"));
+
+        let reloaded = store.get("test-update-with-err").await.unwrap();
+        assert_eq!(reloaded.summary, "Test summary");
     }
 
     #[tokio::test]
