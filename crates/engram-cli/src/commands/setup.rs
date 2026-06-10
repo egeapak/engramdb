@@ -1,7 +1,7 @@
 //! Set up Claude Code integration for the current project.
 
 use crate::output::OutputFormatter;
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -224,6 +224,148 @@ fn try_install_plugin(dry_run: bool, formatter: &OutputFormatter) -> bool {
     }
 }
 
+/// Human-readable JSON type name for error messages.
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Error for a settings.json key that has the wrong JSON type. Names the file
+/// and the offending key so the user can fix it by hand.
+fn shape_error(
+    settings_path: &Path,
+    key_path: &str,
+    expected: &str,
+    found: &Value,
+) -> anyhow::Error {
+    anyhow!(
+        "{}: expected \"{key_path}\" to be a JSON {expected}, found {} — fix or remove the key and re-run engramdb setup",
+        settings_path.display(),
+        json_type_name(found)
+    )
+}
+
+/// True if a value is semantically empty (null, `[]`, or `{}`) and therefore
+/// safe to replace with a freshly shaped container without losing user data.
+fn is_semantically_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Array(arr) => arr.is_empty(),
+        Value::Object(obj) => obj.is_empty(),
+        _ => false,
+    }
+}
+
+/// Read and parse settings.json, validating that the top level is a JSON
+/// object we can merge into. A missing file yields an empty object.
+fn read_settings(settings_path: &Path) -> Result<Value> {
+    let settings: Value = if settings_path.exists() {
+        let content = std::fs::read_to_string(settings_path)
+            .with_context(|| format!("failed to read {}", settings_path.display()))?;
+        serde_json::from_str(&content).with_context(|| {
+            format!(
+                "{}: not valid JSON — fix the file and re-run engramdb setup",
+                settings_path.display()
+            )
+        })?
+    } else {
+        json!({})
+    };
+
+    if !settings.is_object() {
+        return Err(anyhow!(
+            "{}: expected the top-level value to be a JSON object, found {} — fix the file and re-run engramdb setup",
+            settings_path.display(),
+            json_type_name(&settings)
+        ));
+    }
+    Ok(settings)
+}
+
+/// Borrow the top-level settings object, erroring (not panicking) if the
+/// value is not a JSON object.
+fn settings_object_mut<'a>(
+    settings: &'a mut Value,
+    settings_path: &Path,
+) -> Result<&'a mut serde_json::Map<String, Value>> {
+    match settings {
+        Value::Object(map) => Ok(map),
+        other => Err(anyhow!(
+            "{}: expected the top-level value to be a JSON object, found {} — fix the file and re-run engramdb setup",
+            settings_path.display(),
+            json_type_name(other)
+        )),
+    }
+}
+
+/// Get-or-create `parent[key]` as a JSON object. A missing key is inserted as
+/// `{}`; a semantically empty value (null, `[]`, `{}`) is repaired to `{}`;
+/// any other non-object type is a hard error naming the key.
+fn ensure_object_entry<'a>(
+    parent: &'a mut serde_json::Map<String, Value>,
+    key: &str,
+    key_path: &str,
+    settings_path: &Path,
+) -> Result<&'a mut serde_json::Map<String, Value>> {
+    let slot = parent.entry(key).or_insert_with(|| json!({}));
+    if !slot.is_object() && is_semantically_empty(slot) {
+        *slot = json!({});
+    }
+    match slot {
+        Value::Object(map) => Ok(map),
+        other => Err(shape_error(settings_path, key_path, "object", other)),
+    }
+}
+
+/// Get-or-create `parent[key]` as a JSON array. A missing key is inserted as
+/// `[]`; a semantically empty value (null, `[]`, `{}`) is repaired to `[]`;
+/// any other non-array type is a hard error naming the key.
+fn ensure_array_entry<'a>(
+    parent: &'a mut serde_json::Map<String, Value>,
+    key: &str,
+    key_path: &str,
+    settings_path: &Path,
+) -> Result<&'a mut Vec<Value>> {
+    let slot = parent.entry(key).or_insert_with(|| json!([]));
+    if !slot.is_array() && is_semantically_empty(slot) {
+        *slot = json!([]);
+    }
+    match slot {
+        Value::Array(arr) => Ok(arr),
+        other => Err(shape_error(settings_path, key_path, "array", other)),
+    }
+}
+
+/// Atomically replace `path` with `contents`: write a temp file in the same
+/// directory, then rename it over the target. A crash mid-write can therefore
+/// never leave a truncated or corrupt settings.json behind.
+fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("settings.json");
+    let tmp_path = dir.join(format!(".{file_name}.{}.tmp", std::process::id()));
+
+    let result = std::fs::write(&tmp_path, contents)
+        .and_then(|()| std::fs::rename(&tmp_path, path))
+        .with_context(|| format!("failed to write {}", path.display()));
+    if result.is_err() {
+        // Best-effort cleanup; never leave a temp file lying around.
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
 /// Write hooks and MCP server config into settings.json (merge strategy).
 fn install_settings_fallback(
     claude_dir: &Path,
@@ -232,21 +374,13 @@ fn install_settings_fallback(
 ) -> Result<bool> {
     let settings_path = claude_dir.join("settings.json");
 
-    let mut settings: Value = if settings_path.exists() {
-        let content = std::fs::read_to_string(&settings_path)?;
-        serde_json::from_str(&content)?
-    } else {
-        json!({})
-    };
+    let mut settings = read_settings(&settings_path)?;
 
     let mut changed = false;
 
     // --- Hooks ---
-    let hooks = settings
-        .as_object_mut()
-        .unwrap()
-        .entry("hooks")
-        .or_insert_with(|| json!({}));
+    let root = settings_object_mut(&mut settings, &settings_path)?;
+    let hooks = ensure_object_entry(root, "hooks", "hooks", &settings_path)?;
 
     changed |= ensure_hook_entry(
         hooks,
@@ -259,7 +393,8 @@ fn install_settings_fallback(
             }]
         }),
         "engramdb hook pre-tool-use",
-    );
+        &settings_path,
+    )?;
 
     changed |= ensure_hook_entry(
         hooks,
@@ -271,10 +406,11 @@ fn install_settings_fallback(
             }]
         }),
         "engramdb hook session-start",
-    );
+        &settings_path,
+    )?;
 
     // --- MCP server ---
-    changed |= ensure_mcp_server(&mut settings);
+    changed |= ensure_mcp_server(&mut settings, &settings_path)?;
 
     if !changed {
         formatter.print_message("Hooks and MCP already configured in settings.json.");
@@ -288,46 +424,45 @@ fn install_settings_fallback(
 
     std::fs::create_dir_all(claude_dir)?;
     let formatted = serde_json::to_string_pretty(&settings)?;
-    std::fs::write(&settings_path, formatted)?;
+    write_atomic(&settings_path, &formatted)?;
     formatter.print_success("Added hooks and MCP server to settings.json.");
     Ok(true)
 }
 
 /// Ensure the engramdb MCP server entry exists in settings.json.
 /// Returns true if it was added.
-fn ensure_mcp_server(settings: &mut Value) -> bool {
-    let mcp_servers = settings
-        .as_object_mut()
-        .unwrap()
-        .entry("mcpServers")
-        .or_insert_with(|| json!({}));
+fn ensure_mcp_server(settings: &mut Value, settings_path: &Path) -> Result<bool> {
+    let root = settings_object_mut(settings, settings_path)?;
+    let mcp_servers = ensure_object_entry(root, "mcpServers", "mcpServers", settings_path)?;
 
     if mcp_servers.get("engramdb").is_some() {
-        return false;
+        return Ok(false);
     }
 
-    mcp_servers.as_object_mut().unwrap().insert(
+    mcp_servers.insert(
         "engramdb".to_string(),
         json!({
             "command": "engramdb",
             "args": ["serve", "--dir", "."]
         }),
     );
-    true
+    Ok(true)
 }
 
 /// Ensure a hook entry exists in the given event array, matched by command substring.
+/// Foreign elements of unexpected types (non-objects, objects without a
+/// `hooks` array) are left untouched and skipped during matching.
 /// Returns true if a new entry was added.
-fn ensure_hook_entry(hooks: &mut Value, event: &str, entry: Value, match_command: &str) -> bool {
-    let event_array = hooks
-        .as_object_mut()
-        .unwrap()
-        .entry(event)
-        .or_insert_with(|| json!([]));
+fn ensure_hook_entry(
+    hooks: &mut serde_json::Map<String, Value>,
+    event: &str,
+    entry: Value,
+    match_command: &str,
+    settings_path: &Path,
+) -> Result<bool> {
+    let event_array = ensure_array_entry(hooks, event, &format!("hooks.{event}"), settings_path)?;
 
-    let arr = event_array.as_array().unwrap();
-
-    let already_exists = arr.iter().any(|e| {
+    let already_exists = event_array.iter().any(|e| {
         if let Some(inner_hooks) = e.get("hooks").and_then(|h| h.as_array()) {
             inner_hooks.iter().any(|h| {
                 h.get("command")
@@ -341,11 +476,11 @@ fn ensure_hook_entry(hooks: &mut Value, event: &str, entry: Value, match_command
     });
 
     if already_exists {
-        return false;
+        return Ok(false);
     }
 
-    event_array.as_array_mut().unwrap().push(entry);
-    true
+    event_array.push(entry);
+    Ok(true)
 }
 
 /// Ensure MCP tool permissions are present in settings.json.
@@ -359,24 +494,11 @@ fn ensure_mcp_permissions(
 ) -> Result<bool> {
     let settings_path = claude_dir.join("settings.json");
 
-    let mut settings: Value = if settings_path.exists() {
-        let content = std::fs::read_to_string(&settings_path)?;
-        serde_json::from_str(&content)?
-    } else {
-        json!({})
-    };
+    let mut settings = read_settings(&settings_path)?;
 
-    let permissions = settings
-        .as_object_mut()
-        .unwrap()
-        .entry("permissions")
-        .or_insert_with(|| json!({}));
-    let allow = permissions
-        .as_object_mut()
-        .unwrap()
-        .entry("allow")
-        .or_insert_with(|| json!([]));
-    let allow_arr = allow.as_array_mut().unwrap();
+    let root = settings_object_mut(&mut settings, &settings_path)?;
+    let permissions = ensure_object_entry(root, "permissions", "permissions", &settings_path)?;
+    let allow_arr = ensure_array_entry(permissions, "allow", "permissions.allow", &settings_path)?;
 
     // Remove stale entries for tools that have been renamed or removed. Stale
     // entries silently fail to match the new tool names and cause a permission
@@ -430,7 +552,7 @@ fn ensure_mcp_permissions(
 
     std::fs::create_dir_all(claude_dir)?;
     let formatted = serde_json::to_string_pretty(&settings)?;
-    std::fs::write(&settings_path, formatted)?;
+    write_atomic(&settings_path, &formatted)?;
     if removed > 0 {
         formatter.print_success(&format!(
             "Updated MCP tool permissions in settings.json (removed {removed} stale, added {added})."
@@ -797,7 +919,7 @@ mod tests {
     #[test]
     fn test_ensure_mcp_server_adds_new() {
         let mut settings = json!({});
-        let added = ensure_mcp_server(&mut settings);
+        let added = ensure_mcp_server(&mut settings, Path::new("settings.json")).unwrap();
         assert!(added);
         assert_eq!(
             settings["mcpServers"]["engramdb"]["command"]
@@ -814,7 +936,7 @@ mod tests {
                 "engramdb": { "command": "engramdb", "args": ["serve"] }
             }
         });
-        let added = ensure_mcp_server(&mut settings);
+        let added = ensure_mcp_server(&mut settings, Path::new("settings.json")).unwrap();
         assert!(!added);
     }
 
@@ -825,7 +947,14 @@ mod tests {
         let mut hooks = json!({});
         let entry = json!({ "hooks": [{ "type": "command", "command": "my-hook" }] });
 
-        let added = ensure_hook_entry(&mut hooks, "PreToolUse", entry, "my-hook");
+        let added = ensure_hook_entry(
+            hooks.as_object_mut().unwrap(),
+            "PreToolUse",
+            entry,
+            "my-hook",
+            Path::new("settings.json"),
+        )
+        .unwrap();
         assert!(added);
         assert_eq!(hooks["PreToolUse"].as_array().unwrap().len(), 1);
     }
@@ -839,7 +968,14 @@ mod tests {
         });
         let entry = json!({ "hooks": [{ "type": "command", "command": "my-hook --dir ." }] });
 
-        let added = ensure_hook_entry(&mut hooks, "PreToolUse", entry, "my-hook");
+        let added = ensure_hook_entry(
+            hooks.as_object_mut().unwrap(),
+            "PreToolUse",
+            entry,
+            "my-hook",
+            Path::new("settings.json"),
+        )
+        .unwrap();
         assert!(!added);
         assert_eq!(hooks["PreToolUse"].as_array().unwrap().len(), 1);
     }
@@ -1267,5 +1403,276 @@ mod tests {
 
         let second = std::fs::read_to_string(claude_dir.join("settings.json")).unwrap();
         assert_eq!(first, second);
+    }
+
+    // --- Malformed settings.json shape tests ---
+
+    fn write_settings(dir: &Path, content: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("settings.json"), content).unwrap();
+    }
+
+    /// Which setup entry point to drive a malformed-shape case through.
+    enum Via {
+        Fallback,
+        Permissions,
+    }
+
+    fn run_via(via: &Via, dir: &Path, f: &OutputFormatter) -> Result<bool> {
+        match via {
+            Via::Fallback => install_settings_fallback(dir, false, f),
+            Via::Permissions => ensure_mcp_permissions(dir, SETTINGS_MCP_PREFIX, false, f),
+        }
+    }
+
+    #[test]
+    fn test_malformed_settings_error_not_panic() {
+        // (label, file content, entry point, expected error fragment)
+        let cases: &[(&str, &str, Via, &str)] = &[
+            ("top-level array", r#"["x"]"#, Via::Fallback, "top-level"),
+            ("top-level string", r#""hello""#, Via::Fallback, "top-level"),
+            ("top-level number", "42", Via::Permissions, "top-level"),
+            (
+                "hooks non-empty array",
+                r#"{"hooks": ["x"]}"#,
+                Via::Fallback,
+                "\"hooks\"",
+            ),
+            (
+                "hooks string",
+                r#"{"hooks": "x"}"#,
+                Via::Fallback,
+                "\"hooks\"",
+            ),
+            (
+                "hook event not an array",
+                r#"{"hooks": {"PreToolUse": "notanarray"}}"#,
+                Via::Fallback,
+                "\"hooks.PreToolUse\"",
+            ),
+            (
+                "mcpServers non-empty array",
+                r#"{"mcpServers": ["x"]}"#,
+                Via::Fallback,
+                "\"mcpServers\"",
+            ),
+            (
+                "permissions string",
+                r#"{"permissions": "x"}"#,
+                Via::Permissions,
+                "\"permissions\"",
+            ),
+            (
+                "permissions.allow non-empty object",
+                r#"{"permissions": {"allow": {"a": 1}}}"#,
+                Via::Permissions,
+                "\"permissions.allow\"",
+            ),
+        ];
+
+        let f = test_formatter();
+        for (label, content, via, fragment) in cases {
+            let tmp = TempDir::new().unwrap();
+            write_settings(tmp.path(), content);
+
+            let err = run_via(via, tmp.path(), &f)
+                .expect_err(&format!("case {label:?} should error, not succeed"));
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(fragment),
+                "case {label:?}: error should name {fragment}, got: {msg}"
+            );
+            assert!(
+                msg.contains("settings.json"),
+                "case {label:?}: error should name the file, got: {msg}"
+            );
+
+            // The user's file is left untouched on error.
+            let after = std::fs::read_to_string(tmp.path().join("settings.json")).unwrap();
+            assert_eq!(&after, content, "case {label:?}: file must not be modified");
+        }
+    }
+
+    #[test]
+    fn test_malformed_settings_repairs_empty_values() {
+        // Semantically empty values (null, [], {}) of the wrong type are
+        // repaired to the correct empty container instead of erroring.
+        let cases: &[(&str, &str, Via)] = &[
+            ("hooks empty array", r#"{"hooks": []}"#, Via::Fallback),
+            ("hooks null", r#"{"hooks": null}"#, Via::Fallback),
+            (
+                "hook event empty object",
+                r#"{"hooks": {"PreToolUse": {}}}"#,
+                Via::Fallback,
+            ),
+            (
+                "mcpServers empty array",
+                r#"{"mcpServers": []}"#,
+                Via::Fallback,
+            ),
+            (
+                "permissions empty array",
+                r#"{"permissions": []}"#,
+                Via::Permissions,
+            ),
+            (
+                "permissions.allow null",
+                r#"{"permissions": {"allow": null}}"#,
+                Via::Permissions,
+            ),
+        ];
+
+        let f = test_formatter();
+        for (label, content, via) in cases {
+            let tmp = TempDir::new().unwrap();
+            write_settings(tmp.path(), content);
+
+            let changed =
+                run_via(via, tmp.path(), &f).unwrap_or_else(|e| panic!("case {label:?}: {e:#}"));
+            assert!(changed, "case {label:?}: repair should report a change");
+
+            let after = std::fs::read_to_string(tmp.path().join("settings.json")).unwrap();
+            let settings: Value = serde_json::from_str(&after).unwrap();
+            match via {
+                Via::Fallback => {
+                    assert!(
+                        settings["hooks"]["PreToolUse"].is_array(),
+                        "case {label:?}: hooks.PreToolUse should be an array"
+                    );
+                    assert!(
+                        settings["mcpServers"]["engramdb"].is_object(),
+                        "case {label:?}: mcpServers.engramdb should be an object"
+                    );
+                }
+                Via::Permissions => {
+                    let allow = settings["permissions"]["allow"].as_array().unwrap();
+                    assert!(
+                        allow.iter().any(|v| {
+                            v.as_str()
+                                .map(|s| s.starts_with(SETTINGS_MCP_PREFIX))
+                                .unwrap_or(false)
+                        }),
+                        "case {label:?}: permissions.allow should hold the new entries"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_hook_event_array_foreign_elements_preserved() {
+        let tmp = TempDir::new().unwrap();
+        let f = test_formatter();
+        write_settings(
+            tmp.path(),
+            r#"{"hooks": {"PreToolUse": ["junk", 42, {"weird": true}]}}"#,
+        );
+
+        let changed = install_settings_fallback(tmp.path(), false, &f).unwrap();
+        assert!(changed);
+
+        let content = std::fs::read_to_string(tmp.path().join("settings.json")).unwrap();
+        let settings: Value = serde_json::from_str(&content).unwrap();
+        let pre_tool = settings["hooks"]["PreToolUse"].as_array().unwrap();
+
+        // 3 foreign elements untouched + our new entry appended.
+        assert_eq!(pre_tool.len(), 4);
+        assert_eq!(pre_tool[0], json!("junk"));
+        assert_eq!(pre_tool[1], json!(42));
+        assert_eq!(pre_tool[2], json!({"weird": true}));
+        assert!(pre_tool[3]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("engramdb hook pre-tool-use"));
+    }
+
+    #[test]
+    fn test_permissions_allow_foreign_elements_preserved() {
+        let tmp = TempDir::new().unwrap();
+        let f = test_formatter();
+        write_settings(
+            tmp.path(),
+            r#"{"permissions": {"allow": [42, {"x": 1}, "Bash(ls:*)"]}}"#,
+        );
+
+        let changed = ensure_mcp_permissions(tmp.path(), SETTINGS_MCP_PREFIX, false, &f).unwrap();
+        assert!(changed);
+
+        let content = std::fs::read_to_string(tmp.path().join("settings.json")).unwrap();
+        let settings: Value = serde_json::from_str(&content).unwrap();
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+
+        assert_eq!(allow[0], json!(42));
+        assert_eq!(allow[1], json!({"x": 1}));
+        assert_eq!(allow[2], json!("Bash(ls:*)"));
+        assert_eq!(allow.len(), 3 + MCP_TOOL_SUFFIXES.len());
+    }
+
+    #[test]
+    fn test_invalid_json_settings_errors_cleanly() {
+        let tmp = TempDir::new().unwrap();
+        let f = test_formatter();
+        write_settings(tmp.path(), "{not json");
+
+        let err = install_settings_fallback(tmp.path(), false, &f).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("settings.json"), "should name the file: {msg}");
+        assert!(msg.contains("not valid JSON"), "got: {msg}");
+
+        let err = ensure_mcp_permissions(tmp.path(), SETTINGS_MCP_PREFIX, false, &f).unwrap_err();
+        assert!(format!("{err:#}").contains("not valid JSON"));
+    }
+
+    // --- Atomic write tests ---
+
+    #[test]
+    fn test_atomic_write_leaves_no_temp_file() {
+        let tmp = TempDir::new().unwrap();
+        let f = test_formatter();
+
+        install_settings_fallback(tmp.path(), false, &f).unwrap();
+        ensure_mcp_permissions(tmp.path(), SETTINGS_MCP_PREFIX, false, &f).unwrap();
+
+        let entries: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            entries,
+            vec!["settings.json".to_string()],
+            "only settings.json should remain, no temp files: {entries:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_read_only_dir_errors_cleanly() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let claude_dir = tmp.path().join("claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::set_permissions(&claude_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Running as root ignores directory permissions — skip in that case.
+        if std::fs::write(claude_dir.join(".probe"), "x").is_ok() {
+            let _ = std::fs::remove_file(claude_dir.join(".probe"));
+            std::fs::set_permissions(&claude_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+
+        let f = test_formatter();
+        let result = install_settings_fallback(&claude_dir, false, &f);
+
+        // Restore so TempDir cleanup succeeds.
+        std::fs::set_permissions(&claude_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = result.expect_err("read-only dir should error, not panic");
+        assert!(
+            format!("{err:#}").contains("settings.json"),
+            "error should name the file: {err:#}"
+        );
+        // No temp file left behind.
+        assert_eq!(std::fs::read_dir(&claude_dir).unwrap().count(), 0);
     }
 }
