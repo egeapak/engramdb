@@ -434,6 +434,25 @@ pub async fn build_engine(
     assemble_engine(store, config, providers)
 }
 
+/// Build a `RetrievalEngine` with **no** model providers from a store + config path.
+///
+/// For callers that provably never exercise embeddings, NLI, reranking, or
+/// title generation — e.g. the Claude Code hook handlers, whose queries carry
+/// no query text (`query: None` → the engine's semantic step is skipped and
+/// scoring is `scope_only`) and which never create memories. Unlike
+/// [`build_engine`], this skips [`resolve_engine_providers`] entirely,
+/// avoiding the ~240ms ONNX embedding session init (plus the T5
+/// encoder+decoder init when `title.strategy = "t5"`) on every invocation.
+pub async fn build_engine_without_providers(
+    store: MemoryStore,
+    config_path: &std::path::Path,
+) -> RetrievalEngine {
+    let config = crate::storage::config::load_config(config_path)
+        .await
+        .unwrap_or_default();
+    assemble_engine(store, config, EngineProviders::default())
+}
+
 /// Signature of the provider-relevant config fields.
 ///
 /// Two configs with the same key resolve to interchangeable model sessions, so
@@ -634,6 +653,26 @@ mod tests {
     #[test]
     fn expected_fingerprint_is_none_for_unknown_provider() {
         assert!(expected_embedding_fingerprint(&onnx_config("nope")).is_none());
+    }
+
+    /// The hook handlers' construction path: no embedding/NLI/reranker/title
+    /// provider may be wired, regardless of config (the default config has
+    /// embeddings enabled and `title.strategy = "t5"`, which `build_engine`
+    /// would resolve). This is what keeps hook invocations free of any ONNX
+    /// session init.
+    #[tokio::test]
+    async fn build_engine_without_providers_wires_no_models() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &crate::storage::InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let config_path = temp_dir.path().join(".engramdb").join("config.toml");
+
+        let engine = build_engine_without_providers(store, &config_path).await;
+
+        assert!(!engine.embeddings_available());
+        assert!(!engine.nli_available());
+        assert!(engine.title_generator().is_none());
     }
 
     /// The actual safety property the `provider_specs` unification

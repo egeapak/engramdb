@@ -513,9 +513,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Hook { command } => match command {
-            HookCommand::PreToolUse => commands::run_hook_pre_tool_use(&dir, backend).await,
+            // Hooks fire on every Read/Write/Edit, never embed (query: None)
+            // and never create memories — they deliberately skip provider
+            // resolution (no `backend`), see `build_engine_without_providers`.
+            HookCommand::PreToolUse => commands::run_hook_pre_tool_use(&dir).await,
             HookCommand::SessionStart { min_criticality } => {
-                commands::run_hook_session_start(&dir, backend, min_criticality).await
+                commands::run_hook_session_start(&dir, min_criticality).await
             }
         },
         Command::Projects { command } => {

@@ -9,6 +9,7 @@ mod doctor;
 mod error_cases;
 mod gc;
 mod global_flags;
+mod hook;
 mod init;
 mod list;
 mod output_renderers;
