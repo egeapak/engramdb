@@ -198,11 +198,14 @@ class McpSession:
         self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
     def call_tool(self, name, arguments):
-        """Return (latency_seconds, ok)."""
+        """Return (latency_seconds, ok). Last error text kept on self.last_err."""
         t0 = time.perf_counter()
         resp = self.request("tools/call", {"name": name, "arguments": arguments})
         dt = time.perf_counter() - t0
-        ok = "error" not in resp and not resp.get("result", {}).get("isError", False)
+        result = resp.get("result", {})
+        ok = "error" not in resp and not result.get("isError", False)
+        if not ok:
+            self.last_err = json.dumps(resp)[:400]
         return dt, ok
 
     def close(self):
@@ -305,13 +308,18 @@ def make_workload(target, ids, ops_per_iter):
 
 def reset_save_store():
     """Wipe the save targets so every cell starts from an empty store (keeps
-    create latency comparable across cells instead of growing with the index)."""
+    create latency comparable across cells instead of growing with the index).
+
+    Only the local project is re-initialized; the global store is left absent so
+    `open_global()` re-creates it cleanly on first use. We deliberately do NOT
+    rewrite config here — execution mode is driven by the ENGRAMDB_IN_PROCESS env
+    var, and writing a bare config.toml into a wiped global dir would leave it
+    half-initialized and break `open_global()`."""
     shutil.rmtree(PROJECTS_DIR / LOCAL_PROJECT / ".engramdb", ignore_errors=True)
     shutil.rmtree(DATA_DIR / "global", ignore_errors=True)
     shutil.rmtree(DATA_DIR / "projects", ignore_errors=True)
     subprocess.run([BIN, "--quiet", "--dir", str(PROJECTS_DIR / LOCAL_PROJECT),
                     "init", "--no-embeddings"], capture_output=True)
-    write_daemon_config()
 
 
 def fetch_ids(target, n=2):
@@ -364,7 +372,8 @@ def run_cell(execution, target, ops_per_iter, n_sessions, ids):
                 cold_op_lat.append(dt * 1000)
                 first = False
             if not ok:
-                raise RuntimeError(f"warmup op {tool} failed (execution={execution}, target={target})")
+                raise RuntimeError(f"warmup op {tool} failed (execution={execution}, "
+                                   f"target={target}): {getattr(s, 'last_err', '?')}")
 
     # Peak RSS sampled after warmup (models are now resident). For daemon mode
     # the daemon pid is re-discovered here in case it respawned.
