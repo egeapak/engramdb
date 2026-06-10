@@ -43,6 +43,7 @@ trust_multiplier_floor = 0.5   # ceiling on how much low-trust memories are supp
 challenge_penalty = 0.10       # flat subtraction for challenged memories
 depth_decay_base = 0.82        # base for exponential scope-depth decay
 depth_decay_floor = 0.3        # minimum scope score regardless of depth
+scope_multiplier_floor = 0.5   # neutral base for logical-only scope context
 
 [search]
 semantic_weight = 3.0          # weight on semantic similarity vs keyword
@@ -106,7 +107,7 @@ idle_timeout_secs = 900        # 15 min idle → daemon exits
 
 ## Notes on selected sections
 
-- **`[retrieval.scoring]`** — composite formula: `score = base * scope_multiplier * trust_multiplier - challenge_penalty`, clamped to `[0, 1]`. `base` comes from whichever weight set applies (`with_query` / `with_keyword` / `scope_only` / `degraded`).
+- **`[retrieval.scoring]`** — composite formula: `score = base * scope_multiplier * trust_multiplier - challenge_penalty`, clamped to `[0, 1]`. `base` comes from whichever weight set applies (`with_query` / `with_keyword` / `scope_only` / `degraded`). The scope multiplier is the depth-decayed `path` match plus a logical bonus (≤ 0.3) when a `path` is supplied; with only `logical` context it is `scope_multiplier_floor + bonus` for related memories (bare floor for unscoped memories, 0 for unrelated ones); 1.0 (neutral) when no scope context is given.
 - **`[embeddings]`** — changing `provider` or `dimensions` requires `engramdb reindex --embeddings-only`. See [embeddings.md](./embeddings.md) for fingerprinting and the model-change policy.
 - **`[trust_weights]`** — `Provenance` source maps to a trust weight (`human` highest, `inferred` lowest). The multiplier is `floor + (1 - floor) * weight`, so even fully `inferred` memories keep ≥50% of their raw score.
 - **`[nli]`** — off by default. Downloads ~50 MB and adds latency to `create`. When enabled, every `create` checks the top-`max_comparisons` similar memories and auto-challenges contradictions above `contradiction_threshold`.

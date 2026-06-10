@@ -89,10 +89,16 @@ pub struct ScoringConfig {
     /// Weights for degraded mode (no embeddings)
     pub degraded: ScoringWeights,
 
-    /// Deprecated: no longer used in scoring. Retained for TOML backward compatibility.
+    /// Neutral base for the scope multiplier under logical-only context (default 0.5).
     ///
-    /// Scope scoring now uses depth decay (`depth_decay_base` / `depth_decay_floor`)
-    /// instead of a floor-transformed multiplier.
+    /// When a query provides a `path`, scope scoring uses depth decay
+    /// (`depth_decay_base` / `depth_decay_floor`) and this field is unused.
+    /// When a query provides only `logical` context, the multiplier is
+    /// `scope_multiplier_floor + logical_bonus` (capped at 1.0) for memories
+    /// with a related logical scope, the bare floor for memories with no
+    /// logical scopes, and 0.0 for memories whose logical scopes are
+    /// unrelated. Without this floor the logical bonus (max 0.3) alone would
+    /// drag every logical-only result below `retrieval.relevance_threshold`.
     #[serde(default = "ScoringConfig::default_scope_multiplier_floor")]
     pub scope_multiplier_floor: f64,
 

@@ -67,7 +67,10 @@ How it works:
 1. Apply hard filters (`types`, `tags`, `min_criticality`).
 2. Score **every** remaining memory by composite formula:
    - relevance (criticality × decay)
-   - × scope multiplier (depth-decayed match on `path` + logical-hierarchy bonus on `logical`)
+   - × scope multiplier (depth-decayed match on `path` + logical-hierarchy bonus on `logical`;
+     with `logical` only, the bonus rides on `scope_multiplier_floor` (default 0.5) so related
+     memories rank above the threshold, unscoped memories sit at the bare floor, and memories
+     with unrelated logical scopes drop to 0)
    - × trust multiplier (`Provenance` source)
    - − challenge penalty (if challenged)
    - + semantic similarity (if `query` is also passed)

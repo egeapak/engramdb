@@ -668,11 +668,9 @@ impl RetrievalEngine {
             // logical scopes drive the scope proximity signal. In filter mode
             // they have already been applied as hard filters (physical via
             // `SearchFilters`, logical via the pre-filter above), so passing
-            // them to the scorer would double-count and, because scope acts
-            // as a post-multiplier, would penalize results that only matched
-            // via logical scope (logical contributes at most 0.3 to the
-            // multiplier, which silently drags scores below the filter
-            // threshold).
+            // them to the scorer would double-count: scope acts as a
+            // post-multiplier and would discount results that already passed
+            // the hard filter.
             let (ctx_path, ctx_logical): (Option<&str>, &[String]) = match query.mode {
                 RetrievalMode::Rank => (query_path, &query.logical),
                 RetrievalMode::Filter => (None, &[]),
@@ -1060,6 +1058,115 @@ mod tests {
             vec!["src/auth/**".to_string()]
         );
         assert!(result.memories[0].score > result.memories[1].score);
+    }
+
+    #[tokio::test]
+    async fn test_rank_logical_only_returns_matches_above_threshold() {
+        // Regression: a Rank query with only `logical` context (no path) used
+        // to multiply by the bare logical bonus (max 0.3), so every result
+        // fell below the default relevance_threshold (0.45) and the advertised
+        // "rank by logical scope" feature returned nothing. Uses the DEFAULT
+        // config on purpose — the threshold is the bug.
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let config = EngramConfig::default();
+        assert!(config.retrieval.relevance_threshold > 0.3); // guard the premise
+
+        // Exact logical match: scope_mult = 0.5 + 0.3 = 0.8 → 0.9 * 0.8 = 0.72
+        let mut matching = Memory::new(
+            MemoryType::Decision,
+            "OAuth flow decision",
+            "We use PKCE for the OAuth flow",
+            Provenance::human(),
+        );
+        matching.logical = vec!["auth.oauth".to_string()];
+        matching.visibility = Visibility::Shared;
+        matching.criticality = 0.9;
+
+        // Parent logical match: scope_mult = 0.5 + 0.2 = 0.7 → 0.9 * 0.7 = 0.63
+        let mut parent = Memory::new(
+            MemoryType::Convention,
+            "Auth conventions",
+            "All auth modules follow these conventions",
+            Provenance::human(),
+        );
+        parent.logical = vec!["auth".to_string()];
+        parent.visibility = Visibility::Shared;
+        parent.criticality = 0.9;
+
+        // Unrelated logical scopes: scope_mult = 0.0 even at criticality 1.0
+        let mut unrelated = Memory::new(
+            MemoryType::Hazard,
+            "Postgres migration hazard",
+            "Do not run migrations without a backup",
+            Provenance::human(),
+        );
+        unrelated.logical = vec!["database.postgres".to_string()];
+        unrelated.visibility = Visibility::Shared;
+        unrelated.criticality = 1.0;
+
+        // No logical scopes: bare floor → 0.8 * 0.5 = 0.40 < 0.45
+        let mut unscoped = Memory::new(
+            MemoryType::Context,
+            "General context",
+            "General project context",
+            Provenance::human(),
+        );
+        unscoped.visibility = Visibility::Shared;
+        unscoped.criticality = 0.8;
+
+        store.create(&matching).await.unwrap();
+        store.create(&parent).await.unwrap();
+        store.create(&unrelated).await.unwrap();
+        store.create(&unscoped).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, config.clone());
+
+        let query = RetrievalQuery {
+            mode: RetrievalMode::Rank,
+            logical: vec!["auth.oauth".to_string()],
+            ..Default::default()
+        };
+
+        let result = engine.query(&query).await.unwrap();
+
+        let ids: Vec<&str> = result
+            .memories
+            .iter()
+            .map(|sm| sm.memory.id.as_str())
+            .collect();
+        assert!(
+            ids.contains(&matching.id.as_str()),
+            "exact logical match must be returned, got {ids:?}"
+        );
+        assert!(
+            ids.contains(&parent.id.as_str()),
+            "parent logical match must be returned, got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&unrelated.id.as_str()),
+            "unrelated logical scopes must be filtered out, got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&unscoped.id.as_str()),
+            "unscoped memory at criticality 0.8 must stay below threshold, got {ids:?}"
+        );
+
+        // Exact match ranks first and clears the threshold.
+        assert_eq!(result.memories[0].memory.id, matching.id);
+        for sm in &result.memories {
+            assert!(
+                sm.score >= config.retrieval.relevance_threshold,
+                "returned memory {} scored {} below threshold",
+                sm.memory.id,
+                sm.score,
+            );
+        }
     }
 
     #[tokio::test]

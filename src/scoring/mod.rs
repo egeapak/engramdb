@@ -25,8 +25,16 @@
 //!
 //! # Post-multipliers
 //!
-//! - **Scope**: `scope_multiplier = floor + (1 - floor) * scope_score` (default floor=0.5).
-//!   When no scope context is provided, the multiplier is 1.0 (neutral).
+//! - **Scope**: `scope_multiplier = scope_score` whenever scope context is
+//!   provided; 1.0 (neutral) when no context is provided. The raw score
+//!   depends on the context shape (see `scope::scope_proximity`):
+//!   - **Path (± logical)**: depth-decayed physical match (non-matching
+//!     scopes → 0.0) plus a logical bonus of up to 0.3, capped at 1.0.
+//!   - **Logical-only**: `scope_multiplier_floor + logical_bonus` (default
+//!     floor 0.5, capped at 1.0) for related memories, the bare floor for
+//!     memories with no logical scopes, 0.0 for memories whose logical scopes
+//!     are unrelated. The floor keeps strong logical matches above the
+//!     default 0.45 relevance threshold instead of collapsing to the ≤0.3 bonus.
 //! - **Trust**: `trust_multiplier = floor + (1 - floor) * trust_weight` (default floor=0.5).
 //!   Prevents low-trust memories from being suppressed too aggressively.
 //! - **Challenge**: flat subtraction `score -= challenge_penalty` (default 0.10).
