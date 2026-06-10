@@ -28,7 +28,7 @@ def main():
         manifest = json.load(open(os.path.join(pdir, "manifest.json")))
     iters = os.environ.get("BENCH_ITERS")
     workload = rows[0].get("workload", "search") if rows else "search"
-    seeded = rows and rows[0].get("save_reset") is False
+    seeded = rows and (rows[0].get("save_seed") or rows[0].get("save_reset") is False)
     # Dataset size matters for search (corpus queried) and seeded saves (index
     # inserted into); for empty-store saves it does not.
     show_dataset = workload == "search" or (workload == "save" and seeded)

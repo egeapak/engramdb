@@ -47,6 +47,11 @@ WORKLOAD = os.environ.get("BENCH_WORKLOAD", "search")
 # For the save workload: reset the store to empty before each cell (default), or
 # leave it seeded so creates insert into a pre-populated index (BENCH_SAVE_RESET=0).
 SAVE_RESET = os.environ.get("BENCH_SAVE_RESET", "1") != "0"
+# Alternatively reset each cell back to the *seeded* store (a filesystem snapshot
+# of the pre-generated dataset), so creates always insert into a populated index
+# without cross-cell growth confounding the matrix.
+SAVE_SEED = os.environ.get("BENCH_SAVE_SEED", "0") == "1"
+SEED_SNAP = DATA_DIR.parent / "save_seed_snapshot"
 
 LOCAL_PROJECT = "web-api"  # the project used for "local" cells
 ITERS = int(os.environ.get("BENCH_ITERS", "8"))
@@ -306,20 +311,47 @@ def make_workload(target, ids, ops_per_iter):
     return search_ops(target, ids)[:ops_per_iter]
 
 
-def reset_save_store():
-    """Wipe the save targets so every cell starts from an empty store (keeps
-    create latency comparable across cells instead of growing with the index).
+# The save targets whose on-disk state a cell mutates: the local project's
+# memories+config, the global store, and the LanceDB indices under projects/.
+def _save_state_paths():
+    return [
+        PROJECTS_DIR / LOCAL_PROJECT / ".engramdb",
+        DATA_DIR / "global",
+        DATA_DIR / "projects",
+    ]
 
-    Only the local project is re-initialized; the global store is left absent so
-    `open_global()` re-creates it cleanly on first use. We deliberately do NOT
-    rewrite config here — execution mode is driven by the ENGRAMDB_IN_PROCESS env
-    var, and writing a bare config.toml into a wiped global dir would leave it
-    half-initialized and break `open_global()`."""
-    shutil.rmtree(PROJECTS_DIR / LOCAL_PROJECT / ".engramdb", ignore_errors=True)
-    shutil.rmtree(DATA_DIR / "global", ignore_errors=True)
-    shutil.rmtree(DATA_DIR / "projects", ignore_errors=True)
-    subprocess.run([BIN, "--quiet", "--dir", str(PROJECTS_DIR / LOCAL_PROJECT),
-                    "init", "--no-embeddings"], capture_output=True)
+
+def create_seed_snapshot():
+    """Snapshot the seeded store once so each cell can be restored to it."""
+    if SEED_SNAP.exists():
+        shutil.rmtree(SEED_SNAP)
+    SEED_SNAP.mkdir(parents=True)
+    for i, src in enumerate(_save_state_paths()):
+        if src.exists():
+            shutil.copytree(src, SEED_SNAP / str(i))
+
+
+def reset_save_store():
+    """Reset the save targets before a cell so create latency stays comparable
+    across cells (the index grows within a cell, not across them).
+
+    SAVE_SEED restores the populated seed snapshot (creates insert into a
+    pre-filled index); otherwise the store is wiped to empty. We deliberately do
+    NOT rewrite config — execution mode is driven by ENGRAMDB_IN_PROCESS, and a
+    bare config.toml in a wiped global dir would break `open_global()`."""
+    time.sleep(0.3)  # let any background embed from the previous cell drain
+    for src in _save_state_paths():
+        shutil.rmtree(src, ignore_errors=True)
+    if SAVE_SEED:
+        for i, dst in enumerate(_save_state_paths()):
+            snap = SEED_SNAP / str(i)
+            if snap.exists():
+                shutil.copytree(snap, dst)
+    else:
+        # Empty store: re-init only the local project; open_global() recreates
+        # the global store cleanly on first use.
+        subprocess.run([BIN, "--quiet", "--dir", str(PROJECTS_DIR / LOCAL_PROJECT),
+                        "init", "--no-embeddings"], capture_output=True)
 
 
 def fetch_ids(target, n=2):
@@ -418,6 +450,7 @@ def run_cell(execution, target, ops_per_iter, n_sessions, ids):
     return {
         "workload": WORKLOAD,
         "save_reset": SAVE_RESET if WORKLOAD == "save" else None,
+        "save_seed": SAVE_SEED if WORKLOAD == "save" else None,
         "execution": execution,
         "target": target,
         "ops_per_iter": ops_per_iter,
@@ -439,6 +472,9 @@ def run_cell(execution, target, ops_per_iter, n_sessions, ids):
 def main():
     # Daemon stays enabled in config; ENGRAMDB_IN_PROCESS toggles mode per session.
     write_daemon_config()
+    # For seeded saves, capture the pre-generated store before the matrix mutates it.
+    if WORKLOAD == "save" and SAVE_SEED:
+        create_seed_snapshot()
     results = []
     for execution in ["in_process", "daemon"]:
         # Bring the daemon to the matching state: absent for in-process (the env
