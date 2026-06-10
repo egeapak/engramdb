@@ -127,6 +127,29 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
                 continue;
             }
         };
+        // Defense layer 3 (Unix): verify the peer's kernel-reported uid via
+        // `SO_PEERCRED` before serving anything. Layers 1+2 (0700 socket dir,
+        // 0600 socket file — see `transport`) should already keep other users
+        // out, but this check holds even if the socket path was relocated to
+        // a directory with looser permissions. A rejected peer is dropped
+        // before it can drive inference, read Status, probe arbitrary `dir`
+        // config paths, or send an unauthenticated Shutdown.
+        #[cfg(unix)]
+        match stream.peer_cred() {
+            Ok(cred) if peer_allowed(cred.uid(), super::current_euid()) => {}
+            Ok(cred) => {
+                tracing::warn!(
+                    "daemon rejected connection from uid {} (serving uid {} only)",
+                    cred.uid(),
+                    super::current_euid()
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!("daemon rejected connection: peer credentials unavailable: {e}");
+                continue;
+            }
+        }
         let ctx = Arc::clone(&ctx);
         let active = Arc::clone(&active);
         // Count the connection and stamp activity *before* spawning, so the
@@ -144,6 +167,18 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
             active.fetch_sub(1, Ordering::SeqCst);
         });
     }
+}
+
+/// Access policy for an accepted daemon connection: the peer's uid (from
+/// `SO_PEERCRED`) must equal this process's effective uid. Root is
+/// deliberately **not** exempt — a uid-0 peer of a non-root daemon is
+/// rejected like any other mismatch. Root can already reach the models, data,
+/// and the daemon process itself directly, so an exemption would buy nothing
+/// while complicating the policy to two cases; a root client that genuinely
+/// needs a daemon simply spawns one as itself (auto-spawn makes that free).
+#[cfg(unix)]
+pub(crate) fn peer_allowed(peer_uid: u32, my_euid: u32) -> bool {
+    peer_uid == my_euid
 }
 
 /// Serve a single client connection. Generic over the transport stream so the

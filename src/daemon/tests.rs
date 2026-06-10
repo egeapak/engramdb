@@ -634,6 +634,8 @@ async fn dispatch_rejects_missing_dir() {
 #[cfg(unix)]
 #[tokio::test]
 async fn daemon_reclaims_stale_socket() {
+    use std::os::unix::fs::PermissionsExt;
+
     let tmp = TempDir::new().unwrap();
     let socket = tmp.path().join("d.sock");
     std::fs::write(&socket, b"stale - not a live socket").unwrap();
@@ -649,6 +651,34 @@ async fn daemon_reclaims_stale_socket() {
     )
     .await;
     assert!(matches!(resp, DaemonResponse::Pong { .. }));
+
+    // Permission hardening holds on the reclaim path too: the served socket
+    // is owner-only (chmod'd on the temp path before the atomic rename).
+    let mode = std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "reclaimed daemon socket must be mode 0600");
+}
+
+/// The daemon's peer policy: only a peer whose `SO_PEERCRED` uid equals our
+/// effective uid is served. Root (uid 0) is deliberately not exempt — see
+/// `server::peer_allowed`. The accept-path enforcement is exercised
+/// implicitly by every test that connects to a `run_daemon` socket (same
+/// process ⇒ same uid); this pins the decision function itself, which a real
+/// cross-uid connection can't do inside a single-user test environment.
+#[cfg(unix)]
+#[test]
+fn peer_allowed_only_for_matching_euid() {
+    use super::server::peer_allowed;
+    assert!(peer_allowed(1000, 1000), "same uid is served");
+    assert!(peer_allowed(0, 0), "a root daemon serves root peers");
+    assert!(!peer_allowed(1001, 1000), "another user is rejected");
+    assert!(
+        !peer_allowed(0, 1000),
+        "root peers are rejected by a non-root daemon (no uid-0 exemption)"
+    );
+    assert!(
+        !peer_allowed(1000, 0),
+        "a root daemon does not serve non-root peers"
+    );
 }
 
 // ---------------------------------------------------------------------------

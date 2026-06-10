@@ -41,16 +41,39 @@ mod tests;
 
 use std::path::PathBuf;
 
+/// This process's effective uid. Used for the daemon's access-control
+/// layers: per-uid default socket paths, socket-directory ownership checks,
+/// and the `SO_PEERCRED` peer check in the accept loop.
+#[cfg(unix)]
+pub(crate) fn current_euid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
 /// Base directory for the daemon's socket and lock files.
 ///
-/// Prefers `$XDG_RUNTIME_DIR` (tmpfs, per-user, cleared on logout), then the
-/// per-user cache dir, then the system temp dir. Per-user by construction so
-/// daemons of different users never collide.
+/// Prefers `$XDG_RUNTIME_DIR` (tmpfs, per-user, mode 0700 by spec, cleared on
+/// logout), then the per-user cache dir, then — as a last resort on systems
+/// with neither (cron, minimal containers, some su/sudo sessions) — a
+/// **per-uid** subdirectory of the system temp dir (`/tmp/engramdb-<uid>`).
+/// The uid in the temp-dir name guarantees two users never contend for the
+/// same default path even under a shared world-writable `/tmp`.
+///
+/// The base alone is not the security boundary: whichever directory is chosen
+/// (including config/env overrides), the Unix transport hardens it at bind
+/// time — the socket's parent directory is created with (or tightened to)
+/// mode 0700, the socket file is chmod'd 0600, and the server verifies each
+/// accepted peer's uid via `SO_PEERCRED` (see [`transport`] and
+/// `server::peer_allowed`). So even a fallback under `/tmp` is not reachable
+/// by other local users.
 fn runtime_base() -> PathBuf {
-    dirs::runtime_dir()
-        .or_else(dirs::cache_dir)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("engramdb")
+    if let Some(d) = dirs::runtime_dir().or_else(dirs::cache_dir) {
+        return d.join("engramdb");
+    }
+    #[cfg(unix)]
+    let leaf = format!("engramdb-{}", current_euid());
+    #[cfg(not(unix))]
+    let leaf = String::from("engramdb");
+    std::env::temp_dir().join(leaf)
 }
 
 /// The default per-user socket path (no overrides applied).
