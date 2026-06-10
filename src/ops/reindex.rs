@@ -32,6 +32,12 @@ pub struct ReindexResult {
 /// - `embeddings_only`, provider unavailable: error. The caller explicitly
 ///   asked for vectors; silently reporting `embedded: 0` as success would
 ///   mask the broken state `doctor` told them to fix.
+///
+/// When another still-existing checkout owns this project ID (a second clone
+/// of the same git remote — see `MemoryStore::checkout_conflict`), every
+/// destructive step degrades to non-destructive: the metadata rebuild is
+/// upsert-only, the chunks table is never dropped, and only memories backed
+/// by a local file are re-embedded. A warning explains the degraded mode.
 pub async fn reindex(
     store: &MemoryStore,
     engine: Option<&RetrievalEngine>,
@@ -43,6 +49,13 @@ pub async fn reindex(
     let mut warnings = Vec::new();
 
     let embeddings_available = engine.is_some_and(|e| e.embeddings_available());
+
+    // Shared-ID guard: a different, still-existing checkout (second clone of
+    // the same remote) owns this project ID. The LanceDB index is shared but
+    // only this checkout's memory files are visible here, so every
+    // destructive step below must be skipped or scoped to local files —
+    // otherwise the other clone's rows and vectors are silently destroyed.
+    let foreign_checkout = store.checkout_conflict().await;
 
     // The user explicitly asked for vectors to be rebuilt; fail fast
     // instead of silently doing nothing. Existing vectors are untouched.
@@ -58,20 +71,47 @@ pub async fn reindex(
     // the metadata table; existing embedding vectors survive.
     if !embeddings_only {
         indexed = store.reindex().await?;
+        if let Some(other) = &foreign_checkout {
+            warnings.push(format!(
+                "this checkout shares its project ID (and index) with another checkout \
+                 at {} — reindex ran in non-destructive (upsert-only) mode, so the other \
+                 checkout's index rows and vectors were preserved and stale entries were \
+                 NOT pruned. Run reindex from the registered checkout for a full rebuild, \
+                 or remove it and run `engramdb init` here to take over the registration.",
+                other.display(),
+            ));
+        }
     }
 
     // Re-embed all memories if engine has embeddings
     if let Some(engine) = engine {
         if embeddings_available {
-            if !embeddings_only {
-                // Full reindex with a confirmed provider: drop and recreate
-                // the chunks table so stale vectors are fully replaced and a
-                // dimension change in config takes effect. Only safe here —
-                // every memory is re-embedded immediately below.
+            // Full reindex with a confirmed provider: drop and recreate the
+            // chunks table so stale vectors are fully replaced and a
+            // dimension change in config takes effect. Only safe here —
+            // every memory is re-embedded immediately below. Under a
+            // checkout conflict the table is left in place instead: the
+            // per-memory `upsert_chunks` below still replaces this
+            // checkout's vectors atomically, while the other clone's
+            // vectors survive.
+            if !embeddings_only && foreign_checkout.is_none() {
                 store.clear_chunks().await?;
             }
 
+            // Under a checkout conflict the shared index also lists the other
+            // clone's memories, whose files are not visible here. Re-embed
+            // only the ids backed by a local file so they aren't reported as
+            // per-memory errors.
             let ids = store.list_ids().await?;
+            let ids: Vec<String> = if foreign_checkout.is_some() {
+                let local = store
+                    .batch_exists(&ids)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("batch existence check failed: {}", e))?;
+                ids.into_iter().filter(|id| local.contains(id)).collect()
+            } else {
+                ids
+            };
             for id in &ids {
                 match store.get(id).await {
                     Ok(memory) => match engine.embed_memory(&memory).await {
@@ -311,6 +351,89 @@ mod tests {
                 dimensions: 384,
             })
         );
+    }
+
+    /// Create a fake git clone with a fixed remote URL so two directories
+    /// compute the same (remote-derived) project ID.
+    fn make_clone(root: &std::path::Path, name: &str, remote: &str) -> std::path::PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(
+            dir.join(".git").join("config"),
+            format!(
+                "[remote \"origin\"]\n\turl = https://github.com/example/{}.git\n",
+                remote
+            ),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// CRITICAL data-loss guard: a full reindex (with a working provider)
+    /// run from the second clone of the same remote must degrade to
+    /// non-destructive mode — the other clone's index rows and vectors
+    /// survive, the chunks table is not dropped, only local files are
+    /// re-embedded, and a warning explains the degraded mode.
+    #[tokio::test]
+    async fn reindex_in_second_clone_is_upsert_only_and_warns() {
+        let tmp = TempDir::new().unwrap();
+        let a = make_clone(tmp.path(), "clone-a", "ops-reindex-conflict");
+        let b = make_clone(tmp.path(), "clone-b", "ops-reindex-conflict");
+        // The conflict guard reads the global file registry (redirected to a
+        // per-process temp dir by the test-isolation arm).
+        let registry = crate::storage::FileRegistry::global().unwrap();
+
+        let store_a = MemoryStore::init(&a, &registry).await.unwrap();
+        let store_b = MemoryStore::init(&b, &registry).await.unwrap();
+
+        // Clone A's memory file is invisible from B; its index row and
+        // vector live in the shared LanceDB table.
+        let mem_a = Memory::new(MemoryType::Decision, "A", "C", Provenance::human());
+        store_a.create(&mem_a).await.unwrap();
+        store_a
+            .upsert_chunks(&mem_a.id, vec![vec![0.25f32; 384]])
+            .await
+            .unwrap();
+
+        let mem_b = Memory::new(MemoryType::Decision, "B", "C", Provenance::human());
+        store_b.create(&mem_b).await.unwrap();
+
+        let engine_store = MemoryStore::open(&b).await.unwrap();
+        let engine = RetrievalEngine::new(engine_store, EngramConfig::default())
+            .with_embedding_provider(Arc::new(StubEmbeddingProvider));
+
+        let result = reindex(&store_b, Some(&engine), false).await.unwrap();
+
+        assert_eq!(result.indexed, 1, "only B's files are scanned");
+        assert_eq!(result.embedded, 1, "only B's local memory is re-embedded");
+        assert!(
+            result.errors.is_empty(),
+            "the other clone's ids must not surface as errors: {:?}",
+            result.errors
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("another checkout")),
+            "the degraded mode must be surfaced as a warning, got: {:?}",
+            result.warnings
+        );
+
+        // The other clone's row and vector survive — clear_memories,
+        // clear_chunks, and the orphan prune were all skipped.
+        assert!(store_b.list_ids().await.unwrap().contains(&mem_a.id));
+        let chunks = store_b.export_chunks(&mem_a.id).await.unwrap();
+        assert_eq!(
+            chunks.len(),
+            1,
+            "clear_chunks must be skipped under a checkout conflict"
+        );
+        assert_eq!(chunks[0], vec![0.25f32; 384]);
+
+        // B's own memory was re-embedded with the live provider.
+        let b_chunks = store_b.export_chunks(&mem_b.id).await.unwrap();
+        assert_eq!(b_chunks, vec![vec![0.5f32; 384]]);
     }
 
     /// CRITICAL guard: on a partial (here: total) embedding failure, the

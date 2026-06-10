@@ -131,8 +131,25 @@ impl MemoryStore {
         // Create personal directories
         async_fs::create_dir_all(paths::personal_memories_dir(&project_id)?).await?;
 
-        // Update registry
+        // Update registry. `update` keeps the first registration: if another
+        // still-existing checkout already owns this project ID (two clones of
+        // the same remote), the entry continues to point at it.
         registry.update(dir, &project_id).await?;
+
+        // Surface the shared-ID situation loudly at init time. Destructive
+        // index operations are additionally guarded in `reindex`; `doctor`
+        // reports it as a warning check.
+        if let Ok(reg) = registry.load().await {
+            if let Some(other) = super::registry::conflicting_checkout_path(&reg, &project_id, dir)
+            {
+                tracing::warn!(
+                    "Project ID {} is already registered to another checkout at {} — \
+                     both checkouts share one index; see `engramdb doctor`",
+                    project_id,
+                    other.display()
+                );
+            }
+        }
 
         Ok(Self {
             project_dir: dir.to_path_buf(),
@@ -570,16 +587,35 @@ impl MemoryStore {
     /// on disk are deleted, keeping the chunks table consistent. Callers
     /// that intend to re-embed everything (and only those) should follow
     /// up with [`Self::clear_chunks`].
+    ///
+    /// **Shared-ID guard:** when [`Self::checkout_conflict`] detects that a
+    /// different, still-existing checkout owns this project ID (two clones
+    /// of the same git remote share one index but have separate
+    /// `.engramdb/memories/` trees), the rebuild degrades to a
+    /// non-destructive, upsert-only pass: the table is not cleared and
+    /// orphan chunks are not pruned, so the other checkout's rows and
+    /// vectors survive. Index rows have no per-checkout ownership column,
+    /// so a clear here would be unrecoverable data loss for the other clone.
     pub async fn reindex(&self) -> Result<usize> {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
 
-        // Clear only the metadata table — never the vectors. Dropping the
-        // chunks table here would silently destroy all embeddings whenever
-        // no provider is available to rebuild them afterwards.
-        self.lance_index
-            .clear_memories()
-            .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB clear failed: {}", e)))?;
+        let foreign_checkout = self.checkout_conflict().await;
+        if let Some(other) = &foreign_checkout {
+            tracing::warn!(
+                "Project ID is shared with another checkout at {} — running a \
+                 non-destructive (upsert-only) reindex; index rows and vectors \
+                 belonging to the other checkout are preserved",
+                other.display()
+            );
+        } else {
+            // Clear only the metadata table — never the vectors. Dropping the
+            // chunks table here would silently destroy all embeddings whenever
+            // no provider is available to rebuild them afterwards.
+            self.lance_index
+                .clear_memories()
+                .await
+                .map_err(|e| StorageError::Validation(format!("LanceDB clear failed: {}", e)))?;
+        }
 
         let mut indexed_ids = Vec::new();
 
@@ -599,23 +635,28 @@ impl MemoryStore {
 
         // Prune chunks for memories that no longer exist on disk, so the
         // preserved chunks table stays consistent with the rebuilt index.
-        let indexed_set: std::collections::HashSet<&str> =
-            indexed_ids.iter().map(|s| s.as_str()).collect();
-        let chunk_ids = self
-            .lance_index
-            .list_chunk_memory_ids()
-            .await
-            .map_err(|e| {
-                StorageError::Validation(format!("LanceDB list_chunk_memory_ids failed: {}", e))
-            })?;
-        for chunk_id in chunk_ids {
-            if !indexed_set.contains(chunk_id.as_str()) {
-                self.lance_index
-                    .delete_chunks(&chunk_id)
-                    .await
-                    .map_err(|e| {
-                        StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e))
-                    })?;
+        // Skipped under a checkout conflict: the other clone's memory files
+        // are not visible from here, so its chunk rows would all look like
+        // orphans and be deleted.
+        if foreign_checkout.is_none() {
+            let indexed_set: std::collections::HashSet<&str> =
+                indexed_ids.iter().map(|s| s.as_str()).collect();
+            let chunk_ids = self
+                .lance_index
+                .list_chunk_memory_ids()
+                .await
+                .map_err(|e| {
+                    StorageError::Validation(format!("LanceDB list_chunk_memory_ids failed: {}", e))
+                })?;
+            for chunk_id in chunk_ids {
+                if !indexed_set.contains(chunk_id.as_str()) {
+                    self.lance_index
+                        .delete_chunks(&chunk_id)
+                        .await
+                        .map_err(|e| {
+                            StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e))
+                        })?;
+                }
             }
         }
 
@@ -821,6 +862,32 @@ impl MemoryStore {
         manifest::save_manifest(&manifest_path, &manifest).await?;
 
         Ok(())
+    }
+
+    /// Detect whether a different, still-existing checkout owns this
+    /// project ID.
+    ///
+    /// Two independent clones of the same git remote hash to the same
+    /// project ID (deliberately — the ID is stable across moves/re-clones)
+    /// and therefore share one LanceDB index, write lock, and personal
+    /// memories dir, while each keeps its own `.engramdb/memories/` files.
+    /// The global registry records which checkout registered the ID first;
+    /// when that path is a different, still-existing directory, destructive
+    /// index operations from this checkout would corrupt the other one's
+    /// data (see [`Self::reindex`]).
+    ///
+    /// Returns the registered checkout's canonicalized path, or `None` when
+    /// this checkout is the registered owner, the registered path no longer
+    /// exists, this is the global store, or the registry is unavailable.
+    /// Linked git worktrees of the registered checkout never count as a
+    /// conflict.
+    pub async fn checkout_conflict(&self) -> Option<PathBuf> {
+        if self.is_global() {
+            return None;
+        }
+        let registry = super::registry::FileRegistry::global().ok()?;
+        let reg = registry.load().await.ok()?;
+        super::registry::conflicting_checkout_path(&reg, &self.project_id, &self.project_dir)
     }
 
     /// Read the persisted embedding-model fingerprint, if any. `None` on
@@ -1596,6 +1663,186 @@ mod tests {
         assert_eq!(existing.len(), 3);
         assert!(!existing.contains("fake-id-1"));
         assert!(!existing.contains("fake-id-2"));
+    }
+
+    // --- Second-clone (shared project ID) guard tests ---
+
+    /// Create a fake git clone with a fixed remote URL so two directories
+    /// compute the same (remote-derived) project ID. Each test uses a
+    /// distinct `remote` so per-test global state never collides.
+    fn make_clone(root: &Path, name: &str, remote: &str) -> PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(
+            dir.join(".git").join("config"),
+            format!(
+                "[remote \"origin\"]\n\turl = https://github.com/example/{}.git\n",
+                remote
+            ),
+        )
+        .unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn test_second_clone_detects_checkout_conflict() {
+        let tmp = TempDir::new().unwrap();
+        let a = make_clone(tmp.path(), "clone-a", "conflict-detect");
+        let b = make_clone(tmp.path(), "clone-b", "conflict-detect");
+        // `checkout_conflict` consults the global file registry (redirected to
+        // a per-process temp dir by the test-isolation arm), so init through
+        // it rather than an InMemoryRegistry.
+        let registry = crate::registry::FileRegistry::global().unwrap();
+
+        let store_a = MemoryStore::init(&a, &registry).await.unwrap();
+        let store_b = MemoryStore::init(&b, &registry).await.unwrap();
+        assert_eq!(
+            store_a.project_id, store_b.project_id,
+            "clones of one remote share a project ID by design"
+        );
+
+        assert_eq!(
+            store_a.checkout_conflict().await,
+            None,
+            "the registered owner sees no conflict"
+        );
+        assert_eq!(
+            store_b.checkout_conflict().await,
+            Some(a.canonicalize().unwrap()),
+            "the second clone must detect the registered checkout"
+        );
+
+        // The conflict is equally detectable from a plain `open`.
+        let reopened_b = MemoryStore::open(&b).await.unwrap();
+        assert_eq!(
+            reopened_b.checkout_conflict().await,
+            Some(a.canonicalize().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_second_clone_init_does_not_steal_registration_until_owner_gone() {
+        let tmp = TempDir::new().unwrap();
+        let a = make_clone(tmp.path(), "clone-a", "conflict-repoint");
+        let b = make_clone(tmp.path(), "clone-b", "conflict-repoint");
+        let registry = crate::registry::FileRegistry::global().unwrap();
+
+        let store_a = MemoryStore::init(&a, &registry).await.unwrap();
+        MemoryStore::init(&b, &registry).await.unwrap();
+
+        let loaded = registry.load().await.unwrap();
+        let entry = loaded
+            .projects
+            .iter()
+            .find(|e| e.project_id == store_a.project_id)
+            .expect("project registered");
+        assert_eq!(
+            PathBuf::from(&entry.project_path),
+            a.canonicalize().unwrap(),
+            "registry must keep the first checkout while it exists"
+        );
+
+        // The first checkout disappears (deleted / moved clone): the next
+        // init from B legitimately takes over the registration.
+        async_fs::remove_dir_all(&a).await.unwrap();
+        let store_b = MemoryStore::init(&b, &registry).await.unwrap();
+
+        let loaded = registry.load().await.unwrap();
+        let entry = loaded
+            .projects
+            .iter()
+            .find(|e| e.project_id == store_b.project_id)
+            .expect("project registered");
+        assert_eq!(
+            PathBuf::from(&entry.project_path),
+            b.canonicalize().unwrap(),
+            "registry must self-heal once the old checkout is gone"
+        );
+        assert_eq!(store_b.checkout_conflict().await, None);
+    }
+
+    /// CRITICAL data-loss guard: a reindex run from the second clone shares
+    /// the LanceDB index with the first clone but only sees its own memory
+    /// files — it must NOT clear the other clone's index rows or prune its
+    /// vectors as "orphans".
+    #[tokio::test]
+    async fn test_reindex_from_second_clone_preserves_other_checkouts_data() {
+        let tmp = TempDir::new().unwrap();
+        let a = make_clone(tmp.path(), "clone-a", "conflict-reindex");
+        let b = make_clone(tmp.path(), "clone-b", "conflict-reindex");
+        let registry = crate::registry::FileRegistry::global().unwrap();
+
+        let store_a = MemoryStore::init(&a, &registry).await.unwrap();
+        let store_b = MemoryStore::init(&b, &registry).await.unwrap();
+
+        // Clone A's memory file lives only in A's tree; its index row and
+        // vector live in the shared LanceDB table.
+        let mem_a = create_test_memory("clone-a-mem", Visibility::Shared);
+        store_a.create(&mem_a).await.unwrap();
+        store_a
+            .upsert_chunks("clone-a-mem", vec![vec![0.25f32; 384]])
+            .await
+            .unwrap();
+
+        let mem_b = create_test_memory("clone-b-mem", Visibility::Shared);
+        store_b.create(&mem_b).await.unwrap();
+
+        let count = store_b.reindex().await.unwrap();
+        assert_eq!(count, 1, "only this checkout's files are scanned");
+
+        let ids = store_b.list_ids().await.unwrap();
+        assert!(
+            ids.contains(&"clone-a-mem".to_string()),
+            "the other clone's index row must survive a guarded reindex"
+        );
+        assert!(ids.contains(&"clone-b-mem".to_string()));
+
+        let chunks = store_b.export_chunks("clone-a-mem").await.unwrap();
+        assert_eq!(
+            chunks.len(),
+            1,
+            "the other clone's vectors must not be pruned as orphans"
+        );
+        assert_eq!(chunks[0], vec![0.25f32; 384]);
+    }
+
+    /// Control: once the conflicting checkout is gone (and the registry has
+    /// self-healed), reindex is destructive again — stale rows and orphan
+    /// chunks from the departed clone are cleaned up.
+    #[tokio::test]
+    async fn test_reindex_becomes_destructive_again_once_other_clone_gone() {
+        let tmp = TempDir::new().unwrap();
+        let a = make_clone(tmp.path(), "clone-a", "conflict-cleanup");
+        let b = make_clone(tmp.path(), "clone-b", "conflict-cleanup");
+        let registry = crate::registry::FileRegistry::global().unwrap();
+
+        let store_a = MemoryStore::init(&a, &registry).await.unwrap();
+        let store_b = MemoryStore::init(&b, &registry).await.unwrap();
+
+        let mem_a = create_test_memory("clone-a-mem", Visibility::Shared);
+        store_a.create(&mem_a).await.unwrap();
+        store_a
+            .upsert_chunks("clone-a-mem", vec![vec![0.25f32; 384]])
+            .await
+            .unwrap();
+        let mem_b = create_test_memory("clone-b-mem", Visibility::Shared);
+        store_b.create(&mem_b).await.unwrap();
+
+        // Clone A disappears; re-init from B takes over the registration.
+        async_fs::remove_dir_all(&a).await.unwrap();
+        let store_b = MemoryStore::init(&b, &registry).await.unwrap();
+        assert_eq!(store_b.checkout_conflict().await, None);
+
+        let count = store_b.reindex().await.unwrap();
+        assert_eq!(count, 1);
+
+        let ids = store_b.list_ids().await.unwrap();
+        assert_eq!(ids, vec!["clone-b-mem".to_string()]);
+        assert_eq!(
+            store_b.list_chunk_memory_ids().await.unwrap(),
+            Vec::<String>::new(),
+            "the departed clone's orphan chunks are pruned by a full reindex"
+        );
     }
 
     // --- Global memory store tests ---

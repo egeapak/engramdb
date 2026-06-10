@@ -260,6 +260,30 @@ pub async fn doctor_environment(
             status: None,
         });
 
+        // Second clone of the same git remote: both checkouts hash to the
+        // same project ID, so they share one LanceDB index, write lock, and
+        // personal-memories dir while keeping separate .engramdb/memories/.
+        if let Some(other) = &registry_info.conflicting_checkout {
+            project_checks.push(EnvironmentCheck {
+                name: "Checkout identity".to_string(),
+                passed: true,
+                message: format!(
+                    "project ID {} is shared with another checkout at {}",
+                    project_id,
+                    other.display()
+                ),
+                suggestion: Some(
+                    "Two checkouts of the same remote share one index; memories created \
+                     in the other checkout appear as stale entries here, and reindex runs \
+                     in non-destructive mode. Prefer running engramdb from the registered \
+                     checkout, or remove it and run `engramdb init` here to take over."
+                        .to_string(),
+                ),
+                details: vec![],
+                status: Some(CheckStatus::Warn),
+            });
+        }
+
         let sc = if let Some(s) = store {
             match doctor(s).await {
                 Ok(result) => {
@@ -464,6 +488,11 @@ struct RegistryInfo {
     hierarchy_dangling: usize,
     hierarchy_stale_parent: usize,
     hierarchy_cycle: usize,
+    /// A different, still-existing checkout is registered as the owner of
+    /// this project ID (second clone of the same git remote). The two
+    /// checkouts share one LanceDB index, write lock, and personal-memories
+    /// dir while keeping separate `.engramdb/memories/` trees.
+    conflicting_checkout: Option<PathBuf>,
 }
 
 /// Load registry info once for reuse across sections.
@@ -482,6 +511,7 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
                 hierarchy_dangling: 0,
                 hierarchy_stale_parent: 0,
                 hierarchy_cycle: 0,
+                conflicting_checkout: None,
             };
         }
     };
@@ -520,6 +550,9 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
 
             let issues = crate::ops::projects::scan_hierarchy_issues(&reg);
 
+            let conflicting_checkout =
+                crate::storage::conflicting_checkout_path(&reg, &project_id, dir);
+
             RegistryInfo {
                 in_registry,
                 total_projects,
@@ -529,6 +562,7 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
                 hierarchy_dangling: issues.dangling.len(),
                 hierarchy_stale_parent: issues.stale_parent.len(),
                 hierarchy_cycle: issues.cycle_members.len(),
+                conflicting_checkout,
             }
         }
         Err(_) => RegistryInfo {
@@ -540,6 +574,7 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
             hierarchy_dangling: 0,
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
+            conflicting_checkout: None,
         },
     }
 }
@@ -1856,6 +1891,72 @@ mod tests {
         );
     }
 
+    /// Create a fake git clone with a fixed remote URL so two directories
+    /// compute the same (remote-derived) project ID.
+    fn make_clone(root: &std::path::Path, name: &str, remote: &str) -> std::path::PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(
+            dir.join(".git").join("config"),
+            format!(
+                "[remote \"origin\"]\n\turl = https://github.com/example/{}.git\n",
+                remote
+            ),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// A second clone of the same remote shares the registered checkout's
+    /// project ID; doctor must surface this as a "Checkout identity" warning
+    /// naming the other checkout's path.
+    #[tokio::test]
+    async fn test_environment_warns_on_shared_checkout_identity() {
+        let tmp = TempDir::new().unwrap();
+        let a = make_clone(tmp.path(), "clone-a", "doctor-conflict");
+        let b = make_clone(tmp.path(), "clone-b", "doctor-conflict");
+        // doctor reads the global file registry (redirected per-process by
+        // the test-isolation arm), so register through it.
+        let registry = crate::storage::FileRegistry::global().unwrap();
+        MemoryStore::init(&a, &registry).await.unwrap();
+        let store_b = MemoryStore::init(&b, &registry).await.unwrap();
+
+        let result = doctor_environment(&b, Some(&store_b), test_daemon_check()).await;
+        let check = result
+            .all_checks()
+            .into_iter()
+            .find(|c| c.name == "Checkout identity")
+            .expect("shared-ID situation must surface as a doctor check");
+
+        assert!(check.passed, "warning check must not fail the run");
+        assert_eq!(check.status, Some(CheckStatus::Warn));
+        let a_canon = a.canonicalize().unwrap();
+        assert!(
+            check.message.contains("shared with another checkout")
+                && check.message.contains(&a_canon.display().to_string()),
+            "message must name the other checkout, got: {}",
+            check.message
+        );
+    }
+
+    /// The sole (registered) checkout must NOT get a checkout-identity check.
+    #[tokio::test]
+    async fn test_environment_no_checkout_identity_check_for_sole_clone() {
+        let tmp = TempDir::new().unwrap();
+        let a = make_clone(tmp.path(), "clone-a", "doctor-no-conflict");
+        let registry = crate::storage::FileRegistry::global().unwrap();
+        let store = MemoryStore::init(&a, &registry).await.unwrap();
+
+        let result = doctor_environment(&a, Some(&store), test_daemon_check()).await;
+        assert!(
+            !result
+                .all_checks()
+                .iter()
+                .any(|c| c.name == "Checkout identity"),
+            "no conflict check expected for the registered owner"
+        );
+    }
+
     #[tokio::test]
     async fn test_environment_store_not_initialized() {
         let temp_dir = TempDir::new().unwrap();
@@ -2210,6 +2311,7 @@ mod tests {
             hierarchy_dangling: 0,
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
+            conflicting_checkout: None,
         };
         let checks = build_registry_checks(&info);
         assert!(checks[0].message.contains("5 registered"));
@@ -2230,6 +2332,7 @@ mod tests {
             hierarchy_dangling: 0,
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
+            conflicting_checkout: None,
         };
         let checks = build_registry_checks(&info);
         let details_str = checks[0].details.join(" ");
@@ -2249,6 +2352,7 @@ mod tests {
             hierarchy_dangling: 0,
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
+            conflicting_checkout: None,
         };
         let checks = build_registry_checks(&info);
         assert_eq!(checks[0].status, Some(CheckStatus::Warn));
@@ -2268,6 +2372,7 @@ mod tests {
             hierarchy_dangling: 0,
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
+            conflicting_checkout: None,
         };
         let checks = build_registry_checks(&info);
         let hierarchy = checks
@@ -2290,6 +2395,7 @@ mod tests {
             hierarchy_dangling: 1,
             hierarchy_stale_parent: 1,
             hierarchy_cycle: 2,
+            conflicting_checkout: None,
         };
         let checks = build_registry_checks(&info);
         let hierarchy = checks

@@ -87,7 +87,30 @@ pub trait RegistryBackend: Send + Sync {
             .iter_mut()
             .find(|e| e.project_id == project_id)
         {
-            entry.project_path = path_str;
+            // Keep the first registration. Two independent clones of the same
+            // git remote hash to the same project ID (a deliberate feature:
+            // the ID is stable across moves and re-clones), so they share one
+            // LanceDB index, write lock, and personal-memories dir. The
+            // registry's `project_path` records which checkout *owns* the ID;
+            // silently repointing it on every open would let the second clone
+            // steal ownership. Repoint only when the registered path no
+            // longer exists (the legitimate moved/re-cloned self-heal case)
+            // or when it is the same directory under a different spelling.
+            let registered = PathBuf::from(&entry.project_path);
+            let registered_canon = registered
+                .canonicalize()
+                .unwrap_or_else(|_| registered.clone());
+            if registered_canon == abs_path || !registered_canon.exists() {
+                entry.project_path = path_str;
+            } else {
+                tracing::warn!(
+                    "Registry entry for project '{}' already points at existing checkout {}; \
+                     keeping it ({} shares the same project ID)",
+                    project_id,
+                    entry.project_path,
+                    path_str
+                );
+            }
             if overwrite_parent {
                 entry.parent_project_id = parent_project_id.map(|s| s.to_string());
             }
@@ -176,6 +199,55 @@ pub fn resolve_root_project_id(registry: &Registry, project_id: &str) -> String 
         }
     }
     current
+}
+
+/// Detect whether `current_dir`'s claim on `project_id` conflicts with a
+/// different, still-existing checkout recorded in the registry.
+///
+/// Two independent clones of the same git remote hash to the same project ID
+/// and therefore share one machine-global LanceDB index, write lock, and
+/// personal-memories dir — while each keeps its own
+/// `<clone>/.engramdb/memories/` files. Destructive index operations run from
+/// the non-registered clone would silently delete the registered clone's
+/// index rows and vectors.
+///
+/// Returns the registered checkout's canonicalized path when:
+/// - the registry entry for `project_id` points at a different directory than
+///   `current_dir` (after canonicalization),
+/// - that directory still exists (a vanished path is the moved-clone case,
+///   which self-heals via re-registration, not a conflict), and
+/// - `current_dir` is not a linked git worktree of the registered checkout
+///   (worktrees legitimately route to the main checkout's project).
+pub fn conflicting_checkout_path(
+    registry: &Registry,
+    project_id: &str,
+    current_dir: &Path,
+) -> Option<PathBuf> {
+    let entry = registry
+        .projects
+        .iter()
+        .find(|e| e.project_id == project_id)?;
+    let registered = PathBuf::from(&entry.project_path);
+    let registered_canon = registered
+        .canonicalize()
+        .unwrap_or_else(|_| registered.clone());
+    let current_canon = current_dir
+        .canonicalize()
+        .unwrap_or_else(|_| current_dir.to_path_buf());
+    if registered_canon == current_canon || !registered_canon.exists() {
+        return None;
+    }
+    // A linked worktree of the registered checkout shares the main project's
+    // storage by design — not a conflict. (Worktrees normally compute their
+    // own path-derived ID and never collide here, but stay defensive in case
+    // a store is opened at the worktree path directly.)
+    if let Some(main) = crate::project_id::detect_worktree_main(current_dir) {
+        let main_canon = main.canonicalize().unwrap_or(main);
+        if main_canon == registered_canon {
+            return None;
+        }
+    }
+    Some(registered_canon)
 }
 
 // ---------------------------------------------------------------------------
@@ -531,6 +603,162 @@ mod tests {
     fn test_resolve_root_project_id_unknown_returns_input() {
         let reg = Registry::default();
         assert_eq!(resolve_root_project_id(&reg, "unknown"), "unknown");
+    }
+
+    // ---- registration ownership (second-clone guard) ----
+
+    #[tokio::test]
+    async fn test_update_keeps_registered_path_while_it_exists() {
+        let dir_a = TempDir::new().unwrap();
+        let dir_b = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+
+        registry.update(dir_a.path(), "shared-id").await.unwrap();
+        // A second checkout claiming the same project ID must NOT steal the
+        // registration while the first checkout still exists.
+        registry.update(dir_b.path(), "shared-id").await.unwrap();
+
+        let loaded = registry.load().await.unwrap();
+        assert_eq!(loaded.projects.len(), 1);
+        assert_eq!(
+            PathBuf::from(&loaded.projects[0].project_path),
+            dir_a.path().canonicalize().unwrap(),
+            "registration must stay with the first checkout while it exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_repoints_when_registered_path_gone() {
+        let root = TempDir::new().unwrap();
+        let dir_a = root.path().join("a");
+        let dir_b = root.path().join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let registry = InMemoryRegistry::new();
+
+        registry.update(&dir_a, "shared-id").await.unwrap();
+        // The registered checkout vanishes (moved / re-cloned project) —
+        // the next open from the new location self-heals the entry.
+        std::fs::remove_dir_all(&dir_a).unwrap();
+        registry.update(&dir_b, "shared-id").await.unwrap();
+
+        let loaded = registry.load().await.unwrap();
+        assert_eq!(loaded.projects.len(), 1);
+        assert_eq!(
+            PathBuf::from(&loaded.projects[0].project_path),
+            dir_b.canonicalize().unwrap(),
+            "a vanished checkout must repoint to the new location"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_with_parent_sets_parent_without_repointing() {
+        let dir_a = TempDir::new().unwrap();
+        let dir_b = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+
+        registry.update(dir_a.path(), "shared-id").await.unwrap();
+        registry
+            .update_with_parent(dir_b.path(), "shared-id", Some("parent-id"))
+            .await
+            .unwrap();
+
+        let loaded = registry.load().await.unwrap();
+        let entry = &loaded.projects[0];
+        assert_eq!(
+            PathBuf::from(&entry.project_path),
+            dir_a.path().canonicalize().unwrap(),
+            "path must not be stolen even when setting a parent"
+        );
+        assert_eq!(entry.parent_project_id.as_deref(), Some("parent-id"));
+    }
+
+    // ---- conflicting_checkout_path ----
+
+    fn registry_with_entry(project_id: &str, path: &Path) -> Registry {
+        let mut reg = Registry::default();
+        reg.projects.push(RegistryEntry {
+            project_id: project_id.to_string(),
+            project_path: path.to_string_lossy().to_string(),
+            parent_project_id: None,
+        });
+        reg
+    }
+
+    #[test]
+    fn test_conflicting_checkout_path_detects_second_clone() {
+        let dir_a = TempDir::new().unwrap();
+        let dir_b = TempDir::new().unwrap();
+        let reg = registry_with_entry("shared-id", dir_a.path());
+
+        assert_eq!(
+            conflicting_checkout_path(&reg, "shared-id", dir_b.path()),
+            Some(dir_a.path().canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_conflicting_checkout_path_none_for_registered_owner() {
+        let dir_a = TempDir::new().unwrap();
+        let reg = registry_with_entry("shared-id", dir_a.path());
+        assert_eq!(
+            conflicting_checkout_path(&reg, "shared-id", dir_a.path()),
+            None
+        );
+    }
+
+    #[test]
+    fn test_conflicting_checkout_path_none_when_registered_path_gone() {
+        let root = TempDir::new().unwrap();
+        let dir_a = root.path().join("gone");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        let reg = registry_with_entry("shared-id", &dir_a);
+        std::fs::remove_dir_all(&dir_a).unwrap();
+
+        let dir_b = root.path().join("b");
+        std::fs::create_dir_all(&dir_b).unwrap();
+        assert_eq!(
+            conflicting_checkout_path(&reg, "shared-id", &dir_b),
+            None,
+            "a vanished registered path is the moved-clone case, not a conflict"
+        );
+    }
+
+    #[test]
+    fn test_conflicting_checkout_path_none_for_unknown_project() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(
+            conflicting_checkout_path(&Registry::default(), "no-such-id", dir.path()),
+            None
+        );
+    }
+
+    #[test]
+    fn test_conflicting_checkout_path_none_for_linked_worktree_of_registered() {
+        // Fake main + linked-worktree layout mirroring git's structure (same
+        // shape as the worktree.rs tests).
+        let tmp = TempDir::new().unwrap();
+        let main = tmp.path().join("main");
+        let wt = tmp.path().join("wt");
+        let wt_gitdir = main.join(".git").join("worktrees").join("wt");
+        std::fs::create_dir_all(main.join(".git")).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::create_dir_all(&wt_gitdir).unwrap();
+        std::fs::write(wt_gitdir.join("commondir"), "../..").unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", wt_gitdir.display()),
+        )
+        .unwrap();
+
+        // Registry says the main checkout owns the project ID; opening from
+        // the linked worktree legitimately shares that storage.
+        let reg = registry_with_entry("shared-id", &main.canonicalize().unwrap());
+        assert_eq!(
+            conflicting_checkout_path(&reg, "shared-id", &wt),
+            None,
+            "a linked worktree of the registered checkout is not a conflict"
+        );
     }
 
     #[test]
