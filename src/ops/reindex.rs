@@ -5,13 +5,33 @@ use crate::storage::MemoryStore;
 use anyhow::Result;
 
 /// Result of a reindex operation.
+#[derive(Debug)]
 pub struct ReindexResult {
     pub indexed: usize,
     pub embedded: usize,
     pub errors: Vec<String>,
+    /// Non-fatal conditions the user must see — e.g. re-embedding was
+    /// skipped because no embedding provider was available. Existing
+    /// vectors are preserved in that case, but the user asked for a full
+    /// reindex and didn't get one, so surfaces (CLI/MCP) must render these.
+    pub warnings: Vec<String>,
 }
 
 /// Rebuild index and optionally re-embed all memories.
+///
+/// Behavior matrix:
+/// - Full reindex, provider available: rebuild metadata, then drop and
+///   recreate the chunks table (picking up any dimension change) and
+///   re-embed every memory.
+/// - Full reindex, provider unavailable (engine absent or without
+///   embeddings): rebuild metadata only. Existing vectors are preserved;
+///   if an engine was supplied (the caller wanted re-embedding) a warning
+///   is added to the result.
+/// - `embeddings_only`, provider available: re-embed every memory in
+///   place (per-memory upsert replaces stale chunks atomically).
+/// - `embeddings_only`, provider unavailable: error. The caller explicitly
+///   asked for vectors; silently reporting `embedded: 0` as success would
+///   mask the broken state `doctor` told them to fix.
 pub async fn reindex(
     store: &MemoryStore,
     engine: Option<&RetrievalEngine>,
@@ -20,15 +40,37 @@ pub async fn reindex(
     let mut indexed = 0;
     let mut embedded = 0;
     let mut errors = Vec::new();
+    let mut warnings = Vec::new();
 
-    // Rebuild index from files (unless embeddings_only)
+    let embeddings_available = engine.is_some_and(|e| e.embeddings_available());
+
+    // The user explicitly asked for vectors to be rebuilt; fail fast
+    // instead of silently doing nothing. Existing vectors are untouched.
+    if embeddings_only && !embeddings_available {
+        anyhow::bail!(
+            "embedding provider unavailable — refusing to rebuild vectors; \
+             existing embeddings are preserved. Fix the model cache (see \
+             `engramdb doctor`) and retry."
+        );
+    }
+
+    // Rebuild index from files (unless embeddings_only). This rebuilds only
+    // the metadata table; existing embedding vectors survive.
     if !embeddings_only {
         indexed = store.reindex().await?;
     }
 
     // Re-embed all memories if engine has embeddings
     if let Some(engine) = engine {
-        if engine.embeddings_available() {
+        if embeddings_available {
+            if !embeddings_only {
+                // Full reindex with a confirmed provider: drop and recreate
+                // the chunks table so stale vectors are fully replaced and a
+                // dimension change in config takes effect. Only safe here —
+                // every memory is re-embedded immediately below.
+                store.clear_chunks().await?;
+            }
+
             let ids = store.list_ids().await?;
             for id in &ids {
                 match store.get(id).await {
@@ -53,6 +95,17 @@ pub async fn reindex(
                         })?;
                 }
             }
+        } else {
+            // The caller wanted re-embedding (an engine was supplied) but no
+            // provider is available. The index was rebuilt and existing
+            // vectors were preserved — say so loudly instead of reporting
+            // `embedded: 0` as quiet success.
+            warnings.push(
+                "embedding provider unavailable — skipped re-embedding; existing \
+                 vectors were preserved. Fix the model cache (see `engramdb doctor`) \
+                 and run `engramdb reindex --embeddings-only`."
+                    .to_string(),
+            );
         }
     }
 
@@ -60,6 +113,7 @@ pub async fn reindex(
         indexed,
         embedded,
         errors,
+        warnings,
     })
 }
 
@@ -94,6 +148,169 @@ mod tests {
         fn model_id(&self) -> String {
             "onnx/new-model".to_string()
         }
+    }
+
+    /// Embedding provider that deterministically succeeds — used to verify
+    /// the provider-available path replaces (not duplicates) chunks without
+    /// loading any real ONNX model.
+    struct StubEmbeddingProvider;
+
+    #[async_trait]
+    impl EmbeddingProvider for StubEmbeddingProvider {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.5f32; 384])
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.5f32; 384]).collect())
+        }
+        fn dimensions(&self) -> usize {
+            384
+        }
+        fn max_tokens(&self) -> usize {
+            256
+        }
+        fn model_id(&self) -> String {
+            "onnx/stub-model".to_string()
+        }
+    }
+
+    /// CRITICAL data-loss guard: a full reindex with NO embedding provider
+    /// (offline machine, missing model cache — the exact state `doctor`
+    /// tells users to fix by running reindex) must preserve existing
+    /// vectors and warn loudly, not silently drop the chunks table and
+    /// report success with `embedded: 0`.
+    #[tokio::test]
+    async fn reindex_without_provider_preserves_chunks_and_warns() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        let mem = Memory::new(MemoryType::Decision, "T", "C", Provenance::human());
+        store.create(&mem).await.unwrap();
+        store
+            .upsert_chunks(&mem.id, vec![vec![0.25f32; 384]])
+            .await
+            .unwrap();
+
+        // Engine WITHOUT an embedding provider — the caller wanted a full
+        // reindex (engine supplied) but the provider failed to resolve.
+        let engine_store = MemoryStore::open(temp_dir.path()).await.unwrap();
+        let engine = RetrievalEngine::new(engine_store, EngramConfig::default());
+        assert!(!engine.embeddings_available());
+
+        let result = reindex(&store, Some(&engine), false).await.unwrap();
+
+        assert_eq!(result.indexed, 1, "metadata must still be rebuilt");
+        assert_eq!(result.embedded, 0);
+        assert!(result.errors.is_empty());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("embedding provider unavailable")),
+            "skipped re-embedding must surface as a warning, got: {:?}",
+            result.warnings
+        );
+        let chunks = store.export_chunks(&mem.id).await.unwrap();
+        assert_eq!(
+            chunks.len(),
+            1,
+            "existing vectors must survive a reindex without a provider"
+        );
+        assert_eq!(chunks[0], vec![0.25f32; 384]);
+    }
+
+    /// `embeddings_only` is an explicit request to rebuild vectors. With no
+    /// provider it must error (not silently no-op), and the existing
+    /// vectors must be untouched.
+    #[tokio::test]
+    async fn embeddings_only_without_provider_errors_and_preserves_chunks() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        let mem = Memory::new(MemoryType::Decision, "T", "C", Provenance::human());
+        store.create(&mem).await.unwrap();
+        store
+            .upsert_chunks(&mem.id, vec![vec![0.25f32; 384]])
+            .await
+            .unwrap();
+
+        // Engine without provider.
+        let engine_store = MemoryStore::open(temp_dir.path()).await.unwrap();
+        let engine = RetrievalEngine::new(engine_store, EngramConfig::default());
+
+        let err = reindex(&store, Some(&engine), true)
+            .await
+            .expect_err("embeddings-only without a provider must fail fast");
+        assert!(
+            err.to_string().contains("embedding provider unavailable"),
+            "error must explain the refusal, got: {err}"
+        );
+
+        // No engine at all (e.g. embeddings_only combined with index_only)
+        // must fail the same way.
+        assert!(reindex(&store, None, true).await.is_err());
+
+        let chunks = store.export_chunks(&mem.id).await.unwrap();
+        assert_eq!(chunks.len(), 1, "vectors must survive the refused reindex");
+    }
+
+    /// With a working provider, a full reindex must fully replace stale
+    /// vectors — old chunks are dropped and re-embedded, never duplicated —
+    /// and the fingerprint is stamped on clean success.
+    #[tokio::test]
+    async fn reindex_with_provider_replaces_chunks() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        let mem = Memory::new(MemoryType::Decision, "T", "C", Provenance::human());
+        store.create(&mem).await.unwrap();
+
+        // Stale state: three chunks from an old model.
+        store
+            .upsert_chunks(
+                &mem.id,
+                vec![vec![0.1f32; 384], vec![0.2f32; 384], vec![0.3f32; 384]],
+            )
+            .await
+            .unwrap();
+        // Plus chunks for a memory that no longer exists on disk.
+        store
+            .upsert_chunks("ghost-id", vec![vec![0.9f32; 384]])
+            .await
+            .unwrap();
+
+        let engine_store = MemoryStore::open(temp_dir.path()).await.unwrap();
+        let engine = RetrievalEngine::new(engine_store, EngramConfig::default())
+            .with_embedding_provider(Arc::new(StubEmbeddingProvider));
+
+        let result = reindex(&store, Some(&engine), false).await.unwrap();
+
+        assert_eq!(result.indexed, 1);
+        assert_eq!(result.embedded, 1);
+        assert!(result.errors.is_empty());
+        assert!(result.warnings.is_empty());
+
+        // The short test memory embeds to exactly one chunk — the three
+        // stale chunks must be replaced, not appended to.
+        let chunks = store.export_chunks(&mem.id).await.unwrap();
+        assert_eq!(chunks.len(), 1, "stale chunks must be replaced");
+        assert_eq!(chunks[0], vec![0.5f32; 384]);
+
+        // Ghost chunks are gone too.
+        assert_eq!(
+            store.list_chunk_memory_ids().await.unwrap(),
+            vec![mem.id.clone()],
+            "only re-embedded memories may remain in the chunks table"
+        );
+
+        // Clean success stamps the new model's fingerprint.
+        assert_eq!(
+            store.embedding_fingerprint().await.unwrap(),
+            Some(EmbeddingFingerprint {
+                model: "onnx/stub-model".to_string(),
+                dimensions: 384,
+            })
+        );
     }
 
     /// CRITICAL guard: on a partial (here: total) embedding failure, the

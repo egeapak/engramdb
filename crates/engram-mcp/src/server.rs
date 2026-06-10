@@ -1917,7 +1917,8 @@ impl EngramDbServer {
         let r = serde_json::to_string(&serde_json::json!({
             "indexed": result.indexed,
             "embedded": result.embedded,
-            "errors": result.errors
+            "errors": result.errors,
+            "warnings": result.warnings
         }))
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();

@@ -561,36 +561,82 @@ impl MemoryStore {
             .map_err(|e| StorageError::Validation(format!("LanceDB count failed: {}", e)))
     }
 
-    /// Rebuild LanceDB index from memory files on disk.
+    /// Rebuild the LanceDB metadata index from memory files on disk.
+    ///
+    /// Clears and rebuilds only the memories (metadata) table. Existing
+    /// embedding vectors in the chunks table are preserved — chunks are
+    /// keyed by `memory_id`, so a metadata rebuild does not invalidate
+    /// them. Chunk rows whose `memory_id` no longer corresponds to a file
+    /// on disk are deleted, keeping the chunks table consistent. Callers
+    /// that intend to re-embed everything (and only those) should follow
+    /// up with [`Self::clear_chunks`].
     pub async fn reindex(&self) -> Result<usize> {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
 
-        // Clear LanceDB
+        // Clear only the metadata table — never the vectors. Dropping the
+        // chunks table here would silently destroy all embeddings whenever
+        // no provider is available to rebuild them afterwards.
         self.lance_index
-            .clear()
+            .clear_memories()
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB clear failed: {}", e)))?;
 
-        let mut count = 0;
+        let mut indexed_ids = Vec::new();
 
         // Reindex shared memories
         let shared_dir = paths::memories_dir(&self.project_dir);
         if shared_dir.exists() {
-            count += self.reindex_dir(&shared_dir, Visibility::Shared).await?;
+            self.reindex_dir(&shared_dir, Visibility::Shared, &mut indexed_ids)
+                .await?;
         }
 
         // Reindex personal memories
         let personal_dir = paths::personal_memories_dir(&self.project_id)?;
         if personal_dir.exists() {
-            count += self
-                .reindex_dir(&personal_dir, Visibility::Personal)
+            self.reindex_dir(&personal_dir, Visibility::Personal, &mut indexed_ids)
                 .await?;
+        }
+
+        // Prune chunks for memories that no longer exist on disk, so the
+        // preserved chunks table stays consistent with the rebuilt index.
+        let indexed_set: std::collections::HashSet<&str> =
+            indexed_ids.iter().map(|s| s.as_str()).collect();
+        let chunk_ids = self
+            .lance_index
+            .list_chunk_memory_ids()
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB list_chunk_memory_ids failed: {}", e))
+            })?;
+        for chunk_id in chunk_ids {
+            if !indexed_set.contains(chunk_id.as_str()) {
+                self.lance_index
+                    .delete_chunks(&chunk_id)
+                    .await
+                    .map_err(|e| {
+                        StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e))
+                    })?;
+            }
         }
 
         // Update manifest stats
         self.update_manifest_stats().await?;
 
-        Ok(count)
+        Ok(indexed_ids.len())
+    }
+
+    /// Drop and recreate the chunks (vectors) table.
+    ///
+    /// Destroys all embedding vectors and recreates the table with the
+    /// currently configured dimensions. Only call this when a full re-embed
+    /// is about to follow (i.e. an embedding provider is confirmed
+    /// available) — see [`Self::reindex`] for the vector-preserving path.
+    pub async fn clear_chunks(&self) -> Result<()> {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+        self.lance_index
+            .clear_chunks()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB clear_chunks failed: {}", e)))
     }
 
     /// Upsert embedding chunks for a memory.
@@ -696,12 +742,17 @@ impl MemoryStore {
         }
     }
 
-    /// Reindex all .md files in a directory with a given visibility.
+    /// Reindex all .md files in a directory with a given visibility,
+    /// appending the IDs of successfully indexed memories to `indexed_ids`.
     ///
     /// Skips files that cannot be read or parsed, logging a warning for each,
     /// so that a single corrupted file does not abort the entire reindex.
-    async fn reindex_dir(&self, dir: &Path, visibility: Visibility) -> Result<usize> {
-        let mut count = 0;
+    async fn reindex_dir(
+        &self,
+        dir: &Path,
+        visibility: Visibility,
+        indexed_ids: &mut Vec<String>,
+    ) -> Result<()> {
         let mut entries = async_fs::read_dir(dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
@@ -725,10 +776,10 @@ impl MemoryStore {
                 self.lance_index.upsert(&index_entry).await.map_err(|e| {
                     StorageError::Validation(format!("LanceDB upsert failed: {}", e))
                 })?;
-                count += 1;
+                indexed_ids.push(memory.id.clone());
             }
         }
-        Ok(count)
+        Ok(())
     }
 
     /// Check whether the LanceDB index is stale compared to memory files on disk.
@@ -1333,6 +1384,49 @@ mod tests {
 
         assert!(ids.contains(&"reindex-test-1".to_string()));
         assert!(ids.contains(&"reindex-test-2".to_string()));
+    }
+
+    /// Regression test for the reindex data-loss bug: rebuilding metadata
+    /// from the markdown files must NOT destroy existing embedding vectors.
+    /// Chunks for memories that no longer exist on disk are pruned, keeping
+    /// the chunks table consistent without losing live vectors.
+    #[tokio::test]
+    async fn test_reindex_preserves_chunks_and_prunes_orphans() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let memory = create_test_memory("reindex-chunks-live", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+        store
+            .upsert_chunks(
+                "reindex-chunks-live",
+                vec![vec![0.25f32; 384], vec![0.5f32; 384]],
+            )
+            .await
+            .unwrap();
+
+        // Chunks for a memory with no file on disk (deleted out-of-band).
+        store
+            .upsert_chunks("reindex-chunks-ghost", vec![vec![0.75f32; 384]])
+            .await
+            .unwrap();
+
+        let count = store.reindex().await.unwrap();
+        assert_eq!(count, 1);
+
+        // The live memory's vectors must survive a metadata-only reindex.
+        let chunks = store.export_chunks("reindex-chunks-live").await.unwrap();
+        assert_eq!(chunks.len(), 2, "vectors must survive reindex");
+        assert_eq!(chunks[0], vec![0.25f32; 384]);
+
+        // Orphaned chunks must be pruned so the table stays consistent.
+        assert_eq!(
+            store.list_chunk_memory_ids().await.unwrap(),
+            vec!["reindex-chunks-live".to_string()],
+            "ghost chunks must be pruned, live chunks kept"
+        );
     }
 
     #[tokio::test]

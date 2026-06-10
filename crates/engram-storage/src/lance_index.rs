@@ -690,11 +690,26 @@ impl LanceIndex {
         Ok(matches)
     }
 
-    /// Drop and recreate both memories and chunks tables (for reindex).
+    /// Drop and recreate both memories and chunks tables.
+    ///
+    /// Destroys all embedding vectors. Only call this when the caller can
+    /// re-embed everything afterwards (or explicitly wants a full wipe) —
+    /// for a metadata-only rebuild use [`Self::clear_memories`] so existing
+    /// vectors survive.
     pub async fn clear(&self) -> Result<()> {
+        self.clear_memories().await?;
+        self.clear_chunks().await?;
+        Ok(())
+    }
+
+    /// Drop and recreate only the memories (metadata) table.
+    ///
+    /// Leaves the chunks (vectors) table untouched, so a reindex that
+    /// rebuilds metadata from the markdown files does not destroy
+    /// embeddings. Chunks are keyed by `memory_id`, not by table identity.
+    pub async fn clear_memories(&self) -> Result<()> {
         let connection = Arc::clone(&self.connection);
 
-        // Drop and recreate memories table
         let _ = connection.drop_table(&self.table_name, &[]).await;
         let memories_schema = self.memories_schema();
         connection
@@ -703,7 +718,17 @@ impl LanceIndex {
             .await
             .context("Failed to recreate LanceDB memories table")?;
 
-        // Drop and recreate chunks table
+        Ok(())
+    }
+
+    /// Drop and recreate only the chunks (vectors) table.
+    ///
+    /// Recreates the table with the currently configured dimensions, so this
+    /// is also the remediation path when the embedding dimensions change.
+    /// Destroys all vectors — only call when a re-embed is about to follow.
+    pub async fn clear_chunks(&self) -> Result<()> {
+        let connection = Arc::clone(&self.connection);
+
         let _ = connection.drop_table(&self.chunks_table_name, &[]).await;
         let chunks_schema = self.chunks_schema();
         connection
@@ -1174,6 +1199,56 @@ mod tests {
         lance.clear().await.unwrap();
 
         assert_eq!(lance.count().await.unwrap(), 0);
+    }
+
+    /// `clear_memories` must rebuild only the metadata table — embedding
+    /// vectors are expensive to recompute and must survive a metadata-only
+    /// reindex (the data-loss bug this split fixes).
+    #[tokio::test]
+    async fn test_clear_memories_preserves_chunks() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        lance.upsert(&create_test_entry("a")).await.unwrap();
+        lance
+            .upsert_chunks("a", vec![vec![0.1f32; 384], vec![0.2f32; 384]])
+            .await
+            .unwrap();
+
+        lance.clear_memories().await.unwrap();
+
+        assert_eq!(lance.count().await.unwrap(), 0, "metadata must be cleared");
+        assert_eq!(
+            lance.list_chunk_memory_ids().await.unwrap(),
+            vec!["a".to_string()],
+            "chunks must survive a metadata-only clear"
+        );
+        assert_eq!(
+            lance.chunks_for_memory("a").await.unwrap().len(),
+            2,
+            "all chunk rows must survive"
+        );
+    }
+
+    /// `clear_chunks` is the inverse: vectors are dropped, metadata stays.
+    #[tokio::test]
+    async fn test_clear_chunks_preserves_memories() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        lance.upsert(&create_test_entry("a")).await.unwrap();
+        lance
+            .upsert_chunks("a", vec![vec![0.1f32; 384]])
+            .await
+            .unwrap();
+
+        lance.clear_chunks().await.unwrap();
+
+        assert_eq!(lance.count().await.unwrap(), 1, "metadata must survive");
+        assert!(
+            lance.list_chunk_memory_ids().await.unwrap().is_empty(),
+            "chunks must be cleared"
+        );
     }
 
     #[tokio::test]

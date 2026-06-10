@@ -108,13 +108,20 @@ pub async fn run_reindex_with_daemon(
     if result.embedded > 0 {
         formatter.print_success(&format!("Embedded {} memories.", result.embedded));
     }
+    for warning in &result.warnings {
+        formatter.print_warning(warning);
+    }
     if !result.errors.is_empty() {
         formatter.print_error(&format!("{} errors during reindex:", result.errors.len()));
         for err in &result.errors {
             eprintln!("  {}", err);
         }
     }
-    if result.indexed == 0 && result.embedded == 0 && result.errors.is_empty() {
+    if result.indexed == 0
+        && result.embedded == 0
+        && result.errors.is_empty()
+        && result.warnings.is_empty()
+    {
         formatter.print_message("Nothing to reindex.");
     }
 
