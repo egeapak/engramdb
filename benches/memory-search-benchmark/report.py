@@ -31,14 +31,15 @@ def main():
 
     # Full matrix table
     print("## Full matrix\n")
-    hdr = ("| exec | target | ops | sess | cold 1st op (ms) | warm p50 (ms) | "
-           "warm p95 (ms) | iter wall p50 (ms) | thru (ops/s) | sess RSS (MB) | "
-           "daemon RSS (MB) | total RSS (MB) |")
+    hdr = ("| exec | target | ops | sess | startup (ms) | time-to-first-result (ms) | "
+           "warm p50 (ms) | warm p95 (ms) | iter wall p50 (ms) | thru (ops/s) | "
+           "sess RSS (MB) | daemon RSS (MB) | total RSS (MB) |")
     print(hdr)
-    print("|" + "---|" * 12)
+    print("|" + "---|" * 13)
     for c in rows:
         print(f"| {c['execution']} | {c['target']} | {c['ops_per_iter']} | {c['sessions']} | "
-              f"{c['cold_first_op_ms']} | {c['warm_op_p50_ms']} | {c['warm_op_p95_ms']} | "
+              f"{c['session_startup_ms']} | {c['time_to_first_result_ms']} | "
+              f"{c['warm_op_p50_ms']} | {c['warm_op_p95_ms']} | "
               f"{c['iter_wall_p50_ms']} | {c['throughput_ops_s']} | "
               f"{c['rss_sessions_total_mb']} | {c['rss_daemon_mb']} | {c['rss_total_mb']} |")
 
@@ -54,18 +55,21 @@ def main():
             pct = round(100 * saved / ip["rss_total_mb"], 1) if ip["rss_total_mb"] else 0
             print(f"| {s} | {ip['rss_total_mb']} | {dm['rss_total_mb']} | {saved} | {pct}% |")
 
-    # Latency: cold first op (model-load cost) in_process vs daemon
-    print("\n## Cold first-op latency: model-load amortization (sessions=1)\n")
-    print("| target | ops | in_process cold (ms) | daemon cold (ms) | speedup |")
+    # Latency: cold-start (model-load) amortization, in_process vs daemon
+    print("\n## Cold-start amortization: spawn -> first result (sessions=1)\n")
+    print("Time from launching an MCP session to its first search result. "
+          "In-process pays the embedding-model load every session; the daemon "
+          "loads once machine-wide so sessions just connect.\n")
+    print("| target | ops | in_process ttfr (ms) | daemon ttfr (ms) | speedup |")
     print("|---|---|---|---|---|")
     for target in ("local", "global"):
         for ops in (1, 2, 4):
             ip = by.get(("in_process", target, ops, 1))
             dm = by.get(("daemon", target, ops, 1))
-            if ip and dm and dm["cold_first_op_ms"]:
-                sp = round(ip["cold_first_op_ms"] / dm["cold_first_op_ms"], 2)
-                print(f"| {target} | {ops} | {ip['cold_first_op_ms']} | "
-                      f"{dm['cold_first_op_ms']} | {sp}x |")
+            if ip and dm and dm["time_to_first_result_ms"]:
+                sp = round(ip["time_to_first_result_ms"] / dm["time_to_first_result_ms"], 2)
+                print(f"| {target} | {ops} | {ip['time_to_first_result_ms']} | "
+                      f"{dm['time_to_first_result_ms']} | {sp}x |")
 
     # Throughput under parallelism
     print("\n## Throughput under parallel sessions (local, ops/iter=4)\n")

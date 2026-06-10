@@ -22,8 +22,10 @@ makes both the latency and the memory consequences visible.
 
 Output: a JSON results file plus a printed Markdown summary.
 """
+import glob
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -33,6 +35,7 @@ from statistics import median
 
 BIN = os.environ["ENGRAM_BIN"]
 PROJECTS_DIR = Path(os.environ["BENCH_PROJECTS_DIR"])
+DATA_DIR = Path(os.environ["ENGRAMDB_DATA_DIR"])
 OUT = Path(os.environ.get("BENCH_OUT", "results.json"))
 SOCKET = os.environ["ENGRAMDB_DAEMON_SOCKET"]
 
@@ -40,6 +43,75 @@ LOCAL_PROJECT = "web-api"  # the project used for "local" cells
 ITERS = int(os.environ.get("BENCH_ITERS", "8"))
 SESSIONS_LEVELS = [1, 2, 4]
 OPS_LEVELS = [1, 2, 4]
+
+# Config files the MCP server reads to decide whether to use the daemon.
+# `daemon.enabled = false` is the master switch that forces a serve process to
+# load the embedding model in-process; `true` routes inference to the shared
+# daemon. The MCP server ignores ENGRAMDB_IN_PROCESS, so this is the real lever.
+CONFIG_FILES = [
+    PROJECTS_DIR / LOCAL_PROJECT / ".engramdb" / "config.toml",
+    DATA_DIR / "global" / ".engramdb" / "config.toml",
+]
+
+
+def set_daemon_enabled(enabled):
+    body = ("# EngramDB configuration (benchmark-managed)\n"
+            f"[daemon]\nenabled = {'true' if enabled else 'false'}\n"
+            f'socket_path = "{SOCKET}"\nidle_timeout_secs = 3600\n')
+    for p in CONFIG_FILES:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+
+
+def find_daemon_pid():
+    """Locate the running `engramdb daemon run` bound to our socket via /proc."""
+    for cmdpath in glob.glob("/proc/[0-9]*/cmdline"):
+        try:
+            with open(cmdpath, "rb") as f:
+                parts = f.read().split(b"\0")
+        except OSError:
+            continue
+        cmd = [p.decode("utf-8", "replace") for p in parts if p]
+        if any("engramdb" in c for c in cmd) and "daemon" in cmd and SOCKET in cmd:
+            try:
+                return int(cmdpath.split("/")[2])
+            except ValueError:
+                continue
+    return None
+
+
+def stop_daemons():
+    pid = find_daemon_pid()
+    while pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        time.sleep(0.3)
+        nxt = find_daemon_pid()
+        if nxt == pid:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            time.sleep(0.3)
+            nxt = find_daemon_pid()
+        pid = nxt
+
+
+def start_daemon():
+    stop_daemons()
+    subprocess.Popen(
+        [BIN, "daemon", "run", "--socket", SOCKET, "--idle-timeout", "3600"],
+        stdout=open("/tmp/bench-daemon.log", "w"), stderr=subprocess.STDOUT,
+    )
+    for _ in range(50):
+        r = subprocess.run([BIN, "daemon", "status", "--socket", SOCKET],
+                           capture_output=True, text=True)
+        if r.returncode == 0 and "running" in r.stdout:
+            break
+        time.sleep(0.2)
+    return find_daemon_pid()
 
 
 # ----------------------------------------------------------------------------
@@ -60,13 +132,13 @@ def rss_kb(pid):
 # Minimal MCP stdio client (newline-delimited JSON-RPC)
 # ----------------------------------------------------------------------------
 class McpSession:
-    def __init__(self, in_process, label):
+    def __init__(self, label):
+        # Execution mode (in-process vs daemon) is controlled by daemon.enabled
+        # in the store config, not by env, because the MCP server ignores
+        # ENGRAMDB_IN_PROCESS. The env is inherited as-is.
         env = dict(os.environ)
-        if in_process:
-            env["ENGRAMDB_IN_PROCESS"] = "1"
-        else:
-            env.pop("ENGRAMDB_IN_PROCESS", None)
         self.errlog = open(f"/tmp/bench-serve-{label}.err", "w")
+        self._spawn_t0 = time.perf_counter()
         self.p = subprocess.Popen(
             [BIN, "--dir", str(PROJECTS_DIR / LOCAL_PROJECT), "serve",
              "--transport", "stdio"],
@@ -75,6 +147,7 @@ class McpSession:
         )
         self.pid = self.p.pid
         self._id = 0
+        self.startup_ms = None  # spawn -> initialize complete (model-load cost)
 
     def _send(self, obj):
         self.p.stdin.write(json.dumps(obj) + "\n")
@@ -99,11 +172,15 @@ class McpSession:
         return self._read_result(rid)
 
     def initialize(self):
+        # In-process serve loads the embedding model during startup/handshake,
+        # so spawn->initialize wall time captures the per-session model-load
+        # cost the daemon amortizes away.
         self.request("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {"name": "engram-bench", "version": "0"},
         })
+        self.startup_ms = (time.perf_counter() - self._spawn_t0) * 1000
         self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
     def call_tool(self, name, arguments):
@@ -181,28 +258,38 @@ def fetch_ids(target, n=2):
 # ----------------------------------------------------------------------------
 # One matrix cell
 # ----------------------------------------------------------------------------
-def run_cell(execution, target, ops_per_iter, n_sessions, ids, daemon_pid):
+def run_cell(execution, target, ops_per_iter, n_sessions, ids):
     in_process = execution == "in_process"
-    sessions = [McpSession(in_process, f"{execution}-{target}-{ops_per_iter}-{n_sessions}-{i}")
+    sessions = [McpSession(f"{execution}-{target}-{ops_per_iter}-{n_sessions}-{i}")
                 for i in range(n_sessions)]
     for s in sessions:
         s.initialize()
 
     ops = workload_ops(target, ids)[:ops_per_iter]
 
-    # Warmup: each session runs the full op set once. For in_process this is
-    # where the embedding model loads; we record it as the "cold" first op.
-    cold_lat = []
+    # Warmup: each session runs the full op set once. The embedding model loads
+    # in a background task at serve startup; the first embedding query blocks
+    # until it is ready, so spawn->first-result (ttfr) captures the per-session
+    # model-load cost that the daemon amortizes. Cleanest at sessions=1 (no
+    # overlap between sessions' concurrent background loads).
+    cold_op_lat = []
+    ttfr = []
     for s in sessions:
+        first = True
         for (tool, args) in ops:
             dt, ok = s.call_tool(tool, args)
+            if first:
+                ttfr.append((time.perf_counter() - s._spawn_t0) * 1000)
+                cold_op_lat.append(dt * 1000)
+                first = False
             if not ok:
                 raise RuntimeError(f"warmup op {tool} failed (execution={execution}, target={target})")
-        cold_lat.append(dt)
 
-    # Peak RSS sampled after warmup (models are now resident).
+    # Peak RSS sampled after warmup (models are now resident). For daemon mode
+    # the daemon pid is re-discovered here in case it respawned.
     session_rss = [rss_kb(s.pid) for s in sessions]
-    d_rss = rss_kb(daemon_pid) if (not in_process and daemon_pid) else 0
+    daemon_pid = None if in_process else find_daemon_pid()
+    d_rss = rss_kb(daemon_pid) if daemon_pid else 0
     total_rss = sum(session_rss) + d_rss
 
     # Timed phase: ITERS iterations. Each iteration runs all sessions in
@@ -242,7 +329,9 @@ def run_cell(execution, target, ops_per_iter, n_sessions, ids, daemon_pid):
         "target": target,
         "ops_per_iter": ops_per_iter,
         "sessions": n_sessions,
-        "cold_first_op_ms": round(median(cold_lat) * 1000, 1),
+        "session_startup_ms": round(median([s.startup_ms for s in sessions]), 1),
+        "time_to_first_result_ms": round(median(ttfr), 1),
+        "cold_first_op_ms": round(median(cold_op_lat), 1),
         "warm_op_p50_ms": round(median(op_lats) * 1000, 2),
         "warm_op_p95_ms": round(sorted(op_lats)[int(len(op_lats) * 0.95) - 1] * 1000, 2),
         "iter_wall_p50_ms": round(median(iter_walls) * 1000, 2),
@@ -257,32 +346,35 @@ def run_cell(execution, target, ops_per_iter, n_sessions, ids, daemon_pid):
 def main():
     results = []
     for execution in ["in_process", "daemon"]:
-        # The daemon's pid is rediscovered each cell (it may reap/respawn).
+        # Flip the master switch in the store config, then bring the daemon to
+        # the matching state: absent for in-process, running for daemon mode.
+        if execution == "in_process":
+            set_daemon_enabled(False)
+            stop_daemons()
+        else:
+            set_daemon_enabled(True)
+            pid = start_daemon()
+            # Pre-warm: force the daemon to load its model once so per-session
+            # ttfr reflects connecting to an already-warm daemon (steady state).
+            subprocess.run([BIN, "--dir", str(PROJECTS_DIR / LOCAL_PROJECT),
+                            "query", "--mode", "filter", "--query", "warmup",
+                            "-n", "1"], capture_output=True, text=True)
+            print(f"==> daemon for daemon-mode cells: pid {pid} (pre-warmed)")
         for target in ["local", "global"]:
             ids = fetch_ids(target, 2)
             for ops_per_iter in OPS_LEVELS:
                 for n_sessions in SESSIONS_LEVELS:
-                    daemon_pid = read_daemon_pid() if execution == "daemon" else None
-                    cell = run_cell(execution, target, ops_per_iter, n_sessions, ids, daemon_pid)
+                    cell = run_cell(execution, target, ops_per_iter, n_sessions, ids)
                     results.append(cell)
                     print(f"[{execution:11}] {target:6} ops={ops_per_iter} "
-                          f"sess={n_sessions}  warm_p50={cell['warm_op_p50_ms']:7}ms  "
+                          f"sess={n_sessions}  ttfr={cell['time_to_first_result_ms']:8}ms "
+                          f"warm_p50={cell['warm_op_p50_ms']:7}ms  "
                           f"thru={cell['throughput_ops_s']:7}/s  "
-                          f"rss_total={cell['rss_total_mb']:7}MB  "
+                          f"rss_total={cell['rss_total_mb']:8}MB  "
                           f"(sess={cell['rss_sessions_total_mb']} dmn={cell['rss_daemon_mb']})")
+    stop_daemons()
     OUT.write_text(json.dumps(results, indent=2))
     print(f"\nWrote {len(results)} cells -> {OUT}")
-
-
-def read_daemon_pid():
-    """Find the running daemon pid via its status, falling back to pidfile."""
-    pf = os.environ.get("BENCH_DAEMON_PIDFILE")
-    if pf and Path(pf).exists():
-        try:
-            return int(Path(pf).read_text().strip())
-        except Exception:
-            return None
-    return None
 
 
 if __name__ == "__main__":

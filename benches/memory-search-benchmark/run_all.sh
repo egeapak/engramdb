@@ -50,6 +50,8 @@ stop_daemon() {
     kill "$(cat "$BENCH_DAEMON_PIDFILE")" 2>/dev/null || true
     rm -f "$BENCH_DAEMON_PIDFILE"
   fi
+  # Also reap any daemon bound to our socket (bench.py spawns its own).
+  pkill -f "daemon run --socket $ENGRAMDB_DAEMON_SOCKET" 2>/dev/null || true
 }
 trap stop_daemon EXIT
 
@@ -65,12 +67,11 @@ else
   echo "==> Dataset already present (set BENCH_REGEN=1 to rebuild)."
 fi
 
-# --- 3. Fresh daemon for the benchmark proper ---
-echo "==> Starting benchmark daemon..."
-start_daemon
-
-# --- 4. Run the matrix ---
+# --- 3+4. Run the matrix. bench.py owns the daemon lifecycle: it toggles
+#          daemon.enabled in the store config and starts/stops the daemon to
+#          isolate the in-process vs daemon execution phases. ---
 echo "==> Running benchmark matrix (ITERS=$BENCH_ITERS)..."
+stop_daemon  # ensure the gen daemon is gone; bench.py manages its own
 python3 "$HERE/bench.py"
 
 # --- 5. Report ---
