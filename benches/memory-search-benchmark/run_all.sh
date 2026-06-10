@@ -24,6 +24,8 @@ export ENGRAMDB_DAEMON_SOCKET="$SCRATCH/engram-daemon.sock"
 export BENCH_DAEMON_PIDFILE="$SCRATCH/daemon.pid"
 export BENCH_OUT="${BENCH_OUT:-$HERE/results.json}"
 export BENCH_ITERS="${BENCH_ITERS:-8}"
+# Report path derives from BENCH_OUT (results.json -> results.md) unless set.
+BENCH_REPORT="${BENCH_REPORT:-${BENCH_OUT%.json}.md}"
 
 mkdir -p "$ENGRAMDB_DATA_DIR" "$ENGRAMDB_CONFIG_DIR" "$BENCH_PROJECTS_DIR"
 
@@ -76,6 +78,6 @@ python3 "$HERE/bench.py"
 
 # --- 5. Report ---
 echo "==> Rendering report..."
-python3 "$HERE/report.py" "$BENCH_OUT" > "$HERE/RESULTS.md"
-echo "==> Wrote $HERE/RESULTS.md"
-cat "$HERE/RESULTS.md"
+python3 "$HERE/report.py" "$BENCH_OUT" > "$BENCH_REPORT"
+echo "==> Wrote $BENCH_REPORT"
+cat "$BENCH_REPORT"

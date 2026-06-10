@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Render results.json into a Markdown report with comparison tables."""
 import json
+import os
 import sys
 from collections import defaultdict
 
@@ -19,6 +20,21 @@ def main():
     by = {key(c): c for c in rows}
 
     print("# EngramDB Memory Search & Lookup Benchmark\n")
+
+    # Self-describing header: dataset size + iteration count, if discoverable.
+    manifest = {}
+    pdir = os.environ.get("BENCH_PROJECTS_DIR")
+    if pdir and os.path.exists(os.path.join(pdir, "manifest.json")):
+        manifest = json.load(open(os.path.join(pdir, "manifest.json")))
+    iters = os.environ.get("BENCH_ITERS")
+    if manifest:
+        total = (manifest["n_projects"] * manifest["memories_per_project"]
+                 + manifest["global_memories"])
+        print(f"**Dataset**: {manifest['n_projects']} projects × "
+              f"{manifest['memories_per_project']} memories + "
+              f"{manifest['global_memories']} global = {total} memories. "
+              + (f"**Timed iterations/cell**: {iters}.\n" if iters else "\n"))
+
     print("MCP-driven matrix: real `engramdb serve` sessions over stdio JSON-RPC, "
           "exercising `query` (search) and `get` (lookup) tools.\n")
     print("- **execution**: `in_process` (each session loads its own ONNX embedding "

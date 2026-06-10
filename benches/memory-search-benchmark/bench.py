@@ -44,19 +44,21 @@ ITERS = int(os.environ.get("BENCH_ITERS", "8"))
 SESSIONS_LEVELS = [1, 2, 4]
 OPS_LEVELS = [1, 2, 4]
 
-# Config files the MCP server reads to decide whether to use the daemon.
-# `daemon.enabled = false` is the master switch that forces a serve process to
-# load the embedding model in-process; `true` routes inference to the shared
-# daemon. The MCP server ignores ENGRAMDB_IN_PROCESS, so this is the real lever.
+# Config files the MCP server reads. We keep the daemon *enabled* in config and
+# toggle execution mode per session via the ENGRAMDB_IN_PROCESS env var, which
+# the MCP server now honors (engram-types::in_process_override, gating
+# daemon_path_enabled). Setting it forces in-process model loading; leaving it
+# unset routes inference to the shared daemon.
 CONFIG_FILES = [
     PROJECTS_DIR / LOCAL_PROJECT / ".engramdb" / "config.toml",
     DATA_DIR / "global" / ".engramdb" / "config.toml",
 ]
 
 
-def set_daemon_enabled(enabled):
+def write_daemon_config():
+    """Ensure both stores have the daemon enabled (env var does the toggling)."""
     body = ("# EngramDB configuration (benchmark-managed)\n"
-            f"[daemon]\nenabled = {'true' if enabled else 'false'}\n"
+            f"[daemon]\nenabled = true\n"
             f'socket_path = "{SOCKET}"\nidle_timeout_secs = 3600\n')
     for p in CONFIG_FILES:
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -132,11 +134,14 @@ def rss_kb(pid):
 # Minimal MCP stdio client (newline-delimited JSON-RPC)
 # ----------------------------------------------------------------------------
 class McpSession:
-    def __init__(self, label):
-        # Execution mode (in-process vs daemon) is controlled by daemon.enabled
-        # in the store config, not by env, because the MCP server ignores
-        # ENGRAMDB_IN_PROCESS. The env is inherited as-is.
+    def __init__(self, in_process, label):
+        # Execution mode is selected with ENGRAMDB_IN_PROCESS, now honored by the
+        # MCP server: set -> in-process model load; unset -> shared daemon.
         env = dict(os.environ)
+        if in_process:
+            env["ENGRAMDB_IN_PROCESS"] = "1"
+        else:
+            env.pop("ENGRAMDB_IN_PROCESS", None)
         self.errlog = open(f"/tmp/bench-serve-{label}.err", "w")
         self._spawn_t0 = time.perf_counter()
         self.p = subprocess.Popen(
@@ -260,7 +265,7 @@ def fetch_ids(target, n=2):
 # ----------------------------------------------------------------------------
 def run_cell(execution, target, ops_per_iter, n_sessions, ids):
     in_process = execution == "in_process"
-    sessions = [McpSession(f"{execution}-{target}-{ops_per_iter}-{n_sessions}-{i}")
+    sessions = [McpSession(in_process, f"{execution}-{target}-{ops_per_iter}-{n_sessions}-{i}")
                 for i in range(n_sessions)]
     for s in sessions:
         s.initialize()
@@ -344,15 +349,15 @@ def run_cell(execution, target, ops_per_iter, n_sessions, ids):
 
 
 def main():
+    # Daemon stays enabled in config; ENGRAMDB_IN_PROCESS toggles mode per session.
+    write_daemon_config()
     results = []
     for execution in ["in_process", "daemon"]:
-        # Flip the master switch in the store config, then bring the daemon to
-        # the matching state: absent for in-process, running for daemon mode.
+        # Bring the daemon to the matching state: absent for in-process (the env
+        # var also stops serve from spawning one), running for daemon mode.
         if execution == "in_process":
-            set_daemon_enabled(False)
             stop_daemons()
         else:
-            set_daemon_enabled(True)
             pid = start_daemon()
             # Pre-warm: force the daemon to load its model once so per-session
             # ttfr reflects connecting to an already-warm daemon (steady state).

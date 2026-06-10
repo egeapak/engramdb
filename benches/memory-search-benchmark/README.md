@@ -35,11 +35,19 @@ Metrics per cell:
 
 ## How execution mode is controlled
 
-The MCP server ignores `ENGRAMDB_IN_PROCESS`; the real lever is
-`daemon.enabled` in the store's `.engramdb/config.toml` (the master switch in
-`resolve_providers`). `bench.py` writes `enabled = false` for the in-process
-phase (and stops any daemon) and `enabled = true` for the daemon phase (and
-starts/pre-warms a daemon), since config is reloaded per request.
+`bench.py` keeps the daemon **enabled** in config and toggles execution mode
+per session with the `ENGRAMDB_IN_PROCESS` env var: set → the serve process
+loads the embedding model in-process; unset → it routes inference to the shared
+daemon. For the in-process phase it also stops any running daemon (the env var
+additionally prevents the serve heartbeat from spawning one); for the daemon
+phase it starts and pre-warms a daemon.
+
+> Note: the MCP server originally ignored `ENGRAMDB_IN_PROCESS` (it had no
+> equivalent of the CLI `--in-process` flag), which made an early version of
+> this benchmark route *both* modes through the daemon. That was fixed by
+> having the server consult the shared `engram_types::in_process_override()`
+> helper in `daemon_path_enabled`, so the env var now disables both provider
+> routing and the daemon heartbeat — mirroring the CLI flag ladder.
 
 ## Files
 

@@ -1013,9 +1013,14 @@ impl EngramDbServer {
 
     /// Whether the shared-daemon path should be taken. Always disabled under
     /// the crate's own `cargo test --lib` (see [`Self::resolve_providers`]).
+    ///
+    /// `ENGRAMDB_IN_PROCESS` (any truthy value) is a hard override that forces
+    /// in-process model loading, mirroring the CLI's `--in-process` flag. The
+    /// MCP server has no equivalent flag, so this env var is its only knob —
+    /// gating it here disables both provider routing and the daemon heartbeat.
     #[cfg(not(test))]
     fn daemon_path_enabled(config: &engramdb::types::EngramConfig) -> bool {
-        config.daemon.enabled
+        config.daemon.enabled && !engramdb::types::in_process_override()
     }
 
     #[cfg(test)]

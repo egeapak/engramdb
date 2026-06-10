@@ -306,38 +306,76 @@ def add_memory(spec, project_dir=None, glob=False):
     run(args)
 
 
+# Dataset size is configurable so the same generator drives both the default
+# (10x10) and a larger run. Extra memories are distinct variants of the curated
+# seeds (numbered title/summary/content + a variant tag) so vector search still
+# has real, non-duplicate signal; extra projects cycle the base themes.
+N_PROJECTS = int(os.environ.get("BENCH_N_PROJECTS", "10"))
+MEM_PER_PROJECT = int(os.environ.get("BENCH_MEM_PER_PROJECT", "10"))
+N_GLOBAL = int(os.environ.get("BENCH_N_GLOBAL", "10"))
+
+
+def expand(seeds, count):
+    """Yield `count` specs by cycling `seeds`, making repeats distinct."""
+    out = []
+    for i in range(count):
+        typ, title, summary, content, logical, tags = seeds[i % len(seeds)]
+        rep = i // len(seeds)
+        if rep:
+            title = f"{title} v{rep + 1}"
+            summary = f"{summary} (variant {rep + 1})"
+            content = f"{content} (case {rep + 1})"
+            tags = f"{tags},v{rep + 1}"
+        out.append((typ, title, summary, content, logical, tags))
+    return out
+
+
+def project_specs():
+    """Return [(slug, theme, seeds)] for N_PROJECTS, cycling base themes."""
+    base = list(PROJECTS.keys())
+    specs = []
+    for i in range(N_PROJECTS):
+        theme_slug = base[i % len(base)]
+        rep = i // len(base)
+        slug = theme_slug if rep == 0 else f"{theme_slug}-{rep + 1}"
+        specs.append((slug, PROJECTS[theme_slug], SEEDS[theme_slug]))
+    return specs
+
+
 def main():
     t0 = time.time()
     ROOT.mkdir(parents=True, exist_ok=True)
     project_ids = {}
-    for slug in PROJECTS:
+    projects_meta = {}
+    for slug, theme, seeds in project_specs():
         pdir = ROOT / slug
         pdir.mkdir(exist_ok=True)
         run(["--quiet", "--dir", str(pdir), "init", "--no-embeddings"])
-        for spec in SEEDS[slug]:
+        for spec in expand(seeds, MEM_PER_PROJECT):
             add_memory(spec, project_dir=pdir)
-        # capture project id
         r = run(["--dir", str(pdir), "--json", "projects", "info"])
         try:
             pid = json.loads(r.stdout).get("project_id")
         except Exception:
             pid = None
         project_ids[slug] = pid
-        print(f"  {slug}: 10 memories  (id={pid})")
-    # global memories
-    for spec in GLOBAL:
+        projects_meta[slug] = {"path": str(pdir), "id": pid, "theme": theme}
+        print(f"  {slug}: {MEM_PER_PROJECT} memories  (id={pid})")
+    for spec in expand(GLOBAL, N_GLOBAL):
         add_memory(spec, glob=True)
-    print(f"  global: 10 memories")
+    print(f"  global: {N_GLOBAL} memories")
 
     manifest = {
-        "projects": {slug: {"path": str(ROOT / slug), "id": project_ids[slug],
-                            "theme": PROJECTS[slug]} for slug in PROJECTS},
-        "n_projects": len(PROJECTS),
-        "memories_per_project": 10,
-        "global_memories": len(GLOBAL),
+        "projects": projects_meta,
+        "n_projects": N_PROJECTS,
+        "memories_per_project": MEM_PER_PROJECT,
+        "global_memories": N_GLOBAL,
     }
     (ROOT / "manifest.json").write_text(json.dumps(manifest, indent=2))
-    print(f"Generated dataset in {time.time()-t0:.1f}s -> {ROOT}")
+    total = N_PROJECTS * MEM_PER_PROJECT + N_GLOBAL
+    print(f"Generated {total} memories "
+          f"({N_PROJECTS} projects x {MEM_PER_PROJECT} + {N_GLOBAL} global) "
+          f"in {time.time()-t0:.1f}s -> {ROOT}")
 
 
 if __name__ == "__main__":
