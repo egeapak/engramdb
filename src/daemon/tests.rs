@@ -57,8 +57,7 @@ async fn read_msg_eof_is_none() {
 async fn daemon_answers_ping() {
     let tmp = TempDir::new().unwrap();
     let socket = tmp.path().join("d.sock");
-    // Long idle timeout: the watchdog calls process::exit, which would kill
-    // the test binary if it fired.
+    // Long idle timeout so the watchdog doesn't shut the daemon down mid-test.
     tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
 
     let resp = wait_request(
@@ -297,11 +296,11 @@ async fn client_helpers_without_daemon() {
 
 /// `request_shutdown` maps a `ShuttingDown` ack to `Ok(true)`.
 ///
-/// Note: we deliberately do NOT drive a *real* in-process daemon here — its
-/// `Shutdown` handler calls `std::process::exit`, which would terminate the
-/// test runner. A stub that returns `ShuttingDown` exercises the client
-/// mapping safely; the real daemon's exit-on-shutdown is covered by the
-/// `daemon` CLI in practice.
+/// A stub that returns `ShuttingDown` pins the client-side mapping in
+/// isolation; the *real* daemon's shutdown flow (ack, persist, stop
+/// accepting) is driven end-to-end by `cell_self_heals_after_daemon_killed`
+/// and `daemon_cell_respawns_after_handle_lost`, which `run_daemon`'s
+/// return-on-shutdown seam makes safe to exercise in-process.
 #[tokio::test]
 async fn request_shutdown_maps_ack() {
     let tmp = TempDir::new().unwrap();
@@ -894,8 +893,12 @@ async fn daemon_cell_respawns_after_handle_lost() {
     let h2 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
     assert!(h2.is_some(), "Second call should return cached handle");
 
-    // Kill the daemon.
-    super::request_shutdown(&socket).await.unwrap();
+    // Kill the daemon (the Shutdown handler acks, persists, and makes
+    // `run_daemon` return — stopping the in-process accept loop).
+    assert!(
+        super::request_shutdown(&socket).await.unwrap(),
+        "running daemon must ack the shutdown"
+    );
     poll_until_unconnectable(&socket).await;
 
     // Cell detects the dead handle and returns None (ConnectOnly, no respawn).
@@ -1231,8 +1234,12 @@ async fn cell_self_heals_after_daemon_killed() {
     let h1 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
     assert!(h1.is_some(), "cell should connect to running daemon");
 
-    // Kill it.
-    super::request_shutdown(&socket).await.unwrap();
+    // Kill it (the Shutdown handler acks, persists, and makes `run_daemon`
+    // return — stopping the in-process accept loop).
+    assert!(
+        super::request_shutdown(&socket).await.unwrap(),
+        "running daemon must ack the shutdown"
+    );
     poll_until_unconnectable(&socket).await;
 
     // Cell detects dead handle and returns None (ConnectOnly, no respawn).
