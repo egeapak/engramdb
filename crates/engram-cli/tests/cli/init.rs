@@ -53,6 +53,34 @@ fn init_no_embeddings_skips_model() {
 }
 
 #[test]
+fn reinit_preserves_config_and_reports_already_initialized() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+
+    // Simulate a user-customized config between the two inits.
+    let config_path = dir.path().join(".engramdb/config.toml");
+    let custom_config = "# customized by user\n[nli]\nenabled = false\n";
+    std::fs::write(&config_path, custom_config).unwrap();
+
+    helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "init",
+            "--no-embeddings",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("already initialized"));
+
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        custom_config,
+        "re-running `engramdb init` must not clobber an existing config.toml"
+    );
+}
+
+#[test]
 fn double_init_succeeds_or_warns() {
     let dir = TempDir::new().unwrap();
     helpers::init_store(dir.path());

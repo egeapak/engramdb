@@ -54,44 +54,63 @@ pub struct MemoryStore {
 
 impl MemoryStore {
     /// Initialize a new EngramDB store in the given directory.
+    ///
+    /// Idempotent: re-running `init` on an already-initialized project is
+    /// safe. Existing `manifest.toml` (created_at, stats, parent link,
+    /// embedding fingerprint) and `config.toml` (user-customized provider /
+    /// dimensions / NLI / rerank settings) are never overwritten; only
+    /// missing pieces are created.
     pub async fn init(dir: &Path, registry: &dyn RegistryBackend) -> Result<Self> {
         let engramdb_dir = paths::project_dir(dir);
 
-        // Create directory structure
+        // Compute the project ID up front so concurrent inits serialize on
+        // the per-project advisory write lock. The lock file lives under the
+        // *global* data dir (`projects/<id>/write.lock`), and
+        // `acquire_write_lock` creates that directory itself, so there is no
+        // bootstrap-ordering problem with the project dirs created below.
+        let project_id = project_id::compute_project_id(dir);
+        let _lock = write_lock::acquire_write_lock(&project_id).await?;
+
+        // Create directory structure (create_dir_all is idempotent)
         async_fs::create_dir_all(&engramdb_dir).await?;
         async_fs::create_dir_all(paths::memories_dir(dir)).await?;
 
-        // Create manifest.toml with project name derived from directory
+        // Create manifest.toml only if missing. Re-running `init` must not
+        // reset created_at / stats / parent_project_id, and critically must
+        // not drop the embedding fingerprint (that would flip the store to
+        // Untracked and defeat the model-swap corruption guard).
         let manifest_path = engramdb_dir.join("manifest.toml");
-        let project_name = dir
-            .canonicalize()
-            .unwrap_or_else(|_| dir.to_path_buf())
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unnamed-project".to_string());
-        let manifest = manifest::Manifest {
-            project: project_name,
-            ..Default::default()
-        };
-        manifest::save_manifest(&manifest_path, &manifest).await?;
+        if !manifest_path.exists() {
+            let project_name = dir
+                .canonicalize()
+                .unwrap_or_else(|_| dir.to_path_buf())
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unnamed-project".to_string());
+            let manifest = manifest::Manifest {
+                project: project_name,
+                ..Default::default()
+            };
+            manifest::save_manifest(&manifest_path, &manifest).await?;
+        }
 
-        // Create empty config.toml
+        // Create the placeholder config.toml only if missing — never clobber
+        // a user-customized config (a dimensions change alone would make the
+        // next open build LanceIndex against an incompatible chunks table).
         let config_path = engramdb_dir.join("config.toml");
-        async_fs::write(
-            config_path,
-            "# EngramDB configuration\n# See documentation for available settings\n",
-        )
-        .await?;
-
-        // Compute project ID before creating global directories
-        let project_id = project_id::compute_project_id(dir);
+        if !config_path.exists() {
+            async_fs::write(
+                &config_path,
+                "# EngramDB configuration\n# See documentation for available settings\n",
+            )
+            .await?;
+        }
 
         // Create global LanceDB directory
         let lance_path = paths::lancedb_dir(&project_id)?;
         async_fs::create_dir_all(&lance_path).await?;
 
         // Load config to get embedding dimensions
-        let config_path = engramdb_dir.join("config.toml");
         let config = match load_config(&config_path).await {
             Ok(c) => c,
             Err(e) => {
@@ -923,6 +942,85 @@ mod tests {
         assert!(paths::personal_memories_dir(&store.project_id)
             .unwrap()
             .exists());
+    }
+
+    /// Re-running `init` on an already-initialized project must not clobber
+    /// a user-customized config.toml and must not drop the embedding
+    /// fingerprint from the manifest (data-loss regression: `init` used to
+    /// unconditionally rewrite both files).
+    #[tokio::test]
+    async fn test_reinit_preserves_config_and_embedding_fingerprint() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+        let registry = InMemoryRegistry::new();
+
+        let store = MemoryStore::init(project_dir, &registry).await.unwrap();
+
+        // Customize the config (valid TOML so re-init's load_config parses it).
+        let config_path = project_dir.join(".engramdb/config.toml");
+        let custom_config = "# user-customized configuration\n[nli]\nenabled = false\n";
+        async_fs::write(&config_path, custom_config).await.unwrap();
+
+        // Stamp an embedding fingerprint, as a successful (re)embed would.
+        let fingerprint = manifest::EmbeddingFingerprint {
+            model: "onnx/all-MiniLM-L6-v2-q".to_string(),
+            dimensions: 384,
+        };
+        store
+            .set_embedding_fingerprint(fingerprint.clone())
+            .await
+            .unwrap();
+
+        // Re-running init must preserve both files byte-for-byte semantics.
+        MemoryStore::init(project_dir, &registry).await.unwrap();
+
+        let config_after = async_fs::read_to_string(&config_path).await.unwrap();
+        assert_eq!(
+            config_after, custom_config,
+            "re-init clobbered the user's config.toml"
+        );
+
+        let manifest_path = project_dir.join(".engramdb/manifest.toml");
+        let manifest_after = manifest::load_manifest(&manifest_path).await.unwrap();
+        assert_eq!(
+            manifest_after.embedding,
+            Some(fingerprint),
+            "re-init dropped the embedding fingerprint (store flipped to Untracked)"
+        );
+    }
+
+    /// Re-running `init` on a store with existing memories must keep the
+    /// memories readable and preserve manifest stats / created_at.
+    #[tokio::test]
+    async fn test_reinit_preserves_memories_and_manifest_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+        let registry = InMemoryRegistry::new();
+
+        let store = MemoryStore::init(project_dir, &registry).await.unwrap();
+        let memory = create_test_memory("reinit-keep-123", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        let manifest_path = project_dir.join(".engramdb/manifest.toml");
+        let before = manifest::load_manifest(&manifest_path).await.unwrap();
+        assert_eq!(before.stats.memory_count, 1);
+
+        let store2 = MemoryStore::init(project_dir, &registry).await.unwrap();
+
+        // Memory is still readable through the re-initialized store.
+        let retrieved = store2.get("reinit-keep-123").await.unwrap();
+        assert_eq!(retrieved.summary, "Test summary");
+
+        let after = manifest::load_manifest(&manifest_path).await.unwrap();
+        assert_eq!(
+            after.created_at, before.created_at,
+            "re-init reset manifest created_at"
+        );
+        assert_eq!(
+            after.stats.memory_count, before.stats.memory_count,
+            "re-init reset manifest stats"
+        );
+        assert_eq!(after.project, before.project);
     }
 
     #[tokio::test]
