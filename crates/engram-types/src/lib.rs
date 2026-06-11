@@ -14,6 +14,7 @@
 mod challenge;
 pub mod config;
 mod decay;
+pub mod env;
 mod memory;
 mod provenance;
 mod title_strategy;
@@ -26,6 +27,7 @@ pub use config::{
     ScoringWeights, SearchConfig, ThresholdsConfig, TrustWeights, DEFAULT_NLI_MODEL_REPO,
 };
 pub use decay::{Decay, DecayStrategy};
+pub use env::in_process_override;
 pub use memory::{Memory, MemoryType, MemoryUpdate, Status, Visibility};
 pub use provenance::{Provenance, ProvenanceSource};
 pub use title_strategy::TitleStrategy;

@@ -117,11 +117,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     // Resolve the in-process flag: --in-process CLI flag OR ENGRAMDB_IN_PROCESS
     // env var (any truthy string: "1", "true", "yes", "on").
-    let in_process_flag = cli.in_process
-        || std::env::var("ENGRAMDB_IN_PROCESS")
-            .ok()
-            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false);
+    let in_process_flag = cli.in_process || engramdb::types::in_process_override();
     let spawn_daemon_flag = cli.spawn_daemon;
 
     // One process-wide DaemonCell — model-needing ops share it so the daemon
