@@ -488,6 +488,31 @@ impl LanceIndex {
             return Ok(());
         }
 
+        // Validate every vector against the index's fixed width BEFORE any
+        // Arrow construction: `FixedSizeListArray::new` PANICS on a length
+        // mismatch, which would take down the (often background) ingest task
+        // and leave the memory stored but silently unsearchable. The read
+        // path (`vector_search`) already bails cleanly on a dimension
+        // mismatch — the write path must match. A mismatch here usually
+        // means the embedding provider and `[embeddings].dimensions` in
+        // config.toml disagree (the index table is created from the config
+        // value).
+        for (i, chunk) in chunks.iter().enumerate() {
+            if chunk.len() != self.dimensions {
+                anyhow::bail!(
+                    "Embedding dimension mismatch for memory '{}': chunk {} has {} dimensions \
+                     but the index expects {}. The embedding provider and the configured \
+                     [embeddings].dimensions disagree — set [embeddings].dimensions = {} in \
+                     config.toml, then run `engramdb reindex --embeddings-only`.",
+                    memory_id,
+                    i,
+                    chunk.len(),
+                    self.dimensions,
+                    chunk.len()
+                );
+            }
+        }
+
         let table = self.open_chunks_table().await?;
         let schema = self.chunks_schema();
 
@@ -1267,6 +1292,61 @@ mod tests {
         let matches = lance.vector_search(vec![0.1f32; 384], 10).await.unwrap();
         assert!(!matches.is_empty());
         assert_eq!(matches[0].id, "chunk-test");
+    }
+
+    /// A wrong-width vector must be rejected with a descriptive error, not
+    /// crash the process: `FixedSizeListArray::new` panics on a length
+    /// mismatch, and upserts often run in background ingest tasks where a
+    /// panic leaves the memory stored but silently unsearchable.
+    #[tokio::test]
+    async fn test_upsert_chunks_dimension_mismatch_errors_cleanly() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        let err = lance
+            .upsert_chunks("dim-mismatch-mem", vec![vec![0.1f32; 1024]])
+            .await
+            .expect_err("wrong-width vector must return Err, not panic");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("dim-mismatch-mem"),
+            "error must name the memory id: {msg}"
+        );
+        assert!(msg.contains("384"), "error must state expected dims: {msg}");
+        assert!(msg.contains("1024"), "error must state actual dims: {msg}");
+
+        // The index must remain usable: a correct-width upsert for the same
+        // memory still works after the rejected write.
+        lance
+            .upsert_chunks("dim-mismatch-mem", vec![vec![0.1f32; 384]])
+            .await
+            .unwrap();
+        let matches = lance.vector_search(vec![0.1f32; 384], 10).await.unwrap();
+        assert!(matches.iter().any(|m| m.id == "dim-mismatch-mem"));
+    }
+
+    /// Mixed batches are all-or-nothing: one bad chunk among good ones must
+    /// reject the whole upsert (a partial write would mis-shape the
+    /// FixedSizeList values buffer).
+    #[tokio::test]
+    async fn test_upsert_chunks_rejects_mixed_width_batch() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        let err = lance
+            .upsert_chunks("mixed-width-mem", vec![vec![0.1f32; 384], vec![0.2f32; 16]])
+            .await
+            .expect_err("a batch containing a wrong-width chunk must be rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("mixed-width-mem"), "{msg}");
+        assert!(
+            msg.contains("chunk 1"),
+            "error must point at the bad chunk: {msg}"
+        );
+
+        // Nothing from the rejected batch was written.
+        let chunks = lance.chunks_for_memory("mixed-width-mem").await.unwrap();
+        assert!(chunks.is_empty());
     }
 
     #[tokio::test]

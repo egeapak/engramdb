@@ -37,8 +37,24 @@ pub async fn acquire_write_lock(project_id: &str) -> Result<WriteLockGuard> {
 
 /// Acquire an exclusive advisory lock in the given directory.
 pub(crate) async fn acquire_write_lock_at(lock_dir: &Path) -> Result<WriteLockGuard> {
-    tokio::fs::create_dir_all(lock_dir).await?;
-    let lock_path = lock_dir.join("write.lock");
+    acquire_lock_file(lock_dir.join("write.lock")).await
+}
+
+/// Acquire an exclusive advisory lock on an arbitrary lock file.
+///
+/// Generalization of [`acquire_write_lock_at`] that lets the caller name the
+/// lock file itself (e.g. `registry.json.lock` next to the registry file).
+/// Parent directories are created as needed; `flock(LOCK_EX)` runs inside
+/// `spawn_blocking` so a contended acquire never blocks the async executor.
+///
+/// `flock` is per open file description: every call opens a fresh fd, so two
+/// acquisitions serialize even within one process. The flip side is that a
+/// task must never re-acquire a lock it already holds — the second fd would
+/// block forever.
+pub(crate) async fn acquire_lock_file(lock_path: std::path::PathBuf) -> Result<WriteLockGuard> {
+    if let Some(parent) = lock_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
 
     tokio::task::spawn_blocking(move || -> Result<WriteLockGuard> {
         let file = File::options()

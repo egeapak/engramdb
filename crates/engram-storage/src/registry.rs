@@ -6,6 +6,7 @@
 
 use super::error::Result;
 use super::paths;
+use super::write_lock;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -69,6 +70,11 @@ pub trait RegistryBackend: Send + Sync {
     /// Internal upsert used by both `update` and `update_with_parent`.
     /// When `overwrite_parent` is false, the existing parent on the entry
     /// (if any) is preserved.
+    ///
+    /// This is the single locking point for upserts: `update` and
+    /// `update_with_parent` both delegate here, so a backend that overrides
+    /// it with a critical section (see [`FileRegistry`]) takes the lock
+    /// exactly once per mutation.
     #[doc(hidden)]
     async fn update_inner(
         &self,
@@ -77,52 +83,7 @@ pub trait RegistryBackend: Send + Sync {
         parent_project_id: Option<&str>,
         overwrite_parent: bool,
     ) -> Result<()> {
-        let mut registry = self.load().await?;
-
-        let abs_path = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-        let path_str = abs_path.to_string_lossy().to_string();
-
-        if let Some(entry) = registry
-            .projects
-            .iter_mut()
-            .find(|e| e.project_id == project_id)
-        {
-            // Keep the first registration. Two independent clones of the same
-            // git remote hash to the same project ID (a deliberate feature:
-            // the ID is stable across moves and re-clones), so they share one
-            // LanceDB index, write lock, and personal-memories dir. The
-            // registry's `project_path` records which checkout *owns* the ID;
-            // silently repointing it on every open would let the second clone
-            // steal ownership. Repoint only when the registered path no
-            // longer exists (the legitimate moved/re-cloned self-heal case)
-            // or when it is the same directory under a different spelling.
-            let registered = PathBuf::from(&entry.project_path);
-            let registered_canon = registered
-                .canonicalize()
-                .unwrap_or_else(|_| registered.clone());
-            if registered_canon == abs_path || !registered_canon.exists() {
-                entry.project_path = path_str;
-            } else {
-                tracing::warn!(
-                    "Registry entry for project '{}' already points at existing checkout {}; \
-                     keeping it ({} shares the same project ID)",
-                    project_id,
-                    entry.project_path,
-                    path_str
-                );
-            }
-            if overwrite_parent {
-                entry.parent_project_id = parent_project_id.map(|s| s.to_string());
-            }
-        } else {
-            registry.projects.push(RegistryEntry {
-                project_id: project_id.to_string(),
-                project_path: path_str,
-                parent_project_id: parent_project_id.map(|s| s.to_string()),
-            });
-        }
-
-        self.save(&registry).await
+        update_inner_impl(self, dir, project_id, parent_project_id, overwrite_parent).await
     }
 
     /// Set (or clear) the `parent_project_id` of an already-registered project.
@@ -132,20 +93,95 @@ pub trait RegistryBackend: Send + Sync {
     /// the registry. Pass `parent_project_id = None` to promote the project
     /// back to a root.
     async fn set_parent(&self, project_id: &str, parent_project_id: Option<&str>) -> Result<()> {
-        let mut registry = self.load().await?;
-        let entry = registry
-            .projects
-            .iter_mut()
-            .find(|e| e.project_id == project_id)
-            .ok_or_else(|| {
-                super::error::StorageError::Validation(format!(
-                    "Project '{}' not found in registry",
-                    project_id
-                ))
-            })?;
-        entry.parent_project_id = parent_project_id.map(|s| s.to_string());
-        self.save(&registry).await
+        set_parent_impl(self, project_id, parent_project_id).await
     }
+}
+
+/// Load → mutate → save body shared by the trait's default `update_inner`
+/// and [`FileRegistry`]'s lock-wrapped override. Calls only `load`/`save` on
+/// the backend — never another mutating trait method — so a caller already
+/// holding the registry lock cannot re-enter it.
+async fn update_inner_impl<B>(
+    backend: &B,
+    dir: &Path,
+    project_id: &str,
+    parent_project_id: Option<&str>,
+    overwrite_parent: bool,
+) -> Result<()>
+where
+    B: RegistryBackend + ?Sized,
+{
+    let mut registry = backend.load().await?;
+
+    let abs_path = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let path_str = abs_path.to_string_lossy().to_string();
+
+    if let Some(entry) = registry
+        .projects
+        .iter_mut()
+        .find(|e| e.project_id == project_id)
+    {
+        // Keep the first registration. Two independent clones of the same
+        // git remote hash to the same project ID (a deliberate feature:
+        // the ID is stable across moves and re-clones), so they share one
+        // LanceDB index, write lock, and personal-memories dir. The
+        // registry's `project_path` records which checkout *owns* the ID;
+        // silently repointing it on every open would let the second clone
+        // steal ownership. Repoint only when the registered path no
+        // longer exists (the legitimate moved/re-cloned self-heal case)
+        // or when it is the same directory under a different spelling.
+        let registered = PathBuf::from(&entry.project_path);
+        let registered_canon = registered
+            .canonicalize()
+            .unwrap_or_else(|_| registered.clone());
+        if registered_canon == abs_path || !registered_canon.exists() {
+            entry.project_path = path_str;
+        } else {
+            tracing::warn!(
+                "Registry entry for project '{}' already points at existing checkout {}; \
+                 keeping it ({} shares the same project ID)",
+                project_id,
+                entry.project_path,
+                path_str
+            );
+        }
+        if overwrite_parent {
+            entry.parent_project_id = parent_project_id.map(|s| s.to_string());
+        }
+    } else {
+        registry.projects.push(RegistryEntry {
+            project_id: project_id.to_string(),
+            project_path: path_str,
+            parent_project_id: parent_project_id.map(|s| s.to_string()),
+        });
+    }
+
+    backend.save(&registry).await
+}
+
+/// Load → mutate → save body shared by the trait's default `set_parent` and
+/// [`FileRegistry`]'s lock-wrapped override.
+async fn set_parent_impl<B>(
+    backend: &B,
+    project_id: &str,
+    parent_project_id: Option<&str>,
+) -> Result<()>
+where
+    B: RegistryBackend + ?Sized,
+{
+    let mut registry = backend.load().await?;
+    let entry = registry
+        .projects
+        .iter_mut()
+        .find(|e| e.project_id == project_id)
+        .ok_or_else(|| {
+            super::error::StorageError::Validation(format!(
+                "Project '{}' not found in registry",
+                project_id
+            ))
+        })?;
+    entry.parent_project_id = parent_project_id.map(|s| s.to_string());
+    backend.save(&registry).await
 }
 
 /// Collect all direct children of `project_id`.
@@ -255,6 +291,14 @@ pub fn conflicting_checkout_path(
 // ---------------------------------------------------------------------------
 
 /// File-backed registry that persists to a JSON file.
+///
+/// Mutating operations (`update`, `update_with_parent`, `set_parent`) are
+/// serialized across processes by an advisory `flock(2)` on a lock file next
+/// to the registry (`registry.json.lock`): the whole load → mutate → save
+/// cycle runs as one critical section, so two concurrent `engramdb`
+/// invocations registering different projects cannot lose each other's
+/// entries. Plain reads (`load`) stay lock-free — `atomic_write` keeps the
+/// file consistent at all times.
 pub struct FileRegistry {
     path: PathBuf,
 }
@@ -270,6 +314,20 @@ impl FileRegistry {
     /// Create a `FileRegistry` at an arbitrary path (useful for testing).
     pub fn new(path: PathBuf) -> Self {
         Self { path }
+    }
+
+    /// Path of the advisory lock file guarding read-modify-write cycles:
+    /// `<registry-file>.lock` in the same directory (the registry file itself
+    /// can't be the lock — `atomic_write` replaces it by rename, which would
+    /// silently detach any flock held on the old inode).
+    fn lock_path(&self) -> PathBuf {
+        let mut name = self
+            .path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_else(|| std::ffi::OsString::from("registry.json"));
+        name.push(".lock");
+        self.path.with_file_name(name)
     }
 }
 
@@ -291,6 +349,29 @@ impl RegistryBackend for FileRegistry {
         let content = serde_json::to_string_pretty(registry)?;
         super::store::atomic_write(&self.path, &content).await?;
         Ok(())
+    }
+
+    // The two overrides below wrap the shared load → mutate → save bodies in
+    // the cross-process registry lock. They must never call another mutating
+    // trait method while the guard is held: `flock` on a fresh fd in the same
+    // process blocks just like another process, so re-acquiring would
+    // deadlock. (`update`/`update_with_parent` are safe — they delegate to
+    // `update_inner` and take the lock exactly once.)
+
+    async fn update_inner(
+        &self,
+        dir: &Path,
+        project_id: &str,
+        parent_project_id: Option<&str>,
+        overwrite_parent: bool,
+    ) -> Result<()> {
+        let _lock = write_lock::acquire_lock_file(self.lock_path()).await?;
+        update_inner_impl(self, dir, project_id, parent_project_id, overwrite_parent).await
+    }
+
+    async fn set_parent(&self, project_id: &str, parent_project_id: Option<&str>) -> Result<()> {
+        let _lock = write_lock::acquire_lock_file(self.lock_path()).await?;
+        set_parent_impl(self, project_id, parent_project_id).await
     }
 }
 
@@ -405,6 +486,149 @@ mod tests {
 
         let loaded = file_registry.load().await.unwrap();
         assert_eq!(loaded.projects.len(), 1);
+    }
+
+    // ---- cross-process-style concurrency (registry lock) ----
+
+    /// N concurrent registrations of N distinct projects must all survive.
+    /// Each task uses its own `FileRegistry` against the same file and the
+    /// lock is taken on a fresh fd per acquisition, so in-process tasks
+    /// contend on the flock exactly like separate processes would. Without
+    /// the lock the load → mutate → save cycles interleave and entries
+    /// vanish.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn test_file_registry_concurrent_updates_keep_all_entries() {
+        const N: usize = 16;
+        let temp_dir = TempDir::new().unwrap();
+        let registry_path = temp_dir.path().join("registry.json");
+
+        let mut handles = Vec::new();
+        for i in 0..N {
+            let path = registry_path.clone();
+            let dir = temp_dir.path().join(format!("proj-{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            handles.push(tokio::spawn(async move {
+                FileRegistry::new(path)
+                    .update(&dir, &format!("proj-{i}"))
+                    .await
+                    .unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let loaded = FileRegistry::new(registry_path).load().await.unwrap();
+        let mut ids: Vec<_> = loaded
+            .projects
+            .iter()
+            .map(|e| e.project_id.clone())
+            .collect();
+        ids.sort();
+        assert_eq!(
+            loaded.projects.len(),
+            N,
+            "every concurrent registration must survive; got {ids:?}"
+        );
+    }
+
+    /// Same property across real OS threads (each with its own runtime),
+    /// the closest in-process approximation of N separate `engramdb`
+    /// processes hitting the registry at once.
+    #[test]
+    fn test_file_registry_cross_thread_updates_keep_all_entries() {
+        const N: usize = 8;
+        let temp_dir = TempDir::new().unwrap();
+        let registry_path = temp_dir.path().join("registry.json");
+
+        let mut handles = Vec::new();
+        for i in 0..N {
+            let path = registry_path.clone();
+            let dir = temp_dir.path().join(format!("thread-proj-{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            handles.push(std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    FileRegistry::new(path)
+                        .update(&dir, &format!("thread-proj-{i}"))
+                        .await
+                        .unwrap();
+                });
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let loaded = rt
+            .block_on(FileRegistry::new(registry_path).load())
+            .unwrap();
+        assert_eq!(loaded.projects.len(), N);
+    }
+
+    /// A worktree parent link set while other registrations race must
+    /// survive: without the lock, a concurrent `update`'s stale load can
+    /// save right over the freshly written `parent_project_id`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn test_file_registry_concurrent_parent_link_survives() {
+        const N: usize = 8;
+        let temp_dir = TempDir::new().unwrap();
+        let registry_path = temp_dir.path().join("registry.json");
+
+        // Register the child up front so set_parent finds it.
+        let child_dir = temp_dir.path().join("child");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        FileRegistry::new(registry_path.clone())
+            .update(&child_dir, "child-id")
+            .await
+            .unwrap();
+
+        let mut handles = Vec::new();
+        // One task links the child to its parent...
+        {
+            let path = registry_path.clone();
+            handles.push(tokio::spawn(async move {
+                FileRegistry::new(path)
+                    .set_parent("child-id", Some("parent-id"))
+                    .await
+                    .unwrap();
+            }));
+        }
+        // ...while N others register unrelated projects.
+        for i in 0..N {
+            let path = registry_path.clone();
+            let dir = temp_dir.path().join(format!("other-{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            handles.push(tokio::spawn(async move {
+                FileRegistry::new(path)
+                    .update(&dir, &format!("other-{i}"))
+                    .await
+                    .unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let loaded = FileRegistry::new(registry_path).load().await.unwrap();
+        assert_eq!(loaded.projects.len(), N + 1);
+        let child = loaded
+            .projects
+            .iter()
+            .find(|e| e.project_id == "child-id")
+            .expect("child entry must survive");
+        assert_eq!(
+            child.parent_project_id.as_deref(),
+            Some("parent-id"),
+            "the parent link must not be lost to a concurrent registration"
+        );
     }
 
     #[tokio::test]

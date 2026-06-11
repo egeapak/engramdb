@@ -304,10 +304,24 @@ pub fn resolve_engine_providers(
     }
     if let Some(provider) = crate::embeddings::PooledEmbeddingProvider::build(sessions) {
         if provider.dimensions() != config.embeddings.dimensions {
-            eprintln!(
-                "Warning: provider dimensions ({}) != config dimensions ({})",
+            // Deliberately a warning, not a hard error: the Auto backend can
+            // legitimately fall back to a provider with different dimensions
+            // (e.g. ONNX unavailable → Ollama mxbai-embed-large) and graceful
+            // degradation is the contract — operations must keep working.
+            // Corruption is impossible regardless: the LanceDB index is sized
+            // from the config value, `LanceIndex::upsert_chunks` rejects
+            // wrong-width vectors at write time, `vector_search` rejects them
+            // at read time, and the embedding-fingerprint check reports the
+            // drift via `doctor`/open-time warnings.
+            tracing::warn!(
+                "Embedding provider '{}' produces {}-dimensional vectors but \
+                 [embeddings].dimensions = {}. Embeddings will be rejected at write \
+                 time until this is fixed — set [embeddings].dimensions = {} in \
+                 config.toml, then run `engramdb reindex --embeddings-only`.",
+                config.embeddings.provider,
                 provider.dimensions(),
-                config.embeddings.dimensions
+                config.embeddings.dimensions,
+                provider.dimensions(),
             );
         }
         providers.embedding = Some(provider);
