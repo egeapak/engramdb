@@ -67,6 +67,14 @@ pub async fn run_gc(
         formatter.print_message("\nRun with --confirm to delete these memories.");
     } else {
         formatter.print_success(&format!("Removed {} memories.", result.count));
+        if let Some(m) = &result.maintenance {
+            if m.bytes_removed > 0 {
+                formatter.print_message(&format!(
+                    "Index maintenance reclaimed {} bytes ({} old index versions pruned).",
+                    m.bytes_removed, m.old_versions_removed
+                ));
+            }
+        }
         if !result.skipped.is_empty() {
             formatter.print_warning(&format!(
                 "Skipped {} candidate(s) that changed or were deleted concurrently: {}",

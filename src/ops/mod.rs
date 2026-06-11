@@ -34,7 +34,7 @@ pub use doctor::{
     doctor, doctor_environment, CheckStatus, DoctorResult, DoctorSection, EnvironmentCheck,
     EnvironmentDoctorResult,
 };
-pub use gc::{execute_gc_plan, gc_memories, plan_gc, GcCandidate, GcPlan, GcResult};
+pub use gc::{execute_gc_plan, gc_memories, plan_gc, GcCandidate, GcMaintenance, GcPlan, GcResult};
 pub use get::get_memory;
 pub use list::{list_memories, parse_sort_field, ListParams, SortField};
 pub use parsing::{

@@ -1885,6 +1885,10 @@ impl EngramDbServer {
             response["warning"] =
                 serde_json::json!("Stale index entries found. Run reindex to fix.");
         }
+        if let Some(m) = &result.maintenance {
+            // Post-deletion index maintenance (compaction + version pruning).
+            response["index_bytes_reclaimed"] = serde_json::json!(m.bytes_removed);
+        }
         let r = serde_json::to_string(&response)
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();

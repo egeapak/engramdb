@@ -149,6 +149,14 @@ pub async fn reindex(
         }
     }
 
+    // Reindex churns the index heavily (table rebuilds plus a per-memory
+    // upsert each, every one committing a new Lance version) — reclaim disk
+    // opportunistically. Best-effort: maintenance must never fail a reindex
+    // that already succeeded.
+    if let Err(e) = store.optimize().await {
+        tracing::warn!("reindex: index optimize failed (non-fatal): {e}");
+    }
+
     Ok(ReindexResult {
         indexed,
         embedded,

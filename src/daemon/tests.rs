@@ -424,6 +424,64 @@ async fn metrics_persist_then_load_latest() {
     assert_eq!(latest.uptime_secs, 120);
 }
 
+/// Unbounded-growth guard: `persist_at` must prune snapshot rows older than
+/// the retention window (30 days) while the just-appended row — and
+/// `load_latest`'s view of it — survives.
+#[tokio::test]
+async fn metrics_persist_prunes_old_snapshots() {
+    use super::metrics::{self, MetricsSnapshot};
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+
+    // Seed a batch of stale snapshot rows (40 days old) directly, bypassing
+    // the prune-on-persist path.
+    let old_ts = chrono::Utc::now() - chrono::Duration::days(40);
+    for i in 0..5u64 {
+        metrics::persist_row_at(
+            dir,
+            old_ts + chrono::Duration::seconds(i as i64),
+            222,
+            i,
+            MetricsSnapshot {
+                embed: i,
+                ..MetricsSnapshot::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    // A normal persist appends the fresh row and prunes everything stale.
+    metrics::persist_at(
+        dir,
+        222,
+        999,
+        MetricsSnapshot {
+            embed: 42,
+            ..MetricsSnapshot::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // Only the fresh row remains on disk…
+    let conn = lancedb::connect(dir.to_str().unwrap())
+        .execute()
+        .await
+        .unwrap();
+    let table = conn.open_table("daemon_metrics").execute().await.unwrap();
+    assert_eq!(
+        table.count_rows(None).await.unwrap(),
+        1,
+        "stale snapshot rows must be pruned on persist"
+    );
+
+    // …and load_latest still resolves it.
+    let latest = metrics::load_latest_at(dir).await.unwrap().unwrap();
+    assert_eq!(latest.snapshot.embed, 42);
+    assert_eq!(latest.uptime_secs, 999);
+}
+
 // ---------------------------------------------------------------------------
 // Remote providers: error mapping + None-on-Meta-failure
 // ---------------------------------------------------------------------------

@@ -24,7 +24,9 @@ pub mod worktree;
 pub mod write_lock;
 
 pub use error::{Result, StorageError};
-pub use lance_index::{IndexFilterable, IndexForFiltering, IndexSummary, VectorMatch};
+pub use lance_index::{
+    IndexFilterable, IndexForFiltering, IndexOptimizeStats, IndexSummary, VectorMatch,
+};
 pub use manifest::{embedding_status, EmbeddingFingerprint, EmbeddingModelStatus, Manifest};
 pub use project_id::detect_worktree_main;
 pub use registry::{

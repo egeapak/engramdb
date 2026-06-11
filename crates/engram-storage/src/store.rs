@@ -636,6 +636,20 @@ impl MemoryStore {
             .map_err(|e| StorageError::Validation(format!("LanceDB list_ids failed: {}", e)))
     }
 
+    /// Compact fragments and prune old LanceDB dataset versions for the
+    /// memories and chunks tables. See [`LanceIndex::optimize`].
+    ///
+    /// Every create/update/delete commits a new immutable Lance version, so
+    /// this is the disk-space reclamation path. Safe to run concurrently
+    /// with readers (version pruning keeps the lancedb-default 7 days of
+    /// versions). Callers should treat failures as non-fatal.
+    pub async fn optimize(&self) -> Result<super::lance_index::IndexOptimizeStats> {
+        self.lance_index
+            .optimize()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB optimize failed: {}", e)))
+    }
+
     /// Return the count of memories without loading data.
     pub async fn count(&self) -> Result<usize> {
         self.lance_index

@@ -17,6 +17,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema};
 use futures_util::stream::StreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::table::OptimizeAction;
 use lancedb::{connect, Connection, Table};
 
 use chrono::{DateTime, Utc};
@@ -135,6 +136,20 @@ pub struct VectorMatch {
     pub id: String,
     /// Cosine similarity score (higher is better)
     pub score: f64,
+}
+
+/// Aggregate result of [`LanceIndex::optimize`] across the memories and
+/// chunks tables. All counters are zero when there was nothing to reclaim.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IndexOptimizeStats {
+    /// Fragments merged away by compaction.
+    pub fragments_removed: usize,
+    /// Data files removed by compaction (including deletion files).
+    pub files_removed: usize,
+    /// Bytes freed by pruning old dataset versions.
+    pub bytes_removed: u64,
+    /// Number of old dataset versions pruned.
+    pub old_versions_removed: u64,
 }
 
 /// Unified LanceDB wrapper for metadata and vector storage.
@@ -765,6 +780,43 @@ impl LanceIndex {
         Ok(())
     }
 
+    /// Compact small fragments and prune old dataset versions for both the
+    /// memories and chunks tables.
+    ///
+    /// Every mutating LanceDB operation (merge_insert, delete, add) commits a
+    /// new immutable dataset version, so without periodic maintenance disk
+    /// usage grows monotonically with write count. This runs
+    /// `OptimizeAction::All`, which is compaction + version pruning + index
+    /// optimization with library defaults. Version pruning keeps versions
+    /// newer than 7 days (the lancedb default), which is safe for concurrent
+    /// MVCC readers: a reader holding an older-than-7-days snapshot in an
+    /// active query would be pathological.
+    ///
+    /// Returns aggregate statistics across both tables (zeroes when there is
+    /// nothing to reclaim). Callers should treat failures as non-fatal —
+    /// optimization is maintenance, not correctness.
+    pub async fn optimize(&self) -> Result<IndexOptimizeStats> {
+        let mut total = IndexOptimizeStats::default();
+        for (table, label) in [
+            (self.open_table().await?, "memories"),
+            (self.open_chunks_table().await?, "chunks"),
+        ] {
+            let stats = table
+                .optimize(OptimizeAction::All)
+                .await
+                .with_context(|| format!("Failed to optimize LanceDB {label} table"))?;
+            if let Some(c) = stats.compaction {
+                total.fragments_removed += c.fragments_removed;
+                total.files_removed += c.files_removed;
+            }
+            if let Some(p) = stats.prune {
+                total.bytes_removed += p.bytes_removed;
+                total.old_versions_removed += p.old_versions;
+            }
+        }
+        Ok(total)
+    }
+
     // ---- Arrow conversion helpers ----
 
     fn entry_to_batch(&self, entry: &IndexEntry) -> Result<RecordBatch> {
@@ -1207,6 +1259,41 @@ mod tests {
         lance.delete("test-1").await.unwrap();
 
         assert_eq!(lance.count().await.unwrap(), 0);
+    }
+
+    /// `optimize` is the disk-space reclamation path for the append-only
+    /// Lance versions. It must succeed both on freshly-created empty tables
+    /// and after a burst of versioned writes (upserts, chunk writes,
+    /// deletes), and must not disturb live data. Actual byte reclamation is
+    /// environment-dependent (version pruning retains 7 days), so only the
+    /// Ok contract and data integrity are asserted.
+    #[tokio::test]
+    async fn test_optimize_on_empty_and_after_writes() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        // Empty tables: optimize is a safe no-op.
+        let stats = lance.optimize().await.unwrap();
+        assert_eq!(stats.bytes_removed, 0, "nothing to prune on a fresh index");
+
+        // A burst of version-creating writes across both tables.
+        for i in 0..5 {
+            let entry = create_test_entry(&format!("opt-{i}"));
+            lance.upsert(&entry).await.unwrap();
+            lance
+                .upsert_chunks(&format!("opt-{i}"), vec![vec![0.1f32; 384]])
+                .await
+                .unwrap();
+        }
+        lance.delete("opt-0").await.unwrap();
+        lance.delete_chunks("opt-0").await.unwrap();
+
+        lance.optimize().await.unwrap();
+
+        // Live rows survive compaction.
+        assert_eq!(lance.count().await.unwrap(), 4);
+        assert_eq!(lance.chunks_for_memory("opt-1").await.unwrap().len(), 1);
+        assert!(lance.chunks_for_memory("opt-0").await.unwrap().is_empty());
     }
 
     #[tokio::test]

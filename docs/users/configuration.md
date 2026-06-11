@@ -94,7 +94,7 @@ weight = 0.5                   # 0.0 = ignore reranker, 1.0 = trust it fully
 [stats]
 enabled = true
 histogram_capacity = 256
-retention_days = 0             # 0 / unset = retain forever (max 3650)
+retention_days = 90            # prune events older than N days (default 90, max 3650)
 flush_interval_secs = 60
 followup_window_secs = 60
 max_sessions_per_project = 10000
@@ -112,6 +112,7 @@ idle_timeout_secs = 900        # 15 min idle → daemon exits
 - **`[trust_weights]`** — `Provenance` source maps to a trust weight (`human` highest, `inferred` lowest). The multiplier is `floor + (1 - floor) * weight`, so even fully `inferred` memories keep ≥50% of their raw score.
 - **`[nli]`** — off by default. Downloads ~50 MB and adds latency to `create`. When enabled, every `create` checks the top-`max_comparisons` similar memories and auto-challenges contradictions above `contradiction_threshold`.
 - **`[rerank]`** — off by default. Downloads ~100 MB. Final score blends original and reranker: `(1 - weight) * original + weight * rerank_score`.
+- **`[stats]`** — telemetry events persist to a per-project LanceDB table. `retention_days` defaults to **90** so the event log cannot grow without bound; events older than the window are pruned periodically (by the background flush task and by `engramdb gc`). Set up to the maximum of 3650 (10 years) to effectively retain forever. `0` is rejected by validation — older versions documented it as "retain forever" but actually deleted everything, so an explicit positive value is now required. Lifetime counters in `engramdb stats` cover "since the oldest non-pruned event".
 - **`[daemon]`** — see [daemon.md](./daemon.md).
 
 ## Environment variables
