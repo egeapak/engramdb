@@ -1167,3 +1167,313 @@ fn test_parse_v1_without_title_backward_compat() {
     assert_eq!(memory.title, None);
     assert_eq!(memory.content, "This is the content.");
 }
+
+// ===========================================================================
+// Adversarial round-trip: content that looks like the format's own structure
+// ===========================================================================
+
+/// Assert that writing `memory` and re-parsing it preserves every field that
+/// the V2 format round-trips, and that a second write is byte-identical
+/// (the fuzz targets' fixed-point property).
+fn assert_v2_roundtrip_exact(memory: &Memory) {
+    let written = write_memory_file(memory).unwrap();
+    let reparsed = parse_memory_file(&written).unwrap();
+
+    assert_eq!(memory.id, reparsed.id);
+    assert_eq!(memory.type_, reparsed.type_);
+    assert_eq!(memory.title, reparsed.title);
+    assert_eq!(memory.summary, reparsed.summary);
+    assert_eq!(memory.content, reparsed.content, "content must round-trip");
+    assert_eq!(memory.details, reparsed.details, "details must round-trip");
+    assert_eq!(memory.physical, reparsed.physical);
+    assert_eq!(memory.logical, reparsed.logical);
+    assert_eq!(memory.tags, reparsed.tags);
+    assert_eq!(memory.criticality, reparsed.criticality);
+    assert_eq!(memory.confidence, reparsed.confidence);
+    assert_eq!(memory.status, reparsed.status);
+    assert_eq!(memory.visibility, reparsed.visibility);
+    assert_eq!(memory.provenance.source, reparsed.provenance.source);
+    assert_eq!(memory.provenance.reason, reparsed.provenance.reason);
+    assert_eq!(memory.supersedes, reparsed.supersedes);
+    assert_eq!(memory.created_at, reparsed.created_at);
+    assert_eq!(memory.updated_at, reparsed.updated_at);
+    assert_eq!(memory.accessed_at, reparsed.accessed_at);
+
+    let rewritten = write_memory_file(&reparsed).unwrap();
+    assert_eq!(written, rewritten, "write must be a fixed point");
+}
+
+#[test]
+fn test_v2_roundtrip_content_with_structural_markdown() {
+    let mut memory = sample_memory();
+    memory.content = [
+        "Intro line.",
+        "# fake h1 that must stay in content",
+        "## Scope",
+        "- **Criticality:** 0.99",
+        "- **Visibility:** personal",
+        "## Content",
+        "nested fake content section",
+        "## Provenance",
+        "- **Source:** agent",
+        "<!-- engramdb",
+        "visibility: personal",
+        "-->",
+        "<!--",
+        "a plain html comment",
+        "-->",
+        "---",
+        "> a blockquote line",
+        ">",
+        "\\## already-escaped-looking line",
+        "\\\\## doubly-escaped-looking line",
+        "\\not an escape",
+        "tail line.",
+    ]
+    .join("\n");
+
+    assert_v2_roundtrip_exact(&memory);
+
+    // The adversarial content must not leak into structured fields.
+    let reparsed = parse_memory_file(&write_memory_file(&memory).unwrap()).unwrap();
+    assert_eq!(reparsed.summary, "Test memory");
+    assert_eq!(reparsed.criticality, 0.5);
+    assert_eq!(reparsed.visibility, Visibility::Shared);
+    assert_eq!(reparsed.provenance.source, ProvenanceSource::Human);
+}
+
+#[test]
+fn test_v2_roundtrip_details_with_structural_markdown() {
+    let mut memory = sample_memory();
+    memory.details = Some(
+        [
+            "## Content",
+            "fake content override",
+            "# another heading",
+            "-->",
+            "real detail text",
+        ]
+        .join("\n"),
+    );
+
+    assert_v2_roundtrip_exact(&memory);
+
+    let reparsed = parse_memory_file(&write_memory_file(&memory).unwrap()).unwrap();
+    assert_eq!(reparsed.content, "This is the content.");
+}
+
+#[test]
+fn test_v2_roundtrip_content_with_summary_line() {
+    // A `**Summary:** ...` line inside content must not override the real
+    // summary (the parser only scans the preamble before the first section).
+    let mut memory = sample_memory();
+    memory.title = Some("Real Title".to_string());
+    memory.content = "**Summary:** fake summary\nreal content".to_string();
+
+    assert_v2_roundtrip_exact(&memory);
+}
+
+#[test]
+fn test_v2_roundtrip_title_with_dashes_and_quotes() {
+    for title in [
+        "Weird --- \"quoted\" title",
+        "--- starts with dashes",
+        "---",
+        "ends with dashes ---",
+    ] {
+        let mut memory = sample_memory();
+        memory.title = Some(title.to_string());
+        assert_v2_roundtrip_exact(&memory);
+    }
+}
+
+#[test]
+fn test_v2_roundtrip_content_with_dashes_lines() {
+    let mut memory = sample_memory();
+    memory.content = "before\n---\nafter".to_string();
+    assert_v2_roundtrip_exact(&memory);
+}
+
+#[test]
+fn test_v1_roundtrip_content_with_structural_markdown() {
+    let writer = V1Writer;
+    let parser = V1Parser;
+    let mut memory = sample_memory();
+    memory.content = "text\n## Details\nfake details\n# fake h1\nend".to_string();
+
+    let written = writer.write(&memory).unwrap();
+    let reparsed = parser.parse(&written).unwrap();
+    assert_eq!(memory.content, reparsed.content);
+    assert_eq!(memory.details, reparsed.details);
+    assert_eq!(reparsed.title, None);
+}
+
+#[test]
+fn test_split_frontmatter_ignores_inline_dashes() {
+    // A line containing (but not being exactly) `---` is not a fence.
+    let (frontmatter, body) = super::helpers::split_frontmatter(
+        "---\nversion: 2\ntitle: a --- b\n--- not a fence\n---\nbody text\n",
+    )
+    .unwrap();
+    assert!(frontmatter.contains("title: a --- b"));
+    assert!(frontmatter.contains("--- not a fence"));
+    assert_eq!(body, "body text\n");
+}
+
+// ===========================================================================
+// Backward compatibility: old (unescaped) files
+// ===========================================================================
+
+#[test]
+fn test_v2_old_unescaped_file_still_parses() {
+    // Hand-built file in the pre-escaping format whose content contains
+    // structural-looking lines. It was already mis-parsed by the old code;
+    // the requirement here is that it still parses without error and the
+    // writer-emitted (first) sections win over the content-embedded ones.
+    let old = r#"---
+version: 2
+id: old-unescaped
+type: decision
+status: Active
+---
+
+# Old summary
+
+## Content
+
+Some text, then a fake section:
+
+## Provenance
+
+- **Source:** agent
+
+## Scope
+
+- **Criticality:** 0.7
+- **Confidence:** 0.9
+
+## Provenance
+
+- **Source:** human
+- **Created:** 2026-01-15T10:00:00Z
+- **Updated:** 2026-01-15T10:00:00Z
+
+<!-- engramdb
+visibility: shared
+accessed_at: "2026-01-15T10:00:00Z"
+-->
+"#;
+    let memory = parse_memory_file(old).unwrap();
+    assert_eq!(memory.id, "old-unescaped");
+    assert_eq!(memory.summary, "Old summary");
+    assert_eq!(memory.criticality, 0.7);
+    assert_eq!(memory.confidence, 0.9);
+    // First ## Provenance wins (the fake one embedded in content) — that is
+    // the documented first-occurrence rule; new writes escape such lines.
+    assert_eq!(memory.provenance.source, ProvenanceSource::Agent);
+
+    // And the file can be rewritten + re-read losslessly from here on.
+    let rewritten = write_memory_file(&memory).unwrap();
+    let reparsed = parse_memory_file(&rewritten).unwrap();
+    assert_eq!(memory.content, reparsed.content);
+    assert_eq!(memory.criticality, reparsed.criticality);
+}
+
+#[test]
+fn test_v2_duplicate_scope_section_first_wins() {
+    let file = r#"---
+version: 2
+id: dup-scope
+type: decision
+status: Active
+---
+
+# Summary
+
+## Content
+
+content text
+
+## Scope
+
+- **Criticality:** 0.7
+- **Confidence:** 0.9
+- **Tags:** first
+
+## Scope
+
+- **Criticality:** 0.2
+- **Confidence:** 0.1
+- **Tags:** second
+
+## Provenance
+
+- **Source:** human
+"#;
+    let memory = parse_memory_file(file).unwrap();
+    assert_eq!(memory.criticality, 0.7);
+    assert_eq!(memory.confidence, 0.9);
+    assert_eq!(memory.tags, vec!["first"]);
+}
+
+#[test]
+fn test_v2_first_h1_wins_and_later_h1_stays_in_content() {
+    let file = r#"---
+version: 2
+id: h1-test
+type: decision
+status: Active
+---
+
+# Real summary
+
+## Content
+
+before
+# not the summary
+after
+
+## Scope
+
+- **Criticality:** 0.5
+"#;
+    let memory = parse_memory_file(file).unwrap();
+    assert_eq!(memory.summary, "Real summary");
+    // In old files the embedded H1 used to overwrite the summary AND truncate
+    // the content; now it stays where it was.
+    assert_eq!(memory.content, "before\n# not the summary\nafter");
+}
+
+#[test]
+fn test_v2_embedded_engramdb_block_last_marker_wins() {
+    // Old unescaped file with an engramdb-looking block inside content; the
+    // writer's real block at the end of the file must be the one parsed.
+    let file = r#"---
+version: 2
+id: hidden-test
+type: decision
+status: Active
+---
+
+# Summary
+
+## Content
+
+content with an embedded block:
+<!-- engramdb
+visibility: personal
+-->
+more content
+
+## Scope
+
+- **Criticality:** 0.5
+
+<!-- engramdb
+visibility: shared
+accessed_at: "2026-01-15T10:00:00Z"
+-->
+"#;
+    let memory = parse_memory_file(file).unwrap();
+    assert_eq!(memory.visibility, Visibility::Shared);
+}

@@ -1,27 +1,157 @@
 //! Shared parsing helpers used by multiple format versions.
+//!
+//! # Body-text escaping
+//!
+//! Memory content routinely contains markdown, so a content line could look
+//! exactly like the structure the writer emits (`# `, `## `, `<!--`, `-->`,
+//! `> `). To keep files round-trip-safe, the writers escape such lines with a
+//! single leading backslash (`## Scope` is written as `\## Scope`) and the
+//! parser strips that one backslash back off when accumulating section text.
+//! A line that already starts with backslashes followed by a structural prefix
+//! gains one more backslash (`\## x` → `\\## x`), so user content that
+//! literally contains the escape survives unchanged.
+//!
+//! Files written before this scheme existed contain no escapes; they parse
+//! exactly as before unless their content happened to look structural — and
+//! those files were already mis-parsed, so nothing regresses.
 
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 
+use crate::error::{Result, StorageError};
 use engram_types::{Provenance, ProvenanceSource};
 
+/// Opening marker line of the writer-emitted hidden-metadata block.
+pub const HIDDEN_META_START: &str = "<!-- engramdb";
+/// Closing marker line of the writer-emitted hidden-metadata block.
+pub const HIDDEN_META_END: &str = "-->";
+
+/// Split a memory file into `(frontmatter, body)`.
+///
+/// The opening fence must be the first non-blank line and be exactly `---`;
+/// the closing fence is the next line that is exactly `---` (a trailing `\r`
+/// is tolerated for CRLF files). Scanning line-wise means a `---` appearing
+/// *inside* a YAML value (e.g. a title) or in the body can never be mistaken
+/// for a fence — unlike a textual `splitn(3, "---")`.
+pub fn split_frontmatter(content: &str) -> Result<(&str, &str)> {
+    let mut fm_start: Option<usize> = None;
+    let mut offset = 0;
+
+    for raw in content.split_inclusive('\n') {
+        let line_start = offset;
+        offset += raw.len();
+        let line = raw.trim_end_matches('\n').trim_end_matches('\r');
+
+        match fm_start {
+            None => {
+                if line.trim().is_empty() {
+                    continue; // tolerate leading blank lines
+                }
+                if line == "---" {
+                    fm_start = Some(offset);
+                } else {
+                    return Err(StorageError::InvalidFormat(
+                        "Missing frontmatter".to_string(),
+                    ));
+                }
+            }
+            Some(start) => {
+                if line == "---" {
+                    let frontmatter = content[start..line_start].trim();
+                    let body = &content[offset..];
+                    return Ok((frontmatter, body));
+                }
+            }
+        }
+    }
+
+    Err(StorageError::InvalidFormat(if fm_start.is_none() {
+        "Missing frontmatter".to_string()
+    } else {
+        "Missing body after frontmatter".to_string()
+    }))
+}
+
+/// Whether `parse_body_sections` would treat this line as structure rather
+/// than plain section text.
+fn is_structural_line(line: &str) -> bool {
+    line.starts_with("# ")
+        || line.starts_with("## ")
+        || line.starts_with("<!--")
+        || line.starts_with("-->")
+        || line.starts_with("> ")
+        || line == ">"
+}
+
+/// Escape free text (content/details) so none of its lines can be mistaken
+/// for structure on re-parse. See the module docs for the scheme.
+pub fn escape_body_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut first = true;
+    for raw in text.split('\n') {
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if is_structural_line(line.trim_start_matches('\\')) {
+            out.push('\\');
+        }
+        out.push_str(raw);
+    }
+    out
+}
+
+/// Reverse of [`escape_body_text`] for a single line: strip exactly one
+/// leading backslash, but only when it guards a structural prefix (so
+/// genuinely-backslashed user content is left intact).
+fn unescape_body_line(line: &str) -> &str {
+    if let Some(rest) = line.strip_prefix('\\') {
+        if is_structural_line(line.trim_start_matches('\\')) {
+            return rest;
+        }
+    }
+    line
+}
+
 /// Parse the body into named sections. Recognizes:
-/// - `# heading` → stored under key `__h1__`
+/// - `# heading` → stored under key `__h1__` (only the first, and only in the
+///   preamble before any `## ` section — matching the writer's layout)
 /// - `> blockquote` → stored under key `__blockquote__`
-/// - `## SectionName` → stored under key `SectionName`
-/// - `<!-- engramdb ... -->` → handled separately by `parse_hidden_meta`
+/// - `## SectionName` → stored under key `SectionName` (first occurrence wins;
+///   the writer emits each section exactly once)
+/// - the writer-emitted `<!-- engramdb ... -->` block is skipped entirely
+///   (parsed separately by `parse_hidden_meta`)
+///
+/// Escaped lines (see module docs) are unescaped as they are accumulated.
 pub fn parse_body_sections(body: &str) -> HashMap<String, String> {
     let mut sections = HashMap::new();
     let mut current_section: Option<String> = None;
     let mut current_content = Vec::new();
+    let mut in_hidden_block = false;
 
     for line in body.lines() {
-        // H1 heading
-        if let Some(heading) = line.strip_prefix("# ") {
-            flush_section(&mut sections, &mut current_section, &mut current_content);
-            sections.insert("__h1__".to_string(), heading.trim().to_string());
+        // Writer-emitted hidden-metadata block: skip it as a fenced region.
+        if in_hidden_block {
+            if line.trim_end() == HIDDEN_META_END {
+                in_hidden_block = false;
+            }
             continue;
+        }
+        if line.trim_end() == HIDDEN_META_START {
+            in_hidden_block = true;
+            continue;
+        }
+
+        // H1 heading: only the first one, in the preamble before any section.
+        // The writer emits exactly one H1 at the top of the body; anything
+        // that looks like an H1 later is content (old unescaped files).
+        if current_section.is_none() && !sections.contains_key("__h1__") {
+            if let Some(heading) = line.strip_prefix("# ") {
+                sections.insert("__h1__".to_string(), heading.trim().to_string());
+                continue;
+            }
         }
 
         // Blockquote (collect all `>` lines)
@@ -43,14 +173,15 @@ pub fn parse_body_sections(body: &str) -> HashMap<String, String> {
             continue;
         }
 
-        // Skip HTML comment lines (handled by parse_hidden_meta)
+        // Skip stray HTML comment lines (legacy files; new writers escape
+        // comment lines inside content so they reach the branch below).
         if line.starts_with("<!--") || line.starts_with("-->") {
             continue;
         }
 
-        // Accumulate lines into current section
+        // Accumulate lines into current section, undoing writer escaping.
         if current_section.is_some() {
-            current_content.push(line);
+            current_content.push(unescape_body_line(line));
         }
     }
 
@@ -64,7 +195,11 @@ fn flush_section(
     current_content: &mut Vec<&str>,
 ) {
     if let Some(name) = current_section.take() {
-        sections.insert(name, current_content.join("\n").trim().to_string());
+        let text = current_content.join("\n").trim().to_string();
+        // First occurrence wins: the writer emits each section once, so a
+        // duplicate heading can only come from content in old unescaped files
+        // (or hand edits) and must not override the real section.
+        sections.entry(name).or_insert(text);
         current_content.clear();
     }
 }
