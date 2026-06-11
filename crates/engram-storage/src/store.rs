@@ -516,28 +516,82 @@ impl MemoryStore {
         // Resolve full ID first via the index
         let full_id = self.resolve_full_id(id).await?;
 
-        // Try to delete file from shared
-        let shared_deleted = self
-            .delete_file_from_dir(&full_id, &paths::memories_dir(&self.project_dir))
-            .await;
+        self.delete_locked(&full_id).await
+    }
 
-        // If not in shared, try personal
-        if shared_deleted.is_err() {
-            self.delete_file_from_dir(&full_id, &paths::personal_memories_dir(&self.project_id)?)
+    /// Conditionally delete a memory under the per-project write lock.
+    ///
+    /// Re-reads the memory *inside* the lock and calls `predicate` on the
+    /// fresh state, so callers that scored or inspected the memory earlier
+    /// (lock-free) can re-validate that decision against the latest persisted
+    /// state before destroying data — closing the check-then-delete TOCTOU
+    /// window that a plain [`Self::delete`] after an unlocked read leaves
+    /// open.
+    ///
+    /// Returns:
+    /// - `Ok(true)` — predicate returned `true` and the memory was deleted.
+    /// - `Ok(false)` — the memory was kept (predicate returned `false`), or
+    ///   it no longer exists (concurrently deleted, or its data file is
+    ///   missing). Missing memories are a skip, never an error.
+    pub async fn delete_if<F>(&self, id: &str, predicate: F) -> Result<bool>
+    where
+        F: FnOnce(&Memory) -> bool,
+    {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
+        let full_id = match self.resolve_full_id(id).await {
+            Ok(full_id) => full_id,
+            Err(StorageError::NotFound(_)) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+
+        // Fresh read inside the lock — this is the state the predicate
+        // judges. A missing data file (stale index entry) is also a skip.
+        let memory = match self.get(&full_id).await {
+            Ok(m) => m,
+            Err(StorageError::NotFound(_)) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+
+        if !predicate(&memory) {
+            return Ok(false);
+        }
+
+        self.delete_locked(&full_id).await?;
+        Ok(true)
+    }
+
+    /// Shared deletion path for `delete` / `delete_if`. Callers MUST hold the
+    /// per-project write lock and pass a fully resolved ID — this helper does
+    /// not (re-)acquire the lock (`flock(2)` on a second fd in the same
+    /// process would deadlock).
+    async fn delete_locked(&self, full_id: &str) -> Result<()> {
+        // Try to delete file from shared. Only a NotFound falls through to
+        // the personal dir — a real I/O error must propagate as-is, not be
+        // masked by the personal lookup's NotFound.
+        match self
+            .delete_file_from_dir(full_id, &paths::memories_dir(&self.project_dir))
+            .await
+        {
+            Ok(()) => {}
+            Err(StorageError::NotFound(_)) => {
+                self.delete_file_from_dir(
+                    full_id,
+                    &paths::personal_memories_dir(&self.project_id)?,
+                )
                 .await?;
+            }
+            Err(e) => return Err(e),
         }
 
         // Delete from LanceDB (metadata + chunks)
         self.lance_index
-            .delete(&full_id)
+            .delete(full_id)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB delete failed: {}", e)))?;
-        self.lance_index
-            .delete_chunks(&full_id)
-            .await
-            .map_err(|e| {
-                StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e))
-            })?;
+        self.lance_index.delete_chunks(full_id).await.map_err(|e| {
+            StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e))
+        })?;
 
         // Update manifest stats
         self.update_manifest_stats().await?;
@@ -1800,6 +1854,107 @@ mod tests {
             Err(StorageError::NotFound(_)) => {}
             _ => panic!("Expected NotFound error after delete"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_delete_if_predicate_true_deletes() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let memory = create_test_memory("delete-if-true-123", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        let deleted = store
+            .delete_if("delete-if-true-123", |m| m.summary == "Test summary")
+            .await
+            .unwrap();
+        assert!(deleted, "predicate true must delete and report true");
+        assert!(matches!(
+            store.get("delete-if-true-123").await,
+            Err(StorageError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_delete_if_predicate_false_keeps_memory() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let memory = create_test_memory("delete-if-false-123", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        let deleted = store
+            .delete_if("delete-if-false-123", |_| false)
+            .await
+            .unwrap();
+        assert!(!deleted, "predicate false must keep the memory");
+        assert!(store.get("delete-if-false-123").await.is_ok());
+    }
+
+    /// The predicate sees the LATEST persisted state, not whatever the caller
+    /// read before acquiring the lock — that re-read is the whole point.
+    #[tokio::test]
+    async fn test_delete_if_predicate_sees_fresh_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let memory = create_test_memory("delete-if-fresh-123", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        // Concurrent writer bumps criticality after the (hypothetical)
+        // earlier unlocked read.
+        let mut update = MemoryUpdate::new();
+        update.criticality = Some(0.95);
+        store.update("delete-if-fresh-123", update).await.unwrap();
+
+        let deleted = store
+            .delete_if("delete-if-fresh-123", |m| m.criticality < 0.9)
+            .await
+            .unwrap();
+        assert!(!deleted, "predicate must judge the updated criticality");
+        assert!(store.get("delete-if-fresh-123").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_delete_if_missing_id_is_skip_not_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let deleted = store
+            .delete_if("never-existed-123", |_| {
+                panic!("predicate must not run for a missing memory")
+            })
+            .await
+            .unwrap();
+        assert!(!deleted, "missing id must be Ok(false), not an error");
+    }
+
+    /// Stale index entry (row in LanceDB, data file gone) is also a skip.
+    #[tokio::test]
+    async fn test_delete_if_stale_index_entry_is_skip() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let memory = create_test_memory("delete-if-stale-123", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        // Remove the .md file but leave the index row.
+        let memories_dir = paths::memories_dir(temp_dir.path());
+        for entry in std::fs::read_dir(&memories_dir).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+
+        let deleted = store
+            .delete_if("delete-if-stale-123", |_| true)
+            .await
+            .unwrap();
+        assert!(!deleted, "stale index entry must be skipped, not an error");
     }
 
     #[tokio::test]

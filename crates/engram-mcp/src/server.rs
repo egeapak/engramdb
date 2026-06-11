@@ -1761,12 +1761,18 @@ impl EngramDbServer {
         .await
         .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
-        let r = serde_json::to_string(&serde_json::json!({
+        let mut response = serde_json::json!({
             "new_id": result.new_id,
             "superseded_count": result.superseded_count,
             "applied": true,
-        }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        });
+        if !result.skipped_sources.is_empty() {
+            // Sources already gone at delete time (deleted concurrently
+            // after validation) — the compressed memory is still valid.
+            response["skipped_sources"] = serde_json::json!(result.skipped_sources);
+        }
+        let r = serde_json::to_string(&response)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
         Ok(r)
     }
@@ -1869,6 +1875,11 @@ impl EngramDbServer {
             "count": result.count,
             "dry_run": dry_run
         });
+        if !result.skipped.is_empty() {
+            // Candidates skipped at delete time: concurrently deleted, or
+            // modified/re-scored above the threshold under the write lock.
+            response["skipped"] = serde_json::json!(result.skipped);
+        }
         if !result.stale_entries.is_empty() {
             response["stale_entries"] = serde_json::json!(result.stale_entries);
             response["warning"] =

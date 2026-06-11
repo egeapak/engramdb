@@ -67,6 +67,18 @@ pub async fn run_gc(
         formatter.print_message("\nRun with --confirm to delete these memories.");
     } else {
         formatter.print_success(&format!("Removed {} memories.", result.count));
+        if !result.skipped.is_empty() {
+            formatter.print_warning(&format!(
+                "Skipped {} candidate(s) that changed or were deleted concurrently: {}",
+                result.skipped.len(),
+                result
+                    .skipped
+                    .iter()
+                    .map(|id| short_id(id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
     }
 
     Ok(())
