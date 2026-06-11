@@ -676,8 +676,15 @@ impl LanceIndex {
 
         let table = self.open_chunks_table().await?;
 
-        // Fetch more rows than needed to ensure enough unique memories after dedup
-        let chunk_limit = limit * 5;
+        // Fetch more rows than needed to ensure enough unique memories after
+        // dedup. `limit` is ultimately user-influenced, so saturate the
+        // multiply (plain `* 5` panics in debug / wraps in release) and clamp
+        // to a bound LanceDB's query plan can represent — it casts the limit
+        // to an `i32` top-k internally, so e.g. `usize::MAX` would wrap to a
+        // negative k. The clamp only bounds the over-fetch; callers asking
+        // for absurd limits still get the best `MAX_CHUNK_FETCH` chunks.
+        const MAX_CHUNK_FETCH: usize = 65_536;
+        let chunk_limit = limit.saturating_mul(5).min(MAX_CHUNK_FETCH);
         let mut stream = table
             .vector_search(query)?
             .limit(chunk_limit)
@@ -1491,6 +1498,33 @@ mod tests {
         assert_eq!(matches[1].id, "mem-b");
         // Max-score: mem-a's score should be from its close chunk, not averaged
         assert!(matches[0].score > matches[1].score);
+    }
+
+    /// `limit` flows in from user input: `usize::MAX` must neither overflow
+    /// the 5x chunk over-fetch (debug panic / release wrap) nor exceed what
+    /// LanceDB's i32 top-k plan can represent.
+    #[tokio::test]
+    async fn test_vector_search_huge_limit_no_panic() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        lance.upsert(&create_test_entry("mem-a")).await.unwrap();
+        lance
+            .upsert_chunks("mem-a", vec![vec![0.5f32; 384]])
+            .await
+            .unwrap();
+        lance.upsert(&create_test_entry("mem-b")).await.unwrap();
+        lance
+            .upsert_chunks("mem-b", vec![vec![0.3f32; 384]])
+            .await
+            .unwrap();
+
+        let matches = lance
+            .vector_search(vec![0.5f32; 384], usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].id, "mem-a");
     }
 
     #[tokio::test]

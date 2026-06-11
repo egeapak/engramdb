@@ -14,6 +14,10 @@
 
 use anyhow::Result;
 use engramdb::retrieval::engine::{DetailLevel, RetrievalMode, RetrievalQuery, ScoredMemory};
+// Shared with the retrieval engine (which also relativizes `query.path`
+// itself); the hook still pre-relativizes so the injected context shows
+// repo-relative paths.
+use engramdb::storage::paths::relativize_path;
 use engramdb::storage::MemoryStore;
 use std::io::Read;
 use std::path::Path;
@@ -28,23 +32,6 @@ fn extract_file_path(input: &str) -> Option<String> {
         .and_then(|ti| ti.get("file_path"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-}
-
-/// Make a file path relative to the project directory if possible.
-///
-/// Canonicalizes both paths before stripping so that `--dir .` works
-/// when tool input contains an absolute file path.
-fn relativize_path(file_path: &str, project_dir: &Path) -> String {
-    let canonical_dir = project_dir
-        .canonicalize()
-        .unwrap_or(project_dir.to_path_buf());
-    let canonical_file = Path::new(file_path)
-        .canonicalize()
-        .unwrap_or(Path::new(file_path).to_path_buf());
-    canonical_file
-        .strip_prefix(&canonical_dir)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| file_path.to_string())
 }
 
 /// Format scored memories into a compact additionalContext string (for PreToolUse).

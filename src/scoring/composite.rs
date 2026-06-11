@@ -380,6 +380,45 @@ mod tests {
     }
 
     #[test]
+    fn test_composite_score_nan_decay_floor_breakdown_stays_finite() {
+        // `Decay.floor` is unvalidated file data: a NaN floor used to flow
+        // through `decay_factor` into both `relevance` and the breakdown's
+        // `decay` diagnostic. After clamping (NaN → 0.0) the whole breakdown
+        // must stay finite.
+        let mut memory = create_test_memory();
+        memory.created_at = Utc::now() - Duration::days(15);
+        memory.decay = Some(Decay::linear(Duration::days(10)).with_floor(f64::NAN));
+
+        let context = ScoringContext::scope_only(None, &[]);
+        let config = EngramConfig::default();
+        let breakdown = composite_score(&memory, &context, &config, Utc::now());
+
+        assert!(breakdown.final_score.is_finite());
+        assert!(breakdown.relevance.is_finite());
+        assert!(breakdown.decay.is_finite());
+        // Past TTL with NaN→0.0 floor: fully decayed.
+        assert_eq!(breakdown.decay, 1.0);
+        assert_eq!(breakdown.relevance, 0.0);
+    }
+
+    #[test]
+    fn test_composite_score_oversized_decay_floor_clamped() {
+        // floor = 5.0 on an expired-by-TTL memory must not produce
+        // relevance = criticality * 5 (perma-pinned at the clamp).
+        let mut memory = create_test_memory();
+        memory.created_at = Utc::now() - Duration::days(15);
+        memory.decay = Some(Decay::linear(Duration::days(10)).with_floor(5.0));
+
+        let context = ScoringContext::scope_only(None, &[]);
+        let config = EngramConfig::default();
+        let breakdown = composite_score(&memory, &context, &config, Utc::now());
+
+        // Clamped floor = 1.0 → decay factor 1.0 → relevance = criticality.
+        assert_eq!(breakdown.relevance, memory.criticality);
+        assert!(breakdown.final_score <= 1.0);
+    }
+
+    #[test]
     fn test_composite_score_with_semantic() {
         let memory = create_test_memory();
         let logical = vec!["auth.oauth".to_string()];

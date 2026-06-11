@@ -17,6 +17,16 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Upper bound on the vector-search over-fetch window (unique memories
+/// requested from LanceDB per semantic query).
+///
+/// The window is `max_results * 3`, but `max_results` is user-supplied and
+/// unvalidated; without a cap a huge value would turn one query into a full
+/// scan-and-sort of every chunk. Memories outside the window are not dropped
+/// — they are scored with weak semantic evidence (`sem = 0.0`, see Step 4.5
+/// in [`RetrievalEngine::query`]) — so the cap bounds work, not recall.
+const VECTOR_SEARCH_WINDOW_CAP: usize = 1000;
+
 /// Detail level for retrieved memories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DetailLevel {
@@ -564,11 +574,23 @@ impl RetrievalEngine {
         // Step 1: Load lightweight index entries (6 columns).
         let all_entries = self.store.list_for_filtering().await?;
 
+        // Step 1.5: Relativize the query path against the project root.
+        // Physical scopes are stored repo-relative, so an absolute path (the
+        // natural thing for an agent to pass over MCP, or a user on the CLI)
+        // would silently prefix/glob-match nothing. Doing it here covers
+        // every front-end (CLI, MCP, hooks) identically. Relative paths and
+        // absolute paths NOT under the project root pass through unchanged —
+        // an outside path legitimately matches no repo-relative scope.
+        let query_path: Option<String> = query
+            .path
+            .as_ref()
+            .map(|p| crate::storage::paths::relativize_path(p, &self.store.project_dir));
+
         // Step 2: Apply filters. Logical is NOT a filter — it only scores.
         let filters = SearchFilters {
             types: query.types.clone(),
             tags: query.tags.clone(),
-            physical: query.path.clone(),
+            physical: query_path.clone(),
             min_criticality: query.min_criticality,
         };
         let filtered_entries = apply_index_filters(all_entries, &filters);
@@ -622,10 +644,17 @@ impl RetrievalEngine {
                     // embedded memories that miss the window are scored as
                     // sem = 0.0 below instead of jumping to the no-semantic
                     // weight regime.
+                    //
+                    // `max_results` is user-supplied: saturate the multiply
+                    // (a plain `* 3` panics in debug / wraps in release on
+                    // huge values) and cap the window — memories beyond it
+                    // are still returned, just with weak (sem = 0.0)
+                    // semantic evidence, so a finite cap only bounds work.
                     let limit = query
                         .max_results
                         .unwrap_or(self.config.retrieval.max_results)
-                        * 3;
+                        .saturating_mul(3)
+                        .min(VECTOR_SEARCH_WINDOW_CAP);
                     let t_vs = std::time::Instant::now();
                     let vs_result = self.store.vector_search(query_vector, limit).await;
                     self.record_stage("vector_search", t_vs.elapsed().as_secs_f64() * 1000.0);
@@ -707,7 +736,7 @@ impl RetrievalEngine {
         };
 
         let mut scored_memories: Vec<ScoredMemory> = Vec::new();
-        let query_path = query.path.as_deref();
+        let query_path = query_path.as_deref();
         let now = Utc::now();
 
         let t_score = std::time::Instant::now();
@@ -766,7 +795,15 @@ impl RetrievalEngine {
                 ScoringContext::scope_only(ctx_path, ctx_logical)
             };
 
-            let breakdown = if include_expired {
+            // Expired memories (only present when `include_expired` is set —
+            // otherwise Step 2.5b already dropped them) are scored ignoring
+            // decay: their decay factor is at/near floor by definition, so
+            // normal scoring would zero them out and including them would be
+            // pointless. Active memories keep normal decay scoring regardless
+            // of `include_expired` — a half-decayed active memory must not
+            // rank as fresh just because the caller asked to also see expired
+            // ones.
+            let breakdown = if memory.is_expired_at(now) {
                 composite_score_ignore_decay(memory, &context, &self.config, now)
             } else {
                 composite_score(memory, &context, &self.config, now)
@@ -1465,6 +1502,114 @@ mod tests {
         assert!(
             expired_result.score > 0.3,
             "score should exceed threshold because decay was ignored for scoring"
+        );
+    }
+
+    /// Regression: `include_expired: true` must not disable decay for ALL
+    /// memories — only the expired ones are scored with
+    /// `composite_score_ignore_decay`. Before the fix, a half-decayed ACTIVE
+    /// memory ranked as fresh whenever the caller merely asked to also see
+    /// expired memories, silently reordering the non-expired results.
+    #[tokio::test]
+    async fn test_include_expired_keeps_decay_for_active_memories() {
+        use crate::types::{Decay, EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use chrono::{Duration, Utc};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        // ACTIVE memory (no expires_at) that has heavily decayed: 100 half-
+        // lives → decay factor ≈ 0. Its score must reflect that decay even
+        // when include_expired=true.
+        let mut active_decayed = Memory::new(
+            MemoryType::Context,
+            "Active but decayed",
+            "old active content",
+            Provenance::human(),
+        );
+        active_decayed.visibility = Visibility::Shared;
+        active_decayed.criticality = 0.8;
+        active_decayed.decay = Some(Decay::exponential(Duration::hours(1)).with_floor(0.0));
+        active_decayed.created_at = Utc::now() - Duration::hours(100);
+
+        // EXPIRED memory: scored ignoring decay so it can surface at all.
+        let mut expired = Memory::new(
+            MemoryType::Debug,
+            "Expired memory",
+            "expired content",
+            Provenance::human(),
+        );
+        expired.visibility = Visibility::Shared;
+        expired.criticality = 0.8;
+        expired.decay = Some(Decay::linear(Duration::seconds(1)).with_floor(0.0));
+        expired.created_at = Utc::now() - Duration::seconds(10);
+        expired.expires_at = Some(Utc::now() - Duration::seconds(1));
+
+        store.create(&active_decayed).await.unwrap();
+        store.create(&expired).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+
+        // Baseline: include_expired=false → only the active memory, scored
+        // WITH decay (near zero).
+        let result_excl = engine
+            .query(&RetrievalQuery {
+                include_expired: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(result_excl.memories.len(), 1);
+        assert_eq!(result_excl.memories[0].memory.id, active_decayed.id);
+        let active_score_excl = result_excl.memories[0].score;
+        assert!(
+            active_score_excl < 0.1,
+            "active decayed memory should score near zero, got {active_score_excl}"
+        );
+
+        // include_expired=true → both returned; the EXPIRED one is scored
+        // ignore-decay, the ACTIVE one keeps its decayed score.
+        let result_incl = engine
+            .query(&RetrievalQuery {
+                include_expired: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(result_incl.memories.len(), 2);
+
+        let active_incl = result_incl
+            .memories
+            .iter()
+            .find(|sm| sm.memory.id == active_decayed.id)
+            .expect("active memory should be in results");
+        let expired_incl = result_incl
+            .memories
+            .iter()
+            .find(|sm| sm.memory.id == expired.id)
+            .expect("expired memory should be in results");
+
+        assert!(
+            (active_incl.score - active_score_excl).abs() < 1e-9,
+            "active memory's decayed score must not change when include_expired=true \
+             (got {} vs baseline {})",
+            active_incl.score,
+            active_score_excl
+        );
+        assert!(
+            expired_incl.score > 0.3,
+            "expired memory should be scored ignoring decay, got {}",
+            expired_incl.score
+        );
+        assert!(
+            expired_incl.score > active_incl.score,
+            "ignore-decay expired memory should outrank the decayed active one here"
         );
     }
 
@@ -2914,6 +3059,48 @@ mod tests {
             emb.score_breakdown.semantic.unwrap() > 0.0,
             "embedded memory in the top-k must carry its semantic score"
         );
+    }
+
+    /// Regression: `max_results` is user-supplied, so `usize::MAX` must not
+    /// panic in the 3x vector-search over-fetch (debug overflow) or wrap to a
+    /// tiny window (release). The semantic path runs end-to-end via the stub
+    /// provider, exercising both the engine's `saturating_mul(3)` + cap and
+    /// the LanceDB layer's `saturating_mul(5)` + chunk-fetch clamp.
+    #[tokio::test]
+    async fn test_max_results_usize_max_does_not_panic() {
+        use crate::types::EngramConfig;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        let close = stub_memory("closevec note", 0.8);
+        let other = stub_memory("plain note", 0.5);
+        store.create(&close).await.unwrap();
+        store.create(&other).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, config)
+            .with_embedding_provider(Arc::new(MarkerEmbeddingProvider));
+        engine.embed_memory(&close).await.unwrap();
+        engine.embed_memory(&other).await.unwrap();
+
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Rank,
+                query: Some("queryvec".to_string()),
+                max_results: Some(usize::MAX),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.retrieval_quality, "full");
+        assert_eq!(result.memories.len(), 2);
     }
 
     /// Regression (Bug B): when a memory has BOTH a keyword match and a

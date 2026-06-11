@@ -212,11 +212,16 @@ impl Memory {
 
     /// Check if the memory has expired
     pub fn is_expired(&self) -> bool {
-        if let Some(expires_at) = self.expires_at {
-            Utc::now() > expires_at
-        } else {
-            false
-        }
+        self.is_expired_at(Utc::now())
+    }
+
+    /// Check if the memory has expired as of `now`.
+    ///
+    /// Parameterized variant of [`Self::is_expired`] so callers that score a
+    /// whole result set against one timestamp (e.g. the retrieval engine)
+    /// make a consistent decision for every memory in the batch.
+    pub fn is_expired_at(&self, now: chrono::DateTime<Utc>) -> bool {
+        self.expires_at.is_some_and(|expires_at| now > expires_at)
     }
 
     /// Check if the memory is active (not expired, not challenged)

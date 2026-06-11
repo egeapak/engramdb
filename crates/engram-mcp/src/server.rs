@@ -103,7 +103,9 @@ struct QueryInput {
     #[schemars(description = "Search query text (tokenized against summary, content, tags)")]
     query: Option<String>,
 
-    #[schemars(description = "Physical scope — current file path for proximity scoring")]
+    #[schemars(
+        description = "Physical scope — current file path for proximity scoring. Repo-relative or absolute (absolute paths under the project root are relativized automatically)."
+    )]
     path: Option<String>,
 
     #[schemars(
@@ -3311,6 +3313,86 @@ mod tests {
             .await;
         let val = parse_ok(&result);
         assert!(!val["memories"].as_array().unwrap().is_empty());
+    }
+
+    /// Regression: physical scopes are stored repo-relative, so an absolute
+    /// `path` (exactly what the tool description invites an agent to pass)
+    /// used to silently match nothing. The engine now relativizes absolute
+    /// paths against the project root, so absolute-under-root and relative
+    /// queries must return identical results.
+    #[tokio::test]
+    async fn query_filter_absolute_path_relativized_to_project() {
+        let (dir, server) = setup().await;
+        let input = CreateInput {
+            physical: Some(vec!["src/auth.rs".to_string()]),
+            criticality: Some(0.9),
+            ..create_input("hazard", "Auth hazard", "Never log raw tokens")
+        };
+        server.memory_create(Parameters(input)).await.unwrap();
+
+        // Create the file on disk so canonicalization resolves it (mirrors a
+        // real agent passing the path of the file it is editing).
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/auth.rs"), "// auth").unwrap();
+
+        let ids_for = |val: &serde_json::Value| -> Vec<String> {
+            val["memories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["id"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        // Baseline: repo-relative path (filter mode → path is a hard filter).
+        let rel = server
+            .memory_query(Parameters(QueryInput {
+                path: Some("src/auth.rs".to_string()),
+                ..query_input("filter")
+            }))
+            .await;
+        let rel_ids = ids_for(&parse_ok(&rel));
+        assert_eq!(rel_ids.len(), 1, "relative path should match the memory");
+
+        // Absolute path under the project root → identical results.
+        let abs_path = dir.path().join("src/auth.rs");
+        let abs = server
+            .memory_query(Parameters(QueryInput {
+                path: Some(abs_path.to_string_lossy().to_string()),
+                ..query_input("filter")
+            }))
+            .await;
+        let abs_ids = ids_for(&parse_ok(&abs));
+        assert_eq!(
+            abs_ids, rel_ids,
+            "absolute path under the project root must match like the relative path"
+        );
+    }
+
+    /// An absolute path NOT under the project root passes through unchanged:
+    /// it legitimately matches no repo-relative scope, so the query succeeds
+    /// with zero results (and must not panic or error).
+    #[tokio::test]
+    async fn query_filter_absolute_path_outside_project_matches_nothing() {
+        let (_dir, server) = setup().await;
+        let input = CreateInput {
+            physical: Some(vec!["src/auth.rs".to_string()]),
+            criticality: Some(0.9),
+            ..create_input("hazard", "Auth hazard", "Never log raw tokens")
+        };
+        server.memory_create(Parameters(input)).await.unwrap();
+
+        let result = server
+            .memory_query(Parameters(QueryInput {
+                path: Some("/definitely/elsewhere/src/auth.rs".to_string()),
+                ..query_input("filter")
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(
+            val["memories"].as_array().unwrap().is_empty(),
+            "a path outside the project root must match nothing"
+        );
     }
 
     #[tokio::test]

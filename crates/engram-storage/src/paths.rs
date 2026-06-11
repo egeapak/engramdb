@@ -25,6 +25,37 @@ pub fn project_dir(dir: &Path) -> PathBuf {
     dir.join(".engramdb")
 }
 
+/// Make a file path relative to the project directory if possible.
+///
+/// Physical scopes are stored repo-relative, so callers that accept a
+/// user/agent-supplied file path (MCP `query`, CLI `--path`, Claude Code
+/// hooks) must relativize absolute paths before prefix/glob matching.
+///
+/// Behavior:
+/// - Already-relative paths are returned unchanged.
+/// - Absolute paths under `project_dir` are returned repo-relative.
+/// - Absolute paths NOT under `project_dir` are returned unchanged (they
+///   legitimately match no repo-relative scope).
+///
+/// Both paths are canonicalized (best-effort: a nonexistent path falls back
+/// to its literal form) before stripping so that symlinked roots — e.g.
+/// `/tmp` on macOS, or `--dir .` — still strip correctly.
+pub fn relativize_path(file_path: &str, project_dir: &Path) -> String {
+    if Path::new(file_path).is_relative() {
+        return file_path.to_string();
+    }
+    let canonical_dir = project_dir
+        .canonicalize()
+        .unwrap_or(project_dir.to_path_buf());
+    let canonical_file = Path::new(file_path)
+        .canonicalize()
+        .unwrap_or(Path::new(file_path).to_path_buf());
+    canonical_file
+        .strip_prefix(&canonical_dir)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| file_path.to_string())
+}
+
 /// Returns the shared memories directory in the project
 pub fn memories_dir(dir: &Path) -> PathBuf {
     project_dir(dir).join("memories")
