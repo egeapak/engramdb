@@ -918,6 +918,57 @@ async fn poll_until_connectable(socket: &std::path::Path) {
     panic!("daemon on {:?} never became connectable", socket);
 }
 
+/// A daemon that accepts connections but never responds (wedged model mutex,
+/// stuck ONNX thread) must fail the `Ping` health check within
+/// `PING_TIMEOUT` (~2s), not the 60s inference `REQUEST_TIMEOUT` — health
+/// checks run while the `DaemonCell` mutex is held, so a slow probe would
+/// stall every tool call and the heartbeat for minutes before fallback.
+#[tokio::test]
+async fn health_check_of_wedged_daemon_fails_fast() {
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("wedged.sock");
+
+    // Accept-but-never-reply stub: reads requests, writes nothing, and keeps
+    // the connection open so the client is stuck waiting on a response.
+    let stub_socket = socket.clone();
+    tokio::spawn(async move {
+        let listener = super::transport::bind_or_yield(&stub_socket)
+            .await
+            .unwrap()
+            .expect("stub owns the address");
+        loop {
+            let stream = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            tokio::spawn(async move {
+                let (rh, _wh) = tokio::io::split(stream);
+                let mut r = BufReader::new(rh);
+                while read_msg::<_, DaemonRequest>(&mut r)
+                    .await
+                    .unwrap_or(None)
+                    .is_some()
+                {
+                    // Swallow the request; never answer.
+                }
+            });
+        }
+    });
+    poll_until_connectable(&socket).await;
+
+    let handle = super::DaemonHandle::connect_existing(socket);
+    let start = std::time::Instant::now();
+    assert!(
+        !handle.check_health().await,
+        "a wedged daemon must fail the health check"
+    );
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "health check must time out at PING_TIMEOUT (~2s), took {elapsed:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // DaemonCell: re-resolvable cell with spawn backoff
 // ---------------------------------------------------------------------------

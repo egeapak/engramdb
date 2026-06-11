@@ -21,9 +21,13 @@ fn doctor_environment_json_is_parseable() {
         .output()
         .unwrap();
 
+    // A freshly initialized, healthy store must exit 0: advisory findings
+    // (binary not on PATH, untracked fingerprint, .mcp.json not configured)
+    // render as warnings and no longer gate the exit code, so the outcome is
+    // deterministic.
     assert!(
-        output.status.success() || !output.stdout.is_empty(),
-        "doctor must not crash: status={:?} stderr={}",
+        output.status.success(),
+        "fresh-init doctor must exit 0: status={:?} stderr={}",
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
@@ -62,6 +66,10 @@ fn doctor_environment_pretty_renders_section_headers() {
     // `--format pretty` forces the Pretty branch of print_environment_doctor;
     // without it, non-TTY stdout (assert_cmd pipes stdout) falls back to JSON
     // per OutputFormatter::new at output.rs:43-58.
+    //
+    // A fresh, healthy store exits 0: hard checks all pass and the formerly
+    // "host-dependent" findings (binary not on PATH, untracked fingerprint)
+    // are advisory warnings now, so the exit code is deterministic.
     helpers::cmd()
         .args([
             "--dir",
@@ -91,7 +99,14 @@ fn doctor_environment_plain_renders_sections_without_color_codes() {
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    // A fresh, healthy store exits 0 (see the pretty-format test above):
+    // advisory findings render as warnings and do not gate the exit code.
+    assert!(
+        output.status.success(),
+        "fresh-init doctor must exit 0: status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("EngramDB Environment Check"),
@@ -110,9 +125,34 @@ fn doctor_store_subcommand_runs() {
     helpers::init_store(dir.path());
 
     // The fast store-only path is a separate subcommand — exercise it too
-    // so we know both DoctorCommand variants land.
+    // so we know both DoctorCommand variants land. A healthy store must
+    // exit 0 so scripts/CI can gate on `doctor store`.
     helpers::cmd()
         .args(["--dir", dir.path().to_str().unwrap(), "doctor", "store"])
         .assert()
         .success();
+}
+
+#[test]
+fn doctor_store_unhealthy_exits_nonzero() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+
+    // Plant an orphaned memory file (on disk but not in the index): the
+    // store is now unhealthy, so `doctor store` must exit non-zero — exit 0
+    // on a broken store would make CI gating on doctor useless.
+    let orphan = dir
+        .path()
+        .join(".engramdb")
+        .join("memories")
+        .join("orphan-001.md");
+    std::fs::write(&orphan, "---\nid: orphan-001\n---\n").unwrap();
+
+    // (The "N orphaned files" warning goes to stderr in the piped/JSON
+    // output mode; the orphan IDs themselves are listed on stdout.)
+    helpers::cmd()
+        .args(["--dir", dir.path().to_str().unwrap(), "doctor", "store"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("orphan-001"));
 }

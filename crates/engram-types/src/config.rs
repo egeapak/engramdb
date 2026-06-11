@@ -767,8 +767,13 @@ impl Default for DaemonConfig {
 impl DaemonConfig {
     /// Validate that daemon configuration values are within acceptable ranges.
     pub fn validate(&self) -> Result<(), anyhow::Error> {
-        if self.idle_timeout_secs == 0 {
-            anyhow::bail!("daemon.idle_timeout_secs must be > 0");
+        if self.idle_timeout_secs < 60 {
+            anyhow::bail!(
+                "daemon.idle_timeout_secs must be >= 60 (got {}): the MCP heartbeat \
+                 pings at most every 30s, so a smaller idle timeout makes the daemon \
+                 idle-reap and respawn between pings",
+                self.idle_timeout_secs
+            );
         }
         Ok(())
     }
@@ -1589,6 +1594,13 @@ weight = 0.7
         assert!(d.validate().is_ok());
         d.idle_timeout_secs = 0;
         assert!(d.validate().is_err());
+        // The floor is 60s: the MCP heartbeat interval is clamped to a 30s
+        // minimum, so any idle timeout below 60 guarantees the daemon reaps
+        // and respawns between pings (respawn churn). 59 → Err, 60 → Ok.
+        d.idle_timeout_secs = 59;
+        assert!(d.validate().is_err());
+        d.idle_timeout_secs = 60;
+        assert!(d.validate().is_ok());
         // Surfaced through the top-level config validate too.
         let mut cfg = EngramConfig::default();
         cfg.daemon.idle_timeout_secs = 0;

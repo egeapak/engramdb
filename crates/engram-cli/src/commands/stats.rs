@@ -32,7 +32,7 @@ pub async fn run_stats(
     formatter: &OutputFormatter,
 ) -> Result<()> {
     if daemon {
-        return run_daemon_stats(formatter).await;
+        return run_daemon_stats(dir, formatter).await;
     }
 
     let store = if global {
@@ -123,15 +123,13 @@ pub async fn run_stats(
 /// Prefers a live query to the running daemon (authoritative, includes
 /// in-flight counts); falls back to the last snapshot persisted to the global
 /// LanceDB store when no daemon is currently running.
-async fn run_daemon_stats(formatter: &OutputFormatter) -> Result<()> {
-    let cfg = engramdb::storage::config::load_config(
-        &std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join(".engramdb")
-            .join("config.toml"),
-    )
-    .await
-    .unwrap_or_default();
+async fn run_daemon_stats(dir: &Path, formatter: &OutputFormatter) -> Result<()> {
+    // `dir` is the dispatcher-resolved project directory (`--dir` or cwd),
+    // matching every other command — not a second `current_dir()` lookup
+    // that would ignore an explicit `--dir`.
+    let cfg = engramdb::storage::config::load_config(&dir.join(".engramdb").join("config.toml"))
+        .await
+        .unwrap_or_default();
     let socket = engramdb::daemon::resolve_socket(None, &cfg.daemon);
     if let Some(s) = engramdb::daemon::query_status(&socket).await? {
         formatter.print_success(&format!("Embedding daemon: running (pid {})", s.pid));
@@ -154,14 +152,10 @@ async fn run_daemon_stats(formatter: &OutputFormatter) -> Result<()> {
     match engramdb::daemon::metrics::load_latest().await {
         Some(p) => {
             formatter.print_message("Embedding daemon: not running (last persisted snapshot)");
-            let s = p.snapshot;
             println!("  requests (cumulative across restarts):");
-            println!("    embed:       {}", s.embed);
-            println!("    classify:    {}", s.classify);
-            println!("    rerank:      {}", s.rerank);
-            println!("    meta:        {}", s.meta);
-            println!("    status:      {}", s.status);
-            println!("    total:       {}", s.total());
+            for row in persisted_snapshot_rows(&p.snapshot) {
+                println!("{row}");
+            }
         }
         None => {
             formatter.print_message("Embedding daemon: not running and no metrics persisted yet.");
@@ -171,6 +165,23 @@ async fn run_daemon_stats(formatter: &OutputFormatter) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Render the per-op request rows for a persisted daemon metrics snapshot.
+///
+/// Every counter in [`MetricsSnapshot`] must appear here — the per-op rows
+/// sum to the `total` row (pinned by a unit test), so the `stats --daemon`
+/// fallback view never silently drops a counter the live view reports.
+fn persisted_snapshot_rows(s: &engramdb::daemon::metrics::MetricsSnapshot) -> Vec<String> {
+    vec![
+        format!("    embed:       {}", s.embed),
+        format!("    classify:    {}", s.classify),
+        format!("    rerank:      {}", s.rerank),
+        format!("    meta:        {}", s.meta),
+        format!("    status:      {}", s.status),
+        format!("    title:       {}", s.title),
+        format!("    total:       {}", s.total()),
+    ]
 }
 
 /// Print the embeddings availability status for the given model name and backend.
@@ -230,4 +241,48 @@ async fn print_embeddings_status(model: &str, backend: EmbeddingBackend) {
     }
 
     println!("Embeddings: Not available (run 'engramdb init' to download model)");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engramdb::daemon::metrics::MetricsSnapshot;
+
+    /// The `stats --daemon` fallback (persisted-snapshot) view must render
+    /// every counter — including `title`, which it used to omit — and the
+    /// per-op rows must sum to the `total` row.
+    #[test]
+    fn persisted_snapshot_rows_include_title_and_sum_to_total() {
+        let s = MetricsSnapshot {
+            embed: 1,
+            classify: 2,
+            rerank: 3,
+            meta: 4,
+            status: 5,
+            title: 6,
+        };
+        let rows = persisted_snapshot_rows(&s);
+
+        assert!(
+            rows.iter().any(|r| r.contains("title:")),
+            "fallback view must include the title counter: {rows:?}"
+        );
+
+        let value = |row: &String| {
+            row.split_whitespace()
+                .last()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+        };
+        let (total_row, per_op) = rows.split_last().unwrap();
+        assert!(total_row.contains("total:"), "last row must be the total");
+        let per_op_sum: u64 = per_op.iter().map(value).sum();
+        assert_eq!(
+            per_op_sum,
+            value(total_row),
+            "per-op rows must sum to total"
+        );
+        assert_eq!(value(total_row), s.total());
+    }
 }

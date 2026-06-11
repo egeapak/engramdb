@@ -479,7 +479,7 @@ pub fn provider_cache_key(
 ) -> String {
     let backend = resolve_backend(config.embeddings.backend, backend_override);
     format!(
-        "{backend}|{}|{}|{}|{}|{}|{}|{}|{:?}",
+        "{backend}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}",
         config.embeddings.provider,
         config.embeddings.dimensions,
         embedding_pool_size,
@@ -488,6 +488,11 @@ pub fn provider_cache_key(
         config.rerank.enabled,
         config.rerank.model,
         config.title.strategy,
+        // The T5 title pool is sized from this inside
+        // `resolve_engine_providers`, so two configs with different title
+        // pool sizes are NOT interchangeable bundles — omitting it would
+        // serve a stale wrong-sized title pool after a config change.
+        config.title.pool_size,
     )
 }
 
@@ -612,6 +617,14 @@ mod provider_cache_tests {
         assert_eq!(base.title.strategy, crate::title::TitleStrategy::T5);
         let mut c = base.clone();
         c.title.strategy = crate::title::TitleStrategy::Keyword;
+        assert_ne!(k, provider_cache_key(&c, None, 2));
+
+        // Title pool size is folded in: it sizes the pooled T5 generator
+        // inside `resolve_engine_providers`, so changing `[title].pool_size`
+        // must re-resolve instead of serving a stale wrong-sized pool.
+        assert_eq!(base.title.pool_size, None);
+        let mut c = base.clone();
+        c.title.pool_size = Some(3);
         assert_ne!(k, provider_cache_key(&c, None, 2));
 
         // A daemon-only config change does NOT change the model signature.

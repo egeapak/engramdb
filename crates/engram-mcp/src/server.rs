@@ -1,6 +1,6 @@
 //! EngramDB MCP server implementation.
 //!
-//! Defines the server struct, all MCP tools (15), resources (2), and prompts (2).
+//! Defines the server struct, all MCP tools (19), resources (2), and prompts (2).
 //! Tools delegate to the `ops` layer; the server opens a fresh `MemoryStore`
 //! per request so it always sees the latest on-disk state.
 
@@ -2136,6 +2136,21 @@ impl EngramDbServer {
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
         Ok(r)
+    }
+}
+
+impl EngramDbServer {
+    /// Names of every MCP tool this server exposes, in router order.
+    ///
+    /// Public so front-ends that maintain tool allowlists (the CLI's `setup`
+    /// command writes `permissions.allow` entries per tool) can pin their
+    /// lists against the actual tool surface instead of drifting silently.
+    pub fn tool_names() -> Vec<String> {
+        Self::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect()
     }
 }
 

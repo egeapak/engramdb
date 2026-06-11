@@ -424,7 +424,12 @@ fn doctor_environment_against_uninitialized_dir_runs() {
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    // An uninitialized store is a hard doctor failure, so the exit code is
+    // now non-zero — but the report itself must still render in full.
+    assert!(
+        !output.status.success(),
+        "uninitialized store must exit non-zero"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("EngramDB Environment Check"));
     // The Project section's "Store initialized" check should report not-init.

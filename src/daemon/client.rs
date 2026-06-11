@@ -74,6 +74,14 @@ impl DaemonHandle {
     /// wedged daemon doesn't hang a tool call indefinitely.
     const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
+    /// Upper bound on a `Ping` health check. Ping requires no model load —
+    /// the daemon answers it as soon as it binds the socket — so a healthy
+    /// daemon responds in microseconds. Kept far below [`Self::REQUEST_TIMEOUT`]
+    /// because health checks run while the `DaemonCell` mutex is held: a
+    /// wedged-but-accepting daemon must stall a tool call (and the heartbeat)
+    /// for at most a couple of seconds before falling back, not a minute.
+    const PING_TIMEOUT: Duration = Duration::from_secs(2);
+
     /// Get a handle to a live daemon, spawning one if none is reachable.
     ///
     /// Returns `None` if no daemon could be reached or started, or if a
@@ -125,11 +133,14 @@ impl DaemonHandle {
 
     async fn healthy(&self) -> bool {
         match self
-            .request(DaemonRequest {
-                dir: String::new(),
-                backend: None,
-                op: DaemonOp::Ping,
-            })
+            .request_with_timeout(
+                DaemonRequest {
+                    dir: String::new(),
+                    backend: None,
+                    op: DaemonOp::Ping,
+                },
+                Self::PING_TIMEOUT,
+            )
             .await
         {
             Ok(DaemonResponse::Pong { version }) if version == PROTOCOL_VERSION => true,
@@ -143,10 +154,17 @@ impl DaemonHandle {
         }
     }
 
-    /// Spawn a detached daemon. Best-effort and non-blocking: the child is
-    /// not awaited (it self-terminates on idle-timeout and is reparented to
-    /// init if this process exits first). Failures are logged; the retry loop
-    /// in [`Self::connect_or_spawn`] surfaces them as the in-process fallback.
+    /// Spawn a detached daemon. Best-effort and non-blocking: the spawn is
+    /// fire-and-forget (the daemon self-terminates on idle-timeout and is
+    /// reparented to init if this process exits first). Failures are logged;
+    /// the retry loop in [`Self::connect_or_spawn`] surfaces them as the
+    /// in-process fallback.
+    ///
+    /// The child **is** reaped: a background task awaits `wait()` so that when
+    /// the daemon exits (idle-timeout, shutdown, losing the socket-bind race)
+    /// while a long-lived parent (`serve`) is still running, it does not
+    /// linger as a zombie. `kill_on_drop` stays false (tokio's default), so
+    /// the daemon outlives the parent exactly as before.
     fn spawn_daemon(socket: &std::path::Path, idle_timeout_secs: u64) {
         let exe = match std::env::current_exe() {
             Ok(p) => p,
@@ -155,7 +173,7 @@ impl DaemonHandle {
                 return;
             }
         };
-        let mut cmd = std::process::Command::new(exe);
+        let mut cmd = tokio::process::Command::new(exe);
         cmd.arg("daemon")
             .arg("run")
             .arg("--socket")
@@ -166,7 +184,16 @@ impl DaemonHandle {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         match cmd.spawn() {
-            Ok(_child) => tracing::debug!("spawned engramdb daemon"),
+            Ok(mut child) => {
+                tracing::debug!("spawned engramdb daemon");
+                // Reap the child when it exits so a long-lived parent process
+                // (the MCP `serve` loop) doesn't accumulate zombies across
+                // daemon idle-timeout/restart cycles. Purely an await on
+                // process exit — it neither kills nor keeps the child alive.
+                tokio::spawn(async move {
+                    let _ = child.wait().await;
+                });
+            }
             Err(e) => tracing::warn!("failed to spawn engramdb daemon: {e}"),
         }
     }
@@ -187,7 +214,18 @@ impl DaemonHandle {
     /// the caller can fall back to in-process models. The bound is generous
     /// enough for a cold first request that triggers the daemon's model load.
     pub async fn request(&self, req: DaemonRequest) -> anyhow::Result<DaemonResponse> {
-        tokio::time::timeout(Self::REQUEST_TIMEOUT, async {
+        self.request_with_timeout(req, Self::REQUEST_TIMEOUT).await
+    }
+
+    /// [`Self::request`] with an explicit round-trip bound. Inference requests
+    /// use [`Self::REQUEST_TIMEOUT`]; `Ping` health checks use the much
+    /// shorter [`Self::PING_TIMEOUT`].
+    async fn request_with_timeout(
+        &self,
+        req: DaemonRequest,
+        timeout: Duration,
+    ) -> anyhow::Result<DaemonResponse> {
+        tokio::time::timeout(timeout, async {
             let stream = super::transport::connect(&self.socket).await?;
             let (read_half, mut write_half) = tokio::io::split(stream);
             write_msg(&mut write_half, &req).await?;

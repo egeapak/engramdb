@@ -17,9 +17,16 @@ use std::io::{self, IsTerminal};
 
 use super::app::OutputFormat;
 
-/// Helper function to truncate IDs to 13 characters
+/// Helper function to truncate IDs to 13 characters.
+///
+/// Counts `char`s and slices on a char boundary: a byte slice (`&id[..13]`)
+/// would panic on IDs containing multibyte characters (IDs normally are
+/// UUIDs, but this also renders arbitrary on-disk file stems).
 pub fn short_id(id: &str) -> &str {
-    &id[..13.min(id.len())]
+    match id.char_indices().nth(13) {
+        Some((byte_idx, _)) => &id[..byte_idx],
+        None => id,
+    }
 }
 
 /// Output formatter for CLI results.
@@ -1119,6 +1126,20 @@ mod tests {
     fn test_short_id_exact_13() {
         let exact = "1234567890123";
         assert_eq!(short_id(exact), "1234567890123");
+    }
+
+    #[test]
+    fn test_short_id_multibyte_does_not_panic() {
+        // Non-UUID ids can come from arbitrary on-disk file stems. A byte
+        // slice at index 13 would land mid-codepoint here and panic.
+        let multibyte = "ééééééééééééééé"; // 15 chars, 2 bytes each
+        assert_eq!(short_id(multibyte), "ééééééééééééé"); // first 13 chars
+
+        let emoji = "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀"; // 14 chars, 4 bytes each
+        assert_eq!(short_id(emoji).chars().count(), 13);
+
+        // Shorter-than-13 multibyte input is returned whole.
+        assert_eq!(short_id("héllo"), "héllo");
     }
 
     // ========================================

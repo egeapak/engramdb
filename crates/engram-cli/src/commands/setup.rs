@@ -19,6 +19,10 @@ This project uses EngramDB for persistent agent memory.
 const ENGRAM_MD_REF: &str = "@ENGRAM.md";
 
 /// MCP tool suffixes that need permission entries.
+///
+/// Must cover **every** tool the MCP server exposes — a missing entry means a
+/// permission prompt on every invocation of that tool. Pinned against the
+/// server's actual tool router by `mcp_tool_suffixes_match_server_tools`.
 const MCP_TOOL_SUFFIXES: &[&str] = &[
     "query",
     "create",
@@ -35,6 +39,10 @@ const MCP_TOOL_SUFFIXES: &[&str] = &[
     "reindex",
     "compress_candidates",
     "compress_apply",
+    "projects_list",
+    "projects_info",
+    "projects_link",
+    "projects_unlink",
 ];
 
 /// MCP tool suffixes that were removed or renamed and must be stripped from
@@ -1296,6 +1304,23 @@ mod tests {
                 "Missing permission: {expected}"
             );
         }
+    }
+
+    /// `MCP_TOOL_SUFFIXES` must cover exactly the tools the MCP server
+    /// exposes: a missing suffix means a permission prompt on every
+    /// invocation of that tool, an extra one is a stale allowlist entry.
+    /// `engram-cli` depends on `engram-mcp`, so this pins directly against
+    /// the server's tool router instead of a hand-maintained count.
+    #[test]
+    fn mcp_tool_suffixes_match_server_tools() {
+        let mut server_tools = engram_mcp::EngramDbServer::tool_names();
+        server_tools.sort();
+        let mut suffixes: Vec<String> = MCP_TOOL_SUFFIXES.iter().map(|s| s.to_string()).collect();
+        suffixes.sort();
+        assert_eq!(
+            suffixes, server_tools,
+            "MCP_TOOL_SUFFIXES (setup.rs) drifted from the MCP server's tool surface"
+        );
     }
 
     #[tokio::test]
