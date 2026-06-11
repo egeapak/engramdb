@@ -57,6 +57,14 @@ async fn run_store_check(dir: &Path, global: bool, formatter: &OutputFormatter) 
             }
         }
         formatter.print_message("\nRun `engramdb reindex` to repair.");
+        // Unhealthy must exit non-zero so scripts/CI can gate on `doctor`.
+        // The findings were already printed above; the error just sets the
+        // exit code (main maps Err → exit 1).
+        anyhow::bail!(
+            "store is unhealthy ({} stale, {} orphaned)",
+            result.stale_entries.len(),
+            result.orphaned_files.len()
+        );
     }
 
     Ok(())
@@ -80,6 +88,12 @@ async fn run_environment_check(
     let daemon_check = engramdb::daemon::check_daemon(&check_dir).await;
     let result = doctor_environment(&check_dir, store.as_ref(), daemon_check).await;
     formatter.print_environment_doctor(&result);
+    // `all_passed` only reflects hard failures (`passed == false`): checks
+    // rendered as Warn/Info carry `passed == true`, so warnings never flip
+    // the exit code — only real failures exit non-zero.
+    if !result.all_passed {
+        anyhow::bail!("environment check found failing checks");
+    }
     Ok(())
 }
 
@@ -171,7 +185,8 @@ mod tests {
             &formatter,
         )
         .await;
-        assert!(result.is_ok());
+        // Unhealthy store (orphaned file) → Err so the process exits non-zero.
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -180,7 +195,10 @@ mod tests {
 
         let formatter = OutputFormatter::new(None, false, true);
         let result = run_doctor(temp_dir.path(), false, None, &formatter).await;
-        assert!(result.is_ok());
+        // "Store initialized: not found" is a hard failure (passed=false),
+        // so the environment check must exit non-zero. It still prints the
+        // full report rather than erroring out early.
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -190,8 +208,12 @@ mod tests {
         MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
         let formatter = OutputFormatter::new(None, false, true);
+        // An initialized, healthy store must exit 0. Advisory findings (binary
+        // not on PATH, untracked/legacy embedding fingerprint, .mcp.json not
+        // configured) render as warnings now and never flip the exit code, so
+        // the outcome is deterministic regardless of host environment.
         let result = run_doctor(temp_dir.path(), false, None, &formatter).await;
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "fresh init must pass doctor: {:?}", result);
     }
 
     #[tokio::test]
@@ -211,13 +233,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_doctor_environment_succeeds_no_store() {
+    async fn test_run_doctor_environment_no_store_exits_nonzero() {
         let temp_dir = TempDir::new().unwrap();
-        // No init — but environment check should still succeed gracefully
+        // No init — the report still renders gracefully (no panic, full
+        // output), but the missing store is a hard failure → Err.
 
         let formatter = OutputFormatter::new(None, false, true);
         let result = run_doctor(temp_dir.path(), false, None, &formatter).await;
-        assert!(result.is_ok());
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -266,7 +289,9 @@ mod tests {
             &formatter,
         )
         .await;
-        assert!(result.is_ok());
+        // Unhealthy store (stale index entry) → Err so the process exits
+        // non-zero.
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -275,9 +300,11 @@ mod tests {
         let registry = InMemoryRegistry::new();
         MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        // JSON formatter + environment (None subcommand)
+        // JSON formatter + environment (None subcommand). Like the pretty
+        // variant above, an initialized healthy store must exit 0 — advisory
+        // checks render as warnings and do not gate the exit code.
         let formatter = OutputFormatter::new(None, true, true);
         let result = run_doctor(temp_dir.path(), false, None, &formatter).await;
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "fresh init must pass doctor: {:?}", result);
     }
 }

@@ -17,7 +17,7 @@ pub mod v2;
 #[cfg(test)]
 mod tests;
 
-use super::error::{Result, StorageError};
+use super::error::Result;
 use engram_types::Memory;
 
 pub use v1::{V1Parser, V1Writer};
@@ -144,9 +144,7 @@ pub trait MemoryWriter {
 /// Returns `None` for legacy (v1) files that lack a version field,
 /// or `Some(n)` for files with an explicit `version: n`.
 pub fn detect_format_version(content: &str) -> Option<u32> {
-    let mut parts = content.splitn(3, "---");
-    parts.next(); // skip before first ---
-    let frontmatter = parts.next()?.trim();
+    let (frontmatter, _body) = helpers::split_frontmatter(content).ok()?;
 
     for line in frontmatter.lines() {
         let line = line.trim();
@@ -188,13 +186,7 @@ pub fn writer_for_version(version: Option<u32>) -> Box<dyn MemoryWriter> {
 /// correct parser.
 pub fn parse_memory_file(content: &str) -> Result<Memory> {
     // Validate that frontmatter exists before version detection
-    let mut parts = content.splitn(3, "---");
-    parts.next();
-    if parts.next().is_none() {
-        return Err(StorageError::InvalidFormat(
-            "Missing frontmatter".to_string(),
-        ));
-    }
+    helpers::split_frontmatter(content)?;
 
     let version = detect_format_version(content);
     let parser = parser_for_version(version);

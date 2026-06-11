@@ -8,20 +8,15 @@ use engramdb::types::{Decay, DecayStrategy};
 
 // `decay_factor` does float math over caller-influenced durations: an age in
 // seconds divided by a TTL / half-life, then `0.5.powf(..)` and a clamp. TTL,
-// half-life and timestamps ultimately come from on-disk memory files, so a
-// hostile or corrupt file can drive every input here. The factor multiplies
-// into relevance, so it must always be finite (a NaN/inf would unorder search
-// results or break later arithmetic), regardless of zero/negative/overflowing
-// durations or future timestamps.
+// half-life, floor and timestamps ultimately come from on-disk memory files,
+// so a hostile or corrupt file can drive every input here. The factor
+// multiplies into relevance, so it must always land in [0, 1] (a NaN/inf or
+// out-of-range factor would unorder search results or break later
+// arithmetic), regardless of zero/negative/overflowing durations, future
+// timestamps, or a non-finite/out-of-range floor — `decay_factor` clamps the
+// floor into [0, 1] itself (NaN → 0.0), so no input is skipped here.
 fuzz_target!(|input: (u8, Option<i64>, Option<i64>, f64, i64, i64)| {
     let (strat_sel, ttl_secs, half_life_secs, floor, created_ts, now_ts) = input;
-
-    // A NaN/inf floor is propagated verbatim by the function; that's an
-    // input-validation concern, not the arithmetic this target probes. Skip it
-    // so the assertion isolates the age/TTL/half-life math.
-    if !floor.is_finite() {
-        return;
-    }
 
     let strategy = match strat_sel % 4 {
         0 => DecayStrategy::None,
@@ -50,7 +45,7 @@ fuzz_target!(|input: (u8, Option<i64>, Option<i64>, f64, i64, i64)| {
 
     let factor = decay_factor(created_at, now, &decay);
     assert!(
-        factor.is_finite(),
-        "decay_factor produced a non-finite factor (floor={floor})"
+        (0.0..=1.0).contains(&factor),
+        "decay_factor produced a factor outside [0, 1] (factor={factor}, floor={floor})"
     );
 });

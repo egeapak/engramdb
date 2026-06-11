@@ -8,7 +8,12 @@
 //!
 //! - **Unix:** a Unix domain socket bound to the resolved socket path. A stale
 //!   socket left by a crashed daemon is reclaimed atomically (bind a per-pid
-//!   temp path, then `rename` over the target).
+//!   temp path, then `rename` over the target). The bind path is permission-
+//!   hardened: the socket's parent directory is created with (or tightened to)
+//!   mode 0700 and the socket file is chmod'd 0600, so other local users can
+//!   neither traverse to nor connect to the socket even when it falls back to
+//!   a shared location like `/tmp` (see [`super::runtime_base`]). A third
+//!   layer — an `SO_PEERCRED` uid check — lives in the server's accept loop.
 //! - **Windows:** a named pipe whose name is derived from the same resolved
 //!   path, so the `--socket` / `ENGRAMDB_DAEMON_SOCKET` / `[daemon].socket_path`
 //!   override chain (and the per-user default path) carry over unchanged. The
@@ -34,8 +39,16 @@ pub use windows::{bind_or_yield, connect, Listener};
 #[cfg(unix)]
 mod unix {
     use super::*;
+    use std::fs;
     use std::io::ErrorKind;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     use tokio::net::{UnixListener, UnixStream};
+
+    /// Mode for the socket's parent directory: owner-only, no group/other
+    /// traversal.
+    const DIR_MODE: u32 = 0o700;
+    /// Mode for the socket file itself: owner read/write only.
+    const SOCKET_MODE: u32 = 0o600;
 
     /// A bound Unix-domain-socket listener.
     pub struct Listener(UnixListener);
@@ -48,19 +61,90 @@ mod unix {
         }
     }
 
+    /// Create (or vet) the socket's parent directory with owner-only access.
+    ///
+    /// Defense layer 1 of the daemon's local-only access control: the default
+    /// socket path can land outside `$XDG_RUNTIME_DIR` (per-user cache dir, or
+    /// `/tmp/engramdb-<uid>` as a last resort), where a umask-default
+    /// directory would be world-traversable. A 0700 parent denies every other
+    /// user path traversal to the socket regardless of where it lives.
+    ///
+    /// - **Missing:** created (recursively) with mode 0700.
+    /// - **Exists, owned by us, group/other bits set:** tightened to 0700
+    ///   (logged, since an explicitly overridden `socket_path` could point
+    ///   into a deliberately shared directory).
+    /// - **Exists but owned by another user:** refuse to bind with a clear
+    ///   error — we can't fix its permissions, and serving from a directory
+    ///   someone else controls invites socket squatting/swaps. (This also
+    ///   means a socket placed *directly* in a root-owned dir like `/tmp`
+    ///   is rejected; the default path always uses an owned subdirectory.)
+    fn prepare_socket_dir(parent: &Path) -> std::io::Result<()> {
+        if parent.as_os_str().is_empty() {
+            return Ok(());
+        }
+        // Recursive create succeeds (like `create_dir_all`) when the dir
+        // already exists; the mode only applies to directories we create.
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(DIR_MODE)
+            .create(parent)?;
+
+        let meta = fs::metadata(parent)?;
+        let euid = crate::daemon::current_euid();
+        if meta.uid() != euid {
+            return Err(std::io::Error::new(
+                ErrorKind::PermissionDenied,
+                format!(
+                    "daemon socket directory {} is owned by uid {} (we are uid {}); \
+                     refusing to bind — point [daemon].socket_path (or \
+                     ENGRAMDB_DAEMON_SOCKET) at a directory you own",
+                    parent.display(),
+                    meta.uid(),
+                    euid
+                ),
+            ));
+        }
+        if meta.mode() & 0o077 != 0 {
+            // Pre-existing dir with group/other access (e.g. created by an
+            // older engramdb under the default umask): tighten it.
+            tracing::warn!(
+                "tightening daemon socket directory {} from {:o} to {:o}",
+                parent.display(),
+                meta.mode() & 0o777,
+                DIR_MODE
+            );
+            fs::set_permissions(parent, fs::Permissions::from_mode(DIR_MODE))?;
+        }
+        Ok(())
+    }
+
+    /// Defense layer 2: restrict the socket file itself to owner read/write.
+    /// A Unix socket inherits `0777 & ~umask` at bind, which would let any
+    /// user who can traverse to it connect.
+    fn restrict_socket(path: &Path) -> std::io::Result<()> {
+        fs::set_permissions(path, fs::Permissions::from_mode(SOCKET_MODE))
+    }
+
     /// Bind the socket, reclaiming a stale one left by a crashed daemon.
     ///
     /// Returns `Ok(None)` when a *live* daemon already owns the socket (this
-    /// process should exit), `Ok(Some(listener))` when we own it.
+    /// process should exit), `Ok(Some(listener))` when we own it. On success
+    /// the parent directory is mode 0700 and the socket file mode 0600 (see
+    /// [`prepare_socket_dir`] / [`restrict_socket`]).
     pub async fn bind_or_yield(socket: &Path) -> std::io::Result<Option<Listener>> {
         // The socket is a real filesystem entry, so its directory must exist
         // before bind. (Windows named pipes have no parent directory, hence
         // this lives in the Unix transport rather than the shared server loop.)
         if let Some(parent) = socket.parent() {
-            std::fs::create_dir_all(parent)?;
+            prepare_socket_dir(parent)?;
         }
         match UnixListener::bind(socket) {
-            Ok(l) => return Ok(Some(Listener(l))),
+            Ok(l) => {
+                // Brief bind→chmod window with umask-default permissions; the
+                // 0700 parent already blocks other users for its duration.
+                restrict_socket(socket)?;
+                return Ok(Some(Listener(l)));
+            }
             Err(e) if e.kind() != ErrorKind::AddrInUse => return Err(e),
             Err(_) => {}
         }
@@ -77,7 +161,10 @@ mod unix {
         let tmp = socket.with_extension(format!("tmp.{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         let listener = UnixListener::bind(&tmp)?;
-        if let Err(e) = std::fs::rename(&tmp, socket) {
+        // chmod the temp-path socket BEFORE renaming it over the target, so
+        // the target path never exposes a group/world-accessible socket, even
+        // for an instant.
+        if let Err(e) = restrict_socket(&tmp).and_then(|()| std::fs::rename(&tmp, socket)) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
         }
@@ -302,5 +389,78 @@ mod tests {
             connect(&addr).await.is_err(),
             "connecting with no listener must fail"
         );
+    }
+
+    // Unix-only permission hardening: these assert on real filesystem modes,
+    // which only exist for the Unix-domain-socket transport (Windows named
+    // pipes have no on-disk representation).
+    #[cfg(unix)]
+    mod unix_permissions {
+        use super::super::bind_or_yield;
+        use std::os::unix::fs::PermissionsExt;
+
+        fn mode_of(path: &std::path::Path) -> u32 {
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+        }
+
+        /// A fresh bind creates the socket's parent directory with mode 0700
+        /// and the socket file with mode 0600 — owner-only at both layers.
+        #[tokio::test]
+        async fn bind_sets_owner_only_permissions() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            // Parent does not exist yet: bind must create it 0700.
+            let parent = tmp.path().join("rt").join("engramdb");
+            let addr = parent.join("perm.sock");
+
+            let _l = bind_or_yield(&addr)
+                .await
+                .unwrap()
+                .expect("first bind owns the address");
+            assert_eq!(mode_of(&parent), 0o700, "socket dir must be 0700");
+            assert_eq!(mode_of(&addr), 0o600, "socket file must be 0600");
+        }
+
+        /// Reclaiming a stale socket (the bind-temp-then-rename path) must
+        /// also end with a 0600 socket — and the chmod happens on the temp
+        /// path *before* the rename, so the target is never world-accessible.
+        #[tokio::test]
+        async fn stale_reclaim_sets_owner_only_socket() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let addr = tmp.path().join("stale.sock");
+            // A dead socket file with permissive mode, as a crashed pre-
+            // hardening daemon could have left behind.
+            std::fs::write(&addr, b"stale - not a live socket").unwrap();
+            std::fs::set_permissions(&addr, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+            let _l = bind_or_yield(&addr)
+                .await
+                .unwrap()
+                .expect("stale socket must be reclaimed");
+            assert_eq!(mode_of(&addr), 0o600, "reclaimed socket must be 0600");
+        }
+
+        /// A pre-existing socket directory we own but with group/other access
+        /// (e.g. created by an older engramdb under the default umask) is
+        /// tightened to 0700 at bind.
+        #[tokio::test]
+        async fn loose_existing_dir_is_tightened() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let parent = tmp.path().join("loose");
+            std::fs::create_dir(&parent).unwrap();
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(mode_of(&parent), 0o755);
+
+            let addr = parent.join("d.sock");
+            let _l = bind_or_yield(&addr)
+                .await
+                .unwrap()
+                .expect("bind succeeds in an owned dir");
+            assert_eq!(
+                mode_of(&parent),
+                0o700,
+                "owned-but-loose socket dir must be tightened"
+            );
+            assert_eq!(mode_of(&addr), 0o600);
+        }
     }
 }

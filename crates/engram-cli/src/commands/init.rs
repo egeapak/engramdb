@@ -47,7 +47,12 @@ pub async fn run_init(
     };
     let dir: &Path = &target_dir;
 
-    // Initialize the store
+    // Detect a pre-existing store before init so we can report an idempotent
+    // re-init instead of claiming a fresh initialization. `MemoryStore::init`
+    // never overwrites an existing manifest.toml/config.toml.
+    let already_initialized = dir.join(".engramdb/manifest.toml").exists();
+
+    // Initialize the store (idempotent: existing manifest/config preserved)
     let store = MemoryStore::init(dir, registry).await?;
 
     // If we're in a worktree, consolidate any memories that were written
@@ -70,7 +75,9 @@ pub async fn run_init(
             .await?;
     }
 
-    // Copy template if provided
+    // Copy template if provided (explicit user intent — this is the one
+    // path that intentionally overwrites an existing config.toml)
+    let template_applied = template.is_some();
     if let Some(template_path) = template {
         let config_path = dir.join(".engramdb/config.toml");
         fs::copy(&template_path, &config_path)
@@ -134,10 +141,23 @@ pub async fn run_init(
     }
 
     // Print success and helpful info
-    formatter.print_success(&format!(
-        "Initialized EngramDB store at {}",
-        dir.join(".engramdb").display()
-    ));
+    if already_initialized {
+        let note = if template_applied {
+            "existing manifest preserved, config replaced by template"
+        } else {
+            "existing config and manifest preserved"
+        };
+        formatter.print_success(&format!(
+            "EngramDB store already initialized at {} ({})",
+            dir.join(".engramdb").display(),
+            note
+        ));
+    } else {
+        formatter.print_success(&format!(
+            "Initialized EngramDB store at {}",
+            dir.join(".engramdb").display()
+        ));
+    }
     formatter.print_message(&format!("Project ID: {}", store.project_id));
     if let Some(origin) = &worktree_origin {
         formatter.print_message(&format!(
@@ -145,9 +165,11 @@ pub async fn run_init(
             origin.display()
         ));
     }
-    formatter.print_message(
-        "Try: engramdb add --type convention --summary 'Your first memory' --content '...'",
-    );
+    if !already_initialized {
+        formatter.print_message(
+            "Try: engramdb add --type convention --summary 'Your first memory' --content '...'",
+        );
+    }
 
     Ok(())
 }

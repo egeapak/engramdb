@@ -33,7 +33,15 @@ pub struct CompressCandidatesResult {
 #[derive(Debug, Serialize)]
 pub struct CompressApplyResult {
     pub new_id: String,
+    /// Number of source memories the summary supersedes (always
+    /// `source_ids.len()` — the `supersedes` list on the new memory).
     pub superseded_count: usize,
+    /// Source IDs that were already gone when deletion ran (deleted
+    /// concurrently after validation). The summary memory is still valid;
+    /// its `supersedes` may reference these missing IDs, which is harmless —
+    /// `supersedes` is informational metadata and is never dereferenced.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped_sources: Vec<String>,
 }
 
 /// List memories eligible for compression based on criticality threshold and scope.
@@ -87,7 +95,10 @@ pub async fn compress_apply(
         bail!("source_ids must not be empty");
     }
 
-    // Validate all source IDs exist (single dir scan, no file reads)
+    // Validate all source IDs exist (single dir scan, no file reads),
+    // immediately before creating the summary. This cannot be transactional
+    // (no cross-file transactions exist), but keeping the check adjacent to
+    // the create shrinks the window in which a source can vanish unnoticed.
     let existing = store
         .batch_exists(&source_ids)
         .await
@@ -127,14 +138,48 @@ pub async fn compress_apply(
     )
     .await?;
 
-    // Delete source memories now that the compressed memory exists
+    // Delete source memories now that the compressed memory exists.
+    //
+    // From here on the summary memory is durable, so deletion failures must
+    // not abort the sweep mid-way (that would strand an arbitrary suffix of
+    // un-deleted sources). Instead:
+    // - a source that is already gone (deleted concurrently) is skipped and
+    //   reported in `skipped_sources`;
+    // - a real deletion error (I/O) is recorded, the REMAINING sources are
+    //   still attempted, and a partial-failure error listing the un-deleted
+    //   IDs (and the new memory's ID) is returned so the user can clean up
+    //   or re-run. The summary memory remains valid either way.
+    let mut skipped_sources = Vec::new();
+    let mut failed_sources: Vec<(String, crate::storage::StorageError)> = Vec::new();
     for id in &source_ids {
-        store.delete(id).await?;
+        match store.delete(id).await {
+            Ok(()) => {}
+            Err(crate::storage::StorageError::NotFound(_)) => {
+                skipped_sources.push(id.clone());
+            }
+            Err(e) => failed_sources.push((id.clone(), e)),
+        }
+    }
+
+    if !failed_sources.is_empty() {
+        let detail: Vec<String> = failed_sources
+            .iter()
+            .map(|(id, e)| format!("{} ({})", id, e))
+            .collect();
+        bail!(
+            "Compressed memory {} was created, but {} source memor{} could not be deleted: {}. \
+             Delete the listed memories manually (the compressed memory is valid and supersedes them).",
+            result.id,
+            failed_sources.len(),
+            if failed_sources.len() == 1 { "y" } else { "ies" },
+            detail.join(", ")
+        );
     }
 
     Ok(CompressApplyResult {
         new_id: result.id,
         superseded_count,
+        skipped_sources,
     })
 }
 
@@ -284,6 +329,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.superseded_count, 2);
+        assert!(
+            result.skipped_sources.is_empty(),
+            "all sources existed, nothing should be skipped"
+        );
 
         // Verify the new memory exists and has correct supersedes
         let new_memory = store.get(&result.new_id).await.unwrap();
@@ -291,6 +340,136 @@ mod tests {
         assert_eq!(new_memory.summary, "Combined debug summary");
         assert!(new_memory.supersedes.contains(&id1));
         assert!(new_memory.supersedes.contains(&id2));
+
+        // Both sources were really deleted.
+        assert!(store.get(&id1).await.is_err());
+        assert!(store.get(&id2).await.is_err());
+    }
+
+    /// A source that vanishes between validation and the deletion sweep
+    /// (concurrent delete) must be skipped and reported — the apply still
+    /// completes and the summary memory is valid.
+    ///
+    /// Simulated with a "ghost" source: a memory file on disk (so the
+    /// pre-create `batch_exists` validation passes) with no index row (so
+    /// `store.delete` resolves to NotFound, exactly like a source whose
+    /// index row and file were removed by a concurrent delete).
+    #[tokio::test]
+    async fn test_compress_apply_source_gone_at_delete_time_is_skipped() {
+        let (temp, store) = setup_store().await;
+
+        let real_id = add_memory(&store, MemoryType::Debug, "real source", 0.1, vec![]).await;
+
+        let ghost = Memory::new(
+            MemoryType::Debug,
+            "ghost source",
+            "gone before deletion",
+            Provenance::human(),
+        );
+        let ghost_id = ghost.id.clone();
+        let content = crate::storage::memory_file::write_memory_file(&ghost).unwrap();
+        let memories_dir = temp.path().join(".engramdb").join("memories");
+        std::fs::write(memories_dir.join(format!("{}.md", ghost_id)), content).unwrap();
+
+        let result = compress_apply(
+            &store,
+            vec![real_id.clone(), ghost_id.clone()],
+            "Summary".to_string(),
+            "Content".to_string(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.superseded_count, 2);
+        assert_eq!(
+            result.skipped_sources,
+            vec![ghost_id.clone()],
+            "missing source must be reported as skipped, not abort the apply"
+        );
+
+        // The summary is valid and supersedes both (dangling supersedes IDs
+        // are fine — supersedes is informational, never dereferenced).
+        let new_memory = store.get(&result.new_id).await.unwrap();
+        assert!(new_memory.supersedes.contains(&real_id));
+        assert!(new_memory.supersedes.contains(&ghost_id));
+
+        // The real source was still deleted after the skip.
+        assert!(store.get(&real_id).await.is_err());
+    }
+
+    /// A REAL deletion error (I/O) must not abort the sweep mid-way: the
+    /// remaining sources are still attempted, and the returned error lists
+    /// the un-deleted IDs plus the (valid) new memory's ID.
+    ///
+    /// Failure injection: the first source's `.md` file is replaced by a
+    /// directory of the same name — `remove_file(2)` on a directory fails
+    /// (EISDIR), which is a genuine I/O error rather than NotFound, and it
+    /// works regardless of the user the tests run as (unlike chmod tricks,
+    /// which root ignores).
+    #[tokio::test]
+    async fn test_compress_apply_continues_past_real_delete_failure() {
+        let (temp, store) = setup_store().await;
+
+        let broken_id = add_memory(&store, MemoryType::Debug, "undeletable", 0.1, vec![]).await;
+        let ok_id = add_memory(&store, MemoryType::Debug, "deletable", 0.1, vec![]).await;
+
+        // Replace broken's file with a same-named directory.
+        let memories_dir = temp.path().join(".engramdb").join("memories");
+        for entry in std::fs::read_dir(&memories_dir).unwrap() {
+            let path = entry.unwrap().path();
+            let is_broken = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|n| n.contains(&broken_id))
+                .unwrap_or(false);
+            if is_broken {
+                std::fs::remove_file(&path).unwrap();
+                std::fs::create_dir(&path).unwrap();
+            }
+        }
+
+        // broken first, ok second: proves the loop continues past the failure.
+        let err = compress_apply(
+            &store,
+            vec![broken_id.clone(), ok_id.clone()],
+            "Summary".to_string(),
+            "Content".to_string(),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("could not be deleted"),
+            "partial failure must be reported: {}",
+            msg
+        );
+        assert!(
+            msg.contains(&broken_id),
+            "error must list the un-deleted id: {}",
+            msg
+        );
+        assert!(
+            !msg.contains(&ok_id),
+            "successfully deleted source must not be listed as failed: {}",
+            msg
+        );
+
+        // The later source was still attempted and deleted.
+        assert!(store.get(&ok_id).await.is_err());
+
+        // The summary memory was created and remains valid.
+        let entries = store.list_filterable().await.unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.summary == "Summary" && e.type_ == MemoryType::Context),
+            "summary memory must exist despite the partial deletion failure"
+        );
     }
 
     #[tokio::test]

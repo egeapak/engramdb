@@ -15,9 +15,20 @@ fuzz_target!(|input: (
     Option<String>,
     Vec<String>,
     f64,
+    f64,
     f64
 )| {
-    let (memory_physical, memory_logical, current_path, current_logical, base, floor) = input;
+    let (memory_physical, memory_logical, current_path, current_logical, base, floor, logical_floor) =
+        input;
+
+    // A NaN/inf logical-only floor is returned verbatim for unscoped memories;
+    // that's an input-validation concern (config validates it into [0, 1]),
+    // not the combiner arithmetic this target probes. Skip it so the
+    // assertion isolates the path/LCA math.
+    if !logical_floor.is_finite() {
+        return;
+    }
+
     let score = engramdb::scope::scope_proximity(
         &memory_physical,
         &memory_logical,
@@ -25,6 +36,7 @@ fuzz_target!(|input: (
         &current_logical,
         base,
         floor,
+        logical_floor,
     );
     assert!(score.is_finite(), "scope_proximity produced a non-finite score");
 });

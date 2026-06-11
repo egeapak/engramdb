@@ -86,6 +86,11 @@ anyhow = "1"
 # Atomic file writes
 tempfile = "3"
 
+# Unix-only: safe geteuid() for the daemon's socket-permission hardening and
+# SO_PEERCRED peer checks (already in the dependency tree via tempfile et al.).
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
+
 [dev-dependencies]
 # Enable storage's `test-support` module (global-store serialization lock) for
 # this crate's tests; `#[cfg(test)]` items don't cross crate boundaries.

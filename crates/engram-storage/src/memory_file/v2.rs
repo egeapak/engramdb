@@ -31,16 +31,29 @@
 //! accessed_at: "2026-01-15T10:00:00Z"
 //! -->
 //! ```
+//!
+//! # Content escaping
+//!
+//! The free-text sections (`## Content`, `## Details`) may themselves contain
+//! markdown that looks like this format's structure. To keep files round-trip
+//! safe, the writer prefixes any structural-looking content line (`# `, `## `,
+//! `<!--`, `-->`, `> `) with a single backslash, and the parser strips it back
+//! off; a content line that already carries such an escape gains one more
+//! backslash (`\## x` is written as `\\## x`). The hidden `<!-- engramdb -->`
+//! block is only recognized as the *last* line-anchored marker in the file —
+//! where the writer puts it. Files written before escaping existed still parse
+//! (they contain no escapes); see `helpers` module docs for details.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::helpers::{
-    format_provenance_source, parse_body_sections, parse_datetime_field, parse_list_field,
-    parse_provenance_section, parse_score_field,
+    escape_body_text, format_provenance_source, parse_body_sections, parse_datetime_field,
+    parse_list_field, parse_provenance_section, parse_score_field, split_frontmatter,
+    HIDDEN_META_END, HIDDEN_META_START,
 };
 use super::{MemoryParser, MemoryWriter, CURRENT_FORMAT_VERSION};
-use crate::error::{Result, StorageError};
+use crate::error::Result;
 use engram_types::{Challenge, Decay, Memory, MemoryType, Status, Visibility};
 
 // ---------------------------------------------------------------------------
@@ -113,19 +126,6 @@ impl MemoryWriter for V2Writer {
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
-
-fn split_frontmatter(content: &str) -> Result<(&str, &str)> {
-    let mut parts = content.splitn(3, "---");
-    parts.next();
-    let frontmatter = parts
-        .next()
-        .ok_or_else(|| StorageError::InvalidFormat("Missing frontmatter".to_string()))?
-        .trim();
-    let body = parts
-        .next()
-        .ok_or_else(|| StorageError::InvalidFormat("Missing body after frontmatter".to_string()))?;
-    Ok((frontmatter, body))
-}
 
 fn parse_v2(frontmatter: &str, body: &str) -> Result<Memory> {
     let fm: MinimalFrontmatter = serde_yaml_ng::from_str(frontmatter)?;
@@ -217,13 +217,13 @@ fn write_v2(memory: &Memory) -> Result<String> {
 
     // -- ## Content --
     out.push_str("## Content\n\n");
-    out.push_str(&memory.content);
+    out.push_str(&escape_body_text(&memory.content));
     out.push('\n');
 
     // -- ## Details (optional) --
     if let Some(details) = &memory.details {
         out.push_str("\n## Details\n\n");
-        out.push_str(details);
+        out.push_str(&escape_body_text(details));
         out.push('\n');
     }
 
@@ -289,10 +289,17 @@ fn write_v2(memory: &Memory) -> Result<String> {
     Ok(out)
 }
 
-/// Extract a value from a `**Field:** value` line in the body text.
+/// Extract a value from a `**Field:** value` line in the body preamble.
+///
+/// Only the region before the first `## ` section heading is scanned — the
+/// writer emits these lines right after the H1, so a `**Field:**` line inside
+/// content can never hijack the value.
 fn extract_bold_field(body: &str, field: &str) -> Option<String> {
     let prefix = format!("**{field}:** ");
     for line in body.lines() {
+        if line.starts_with("## ") {
+            break;
+        }
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix(&prefix) {
             let val = rest.trim().to_string();
@@ -304,14 +311,35 @@ fn extract_bold_field(body: &str, field: &str) -> Option<String> {
     None
 }
 
-/// Extract `<!-- engramdb ... -->` block and parse as YAML.
+/// Extract the `<!-- engramdb ... -->` block and parse it as YAML.
+///
+/// The writer emits the block at the very end of the file with the markers on
+/// their own lines, so the *last* line-anchored `<!-- engramdb` marker is the
+/// authoritative one (a content-embedded block in an old unescaped file can
+/// no longer hijack the metadata; new writes escape such lines anyway). For
+/// legacy/hand-edited files without a line-anchored marker, fall back to the
+/// historical first-substring scan.
 fn parse_hidden_meta(body: &str) -> HiddenMeta {
-    let start_marker = "<!-- engramdb";
-    let end_marker = "-->";
+    let lines: Vec<&str> = body.lines().collect();
+    if let Some(start) = lines
+        .iter()
+        .rposition(|line| line.trim_end() == HIDDEN_META_START)
+    {
+        if let Some(len) = lines[start + 1..]
+            .iter()
+            .position(|line| line.trim_end() == HIDDEN_META_END)
+        {
+            let yaml_content = lines[start + 1..start + 1 + len].join("\n");
+            if let Ok(meta) = serde_yaml_ng::from_str(yaml_content.trim()) {
+                return meta;
+            }
+        }
+    }
 
-    if let Some(start_idx) = body.find(start_marker) {
-        let after_marker = &body[start_idx + start_marker.len()..];
-        if let Some(end_idx) = after_marker.find(end_marker) {
+    // Legacy fallback: first substring occurrence anywhere in the body.
+    if let Some(start_idx) = body.find(HIDDEN_META_START) {
+        let after_marker = &body[start_idx + HIDDEN_META_START.len()..];
+        if let Some(end_idx) = after_marker.find(HIDDEN_META_END) {
             let yaml_content = after_marker[..end_idx].trim();
             if let Ok(meta) = serde_yaml_ng::from_str(yaml_content) {
                 return meta;

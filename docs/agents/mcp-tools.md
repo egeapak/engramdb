@@ -24,7 +24,7 @@ Every tool exposed by `engramdb serve`. For when to use which tool, see [workflo
 | `mode` | `"rank"` \| `"filter"` | Required. `"rank"` browses by context; `"filter"` requires a positive signal. |
 | `query?` | `string` | Search text (tokenized against summary, content, tags). |
 | `path?` | `string` | Physical context (file path) for proximity scoring. |
-| `logical?` | `array[string]` | Logical scopes (dot-notation) for hierarchy proximity. **Scoring signal, not a filter.** |
+| `logical?` | `array[string]` | Logical scopes (dot-notation). Scoring signal in `rank` mode; in `filter` mode a hard **hierarchical** filter — a memory matches when one of its scopes is equal to, a descendant of, or an ancestor of a queried scope (querying `auth` matches `auth.oauth`; siblings like `auth.jwt` vs `auth.oauth` do not match). |
 | `types?` | `array[string]` | Filter by memory types. |
 | `tags?` | `array[string]` | Filter by tags (OR within). |
 | `min_criticality?` | `f64` | Drop memories below this criticality. |

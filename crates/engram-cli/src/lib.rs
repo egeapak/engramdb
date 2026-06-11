@@ -136,8 +136,9 @@ pub async fn run(cli: Cli) -> Result<()> {
     // stray store, and register the worktree as a sub-project. `init` and
     // `serve` perform their own worktree handling (they own user-facing
     // messaging / run the MCP server); `completions` and `setup` don't touch
-    // a memory store; `daemon` is a process-wide model host that ignores
-    // `dir` entirely (each request carries its own resolved store dir).
+    // a memory store; `daemon` is a process-wide model host that only reads
+    // `dir` for its `[daemon]` config section (each request carries its own
+    // resolved store dir).
     let dir = if matches!(
         cli.command,
         Command::Init { .. }
@@ -425,7 +426,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Serve { transport, port } => {
             commands::run_serve(&dir, &transport, port, backend, &formatter).await
         }
-        Command::Daemon { command } => commands::run_daemon_cmd(command, &formatter).await,
+        Command::Daemon { command } => commands::run_daemon_cmd(&dir, command, &formatter).await,
         Command::Completions { shell } => {
             commands::run_completions(shell);
             Ok(())
@@ -509,9 +510,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Hook { command } => match command {
-            HookCommand::PreToolUse => commands::run_hook_pre_tool_use(&dir, backend).await,
+            // Hooks fire on every Read/Write/Edit, never embed (query: None)
+            // and never create memories — they deliberately skip provider
+            // resolution (no `backend`), see `build_engine_without_providers`.
+            HookCommand::PreToolUse => commands::run_hook_pre_tool_use(&dir).await,
             HookCommand::SessionStart { min_criticality } => {
-                commands::run_hook_session_start(&dir, backend, min_criticality).await
+                commands::run_hook_session_start(&dir, min_criticality).await
             }
         },
         Command::Projects { command } => {

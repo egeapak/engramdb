@@ -17,6 +17,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema};
 use futures_util::stream::StreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::table::OptimizeAction;
 use lancedb::{connect, Connection, Table};
 
 use chrono::{DateTime, Utc};
@@ -135,6 +136,20 @@ pub struct VectorMatch {
     pub id: String,
     /// Cosine similarity score (higher is better)
     pub score: f64,
+}
+
+/// Aggregate result of [`LanceIndex::optimize`] across the memories and
+/// chunks tables. All counters are zero when there was nothing to reclaim.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IndexOptimizeStats {
+    /// Fragments merged away by compaction.
+    pub fragments_removed: usize,
+    /// Data files removed by compaction (including deletion files).
+    pub files_removed: usize,
+    /// Bytes freed by pruning old dataset versions.
+    pub bytes_removed: u64,
+    /// Number of old dataset versions pruned.
+    pub old_versions_removed: u64,
 }
 
 /// Unified LanceDB wrapper for metadata and vector storage.
@@ -488,6 +503,31 @@ impl LanceIndex {
             return Ok(());
         }
 
+        // Validate every vector against the index's fixed width BEFORE any
+        // Arrow construction: `FixedSizeListArray::new` PANICS on a length
+        // mismatch, which would take down the (often background) ingest task
+        // and leave the memory stored but silently unsearchable. The read
+        // path (`vector_search`) already bails cleanly on a dimension
+        // mismatch — the write path must match. A mismatch here usually
+        // means the embedding provider and `[embeddings].dimensions` in
+        // config.toml disagree (the index table is created from the config
+        // value).
+        for (i, chunk) in chunks.iter().enumerate() {
+            if chunk.len() != self.dimensions {
+                anyhow::bail!(
+                    "Embedding dimension mismatch for memory '{}': chunk {} has {} dimensions \
+                     but the index expects {}. The embedding provider and the configured \
+                     [embeddings].dimensions disagree — set [embeddings].dimensions = {} in \
+                     config.toml, then run `engramdb reindex --embeddings-only`.",
+                    memory_id,
+                    i,
+                    chunk.len(),
+                    self.dimensions,
+                    chunk.len()
+                );
+            }
+        }
+
         let table = self.open_chunks_table().await?;
         let schema = self.chunks_schema();
 
@@ -625,7 +665,19 @@ impl LanceIndex {
     /// Queries the chunks table, groups results by memory_id, and takes the
     /// max score per memory. Returns one `VectorMatch` per unique memory,
     /// sorted by score descending, truncated to `limit`.
-    pub async fn vector_search(&self, query: Vec<f32>, limit: usize) -> Result<Vec<VectorMatch>> {
+    ///
+    /// When `restrict_to` is `Some`, the search is pushed down to only the
+    /// chunks whose `memory_id` is in the given set (via a LanceDB
+    /// `memory_id IN (...)` predicate), so the top-k window is spent
+    /// entirely on candidates the caller actually cares about instead of
+    /// being saturated by filtered-out memories. `Some(&[])` short-circuits
+    /// to an empty result; `None` searches the whole store.
+    pub async fn vector_search(
+        &self,
+        query: Vec<f32>,
+        limit: usize,
+        restrict_to: Option<&[String]>,
+    ) -> Result<Vec<VectorMatch>> {
         if query.len() != self.dimensions {
             anyhow::bail!(
                 "Query vector dimension mismatch: expected {}, got {}",
@@ -634,13 +686,36 @@ impl LanceIndex {
             );
         }
 
+        // An explicitly empty restriction set can match nothing — and
+        // `IN ()` is not valid SQL — so bail before touching the table.
+        if restrict_to.is_some_and(|ids| ids.is_empty()) {
+            return Ok(Vec::new());
+        }
+
         let table = self.open_chunks_table().await?;
 
-        // Fetch more rows than needed to ensure enough unique memories after dedup
-        let chunk_limit = limit * 5;
-        let mut stream = table
-            .vector_search(query)?
-            .limit(chunk_limit)
+        // Fetch more rows than needed to ensure enough unique memories after
+        // dedup. `limit` is ultimately user-influenced, so saturate the
+        // multiply (plain `* 5` panics in debug / wraps in release) and clamp
+        // to a bound LanceDB's query plan can represent — it casts the limit
+        // to an `i32` top-k internally, so e.g. `usize::MAX` would wrap to a
+        // negative k. The clamp only bounds the over-fetch; callers asking
+        // for absurd limits still get the best `MAX_CHUNK_FETCH` chunks.
+        const MAX_CHUNK_FETCH: usize = 65_536;
+        let chunk_limit = limit.saturating_mul(5).min(MAX_CHUNK_FETCH);
+        let mut vector_query = table.vector_search(query)?.limit(chunk_limit);
+        if let Some(ids) = restrict_to {
+            // Memory ids are server-generated UUIDs, but reuse the same
+            // single-quote escaping discipline as every other predicate in
+            // this file rather than trusting that.
+            let id_list = ids
+                .iter()
+                .map(|id| format!("'{}'", id.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            vector_query = vector_query.only_if(format!("memory_id IN ({})", id_list));
+        }
+        let mut stream = vector_query
             .execute()
             .await
             .context("Failed to execute vector search")?;
@@ -690,11 +765,26 @@ impl LanceIndex {
         Ok(matches)
     }
 
-    /// Drop and recreate both memories and chunks tables (for reindex).
+    /// Drop and recreate both memories and chunks tables.
+    ///
+    /// Destroys all embedding vectors. Only call this when the caller can
+    /// re-embed everything afterwards (or explicitly wants a full wipe) —
+    /// for a metadata-only rebuild use [`Self::clear_memories`] so existing
+    /// vectors survive.
     pub async fn clear(&self) -> Result<()> {
+        self.clear_memories().await?;
+        self.clear_chunks().await?;
+        Ok(())
+    }
+
+    /// Drop and recreate only the memories (metadata) table.
+    ///
+    /// Leaves the chunks (vectors) table untouched, so a reindex that
+    /// rebuilds metadata from the markdown files does not destroy
+    /// embeddings. Chunks are keyed by `memory_id`, not by table identity.
+    pub async fn clear_memories(&self) -> Result<()> {
         let connection = Arc::clone(&self.connection);
 
-        // Drop and recreate memories table
         let _ = connection.drop_table(&self.table_name, &[]).await;
         let memories_schema = self.memories_schema();
         connection
@@ -703,7 +793,17 @@ impl LanceIndex {
             .await
             .context("Failed to recreate LanceDB memories table")?;
 
-        // Drop and recreate chunks table
+        Ok(())
+    }
+
+    /// Drop and recreate only the chunks (vectors) table.
+    ///
+    /// Recreates the table with the currently configured dimensions, so this
+    /// is also the remediation path when the embedding dimensions change.
+    /// Destroys all vectors — only call when a re-embed is about to follow.
+    pub async fn clear_chunks(&self) -> Result<()> {
+        let connection = Arc::clone(&self.connection);
+
         let _ = connection.drop_table(&self.chunks_table_name, &[]).await;
         let chunks_schema = self.chunks_schema();
         connection
@@ -713,6 +813,43 @@ impl LanceIndex {
             .context("Failed to recreate LanceDB chunks table")?;
 
         Ok(())
+    }
+
+    /// Compact small fragments and prune old dataset versions for both the
+    /// memories and chunks tables.
+    ///
+    /// Every mutating LanceDB operation (merge_insert, delete, add) commits a
+    /// new immutable dataset version, so without periodic maintenance disk
+    /// usage grows monotonically with write count. This runs
+    /// `OptimizeAction::All`, which is compaction + version pruning + index
+    /// optimization with library defaults. Version pruning keeps versions
+    /// newer than 7 days (the lancedb default), which is safe for concurrent
+    /// MVCC readers: a reader holding an older-than-7-days snapshot in an
+    /// active query would be pathological.
+    ///
+    /// Returns aggregate statistics across both tables (zeroes when there is
+    /// nothing to reclaim). Callers should treat failures as non-fatal —
+    /// optimization is maintenance, not correctness.
+    pub async fn optimize(&self) -> Result<IndexOptimizeStats> {
+        let mut total = IndexOptimizeStats::default();
+        for (table, label) in [
+            (self.open_table().await?, "memories"),
+            (self.open_chunks_table().await?, "chunks"),
+        ] {
+            let stats = table
+                .optimize(OptimizeAction::All)
+                .await
+                .with_context(|| format!("Failed to optimize LanceDB {label} table"))?;
+            if let Some(c) = stats.compaction {
+                total.fragments_removed += c.fragments_removed;
+                total.files_removed += c.files_removed;
+            }
+            if let Some(p) = stats.prune {
+                total.bytes_removed += p.bytes_removed;
+                total.old_versions_removed += p.old_versions;
+            }
+        }
+        Ok(total)
     }
 
     // ---- Arrow conversion helpers ----
@@ -1159,6 +1296,41 @@ mod tests {
         assert_eq!(lance.count().await.unwrap(), 0);
     }
 
+    /// `optimize` is the disk-space reclamation path for the append-only
+    /// Lance versions. It must succeed both on freshly-created empty tables
+    /// and after a burst of versioned writes (upserts, chunk writes,
+    /// deletes), and must not disturb live data. Actual byte reclamation is
+    /// environment-dependent (version pruning retains 7 days), so only the
+    /// Ok contract and data integrity are asserted.
+    #[tokio::test]
+    async fn test_optimize_on_empty_and_after_writes() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        // Empty tables: optimize is a safe no-op.
+        let stats = lance.optimize().await.unwrap();
+        assert_eq!(stats.bytes_removed, 0, "nothing to prune on a fresh index");
+
+        // A burst of version-creating writes across both tables.
+        for i in 0..5 {
+            let entry = create_test_entry(&format!("opt-{i}"));
+            lance.upsert(&entry).await.unwrap();
+            lance
+                .upsert_chunks(&format!("opt-{i}"), vec![vec![0.1f32; 384]])
+                .await
+                .unwrap();
+        }
+        lance.delete("opt-0").await.unwrap();
+        lance.delete_chunks("opt-0").await.unwrap();
+
+        lance.optimize().await.unwrap();
+
+        // Live rows survive compaction.
+        assert_eq!(lance.count().await.unwrap(), 4);
+        assert_eq!(lance.chunks_for_memory("opt-1").await.unwrap().len(), 1);
+        assert!(lance.chunks_for_memory("opt-0").await.unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn test_clear() {
         let temp_dir = TempDir::new().unwrap();
@@ -1176,6 +1348,56 @@ mod tests {
         assert_eq!(lance.count().await.unwrap(), 0);
     }
 
+    /// `clear_memories` must rebuild only the metadata table — embedding
+    /// vectors are expensive to recompute and must survive a metadata-only
+    /// reindex (the data-loss bug this split fixes).
+    #[tokio::test]
+    async fn test_clear_memories_preserves_chunks() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        lance.upsert(&create_test_entry("a")).await.unwrap();
+        lance
+            .upsert_chunks("a", vec![vec![0.1f32; 384], vec![0.2f32; 384]])
+            .await
+            .unwrap();
+
+        lance.clear_memories().await.unwrap();
+
+        assert_eq!(lance.count().await.unwrap(), 0, "metadata must be cleared");
+        assert_eq!(
+            lance.list_chunk_memory_ids().await.unwrap(),
+            vec!["a".to_string()],
+            "chunks must survive a metadata-only clear"
+        );
+        assert_eq!(
+            lance.chunks_for_memory("a").await.unwrap().len(),
+            2,
+            "all chunk rows must survive"
+        );
+    }
+
+    /// `clear_chunks` is the inverse: vectors are dropped, metadata stays.
+    #[tokio::test]
+    async fn test_clear_chunks_preserves_memories() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        lance.upsert(&create_test_entry("a")).await.unwrap();
+        lance
+            .upsert_chunks("a", vec![vec![0.1f32; 384]])
+            .await
+            .unwrap();
+
+        lance.clear_chunks().await.unwrap();
+
+        assert_eq!(lance.count().await.unwrap(), 1, "metadata must survive");
+        assert!(
+            lance.list_chunk_memory_ids().await.unwrap().is_empty(),
+            "chunks must be cleared"
+        );
+    }
+
     #[tokio::test]
     async fn test_upsert_chunks() {
         let temp_dir = TempDir::new().unwrap();
@@ -1189,9 +1411,70 @@ mod tests {
         lance.upsert_chunks("chunk-test", chunks).await.unwrap();
 
         // Should be searchable
-        let matches = lance.vector_search(vec![0.1f32; 384], 10).await.unwrap();
+        let matches = lance
+            .vector_search(vec![0.1f32; 384], 10, None)
+            .await
+            .unwrap();
         assert!(!matches.is_empty());
         assert_eq!(matches[0].id, "chunk-test");
+    }
+
+    /// A wrong-width vector must be rejected with a descriptive error, not
+    /// crash the process: `FixedSizeListArray::new` panics on a length
+    /// mismatch, and upserts often run in background ingest tasks where a
+    /// panic leaves the memory stored but silently unsearchable.
+    #[tokio::test]
+    async fn test_upsert_chunks_dimension_mismatch_errors_cleanly() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        let err = lance
+            .upsert_chunks("dim-mismatch-mem", vec![vec![0.1f32; 1024]])
+            .await
+            .expect_err("wrong-width vector must return Err, not panic");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("dim-mismatch-mem"),
+            "error must name the memory id: {msg}"
+        );
+        assert!(msg.contains("384"), "error must state expected dims: {msg}");
+        assert!(msg.contains("1024"), "error must state actual dims: {msg}");
+
+        // The index must remain usable: a correct-width upsert for the same
+        // memory still works after the rejected write.
+        lance
+            .upsert_chunks("dim-mismatch-mem", vec![vec![0.1f32; 384]])
+            .await
+            .unwrap();
+        let matches = lance
+            .vector_search(vec![0.1f32; 384], 10, None)
+            .await
+            .unwrap();
+        assert!(matches.iter().any(|m| m.id == "dim-mismatch-mem"));
+    }
+
+    /// Mixed batches are all-or-nothing: one bad chunk among good ones must
+    /// reject the whole upsert (a partial write would mis-shape the
+    /// FixedSizeList values buffer).
+    #[tokio::test]
+    async fn test_upsert_chunks_rejects_mixed_width_batch() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        let err = lance
+            .upsert_chunks("mixed-width-mem", vec![vec![0.1f32; 384], vec![0.2f32; 16]])
+            .await
+            .expect_err("a batch containing a wrong-width chunk must be rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("mixed-width-mem"), "{msg}");
+        assert!(
+            msg.contains("chunk 1"),
+            "error must point at the bad chunk: {msg}"
+        );
+
+        // Nothing from the rejected batch was written.
+        let chunks = lance.chunks_for_memory("mixed-width-mem").await.unwrap();
+        assert!(chunks.is_empty());
     }
 
     #[tokio::test]
@@ -1207,14 +1490,20 @@ mod tests {
             .unwrap();
 
         // Verify searchable
-        let matches = lance.vector_search(vec![0.1f32; 384], 10).await.unwrap();
+        let matches = lance
+            .vector_search(vec![0.1f32; 384], 10, None)
+            .await
+            .unwrap();
         assert!(!matches.is_empty());
 
         // Delete chunks
         lance.delete_chunks("del-chunk").await.unwrap();
 
         // Should no longer appear in search
-        let matches = lance.vector_search(vec![0.1f32; 384], 10).await.unwrap();
+        let matches = lance
+            .vector_search(vec![0.1f32; 384], 10, None)
+            .await
+            .unwrap();
         assert!(matches.is_empty());
     }
 
@@ -1241,7 +1530,7 @@ mod tests {
 
         // Search for something close to chunk_close
         let query = vec![0.5f32; 384];
-        let matches = lance.vector_search(query, 10).await.unwrap();
+        let matches = lance.vector_search(query, 10, None).await.unwrap();
 
         assert_eq!(matches.len(), 2);
         // mem-a should rank first (its best chunk is closer to query)
@@ -1251,12 +1540,120 @@ mod tests {
         assert!(matches[0].score > matches[1].score);
     }
 
+    /// `limit` flows in from user input: `usize::MAX` must neither overflow
+    /// the 5x chunk over-fetch (debug panic / release wrap) nor exceed what
+    /// LanceDB's i32 top-k plan can represent.
+    #[tokio::test]
+    async fn test_vector_search_huge_limit_no_panic() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        lance.upsert(&create_test_entry("mem-a")).await.unwrap();
+        lance
+            .upsert_chunks("mem-a", vec![vec![0.5f32; 384]])
+            .await
+            .unwrap();
+        lance.upsert(&create_test_entry("mem-b")).await.unwrap();
+        lance
+            .upsert_chunks("mem-b", vec![vec![0.3f32; 384]])
+            .await
+            .unwrap();
+
+        let matches = lance
+            .vector_search(vec![0.5f32; 384], usize::MAX, None)
+            .await
+            .unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].id, "mem-a");
+    }
+
+    /// `restrict_to` pushes the candidate set down into the LanceDB
+    /// predicate: only restricted ids come back, each with its real
+    /// similarity score, even when ids outside the set are closer to the
+    /// query (and would otherwise saturate the top-k window).
+    #[tokio::test]
+    async fn test_vector_search_restrict_to_subset() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        // "near" is closest to the query, "mid" next, "far" farthest.
+        for (id, val) in [("near", 0.5f32), ("mid", 0.3), ("far", -0.5)] {
+            lance.upsert(&create_test_entry(id)).await.unwrap();
+            lance.upsert_chunks(id, vec![vec![val; 384]]).await.unwrap();
+        }
+
+        let restrict = vec!["mid".to_string(), "far".to_string()];
+        // limit 1: without pushdown, "near" would consume the window and
+        // post-filtering would leave nothing.
+        let matches = lance
+            .vector_search(vec![0.5f32; 384], 1, Some(&restrict))
+            .await
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, "mid", "best match WITHIN the restriction");
+        assert!(matches[0].score > 0.0);
+
+        // Both restricted ids with headroom; "near" must never appear.
+        let matches = lance
+            .vector_search(vec![0.5f32; 384], 10, Some(&restrict))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = matches.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["mid", "far"]);
+    }
+
+    /// An explicitly empty restriction set matches nothing (and must not
+    /// generate the invalid `IN ()` predicate).
+    #[tokio::test]
+    async fn test_vector_search_restrict_to_empty_set() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        lance.upsert(&create_test_entry("mem-a")).await.unwrap();
+        lance
+            .upsert_chunks("mem-a", vec![vec![0.5f32; 384]])
+            .await
+            .unwrap();
+
+        let matches = lance
+            .vector_search(vec![0.5f32; 384], 10, Some(&[]))
+            .await
+            .unwrap();
+        assert!(matches.is_empty());
+    }
+
+    /// Restriction ids flow through the same quote-escaping discipline as
+    /// every other `only_if` site: a literal quote in an id must neither
+    /// error at the SQL layer nor match the wrong row.
+    #[tokio::test]
+    async fn test_vector_search_restrict_to_with_quote_in_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        let quoted = "abc'def";
+        for id in [quoted, "plain"] {
+            lance.upsert(&create_test_entry(id)).await.unwrap();
+            lance
+                .upsert_chunks(id, vec![vec![0.5f32; 384]])
+                .await
+                .unwrap();
+        }
+
+        let restrict = vec![quoted.to_string()];
+        let matches = lance
+            .vector_search(vec![0.5f32; 384], 10, Some(&restrict))
+            .await
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, quoted);
+    }
+
     #[tokio::test]
     async fn test_search_empty_store() {
         let temp_dir = TempDir::new().unwrap();
         let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
 
-        let results = lance.vector_search(vec![0.1f32; 384], 10).await;
+        let results = lance.vector_search(vec![0.1f32; 384], 10, None).await;
         assert!(results.is_ok());
         assert!(results.unwrap().is_empty());
     }
@@ -1370,7 +1767,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
 
-        let result = lance.vector_search(vec![0.1f32; 16], 5).await;
+        let result = lance.vector_search(vec![0.1f32; 16], 5, None).await;
         assert!(result.is_err(), "wrong-dim query must error");
         let msg = format!("{:?}", result.err().unwrap());
         assert!(

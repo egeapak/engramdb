@@ -30,4 +30,6 @@ pub use collector::{
 };
 // `EventRow` appears in `persistence::spawn_flush_task`'s receiver type, which
 // the top-level crate drives across the boundary, so it must be public too.
-pub use collector::EventRow;
+// `EventType` is an `EventRow` field type, exported so cross-crate callers
+// (and the core crate's gc-maintenance tests) can construct rows.
+pub use collector::{EventRow, EventType};

@@ -34,7 +34,7 @@ pub use doctor::{
     doctor, doctor_environment, CheckStatus, DoctorResult, DoctorSection, EnvironmentCheck,
     EnvironmentDoctorResult,
 };
-pub use gc::{gc_memories, GcResult};
+pub use gc::{execute_gc_plan, gc_memories, plan_gc, GcCandidate, GcMaintenance, GcPlan, GcResult};
 pub use get::get_memory;
 pub use list::{list_memories, parse_sort_field, ListParams, SortField};
 pub use parsing::{
@@ -304,10 +304,24 @@ pub fn resolve_engine_providers(
     }
     if let Some(provider) = crate::embeddings::PooledEmbeddingProvider::build(sessions) {
         if provider.dimensions() != config.embeddings.dimensions {
-            eprintln!(
-                "Warning: provider dimensions ({}) != config dimensions ({})",
+            // Deliberately a warning, not a hard error: the Auto backend can
+            // legitimately fall back to a provider with different dimensions
+            // (e.g. ONNX unavailable → Ollama mxbai-embed-large) and graceful
+            // degradation is the contract — operations must keep working.
+            // Corruption is impossible regardless: the LanceDB index is sized
+            // from the config value, `LanceIndex::upsert_chunks` rejects
+            // wrong-width vectors at write time, `vector_search` rejects them
+            // at read time, and the embedding-fingerprint check reports the
+            // drift via `doctor`/open-time warnings.
+            tracing::warn!(
+                "Embedding provider '{}' produces {}-dimensional vectors but \
+                 [embeddings].dimensions = {}. Embeddings will be rejected at write \
+                 time until this is fixed — set [embeddings].dimensions = {} in \
+                 config.toml, then run `engramdb reindex --embeddings-only`.",
+                config.embeddings.provider,
                 provider.dimensions(),
-                config.embeddings.dimensions
+                config.embeddings.dimensions,
+                provider.dimensions(),
             );
         }
         providers.embedding = Some(provider);
@@ -434,6 +448,25 @@ pub async fn build_engine(
     assemble_engine(store, config, providers)
 }
 
+/// Build a `RetrievalEngine` with **no** model providers from a store + config path.
+///
+/// For callers that provably never exercise embeddings, NLI, reranking, or
+/// title generation — e.g. the Claude Code hook handlers, whose queries carry
+/// no query text (`query: None` → the engine's semantic step is skipped and
+/// scoring is `scope_only`) and which never create memories. Unlike
+/// [`build_engine`], this skips [`resolve_engine_providers`] entirely,
+/// avoiding the ~240ms ONNX embedding session init (plus the T5
+/// encoder+decoder init when `title.strategy = "t5"`) on every invocation.
+pub async fn build_engine_without_providers(
+    store: MemoryStore,
+    config_path: &std::path::Path,
+) -> RetrievalEngine {
+    let config = crate::storage::config::load_config(config_path)
+        .await
+        .unwrap_or_default();
+    assemble_engine(store, config, EngineProviders::default())
+}
+
 /// Signature of the provider-relevant config fields.
 ///
 /// Two configs with the same key resolve to interchangeable model sessions, so
@@ -446,7 +479,7 @@ pub fn provider_cache_key(
 ) -> String {
     let backend = resolve_backend(config.embeddings.backend, backend_override);
     format!(
-        "{backend}|{}|{}|{}|{}|{}|{}|{}|{:?}",
+        "{backend}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}",
         config.embeddings.provider,
         config.embeddings.dimensions,
         embedding_pool_size,
@@ -455,6 +488,11 @@ pub fn provider_cache_key(
         config.rerank.enabled,
         config.rerank.model,
         config.title.strategy,
+        // The T5 title pool is sized from this inside
+        // `resolve_engine_providers`, so two configs with different title
+        // pool sizes are NOT interchangeable bundles — omitting it would
+        // serve a stale wrong-sized title pool after a config change.
+        config.title.pool_size,
     )
 }
 
@@ -581,6 +619,14 @@ mod provider_cache_tests {
         c.title.strategy = crate::title::TitleStrategy::Keyword;
         assert_ne!(k, provider_cache_key(&c, None, 2));
 
+        // Title pool size is folded in: it sizes the pooled T5 generator
+        // inside `resolve_engine_providers`, so changing `[title].pool_size`
+        // must re-resolve instead of serving a stale wrong-sized pool.
+        assert_eq!(base.title.pool_size, None);
+        let mut c = base.clone();
+        c.title.pool_size = Some(3);
+        assert_ne!(k, provider_cache_key(&c, None, 2));
+
         // A daemon-only config change does NOT change the model signature.
         let mut c = base.clone();
         c.daemon.idle_timeout_secs += 1;
@@ -634,6 +680,26 @@ mod tests {
     #[test]
     fn expected_fingerprint_is_none_for_unknown_provider() {
         assert!(expected_embedding_fingerprint(&onnx_config("nope")).is_none());
+    }
+
+    /// The hook handlers' construction path: no embedding/NLI/reranker/title
+    /// provider may be wired, regardless of config (the default config has
+    /// embeddings enabled and `title.strategy = "t5"`, which `build_engine`
+    /// would resolve). This is what keeps hook invocations free of any ONNX
+    /// session init.
+    #[tokio::test]
+    async fn build_engine_without_providers_wires_no_models() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &crate::storage::InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let config_path = temp_dir.path().join(".engramdb").join("config.toml");
+
+        let engine = build_engine_without_providers(store, &config_path).await;
+
+        assert!(!engine.embeddings_available());
+        assert!(!engine.nli_available());
+        assert!(engine.title_generator().is_none());
     }
 
     /// The actual safety property the `provider_specs` unification

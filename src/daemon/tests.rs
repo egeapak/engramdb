@@ -57,8 +57,7 @@ async fn read_msg_eof_is_none() {
 async fn daemon_answers_ping() {
     let tmp = TempDir::new().unwrap();
     let socket = tmp.path().join("d.sock");
-    // Long idle timeout: the watchdog calls process::exit, which would kill
-    // the test binary if it fired.
+    // Long idle timeout so the watchdog doesn't shut the daemon down mid-test.
     tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
 
     let resp = wait_request(
@@ -297,11 +296,11 @@ async fn client_helpers_without_daemon() {
 
 /// `request_shutdown` maps a `ShuttingDown` ack to `Ok(true)`.
 ///
-/// Note: we deliberately do NOT drive a *real* in-process daemon here — its
-/// `Shutdown` handler calls `std::process::exit`, which would terminate the
-/// test runner. A stub that returns `ShuttingDown` exercises the client
-/// mapping safely; the real daemon's exit-on-shutdown is covered by the
-/// `daemon` CLI in practice.
+/// A stub that returns `ShuttingDown` pins the client-side mapping in
+/// isolation; the *real* daemon's shutdown flow (ack, persist, stop
+/// accepting) is driven end-to-end by `cell_self_heals_after_daemon_killed`
+/// and `daemon_cell_respawns_after_handle_lost`, which `run_daemon`'s
+/// return-on-shutdown seam makes safe to exercise in-process.
 #[tokio::test]
 async fn request_shutdown_maps_ack() {
     let tmp = TempDir::new().unwrap();
@@ -423,6 +422,64 @@ async fn metrics_persist_then_load_latest() {
     assert_eq!(latest.snapshot.title, 7);
     assert_eq!(latest.snapshot.total(), 9 + 4 + 2 + 5 + 3 + 7);
     assert_eq!(latest.uptime_secs, 120);
+}
+
+/// Unbounded-growth guard: `persist_at` must prune snapshot rows older than
+/// the retention window (30 days) while the just-appended row — and
+/// `load_latest`'s view of it — survives.
+#[tokio::test]
+async fn metrics_persist_prunes_old_snapshots() {
+    use super::metrics::{self, MetricsSnapshot};
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+
+    // Seed a batch of stale snapshot rows (40 days old) directly, bypassing
+    // the prune-on-persist path.
+    let old_ts = chrono::Utc::now() - chrono::Duration::days(40);
+    for i in 0..5u64 {
+        metrics::persist_row_at(
+            dir,
+            old_ts + chrono::Duration::seconds(i as i64),
+            222,
+            i,
+            MetricsSnapshot {
+                embed: i,
+                ..MetricsSnapshot::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    // A normal persist appends the fresh row and prunes everything stale.
+    metrics::persist_at(
+        dir,
+        222,
+        999,
+        MetricsSnapshot {
+            embed: 42,
+            ..MetricsSnapshot::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // Only the fresh row remains on disk…
+    let conn = lancedb::connect(dir.to_str().unwrap())
+        .execute()
+        .await
+        .unwrap();
+    let table = conn.open_table("daemon_metrics").execute().await.unwrap();
+    assert_eq!(
+        table.count_rows(None).await.unwrap(),
+        1,
+        "stale snapshot rows must be pruned on persist"
+    );
+
+    // …and load_latest still resolves it.
+    let latest = metrics::load_latest_at(dir).await.unwrap().unwrap();
+    assert_eq!(latest.snapshot.embed, 42);
+    assert_eq!(latest.uptime_secs, 999);
 }
 
 // ---------------------------------------------------------------------------
@@ -634,6 +691,8 @@ async fn dispatch_rejects_missing_dir() {
 #[cfg(unix)]
 #[tokio::test]
 async fn daemon_reclaims_stale_socket() {
+    use std::os::unix::fs::PermissionsExt;
+
     let tmp = TempDir::new().unwrap();
     let socket = tmp.path().join("d.sock");
     std::fs::write(&socket, b"stale - not a live socket").unwrap();
@@ -649,6 +708,34 @@ async fn daemon_reclaims_stale_socket() {
     )
     .await;
     assert!(matches!(resp, DaemonResponse::Pong { .. }));
+
+    // Permission hardening holds on the reclaim path too: the served socket
+    // is owner-only (chmod'd on the temp path before the atomic rename).
+    let mode = std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "reclaimed daemon socket must be mode 0600");
+}
+
+/// The daemon's peer policy: only a peer whose `SO_PEERCRED` uid equals our
+/// effective uid is served. Root (uid 0) is deliberately not exempt — see
+/// `server::peer_allowed`. The accept-path enforcement is exercised
+/// implicitly by every test that connects to a `run_daemon` socket (same
+/// process ⇒ same uid); this pins the decision function itself, which a real
+/// cross-uid connection can't do inside a single-user test environment.
+#[cfg(unix)]
+#[test]
+fn peer_allowed_only_for_matching_euid() {
+    use super::server::peer_allowed;
+    assert!(peer_allowed(1000, 1000), "same uid is served");
+    assert!(peer_allowed(0, 0), "a root daemon serves root peers");
+    assert!(!peer_allowed(1001, 1000), "another user is rejected");
+    assert!(
+        !peer_allowed(0, 1000),
+        "root peers are rejected by a non-root daemon (no uid-0 exemption)"
+    );
+    assert!(
+        !peer_allowed(1000, 0),
+        "a root daemon does not serve non-root peers"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -831,6 +918,57 @@ async fn poll_until_connectable(socket: &std::path::Path) {
     panic!("daemon on {:?} never became connectable", socket);
 }
 
+/// A daemon that accepts connections but never responds (wedged model mutex,
+/// stuck ONNX thread) must fail the `Ping` health check within
+/// `PING_TIMEOUT` (~2s), not the 60s inference `REQUEST_TIMEOUT` — health
+/// checks run while the `DaemonCell` mutex is held, so a slow probe would
+/// stall every tool call and the heartbeat for minutes before fallback.
+#[tokio::test]
+async fn health_check_of_wedged_daemon_fails_fast() {
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("wedged.sock");
+
+    // Accept-but-never-reply stub: reads requests, writes nothing, and keeps
+    // the connection open so the client is stuck waiting on a response.
+    let stub_socket = socket.clone();
+    tokio::spawn(async move {
+        let listener = super::transport::bind_or_yield(&stub_socket)
+            .await
+            .unwrap()
+            .expect("stub owns the address");
+        loop {
+            let stream = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            tokio::spawn(async move {
+                let (rh, _wh) = tokio::io::split(stream);
+                let mut r = BufReader::new(rh);
+                while read_msg::<_, DaemonRequest>(&mut r)
+                    .await
+                    .unwrap_or(None)
+                    .is_some()
+                {
+                    // Swallow the request; never answer.
+                }
+            });
+        }
+    });
+    poll_until_connectable(&socket).await;
+
+    let handle = super::DaemonHandle::connect_existing(socket);
+    let start = std::time::Instant::now();
+    assert!(
+        !handle.check_health().await,
+        "a wedged daemon must fail the health check"
+    );
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "health check must time out at PING_TIMEOUT (~2s), took {elapsed:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // DaemonCell: re-resolvable cell with spawn backoff
 // ---------------------------------------------------------------------------
@@ -864,8 +1002,12 @@ async fn daemon_cell_respawns_after_handle_lost() {
     let h2 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
     assert!(h2.is_some(), "Second call should return cached handle");
 
-    // Kill the daemon.
-    super::request_shutdown(&socket).await.unwrap();
+    // Kill the daemon (the Shutdown handler acks, persists, and makes
+    // `run_daemon` return — stopping the in-process accept loop).
+    assert!(
+        super::request_shutdown(&socket).await.unwrap(),
+        "running daemon must ack the shutdown"
+    );
     poll_until_unconnectable(&socket).await;
 
     // Cell detects the dead handle and returns None (ConnectOnly, no respawn).
@@ -1201,8 +1343,12 @@ async fn cell_self_heals_after_daemon_killed() {
     let h1 = cell.get(&socket, 3600, DaemonPolicy::ConnectOnly).await;
     assert!(h1.is_some(), "cell should connect to running daemon");
 
-    // Kill it.
-    super::request_shutdown(&socket).await.unwrap();
+    // Kill it (the Shutdown handler acks, persists, and makes `run_daemon`
+    // return — stopping the in-process accept loop).
+    assert!(
+        super::request_shutdown(&socket).await.unwrap(),
+        "running daemon must ack the shutdown"
+    );
     poll_until_unconnectable(&socket).await;
 
     // Cell detects dead handle and returns None (ConnectOnly, no respawn).

@@ -39,6 +39,12 @@ Use it for:
 
 - Answering a user question by keyword (`query`).
 - Pulling all memories about a specific scope (`logical: ["auth.oauth"]`).
+  Logical matching is **hierarchical**, mirroring rank mode's dot-notation
+  semantics: querying `auth` matches memories scoped `auth`, `auth.oauth`,
+  `auth.oauth.google` (descendants), and querying `auth.oauth` also matches a
+  memory scoped just `auth` (broad memories apply to their subdomains).
+  Siblings (`auth.jwt` vs `auth.oauth`) and lookalike prefixes
+  (`authentication` vs `auth`) do **not** match.
 - Pulling memories by tag set (`tags: ["security"]`).
 - Combinations (`query` + `tags` is a powerful narrow search).
 
@@ -67,7 +73,10 @@ How it works:
 1. Apply hard filters (`types`, `tags`, `min_criticality`).
 2. Score **every** remaining memory by composite formula:
    - relevance (criticality × decay)
-   - × scope multiplier (depth-decayed match on `path` + logical-hierarchy bonus on `logical`)
+   - × scope multiplier (depth-decayed match on `path` + logical-hierarchy bonus on `logical`;
+     with `logical` only, the bonus rides on `scope_multiplier_floor` (default 0.5) so related
+     memories rank above the threshold, unscoped memories sit at the bare floor, and memories
+     with unrelated logical scopes drop to 0)
    - × trust multiplier (`Provenance` source)
    - − challenge penalty (if challenged)
    - + semantic similarity (if `query` is also passed)
@@ -108,7 +117,7 @@ Example: user asks "how does auth work" while pointed at `src/api/auth/oauth.rs`
 | `path` | Filters or scopes | Scoring signal (proximity) |
 | `logical` | Filters or scopes | Scoring signal (hierarchy) |
 
-(In both modes, `path` and `logical` act as **scoring** signals, not hard filters; only `types`, `tags`, `min_criticality`, and `include_expired` are hard filters.)
+(In `rank` mode, `path` and `logical` act as **scoring** signals. In `filter` mode they are hard filters: `logical` is matched **hierarchically** — a memory passes when any of its logical scopes is equal to, a descendant of, or an ancestor of a queried scope on the same dot-notation chain.)
 
 ## Examples
 

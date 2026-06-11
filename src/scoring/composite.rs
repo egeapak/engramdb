@@ -27,8 +27,11 @@ pub struct ScoreBreakdown {
     pub relevance: f64,
     /// Raw scope proximity score (before multiplier transform)
     pub scope: f64,
-    /// Computed scope multiplier: `scope_score` when scope context is present
-    /// (depth decay provides the floor), or 1.0 when no context is provided.
+    /// Computed scope multiplier: `scope_score` when scope context is present,
+    /// or 1.0 when no context is provided. With a `path`, depth decay provides
+    /// the floor; with logical-only context, the score is built on
+    /// `scope_multiplier_floor` so the bonus alone never caps the multiplier
+    /// (see `scope::scope_proximity`).
     pub scope_multiplier: f64,
     /// Raw trust weight based on provenance
     pub trust: f64,
@@ -145,15 +148,24 @@ impl<'a> ScoringContext<'a> {
 ///
 /// The scoring operates in four modes:
 ///
-/// 1. **With keyword** (keyword_score is Some):
+/// 1. **With keyword** (keyword_score is Some; semantic optional):
 ///    - Uses `config.retrieval.scoring.with_keyword` weights
 ///    - base = 0.45*keyword + 0.30*semantic + 0.25*(criticality*decay)
+///    - When semantic_score is None, the semantic weight drops out and the
+///      remaining weights renormalize (≈ 0.64*keyword + 0.36*relevance).
+///      The retrieval engine passes both signals when both matched, so the
+///      combined formula above is the normal full-evidence path.
 ///
-/// 2. **With query + embeddings** (semantic_score is Some):
+/// 2. **With query + embeddings** (semantic_score is Some, no keyword):
 ///    - Uses `config.retrieval.scoring.with_query` weights
 ///    - base = 0.55*semantic + 0.45*(criticality*decay)
+///    - `semantic_score = Some(0.0)` is valid ("checked, found nothing" —
+///      e.g. an embedded memory that missed the vector-search top-k) and
+///      consumes the semantic weight at zero, scoring strictly lower than
+///      `None` (no evidence, mode 3).
 ///
-/// 3. **With query, no embeddings** (query is Some, semantic_score is None):
+/// 3. **With query, no semantic evidence** (query is Some, both scores None —
+///    embeddings unavailable, or the memory was never embedded):
 ///    - Uses `config.retrieval.scoring.degraded` weights
 ///    - base = 1.0*(criticality*decay)
 ///
@@ -164,8 +176,13 @@ impl<'a> ScoringContext<'a> {
 /// Then: `score = base * scope_multiplier * trust_multiplier`
 ///
 /// Scope multiplier: when scope context is provided,
-/// `scope_multiplier = scope_score` (depth decay provides the floor).
-/// When no context is provided, scope_multiplier = 1.0 (neutral).
+/// `scope_multiplier = scope_score`. With a `path`, depth decay provides the
+/// floor for matching scopes (non-matching → 0.0) and logical adds a bonus of
+/// up to 0.3. With logical-only context (no path), the logical bonus rides on
+/// `scope_multiplier_floor` (default 0.5): related memories get
+/// `floor + bonus`, unscoped memories get the bare floor, and memories whose
+/// logical scopes are unrelated get 0.0. When no context is provided,
+/// scope_multiplier = 1.0 (neutral).
 ///
 /// Trust multiplier: `trust_floor + (1 - trust_floor) * trust_weight` (default floor=0.5).
 ///
@@ -227,6 +244,7 @@ fn composite_score_inner(
         context.logical,
         config.retrieval.scoring.depth_decay_base,
         config.retrieval.scoring.depth_decay_floor,
+        config.retrieval.scoring.scope_multiplier_floor,
     );
 
     let trust = trust_weight_from_config(memory.provenance.source, &config.trust_weights);
@@ -283,8 +301,10 @@ fn composite_score_inner(
     }
 
     // Apply scope as a post-multiplier.
-    // When scope context is provided: multiplier = scope_score directly
-    // (depth decay already provides a floor, so no additional floor transform needed).
+    // When scope context is provided: multiplier = scope_score directly.
+    // (With a path, depth decay provides the floor; with logical-only context,
+    // scope_proximity builds on scope_multiplier_floor so the bonus alone
+    // never caps the multiplier at 0.3.)
     // When no context: multiplier = 1.0 (neutral, doesn't penalize global searches)
     let has_scope_context = context.path.is_some() || !context.logical.is_empty();
     let scope_multiplier = if has_scope_context { scope_score } else { 1.0 };
@@ -357,6 +377,45 @@ mod tests {
             accessed_at: Utc::now(),
             expires_at: None,
         }
+    }
+
+    #[test]
+    fn test_composite_score_nan_decay_floor_breakdown_stays_finite() {
+        // `Decay.floor` is unvalidated file data: a NaN floor used to flow
+        // through `decay_factor` into both `relevance` and the breakdown's
+        // `decay` diagnostic. After clamping (NaN → 0.0) the whole breakdown
+        // must stay finite.
+        let mut memory = create_test_memory();
+        memory.created_at = Utc::now() - Duration::days(15);
+        memory.decay = Some(Decay::linear(Duration::days(10)).with_floor(f64::NAN));
+
+        let context = ScoringContext::scope_only(None, &[]);
+        let config = EngramConfig::default();
+        let breakdown = composite_score(&memory, &context, &config, Utc::now());
+
+        assert!(breakdown.final_score.is_finite());
+        assert!(breakdown.relevance.is_finite());
+        assert!(breakdown.decay.is_finite());
+        // Past TTL with NaN→0.0 floor: fully decayed.
+        assert_eq!(breakdown.decay, 1.0);
+        assert_eq!(breakdown.relevance, 0.0);
+    }
+
+    #[test]
+    fn test_composite_score_oversized_decay_floor_clamped() {
+        // floor = 5.0 on an expired-by-TTL memory must not produce
+        // relevance = criticality * 5 (perma-pinned at the clamp).
+        let mut memory = create_test_memory();
+        memory.created_at = Utc::now() - Duration::days(15);
+        memory.decay = Some(Decay::linear(Duration::days(10)).with_floor(5.0));
+
+        let context = ScoringContext::scope_only(None, &[]);
+        let config = EngramConfig::default();
+        let breakdown = composite_score(&memory, &context, &config, Utc::now());
+
+        // Clamped floor = 1.0 → decay factor 1.0 → relevance = criticality.
+        assert_eq!(breakdown.relevance, memory.criticality);
+        assert!(breakdown.final_score <= 1.0);
     }
 
     #[test]
@@ -881,8 +940,8 @@ mod tests {
         let ignore = composite_score_ignore_decay(&memory, &context, &config, now);
 
         // relevance = 0.3, base = 1.0*0.3 = 0.3
-        // scope_mult = 0.5 + 0.5*0.0 = 0.5 → 0.3*0.5 = 0.15
-        // Below default threshold of 0.3
+        // scope_mult = 0.0 (non-matching path) → 0.3*0.0 = 0.0
+        // Below default threshold
         assert!(
             ignore.final_score < 0.3,
             "low crit+no scope should still be below threshold: {}",
@@ -1222,6 +1281,98 @@ mod tests {
             "score should be ~0.4, got {}",
             breakdown.final_score,
         );
+    }
+
+    #[test]
+    fn test_logical_only_exact_match_exceeds_default_threshold() {
+        // Regression: a rank query with only `logical` context used to use the
+        // bare logical bonus (max 0.3) as the multiplier, so every result fell
+        // below the default 0.45 relevance threshold.
+        let memory = create_test_memory(); // logical = ["auth.oauth"], crit 0.8
+        let current_logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(None, &current_logical);
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let breakdown = composite_score(&memory, &context, &config, now);
+
+        // scope_mult = 0.5 floor + 0.3 exact bonus = 0.8
+        assert!(
+            (breakdown.scope_multiplier - 0.8).abs() < 0.001,
+            "logical-only exact match multiplier should be 0.8, got {}",
+            breakdown.scope_multiplier,
+        );
+        // base = 1.0*0.8 (criticality) * scope_mult(0.8) * trust(1.0) = 0.64
+        assert!((breakdown.final_score - 0.64).abs() < 0.01);
+        assert!(
+            breakdown.final_score >= config.retrieval.relevance_threshold,
+            "exact logical match ({}) must clear the default threshold ({})",
+            breakdown.final_score,
+            config.retrieval.relevance_threshold,
+        );
+    }
+
+    #[test]
+    fn test_logical_only_partial_match_in_range() {
+        // Parent-scope match: floor + 0.2 bonus = 0.7 multiplier.
+        let memory = create_test_memory(); // logical = ["auth.oauth"]
+        let current_logical = vec!["auth.oauth.google".to_string()];
+        let context = ScoringContext::scope_only(None, &current_logical);
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let breakdown = composite_score(&memory, &context, &config, now);
+
+        assert!(
+            (breakdown.scope_multiplier - 0.7).abs() < 0.001,
+            "parent match multiplier should be 0.7, got {}",
+            breakdown.scope_multiplier,
+        );
+        // 0.8 * 0.7 = 0.56 — above the 0.45 threshold
+        assert!((breakdown.final_score - 0.56).abs() < 0.01);
+        assert!(breakdown.final_score >= config.retrieval.relevance_threshold);
+    }
+
+    #[test]
+    fn test_logical_only_mismatch_scores_zero() {
+        // Memory declares logical scopes unrelated to the query: suppressed,
+        // even at maximum criticality.
+        let mut memory = create_test_memory(); // logical = ["auth.oauth"]
+        memory.criticality = 1.0;
+        let current_logical = vec!["database.postgres".to_string()];
+        let context = ScoringContext::scope_only(None, &current_logical);
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let breakdown = composite_score(&memory, &context, &config, now);
+
+        assert_eq!(breakdown.scope_multiplier, 0.0);
+        assert!((breakdown.final_score - 0.0).abs() < f64::EPSILON);
+        assert!(breakdown.final_score < config.retrieval.relevance_threshold);
+    }
+
+    #[test]
+    fn test_logical_only_unscoped_memory_gets_neutral_floor() {
+        // Memory with no logical scopes under a logical-only query gets the
+        // bare floor: it ranks below any related memory, and clears the
+        // default threshold only at very high criticality (0.5 * 1.0 = 0.50).
+        let mut memory = create_test_memory();
+        memory.logical = vec![];
+        let current_logical = vec!["auth.oauth".to_string()];
+        let context = ScoringContext::scope_only(None, &current_logical);
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let breakdown = composite_score(&memory, &context, &config, now);
+
+        assert!(
+            (breakdown.scope_multiplier - 0.5).abs() < 0.001,
+            "unscoped memory multiplier should be the 0.5 floor, got {}",
+            breakdown.scope_multiplier,
+        );
+        // 0.8 * 0.5 = 0.40 — below the default 0.45 threshold
+        assert!((breakdown.final_score - 0.40).abs() < 0.01);
+        assert!(breakdown.final_score < config.retrieval.relevance_threshold);
     }
 
     #[test]

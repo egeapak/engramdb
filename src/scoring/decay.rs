@@ -14,6 +14,9 @@
 //! # Implementation Notes
 //!
 //! - All decay factors are clamped to [floor, 1.0] range
+//! - The floor itself is clamped to [0.0, 1.0] (NaN → 0.0) at the point of
+//!   use, since `Decay` is parsed from on-disk files with no validation —
+//!   the returned factor is therefore always in [0.0, 1.0]
 //! - Missing TTL or half_life parameters result in no decay (factor = 1.0)
 //! - Future timestamps (created_at > now) are handled gracefully (factor = 1.0)
 
@@ -46,6 +49,19 @@ pub fn decay_factor(created_at: DateTime<Utc>, now: DateTime<Utc>, decay: &Optio
         return 1.0;
     };
 
+    // Clamp the floor into [0, 1] at the point of use. `Decay.floor` is plain
+    // serde data parsed from on-disk memory files with no validation, so a
+    // corrupt or hostile file can carry e.g. `floor = 5.0` (which would pin
+    // relevance at criticality * 5 forever) or `floor = NaN` (which would
+    // propagate into every downstream score and breakdown). NaN maps to 0.0
+    // (no floor); clamping here rather than at parse time also covers
+    // programmatically constructed `Decay` values.
+    let floor = if decay_config.floor.is_nan() {
+        0.0
+    } else {
+        decay_config.floor.clamp(0.0, 1.0)
+    };
+
     let age = now.signed_duration_since(created_at);
     let age_secs = age.num_seconds() as f64;
 
@@ -56,10 +72,10 @@ pub fn decay_factor(created_at: DateTime<Utc>, now: DateTime<Utc>, decay: &Optio
             if let Some(ttl) = decay_config.ttl {
                 let ttl_secs = ttl.num_seconds() as f64;
                 if age_secs >= ttl_secs {
-                    decay_config.floor
+                    floor
                 } else {
                     let factor = 1.0 - (age_secs / ttl_secs);
-                    factor.max(decay_config.floor).min(1.0)
+                    factor.max(floor).min(1.0)
                 }
             } else {
                 // No TTL specified, no decay
@@ -73,11 +89,11 @@ pub fn decay_factor(created_at: DateTime<Utc>, now: DateTime<Utc>, decay: &Optio
                 if half_life_secs <= 0.0 {
                     // Zero or negative half-life would cause division by zero (NaN).
                     // Treat as fully decayed → return floor.
-                    return decay_config.floor;
+                    return floor;
                 }
                 let exponent = age_secs / half_life_secs;
                 let factor = 0.5_f64.powf(exponent);
-                factor.max(decay_config.floor).min(1.0)
+                factor.max(floor).min(1.0)
             } else {
                 // No half-life specified, no decay
                 1.0
@@ -90,7 +106,7 @@ pub fn decay_factor(created_at: DateTime<Utc>, now: DateTime<Utc>, decay: &Optio
                 if age_secs < ttl_secs {
                     1.0
                 } else {
-                    decay_config.floor
+                    floor
                 }
             } else {
                 // No TTL specified, no decay
@@ -286,6 +302,76 @@ mod tests {
         // Zero half-life should return floor, not NaN
         assert_eq!(factor, 0.1);
         assert!(!factor.is_nan());
+    }
+
+    #[test]
+    fn test_decay_factor_floor_above_one_clamped() {
+        // `Decay.floor` is unvalidated serde data from on-disk memory files:
+        // a floor of 5.0 must not yield a decay factor of 5.0 (which would
+        // pin relevance at criticality * 5). It clamps to 1.0.
+        let now = Utc::now();
+        let created_at = now - Duration::days(15);
+
+        // Linear, expired branch returns the floor directly.
+        let decay = Some(Decay::linear(Duration::days(10)).with_floor(5.0));
+        assert_eq!(decay_factor(created_at, now, &decay), 1.0);
+
+        // Exponential, fully decayed: max(floor) path.
+        let decay = Some(Decay::exponential(Duration::days(1)).with_floor(5.0));
+        assert_eq!(decay_factor(created_at, now, &decay), 1.0);
+
+        // Step, expired branch returns the floor directly.
+        let decay = Some(Decay {
+            strategy: DecayStrategy::Step,
+            half_life: None,
+            ttl: Some(Duration::days(10)),
+            floor: 5.0,
+        });
+        assert_eq!(decay_factor(created_at, now, &decay), 1.0);
+    }
+
+    #[test]
+    fn test_decay_factor_negative_floor_clamped() {
+        let now = Utc::now();
+        let created_at = now - Duration::days(15);
+        let decay = Some(Decay::linear(Duration::days(10)).with_floor(-2.0));
+        assert_eq!(decay_factor(created_at, now, &decay), 0.0);
+    }
+
+    #[test]
+    fn test_decay_factor_nan_floor_becomes_zero() {
+        let now = Utc::now();
+        let created_at = now - Duration::days(15);
+
+        // Expired branches would otherwise return NaN verbatim and poison
+        // every downstream score and breakdown diagnostic.
+        let decay = Some(Decay::linear(Duration::days(10)).with_floor(f64::NAN));
+        assert_eq!(decay_factor(created_at, now, &decay), 0.0);
+
+        let decay = Some(Decay {
+            strategy: DecayStrategy::Step,
+            half_life: None,
+            ttl: Some(Duration::days(10)),
+            floor: f64::NAN,
+        });
+        assert_eq!(decay_factor(created_at, now, &decay), 0.0);
+
+        // Non-expired clamp path: factor.max(NaN-floor) would be fine, but
+        // make sure the result stays finite and in range too.
+        let created_at = now - Duration::days(5);
+        let decay = Some(Decay::linear(Duration::days(10)).with_floor(f64::NAN));
+        let factor = decay_factor(created_at, now, &decay);
+        assert!(factor.is_finite());
+        assert!((factor - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_decay_factor_normal_floor_unaffected_by_clamp() {
+        // Sanity: valid floors keep their exact pre-clamp behavior.
+        let now = Utc::now();
+        let created_at = now - Duration::days(15);
+        let decay = Some(Decay::linear(Duration::days(10)).with_floor(0.25));
+        assert_eq!(decay_factor(created_at, now, &decay), 0.25);
     }
 
     #[test]

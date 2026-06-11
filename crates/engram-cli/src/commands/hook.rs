@@ -2,11 +2,23 @@
 //!
 //! Reads hook event JSON from stdin, retrieves relevant memories,
 //! and outputs additionalContext JSON to stdout.
+//!
+//! Hooks fire on every Read/Write/Edit the agent performs, so latency is
+//! critical. Both handlers build their engine via
+//! [`engramdb::ops::build_engine_without_providers`]: hook queries carry no
+//! query text (`query: None` → the engine's semantic step is skipped and
+//! scoring is `scope_only`) and hooks never create memories, so embedding,
+//! NLI, reranker, and T5 title models are provably never used. Skipping
+//! provider resolution avoids a ~240ms ONNX session init (plus the T5
+//! encoder+decoder init) on every hook invocation.
 
 use anyhow::Result;
 use engramdb::retrieval::engine::{DetailLevel, RetrievalMode, RetrievalQuery, ScoredMemory};
+// Shared with the retrieval engine (which also relativizes `query.path`
+// itself); the hook still pre-relativizes so the injected context shows
+// repo-relative paths.
+use engramdb::storage::paths::relativize_path;
 use engramdb::storage::MemoryStore;
-use engramdb::types::EmbeddingBackend;
 use std::io::Read;
 use std::path::Path;
 
@@ -20,23 +32,6 @@ fn extract_file_path(input: &str) -> Option<String> {
         .and_then(|ti| ti.get("file_path"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-}
-
-/// Make a file path relative to the project directory if possible.
-///
-/// Canonicalizes both paths before stripping so that `--dir .` works
-/// when tool input contains an absolute file path.
-fn relativize_path(file_path: &str, project_dir: &Path) -> String {
-    let canonical_dir = project_dir
-        .canonicalize()
-        .unwrap_or(project_dir.to_path_buf());
-    let canonical_file = Path::new(file_path)
-        .canonicalize()
-        .unwrap_or(Path::new(file_path).to_path_buf());
-    canonical_file
-        .strip_prefix(&canonical_dir)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| file_path.to_string())
 }
 
 /// Format scored memories into a compact additionalContext string (for PreToolUse).
@@ -208,12 +203,7 @@ fn build_hook_response(event_name: &str, additional_context: &str) -> Result<Str
 /// Core hook logic: given input JSON, project dir, and store, retrieve and format.
 ///
 /// Returns `Ok(Some(json))` if memories were found, `Ok(None)` if nothing to output.
-async fn process_hook_input(
-    input: &str,
-    dir: &Path,
-    store: MemoryStore,
-    embedding_backend: Option<EmbeddingBackend>,
-) -> Result<Option<String>> {
+async fn process_hook_input(input: &str, dir: &Path, store: MemoryStore) -> Result<Option<String>> {
     let file_path = match extract_file_path(input) {
         Some(fp) => fp,
         None => return Ok(None),
@@ -222,7 +212,9 @@ async fn process_hook_input(
     let relative_path = relativize_path(&file_path, dir);
 
     let config_path = dir.join(".engramdb").join("config.toml");
-    let engine = engramdb::ops::build_engine(store, &config_path, embedding_backend).await;
+    // No model providers: the query below has `query: None`, so retrieval is
+    // scope_only and never embeds (see module docs).
+    let engine = engramdb::ops::build_engine_without_providers(store, &config_path).await;
 
     let query = RetrievalQuery {
         mode: RetrievalMode::Rank,
@@ -262,10 +254,7 @@ async fn process_hook_input(
 /// Reads JSON from stdin, extracts `tool_input.file_path`,
 /// retrieves relevant memories for that path, and prints
 /// JSON with `additionalContext` to stdout.
-pub async fn run_hook_pre_tool_use(
-    dir: &Path,
-    embedding_backend: Option<EmbeddingBackend>,
-) -> Result<()> {
+pub async fn run_hook_pre_tool_use(dir: &Path) -> Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
 
@@ -278,7 +267,7 @@ pub async fn run_hook_pre_tool_use(
         }
     };
 
-    if let Some(json) = process_hook_input(&input, dir, store, embedding_backend).await? {
+    if let Some(json) = process_hook_input(&input, dir, store).await? {
         println!("{}", json);
     }
 
@@ -290,11 +279,7 @@ pub async fn run_hook_pre_tool_use(
 /// retrieval failed). Split from [`run_hook_session_start`] so the body is
 /// unit-testable without stdout capture — mirrors how `process_hook_input`
 /// backs `run_hook_pre_tool_use`.
-async fn process_session_start(
-    dir: &Path,
-    embedding_backend: Option<EmbeddingBackend>,
-    min_criticality: f64,
-) -> Result<Option<String>> {
+async fn process_session_start(dir: &Path, min_criticality: f64) -> Result<Option<String>> {
     let store = match MemoryStore::open(dir).await {
         Ok(s) => s,
         Err(e) => {
@@ -304,7 +289,9 @@ async fn process_session_start(
     };
 
     let config_path = dir.join(".engramdb").join("config.toml");
-    let engine = engramdb::ops::build_engine(store, &config_path, embedding_backend).await;
+    // No model providers: the query below has `query: None`, so retrieval is
+    // scope_only and never embeds (see module docs).
+    let engine = engramdb::ops::build_engine_without_providers(store, &config_path).await;
 
     let query = RetrievalQuery {
         mode: RetrievalMode::Rank,
@@ -338,12 +325,8 @@ async fn process_session_start(
 ///
 /// Retrieves high-criticality active memories and prints them as
 /// additionalContext JSON to stdout so they are surfaced at session start.
-pub async fn run_hook_session_start(
-    dir: &Path,
-    embedding_backend: Option<EmbeddingBackend>,
-    min_criticality: f64,
-) -> Result<()> {
-    if let Some(json) = process_session_start(dir, embedding_backend, min_criticality).await? {
+pub async fn run_hook_session_start(dir: &Path, min_criticality: f64) -> Result<()> {
+    if let Some(json) = process_session_start(dir, min_criticality).await? {
         println!("{}", json);
     }
     Ok(())
@@ -933,7 +916,7 @@ mod tests {
         })
         .to_string();
 
-        let result = process_hook_input(&input, temp_dir.path(), store, None)
+        let result = process_hook_input(&input, temp_dir.path(), store)
             .await
             .unwrap();
 
@@ -957,7 +940,7 @@ mod tests {
         })
         .to_string();
 
-        let result = process_hook_input(&input, temp_dir.path(), store, None)
+        let result = process_hook_input(&input, temp_dir.path(), store)
             .await
             .unwrap();
 
@@ -974,7 +957,7 @@ mod tests {
         let (temp_dir, store) = setup_store_with_memories().await;
 
         let input = r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#;
-        let result = process_hook_input(input, temp_dir.path(), store, None)
+        let result = process_hook_input(input, temp_dir.path(), store)
             .await
             .unwrap();
         assert!(result.is_none());
@@ -984,7 +967,7 @@ mod tests {
     async fn test_process_hook_input_invalid_json() {
         let (temp_dir, store) = setup_store_with_memories().await;
 
-        let result = process_hook_input("not json", temp_dir.path(), store, None)
+        let result = process_hook_input("not json", temp_dir.path(), store)
             .await
             .unwrap();
         assert!(result.is_none());
@@ -1003,7 +986,7 @@ mod tests {
         })
         .to_string();
 
-        let result = process_hook_input(&input, temp_dir.path(), store, None)
+        let result = process_hook_input(&input, temp_dir.path(), store)
             .await
             .unwrap();
         assert!(result.is_none());
@@ -1023,7 +1006,7 @@ mod tests {
         })
         .to_string();
 
-        let result = process_hook_input(&input, temp_dir.path(), store, None)
+        let result = process_hook_input(&input, temp_dir.path(), store)
             .await
             .unwrap();
 
@@ -1139,9 +1122,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         // No init — `MemoryStore::open` will fail and the hook must
         // swallow it (we don't want a missing store to break Claude Code).
-        let out = process_session_start(temp_dir.path(), None, 0.5)
-            .await
-            .unwrap();
+        let out = process_session_start(temp_dir.path(), 0.5).await.unwrap();
         assert!(out.is_none(), "missing store must return None silently");
     }
 
@@ -1153,7 +1134,7 @@ mod tests {
 
         // An empty store still emits the reflection nudge on its own, but no
         // "Key project memories" block.
-        let out = process_session_start(temp_dir.path(), None, 0.5)
+        let out = process_session_start(temp_dir.path(), 0.5)
             .await
             .unwrap()
             .expect("empty store still surfaces the reflection nudge");
@@ -1177,7 +1158,7 @@ mod tests {
         // when min_criticality is above all of them, but the nudge still fires.
         let dir = store_with_criticality(&[(0.2, "low"), (0.3, "lower")]).await;
 
-        let out = process_session_start(dir.path(), None, 0.9)
+        let out = process_session_start(dir.path(), 0.9)
             .await
             .unwrap()
             .expect("below-threshold store still surfaces the reflection nudge");
@@ -1205,7 +1186,7 @@ mod tests {
             store_with_criticality(&[(0.95, "Critical decision A"), (0.10, "Low-priority B")])
                 .await;
 
-        let out = process_session_start(dir.path(), None, 0.7)
+        let out = process_session_start(dir.path(), 0.7)
             .await
             .unwrap()
             .expect("high-criticality memory should surface");
@@ -1237,7 +1218,7 @@ mod tests {
         .await;
 
         // Lower threshold: both included.
-        let permissive = process_session_start(dir.path(), None, 0.5)
+        let permissive = process_session_start(dir.path(), 0.5)
             .await
             .unwrap()
             .expect("permissive threshold should surface at least one");
@@ -1249,7 +1230,7 @@ mod tests {
         assert!(permissive_ctx.contains("Mid criticality"));
 
         // Higher threshold: only the top one survives.
-        let strict = process_session_start(dir.path(), None, 0.9)
+        let strict = process_session_start(dir.path(), 0.9)
             .await
             .unwrap()
             .expect("strict threshold should still surface the top memory");

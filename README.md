@@ -23,7 +23,7 @@ EngramDB gives your AI coding agent a memory layer that persists between convers
 
 ### Install
 
-Build from source (requires Rust 1.75+):
+Build from source (requires a recent stable Rust toolchain):
 
 ```bash
 cargo install --git https://github.com/egeapak/engramdb
@@ -145,15 +145,21 @@ When running as an MCP server (`engramdb serve`), the following tools are availa
 
 EngramDB reads configuration from `.engramdb/config.toml`:
 
+Each section is optional, but a section you *do* write must be complete: once a
+section header appears, every field in it that has no built-in default is
+required. In particular, an `[embeddings]` table must set `provider`,
+`dimensions`, and `max_tokens` (no defaults — this keeps a partial embeddings
+config from silently mismatching the index), and any `[retrieval.scoring]` or
+`[thresholds]` table must set all of its fields. The example below parses as-is;
+see [`docs/users/configuration.md`](docs/users/configuration.md) for the
+complete, copy-pasteable schema with every field and its default.
+
 ```toml
 [embeddings]
-backend = "auto"   # "auto", "onnx", or "ollama"
-
-[scoring]
-decay_rate = 0.01  # Daily criticality decay
-
-[gc]
-threshold = 0.1    # Minimum criticality to keep
+backend = "auto"   # "auto" (default), "onnx", or "ollama"
+provider = "onnx"  # required when [embeddings] is present
+dimensions = 384   # required; must match the provider
+max_tokens = 256   # required
 
 [daemon]
 enabled = true            # Delegate embedding/NLI/rerank to the shared daemon
@@ -164,9 +170,9 @@ idle_timeout_secs = 900   # Daemon reaps this long after the last session discon
 
 ### Embedding backends
 
-- **onnx** (default) — local ONNX Runtime with all-MiniLM-L6-v2, no external dependencies
+- **auto** (default) — tries ONNX first, falls back to Ollama
+- **onnx** — local ONNX Runtime with all-MiniLM-L6-v2, no external dependencies
 - **ollama** — uses a local Ollama instance for embeddings (requires `ollama` running)
-- **auto** — tries ONNX first, falls back to Ollama
 
 Models are cached in the system cache directory (`~/Library/Caches/engramdb/models` on macOS).
 
@@ -229,7 +235,7 @@ cargo build --release
 Run tests:
 
 ```bash
-cargo nextest run
+cargo nextest run --workspace --all-features
 ```
 
 ## Documentation

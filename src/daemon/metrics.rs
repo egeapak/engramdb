@@ -25,6 +25,13 @@ use crate::storage::paths::global_lancedb_dir;
 
 const TABLE_NAME: &str = "daemon_metrics";
 
+/// Snapshot rows older than this are deleted on every persist. The newest
+/// row is all that's ever read back (counters are cumulative), so 30 days of
+/// history is generous headroom for debugging while keeping the table — which
+/// otherwise gains a row every 300 s plus one per daemon exit — bounded
+/// (~8.6 k rows max at the periodic cadence).
+const SNAPSHOT_RETENTION_DAYS: i64 = 30;
+
 /// Live per-op request counters. Seeded from the last persisted snapshot at
 /// daemon startup so totals are cumulative across daemon restarts.
 #[derive(Debug, Default)]
@@ -178,9 +185,31 @@ pub async fn persist(pid: u32, uptime_secs: u64, snap: MetricsSnapshot) {
     }
 }
 
-/// Append a snapshot row to a specific LanceDB directory (testable form).
+/// Append a snapshot row to a specific LanceDB directory (testable form),
+/// then prune snapshot rows older than [`SNAPSHOT_RETENTION_DAYS`] and
+/// compact the table. The just-appended row carries `ts = now`, so the
+/// newest snapshot always survives the prune — cumulative seeding across
+/// restarts is preserved even after long idle gaps (pruning only runs when
+/// a newer row has just landed). Prune/compaction failures never fail the
+/// persist itself.
 pub(crate) async fn persist_at(
     dir: &std::path::Path,
+    pid: u32,
+    uptime_secs: u64,
+    snap: MetricsSnapshot,
+) -> Result<()> {
+    persist_row_at(dir, Utc::now(), pid, uptime_secs, snap).await?;
+    if let Err(e) = prune_snapshots_at(dir).await {
+        tracing::debug!("daemon metrics prune failed (non-fatal): {e}");
+    }
+    Ok(())
+}
+
+/// Append a single snapshot row with an explicit timestamp, without pruning.
+/// Split out so tests can seed old rows deterministically.
+pub(crate) async fn persist_row_at(
+    dir: &std::path::Path,
+    ts: chrono::DateTime<Utc>,
     pid: u32,
     uptime_secs: u64,
     snap: MetricsSnapshot,
@@ -189,7 +218,7 @@ pub(crate) async fn persist_at(
     let schema = schema();
     let arrays: Vec<ArrayRef> = vec![
         Arc::new(
-            TimestampMicrosecondArray::from(vec![Utc::now().timestamp_micros()])
+            TimestampMicrosecondArray::from(vec![ts.timestamp_micros()])
                 .with_timezone(Arc::<str>::from("UTC")),
         ),
         Arc::new(StringArray::from(vec![pid.to_string()])),
@@ -210,6 +239,38 @@ pub(crate) async fn persist_at(
         .execute()
         .await
         .context("appending daemon_metrics row")?;
+    Ok(())
+}
+
+/// Delete snapshot rows older than [`SNAPSHOT_RETENTION_DAYS`], then run
+/// `Table::optimize()` so the deleted rows' fragments are compacted and old
+/// Lance dataset versions (one per append/delete) are actually reclaimed
+/// from disk (version pruning keeps the lancedb-default 7 days, which is
+/// safe for concurrent readers). The table is tiny, so doing this on every
+/// persist (~300 s cadence) is cheap.
+async fn prune_snapshots_at(dir: &std::path::Path) -> Result<()> {
+    let path = dir.to_str().context("lancedb path is not UTF-8")?;
+    let conn = connect(path)
+        .execute()
+        .await
+        .context("opening LanceDB connection")?;
+    let table = match conn.open_table(TABLE_NAME).execute().await {
+        Ok(t) => t,
+        Err(_) => return Ok(()),
+    };
+    let cutoff = Utc::now() - chrono::Duration::days(SNAPSHOT_RETENTION_DAYS);
+    let predicate = format!(
+        "ts < TIMESTAMP '{}'",
+        cutoff.format("%Y-%m-%d %H:%M:%S%.6f%:z")
+    );
+    table
+        .delete(&predicate)
+        .await
+        .context("pruning old daemon_metrics snapshots")?;
+    table
+        .optimize(lancedb::table::OptimizeAction::All)
+        .await
+        .context("optimizing daemon_metrics table")?;
     Ok(())
 }
 
@@ -236,6 +297,13 @@ pub async fn load_latest() -> Option<PersistedMetrics> {
 }
 
 /// Read the newest snapshot from a specific LanceDB directory (testable form).
+///
+/// This is a full table scan: lancedb 0.26's query builder has no
+/// `order_by` pushdown (only `limit`/`offset`/`only_if`, none of which can
+/// select the max-`ts` row), and a `ts >= cutoff` filter could miss the only
+/// surviving row after a long daemon idle gap. The scan stays cheap because
+/// `persist_at` prunes rows older than [`SNAPSHOT_RETENTION_DAYS`] on every
+/// persist, bounding the table to ~8.6 k rows.
 pub(crate) async fn load_latest_at(dir: &std::path::Path) -> Result<Option<PersistedMetrics>> {
     let path = match dir.to_str() {
         Some(p) => p,

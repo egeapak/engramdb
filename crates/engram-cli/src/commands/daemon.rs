@@ -5,17 +5,16 @@ use crate::output::{format_ping_line, OutputFormatter};
 use anyhow::Result;
 use engramdb::daemon;
 use engramdb::types::DaemonConfig;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Duration;
 
-/// Load the `[daemon]` config from the current directory's store (best
+/// Load the `[daemon]` config from the given project directory's store (best
 /// effort; defaults when absent). Used so a configured `socket_path` /
-/// `idle_timeout_secs` apply to the `daemon` subcommands too.
-async fn cwd_daemon_config() -> DaemonConfig {
-    let path = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".engramdb")
-        .join("config.toml");
+/// `idle_timeout_secs` apply to the `daemon` subcommands too. `dir` is the
+/// dispatcher-resolved project directory (`--dir` or cwd), like every other
+/// command — not a separate `current_dir()` lookup that would ignore `--dir`.
+async fn daemon_config_at(dir: &Path) -> DaemonConfig {
+    let path = dir.join(".engramdb").join("config.toml");
     engramdb::storage::config::load_config(&path)
         .await
         .unwrap_or_default()
@@ -36,8 +35,12 @@ fn fmt_dur(secs: u64) -> String {
 }
 
 /// Dispatch an `engramdb daemon <sub>` invocation.
-pub async fn run_daemon_cmd(command: DaemonCommand, formatter: &OutputFormatter) -> Result<()> {
-    let cfg = cwd_daemon_config().await;
+pub async fn run_daemon_cmd(
+    dir: &Path,
+    command: DaemonCommand,
+    formatter: &OutputFormatter,
+) -> Result<()> {
+    let cfg = daemon_config_at(dir).await;
     match command {
         DaemonCommand::Run {
             socket,
@@ -162,7 +165,7 @@ mod tests {
             socket: Some(socket),
         };
         // Result must be Ok and must not panic.
-        run_daemon_cmd(cmd, &fmt()).await.unwrap();
+        run_daemon_cmd(tmp.path(), cmd, &fmt()).await.unwrap();
     }
 
     /// `daemon stop` against a socket no daemon owns: must print
@@ -176,6 +179,6 @@ mod tests {
         let cmd = DaemonCommand::Stop {
             socket: Some(socket),
         };
-        run_daemon_cmd(cmd, &fmt()).await.unwrap();
+        run_daemon_cmd(tmp.path(), cmd, &fmt()).await.unwrap();
     }
 }

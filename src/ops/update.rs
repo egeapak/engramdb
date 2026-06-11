@@ -51,106 +51,99 @@ pub async fn update_memory(
     params: UpdateParams,
     engine: Option<&RetrievalEngine>,
 ) -> Result<bool> {
-    // Load the existing memory to handle tag operations
-    let mut memory = store.get(id).await?;
-
-    // Apply direct field updates
-    let mut update = MemoryUpdate::new();
-    update.type_ = params.type_;
-    update.content = params.content;
-    update.summary = params.summary;
-    update.title = params.title;
-    update.details = params.details;
-    update.physical = params.physical;
-    update.logical = params.logical;
-    update.criticality = params.criticality;
-    update.confidence = params.confidence;
-    update.visibility = params.visibility;
-    update.status = params.status;
-    update.supersedes = params.supersedes;
-
-    // Handle tags: full replacement first if provided
-    if let Some(tags) = params.tags {
-        update.tags = Some(tags);
-    }
-
-    // Handle decay config updates
-    if params.decay_strategy.is_some()
+    // Parse the decay strategy up front (it doesn't depend on the stored
+    // memory) so invalid input fails before taking the write lock.
+    let parsed_decay_strategy = match params.decay_strategy.as_deref() {
+        Some(strategy_str) => Some(parse_decay_strategy(strategy_str)?),
+        None => None,
+    };
+    let wants_decay_update = parsed_decay_strategy.is_some()
         || params.decay_half_life.is_some()
         || params.decay_ttl.is_some()
-        || params.decay_floor.is_some()
-    {
-        // Get existing decay or create new one
-        let existing_decay = memory.decay.clone();
+        || params.decay_floor.is_some();
+    let embed_async = params.embed_async;
 
-        let strategy = if let Some(ref strategy_str) = params.decay_strategy {
-            parse_decay_strategy(strategy_str)?
-        } else {
-            // Keep existing strategy or default to None
-            existing_decay
-                .as_ref()
-                .map(|d| d.strategy.clone())
-                .unwrap_or(DecayStrategy::None)
-        };
+    // Merge the params into the memory atomically: `update_with` re-reads the
+    // memory inside the per-project write lock, so two concurrent updates
+    // cannot snapshot the same old state and silently erase each other's
+    // changes (the old get-merge-update flow did exactly that).
+    let saved = store
+        .update_with(id, move |memory| {
+            // Apply direct field updates
+            let mut update = MemoryUpdate::new();
+            update.type_ = params.type_;
+            update.content = params.content;
+            update.summary = params.summary;
+            update.title = params.title;
+            update.details = params.details;
+            update.physical = params.physical;
+            update.logical = params.logical;
+            update.criticality = params.criticality;
+            update.confidence = params.confidence;
+            update.visibility = params.visibility;
+            update.status = params.status;
+            update.supersedes = params.supersedes;
 
-        let mut decay = Decay::new(strategy);
+            // Handle tags: full replacement first if provided
+            if let Some(tags) = params.tags {
+                update.tags = Some(tags);
+            }
 
-        // Merge numeric fields: prefer params, fall back to existing
-        if let Some(half_life_secs) = params.decay_half_life {
-            decay.half_life = Some(Duration::seconds(half_life_secs as i64));
-        } else if let Some(existing) = &existing_decay {
-            decay.half_life = existing.half_life;
-        }
+            // Handle decay config updates (merged against the locked state)
+            if wants_decay_update {
+                let existing_decay = memory.decay.clone();
 
-        if let Some(ttl_secs) = params.decay_ttl {
-            decay.ttl = Some(Duration::seconds(ttl_secs as i64));
-        } else if let Some(existing) = &existing_decay {
-            decay.ttl = existing.ttl;
-        }
+                let strategy = parsed_decay_strategy.unwrap_or_else(|| {
+                    // Keep existing strategy or default to None
+                    existing_decay
+                        .as_ref()
+                        .map(|d| d.strategy.clone())
+                        .unwrap_or(DecayStrategy::None)
+                });
 
-        if let Some(floor) = params.decay_floor {
-            decay.floor = floor;
-        } else if let Some(existing) = &existing_decay {
-            decay.floor = existing.floor;
-        }
+                let mut decay = Decay::new(strategy);
 
-        update.decay = Some(decay);
-    }
+                // Merge numeric fields: prefer params, fall back to existing
+                if let Some(half_life_secs) = params.decay_half_life {
+                    decay.half_life = Some(Duration::seconds(half_life_secs as i64));
+                } else if let Some(existing) = &existing_decay {
+                    decay.half_life = existing.half_life;
+                }
 
-    // Apply the update to get the current state
-    update.apply_to(&mut memory);
+                if let Some(ttl_secs) = params.decay_ttl {
+                    decay.ttl = Some(Duration::seconds(ttl_secs as i64));
+                } else if let Some(existing) = &existing_decay {
+                    decay.ttl = existing.ttl;
+                }
 
-    // Then handle tag additions (after replacement)
-    if let Some(tags_to_add) = params.tags_add {
-        memory.tags.extend(tags_to_add);
-        // Deduplicate tags
-        memory.tags.sort();
-        memory.tags.dedup();
-    }
+                if let Some(floor) = params.decay_floor {
+                    decay.floor = floor;
+                } else if let Some(existing) = &existing_decay {
+                    decay.floor = existing.floor;
+                }
 
-    // Then handle tag removals
-    if let Some(tags_to_remove) = params.tags_remove {
-        memory.tags.retain(|tag| !tags_to_remove.contains(tag));
-    }
+                update.decay = Some(decay);
+            }
 
-    // Convert back to update with final tags state
-    let mut final_update = MemoryUpdate::new();
-    final_update.type_ = Some(memory.type_);
-    final_update.content = Some(memory.content);
-    final_update.summary = Some(memory.summary);
-    final_update.title = memory.title;
-    final_update.details = memory.details;
-    final_update.physical = Some(memory.physical);
-    final_update.logical = Some(memory.logical);
-    final_update.tags = Some(memory.tags);
-    final_update.criticality = Some(memory.criticality);
-    final_update.confidence = Some(memory.confidence);
-    final_update.visibility = Some(memory.visibility);
-    final_update.status = Some(memory.status);
-    final_update.supersedes = Some(memory.supersedes);
-    final_update.decay = memory.decay;
+            // Apply the update to get the current state
+            update.apply_to(memory);
 
-    store.update(id, final_update).await?;
+            // Then handle tag additions (after replacement)
+            if let Some(tags_to_add) = params.tags_add {
+                memory.tags.extend(tags_to_add);
+                // Deduplicate tags
+                memory.tags.sort();
+                memory.tags.dedup();
+            }
+
+            // Then handle tag removals
+            if let Some(tags_to_remove) = params.tags_remove {
+                memory.tags.retain(|tag| !tags_to_remove.contains(tag));
+            }
+
+            Ok(())
+        })
+        .await?;
 
     // Re-embed the updated memory if an engine with embeddings is available.
     //
@@ -166,8 +159,7 @@ pub async fn update_memory(
     //                                        (preserves the pre-flag behavior).
     if let Some(engine) = engine {
         if engine.embeddings_available() {
-            let saved = store.get(id).await?;
-            if params.embed_async {
+            if embed_async {
                 let _ = engine.spawn_ingest(saved);
             } else {
                 engine.embed_memory(&saved).await?;
@@ -396,6 +388,50 @@ mod tests {
         assert!(memory.tags.contains(&"b".to_string()));
         assert!(memory.tags.contains(&"c".to_string()));
         assert!(!memory.tags.contains(&"a".to_string()));
+    }
+
+    /// Two concurrent `update_memory` calls must both persist their changes.
+    /// The merge logic runs inside `MemoryStore::update_with` (re-read under
+    /// the per-project write lock), so neither call can snapshot stale state
+    /// and silently erase the other's tag.
+    #[tokio::test]
+    async fn test_concurrent_updates_both_persist() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
+
+        let store_a = store.clone();
+        let id_a = id.clone();
+        let task_a = tokio::spawn(async move {
+            let mut params = empty_update_params();
+            params.tags_add = Some(vec!["concurrent-a".to_string()]);
+            update_memory(&store_a, &id_a, params, None).await.unwrap();
+        });
+
+        let store_b = store.clone();
+        let id_b = id.clone();
+        let task_b = tokio::spawn(async move {
+            let mut params = empty_update_params();
+            params.tags_add = Some(vec!["concurrent-b".to_string()]);
+            update_memory(&store_b, &id_b, params, None).await.unwrap();
+        });
+
+        task_a.await.unwrap();
+        task_b.await.unwrap();
+
+        let memory = store.get(&id).await.unwrap();
+        assert!(
+            memory.tags.contains(&"concurrent-a".to_string()),
+            "tag from update A was lost: {:?}",
+            memory.tags
+        );
+        assert!(
+            memory.tags.contains(&"concurrent-b".to_string()),
+            "tag from update B was lost: {:?}",
+            memory.tags
+        );
+        // Original tags survive too
+        assert!(memory.tags.contains(&"tag1".to_string()));
+        assert!(memory.tags.contains(&"tag2".to_string()));
     }
 
     #[tokio::test]

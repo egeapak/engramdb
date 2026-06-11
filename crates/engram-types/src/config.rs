@@ -89,10 +89,16 @@ pub struct ScoringConfig {
     /// Weights for degraded mode (no embeddings)
     pub degraded: ScoringWeights,
 
-    /// Deprecated: no longer used in scoring. Retained for TOML backward compatibility.
+    /// Neutral base for the scope multiplier under logical-only context (default 0.5).
     ///
-    /// Scope scoring now uses depth decay (`depth_decay_base` / `depth_decay_floor`)
-    /// instead of a floor-transformed multiplier.
+    /// When a query provides a `path`, scope scoring uses depth decay
+    /// (`depth_decay_base` / `depth_decay_floor`) and this field is unused.
+    /// When a query provides only `logical` context, the multiplier is
+    /// `scope_multiplier_floor + logical_bonus` (capped at 1.0) for memories
+    /// with a related logical scope, the bare floor for memories with no
+    /// logical scopes, and 0.0 for memories whose logical scopes are
+    /// unrelated. Without this floor the logical bonus (max 0.3) alone would
+    /// drag every logical-only result below `retrieval.relevance_threshold`.
     #[serde(default = "ScoringConfig::default_scope_multiplier_floor")]
     pub scope_multiplier_floor: f64,
 
@@ -761,8 +767,13 @@ impl Default for DaemonConfig {
 impl DaemonConfig {
     /// Validate that daemon configuration values are within acceptable ranges.
     pub fn validate(&self) -> Result<(), anyhow::Error> {
-        if self.idle_timeout_secs == 0 {
-            anyhow::bail!("daemon.idle_timeout_secs must be > 0");
+        if self.idle_timeout_secs < 60 {
+            anyhow::bail!(
+                "daemon.idle_timeout_secs must be >= 60 (got {}): the MCP heartbeat \
+                 pings at most every 30s, so a smaller idle timeout makes the daemon \
+                 idle-reap and respawn between pings",
+                self.idle_timeout_secs
+            );
         }
         Ok(())
     }
@@ -784,12 +795,16 @@ pub struct StatsConfig {
     #[serde(default = "default_histogram_capacity")]
     pub histogram_capacity: usize,
 
-    /// Optional retention window for the on-disk LanceDB event log.
-    /// `None` (the default) means unlimited retention. When `Some(n)`,
-    /// the persistence flush task prunes events older than `n` days.
-    /// Note: lifetime counters become "since the oldest non-pruned event"
-    /// when retention is set.
-    #[serde(default)]
+    /// Retention window for the on-disk LanceDB event log, in days.
+    /// Defaults to 90 so the per-project `stats_events` table cannot grow
+    /// without bound; the persistence flush task (and `gc`) prune events
+    /// older than this. `None` (only reachable programmatically — TOML has
+    /// no null) means unlimited retention; to effectively retain forever
+    /// from config, set the maximum of 3650 (10 years). A value of 0 is
+    /// rejected by validation: it is ambiguous between "prune everything"
+    /// and the legacy "retain forever" meaning.
+    /// Note: lifetime counters become "since the oldest non-pruned event".
+    #[serde(default = "default_retention_days")]
     pub retention_days: Option<u64>,
 
     /// Flush task interval in seconds. The persistence task drains
@@ -820,6 +835,11 @@ fn default_histogram_capacity() -> usize {
 fn default_flush_interval_secs() -> u64 {
     60
 }
+/// 90 days of telemetry by default — finite so the event log cannot grow
+/// monotonically on long-lived projects whose users never touch `[stats]`.
+fn default_retention_days() -> Option<u64> {
+    Some(90)
+}
 fn default_followup_window_secs() -> u64 {
     60
 }
@@ -832,7 +852,7 @@ impl Default for StatsConfig {
         Self {
             enabled: default_stats_enabled(),
             histogram_capacity: default_histogram_capacity(),
-            retention_days: None,
+            retention_days: default_retention_days(),
             flush_interval_secs: default_flush_interval_secs(),
             followup_window_secs: default_followup_window_secs(),
             max_sessions_per_project: default_max_sessions_per_project(),
@@ -855,6 +875,13 @@ impl StatsConfig {
             anyhow::bail!("stats.max_sessions_per_project must be >= 1");
         }
         if let Some(days) = self.retention_days {
+            if days == 0 {
+                anyhow::bail!(
+                    "stats.retention_days must be >= 1 (0 is ambiguous). \
+                     Set a positive number of days to prune older events, \
+                     or 3650 (the maximum, 10 years) to effectively retain forever."
+                );
+            }
             if days > 3650 {
                 anyhow::bail!("stats.retention_days ({}) must be <= 3650", days);
             }
@@ -1567,6 +1594,13 @@ weight = 0.7
         assert!(d.validate().is_ok());
         d.idle_timeout_secs = 0;
         assert!(d.validate().is_err());
+        // The floor is 60s: the MCP heartbeat interval is clamped to a 30s
+        // minimum, so any idle timeout below 60 guarantees the daemon reaps
+        // and respawns between pings (respawn churn). 59 → Err, 60 → Ok.
+        d.idle_timeout_secs = 59;
+        assert!(d.validate().is_err());
+        d.idle_timeout_secs = 60;
+        assert!(d.validate().is_ok());
         // Surfaced through the top-level config validate too.
         let mut cfg = EngramConfig::default();
         cfg.daemon.idle_timeout_secs = 0;
@@ -1676,5 +1710,56 @@ weight = 0.7
         assert!(cfg.daemon.enabled);
         assert_eq!(cfg.daemon.idle_timeout_secs, 30);
         assert_eq!(cfg.daemon.socket_path.as_deref(), Some("/run/x.sock"));
+    }
+
+    /// Unbounded-growth guard: telemetry retention must default to a finite
+    /// window (90 days) for both `Default` and a config file that never
+    /// mentions `[stats]` — otherwise the per-project `stats_events` table
+    /// grows forever for everyone who never set the field.
+    #[test]
+    fn stats_retention_defaults_to_90_days() {
+        assert_eq!(StatsConfig::default().retention_days, Some(90));
+
+        let cfg: EngramConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.stats.retention_days, Some(90));
+
+        // A `[stats]` section that sets other fields but omits retention
+        // still gets the finite default.
+        let cfg: EngramConfig = toml::from_str("[stats]\nenabled = true\n").unwrap();
+        assert_eq!(cfg.stats.retention_days, Some(90));
+
+        // An explicit value is honored verbatim.
+        let cfg: EngramConfig = toml::from_str("[stats]\nretention_days = 7\n").unwrap();
+        assert_eq!(cfg.stats.retention_days, Some(7));
+    }
+
+    /// `retention_days = 0` used to compute `cutoff = now` and delete every
+    /// event while the docs said 0 meant "retain forever". It is now
+    /// rejected outright so users must say what they mean.
+    #[test]
+    fn stats_retention_zero_is_rejected() {
+        let cfg = StatsConfig {
+            retention_days: Some(0),
+            ..StatsConfig::default()
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("retention_days must be >= 1"),
+            "unexpected message: {err}"
+        );
+
+        // Boundary values stay valid.
+        for days in [Some(1), Some(90), Some(3650), None] {
+            let cfg = StatsConfig {
+                retention_days: days,
+                ..StatsConfig::default()
+            };
+            assert!(cfg.validate().is_ok(), "{days:?} should validate");
+        }
+        let cfg = StatsConfig {
+            retention_days: Some(3651),
+            ..StatsConfig::default()
+        };
+        assert!(cfg.validate().is_err(), "above the 3650 cap must fail");
     }
 }

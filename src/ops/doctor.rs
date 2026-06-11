@@ -260,6 +260,30 @@ pub async fn doctor_environment(
             status: None,
         });
 
+        // Second clone of the same git remote: both checkouts hash to the
+        // same project ID, so they share one LanceDB index, write lock, and
+        // personal-memories dir while keeping separate .engramdb/memories/.
+        if let Some(other) = &registry_info.conflicting_checkout {
+            project_checks.push(EnvironmentCheck {
+                name: "Checkout identity".to_string(),
+                passed: true,
+                message: format!(
+                    "project ID {} is shared with another checkout at {}",
+                    project_id,
+                    other.display()
+                ),
+                suggestion: Some(
+                    "Two checkouts of the same remote share one index; memories created \
+                     in the other checkout appear as stale entries here, and reindex runs \
+                     in non-destructive mode. Prefer running engramdb from the registered \
+                     checkout, or remove it and run `engramdb init` here to take over."
+                        .to_string(),
+                ),
+                details: vec![],
+                status: Some(CheckStatus::Warn),
+            });
+        }
+
         let sc = if let Some(s) = store {
             match doctor(s).await {
                 Ok(result) => {
@@ -412,13 +436,16 @@ async fn check_binary_on_path() -> EnvironmentCheck {
                 status: None,
             }
         }
+        // Advisory: the MCP server and Claude Code hooks invoke an absolute
+        // binary path, so `engramdb` not being on PATH breaks nothing. Render
+        // it as a warning, not a failure that would flip the exit code.
         _ => EnvironmentCheck {
             name: "Binary on PATH".to_string(),
-            passed: false,
+            passed: true,
             message: "not found".to_string(),
             suggestion: Some("Install with `brew install engramdb`".to_string()),
             details: vec![],
-            status: None,
+            status: Some(CheckStatus::Warn),
         },
     }
 }
@@ -464,6 +491,11 @@ struct RegistryInfo {
     hierarchy_dangling: usize,
     hierarchy_stale_parent: usize,
     hierarchy_cycle: usize,
+    /// A different, still-existing checkout is registered as the owner of
+    /// this project ID (second clone of the same git remote). The two
+    /// checkouts share one LanceDB index, write lock, and personal-memories
+    /// dir while keeping separate `.engramdb/memories/` trees.
+    conflicting_checkout: Option<PathBuf>,
 }
 
 /// Load registry info once for reuse across sections.
@@ -482,6 +514,7 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
                 hierarchy_dangling: 0,
                 hierarchy_stale_parent: 0,
                 hierarchy_cycle: 0,
+                conflicting_checkout: None,
             };
         }
     };
@@ -520,6 +553,9 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
 
             let issues = crate::ops::projects::scan_hierarchy_issues(&reg);
 
+            let conflicting_checkout =
+                crate::storage::conflicting_checkout_path(&reg, &project_id, dir);
+
             RegistryInfo {
                 in_registry,
                 total_projects,
@@ -529,6 +565,7 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
                 hierarchy_dangling: issues.dangling.len(),
                 hierarchy_stale_parent: issues.stale_parent.len(),
                 hierarchy_cycle: issues.cycle_members.len(),
+                conflicting_checkout,
             }
         }
         Err(_) => RegistryInfo {
@@ -540,6 +577,7 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
             hierarchy_dangling: 0,
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
+            conflicting_checkout: None,
         },
     }
 }
@@ -642,13 +680,20 @@ async fn check_embedding_model_identity(dir: &Path) -> EnvironmentCheck {
     };
 
     let reindex = "run `engramdb reindex --embeddings-only` to re-embed and stamp the store";
-    let (passed, message, suggestion) =
+    // `Untracked` is advisory: the fingerprint is only stamped by `reindex`,
+    // never by `add`, so every normally-used store is "untracked (legacy
+    // store)" until its first reindex even though semantic search works fine.
+    // Render it as a warning so it never flips the exit code. `Mismatch` and
+    // `DimensionMismatch` are genuine correctness bugs (search served from
+    // stale/mixed vectors) and stay hard failures.
+    let (passed, message, suggestion, status) =
         match embedding_status(stored.as_ref(), &expected.model, expected.dimensions) {
-            EmbeddingModelStatus::Match => (true, format!("ok: {}", expected.model), None),
+            EmbeddingModelStatus::Match => (true, format!("ok: {}", expected.model), None, None),
             EmbeddingModelStatus::Untracked { current } => (
-                false,
+                true,
                 format!("untracked (legacy store); current model {current}"),
                 Some(reindex.to_string()),
+                Some(CheckStatus::Warn),
             ),
             EmbeddingModelStatus::Mismatch { stored, current } => (
                 false,
@@ -656,11 +701,13 @@ async fn check_embedding_model_identity(dir: &Path) -> EnvironmentCheck {
                 "MISMATCH: stored {stored}, current {current} — search uses stale/mixed vectors"
             ),
                 Some(reindex.to_string()),
+                None,
             ),
             EmbeddingModelStatus::DimensionMismatch { stored, current } => (
                 false,
                 format!("DIMENSION MISMATCH: stored {stored}d vs current {current}d"),
                 Some(reindex.to_string()),
+                None,
             ),
         };
     EnvironmentCheck {
@@ -669,7 +716,7 @@ async fn check_embedding_model_identity(dir: &Path) -> EnvironmentCheck {
         message,
         suggestion,
         details: vec![],
-        status: None,
+        status,
     }
 }
 
@@ -1119,15 +1166,19 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
     let content = match std::fs::read_to_string(&mcp_path) {
         Ok(c) => c,
         Err(_) => {
+            // Advisory: a missing project `.mcp.json` just means the user
+            // hasn't run `engramdb setup` for project-scoped MCP. The MCP
+            // integration works fine via absolute paths / user-scoped config,
+            // so this must not flip the exit code.
             return EnvironmentCheck {
                 name: "MCP server configuration".to_string(),
-                passed: false,
+                passed: true,
                 message: ".mcp.json not found".to_string(),
                 suggestion: Some(
                     "Add engramdb to .mcp.json, or install the Claude Code plugin".to_string(),
                 ),
                 details: vec![],
-                status: None,
+                status: Some(CheckStatus::Warn),
             };
         }
     };
@@ -1135,13 +1186,16 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
     let json: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
         Err(e) => {
+            // Advisory: a malformed project `.mcp.json` is a setup issue, not
+            // store corruption — the MCP integration works via absolute paths /
+            // user-scoped config, so this must not flip the exit code.
             return EnvironmentCheck {
                 name: "MCP server configuration".to_string(),
-                passed: false,
+                passed: true,
                 message: format!("invalid JSON: {}", e),
                 suggestion: Some("Fix the JSON syntax in .mcp.json".to_string()),
                 details: vec![],
-                status: None,
+                status: Some(CheckStatus::Warn),
             };
         }
     };
@@ -1151,13 +1205,13 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
         None => {
             return EnvironmentCheck {
                 name: "MCP server configuration".to_string(),
-                passed: false,
+                passed: true,
                 message: "missing 'mcpServers' key".to_string(),
                 suggestion: Some(
                     "Add an 'mcpServers' object containing an 'engramdb' entry".to_string(),
                 ),
                 details: vec![],
-                status: None,
+                status: Some(CheckStatus::Warn),
             };
         }
     };
@@ -1167,11 +1221,11 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
         None => {
             return EnvironmentCheck {
                 name: "MCP server configuration".to_string(),
-                passed: false,
+                passed: true,
                 message: "missing 'mcpServers.engramdb' key".to_string(),
                 suggestion: Some("Add an 'engramdb' entry under 'mcpServers'".to_string()),
                 details: vec![],
-                status: None,
+                status: Some(CheckStatus::Warn),
             };
         }
     };
@@ -1195,24 +1249,24 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
             if !on_path {
                 return EnvironmentCheck {
                     name: "MCP server configuration".to_string(),
-                    passed: false,
+                    passed: true,
                     message: format!("command '{}' not found on disk or PATH", cmd),
                     suggestion: Some("Check the 'command' path in .mcp.json".to_string()),
                     details: vec![],
-                    status: None,
+                    status: Some(CheckStatus::Warn),
                 };
             }
         }
     } else {
         return EnvironmentCheck {
             name: "MCP server configuration".to_string(),
-            passed: false,
+            passed: true,
             message: "missing or invalid 'command' field".to_string(),
             suggestion: Some(
                 "Add a 'command' string to mcpServers.engramdb in .mcp.json".to_string(),
             ),
             details: vec![],
-            status: None,
+            status: Some(CheckStatus::Warn),
         };
     }
 
@@ -1221,11 +1275,11 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
         if !args.is_array() {
             return EnvironmentCheck {
                 name: "MCP server configuration".to_string(),
-                passed: false,
+                passed: true,
                 message: "'args' field is not an array".to_string(),
                 suggestion: Some("Set 'args' to an array of strings in .mcp.json".to_string()),
                 details: vec![],
-                status: None,
+                status: Some(CheckStatus::Warn),
             };
         }
     }
@@ -1351,9 +1405,12 @@ async fn check_embedding_model_cached(dir: &Path, cache_dir: &Path) -> Environme
         false
     };
 
+    // Advisory: an uncached model is downloaded on first use, so a cold cache
+    // doesn't mean the store is broken — render it as a warning, not a failure
+    // that flips the exit code.
     EnvironmentCheck {
         name: "Embedding model".to_string(),
-        passed: has_models,
+        passed: true,
         message: if has_models {
             format!("{} cached", model_name)
         } else {
@@ -1365,7 +1422,11 @@ async fn check_embedding_model_cached(dir: &Path, cache_dir: &Path) -> Environme
             Some("Run `engramdb init` to download the embedding model".to_string())
         },
         details: vec![],
-        status: None,
+        status: if has_models {
+            None
+        } else {
+            Some(CheckStatus::Warn)
+        },
     }
 }
 
@@ -1856,6 +1917,72 @@ mod tests {
         );
     }
 
+    /// Create a fake git clone with a fixed remote URL so two directories
+    /// compute the same (remote-derived) project ID.
+    fn make_clone(root: &std::path::Path, name: &str, remote: &str) -> std::path::PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(
+            dir.join(".git").join("config"),
+            format!(
+                "[remote \"origin\"]\n\turl = https://github.com/example/{}.git\n",
+                remote
+            ),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// A second clone of the same remote shares the registered checkout's
+    /// project ID; doctor must surface this as a "Checkout identity" warning
+    /// naming the other checkout's path.
+    #[tokio::test]
+    async fn test_environment_warns_on_shared_checkout_identity() {
+        let tmp = TempDir::new().unwrap();
+        let a = make_clone(tmp.path(), "clone-a", "doctor-conflict");
+        let b = make_clone(tmp.path(), "clone-b", "doctor-conflict");
+        // doctor reads the global file registry (redirected per-process by
+        // the test-isolation arm), so register through it.
+        let registry = crate::storage::FileRegistry::global().unwrap();
+        MemoryStore::init(&a, &registry).await.unwrap();
+        let store_b = MemoryStore::init(&b, &registry).await.unwrap();
+
+        let result = doctor_environment(&b, Some(&store_b), test_daemon_check()).await;
+        let check = result
+            .all_checks()
+            .into_iter()
+            .find(|c| c.name == "Checkout identity")
+            .expect("shared-ID situation must surface as a doctor check");
+
+        assert!(check.passed, "warning check must not fail the run");
+        assert_eq!(check.status, Some(CheckStatus::Warn));
+        let a_canon = a.canonicalize().unwrap();
+        assert!(
+            check.message.contains("shared with another checkout")
+                && check.message.contains(&a_canon.display().to_string()),
+            "message must name the other checkout, got: {}",
+            check.message
+        );
+    }
+
+    /// The sole (registered) checkout must NOT get a checkout-identity check.
+    #[tokio::test]
+    async fn test_environment_no_checkout_identity_check_for_sole_clone() {
+        let tmp = TempDir::new().unwrap();
+        let a = make_clone(tmp.path(), "clone-a", "doctor-no-conflict");
+        let registry = crate::storage::FileRegistry::global().unwrap();
+        let store = MemoryStore::init(&a, &registry).await.unwrap();
+
+        let result = doctor_environment(&a, Some(&store), test_daemon_check()).await;
+        assert!(
+            !result
+                .all_checks()
+                .iter()
+                .any(|c| c.name == "Checkout identity"),
+            "no conflict check expected for the registered owner"
+        );
+    }
+
     #[tokio::test]
     async fn test_environment_store_not_initialized() {
         let temp_dir = TempDir::new().unwrap();
@@ -2009,7 +2136,10 @@ mod tests {
         let cache_dir = TempDir::new().unwrap();
         let result = check_embedding_model_cached(temp_dir.path(), cache_dir.path()).await;
         assert_eq!(result.name, "Embedding model");
-        assert!(!result.passed);
+        // Advisory: an uncached model is fetched on first use, so it warns
+        // rather than failing (does not gate the exit code).
+        assert!(result.passed);
+        assert_eq!(result.status, Some(CheckStatus::Warn));
         assert_eq!(result.message, "not cached");
         assert!(result.suggestion.is_some());
     }
@@ -2060,7 +2190,10 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let result = check_mcp_config_deep(temp_dir.path());
         assert_eq!(result.name, "MCP server configuration");
-        assert!(!result.passed);
+        // Advisory: a missing project `.mcp.json` is a setup hint, not a
+        // failure — it warns and never gates the exit code.
+        assert!(result.passed);
+        assert_eq!(result.status, Some(CheckStatus::Warn));
         assert!(result.message.contains("not found"));
     }
 
@@ -2070,7 +2203,10 @@ mod tests {
         std::fs::write(temp_dir.path().join(".mcp.json"), "not json {{{").unwrap();
 
         let result = check_mcp_config_deep(temp_dir.path());
-        assert!(!result.passed);
+        // Advisory: a malformed `.mcp.json` is a setup issue, not store
+        // corruption — it warns rather than failing the exit code.
+        assert!(result.passed);
+        assert_eq!(result.status, Some(CheckStatus::Warn));
         assert!(result.message.contains("invalid JSON"));
     }
 
@@ -2080,7 +2216,8 @@ mod tests {
         std::fs::write(temp_dir.path().join(".mcp.json"), r#"{"other": {}}"#).unwrap();
 
         let result = check_mcp_config_deep(temp_dir.path());
-        assert!(!result.passed);
+        assert!(result.passed);
+        assert_eq!(result.status, Some(CheckStatus::Warn));
         assert!(result.message.contains("mcpServers"));
     }
 
@@ -2094,7 +2231,8 @@ mod tests {
         .unwrap();
 
         let result = check_mcp_config_deep(temp_dir.path());
-        assert!(!result.passed);
+        assert!(result.passed);
+        assert_eq!(result.status, Some(CheckStatus::Warn));
         assert!(result.message.contains("engramdb"));
     }
 
@@ -2128,7 +2266,8 @@ mod tests {
         .unwrap();
 
         let result = check_mcp_config_deep(temp_dir.path());
-        assert!(!result.passed);
+        assert!(result.passed);
+        assert_eq!(result.status, Some(CheckStatus::Warn));
         assert!(result.message.contains("command"));
     }
 
@@ -2142,10 +2281,12 @@ mod tests {
         .unwrap();
 
         let result = check_mcp_config_deep(temp_dir.path());
-        // engramdb might not be on PATH, so check it either fails on args or on command
-        if result.passed {
-            panic!("should fail with non-array args");
-        }
+        // Advisory now: whether engramdb is on PATH or not, a malformed
+        // `.mcp.json` warns (passed=true) rather than gating the exit code.
+        // The diagnostic message still flags either the bad args or the
+        // missing command.
+        assert!(result.passed);
+        assert_eq!(result.status, Some(CheckStatus::Warn));
         assert!(
             result.message.contains("args") || result.message.contains("not found"),
             "unexpected: {}",
@@ -2210,6 +2351,7 @@ mod tests {
             hierarchy_dangling: 0,
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
+            conflicting_checkout: None,
         };
         let checks = build_registry_checks(&info);
         assert!(checks[0].message.contains("5 registered"));
@@ -2230,6 +2372,7 @@ mod tests {
             hierarchy_dangling: 0,
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
+            conflicting_checkout: None,
         };
         let checks = build_registry_checks(&info);
         let details_str = checks[0].details.join(" ");
@@ -2249,6 +2392,7 @@ mod tests {
             hierarchy_dangling: 0,
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
+            conflicting_checkout: None,
         };
         let checks = build_registry_checks(&info);
         assert_eq!(checks[0].status, Some(CheckStatus::Warn));
@@ -2268,6 +2412,7 @@ mod tests {
             hierarchy_dangling: 0,
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
+            conflicting_checkout: None,
         };
         let checks = build_registry_checks(&info);
         let hierarchy = checks
@@ -2290,6 +2435,7 @@ mod tests {
             hierarchy_dangling: 1,
             hierarchy_stale_parent: 1,
             hierarchy_cycle: 2,
+            conflicting_checkout: None,
         };
         let checks = build_registry_checks(&info);
         let hierarchy = checks

@@ -17,6 +17,29 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Upper bound on the vector-search over-fetch window (unique memories
+/// requested from LanceDB per semantic query).
+///
+/// The window is `max_results * 3`, but `max_results` is user-supplied and
+/// unvalidated; without a cap a huge value would turn one query into a full
+/// scan-and-sort of every chunk. Memories outside the window are not dropped
+/// — they are scored with weak semantic evidence (`sem = 0.0`, see Step 4.5
+/// in [`RetrievalEngine::query`]) — so the cap bounds work, not recall.
+const VECTOR_SEARCH_WINDOW_CAP: usize = 1000;
+
+/// Maximum size of the filtered candidate set that gets pushed down into the
+/// vector search as a `memory_id IN (...)` predicate.
+///
+/// When the index filters (type/tag/path/criticality, filter-mode logical,
+/// expiry) narrow the candidates to at most this many memories, the vector
+/// search is restricted to them so the top-k window is spent entirely on
+/// real candidates — otherwise narrow filters let filtered-out memories
+/// saturate the window and survivors degrade to weak (`sem = 0.0`) evidence.
+/// Above this size the predicate would be a huge SQL `IN` list for little
+/// gain (a large candidate set can't be saturated easily), so we fall back
+/// to the whole-store search.
+const VECTOR_RESTRICT_MAX_IDS: usize = 500;
+
 /// Detail level for retrieved memories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DetailLevel {
@@ -53,8 +76,9 @@ pub struct RetrievalQuery {
     /// Physical scope - current file path
     pub path: Option<String>,
 
-    /// Logical scopes - dot-notation domains; contribute to scoring only,
-    /// never used as a filter.
+    /// Logical scopes - dot-notation domains. In Rank mode they contribute
+    /// to scoring only; in Filter mode they act as a hard hierarchical
+    /// filter (see Step 2.5a in [`RetrievalEngine::query`]).
     pub logical: Vec<String>,
 
     /// Search query text (for semantic similarity + keyword search)
@@ -517,6 +541,29 @@ impl RetrievalEngine {
     /// Logical scope is always a scoring signal, never a filter: scoping a
     /// query with `logical = ["workflow.git.pr"]` makes unrelated memories
     /// rank lower but does not exclude them.
+    ///
+    /// # Scoring pipeline
+    ///
+    /// Index-level filter → batch load → optional vector search (top-k,
+    /// restricted to the filtered candidate set when the filters narrowed it
+    /// to at most [`VECTOR_RESTRICT_MAX_IDS`] memories, whole-store
+    /// otherwise) → keyword search → composite scoring → threshold →
+    /// optional cross-encoder rerank. Per memory, the composite weights are
+    /// chosen from the query evidence:
+    ///
+    /// | keyword | semantic                  | weights (defaults)                  |
+    /// |---------|---------------------------|-------------------------------------|
+    /// | yes     | yes (incl. missed top-k)  | `with_keyword`: 0.45kw 0.30sem 0.25rel |
+    /// | yes     | no chunks / no embeddings | `with_keyword`, sem weight renormalized away |
+    /// | no      | yes (incl. missed top-k)  | `with_query`: 0.55sem 0.45rel       |
+    /// | no      | no chunks / no embeddings | `degraded`: 1.0rel                  |
+    /// | — no query text —                   || `scope_only`: 1.0rel               |
+    ///
+    /// "Missed top-k" means vector search ran and the memory has embedding
+    /// chunks but fell outside the over-fetch window: it is scored with
+    /// `sem = 0.0` (weak evidence) so low similarity can never outrank high
+    /// similarity. Only memories with no chunks at all (created while
+    /// embeddings were unavailable) take the no-semantic-evidence paths.
     pub async fn query(&self, query: &RetrievalQuery) -> Result<RetrievalResult> {
         use crate::search::{keyword_search, normalize_keyword_score, query_token_count};
 
@@ -542,12 +589,25 @@ impl RetrievalEngine {
 
         // Step 1: Load lightweight index entries (6 columns).
         let all_entries = self.store.list_for_filtering().await?;
+        let total_entry_count = all_entries.len();
+
+        // Step 1.5: Relativize the query path against the project root.
+        // Physical scopes are stored repo-relative, so an absolute path (the
+        // natural thing for an agent to pass over MCP, or a user on the CLI)
+        // would silently prefix/glob-match nothing. Doing it here covers
+        // every front-end (CLI, MCP, hooks) identically. Relative paths and
+        // absolute paths NOT under the project root pass through unchanged —
+        // an outside path legitimately matches no repo-relative scope.
+        let query_path: Option<String> = query
+            .path
+            .as_ref()
+            .map(|p| crate::storage::paths::relativize_path(p, &self.store.project_dir));
 
         // Step 2: Apply filters. Logical is NOT a filter — it only scores.
         let filters = SearchFilters {
             types: query.types.clone(),
             tags: query.tags.clone(),
-            physical: query.path.clone(),
+            physical: query_path.clone(),
             min_criticality: query.min_criticality,
         };
         let filtered_entries = apply_index_filters(all_entries, &filters);
@@ -557,10 +617,25 @@ impl RetrievalEngine {
         // already filtered via `SearchFilters.physical`; logical is not a
         // field on `SearchFilters` because it's a scoring signal in rank
         // mode, so we apply it here explicitly.
+        //
+        // Matching is hierarchical, not exact: a memory passes when any of
+        // its logical scopes lies on the same ancestor chain as any queried
+        // scope (equal, descendant, or ancestor). Querying `auth` matches
+        // memories scoped `auth.oauth` (the domain includes its subdomains),
+        // and querying `auth.oauth` matches a memory scoped `auth` (broad
+        // memories apply to their subdomains) — mirroring rank mode's
+        // bidirectional parent↔child proximity. Siblings (`auth.jwt` vs
+        // `auth.oauth`) do NOT pass. See `scope::logical::hierarchically_related`.
         let filtered_entries = if query.mode == RetrievalMode::Filter && !query.logical.is_empty() {
             filtered_entries
                 .into_iter()
-                .filter(|e| e.logical.iter().any(|s| query.logical.contains(s)))
+                .filter(|e| {
+                    e.logical.iter().any(|mem_scope| {
+                        query.logical.iter().any(|query_scope| {
+                            crate::scope::logical::hierarchically_related(mem_scope, query_scope)
+                        })
+                    })
+                })
                 .collect()
         } else {
             filtered_entries
@@ -593,12 +668,40 @@ impl RetrievalEngine {
                 self.record_stage("embed", t_embed.elapsed().as_secs_f64() * 1000.0);
 
                 if let Ok(query_vector) = embed_result {
+                    // Over-fetch 3x so the top-k still has headroom after
+                    // chunk-level dedup.
+                    //
+                    // `max_results` is user-supplied: saturate the multiply
+                    // (a plain `* 3` panics in debug / wraps in release on
+                    // huge values) and cap the window — memories beyond it
+                    // are still returned, just with weak (sem = 0.0)
+                    // semantic evidence, so a finite cap only bounds work.
                     let limit = query
                         .max_results
                         .unwrap_or(self.config.retrieval.max_results)
-                        * 3;
+                        .saturating_mul(3)
+                        .min(VECTOR_SEARCH_WINDOW_CAP);
+
+                    // Filter pushdown: when the index filters actually
+                    // narrowed the candidate set and it is small enough,
+                    // restrict the vector search to the surviving ids so
+                    // filtered-out memories can't saturate the top-k window
+                    // (which would degrade surviving candidates to weak
+                    // sem = 0.0 evidence and mis-rank them). With no filters
+                    // — or a still-large candidate set — fall back to the
+                    // whole-store search, where the windowing artifact is
+                    // mild because little or nothing in the window is
+                    // discarded.
+                    let restrict_ids: Option<Vec<String>> = (filtered_entries.len()
+                        < total_entry_count
+                        && filtered_entries.len() <= VECTOR_RESTRICT_MAX_IDS)
+                        .then(|| filtered_entries.iter().map(|e| e.id.clone()).collect());
+
                     let t_vs = std::time::Instant::now();
-                    let vs_result = self.store.vector_search(query_vector, limit).await;
+                    let vs_result = self
+                        .store
+                        .vector_search(query_vector, limit, restrict_ids.as_deref())
+                        .await;
                     self.record_stage("vector_search", t_vs.elapsed().as_secs_f64() * 1000.0);
                     vs_result
                         .ok()
@@ -612,6 +715,39 @@ impl RetrievalEngine {
         } else {
             None
         };
+
+        // Step 4.5: When vector search ran, fetch the set of memory ids that
+        // have embedding chunks at all. A memory WITH chunks that merely
+        // missed the top-k over-fetch window must be scored as weak semantic
+        // evidence (sem = 0.0, "checked, found nothing"), not dropped into
+        // the no-semantic weight regime: that regime renormalizes relevance
+        // to full weight, so being LESS similar than the top-k cutoff would
+        // otherwise RAISE a memory's score above genuinely similar in-top-k
+        // memories (whose 1/(1+L2) scores top out well below 1.0). Memories
+        // with no chunks (created while embeddings were unavailable) keep
+        // sem = None — the legacy no-evidence path (see
+        // scoring::composite::tests::test_semantic_none_vs_zero_differ).
+        //
+        // Index entries carry no has-embedding flag, so this costs one extra
+        // LanceDB single-column scan of the chunks table per semantic query —
+        // cheap next to the vector search itself. If the scan fails we fall
+        // back to the legacy no-evidence path rather than failing the query.
+        let embedded_ids: Option<std::collections::HashSet<String>> =
+            if semantic_scores_map.is_some() {
+                match self.store.list_chunk_memory_ids().await {
+                    Ok(ids) => Some(ids.into_iter().collect()),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to list embedded memory ids ({}); memories outside the \
+                             vector top-k will use no-semantic-evidence scoring",
+                            e
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
 
         // Step 5: Run keyword search whenever query text is present. Keyword
         // scores power both the "keyword_only" mode and the filter-mode
@@ -645,7 +781,7 @@ impl RetrievalEngine {
         };
 
         let mut scored_memories: Vec<ScoredMemory> = Vec::new();
-        let query_path = query.path.as_deref();
+        let query_path = query_path.as_deref();
         let now = Utc::now();
 
         let t_score = std::time::Instant::now();
@@ -655,42 +791,64 @@ impl RetrievalEngine {
                 None => continue,
             };
 
-            // Build scoring context. Semantic wins when present for this
-            // memory; keyword fills in otherwise; fall back to degraded when
-            // query text is set but nothing matched; scope_only when no query.
+            // Gather query evidence for this memory. Semantic comes from the
+            // vector top-k when present; an embedded memory that missed the
+            // top-k window counts as weak evidence (sem = 0.0); a memory with
+            // no chunks at all keeps sem = None (no evidence). See Step 4.5.
             let sem_score = semantic_scores_map
                 .as_ref()
                 .and_then(|m| m.get(&memory.id))
-                .copied();
+                .copied()
+                .or_else(|| {
+                    embedded_ids
+                        .as_ref()
+                        .is_some_and(|ids| ids.contains(&memory.id))
+                        .then_some(0.0)
+                });
             let kw_score = keyword_map.get(&memory.id).copied();
 
             // Build scoring context. In rank mode the user-supplied path and
             // logical scopes drive the scope proximity signal. In filter mode
             // they have already been applied as hard filters (physical via
             // `SearchFilters`, logical via the pre-filter above), so passing
-            // them to the scorer would double-count and, because scope acts
-            // as a post-multiplier, would penalize results that only matched
-            // via logical scope (logical contributes at most 0.3 to the
-            // multiplier, which silently drags scores below the filter
-            // threshold).
+            // them to the scorer would double-count: scope acts as a
+            // post-multiplier and would discount results that already passed
+            // the hard filter.
             let (ctx_path, ctx_logical): (Option<&str>, &[String]) = match query.mode {
                 RetrievalMode::Rank => (query_path, &query.logical),
                 RetrievalMode::Filter => (None, &[]),
             };
 
+            // Pick the scoring constructor from the available evidence:
+            //   keyword + semantic → with_keyword(kw, Some(sem)): the
+            //     documented combined formula (0.45*kw + 0.30*sem +
+            //     0.25*relevance);
+            //   keyword only       → with_keyword(kw, None): semantic weight
+            //     drops out and the rest renormalizes;
+            //   semantic only      → with_semantic (0.55*sem + 0.45*relevance);
+            //   neither            → degraded (relevance only);
+            //   no query text      → scope_only.
             let context = if let Some(ref q) = query.query {
-                if let Some(s) = sem_score {
-                    ScoringContext::with_semantic(ctx_path, ctx_logical, q, s)
-                } else if let Some(kw) = kw_score {
-                    ScoringContext::with_keyword(ctx_path, ctx_logical, q, kw, None)
-                } else {
-                    ScoringContext::with_query_degraded(ctx_path, ctx_logical, q)
+                match (kw_score, sem_score) {
+                    (Some(kw), sem) => {
+                        ScoringContext::with_keyword(ctx_path, ctx_logical, q, kw, sem)
+                    }
+                    (None, Some(s)) => ScoringContext::with_semantic(ctx_path, ctx_logical, q, s),
+                    (None, None) => ScoringContext::with_query_degraded(ctx_path, ctx_logical, q),
                 }
             } else {
                 ScoringContext::scope_only(ctx_path, ctx_logical)
             };
 
-            let breakdown = if include_expired {
+            // Expired memories (only present when `include_expired` is set —
+            // otherwise Step 2.5b already dropped them) are scored ignoring
+            // decay: their decay factor is at/near floor by definition, so
+            // normal scoring would zero them out and including them would be
+            // pointless. Active memories keep normal decay scoring regardless
+            // of `include_expired` — a half-decayed active memory must not
+            // rank as fresh just because the caller asked to also see expired
+            // ones.
+            let breakdown = if memory.is_expired_at(now) {
                 composite_score_ignore_decay(memory, &context, &self.config, now)
             } else {
                 composite_score(memory, &context, &self.config, now)
@@ -872,7 +1030,7 @@ async fn detect_contradictions_with(
     let query_vector = embedding_provider.embed(&text).await?;
 
     let matches = store
-        .vector_search(query_vector, nli_config.max_comparisons)
+        .vector_search(query_vector, nli_config.max_comparisons, None)
         .await?;
 
     let candidates: Vec<_> = matches
@@ -1060,6 +1218,115 @@ mod tests {
             vec!["src/auth/**".to_string()]
         );
         assert!(result.memories[0].score > result.memories[1].score);
+    }
+
+    #[tokio::test]
+    async fn test_rank_logical_only_returns_matches_above_threshold() {
+        // Regression: a Rank query with only `logical` context (no path) used
+        // to multiply by the bare logical bonus (max 0.3), so every result
+        // fell below the default relevance_threshold (0.45) and the advertised
+        // "rank by logical scope" feature returned nothing. Uses the DEFAULT
+        // config on purpose — the threshold is the bug.
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let config = EngramConfig::default();
+        assert!(config.retrieval.relevance_threshold > 0.3); // guard the premise
+
+        // Exact logical match: scope_mult = 0.5 + 0.3 = 0.8 → 0.9 * 0.8 = 0.72
+        let mut matching = Memory::new(
+            MemoryType::Decision,
+            "OAuth flow decision",
+            "We use PKCE for the OAuth flow",
+            Provenance::human(),
+        );
+        matching.logical = vec!["auth.oauth".to_string()];
+        matching.visibility = Visibility::Shared;
+        matching.criticality = 0.9;
+
+        // Parent logical match: scope_mult = 0.5 + 0.2 = 0.7 → 0.9 * 0.7 = 0.63
+        let mut parent = Memory::new(
+            MemoryType::Convention,
+            "Auth conventions",
+            "All auth modules follow these conventions",
+            Provenance::human(),
+        );
+        parent.logical = vec!["auth".to_string()];
+        parent.visibility = Visibility::Shared;
+        parent.criticality = 0.9;
+
+        // Unrelated logical scopes: scope_mult = 0.0 even at criticality 1.0
+        let mut unrelated = Memory::new(
+            MemoryType::Hazard,
+            "Postgres migration hazard",
+            "Do not run migrations without a backup",
+            Provenance::human(),
+        );
+        unrelated.logical = vec!["database.postgres".to_string()];
+        unrelated.visibility = Visibility::Shared;
+        unrelated.criticality = 1.0;
+
+        // No logical scopes: bare floor → 0.8 * 0.5 = 0.40 < 0.45
+        let mut unscoped = Memory::new(
+            MemoryType::Context,
+            "General context",
+            "General project context",
+            Provenance::human(),
+        );
+        unscoped.visibility = Visibility::Shared;
+        unscoped.criticality = 0.8;
+
+        store.create(&matching).await.unwrap();
+        store.create(&parent).await.unwrap();
+        store.create(&unrelated).await.unwrap();
+        store.create(&unscoped).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, config.clone());
+
+        let query = RetrievalQuery {
+            mode: RetrievalMode::Rank,
+            logical: vec!["auth.oauth".to_string()],
+            ..Default::default()
+        };
+
+        let result = engine.query(&query).await.unwrap();
+
+        let ids: Vec<&str> = result
+            .memories
+            .iter()
+            .map(|sm| sm.memory.id.as_str())
+            .collect();
+        assert!(
+            ids.contains(&matching.id.as_str()),
+            "exact logical match must be returned, got {ids:?}"
+        );
+        assert!(
+            ids.contains(&parent.id.as_str()),
+            "parent logical match must be returned, got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&unrelated.id.as_str()),
+            "unrelated logical scopes must be filtered out, got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&unscoped.id.as_str()),
+            "unscoped memory at criticality 0.8 must stay below threshold, got {ids:?}"
+        );
+
+        // Exact match ranks first and clears the threshold.
+        assert_eq!(result.memories[0].memory.id, matching.id);
+        for sm in &result.memories {
+            assert!(
+                sm.score >= config.retrieval.relevance_threshold,
+                "returned memory {} scored {} below threshold",
+                sm.memory.id,
+                sm.score,
+            );
+        }
     }
 
     #[tokio::test]
@@ -1280,6 +1547,114 @@ mod tests {
         assert!(
             expired_result.score > 0.3,
             "score should exceed threshold because decay was ignored for scoring"
+        );
+    }
+
+    /// Regression: `include_expired: true` must not disable decay for ALL
+    /// memories — only the expired ones are scored with
+    /// `composite_score_ignore_decay`. Before the fix, a half-decayed ACTIVE
+    /// memory ranked as fresh whenever the caller merely asked to also see
+    /// expired memories, silently reordering the non-expired results.
+    #[tokio::test]
+    async fn test_include_expired_keeps_decay_for_active_memories() {
+        use crate::types::{Decay, EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use chrono::{Duration, Utc};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        // ACTIVE memory (no expires_at) that has heavily decayed: 100 half-
+        // lives → decay factor ≈ 0. Its score must reflect that decay even
+        // when include_expired=true.
+        let mut active_decayed = Memory::new(
+            MemoryType::Context,
+            "Active but decayed",
+            "old active content",
+            Provenance::human(),
+        );
+        active_decayed.visibility = Visibility::Shared;
+        active_decayed.criticality = 0.8;
+        active_decayed.decay = Some(Decay::exponential(Duration::hours(1)).with_floor(0.0));
+        active_decayed.created_at = Utc::now() - Duration::hours(100);
+
+        // EXPIRED memory: scored ignoring decay so it can surface at all.
+        let mut expired = Memory::new(
+            MemoryType::Debug,
+            "Expired memory",
+            "expired content",
+            Provenance::human(),
+        );
+        expired.visibility = Visibility::Shared;
+        expired.criticality = 0.8;
+        expired.decay = Some(Decay::linear(Duration::seconds(1)).with_floor(0.0));
+        expired.created_at = Utc::now() - Duration::seconds(10);
+        expired.expires_at = Some(Utc::now() - Duration::seconds(1));
+
+        store.create(&active_decayed).await.unwrap();
+        store.create(&expired).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, config);
+
+        // Baseline: include_expired=false → only the active memory, scored
+        // WITH decay (near zero).
+        let result_excl = engine
+            .query(&RetrievalQuery {
+                include_expired: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(result_excl.memories.len(), 1);
+        assert_eq!(result_excl.memories[0].memory.id, active_decayed.id);
+        let active_score_excl = result_excl.memories[0].score;
+        assert!(
+            active_score_excl < 0.1,
+            "active decayed memory should score near zero, got {active_score_excl}"
+        );
+
+        // include_expired=true → both returned; the EXPIRED one is scored
+        // ignore-decay, the ACTIVE one keeps its decayed score.
+        let result_incl = engine
+            .query(&RetrievalQuery {
+                include_expired: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(result_incl.memories.len(), 2);
+
+        let active_incl = result_incl
+            .memories
+            .iter()
+            .find(|sm| sm.memory.id == active_decayed.id)
+            .expect("active memory should be in results");
+        let expired_incl = result_incl
+            .memories
+            .iter()
+            .find(|sm| sm.memory.id == expired.id)
+            .expect("expired memory should be in results");
+
+        assert!(
+            (active_incl.score - active_score_excl).abs() < 1e-9,
+            "active memory's decayed score must not change when include_expired=true \
+             (got {} vs baseline {})",
+            active_incl.score,
+            active_score_excl
+        );
+        assert!(
+            expired_incl.score > 0.3,
+            "expired memory should be scored ignoring decay, got {}",
+            expired_incl.score
+        );
+        assert!(
+            expired_incl.score > active_incl.score,
+            "ignore-decay expired memory should outrank the decayed active one here"
         );
     }
 
@@ -2541,5 +2916,591 @@ mod tests {
             relevant_rerank,
             keyword_rerank,
         );
+    }
+
+    // ─── Filter-mode hierarchical logical filter ─────────────────────────────
+
+    /// Regression: the filter-mode `logical` filter was exact string
+    /// equality, so `logical: ["auth"]` failed to match a memory scoped
+    /// `auth.oauth` even though logical scopes are documented as dot-notation
+    /// hierarchies (and rank mode scores them hierarchically). Querying a
+    /// domain must surface its subdomains.
+    #[tokio::test]
+    async fn test_filter_mode_logical_matches_descendants() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let config = EngramConfig::default();
+
+        let scoped = |logical: &str, summary: &str| {
+            let mut m = Memory::new(MemoryType::Decision, summary, "body", Provenance::human());
+            m.logical = vec![logical.to_string()];
+            m.visibility = Visibility::Shared;
+            m.criticality = 0.9;
+            m
+        };
+
+        let exact = scoped("auth", "Auth conventions");
+        let child = scoped("auth.oauth", "OAuth decision");
+        let grandchild = scoped("auth.oauth.google", "Google OAuth quirk");
+        let unrelated = scoped("billing", "Billing decision");
+        for m in [&exact, &child, &grandchild, &unrelated] {
+            store.create(m).await.unwrap();
+        }
+
+        let engine = RetrievalEngine::new(store, config);
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Filter,
+                logical: vec!["auth".to_string()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = result
+            .memories
+            .iter()
+            .map(|sm| sm.memory.id.as_str())
+            .collect();
+        assert!(ids.contains(&exact.id.as_str()), "exact match: {ids:?}");
+        assert!(
+            ids.contains(&child.id.as_str()),
+            "descendant `auth.oauth` must match query `auth`: {ids:?}"
+        );
+        assert!(
+            ids.contains(&grandchild.id.as_str()),
+            "deep descendant `auth.oauth.google` must match query `auth`: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&unrelated.id.as_str()),
+            "`billing` must not match query `auth`: {ids:?}"
+        );
+        assert_eq!(result.memories.len(), 3);
+    }
+
+    /// The ancestor direction of the contract: querying `auth.oauth` matches
+    /// a memory scoped just `auth` (broad memories apply to their
+    /// subdomains, mirroring rank mode's bidirectional parent↔child bonus)
+    /// — but NOT the sibling `auth.jwt`, which rank mode only nudges and a
+    /// hard filter must exclude.
+    #[tokio::test]
+    async fn test_filter_mode_logical_matches_ancestors_not_siblings() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let config = EngramConfig::default();
+
+        let scoped = |logical: &str, summary: &str| {
+            let mut m = Memory::new(MemoryType::Decision, summary, "body", Provenance::human());
+            m.logical = vec![logical.to_string()];
+            m.visibility = Visibility::Shared;
+            m.criticality = 0.9;
+            m
+        };
+
+        let ancestor = scoped("auth", "Auth conventions");
+        let exact = scoped("auth.oauth", "OAuth decision");
+        let sibling = scoped("auth.jwt", "JWT decision");
+        // String prefix but not a segment ancestor.
+        let prefix_trap = scoped("authentication", "Unrelated prefix");
+        for m in [&ancestor, &exact, &sibling, &prefix_trap] {
+            store.create(m).await.unwrap();
+        }
+
+        let engine = RetrievalEngine::new(store, config);
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Filter,
+                logical: vec!["auth.oauth".to_string()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = result
+            .memories
+            .iter()
+            .map(|sm| sm.memory.id.as_str())
+            .collect();
+        assert!(ids.contains(&exact.id.as_str()), "exact match: {ids:?}");
+        assert!(
+            ids.contains(&ancestor.id.as_str()),
+            "ancestor `auth` must match query `auth.oauth`: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&sibling.id.as_str()),
+            "sibling `auth.jwt` must NOT match query `auth.oauth`: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&prefix_trap.id.as_str()),
+            "`authentication` is not segment-related to `auth.oauth`: {ids:?}"
+        );
+        assert_eq!(result.memories.len(), 2);
+    }
+
+    // ─── Semantic-evidence regime tests (stub provider, no ONNX) ────────────
+
+    /// Deterministic embedding stub: marker substrings map to fixed vectors so
+    /// vector-search distances are fully controlled without loading any ONNX
+    /// model. Distances from the query marker's vector (e0), whether LanceDB
+    /// reports plain or squared L2 — the ordering is identical:
+    ///   "queryvec" → v[0]=1.0, "closevec" → v[0]=0.4 (near),
+    ///   "fillvec" → v[0]=0.1 (mid), anything else → v[1]=1.0 (orthogonal).
+    struct MarkerEmbeddingProvider;
+
+    fn marker_vector(text: &str) -> Vec<f32> {
+        let mut v = vec![0.0f32; 384];
+        if text.contains("queryvec") {
+            v[0] = 1.0;
+        } else if text.contains("closevec") {
+            v[0] = 0.4;
+        } else if text.contains("fillvec") {
+            v[0] = 0.1;
+        } else {
+            v[1] = 1.0;
+        }
+        v
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for MarkerEmbeddingProvider {
+        async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(marker_vector(text))
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|t| marker_vector(t)).collect())
+        }
+        fn dimensions(&self) -> usize {
+            384
+        }
+        fn max_tokens(&self) -> usize {
+            256
+        }
+        fn model_id(&self) -> String {
+            "stub/marker".to_string()
+        }
+    }
+
+    fn stub_memory(summary: &str, criticality: f64) -> crate::types::Memory {
+        use crate::types::{Memory, MemoryType, Provenance, Visibility};
+        let mut m = Memory::new(MemoryType::Context, summary, "body", Provenance::human());
+        m.visibility = Visibility::Shared;
+        m.criticality = criticality;
+        m
+    }
+
+    /// Regression (Bug A): membership in the vector-search top-k must not
+    /// decide the weight regime. Before the fix, an embedded memory that
+    /// missed the top-k over-fetch window fell to the degraded weights
+    /// (relevance at full weight), so a memory LESS similar to the query
+    /// outranked an equally critical memory that WAS similar — the in-top-k
+    /// memory's 1/(1+L2) semantic score tops out well below 1.0, dragging
+    /// its with_query score under the absent memory's bare criticality.
+    #[tokio::test]
+    async fn test_missed_topk_embedded_memory_scores_as_weak_semantic() {
+        use crate::types::EngramConfig;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        // Semantically close to the query; same criticality as `far`.
+        let close = stub_memory("closevec note", 0.8);
+        // Orthogonal to the query. With max_results = 2 the over-fetch window
+        // is 6, and `close` + 6 fillers are all nearer the query, so `far` is
+        // guaranteed to miss the top-k.
+        let far = stub_memory("unrelated note", 0.8);
+
+        let mut all = vec![close.clone(), far.clone()];
+        for i in 0..6 {
+            all.push(stub_memory(&format!("fillvec note {i}"), 0.0));
+        }
+        for m in &all {
+            store.create(m).await.unwrap();
+        }
+
+        let engine = RetrievalEngine::new(store, config)
+            .with_embedding_provider(Arc::new(MarkerEmbeddingProvider));
+        for m in &all {
+            engine.embed_memory(m).await.unwrap();
+        }
+
+        // "queryvec" appears in no memory text, so keyword evidence is empty
+        // and the semantic regime is isolated.
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Rank,
+                query: Some("queryvec".to_string()),
+                max_results: Some(2),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.retrieval_quality, "full");
+        assert_eq!(result.memories.len(), 2);
+        // Pre-fix order was [far (0.80, degraded), close (~0.70, semantic)].
+        assert_eq!(
+            result.memories[0].memory.id, close.id,
+            "semantically close memory must rank first"
+        );
+        assert_eq!(
+            result.memories[1].memory.id, far.id,
+            "dissimilar memory must rank second (above the zero-criticality fillers)"
+        );
+        // Missed-top-k with chunks = weak evidence, not no evidence.
+        assert_eq!(result.memories[1].score_breakdown.semantic, Some(0.0));
+        assert!(result.memories[0].score_breakdown.semantic.unwrap() > 0.0);
+        assert!(result.memories[0].score > result.memories[1].score);
+    }
+
+    /// A memory with NO embedding chunks (created while embeddings were
+    /// unavailable) must keep the no-evidence degraded path even when vector
+    /// search ran for the query — protecting the `None > Some(0.0)` semantics
+    /// asserted by scoring::composite::tests::test_semantic_none_vs_zero_differ
+    /// end-to-end through the engine.
+    #[tokio::test]
+    async fn test_unembedded_memory_keeps_no_evidence_path() {
+        use crate::types::EngramConfig;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        let embedded = stub_memory("closevec note", 0.8);
+        let unembedded = stub_memory("plain note", 0.8);
+        store.create(&embedded).await.unwrap();
+        store.create(&unembedded).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, config)
+            .with_embedding_provider(Arc::new(MarkerEmbeddingProvider));
+        // Only `embedded` gets chunks; `unembedded` simulates a memory created
+        // while the embedding backend was down.
+        engine.embed_memory(&embedded).await.unwrap();
+
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Rank,
+                query: Some("queryvec".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.retrieval_quality, "full");
+        assert_eq!(result.memories.len(), 2);
+        let by_id = |id: &str| {
+            result
+                .memories
+                .iter()
+                .find(|sm| sm.memory.id == id)
+                .unwrap()
+        };
+
+        let un = by_id(&unembedded.id);
+        assert!(
+            un.score_breakdown.semantic.is_none(),
+            "memory without chunks must keep semantic = None"
+        );
+        // Degraded weights: relevance at full weight → criticality (0.8).
+        assert!(
+            (un.score - 0.8).abs() < 0.01,
+            "no-evidence memory should score ~0.8 (degraded), got {}",
+            un.score
+        );
+
+        let emb = by_id(&embedded.id);
+        assert!(
+            emb.score_breakdown.semantic.unwrap() > 0.0,
+            "embedded memory in the top-k must carry its semantic score"
+        );
+    }
+
+    /// Regression: `max_results` is user-supplied, so `usize::MAX` must not
+    /// panic in the 3x vector-search over-fetch (debug overflow) or wrap to a
+    /// tiny window (release). The semantic path runs end-to-end via the stub
+    /// provider, exercising both the engine's `saturating_mul(3)` + cap and
+    /// the LanceDB layer's `saturating_mul(5)` + chunk-fetch clamp.
+    #[tokio::test]
+    async fn test_max_results_usize_max_does_not_panic() {
+        use crate::types::EngramConfig;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        let close = stub_memory("closevec note", 0.8);
+        let other = stub_memory("plain note", 0.5);
+        store.create(&close).await.unwrap();
+        store.create(&other).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, config)
+            .with_embedding_provider(Arc::new(MarkerEmbeddingProvider));
+        engine.embed_memory(&close).await.unwrap();
+        engine.embed_memory(&other).await.unwrap();
+
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Rank,
+                query: Some("queryvec".to_string()),
+                max_results: Some(usize::MAX),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.retrieval_quality, "full");
+        assert_eq!(result.memories.len(), 2);
+    }
+
+    /// Regression (Bug B): when a memory has BOTH a keyword match and a
+    /// semantic score, both must contribute via the documented combined
+    /// with_keyword weights (0.45*kw + 0.30*sem + 0.25*relevance). Before the
+    /// fix, semantic presence routed scoring to with_semantic and the keyword
+    /// evidence was discarded, so the combined formula could never fire.
+    #[tokio::test]
+    async fn test_keyword_and_semantic_both_contribute() {
+        use crate::types::EngramConfig;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        // Both memories embed to the same vector as the query "zebra" (no
+        // marker substring → orthogonal default vector), so sem = 1.0 for
+        // both; only `both_signals` matches the keyword.
+        let both_signals = stub_memory("zebra protocol decision", 0.8);
+        let sem_only = stub_memory("samevec protocol decision", 0.8);
+        store.create(&both_signals).await.unwrap();
+        store.create(&sem_only).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, config.clone())
+            .with_embedding_provider(Arc::new(MarkerEmbeddingProvider));
+        engine.embed_memory(&both_signals).await.unwrap();
+        engine.embed_memory(&sem_only).await.unwrap();
+
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Rank,
+                query: Some("zebra".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.retrieval_quality, "full");
+        assert_eq!(result.memories.len(), 2);
+        let by_id = |id: &str| {
+            result
+                .memories
+                .iter()
+                .find(|sm| sm.memory.id == id)
+                .unwrap()
+        };
+
+        // Both signals recorded (pre-fix: keyword was None whenever a
+        // semantic score existed).
+        let combined = by_id(&both_signals.id);
+        let kw = combined
+            .score_breakdown
+            .keyword
+            .expect("keyword evidence must be recorded alongside semantic");
+        let sem = combined
+            .score_breakdown
+            .semantic
+            .expect("semantic evidence must be recorded alongside keyword");
+        assert!(kw > 0.0);
+        assert!(sem > 0.9, "identical vectors should give sem ~1.0: {sem}");
+
+        // The final score must follow the combined with_keyword formula
+        // (scope and trust multipliers are 1.0 here: no scope context, human
+        // provenance), proving both signals actually moved the score.
+        let w = &config.retrieval.scoring.with_keyword;
+        let expected = w.keyword.unwrap() * kw
+            + w.semantic.unwrap() * sem
+            + w.relevance * combined.score_breakdown.relevance;
+        assert!(
+            (combined.score - expected).abs() < 0.01,
+            "combined score {} should match 0.45*kw + 0.30*sem + 0.25*rel = {}",
+            combined.score,
+            expected
+        );
+
+        // The semantic-only memory keeps the with_query path.
+        let semantic_only = by_id(&sem_only.id);
+        assert!(semantic_only.score_breakdown.keyword.is_none());
+        assert!(semantic_only.score_breakdown.semantic.unwrap() > 0.9);
+        // And the two regimes produce different scores for the same sem/crit.
+        assert!(
+            (combined.score - semantic_only.score).abs() > 0.05,
+            "keyword evidence must change the score: combined={} sem_only={}",
+            combined.score,
+            semantic_only.score
+        );
+    }
+
+    // ─── Vector-search filter pushdown ───────────────────────────────────────
+
+    /// Shared setup for the pushdown tests: 8 untagged "closevec" fillers
+    /// (nearest to the query, zero criticality) that saturate the
+    /// `max_results = 2` → window-of-6 vector top-k, plus two tagged
+    /// memories — "fillvec" (mid similarity) and an orthogonal one — that
+    /// are both FARTHER from the query than every filler.
+    async fn pushdown_fixture() -> (
+        tempfile::TempDir,
+        RetrievalEngine,
+        crate::types::Memory,
+        crate::types::Memory,
+    ) {
+        use crate::types::EngramConfig;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        let mut tagged_mid = stub_memory("fillvec tagged note", 0.8);
+        tagged_mid.tags = vec!["pick".to_string()];
+        let mut tagged_far = stub_memory("plain tagged note", 0.8);
+        tagged_far.tags = vec!["pick".to_string()];
+
+        let mut all = vec![tagged_mid.clone(), tagged_far.clone()];
+        for i in 0..8 {
+            all.push(stub_memory(&format!("closevec filler {i}"), 0.0));
+        }
+        for m in &all {
+            store.create(m).await.unwrap();
+        }
+
+        let engine = RetrievalEngine::new(store, config)
+            .with_embedding_provider(Arc::new(MarkerEmbeddingProvider));
+        for m in &all {
+            engine.embed_memory(m).await.unwrap();
+        }
+
+        (temp_dir, engine, tagged_mid, tagged_far)
+    }
+
+    /// Regression: vector search used to run over the WHOLE chunks table, so
+    /// with a narrow tag filter the over-fetch window (max_results*3 = 6)
+    /// was saturated by filtered-out fillers and the surviving candidates
+    /// degraded to weak (sem = 0.0) evidence — losing their real semantic
+    /// ordering. With pushdown, the filtered survivors keep real scores.
+    #[tokio::test]
+    async fn test_vector_search_pushdown_keeps_real_semantic_scores() {
+        let (_dir, engine, tagged_mid, tagged_far) = pushdown_fixture().await;
+
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Rank,
+                query: Some("queryvec".to_string()),
+                tags: Some(vec!["pick".to_string()]),
+                max_results: Some(2),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.retrieval_quality, "full");
+        assert_eq!(result.memories.len(), 2, "both tagged memories survive");
+
+        // Real semantic evidence for both survivors (pre-fix: Some(0.0)).
+        let by_id = |id: &str| {
+            result
+                .memories
+                .iter()
+                .find(|sm| sm.memory.id == id)
+                .unwrap()
+        };
+        let mid_sem = by_id(&tagged_mid.id)
+            .score_breakdown
+            .semantic
+            .expect("survivor must carry semantic evidence");
+        let far_sem = by_id(&tagged_far.id)
+            .score_breakdown
+            .semantic
+            .expect("survivor must carry semantic evidence");
+        assert!(
+            mid_sem > 0.0,
+            "filtered survivor must get its REAL semantic score, got {mid_sem}"
+        );
+        assert!(far_sem > 0.0, "got {far_sem}");
+        assert!(
+            mid_sem > far_sem,
+            "semantic ordering must be preserved within the filter set: \
+             mid={mid_sem} far={far_sem}"
+        );
+        // And the ranking follows: the more-similar survivor ranks first.
+        assert_eq!(
+            result.memories[0].memory.id, tagged_mid.id,
+            "more-similar survivor must rank first"
+        );
+    }
+
+    /// Fallback: with no filters the candidate set isn't narrowed, so the
+    /// whole-store search runs unchanged — fillers (nearest to the query)
+    /// own the window and the top results, with real semantic scores, while
+    /// out-of-window memories keep the weak (sem = 0.0) evidence path
+    /// covered by `test_missed_topk_embedded_memory_scores_as_weak_semantic`.
+    #[tokio::test]
+    async fn test_vector_search_no_filters_falls_back_to_whole_store() {
+        let (_dir, engine, _tagged_mid, _tagged_far) = pushdown_fixture().await;
+
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Rank,
+                query: Some("queryvec".to_string()),
+                max_results: Some(2),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.retrieval_quality, "full");
+        assert_eq!(result.memories.len(), 2);
+        for sm in &result.memories {
+            assert!(
+                sm.memory.summary.contains("closevec"),
+                "whole-store search: nearest fillers must win the top-k, got {}",
+                sm.memory.summary
+            );
+            assert!(
+                sm.score_breakdown.semantic.unwrap() > 0.0,
+                "in-window memories carry real semantic scores"
+            );
+        }
     }
 }

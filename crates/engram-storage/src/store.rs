@@ -54,44 +54,63 @@ pub struct MemoryStore {
 
 impl MemoryStore {
     /// Initialize a new EngramDB store in the given directory.
+    ///
+    /// Idempotent: re-running `init` on an already-initialized project is
+    /// safe. Existing `manifest.toml` (created_at, stats, parent link,
+    /// embedding fingerprint) and `config.toml` (user-customized provider /
+    /// dimensions / NLI / rerank settings) are never overwritten; only
+    /// missing pieces are created.
     pub async fn init(dir: &Path, registry: &dyn RegistryBackend) -> Result<Self> {
         let engramdb_dir = paths::project_dir(dir);
 
-        // Create directory structure
+        // Compute the project ID up front so concurrent inits serialize on
+        // the per-project advisory write lock. The lock file lives under the
+        // *global* data dir (`projects/<id>/write.lock`), and
+        // `acquire_write_lock` creates that directory itself, so there is no
+        // bootstrap-ordering problem with the project dirs created below.
+        let project_id = project_id::compute_project_id(dir);
+        let _lock = write_lock::acquire_write_lock(&project_id).await?;
+
+        // Create directory structure (create_dir_all is idempotent)
         async_fs::create_dir_all(&engramdb_dir).await?;
         async_fs::create_dir_all(paths::memories_dir(dir)).await?;
 
-        // Create manifest.toml with project name derived from directory
+        // Create manifest.toml only if missing. Re-running `init` must not
+        // reset created_at / stats / parent_project_id, and critically must
+        // not drop the embedding fingerprint (that would flip the store to
+        // Untracked and defeat the model-swap corruption guard).
         let manifest_path = engramdb_dir.join("manifest.toml");
-        let project_name = dir
-            .canonicalize()
-            .unwrap_or_else(|_| dir.to_path_buf())
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unnamed-project".to_string());
-        let manifest = manifest::Manifest {
-            project: project_name,
-            ..Default::default()
-        };
-        manifest::save_manifest(&manifest_path, &manifest).await?;
+        if !manifest_path.exists() {
+            let project_name = dir
+                .canonicalize()
+                .unwrap_or_else(|_| dir.to_path_buf())
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unnamed-project".to_string());
+            let manifest = manifest::Manifest {
+                project: project_name,
+                ..Default::default()
+            };
+            manifest::save_manifest(&manifest_path, &manifest).await?;
+        }
 
-        // Create empty config.toml
+        // Create the placeholder config.toml only if missing — never clobber
+        // a user-customized config (a dimensions change alone would make the
+        // next open build LanceIndex against an incompatible chunks table).
         let config_path = engramdb_dir.join("config.toml");
-        async_fs::write(
-            config_path,
-            "# EngramDB configuration\n# See documentation for available settings\n",
-        )
-        .await?;
-
-        // Compute project ID before creating global directories
-        let project_id = project_id::compute_project_id(dir);
+        if !config_path.exists() {
+            async_fs::write(
+                &config_path,
+                "# EngramDB configuration\n# See documentation for available settings\n",
+            )
+            .await?;
+        }
 
         // Create global LanceDB directory
         let lance_path = paths::lancedb_dir(&project_id)?;
         async_fs::create_dir_all(&lance_path).await?;
 
         // Load config to get embedding dimensions
-        let config_path = engramdb_dir.join("config.toml");
         let config = match load_config(&config_path).await {
             Ok(c) => c,
             Err(e) => {
@@ -112,8 +131,25 @@ impl MemoryStore {
         // Create personal directories
         async_fs::create_dir_all(paths::personal_memories_dir(&project_id)?).await?;
 
-        // Update registry
+        // Update registry. `update` keeps the first registration: if another
+        // still-existing checkout already owns this project ID (two clones of
+        // the same remote), the entry continues to point at it.
         registry.update(dir, &project_id).await?;
+
+        // Surface the shared-ID situation loudly at init time. Destructive
+        // index operations are additionally guarded in `reindex`; `doctor`
+        // reports it as a warning check.
+        if let Ok(reg) = registry.load().await {
+            if let Some(other) = super::registry::conflicting_checkout_path(&reg, &project_id, dir)
+            {
+                tracing::warn!(
+                    "Project ID {} is already registered to another checkout at {} — \
+                     both checkouts share one index; see `engramdb doctor`",
+                    project_id,
+                    other.display()
+                );
+            }
+        }
 
         Ok(Self {
             project_dir: dir.to_path_buf(),
@@ -344,22 +380,7 @@ impl MemoryStore {
     }
 
     async fn get_from_dir(&self, id: &str, dir: &Path) -> Result<Memory> {
-        if !dir.exists() {
-            return Err(StorageError::NotFound(id.to_string()));
-        }
-
-        let mut matches = Vec::new();
-
-        let mut entries = async_fs::read_dir(dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if memory_file::stem_matches_id_prefix(stem, id) {
-                    matches.push(path);
-                }
-            }
-        }
+        let matches = find_memory_files(dir, id).await?;
 
         match matches.len() {
             0 => Err(StorageError::NotFound(id.to_string())),
@@ -367,39 +388,116 @@ impl MemoryStore {
                 let content = async_fs::read_to_string(&matches[0]).await?;
                 memory_file::parse_memory_file(&content)
             }
-            _ => Err(StorageError::Validation(format!(
-                "Ambiguous ID prefix '{}': matches {} memories",
-                id,
-                matches.len()
-            ))),
+            _ => {
+                // Multiple files for ONE full ID (`find_memory_files` already
+                // rejected distinct IDs as ambiguous): a stale duplicate left
+                // by an update that crashed between writing the renamed file
+                // and removing the old one. The newest file is the current
+                // state — the rename path always writes the new file last.
+                let newest = newest_by_mtime(&matches).await;
+                let content = async_fs::read_to_string(newest).await?;
+                memory_file::parse_memory_file(&content)
+            }
         }
     }
 
     /// Update a memory.
+    ///
+    /// Note: callers that first read the memory to compute the update perform
+    /// an unlocked read-modify-write — a concurrent update can be lost. Use
+    /// [`MemoryStore::update_with`] to make read-modify-write atomic.
     pub async fn update(&self, id: &str, updates: MemoryUpdate) -> Result<()> {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
 
-        // Get existing memory
+        // Get existing memory (inside the lock)
         let mut memory = self.get(id).await?;
         let old_visibility = memory.visibility;
 
         // Apply updates
         updates.apply_to(&mut memory);
 
-        // Always delete the old file first (filename may have changed due to title update)
-        let old_dir = self.get_memories_dir(&old_visibility)?;
-        self.delete_file_from_dir(id, &old_dir).await?;
+        self.write_updated_locked(id, &memory, old_visibility).await
+    }
 
-        // Write to (possibly new) location atomically
+    /// Atomically read-modify-write a memory.
+    ///
+    /// Acquires the per-project write lock, re-reads the memory inside the
+    /// lock, applies `f` to it, then persists via the same write path as
+    /// [`MemoryStore::update`]. This makes the whole read-merge-write sequence
+    /// one critical section, so two concurrent `update_with` calls (or an
+    /// `update_with` racing an `update`) cannot silently erase each other's
+    /// changes.
+    ///
+    /// The memory's `updated_at` is bumped after `f` succeeds, matching the
+    /// `MemoryUpdate::apply_to` behavior of `update`. If `f` returns an error,
+    /// nothing is written and the error is surfaced as a validation error.
+    ///
+    /// Returns the memory exactly as persisted.
+    pub async fn update_with<F>(&self, id: &str, f: F) -> Result<Memory>
+    where
+        F: FnOnce(&mut Memory) -> anyhow::Result<()>,
+    {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
+        // Re-read inside the lock so `f` sees the latest persisted state.
+        let mut memory = self.get(id).await?;
+        let old_visibility = memory.visibility;
+
+        f(&mut memory).map_err(|e| StorageError::Validation(format!("{:#}", e)))?;
+        memory.mark_updated();
+
+        self.write_updated_locked(id, &memory, old_visibility)
+            .await?;
+
+        Ok(memory)
+    }
+
+    /// Shared write path for `update` / `update_with`. Callers MUST hold the
+    /// per-project write lock — this helper does not (re-)acquire it, because
+    /// one acquisition must span the entire read-modify-write critical
+    /// section.
+    async fn write_updated_locked(
+        &self,
+        id: &str,
+        memory: &Memory,
+        old_visibility: Visibility,
+    ) -> Result<()> {
+        // Locate the existing file(s) for this memory before writing. `id`
+        // may be a prefix; the filename may be about to change (title or
+        // visibility update); and a stale duplicate from a previously
+        // crashed update may also still be present.
+        let old_dir = self.get_memories_dir(&old_visibility)?;
+        let old_paths = find_memory_files(&old_dir, id).await?;
+
         let memories_dir = self.get_memories_dir(&memory.visibility)?;
         async_fs::create_dir_all(&memories_dir).await?;
-        let filename = memory_file::memory_filename(&memory);
+        let filename = memory_file::memory_filename(memory);
         let file_path = memories_dir.join(&filename);
-        let content = memory_file::write_memory_file(&memory)?;
+        let content = memory_file::write_memory_file(memory)?;
+
+        // Durability ordering: write the NEW file first, THEN remove any old
+        // file at a different path. In the common case (filename unchanged)
+        // the atomic_write replaces the file in place and nothing is deleted,
+        // so the memory is never absent from disk and lock-free readers can
+        // never observe a spurious NotFound. When the filename changed
+        // (title/visibility update), a crash between the write and the
+        // removal leaves at worst TWO files for one ID — readers resolve
+        // that to the newest mtime (see `get_from_dir`) and the next
+        // update/delete/reindex cleans the stale one up. The old
+        // delete-then-write order could lose the memory's file entirely.
         atomic_write(&file_path, &content).await?;
+        for old in &old_paths {
+            if *old != file_path {
+                match async_fs::remove_file(old).await {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
 
         // Upsert metadata to LanceDB (chunks are managed separately)
-        let entry = IndexEntry::from(&memory);
+        let entry = IndexEntry::from(memory);
         self.lance_index
             .upsert(&entry)
             .await
@@ -418,28 +516,82 @@ impl MemoryStore {
         // Resolve full ID first via the index
         let full_id = self.resolve_full_id(id).await?;
 
-        // Try to delete file from shared
-        let shared_deleted = self
-            .delete_file_from_dir(&full_id, &paths::memories_dir(&self.project_dir))
-            .await;
+        self.delete_locked(&full_id).await
+    }
 
-        // If not in shared, try personal
-        if shared_deleted.is_err() {
-            self.delete_file_from_dir(&full_id, &paths::personal_memories_dir(&self.project_id)?)
+    /// Conditionally delete a memory under the per-project write lock.
+    ///
+    /// Re-reads the memory *inside* the lock and calls `predicate` on the
+    /// fresh state, so callers that scored or inspected the memory earlier
+    /// (lock-free) can re-validate that decision against the latest persisted
+    /// state before destroying data — closing the check-then-delete TOCTOU
+    /// window that a plain [`Self::delete`] after an unlocked read leaves
+    /// open.
+    ///
+    /// Returns:
+    /// - `Ok(true)` — predicate returned `true` and the memory was deleted.
+    /// - `Ok(false)` — the memory was kept (predicate returned `false`), or
+    ///   it no longer exists (concurrently deleted, or its data file is
+    ///   missing). Missing memories are a skip, never an error.
+    pub async fn delete_if<F>(&self, id: &str, predicate: F) -> Result<bool>
+    where
+        F: FnOnce(&Memory) -> bool,
+    {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
+        let full_id = match self.resolve_full_id(id).await {
+            Ok(full_id) => full_id,
+            Err(StorageError::NotFound(_)) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+
+        // Fresh read inside the lock — this is the state the predicate
+        // judges. A missing data file (stale index entry) is also a skip.
+        let memory = match self.get(&full_id).await {
+            Ok(m) => m,
+            Err(StorageError::NotFound(_)) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+
+        if !predicate(&memory) {
+            return Ok(false);
+        }
+
+        self.delete_locked(&full_id).await?;
+        Ok(true)
+    }
+
+    /// Shared deletion path for `delete` / `delete_if`. Callers MUST hold the
+    /// per-project write lock and pass a fully resolved ID — this helper does
+    /// not (re-)acquire the lock (`flock(2)` on a second fd in the same
+    /// process would deadlock).
+    async fn delete_locked(&self, full_id: &str) -> Result<()> {
+        // Try to delete file from shared. Only a NotFound falls through to
+        // the personal dir — a real I/O error must propagate as-is, not be
+        // masked by the personal lookup's NotFound.
+        match self
+            .delete_file_from_dir(full_id, &paths::memories_dir(&self.project_dir))
+            .await
+        {
+            Ok(()) => {}
+            Err(StorageError::NotFound(_)) => {
+                self.delete_file_from_dir(
+                    full_id,
+                    &paths::personal_memories_dir(&self.project_id)?,
+                )
                 .await?;
+            }
+            Err(e) => return Err(e),
         }
 
         // Delete from LanceDB (metadata + chunks)
         self.lance_index
-            .delete(&full_id)
+            .delete(full_id)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB delete failed: {}", e)))?;
-        self.lance_index
-            .delete_chunks(&full_id)
-            .await
-            .map_err(|e| {
-                StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e))
-            })?;
+        self.lance_index.delete_chunks(full_id).await.map_err(|e| {
+            StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e))
+        })?;
 
         // Update manifest stats
         self.update_manifest_stats().await?;
@@ -484,6 +636,20 @@ impl MemoryStore {
             .map_err(|e| StorageError::Validation(format!("LanceDB list_ids failed: {}", e)))
     }
 
+    /// Compact fragments and prune old LanceDB dataset versions for the
+    /// memories and chunks tables. See [`LanceIndex::optimize`].
+    ///
+    /// Every create/update/delete commits a new immutable Lance version, so
+    /// this is the disk-space reclamation path. Safe to run concurrently
+    /// with readers (version pruning keeps the lancedb-default 7 days of
+    /// versions). Callers should treat failures as non-fatal.
+    pub async fn optimize(&self) -> Result<super::lance_index::IndexOptimizeStats> {
+        self.lance_index
+            .optimize()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB optimize failed: {}", e)))
+    }
+
     /// Return the count of memories without loading data.
     pub async fn count(&self) -> Result<usize> {
         self.lance_index
@@ -492,36 +658,106 @@ impl MemoryStore {
             .map_err(|e| StorageError::Validation(format!("LanceDB count failed: {}", e)))
     }
 
-    /// Rebuild LanceDB index from memory files on disk.
+    /// Rebuild the LanceDB metadata index from memory files on disk.
+    ///
+    /// Clears and rebuilds only the memories (metadata) table. Existing
+    /// embedding vectors in the chunks table are preserved — chunks are
+    /// keyed by `memory_id`, so a metadata rebuild does not invalidate
+    /// them. Chunk rows whose `memory_id` no longer corresponds to a file
+    /// on disk are deleted, keeping the chunks table consistent. Callers
+    /// that intend to re-embed everything (and only those) should follow
+    /// up with [`Self::clear_chunks`].
+    ///
+    /// **Shared-ID guard:** when [`Self::checkout_conflict`] detects that a
+    /// different, still-existing checkout owns this project ID (two clones
+    /// of the same git remote share one index but have separate
+    /// `.engramdb/memories/` trees), the rebuild degrades to a
+    /// non-destructive, upsert-only pass: the table is not cleared and
+    /// orphan chunks are not pruned, so the other checkout's rows and
+    /// vectors survive. Index rows have no per-checkout ownership column,
+    /// so a clear here would be unrecoverable data loss for the other clone.
     pub async fn reindex(&self) -> Result<usize> {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
 
-        // Clear LanceDB
-        self.lance_index
-            .clear()
-            .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB clear failed: {}", e)))?;
+        let foreign_checkout = self.checkout_conflict().await;
+        if let Some(other) = &foreign_checkout {
+            tracing::warn!(
+                "Project ID is shared with another checkout at {} — running a \
+                 non-destructive (upsert-only) reindex; index rows and vectors \
+                 belonging to the other checkout are preserved",
+                other.display()
+            );
+        } else {
+            // Clear only the metadata table — never the vectors. Dropping the
+            // chunks table here would silently destroy all embeddings whenever
+            // no provider is available to rebuild them afterwards.
+            self.lance_index
+                .clear_memories()
+                .await
+                .map_err(|e| StorageError::Validation(format!("LanceDB clear failed: {}", e)))?;
+        }
 
-        let mut count = 0;
+        let mut indexed_ids = Vec::new();
 
         // Reindex shared memories
         let shared_dir = paths::memories_dir(&self.project_dir);
         if shared_dir.exists() {
-            count += self.reindex_dir(&shared_dir, Visibility::Shared).await?;
+            self.reindex_dir(&shared_dir, Visibility::Shared, &mut indexed_ids)
+                .await?;
         }
 
         // Reindex personal memories
         let personal_dir = paths::personal_memories_dir(&self.project_id)?;
         if personal_dir.exists() {
-            count += self
-                .reindex_dir(&personal_dir, Visibility::Personal)
+            self.reindex_dir(&personal_dir, Visibility::Personal, &mut indexed_ids)
                 .await?;
+        }
+
+        // Prune chunks for memories that no longer exist on disk, so the
+        // preserved chunks table stays consistent with the rebuilt index.
+        // Skipped under a checkout conflict: the other clone's memory files
+        // are not visible from here, so its chunk rows would all look like
+        // orphans and be deleted.
+        if foreign_checkout.is_none() {
+            let indexed_set: std::collections::HashSet<&str> =
+                indexed_ids.iter().map(|s| s.as_str()).collect();
+            let chunk_ids = self
+                .lance_index
+                .list_chunk_memory_ids()
+                .await
+                .map_err(|e| {
+                    StorageError::Validation(format!("LanceDB list_chunk_memory_ids failed: {}", e))
+                })?;
+            for chunk_id in chunk_ids {
+                if !indexed_set.contains(chunk_id.as_str()) {
+                    self.lance_index
+                        .delete_chunks(&chunk_id)
+                        .await
+                        .map_err(|e| {
+                            StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e))
+                        })?;
+                }
+            }
         }
 
         // Update manifest stats
         self.update_manifest_stats().await?;
 
-        Ok(count)
+        Ok(indexed_ids.len())
+    }
+
+    /// Drop and recreate the chunks (vectors) table.
+    ///
+    /// Destroys all embedding vectors and recreates the table with the
+    /// currently configured dimensions. Only call this when a full re-embed
+    /// is about to follow (i.e. an embedding provider is confirmed
+    /// available) — see [`Self::reindex`] for the vector-preserving path.
+    pub async fn clear_chunks(&self) -> Result<()> {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+        self.lance_index
+            .clear_chunks()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB clear_chunks failed: {}", e)))
     }
 
     /// Upsert embedding chunks for a memory.
@@ -563,9 +799,19 @@ impl MemoryStore {
     }
 
     /// Perform vector similarity search.
-    pub async fn vector_search(&self, query: Vec<f32>, limit: usize) -> Result<Vec<VectorMatch>> {
+    ///
+    /// `restrict_to` optionally pushes a candidate `memory_id` set down into
+    /// the LanceDB predicate so the top-k window isn't saturated by memories
+    /// the caller has already filtered out. `Some(&[])` returns no matches;
+    /// `None` searches the whole store.
+    pub async fn vector_search(
+        &self,
+        query: Vec<f32>,
+        limit: usize,
+        restrict_to: Option<&[String]>,
+    ) -> Result<Vec<VectorMatch>> {
         self.lance_index
-            .vector_search(query, limit)
+            .vector_search(query, limit, restrict_to)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB vector_search failed: {}", e)))
     }
@@ -579,35 +825,25 @@ impl MemoryStore {
         }
     }
 
-    /// Delete just the .md file from a directory (does not touch LanceDB).
+    /// Delete just the .md file(s) from a directory (does not touch LanceDB).
+    ///
+    /// All files matching the ID are removed: `find_memory_files` guarantees
+    /// they share one full ID, so any extra file is a stale duplicate left by
+    /// a crashed rename-update — deleting the memory sweeps it up too.
     async fn delete_file_from_dir(&self, id: &str, dir: &Path) -> Result<()> {
-        if !dir.exists() {
+        let matches = find_memory_files(dir, id).await?;
+
+        if matches.is_empty() {
             return Err(StorageError::NotFound(id.to_string()));
         }
-
-        let mut matches = Vec::new();
-        let mut entries = async_fs::read_dir(dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if memory_file::stem_matches_id_prefix(stem, id) {
-                    matches.push(path);
-                }
+        for path in &matches {
+            match async_fs::remove_file(path).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
             }
         }
-
-        match matches.len() {
-            0 => Err(StorageError::NotFound(id.to_string())),
-            1 => {
-                async_fs::remove_file(&matches[0]).await?;
-                Ok(())
-            }
-            _ => Err(StorageError::Validation(format!(
-                "Ambiguous ID prefix '{}': matches {} memories",
-                id,
-                matches.len()
-            ))),
-        }
+        Ok(())
     }
 
     /// Resolve a prefix ID to a full ID using a LanceDB WHERE filter.
@@ -627,12 +863,24 @@ impl MemoryStore {
         }
     }
 
-    /// Reindex all .md files in a directory with a given visibility.
+    /// Reindex all .md files in a directory with a given visibility,
+    /// appending the IDs of successfully indexed memories to `indexed_ids`.
     ///
     /// Skips files that cannot be read or parsed, logging a warning for each,
     /// so that a single corrupted file does not abort the entire reindex.
-    async fn reindex_dir(&self, dir: &Path, visibility: Visibility) -> Result<usize> {
-        let mut count = 0;
+    ///
+    /// When two files share one memory ID (a stale duplicate left by an
+    /// update that crashed between writing the renamed file and removing the
+    /// old one), the newest file wins and the stale one is deleted — reindex
+    /// runs under the project write lock and is the documented repair path.
+    async fn reindex_dir(
+        &self,
+        dir: &Path,
+        visibility: Visibility,
+        indexed_ids: &mut Vec<String>,
+    ) -> Result<()> {
+        let mut by_id: HashMap<String, (PathBuf, std::time::SystemTime, Memory)> = HashMap::new();
+
         let mut entries = async_fs::read_dir(dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
@@ -651,15 +899,47 @@ impl MemoryStore {
                         continue;
                     }
                 };
-                let mut index_entry = IndexEntry::from(&memory);
-                index_entry.visibility = visibility;
-                self.lance_index.upsert(&index_entry).await.map_err(|e| {
-                    StorageError::Validation(format!("LanceDB upsert failed: {}", e))
-                })?;
-                count += 1;
+                let mtime = file_mtime(&path).await;
+                let stale = match by_id.entry(memory.id.clone()) {
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert((path, mtime, memory));
+                        None
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut slot) => {
+                        if mtime >= slot.get().1 {
+                            let (old_path, _, _) = slot.insert((path, mtime, memory));
+                            Some(old_path)
+                        } else {
+                            Some(path)
+                        }
+                    }
+                };
+                if let Some(stale_path) = stale {
+                    tracing::warn!(
+                        "Removing stale duplicate file {} (same memory ID, older mtime)",
+                        stale_path.display()
+                    );
+                    if let Err(e) = async_fs::remove_file(&stale_path).await {
+                        tracing::warn!(
+                            "Failed to remove stale duplicate {}: {}",
+                            stale_path.display(),
+                            e
+                        );
+                    }
+                }
             }
         }
-        Ok(count)
+
+        for (id, (_path, _mtime, memory)) in by_id {
+            let mut index_entry = IndexEntry::from(&memory);
+            index_entry.visibility = visibility;
+            self.lance_index
+                .upsert(&index_entry)
+                .await
+                .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
+            indexed_ids.push(id);
+        }
+        Ok(())
     }
 
     /// Check whether the LanceDB index is stale compared to memory files on disk.
@@ -684,6 +964,13 @@ impl MemoryStore {
         }
     }
 
+    /// Recompute and persist manifest stats (load-modify-save of
+    /// `manifest.toml`).
+    ///
+    /// Callers MUST hold the per-project write lock — every call site
+    /// (`create`, `write_updated_locked`, `delete`, `reindex`) already runs
+    /// inside it. Calling this unlocked could race another manifest writer
+    /// (e.g. [`Self::set_embedding_fingerprint`]) and clobber its fields.
     async fn update_manifest_stats(&self) -> Result<()> {
         let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
         let mut manifest = manifest::load_manifest(&manifest_path).await?;
@@ -703,6 +990,32 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Detect whether a different, still-existing checkout owns this
+    /// project ID.
+    ///
+    /// Two independent clones of the same git remote hash to the same
+    /// project ID (deliberately — the ID is stable across moves/re-clones)
+    /// and therefore share one LanceDB index, write lock, and personal
+    /// memories dir, while each keeps its own `.engramdb/memories/` files.
+    /// The global registry records which checkout registered the ID first;
+    /// when that path is a different, still-existing directory, destructive
+    /// index operations from this checkout would corrupt the other one's
+    /// data (see [`Self::reindex`]).
+    ///
+    /// Returns the registered checkout's canonicalized path, or `None` when
+    /// this checkout is the registered owner, the registered path no longer
+    /// exists, this is the global store, or the registry is unavailable.
+    /// Linked git worktrees of the registered checkout never count as a
+    /// conflict.
+    pub async fn checkout_conflict(&self) -> Option<PathBuf> {
+        if self.is_global() {
+            return None;
+        }
+        let registry = super::registry::FileRegistry::global().ok()?;
+        let reg = registry.load().await.ok()?;
+        super::registry::conflicting_checkout_path(&reg, &self.project_id, &self.project_dir)
+    }
+
     /// Read the persisted embedding-model fingerprint, if any. `None` on
     /// legacy stores created before model tracking (treated as untracked).
     pub async fn embedding_fingerprint(&self) -> Result<Option<manifest::EmbeddingFingerprint>> {
@@ -713,10 +1026,24 @@ impl MemoryStore {
 
     /// Stamp the store with the embedding-model fingerprint its vectors
     /// were produced with. Called after a successful full (re)embed.
+    ///
+    /// Acquires the per-project write lock: this is a load-modify-save of
+    /// `manifest.toml`, racing `update_manifest_stats` (which every mutating
+    /// op runs under the lock). Without the lock, a concurrent `create`
+    /// could load the pre-stamp manifest and save over the fingerprint,
+    /// silently flipping the store back to Untracked right after a
+    /// successful reindex.
+    ///
+    /// Callers must NOT already hold the project write lock: `flock(2)` is
+    /// per open-file-description, so re-acquiring on a second fd in the same
+    /// process blocks forever. All call sites (e.g. `ops::reindex`) invoke
+    /// this after `store.reindex()` has returned and released the lock.
     pub async fn set_embedding_fingerprint(
         &self,
         fingerprint: manifest::EmbeddingFingerprint,
     ) -> Result<()> {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
         let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
         let mut manifest = manifest::load_manifest(&manifest_path).await?;
         manifest.embedding = Some(fingerprint);
@@ -725,19 +1052,102 @@ impl MemoryStore {
     }
 }
 
-/// Write content atomically using write-to-temp-then-rename.
+/// Write content atomically and durably using write-to-temp-then-rename.
 ///
-/// Creates a temp file in the same directory then persists (renames) to the
-/// target path.  `rename(2)` is atomic on APFS/ext4, eliminating partial-read
-/// windows.  The temp file is auto-cleaned on error.
+/// Creates a temp file in the same directory, writes and **fsyncs** it, then
+/// persists (renames) to the target path.  `rename(2)` is atomic on
+/// APFS/ext4, eliminating partial-read windows, and the fsync-before-rename
+/// ensures the rename can never survive a power loss without the data (which
+/// would leave a zero-length or partial file).  On Unix the parent directory
+/// is fsynced afterwards so the rename itself is durable too.  The temp file
+/// is auto-cleaned on error.
+///
+/// The blocking syscalls (write/fsync/rename) run on the blocking thread
+/// pool so the async executor is never stalled.
 pub(crate) async fn atomic_write(path: &Path, content: &str) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        StorageError::Validation("atomic_write target has no parent directory".into())
-    })?;
-    let tmp = tempfile::NamedTempFile::new_in(parent)?;
-    async_fs::write(tmp.path(), content).await?;
-    tmp.persist(path)?;
-    Ok(())
+    let path = path.to_path_buf();
+    let content = content.to_owned();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        use std::io::Write;
+
+        let parent = path.parent().ok_or_else(|| {
+            StorageError::Validation("atomic_write target has no parent directory".into())
+        })?;
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+        tmp.as_file_mut().write_all(content.as_bytes())?;
+        // fsync BEFORE rename: otherwise the rename can be persisted without
+        // the file contents.
+        tmp.as_file().sync_all()?;
+        tmp.persist(&path)?;
+        // fsync the directory so the rename (the file's existence under its
+        // final name) is durable. Directories can't be opened for writing on
+        // Windows, so this is Unix-only; the data itself is already synced.
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| StorageError::Validation(format!("atomic_write task failed: {}", e)))?
+}
+
+/// Locate every file in `dir` whose stem matches the given ID (or ID prefix).
+///
+/// Multiple files may legitimately share one full ID: a rename-update (title
+/// or visibility change) writes the new file before removing the old one, so
+/// a crash in between leaves a stale duplicate. All files for the SAME full
+/// ID are returned (callers resolve by mtime or clean them all up); matches
+/// spanning DISTINCT full IDs are a true ambiguous-prefix error.
+///
+/// Returns an empty Vec when the directory does not exist.
+async fn find_memory_files(dir: &Path, id: &str) -> Result<Vec<PathBuf>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut matches = Vec::new();
+    let mut distinct_ids = HashSet::new();
+    let mut entries = async_fs::read_dir(dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            if memory_file::stem_matches_id_prefix(stem, id) {
+                distinct_ids.insert(memory_file::extract_id_from_stem(stem).to_string());
+                matches.push(path);
+            }
+        }
+    }
+
+    if distinct_ids.len() > 1 {
+        return Err(StorageError::Validation(format!(
+            "Ambiguous ID prefix '{}': matches {} memories",
+            id,
+            distinct_ids.len()
+        )));
+    }
+    Ok(matches)
+}
+
+/// Modification time of a file; `UNIX_EPOCH` when unavailable, so a file we
+/// cannot stat loses any newest-wins comparison.
+async fn file_mtime(path: &Path) -> std::time::SystemTime {
+    match async_fs::metadata(path).await {
+        Ok(meta) => meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        Err(_) => std::time::SystemTime::UNIX_EPOCH,
+    }
+}
+
+/// Pick the most recently modified path. `paths` must be non-empty.
+async fn newest_by_mtime(paths: &[PathBuf]) -> &PathBuf {
+    let mut best = &paths[0];
+    let mut best_mtime = file_mtime(best).await;
+    for path in &paths[1..] {
+        let mtime = file_mtime(path).await;
+        if mtime >= best_mtime {
+            best = path;
+            best_mtime = mtime;
+        }
+    }
+    best
 }
 
 /// Count `.md` files in a directory. Returns 0 if the directory doesn't exist.
@@ -773,8 +1183,19 @@ async fn scan_dir_to_map(dir: &Path) -> HashMap<String, PathBuf> {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("md") {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                let id = memory_file::extract_id_from_stem(stem);
-                map.insert(id.to_string(), path);
+                let id = memory_file::extract_id_from_stem(stem).to_string();
+                match map.get(&id) {
+                    // Stale duplicate from a crashed rename-update: keep the
+                    // newest file (the rename path writes the new file last).
+                    Some(existing) => {
+                        if file_mtime(&path).await >= file_mtime(existing).await {
+                            map.insert(id, path);
+                        }
+                    }
+                    None => {
+                        map.insert(id, path);
+                    }
+                }
             }
         }
     }
@@ -873,6 +1294,85 @@ mod tests {
         assert!(paths::personal_memories_dir(&store.project_id)
             .unwrap()
             .exists());
+    }
+
+    /// Re-running `init` on an already-initialized project must not clobber
+    /// a user-customized config.toml and must not drop the embedding
+    /// fingerprint from the manifest (data-loss regression: `init` used to
+    /// unconditionally rewrite both files).
+    #[tokio::test]
+    async fn test_reinit_preserves_config_and_embedding_fingerprint() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+        let registry = InMemoryRegistry::new();
+
+        let store = MemoryStore::init(project_dir, &registry).await.unwrap();
+
+        // Customize the config (valid TOML so re-init's load_config parses it).
+        let config_path = project_dir.join(".engramdb/config.toml");
+        let custom_config = "# user-customized configuration\n[nli]\nenabled = false\n";
+        async_fs::write(&config_path, custom_config).await.unwrap();
+
+        // Stamp an embedding fingerprint, as a successful (re)embed would.
+        let fingerprint = manifest::EmbeddingFingerprint {
+            model: "onnx/all-MiniLM-L6-v2-q".to_string(),
+            dimensions: 384,
+        };
+        store
+            .set_embedding_fingerprint(fingerprint.clone())
+            .await
+            .unwrap();
+
+        // Re-running init must preserve both files byte-for-byte semantics.
+        MemoryStore::init(project_dir, &registry).await.unwrap();
+
+        let config_after = async_fs::read_to_string(&config_path).await.unwrap();
+        assert_eq!(
+            config_after, custom_config,
+            "re-init clobbered the user's config.toml"
+        );
+
+        let manifest_path = project_dir.join(".engramdb/manifest.toml");
+        let manifest_after = manifest::load_manifest(&manifest_path).await.unwrap();
+        assert_eq!(
+            manifest_after.embedding,
+            Some(fingerprint),
+            "re-init dropped the embedding fingerprint (store flipped to Untracked)"
+        );
+    }
+
+    /// Re-running `init` on a store with existing memories must keep the
+    /// memories readable and preserve manifest stats / created_at.
+    #[tokio::test]
+    async fn test_reinit_preserves_memories_and_manifest_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+        let registry = InMemoryRegistry::new();
+
+        let store = MemoryStore::init(project_dir, &registry).await.unwrap();
+        let memory = create_test_memory("reinit-keep-123", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        let manifest_path = project_dir.join(".engramdb/manifest.toml");
+        let before = manifest::load_manifest(&manifest_path).await.unwrap();
+        assert_eq!(before.stats.memory_count, 1);
+
+        let store2 = MemoryStore::init(project_dir, &registry).await.unwrap();
+
+        // Memory is still readable through the re-initialized store.
+        let retrieved = store2.get("reinit-keep-123").await.unwrap();
+        assert_eq!(retrieved.summary, "Test summary");
+
+        let after = manifest::load_manifest(&manifest_path).await.unwrap();
+        assert_eq!(
+            after.created_at, before.created_at,
+            "re-init reset manifest created_at"
+        );
+        assert_eq!(
+            after.stats.memory_count, before.stats.memory_count,
+            "re-init reset manifest stats"
+        );
+        assert_eq!(after.project, before.project);
     }
 
     #[tokio::test]
@@ -1009,6 +1509,354 @@ mod tests {
         assert_eq!(retrieved.content, "Test content");
     }
 
+    /// Set a file's mtime `secs` seconds into the past, so newest-wins
+    /// duplicate resolution has an unambiguous ordering.
+    fn age_file(path: &Path, secs: u64) {
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    /// All files in `dir` whose stem matches `id` (same matching rule the
+    /// store uses).
+    fn files_matching_id(dir: &Path, id: &str) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| {
+                let path = e.unwrap().path();
+                let stem = path.file_stem()?.to_str()?.to_owned();
+                memory_file::stem_matches_id_prefix(&stem, id).then_some(path)
+            })
+            .collect()
+    }
+
+    /// Issue-1 contract (a): an update that does not change the filename must
+    /// replace the file in place — the old path still exists afterwards and
+    /// no second file appears (the old delete-then-write order made the file
+    /// briefly absent, so racing lock-free readers saw spurious NotFound).
+    #[tokio::test]
+    async fn test_update_same_filename_replaces_in_place() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let memory = create_test_memory("inplace-update-123", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        let dir = paths::memories_dir(&store.project_dir);
+        let path = dir.join("inplace-update-123.md");
+        assert!(path.exists(), "file must exist after create");
+
+        let mut update = MemoryUpdate::new();
+        update.content = Some("New content".to_string());
+        store.update("inplace-update-123", update).await.unwrap();
+
+        assert!(
+            path.exists(),
+            "same-filename update must keep the file at its original path"
+        );
+        assert_eq!(
+            files_matching_id(&dir, "inplace-update-123").len(),
+            1,
+            "exactly one file for the id"
+        );
+        let retrieved = store.get("inplace-update-123").await.unwrap();
+        assert_eq!(retrieved.content, "New content");
+    }
+
+    /// Issue-1 contract (b): a title-changing update renames the file —
+    /// afterwards exactly one file exists for the id and `get` returns the
+    /// new state.
+    #[tokio::test]
+    async fn test_update_title_change_leaves_single_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "aaaa1111-2222-3333-4444-555566667777";
+        let mut memory = create_test_memory(id, Visibility::Shared);
+        memory.title = Some("First Title".to_string());
+        store.create(&memory).await.unwrap();
+
+        let dir = paths::memories_dir(&store.project_dir);
+        let old_path = dir.join(format!("first-title_{}.md", id));
+        assert!(old_path.exists(), "slugged filename expected after create");
+
+        let mut update = MemoryUpdate::new();
+        update.title = Some("Second Title".to_string());
+        update.content = Some("Renamed content".to_string());
+        store.update(id, update).await.unwrap();
+
+        assert!(!old_path.exists(), "old slug file must be removed");
+        let new_path = dir.join(format!("second-title_{}.md", id));
+        assert!(new_path.exists(), "new slug file must exist");
+        assert_eq!(
+            files_matching_id(&dir, id).len(),
+            1,
+            "exactly one file for the id after a rename-update"
+        );
+
+        let retrieved = store.get(id).await.unwrap();
+        assert_eq!(retrieved.title.as_deref(), Some("Second Title"));
+        assert_eq!(retrieved.content, "Renamed content");
+    }
+
+    /// Issue-1 contract (c): simulate the crash window of a rename-update —
+    /// BOTH the new and the stale old file exist for one id. Readers must
+    /// resolve to the newest file (not error as "ambiguous"), and `delete`
+    /// must sweep both files.
+    #[tokio::test]
+    async fn test_stale_duplicate_resolves_to_newest_and_delete_sweeps_both() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "cccc1111-2222-3333-4444-555566667777";
+        let mut memory = create_test_memory(id, Visibility::Shared);
+        memory.title = Some("New Title".to_string());
+        memory.content = "Current content".to_string();
+        store.create(&memory).await.unwrap();
+
+        // Manually create the stale pre-rename file (old title, old content)
+        // with an unambiguously older mtime.
+        let dir = paths::memories_dir(&store.project_dir);
+        let mut stale = memory.clone();
+        stale.title = Some("Old Title".to_string());
+        stale.content = "Stale content".to_string();
+        let stale_path = dir.join(memory_file::memory_filename(&stale));
+        std::fs::write(&stale_path, memory_file::write_memory_file(&stale).unwrap()).unwrap();
+        age_file(&stale_path, 3600);
+        assert_eq!(files_matching_id(&dir, id).len(), 2);
+
+        // get resolves to the newest file instead of failing as ambiguous.
+        let got = store.get(id).await.unwrap();
+        assert_eq!(got.content, "Current content");
+
+        // get_batch resolves the duplicate the same way.
+        let batch = store.get_batch(&[id]).await.unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].1.content, "Current content");
+
+        // delete removes BOTH files — no orphan left behind.
+        store.delete(id).await.unwrap();
+        assert!(files_matching_id(&dir, id).is_empty());
+        assert!(store.get(id).await.is_err());
+    }
+
+    /// A subsequent update also cleans up a stale duplicate left by a
+    /// crashed rename-update.
+    #[tokio::test]
+    async fn test_update_cleans_up_stale_duplicate() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "dddd1111-2222-3333-4444-555566667777";
+        let mut memory = create_test_memory(id, Visibility::Shared);
+        memory.title = Some("New Title".to_string());
+        store.create(&memory).await.unwrap();
+
+        let dir = paths::memories_dir(&store.project_dir);
+        let mut stale = memory.clone();
+        stale.title = Some("Old Title".to_string());
+        let stale_path = dir.join(memory_file::memory_filename(&stale));
+        std::fs::write(&stale_path, memory_file::write_memory_file(&stale).unwrap()).unwrap();
+        age_file(&stale_path, 3600);
+        assert_eq!(files_matching_id(&dir, id).len(), 2);
+
+        let mut update = MemoryUpdate::new();
+        update.content = Some("Post-crash content".to_string());
+        store.update(id, update).await.unwrap();
+
+        assert_eq!(
+            files_matching_id(&dir, id).len(),
+            1,
+            "update must sweep the stale duplicate"
+        );
+        assert!(!stale_path.exists());
+        let got = store.get(id).await.unwrap();
+        assert_eq!(got.content, "Post-crash content");
+    }
+
+    /// Reindex with a stale duplicate on disk: the newest file wins (its
+    /// content is what gets indexed), the duplicate counts once, and the
+    /// stale file is removed (reindex is the repair path).
+    #[tokio::test]
+    async fn test_reindex_dedupes_and_removes_stale_duplicate() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "eeee1111-2222-3333-4444-555566667777";
+        let mut memory = create_test_memory(id, Visibility::Shared);
+        memory.title = Some("New Title".to_string());
+        memory.summary = "Current summary".to_string();
+        store.create(&memory).await.unwrap();
+
+        let dir = paths::memories_dir(&store.project_dir);
+        let mut stale = memory.clone();
+        stale.title = Some("Old Title".to_string());
+        stale.summary = "Stale summary".to_string();
+        let stale_path = dir.join(memory_file::memory_filename(&stale));
+        std::fs::write(&stale_path, memory_file::write_memory_file(&stale).unwrap()).unwrap();
+        age_file(&stale_path, 3600);
+
+        let count = store.reindex().await.unwrap();
+        assert_eq!(count, 1, "duplicate files for one id must index once");
+        assert!(
+            !stale_path.exists(),
+            "reindex must remove the stale duplicate"
+        );
+        assert_eq!(files_matching_id(&dir, id).len(), 1);
+
+        let got = store.get(id).await.unwrap();
+        assert_eq!(got.summary, "Current summary");
+        assert_eq!(store.list_ids().await.unwrap(), vec![id.to_string()]);
+    }
+
+    /// Issue-3 regression: `set_embedding_fingerprint` racing concurrent
+    /// `create`s must not lose the fingerprint. Both paths do a
+    /// load-modify-save of manifest.toml; without the write lock a create
+    /// could load the pre-stamp manifest and save over the fingerprint.
+    #[tokio::test]
+    async fn test_set_embedding_fingerprint_survives_concurrent_creates() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let fingerprint = manifest::EmbeddingFingerprint {
+            model: "onnx/race-test-model".to_string(),
+            dimensions: 384,
+        };
+
+        let mut tasks = Vec::new();
+        for i in 0..8 {
+            let store = store.clone();
+            tasks.push(tokio::spawn(async move {
+                let mem = create_test_memory(&format!("fp-race-{}", i), Visibility::Shared);
+                store.create(&mem).await.unwrap();
+            }));
+        }
+        let stamp = {
+            let store = store.clone();
+            let fingerprint = fingerprint.clone();
+            tokio::spawn(async move {
+                store.set_embedding_fingerprint(fingerprint).await.unwrap();
+            })
+        };
+
+        for task in tasks {
+            task.await.unwrap();
+        }
+        stamp.await.unwrap();
+
+        assert_eq!(
+            store.embedding_fingerprint().await.unwrap(),
+            Some(fingerprint),
+            "a concurrent create clobbered the fingerprint (manifest RMW race)"
+        );
+        assert_eq!(store.count().await.unwrap(), 8, "all creates must land");
+    }
+
+    /// The core atomicity property of `update_with`: N concurrent
+    /// read-modify-write updates must all survive. Each task appends one
+    /// distinct tag inside the closure; because the memory is re-read under
+    /// the per-project write lock, no task can snapshot stale state and
+    /// overwrite another task's tag. (The old unlocked get-merge-update flow
+    /// would lose tags here.)
+    #[tokio::test]
+    async fn test_update_with_serializes_concurrent_updates() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let memory = create_test_memory("test-update-with-race", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        let tasks: Vec<_> = (0..8)
+            .map(|i| {
+                let store = store.clone();
+                tokio::spawn(async move {
+                    store
+                        .update_with("test-update-with-race", move |m| {
+                            m.tags.push(format!("tag-{}", i));
+                            Ok(())
+                        })
+                        .await
+                        .unwrap();
+                })
+            })
+            .collect();
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        let final_memory = store.get("test-update-with-race").await.unwrap();
+        for i in 0..8 {
+            assert!(
+                final_memory.tags.contains(&format!("tag-{}", i)),
+                "tag-{} was lost; tags = {:?} — update_with did not serialize",
+                i,
+                final_memory.tags
+            );
+        }
+        assert_eq!(final_memory.tags.len(), 8);
+    }
+
+    /// `update_with` returns the memory exactly as persisted (closure applied,
+    /// `updated_at` bumped), and the same state is readable back from disk.
+    #[tokio::test]
+    async fn test_update_with_returns_persisted_memory() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let memory = create_test_memory("test-update-with-ret", Visibility::Shared);
+        let created_at = memory.updated_at;
+        store.create(&memory).await.unwrap();
+
+        let returned = store
+            .update_with("test-update-with-ret", |m| {
+                m.summary = "Closure summary".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(returned.summary, "Closure summary");
+        assert!(returned.updated_at >= created_at);
+
+        let reloaded = store.get("test-update-with-ret").await.unwrap();
+        assert_eq!(reloaded.summary, "Closure summary");
+        assert_eq!(reloaded.updated_at, returned.updated_at);
+    }
+
+    /// A failing closure must abort the update: nothing is written and the
+    /// error surfaces to the caller.
+    #[tokio::test]
+    async fn test_update_with_closure_error_writes_nothing() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let memory = create_test_memory("test-update-with-err", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        let result = store
+            .update_with("test-update-with-err", |m| {
+                m.summary = "Should not persist".to_string();
+                anyhow::bail!("merge failed")
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("merge failed"));
+
+        let reloaded = store.get("test-update-with-err").await.unwrap();
+        assert_eq!(reloaded.summary, "Test summary");
+    }
+
     #[tokio::test]
     async fn test_delete_removes_memory() {
         let temp_dir = TempDir::new().unwrap();
@@ -1030,6 +1878,107 @@ mod tests {
             Err(StorageError::NotFound(_)) => {}
             _ => panic!("Expected NotFound error after delete"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_delete_if_predicate_true_deletes() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let memory = create_test_memory("delete-if-true-123", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        let deleted = store
+            .delete_if("delete-if-true-123", |m| m.summary == "Test summary")
+            .await
+            .unwrap();
+        assert!(deleted, "predicate true must delete and report true");
+        assert!(matches!(
+            store.get("delete-if-true-123").await,
+            Err(StorageError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_delete_if_predicate_false_keeps_memory() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let memory = create_test_memory("delete-if-false-123", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        let deleted = store
+            .delete_if("delete-if-false-123", |_| false)
+            .await
+            .unwrap();
+        assert!(!deleted, "predicate false must keep the memory");
+        assert!(store.get("delete-if-false-123").await.is_ok());
+    }
+
+    /// The predicate sees the LATEST persisted state, not whatever the caller
+    /// read before acquiring the lock — that re-read is the whole point.
+    #[tokio::test]
+    async fn test_delete_if_predicate_sees_fresh_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let memory = create_test_memory("delete-if-fresh-123", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        // Concurrent writer bumps criticality after the (hypothetical)
+        // earlier unlocked read.
+        let mut update = MemoryUpdate::new();
+        update.criticality = Some(0.95);
+        store.update("delete-if-fresh-123", update).await.unwrap();
+
+        let deleted = store
+            .delete_if("delete-if-fresh-123", |m| m.criticality < 0.9)
+            .await
+            .unwrap();
+        assert!(!deleted, "predicate must judge the updated criticality");
+        assert!(store.get("delete-if-fresh-123").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_delete_if_missing_id_is_skip_not_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let deleted = store
+            .delete_if("never-existed-123", |_| {
+                panic!("predicate must not run for a missing memory")
+            })
+            .await
+            .unwrap();
+        assert!(!deleted, "missing id must be Ok(false), not an error");
+    }
+
+    /// Stale index entry (row in LanceDB, data file gone) is also a skip.
+    #[tokio::test]
+    async fn test_delete_if_stale_index_entry_is_skip() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let memory = create_test_memory("delete-if-stale-123", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        // Remove the .md file but leave the index row.
+        let memories_dir = paths::memories_dir(temp_dir.path());
+        for entry in std::fs::read_dir(&memories_dir).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+
+        let deleted = store
+            .delete_if("delete-if-stale-123", |_| true)
+            .await
+            .unwrap();
+        assert!(!deleted, "stale index entry must be skipped, not an error");
     }
 
     #[tokio::test]
@@ -1087,6 +2036,49 @@ mod tests {
 
         assert!(ids.contains(&"reindex-test-1".to_string()));
         assert!(ids.contains(&"reindex-test-2".to_string()));
+    }
+
+    /// Regression test for the reindex data-loss bug: rebuilding metadata
+    /// from the markdown files must NOT destroy existing embedding vectors.
+    /// Chunks for memories that no longer exist on disk are pruned, keeping
+    /// the chunks table consistent without losing live vectors.
+    #[tokio::test]
+    async fn test_reindex_preserves_chunks_and_prunes_orphans() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let memory = create_test_memory("reindex-chunks-live", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+        store
+            .upsert_chunks(
+                "reindex-chunks-live",
+                vec![vec![0.25f32; 384], vec![0.5f32; 384]],
+            )
+            .await
+            .unwrap();
+
+        // Chunks for a memory with no file on disk (deleted out-of-band).
+        store
+            .upsert_chunks("reindex-chunks-ghost", vec![vec![0.75f32; 384]])
+            .await
+            .unwrap();
+
+        let count = store.reindex().await.unwrap();
+        assert_eq!(count, 1);
+
+        // The live memory's vectors must survive a metadata-only reindex.
+        let chunks = store.export_chunks("reindex-chunks-live").await.unwrap();
+        assert_eq!(chunks.len(), 2, "vectors must survive reindex");
+        assert_eq!(chunks[0], vec![0.25f32; 384]);
+
+        // Orphaned chunks must be pruned so the table stays consistent.
+        assert_eq!(
+            store.list_chunk_memory_ids().await.unwrap(),
+            vec!["reindex-chunks-live".to_string()],
+            "ghost chunks must be pruned, live chunks kept"
+        );
     }
 
     #[tokio::test]
@@ -1256,6 +2248,186 @@ mod tests {
         assert_eq!(existing.len(), 3);
         assert!(!existing.contains("fake-id-1"));
         assert!(!existing.contains("fake-id-2"));
+    }
+
+    // --- Second-clone (shared project ID) guard tests ---
+
+    /// Create a fake git clone with a fixed remote URL so two directories
+    /// compute the same (remote-derived) project ID. Each test uses a
+    /// distinct `remote` so per-test global state never collides.
+    fn make_clone(root: &Path, name: &str, remote: &str) -> PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(
+            dir.join(".git").join("config"),
+            format!(
+                "[remote \"origin\"]\n\turl = https://github.com/example/{}.git\n",
+                remote
+            ),
+        )
+        .unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn test_second_clone_detects_checkout_conflict() {
+        let tmp = TempDir::new().unwrap();
+        let a = make_clone(tmp.path(), "clone-a", "conflict-detect");
+        let b = make_clone(tmp.path(), "clone-b", "conflict-detect");
+        // `checkout_conflict` consults the global file registry (redirected to
+        // a per-process temp dir by the test-isolation arm), so init through
+        // it rather than an InMemoryRegistry.
+        let registry = crate::registry::FileRegistry::global().unwrap();
+
+        let store_a = MemoryStore::init(&a, &registry).await.unwrap();
+        let store_b = MemoryStore::init(&b, &registry).await.unwrap();
+        assert_eq!(
+            store_a.project_id, store_b.project_id,
+            "clones of one remote share a project ID by design"
+        );
+
+        assert_eq!(
+            store_a.checkout_conflict().await,
+            None,
+            "the registered owner sees no conflict"
+        );
+        assert_eq!(
+            store_b.checkout_conflict().await,
+            Some(a.canonicalize().unwrap()),
+            "the second clone must detect the registered checkout"
+        );
+
+        // The conflict is equally detectable from a plain `open`.
+        let reopened_b = MemoryStore::open(&b).await.unwrap();
+        assert_eq!(
+            reopened_b.checkout_conflict().await,
+            Some(a.canonicalize().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_second_clone_init_does_not_steal_registration_until_owner_gone() {
+        let tmp = TempDir::new().unwrap();
+        let a = make_clone(tmp.path(), "clone-a", "conflict-repoint");
+        let b = make_clone(tmp.path(), "clone-b", "conflict-repoint");
+        let registry = crate::registry::FileRegistry::global().unwrap();
+
+        let store_a = MemoryStore::init(&a, &registry).await.unwrap();
+        MemoryStore::init(&b, &registry).await.unwrap();
+
+        let loaded = registry.load().await.unwrap();
+        let entry = loaded
+            .projects
+            .iter()
+            .find(|e| e.project_id == store_a.project_id)
+            .expect("project registered");
+        assert_eq!(
+            PathBuf::from(&entry.project_path),
+            a.canonicalize().unwrap(),
+            "registry must keep the first checkout while it exists"
+        );
+
+        // The first checkout disappears (deleted / moved clone): the next
+        // init from B legitimately takes over the registration.
+        async_fs::remove_dir_all(&a).await.unwrap();
+        let store_b = MemoryStore::init(&b, &registry).await.unwrap();
+
+        let loaded = registry.load().await.unwrap();
+        let entry = loaded
+            .projects
+            .iter()
+            .find(|e| e.project_id == store_b.project_id)
+            .expect("project registered");
+        assert_eq!(
+            PathBuf::from(&entry.project_path),
+            b.canonicalize().unwrap(),
+            "registry must self-heal once the old checkout is gone"
+        );
+        assert_eq!(store_b.checkout_conflict().await, None);
+    }
+
+    /// CRITICAL data-loss guard: a reindex run from the second clone shares
+    /// the LanceDB index with the first clone but only sees its own memory
+    /// files — it must NOT clear the other clone's index rows or prune its
+    /// vectors as "orphans".
+    #[tokio::test]
+    async fn test_reindex_from_second_clone_preserves_other_checkouts_data() {
+        let tmp = TempDir::new().unwrap();
+        let a = make_clone(tmp.path(), "clone-a", "conflict-reindex");
+        let b = make_clone(tmp.path(), "clone-b", "conflict-reindex");
+        let registry = crate::registry::FileRegistry::global().unwrap();
+
+        let store_a = MemoryStore::init(&a, &registry).await.unwrap();
+        let store_b = MemoryStore::init(&b, &registry).await.unwrap();
+
+        // Clone A's memory file lives only in A's tree; its index row and
+        // vector live in the shared LanceDB table.
+        let mem_a = create_test_memory("clone-a-mem", Visibility::Shared);
+        store_a.create(&mem_a).await.unwrap();
+        store_a
+            .upsert_chunks("clone-a-mem", vec![vec![0.25f32; 384]])
+            .await
+            .unwrap();
+
+        let mem_b = create_test_memory("clone-b-mem", Visibility::Shared);
+        store_b.create(&mem_b).await.unwrap();
+
+        let count = store_b.reindex().await.unwrap();
+        assert_eq!(count, 1, "only this checkout's files are scanned");
+
+        let ids = store_b.list_ids().await.unwrap();
+        assert!(
+            ids.contains(&"clone-a-mem".to_string()),
+            "the other clone's index row must survive a guarded reindex"
+        );
+        assert!(ids.contains(&"clone-b-mem".to_string()));
+
+        let chunks = store_b.export_chunks("clone-a-mem").await.unwrap();
+        assert_eq!(
+            chunks.len(),
+            1,
+            "the other clone's vectors must not be pruned as orphans"
+        );
+        assert_eq!(chunks[0], vec![0.25f32; 384]);
+    }
+
+    /// Control: once the conflicting checkout is gone (and the registry has
+    /// self-healed), reindex is destructive again — stale rows and orphan
+    /// chunks from the departed clone are cleaned up.
+    #[tokio::test]
+    async fn test_reindex_becomes_destructive_again_once_other_clone_gone() {
+        let tmp = TempDir::new().unwrap();
+        let a = make_clone(tmp.path(), "clone-a", "conflict-cleanup");
+        let b = make_clone(tmp.path(), "clone-b", "conflict-cleanup");
+        let registry = crate::registry::FileRegistry::global().unwrap();
+
+        let store_a = MemoryStore::init(&a, &registry).await.unwrap();
+        let store_b = MemoryStore::init(&b, &registry).await.unwrap();
+
+        let mem_a = create_test_memory("clone-a-mem", Visibility::Shared);
+        store_a.create(&mem_a).await.unwrap();
+        store_a
+            .upsert_chunks("clone-a-mem", vec![vec![0.25f32; 384]])
+            .await
+            .unwrap();
+        let mem_b = create_test_memory("clone-b-mem", Visibility::Shared);
+        store_b.create(&mem_b).await.unwrap();
+
+        // Clone A disappears; re-init from B takes over the registration.
+        async_fs::remove_dir_all(&a).await.unwrap();
+        let store_b = MemoryStore::init(&b, &registry).await.unwrap();
+        assert_eq!(store_b.checkout_conflict().await, None);
+
+        let count = store_b.reindex().await.unwrap();
+        assert_eq!(count, 1);
+
+        let ids = store_b.list_ids().await.unwrap();
+        assert_eq!(ids, vec!["clone-b-mem".to_string()]);
+        assert_eq!(
+            store_b.list_chunk_memory_ids().await.unwrap(),
+            Vec::<String>::new(),
+            "the departed clone's orphan chunks are pruned by a full reindex"
+        );
     }
 
     // --- Global memory store tests ---

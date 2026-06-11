@@ -30,6 +30,12 @@ struct Ctx {
     ping_count: AtomicU64,
     /// Timestamp of the most recent `Ping`, or `None` if no ping yet.
     last_ping: Mutex<Option<Instant>>,
+    /// Signals `run_daemon` (and its background tasks) to wind down. Sent by
+    /// the `Shutdown` handler and the idle watchdog. `run_daemon` *returns*
+    /// when this fires; the process exit belongs to the binary front-end
+    /// (`engramdb daemon run` exits when `run_daemon` returns), which keeps
+    /// `run_daemon` fully drivable inside a test process.
+    shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl Ctx {
@@ -41,16 +47,25 @@ impl Ctx {
         )
         .await;
     }
+
+    /// Ask the accept loop (and background tasks) to stop.
+    fn request_shutdown(&self) {
+        let _ = self.shutdown.send(true);
+    }
 }
 
-/// Run the embedding daemon until idle-timeout or termination.
+/// Run the embedding daemon until idle-timeout or shutdown.
 ///
 /// Startup is race-coordinated by the socket itself: only one process can be
 /// bound to a given path. If a live daemon already owns the socket this
 /// returns `Ok(())` (that daemon wins); a stale socket left by a crashed
-/// daemon is detected (no listener answers) and reclaimed. Once serving, the
-/// process exits after `idle_timeout` with no active connections — the next
-/// MCP process that needs a daemon respawns one.
+/// daemon is detected (no listener answers) and reclaimed. Once serving, this
+/// function returns after `idle_timeout` with no active connections, or when
+/// a client sends `Shutdown` — the `engramdb daemon run` front-end then exits
+/// the process (leaving the socket for the next daemon to reclaim), and the
+/// next MCP process that needs a daemon respawns one. Returning instead of
+/// calling `process::exit` here keeps `run_daemon` drivable in-process by
+/// tests.
 pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Result<()> {
     let listener: super::transport::Listener =
         match super::transport::bind_or_yield(&socket).await? {
@@ -68,6 +83,7 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
         .await
         .map(|p| p.snapshot)
         .unwrap_or_default();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let ctx = Arc::new(Ctx {
         cache: ProviderCache::new(),
         counters: Arc::new(Counters::seeded(base)),
@@ -76,6 +92,7 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
         last_activity: Mutex::new(Instant::now()),
         ping_count: AtomicU64::new(0),
         last_ping: Mutex::new(None),
+        shutdown: shutdown_tx,
     });
     let active = Arc::new(AtomicUsize::new(0));
 
@@ -83,26 +100,34 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
     // recent snapshot for `stats --daemon`.
     {
         let ctx = Arc::clone(&ctx);
+        let mut shutdown = shutdown_rx.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(PERSIST_INTERVAL).await;
-                ctx.persist().await;
+                tokio::select! {
+                    _ = tokio::time::sleep(PERSIST_INTERVAL) => ctx.persist().await,
+                    _ = shutdown.changed() => return,
+                }
             }
         });
     }
 
-    // Idle watchdog: persist a final snapshot, then exit the process (leaving
-    // the socket for the next daemon to reclaim) once nothing has used us for
+    // Idle watchdog: persist a final snapshot, then signal shutdown (which
+    // makes `run_daemon` return, and the daemon binary exit — leaving the
+    // socket for the next daemon to reclaim) once nothing has used us for
     // `idle_timeout` and no connection is in flight.
     {
         let ctx = Arc::clone(&ctx);
         let active = Arc::clone(&active);
+        let mut shutdown = shutdown_rx.clone();
         let tick = idle_timeout
             .min(Duration::from_secs(30))
             .max(Duration::from_secs(1));
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(tick).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(tick) => {}
+                    _ = shutdown.changed() => return,
+                }
                 if active.load(Ordering::SeqCst) == 0 {
                     let idle_for = ctx
                         .last_activity
@@ -110,9 +135,10 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
                         .map(|t| t.elapsed())
                         .unwrap_or_default();
                     if idle_for >= idle_timeout {
-                        tracing::info!("engramdb daemon idle for {idle_for:?}; exiting");
+                        tracing::info!("engramdb daemon idle for {idle_for:?}; shutting down");
                         ctx.persist().await;
-                        std::process::exit(0);
+                        ctx.request_shutdown();
+                        return;
                     }
                 }
             }
@@ -120,13 +146,46 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
     }
 
     loop {
-        let stream = match listener.accept().await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("daemon accept failed: {e}");
+        let stream = tokio::select! {
+            // Shutdown (requested by a client or the idle watchdog): stop
+            // accepting and return. Dropping the listener refuses any further
+            // connections; the socket *file* stays behind exactly as a killed
+            // daemon would leave it, and the next daemon reclaims it.
+            _ = shutdown_rx.changed() => {
+                tracing::info!("engramdb daemon stopped accepting connections");
+                return Ok(());
+            }
+            res = listener.accept() => match res {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("daemon accept failed: {e}");
+                    continue;
+                }
+            },
+        };
+        // Defense layer 3 (Unix): verify the peer's kernel-reported uid via
+        // `SO_PEERCRED` before serving anything. Layers 1+2 (0700 socket dir,
+        // 0600 socket file — see `transport`) should already keep other users
+        // out, but this check holds even if the socket path was relocated to
+        // a directory with looser permissions. A rejected peer is dropped
+        // before it can drive inference, read Status, probe arbitrary `dir`
+        // config paths, or send an unauthenticated Shutdown.
+        #[cfg(unix)]
+        match stream.peer_cred() {
+            Ok(cred) if peer_allowed(cred.uid(), super::current_euid()) => {}
+            Ok(cred) => {
+                tracing::warn!(
+                    "daemon rejected connection from uid {} (serving uid {} only)",
+                    cred.uid(),
+                    super::current_euid()
+                );
                 continue;
             }
-        };
+            Err(e) => {
+                tracing::warn!("daemon rejected connection: peer credentials unavailable: {e}");
+                continue;
+            }
+        }
         let ctx = Arc::clone(&ctx);
         let active = Arc::clone(&active);
         // Count the connection and stamp activity *before* spawning, so the
@@ -146,6 +205,18 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
     }
 }
 
+/// Access policy for an accepted daemon connection: the peer's uid (from
+/// `SO_PEERCRED`) must equal this process's effective uid. Root is
+/// deliberately **not** exempt — a uid-0 peer of a non-root daemon is
+/// rejected like any other mismatch. Root can already reach the models, data,
+/// and the daemon process itself directly, so an exemption would buy nothing
+/// while complicating the policy to two cases; a root client that genuinely
+/// needs a daemon simply spawns one as itself (auto-spawn makes that free).
+#[cfg(unix)]
+pub(crate) fn peer_allowed(peer_uid: u32, my_euid: u32) -> bool {
+    peer_uid == my_euid
+}
+
 /// Serve a single client connection. Generic over the transport stream so the
 /// same dispatch loop runs over a Unix domain socket or a Windows named pipe.
 async fn handle_conn<S>(stream: S, ctx: &Ctx) -> std::io::Result<()>
@@ -156,12 +227,14 @@ where
     let mut reader = BufReader::new(read_half);
 
     while let Some(req) = read_msg::<_, DaemonRequest>(&mut reader).await? {
-        // Shutdown is terminal: ack, flush, persist, then exit the process.
+        // Shutdown is terminal: ack, flush, persist, then signal the accept
+        // loop so `run_daemon` returns (the daemon binary's main then exits).
         if let DaemonOp::Shutdown = req.op {
             write_msg(&mut write_half, &DaemonResponse::ShuttingDown).await?;
             tracing::info!("engramdb daemon shutting down on request");
             ctx.persist().await;
-            std::process::exit(0);
+            ctx.request_shutdown();
+            return Ok(());
         }
 
         let resp = dispatch(req, ctx).await;

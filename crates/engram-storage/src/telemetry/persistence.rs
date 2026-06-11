@@ -412,8 +412,11 @@ fn nullable_bool(arr: &BooleanArray, i: usize) -> Option<bool> {
     }
 }
 
-/// Delete events older than `retention_days`. No-op when `retention_days`
-/// is `None` (the default) — counters cover the entire recorded history.
+/// Delete events older than `retention_days`. Callers skip this entirely
+/// when `[stats].retention_days` is `None` (explicit unlimited retention —
+/// the config default is `Some(90)`); validation rejects 0, so the cutoff
+/// is always strictly in the past. Invoked periodically by the flush task
+/// and opportunistically by `gc`.
 pub async fn prune_older_than(project_id: &str, retention_days: u64) -> Result<()> {
     if is_in_memory_only(project_id) {
         return Ok(());
@@ -595,11 +598,13 @@ fn spawn_append(
     })
 }
 
-/// Run `Table::optimize()` to compact small Lance fragments. Idempotent and
-/// safe to call concurrently with appends — Lance handles concurrent
-/// versioning. Errors are logged at debug level only (compaction is an
-/// optimization, not a correctness requirement).
-async fn optimize_table(project_id: &str) -> Result<()> {
+/// Run `Table::optimize()` to compact small Lance fragments and prune old
+/// dataset versions of the `stats_events` table. Idempotent and safe to call
+/// concurrently with appends — Lance handles concurrent versioning, and
+/// version pruning keeps the lancedb-default 7 days of versions. Callers
+/// (the flush task, `gc`) treat failures as non-fatal: compaction is an
+/// optimization, not a correctness requirement.
+pub async fn optimize_table(project_id: &str) -> Result<()> {
     if is_in_memory_only(project_id) {
         return Ok(());
     }
@@ -724,6 +729,38 @@ mod tests {
         let read = load_recent(&pid, 100).await.unwrap();
         assert_eq!(read.len(), 1, "stale row pruned");
         assert_eq!(read[0].session_id.as_deref(), Some("new"));
+    }
+
+    /// Unbounded-growth guard: the *default* config retention must be finite
+    /// and pruning with it must actually delete rows older than the window
+    /// while keeping everything inside it.
+    #[tokio::test]
+    async fn prune_with_default_retention_drops_ancient_rows() {
+        let pid = unique_pid("prune-default");
+        ensure_project_dir(&pid).await;
+        let now = Utc::now();
+        let events = vec![
+            tool_event(
+                now - chrono::Duration::days(120),
+                "query",
+                1.0,
+                true,
+                "ancient",
+            ),
+            tool_event(now - chrono::Duration::days(10), "query", 2.0, true, "kept"),
+            tool_event(now, "query", 3.0, true, "fresh"),
+        ];
+        append_events(&pid, &events, None).await;
+
+        let days = StatsConfig::default()
+            .retention_days
+            .expect("default retention must be finite (Some(90))");
+        prune_older_than(&pid, days).await.unwrap();
+
+        let read = load_recent(&pid, 100).await.unwrap();
+        assert_eq!(read.len(), 2, "only the 120-day-old row is pruned");
+        assert_eq!(read[0].session_id.as_deref(), Some("kept"));
+        assert_eq!(read[1].session_id.as_deref(), Some("fresh"));
     }
 
     /// R4 regression: project IDs without an initialized parent directory

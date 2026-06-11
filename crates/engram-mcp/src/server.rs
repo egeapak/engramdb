@@ -1,6 +1,6 @@
 //! EngramDB MCP server implementation.
 //!
-//! Defines the server struct, all MCP tools (15), resources (2), and prompts (2).
+//! Defines the server struct, all MCP tools (19), resources (2), and prompts (2).
 //! Tools delegate to the `ops` layer; the server opens a fresh `MemoryStore`
 //! per request so it always sees the latest on-disk state.
 
@@ -103,7 +103,9 @@ struct QueryInput {
     #[schemars(description = "Search query text (tokenized against summary, content, tags)")]
     query: Option<String>,
 
-    #[schemars(description = "Physical scope — current file path for proximity scoring")]
+    #[schemars(
+        description = "Physical scope — current file path for proximity scoring. Repo-relative or absolute (absolute paths under the project root are relativized automatically)."
+    )]
     path: Option<String>,
 
     #[schemars(
@@ -1766,12 +1768,18 @@ impl EngramDbServer {
         .await
         .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
-        let r = serde_json::to_string(&serde_json::json!({
+        let mut response = serde_json::json!({
             "new_id": result.new_id,
             "superseded_count": result.superseded_count,
             "applied": true,
-        }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        });
+        if !result.skipped_sources.is_empty() {
+            // Sources already gone at delete time (deleted concurrently
+            // after validation) — the compressed memory is still valid.
+            response["skipped_sources"] = serde_json::json!(result.skipped_sources);
+        }
+        let r = serde_json::to_string(&response)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
         Ok(r)
     }
@@ -1874,10 +1882,19 @@ impl EngramDbServer {
             "count": result.count,
             "dry_run": dry_run
         });
+        if !result.skipped.is_empty() {
+            // Candidates skipped at delete time: concurrently deleted, or
+            // modified/re-scored above the threshold under the write lock.
+            response["skipped"] = serde_json::json!(result.skipped);
+        }
         if !result.stale_entries.is_empty() {
             response["stale_entries"] = serde_json::json!(result.stale_entries);
             response["warning"] =
                 serde_json::json!("Stale index entries found. Run reindex to fix.");
+        }
+        if let Some(m) = &result.maintenance {
+            // Post-deletion index maintenance (compaction + version pruning).
+            response["index_bytes_reclaimed"] = serde_json::json!(m.bytes_removed);
         }
         let r = serde_json::to_string(&response)
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
@@ -1922,7 +1939,8 @@ impl EngramDbServer {
         let r = serde_json::to_string(&serde_json::json!({
             "indexed": result.indexed,
             "embedded": result.embedded,
-            "errors": result.errors
+            "errors": result.errors,
+            "warnings": result.warnings
         }))
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
@@ -2123,6 +2141,21 @@ impl EngramDbServer {
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
         Ok(r)
+    }
+}
+
+impl EngramDbServer {
+    /// Names of every MCP tool this server exposes, in router order.
+    ///
+    /// Public so front-ends that maintain tool allowlists (the CLI's `setup`
+    /// command writes `permissions.allow` entries per tool) can pin their
+    /// lists against the actual tool surface instead of drifting silently.
+    pub fn tool_names() -> Vec<String> {
+        Self::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect()
     }
 }
 
@@ -3302,6 +3335,86 @@ mod tests {
         assert!(!val["memories"].as_array().unwrap().is_empty());
     }
 
+    /// Regression: physical scopes are stored repo-relative, so an absolute
+    /// `path` (exactly what the tool description invites an agent to pass)
+    /// used to silently match nothing. The engine now relativizes absolute
+    /// paths against the project root, so absolute-under-root and relative
+    /// queries must return identical results.
+    #[tokio::test]
+    async fn query_filter_absolute_path_relativized_to_project() {
+        let (dir, server) = setup().await;
+        let input = CreateInput {
+            physical: Some(vec!["src/auth.rs".to_string()]),
+            criticality: Some(0.9),
+            ..create_input("hazard", "Auth hazard", "Never log raw tokens")
+        };
+        server.memory_create(Parameters(input)).await.unwrap();
+
+        // Create the file on disk so canonicalization resolves it (mirrors a
+        // real agent passing the path of the file it is editing).
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/auth.rs"), "// auth").unwrap();
+
+        let ids_for = |val: &serde_json::Value| -> Vec<String> {
+            val["memories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["id"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        // Baseline: repo-relative path (filter mode → path is a hard filter).
+        let rel = server
+            .memory_query(Parameters(QueryInput {
+                path: Some("src/auth.rs".to_string()),
+                ..query_input("filter")
+            }))
+            .await;
+        let rel_ids = ids_for(&parse_ok(&rel));
+        assert_eq!(rel_ids.len(), 1, "relative path should match the memory");
+
+        // Absolute path under the project root → identical results.
+        let abs_path = dir.path().join("src/auth.rs");
+        let abs = server
+            .memory_query(Parameters(QueryInput {
+                path: Some(abs_path.to_string_lossy().to_string()),
+                ..query_input("filter")
+            }))
+            .await;
+        let abs_ids = ids_for(&parse_ok(&abs));
+        assert_eq!(
+            abs_ids, rel_ids,
+            "absolute path under the project root must match like the relative path"
+        );
+    }
+
+    /// An absolute path NOT under the project root passes through unchanged:
+    /// it legitimately matches no repo-relative scope, so the query succeeds
+    /// with zero results (and must not panic or error).
+    #[tokio::test]
+    async fn query_filter_absolute_path_outside_project_matches_nothing() {
+        let (_dir, server) = setup().await;
+        let input = CreateInput {
+            physical: Some(vec!["src/auth.rs".to_string()]),
+            criticality: Some(0.9),
+            ..create_input("hazard", "Auth hazard", "Never log raw tokens")
+        };
+        server.memory_create(Parameters(input)).await.unwrap();
+
+        let result = server
+            .memory_query(Parameters(QueryInput {
+                path: Some("/definitely/elsewhere/src/auth.rs".to_string()),
+                ..query_input("filter")
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(
+            val["memories"].as_array().unwrap().is_empty(),
+            "a path outside the project root must match nothing"
+        );
+    }
+
     #[tokio::test]
     async fn retrieve_by_logical() {
         let (_dir, server) = setup().await;
@@ -3322,6 +3435,64 @@ mod tests {
             .await;
         let val = parse_ok(&result);
         assert!(!val["memories"].as_array().unwrap().is_empty());
+    }
+
+    /// Filter-mode `logical` is a hierarchical filter, not exact string
+    /// equality: querying the domain `auth` must surface a memory scoped to
+    /// the subdomain `auth.oauth` (and the ancestor direction holds:
+    /// querying `auth.oauth` surfaces a memory scoped `auth`), while an
+    /// unrelated scope matches nothing. Mirrors the engine-level contract in
+    /// `retrieval::engine`.
+    #[tokio::test]
+    async fn query_filter_logical_is_hierarchical() {
+        let (_dir, server) = setup().await;
+        let input = CreateInput {
+            logical: Some(vec!["auth.oauth".to_string()]),
+            criticality: Some(0.9),
+            ..create_input("decision", "OAuth decision", "We use PKCE")
+        };
+        server.memory_create(Parameters(input)).await.unwrap();
+
+        // Querying the parent domain matches the subdomain-scoped memory.
+        let result = server
+            .memory_query(Parameters(QueryInput {
+                logical: Some(vec!["auth".to_string()]),
+                ..query_input("filter")
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(
+            val["memories"].as_array().unwrap().len(),
+            1,
+            "query `auth` must match memory scoped `auth.oauth`: {val}"
+        );
+
+        // Querying a deeper scope matches the ancestor-scoped memory.
+        let result = server
+            .memory_query(Parameters(QueryInput {
+                logical: Some(vec!["auth.oauth.google".to_string()]),
+                ..query_input("filter")
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(
+            val["memories"].as_array().unwrap().len(),
+            1,
+            "query `auth.oauth.google` must match ancestor scope `auth.oauth`: {val}"
+        );
+
+        // Unrelated scope matches nothing.
+        let result = server
+            .memory_query(Parameters(QueryInput {
+                logical: Some(vec!["billing".to_string()]),
+                ..query_input("filter")
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(
+            val["memories"].as_array().unwrap().is_empty(),
+            "query `billing` must not match `auth.oauth`: {val}"
+        );
     }
 
     #[tokio::test]

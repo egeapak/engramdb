@@ -17,9 +17,9 @@
 //! <optional details>
 //! ```
 
-use super::helpers::parse_body_sections;
+use super::helpers::{escape_body_text, parse_body_sections, split_frontmatter};
 use super::{MemoryParser, MemoryWriter};
-use crate::error::{Result, StorageError};
+use crate::error::Result;
 use engram_types::Memory;
 
 /// Parser for the V1 (legacy) full-YAML-frontmatter format.
@@ -52,19 +52,6 @@ impl MemoryWriter for V1Writer {
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
-
-fn split_frontmatter(content: &str) -> Result<(&str, &str)> {
-    let mut parts = content.splitn(3, "---");
-    parts.next(); // skip before first ---
-    let frontmatter = parts
-        .next()
-        .ok_or_else(|| StorageError::InvalidFormat("Missing frontmatter".to_string()))?
-        .trim();
-    let body = parts
-        .next()
-        .ok_or_else(|| StorageError::InvalidFormat("Missing body after frontmatter".to_string()))?;
-    Ok((frontmatter, body))
-}
 
 fn parse_v1(frontmatter: &str, body: &str) -> Result<Memory> {
     let mut memory: Memory = serde_yaml_ng::from_str(frontmatter)?;
@@ -106,12 +93,12 @@ fn write_v1(memory: &Memory) -> Result<String> {
     }
 
     out.push_str("## Content\n\n");
-    out.push_str(&memory.content);
+    out.push_str(&escape_body_text(&memory.content));
     out.push('\n');
 
     if let Some(details) = &memory.details {
         out.push_str("\n## Details\n\n");
-        out.push_str(details);
+        out.push_str(&escape_body_text(details));
         out.push('\n');
     }
 
