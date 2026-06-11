@@ -78,7 +78,7 @@ engramdb query --mode <rank|filter> [query] [flags...]
 | `--mode <rank\|filter>` | Required. |
 | `[QUERY]` or `--query <text>` | Search text. Explicit flag wins over positional. |
 | `-p, --path <path>` | Physical context for proximity scoring. |
-| `-l, --logical <dot.path>` | Logical context for hierarchy proximity. Repeatable. Not a filter. |
+| `-l, --logical <dot.path>` | Logical context (dot-notation). Repeatable. Scoring signal in `rank` mode; hard hierarchical filter in `filter` mode (`auth` matches `auth.oauth` and vice versa; siblings don't match). |
 | `-t, --type <T>` | Filter by type. Repeatable. |
 | `--tags <a,b,c>` | Filter by tags (OR within the list). |
 | `--min-criticality <0..1>` | Drop memories below this. |

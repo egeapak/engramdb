@@ -135,6 +135,34 @@ fn lca_distance(a: &str, b: &str) -> Option<(usize, usize)> {
     Some((asegs.len() - common, bsegs.len() - common))
 }
 
+/// Returns `true` when two dot-notation scopes lie on the same ancestor
+/// chain: they are equal, or one is a strict ancestor of the other
+/// (`auth` ↔ `auth.oauth` ↔ `auth.oauth.google`).
+///
+/// This is the hierarchical-relatedness contract used by filter-mode's hard
+/// `logical` filter (see `retrieval::engine`), chosen to mirror rank mode's
+/// proximity table above, where ancestor↔descendant relationships at any
+/// distance earn a bonus in **both** directions:
+///
+/// - Querying `auth` matches memories scoped `auth`, `auth.oauth`,
+///   `auth.oauth.google` — a query for the domain surfaces everything under
+///   it (descendant-or-equal).
+/// - Querying `auth.oauth` also matches a memory scoped just `auth` — a
+///   broad memory applies to all of its subdomains (ancestor-or-equal),
+///   exactly as rank mode awards the parent↔child bonus bidirectionally.
+///
+/// Siblings and cousins (`auth.jwt` vs `auth.oauth`) are **not** related
+/// here: rank mode gives them only a small proximity bonus, and admitting
+/// them through a hard filter would leak adjacent subdomains into a query
+/// that named a specific one. Matching is per-segment (so `auth` never
+/// matches `authentication`), and empty scopes are never related. Logical
+/// scopes do not support globs (only physical scopes do).
+pub fn hierarchically_related(a: &str, b: &str) -> bool {
+    (!a.is_empty() && a == b)
+        || ancestor_distance(a, b).is_some()
+        || ancestor_distance(b, a).is_some()
+}
+
 /// Extracts the parent scope from a dot-notation scope.
 ///
 /// # Examples
@@ -362,6 +390,48 @@ mod tests {
     fn test_lca_distance_empty_scopes() {
         assert_eq!(lca_distance("", "a.b"), None);
         assert_eq!(lca_distance("a.b", ""), None);
+    }
+
+    #[test]
+    fn test_hierarchically_related_equal() {
+        assert!(hierarchically_related("auth", "auth"));
+        assert!(hierarchically_related("auth.oauth", "auth.oauth"));
+    }
+
+    #[test]
+    fn test_hierarchically_related_descendant_and_ancestor() {
+        // Both directions, at any distance.
+        assert!(hierarchically_related("auth", "auth.oauth"));
+        assert!(hierarchically_related("auth.oauth", "auth"));
+        assert!(hierarchically_related(
+            "auth",
+            "auth.oauth.google.workspace"
+        ));
+        assert!(hierarchically_related(
+            "auth.oauth.google.workspace",
+            "auth"
+        ));
+    }
+
+    #[test]
+    fn test_hierarchically_related_rejects_siblings_and_cousins() {
+        assert!(!hierarchically_related("auth.jwt", "auth.oauth"));
+        assert!(!hierarchically_related("a.b.c", "a.d.e"));
+    }
+
+    #[test]
+    fn test_hierarchically_related_rejects_unrelated_and_prefix_strings() {
+        assert!(!hierarchically_related("billing", "auth"));
+        // Segment-wise, not string-prefix: "auth" is not related to
+        // "authentication".
+        assert!(!hierarchically_related("auth", "authentication"));
+    }
+
+    #[test]
+    fn test_hierarchically_related_empty_never_matches() {
+        assert!(!hierarchically_related("", ""));
+        assert!(!hierarchically_related("", "auth"));
+        assert!(!hierarchically_related("auth", ""));
     }
 
     #[test]

@@ -27,6 +27,19 @@ use std::sync::Arc;
 /// in [`RetrievalEngine::query`]) — so the cap bounds work, not recall.
 const VECTOR_SEARCH_WINDOW_CAP: usize = 1000;
 
+/// Maximum size of the filtered candidate set that gets pushed down into the
+/// vector search as a `memory_id IN (...)` predicate.
+///
+/// When the index filters (type/tag/path/criticality, filter-mode logical,
+/// expiry) narrow the candidates to at most this many memories, the vector
+/// search is restricted to them so the top-k window is spent entirely on
+/// real candidates — otherwise narrow filters let filtered-out memories
+/// saturate the window and survivors degrade to weak (`sem = 0.0`) evidence.
+/// Above this size the predicate would be a huge SQL `IN` list for little
+/// gain (a large candidate set can't be saturated easily), so we fall back
+/// to the whole-store search.
+const VECTOR_RESTRICT_MAX_IDS: usize = 500;
+
 /// Detail level for retrieved memories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DetailLevel {
@@ -63,8 +76,9 @@ pub struct RetrievalQuery {
     /// Physical scope - current file path
     pub path: Option<String>,
 
-    /// Logical scopes - dot-notation domains; contribute to scoring only,
-    /// never used as a filter.
+    /// Logical scopes - dot-notation domains. In Rank mode they contribute
+    /// to scoring only; in Filter mode they act as a hard hierarchical
+    /// filter (see Step 2.5a in [`RetrievalEngine::query`]).
     pub logical: Vec<String>,
 
     /// Search query text (for semantic similarity + keyword search)
@@ -530,8 +544,10 @@ impl RetrievalEngine {
     ///
     /// # Scoring pipeline
     ///
-    /// Index-level filter → batch load → optional vector search (top-k over
-    /// the whole store) → keyword search → composite scoring → threshold →
+    /// Index-level filter → batch load → optional vector search (top-k,
+    /// restricted to the filtered candidate set when the filters narrowed it
+    /// to at most [`VECTOR_RESTRICT_MAX_IDS`] memories, whole-store
+    /// otherwise) → keyword search → composite scoring → threshold →
     /// optional cross-encoder rerank. Per memory, the composite weights are
     /// chosen from the query evidence:
     ///
@@ -573,6 +589,7 @@ impl RetrievalEngine {
 
         // Step 1: Load lightweight index entries (6 columns).
         let all_entries = self.store.list_for_filtering().await?;
+        let total_entry_count = all_entries.len();
 
         // Step 1.5: Relativize the query path against the project root.
         // Physical scopes are stored repo-relative, so an absolute path (the
@@ -600,10 +617,25 @@ impl RetrievalEngine {
         // already filtered via `SearchFilters.physical`; logical is not a
         // field on `SearchFilters` because it's a scoring signal in rank
         // mode, so we apply it here explicitly.
+        //
+        // Matching is hierarchical, not exact: a memory passes when any of
+        // its logical scopes lies on the same ancestor chain as any queried
+        // scope (equal, descendant, or ancestor). Querying `auth` matches
+        // memories scoped `auth.oauth` (the domain includes its subdomains),
+        // and querying `auth.oauth` matches a memory scoped `auth` (broad
+        // memories apply to their subdomains) — mirroring rank mode's
+        // bidirectional parent↔child proximity. Siblings (`auth.jwt` vs
+        // `auth.oauth`) do NOT pass. See `scope::logical::hierarchically_related`.
         let filtered_entries = if query.mode == RetrievalMode::Filter && !query.logical.is_empty() {
             filtered_entries
                 .into_iter()
-                .filter(|e| e.logical.iter().any(|s| query.logical.contains(s)))
+                .filter(|e| {
+                    e.logical.iter().any(|mem_scope| {
+                        query.logical.iter().any(|query_scope| {
+                            crate::scope::logical::hierarchically_related(mem_scope, query_scope)
+                        })
+                    })
+                })
                 .collect()
         } else {
             filtered_entries
@@ -637,13 +669,7 @@ impl RetrievalEngine {
 
                 if let Ok(query_vector) = embed_result {
                     // Over-fetch 3x so the top-k still has headroom after
-                    // memories outside the filter set are discarded. Vector
-                    // search runs over the WHOLE store (no filter pushdown),
-                    // so with narrow filters the window can still be saturated
-                    // by filtered-out memories. That artifact is mild now:
-                    // embedded memories that miss the window are scored as
-                    // sem = 0.0 below instead of jumping to the no-semantic
-                    // weight regime.
+                    // chunk-level dedup.
                     //
                     // `max_results` is user-supplied: saturate the multiply
                     // (a plain `* 3` panics in debug / wraps in release on
@@ -655,8 +681,27 @@ impl RetrievalEngine {
                         .unwrap_or(self.config.retrieval.max_results)
                         .saturating_mul(3)
                         .min(VECTOR_SEARCH_WINDOW_CAP);
+
+                    // Filter pushdown: when the index filters actually
+                    // narrowed the candidate set and it is small enough,
+                    // restrict the vector search to the surviving ids so
+                    // filtered-out memories can't saturate the top-k window
+                    // (which would degrade surviving candidates to weak
+                    // sem = 0.0 evidence and mis-rank them). With no filters
+                    // — or a still-large candidate set — fall back to the
+                    // whole-store search, where the windowing artifact is
+                    // mild because little or nothing in the window is
+                    // discarded.
+                    let restrict_ids: Option<Vec<String>> = (filtered_entries.len()
+                        < total_entry_count
+                        && filtered_entries.len() <= VECTOR_RESTRICT_MAX_IDS)
+                        .then(|| filtered_entries.iter().map(|e| e.id.clone()).collect());
+
                     let t_vs = std::time::Instant::now();
-                    let vs_result = self.store.vector_search(query_vector, limit).await;
+                    let vs_result = self
+                        .store
+                        .vector_search(query_vector, limit, restrict_ids.as_deref())
+                        .await;
                     self.record_stage("vector_search", t_vs.elapsed().as_secs_f64() * 1000.0);
                     vs_result
                         .ok()
@@ -985,7 +1030,7 @@ async fn detect_contradictions_with(
     let query_vector = embedding_provider.embed(&text).await?;
 
     let matches = store
-        .vector_search(query_vector, nli_config.max_comparisons)
+        .vector_search(query_vector, nli_config.max_comparisons, None)
         .await?;
 
     let candidates: Vec<_> = matches
@@ -2873,6 +2918,135 @@ mod tests {
         );
     }
 
+    // ─── Filter-mode hierarchical logical filter ─────────────────────────────
+
+    /// Regression: the filter-mode `logical` filter was exact string
+    /// equality, so `logical: ["auth"]` failed to match a memory scoped
+    /// `auth.oauth` even though logical scopes are documented as dot-notation
+    /// hierarchies (and rank mode scores them hierarchically). Querying a
+    /// domain must surface its subdomains.
+    #[tokio::test]
+    async fn test_filter_mode_logical_matches_descendants() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let config = EngramConfig::default();
+
+        let scoped = |logical: &str, summary: &str| {
+            let mut m = Memory::new(MemoryType::Decision, summary, "body", Provenance::human());
+            m.logical = vec![logical.to_string()];
+            m.visibility = Visibility::Shared;
+            m.criticality = 0.9;
+            m
+        };
+
+        let exact = scoped("auth", "Auth conventions");
+        let child = scoped("auth.oauth", "OAuth decision");
+        let grandchild = scoped("auth.oauth.google", "Google OAuth quirk");
+        let unrelated = scoped("billing", "Billing decision");
+        for m in [&exact, &child, &grandchild, &unrelated] {
+            store.create(m).await.unwrap();
+        }
+
+        let engine = RetrievalEngine::new(store, config);
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Filter,
+                logical: vec!["auth".to_string()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = result
+            .memories
+            .iter()
+            .map(|sm| sm.memory.id.as_str())
+            .collect();
+        assert!(ids.contains(&exact.id.as_str()), "exact match: {ids:?}");
+        assert!(
+            ids.contains(&child.id.as_str()),
+            "descendant `auth.oauth` must match query `auth`: {ids:?}"
+        );
+        assert!(
+            ids.contains(&grandchild.id.as_str()),
+            "deep descendant `auth.oauth.google` must match query `auth`: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&unrelated.id.as_str()),
+            "`billing` must not match query `auth`: {ids:?}"
+        );
+        assert_eq!(result.memories.len(), 3);
+    }
+
+    /// The ancestor direction of the contract: querying `auth.oauth` matches
+    /// a memory scoped just `auth` (broad memories apply to their
+    /// subdomains, mirroring rank mode's bidirectional parent↔child bonus)
+    /// — but NOT the sibling `auth.jwt`, which rank mode only nudges and a
+    /// hard filter must exclude.
+    #[tokio::test]
+    async fn test_filter_mode_logical_matches_ancestors_not_siblings() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let config = EngramConfig::default();
+
+        let scoped = |logical: &str, summary: &str| {
+            let mut m = Memory::new(MemoryType::Decision, summary, "body", Provenance::human());
+            m.logical = vec![logical.to_string()];
+            m.visibility = Visibility::Shared;
+            m.criticality = 0.9;
+            m
+        };
+
+        let ancestor = scoped("auth", "Auth conventions");
+        let exact = scoped("auth.oauth", "OAuth decision");
+        let sibling = scoped("auth.jwt", "JWT decision");
+        // String prefix but not a segment ancestor.
+        let prefix_trap = scoped("authentication", "Unrelated prefix");
+        for m in [&ancestor, &exact, &sibling, &prefix_trap] {
+            store.create(m).await.unwrap();
+        }
+
+        let engine = RetrievalEngine::new(store, config);
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Filter,
+                logical: vec!["auth.oauth".to_string()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = result
+            .memories
+            .iter()
+            .map(|sm| sm.memory.id.as_str())
+            .collect();
+        assert!(ids.contains(&exact.id.as_str()), "exact match: {ids:?}");
+        assert!(
+            ids.contains(&ancestor.id.as_str()),
+            "ancestor `auth` must match query `auth.oauth`: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&sibling.id.as_str()),
+            "sibling `auth.jwt` must NOT match query `auth.oauth`: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&prefix_trap.id.as_str()),
+            "`authentication` is not segment-related to `auth.oauth`: {ids:?}"
+        );
+        assert_eq!(result.memories.len(), 2);
+    }
+
     // ─── Semantic-evidence regime tests (stub provider, no ONNX) ────────────
 
     /// Deterministic embedding stub: marker substrings map to fixed vectors so
@@ -3192,5 +3366,141 @@ mod tests {
             combined.score,
             semantic_only.score
         );
+    }
+
+    // ─── Vector-search filter pushdown ───────────────────────────────────────
+
+    /// Shared setup for the pushdown tests: 8 untagged "closevec" fillers
+    /// (nearest to the query, zero criticality) that saturate the
+    /// `max_results = 2` → window-of-6 vector top-k, plus two tagged
+    /// memories — "fillvec" (mid similarity) and an orthogonal one — that
+    /// are both FARTHER from the query than every filler.
+    async fn pushdown_fixture() -> (
+        tempfile::TempDir,
+        RetrievalEngine,
+        crate::types::Memory,
+        crate::types::Memory,
+    ) {
+        use crate::types::EngramConfig;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+
+        let mut tagged_mid = stub_memory("fillvec tagged note", 0.8);
+        tagged_mid.tags = vec!["pick".to_string()];
+        let mut tagged_far = stub_memory("plain tagged note", 0.8);
+        tagged_far.tags = vec!["pick".to_string()];
+
+        let mut all = vec![tagged_mid.clone(), tagged_far.clone()];
+        for i in 0..8 {
+            all.push(stub_memory(&format!("closevec filler {i}"), 0.0));
+        }
+        for m in &all {
+            store.create(m).await.unwrap();
+        }
+
+        let engine = RetrievalEngine::new(store, config)
+            .with_embedding_provider(Arc::new(MarkerEmbeddingProvider));
+        for m in &all {
+            engine.embed_memory(m).await.unwrap();
+        }
+
+        (temp_dir, engine, tagged_mid, tagged_far)
+    }
+
+    /// Regression: vector search used to run over the WHOLE chunks table, so
+    /// with a narrow tag filter the over-fetch window (max_results*3 = 6)
+    /// was saturated by filtered-out fillers and the surviving candidates
+    /// degraded to weak (sem = 0.0) evidence — losing their real semantic
+    /// ordering. With pushdown, the filtered survivors keep real scores.
+    #[tokio::test]
+    async fn test_vector_search_pushdown_keeps_real_semantic_scores() {
+        let (_dir, engine, tagged_mid, tagged_far) = pushdown_fixture().await;
+
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Rank,
+                query: Some("queryvec".to_string()),
+                tags: Some(vec!["pick".to_string()]),
+                max_results: Some(2),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.retrieval_quality, "full");
+        assert_eq!(result.memories.len(), 2, "both tagged memories survive");
+
+        // Real semantic evidence for both survivors (pre-fix: Some(0.0)).
+        let by_id = |id: &str| {
+            result
+                .memories
+                .iter()
+                .find(|sm| sm.memory.id == id)
+                .unwrap()
+        };
+        let mid_sem = by_id(&tagged_mid.id)
+            .score_breakdown
+            .semantic
+            .expect("survivor must carry semantic evidence");
+        let far_sem = by_id(&tagged_far.id)
+            .score_breakdown
+            .semantic
+            .expect("survivor must carry semantic evidence");
+        assert!(
+            mid_sem > 0.0,
+            "filtered survivor must get its REAL semantic score, got {mid_sem}"
+        );
+        assert!(far_sem > 0.0, "got {far_sem}");
+        assert!(
+            mid_sem > far_sem,
+            "semantic ordering must be preserved within the filter set: \
+             mid={mid_sem} far={far_sem}"
+        );
+        // And the ranking follows: the more-similar survivor ranks first.
+        assert_eq!(
+            result.memories[0].memory.id, tagged_mid.id,
+            "more-similar survivor must rank first"
+        );
+    }
+
+    /// Fallback: with no filters the candidate set isn't narrowed, so the
+    /// whole-store search runs unchanged — fillers (nearest to the query)
+    /// own the window and the top results, with real semantic scores, while
+    /// out-of-window memories keep the weak (sem = 0.0) evidence path
+    /// covered by `test_missed_topk_embedded_memory_scores_as_weak_semantic`.
+    #[tokio::test]
+    async fn test_vector_search_no_filters_falls_back_to_whole_store() {
+        let (_dir, engine, _tagged_mid, _tagged_far) = pushdown_fixture().await;
+
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Rank,
+                query: Some("queryvec".to_string()),
+                max_results: Some(2),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.retrieval_quality, "full");
+        assert_eq!(result.memories.len(), 2);
+        for sm in &result.memories {
+            assert!(
+                sm.memory.summary.contains("closevec"),
+                "whole-store search: nearest fillers must win the top-k, got {}",
+                sm.memory.summary
+            );
+            assert!(
+                sm.score_breakdown.semantic.unwrap() > 0.0,
+                "in-window memories carry real semantic scores"
+            );
+        }
     }
 }

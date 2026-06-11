@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(chunks.len(), 1, "embedding must be carried into main");
         assert_eq!(chunks[0].len(), 384);
         let hits = main_store
-            .vector_search(vec![0.25f32; 384], 5)
+            .vector_search(vec![0.25f32; 384], 5, None)
             .await
             .unwrap();
         assert!(

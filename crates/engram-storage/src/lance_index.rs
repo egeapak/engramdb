@@ -665,13 +665,31 @@ impl LanceIndex {
     /// Queries the chunks table, groups results by memory_id, and takes the
     /// max score per memory. Returns one `VectorMatch` per unique memory,
     /// sorted by score descending, truncated to `limit`.
-    pub async fn vector_search(&self, query: Vec<f32>, limit: usize) -> Result<Vec<VectorMatch>> {
+    ///
+    /// When `restrict_to` is `Some`, the search is pushed down to only the
+    /// chunks whose `memory_id` is in the given set (via a LanceDB
+    /// `memory_id IN (...)` predicate), so the top-k window is spent
+    /// entirely on candidates the caller actually cares about instead of
+    /// being saturated by filtered-out memories. `Some(&[])` short-circuits
+    /// to an empty result; `None` searches the whole store.
+    pub async fn vector_search(
+        &self,
+        query: Vec<f32>,
+        limit: usize,
+        restrict_to: Option<&[String]>,
+    ) -> Result<Vec<VectorMatch>> {
         if query.len() != self.dimensions {
             anyhow::bail!(
                 "Query vector dimension mismatch: expected {}, got {}",
                 self.dimensions,
                 query.len()
             );
+        }
+
+        // An explicitly empty restriction set can match nothing — and
+        // `IN ()` is not valid SQL — so bail before touching the table.
+        if restrict_to.is_some_and(|ids| ids.is_empty()) {
+            return Ok(Vec::new());
         }
 
         let table = self.open_chunks_table().await?;
@@ -685,9 +703,19 @@ impl LanceIndex {
         // for absurd limits still get the best `MAX_CHUNK_FETCH` chunks.
         const MAX_CHUNK_FETCH: usize = 65_536;
         let chunk_limit = limit.saturating_mul(5).min(MAX_CHUNK_FETCH);
-        let mut stream = table
-            .vector_search(query)?
-            .limit(chunk_limit)
+        let mut vector_query = table.vector_search(query)?.limit(chunk_limit);
+        if let Some(ids) = restrict_to {
+            // Memory ids are server-generated UUIDs, but reuse the same
+            // single-quote escaping discipline as every other predicate in
+            // this file rather than trusting that.
+            let id_list = ids
+                .iter()
+                .map(|id| format!("'{}'", id.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            vector_query = vector_query.only_if(format!("memory_id IN ({})", id_list));
+        }
+        let mut stream = vector_query
             .execute()
             .await
             .context("Failed to execute vector search")?;
@@ -1383,7 +1411,10 @@ mod tests {
         lance.upsert_chunks("chunk-test", chunks).await.unwrap();
 
         // Should be searchable
-        let matches = lance.vector_search(vec![0.1f32; 384], 10).await.unwrap();
+        let matches = lance
+            .vector_search(vec![0.1f32; 384], 10, None)
+            .await
+            .unwrap();
         assert!(!matches.is_empty());
         assert_eq!(matches[0].id, "chunk-test");
     }
@@ -1415,7 +1446,10 @@ mod tests {
             .upsert_chunks("dim-mismatch-mem", vec![vec![0.1f32; 384]])
             .await
             .unwrap();
-        let matches = lance.vector_search(vec![0.1f32; 384], 10).await.unwrap();
+        let matches = lance
+            .vector_search(vec![0.1f32; 384], 10, None)
+            .await
+            .unwrap();
         assert!(matches.iter().any(|m| m.id == "dim-mismatch-mem"));
     }
 
@@ -1456,14 +1490,20 @@ mod tests {
             .unwrap();
 
         // Verify searchable
-        let matches = lance.vector_search(vec![0.1f32; 384], 10).await.unwrap();
+        let matches = lance
+            .vector_search(vec![0.1f32; 384], 10, None)
+            .await
+            .unwrap();
         assert!(!matches.is_empty());
 
         // Delete chunks
         lance.delete_chunks("del-chunk").await.unwrap();
 
         // Should no longer appear in search
-        let matches = lance.vector_search(vec![0.1f32; 384], 10).await.unwrap();
+        let matches = lance
+            .vector_search(vec![0.1f32; 384], 10, None)
+            .await
+            .unwrap();
         assert!(matches.is_empty());
     }
 
@@ -1490,7 +1530,7 @@ mod tests {
 
         // Search for something close to chunk_close
         let query = vec![0.5f32; 384];
-        let matches = lance.vector_search(query, 10).await.unwrap();
+        let matches = lance.vector_search(query, 10, None).await.unwrap();
 
         assert_eq!(matches.len(), 2);
         // mem-a should rank first (its best chunk is closer to query)
@@ -1520,11 +1560,92 @@ mod tests {
             .unwrap();
 
         let matches = lance
-            .vector_search(vec![0.5f32; 384], usize::MAX)
+            .vector_search(vec![0.5f32; 384], usize::MAX, None)
             .await
             .unwrap();
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].id, "mem-a");
+    }
+
+    /// `restrict_to` pushes the candidate set down into the LanceDB
+    /// predicate: only restricted ids come back, each with its real
+    /// similarity score, even when ids outside the set are closer to the
+    /// query (and would otherwise saturate the top-k window).
+    #[tokio::test]
+    async fn test_vector_search_restrict_to_subset() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        // "near" is closest to the query, "mid" next, "far" farthest.
+        for (id, val) in [("near", 0.5f32), ("mid", 0.3), ("far", -0.5)] {
+            lance.upsert(&create_test_entry(id)).await.unwrap();
+            lance.upsert_chunks(id, vec![vec![val; 384]]).await.unwrap();
+        }
+
+        let restrict = vec!["mid".to_string(), "far".to_string()];
+        // limit 1: without pushdown, "near" would consume the window and
+        // post-filtering would leave nothing.
+        let matches = lance
+            .vector_search(vec![0.5f32; 384], 1, Some(&restrict))
+            .await
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, "mid", "best match WITHIN the restriction");
+        assert!(matches[0].score > 0.0);
+
+        // Both restricted ids with headroom; "near" must never appear.
+        let matches = lance
+            .vector_search(vec![0.5f32; 384], 10, Some(&restrict))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = matches.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["mid", "far"]);
+    }
+
+    /// An explicitly empty restriction set matches nothing (and must not
+    /// generate the invalid `IN ()` predicate).
+    #[tokio::test]
+    async fn test_vector_search_restrict_to_empty_set() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        lance.upsert(&create_test_entry("mem-a")).await.unwrap();
+        lance
+            .upsert_chunks("mem-a", vec![vec![0.5f32; 384]])
+            .await
+            .unwrap();
+
+        let matches = lance
+            .vector_search(vec![0.5f32; 384], 10, Some(&[]))
+            .await
+            .unwrap();
+        assert!(matches.is_empty());
+    }
+
+    /// Restriction ids flow through the same quote-escaping discipline as
+    /// every other `only_if` site: a literal quote in an id must neither
+    /// error at the SQL layer nor match the wrong row.
+    #[tokio::test]
+    async fn test_vector_search_restrict_to_with_quote_in_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        let quoted = "abc'def";
+        for id in [quoted, "plain"] {
+            lance.upsert(&create_test_entry(id)).await.unwrap();
+            lance
+                .upsert_chunks(id, vec![vec![0.5f32; 384]])
+                .await
+                .unwrap();
+        }
+
+        let restrict = vec![quoted.to_string()];
+        let matches = lance
+            .vector_search(vec![0.5f32; 384], 10, Some(&restrict))
+            .await
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, quoted);
     }
 
     #[tokio::test]
@@ -1532,7 +1653,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
 
-        let results = lance.vector_search(vec![0.1f32; 384], 10).await;
+        let results = lance.vector_search(vec![0.1f32; 384], 10, None).await;
         assert!(results.is_ok());
         assert!(results.unwrap().is_empty());
     }
@@ -1646,7 +1767,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
 
-        let result = lance.vector_search(vec![0.1f32; 16], 5).await;
+        let result = lance.vector_search(vec![0.1f32; 16], 5, None).await;
         assert!(result.is_err(), "wrong-dim query must error");
         let msg = format!("{:?}", result.err().unwrap());
         assert!(

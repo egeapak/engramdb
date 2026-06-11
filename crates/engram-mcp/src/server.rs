@@ -3417,6 +3417,64 @@ mod tests {
         assert!(!val["memories"].as_array().unwrap().is_empty());
     }
 
+    /// Filter-mode `logical` is a hierarchical filter, not exact string
+    /// equality: querying the domain `auth` must surface a memory scoped to
+    /// the subdomain `auth.oauth` (and the ancestor direction holds:
+    /// querying `auth.oauth` surfaces a memory scoped `auth`), while an
+    /// unrelated scope matches nothing. Mirrors the engine-level contract in
+    /// `retrieval::engine`.
+    #[tokio::test]
+    async fn query_filter_logical_is_hierarchical() {
+        let (_dir, server) = setup().await;
+        let input = CreateInput {
+            logical: Some(vec!["auth.oauth".to_string()]),
+            criticality: Some(0.9),
+            ..create_input("decision", "OAuth decision", "We use PKCE")
+        };
+        server.memory_create(Parameters(input)).await.unwrap();
+
+        // Querying the parent domain matches the subdomain-scoped memory.
+        let result = server
+            .memory_query(Parameters(QueryInput {
+                logical: Some(vec!["auth".to_string()]),
+                ..query_input("filter")
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(
+            val["memories"].as_array().unwrap().len(),
+            1,
+            "query `auth` must match memory scoped `auth.oauth`: {val}"
+        );
+
+        // Querying a deeper scope matches the ancestor-scoped memory.
+        let result = server
+            .memory_query(Parameters(QueryInput {
+                logical: Some(vec!["auth.oauth.google".to_string()]),
+                ..query_input("filter")
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert_eq!(
+            val["memories"].as_array().unwrap().len(),
+            1,
+            "query `auth.oauth.google` must match ancestor scope `auth.oauth`: {val}"
+        );
+
+        // Unrelated scope matches nothing.
+        let result = server
+            .memory_query(Parameters(QueryInput {
+                logical: Some(vec!["billing".to_string()]),
+                ..query_input("filter")
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(
+            val["memories"].as_array().unwrap().is_empty(),
+            "query `billing` must not match `auth.oauth`: {val}"
+        );
+    }
+
     #[tokio::test]
     async fn retrieve_detail_level_summary() {
         let (_dir, server) = setup().await;

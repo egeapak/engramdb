@@ -799,9 +799,19 @@ impl MemoryStore {
     }
 
     /// Perform vector similarity search.
-    pub async fn vector_search(&self, query: Vec<f32>, limit: usize) -> Result<Vec<VectorMatch>> {
+    ///
+    /// `restrict_to` optionally pushes a candidate `memory_id` set down into
+    /// the LanceDB predicate so the top-k window isn't saturated by memories
+    /// the caller has already filtered out. `Some(&[])` returns no matches;
+    /// `None` searches the whole store.
+    pub async fn vector_search(
+        &self,
+        query: Vec<f32>,
+        limit: usize,
+        restrict_to: Option<&[String]>,
+    ) -> Result<Vec<VectorMatch>> {
         self.lance_index
-            .vector_search(query, limit)
+            .vector_search(query, limit, restrict_to)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB vector_search failed: {}", e)))
     }
