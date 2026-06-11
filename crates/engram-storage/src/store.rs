@@ -380,22 +380,7 @@ impl MemoryStore {
     }
 
     async fn get_from_dir(&self, id: &str, dir: &Path) -> Result<Memory> {
-        if !dir.exists() {
-            return Err(StorageError::NotFound(id.to_string()));
-        }
-
-        let mut matches = Vec::new();
-
-        let mut entries = async_fs::read_dir(dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if memory_file::stem_matches_id_prefix(stem, id) {
-                    matches.push(path);
-                }
-            }
-        }
+        let matches = find_memory_files(dir, id).await?;
 
         match matches.len() {
             0 => Err(StorageError::NotFound(id.to_string())),
@@ -403,11 +388,16 @@ impl MemoryStore {
                 let content = async_fs::read_to_string(&matches[0]).await?;
                 memory_file::parse_memory_file(&content)
             }
-            _ => Err(StorageError::Validation(format!(
-                "Ambiguous ID prefix '{}': matches {} memories",
-                id,
-                matches.len()
-            ))),
+            _ => {
+                // Multiple files for ONE full ID (`find_memory_files` already
+                // rejected distinct IDs as ambiguous): a stale duplicate left
+                // by an update that crashed between writing the renamed file
+                // and removing the old one. The newest file is the current
+                // state — the rename path always writes the new file last.
+                let newest = newest_by_mtime(&matches).await;
+                let content = async_fs::read_to_string(newest).await?;
+                memory_file::parse_memory_file(&content)
+            }
         }
     }
 
@@ -472,17 +462,39 @@ impl MemoryStore {
         memory: &Memory,
         old_visibility: Visibility,
     ) -> Result<()> {
-        // Always delete the old file first (filename may have changed due to title update)
+        // Locate the existing file(s) for this memory before writing. `id`
+        // may be a prefix; the filename may be about to change (title or
+        // visibility update); and a stale duplicate from a previously
+        // crashed update may also still be present.
         let old_dir = self.get_memories_dir(&old_visibility)?;
-        self.delete_file_from_dir(id, &old_dir).await?;
+        let old_paths = find_memory_files(&old_dir, id).await?;
 
-        // Write to (possibly new) location atomically
         let memories_dir = self.get_memories_dir(&memory.visibility)?;
         async_fs::create_dir_all(&memories_dir).await?;
         let filename = memory_file::memory_filename(memory);
         let file_path = memories_dir.join(&filename);
         let content = memory_file::write_memory_file(memory)?;
+
+        // Durability ordering: write the NEW file first, THEN remove any old
+        // file at a different path. In the common case (filename unchanged)
+        // the atomic_write replaces the file in place and nothing is deleted,
+        // so the memory is never absent from disk and lock-free readers can
+        // never observe a spurious NotFound. When the filename changed
+        // (title/visibility update), a crash between the write and the
+        // removal leaves at worst TWO files for one ID — readers resolve
+        // that to the newest mtime (see `get_from_dir`) and the next
+        // update/delete/reindex cleans the stale one up. The old
+        // delete-then-write order could lose the memory's file entirely.
         atomic_write(&file_path, &content).await?;
+        for old in &old_paths {
+            if *old != file_path {
+                match async_fs::remove_file(old).await {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
 
         // Upsert metadata to LanceDB (chunks are managed separately)
         let entry = IndexEntry::from(memory);
@@ -735,35 +747,25 @@ impl MemoryStore {
         }
     }
 
-    /// Delete just the .md file from a directory (does not touch LanceDB).
+    /// Delete just the .md file(s) from a directory (does not touch LanceDB).
+    ///
+    /// All files matching the ID are removed: `find_memory_files` guarantees
+    /// they share one full ID, so any extra file is a stale duplicate left by
+    /// a crashed rename-update — deleting the memory sweeps it up too.
     async fn delete_file_from_dir(&self, id: &str, dir: &Path) -> Result<()> {
-        if !dir.exists() {
+        let matches = find_memory_files(dir, id).await?;
+
+        if matches.is_empty() {
             return Err(StorageError::NotFound(id.to_string()));
         }
-
-        let mut matches = Vec::new();
-        let mut entries = async_fs::read_dir(dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if memory_file::stem_matches_id_prefix(stem, id) {
-                    matches.push(path);
-                }
+        for path in &matches {
+            match async_fs::remove_file(path).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
             }
         }
-
-        match matches.len() {
-            0 => Err(StorageError::NotFound(id.to_string())),
-            1 => {
-                async_fs::remove_file(&matches[0]).await?;
-                Ok(())
-            }
-            _ => Err(StorageError::Validation(format!(
-                "Ambiguous ID prefix '{}': matches {} memories",
-                id,
-                matches.len()
-            ))),
-        }
+        Ok(())
     }
 
     /// Resolve a prefix ID to a full ID using a LanceDB WHERE filter.
@@ -788,12 +790,19 @@ impl MemoryStore {
     ///
     /// Skips files that cannot be read or parsed, logging a warning for each,
     /// so that a single corrupted file does not abort the entire reindex.
+    ///
+    /// When two files share one memory ID (a stale duplicate left by an
+    /// update that crashed between writing the renamed file and removing the
+    /// old one), the newest file wins and the stale one is deleted — reindex
+    /// runs under the project write lock and is the documented repair path.
     async fn reindex_dir(
         &self,
         dir: &Path,
         visibility: Visibility,
         indexed_ids: &mut Vec<String>,
     ) -> Result<()> {
+        let mut by_id: HashMap<String, (PathBuf, std::time::SystemTime, Memory)> = HashMap::new();
+
         let mut entries = async_fs::read_dir(dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
@@ -812,13 +821,45 @@ impl MemoryStore {
                         continue;
                     }
                 };
-                let mut index_entry = IndexEntry::from(&memory);
-                index_entry.visibility = visibility;
-                self.lance_index.upsert(&index_entry).await.map_err(|e| {
-                    StorageError::Validation(format!("LanceDB upsert failed: {}", e))
-                })?;
-                indexed_ids.push(memory.id.clone());
+                let mtime = file_mtime(&path).await;
+                let stale = match by_id.entry(memory.id.clone()) {
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert((path, mtime, memory));
+                        None
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut slot) => {
+                        if mtime >= slot.get().1 {
+                            let (old_path, _, _) = slot.insert((path, mtime, memory));
+                            Some(old_path)
+                        } else {
+                            Some(path)
+                        }
+                    }
+                };
+                if let Some(stale_path) = stale {
+                    tracing::warn!(
+                        "Removing stale duplicate file {} (same memory ID, older mtime)",
+                        stale_path.display()
+                    );
+                    if let Err(e) = async_fs::remove_file(&stale_path).await {
+                        tracing::warn!(
+                            "Failed to remove stale duplicate {}: {}",
+                            stale_path.display(),
+                            e
+                        );
+                    }
+                }
             }
+        }
+
+        for (id, (_path, _mtime, memory)) in by_id {
+            let mut index_entry = IndexEntry::from(&memory);
+            index_entry.visibility = visibility;
+            self.lance_index
+                .upsert(&index_entry)
+                .await
+                .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
+            indexed_ids.push(id);
         }
         Ok(())
     }
@@ -845,6 +886,13 @@ impl MemoryStore {
         }
     }
 
+    /// Recompute and persist manifest stats (load-modify-save of
+    /// `manifest.toml`).
+    ///
+    /// Callers MUST hold the per-project write lock — every call site
+    /// (`create`, `write_updated_locked`, `delete`, `reindex`) already runs
+    /// inside it. Calling this unlocked could race another manifest writer
+    /// (e.g. [`Self::set_embedding_fingerprint`]) and clobber its fields.
     async fn update_manifest_stats(&self) -> Result<()> {
         let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
         let mut manifest = manifest::load_manifest(&manifest_path).await?;
@@ -900,10 +948,24 @@ impl MemoryStore {
 
     /// Stamp the store with the embedding-model fingerprint its vectors
     /// were produced with. Called after a successful full (re)embed.
+    ///
+    /// Acquires the per-project write lock: this is a load-modify-save of
+    /// `manifest.toml`, racing `update_manifest_stats` (which every mutating
+    /// op runs under the lock). Without the lock, a concurrent `create`
+    /// could load the pre-stamp manifest and save over the fingerprint,
+    /// silently flipping the store back to Untracked right after a
+    /// successful reindex.
+    ///
+    /// Callers must NOT already hold the project write lock: `flock(2)` is
+    /// per open-file-description, so re-acquiring on a second fd in the same
+    /// process blocks forever. All call sites (e.g. `ops::reindex`) invoke
+    /// this after `store.reindex()` has returned and released the lock.
     pub async fn set_embedding_fingerprint(
         &self,
         fingerprint: manifest::EmbeddingFingerprint,
     ) -> Result<()> {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
         let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
         let mut manifest = manifest::load_manifest(&manifest_path).await?;
         manifest.embedding = Some(fingerprint);
@@ -912,19 +974,102 @@ impl MemoryStore {
     }
 }
 
-/// Write content atomically using write-to-temp-then-rename.
+/// Write content atomically and durably using write-to-temp-then-rename.
 ///
-/// Creates a temp file in the same directory then persists (renames) to the
-/// target path.  `rename(2)` is atomic on APFS/ext4, eliminating partial-read
-/// windows.  The temp file is auto-cleaned on error.
+/// Creates a temp file in the same directory, writes and **fsyncs** it, then
+/// persists (renames) to the target path.  `rename(2)` is atomic on
+/// APFS/ext4, eliminating partial-read windows, and the fsync-before-rename
+/// ensures the rename can never survive a power loss without the data (which
+/// would leave a zero-length or partial file).  On Unix the parent directory
+/// is fsynced afterwards so the rename itself is durable too.  The temp file
+/// is auto-cleaned on error.
+///
+/// The blocking syscalls (write/fsync/rename) run on the blocking thread
+/// pool so the async executor is never stalled.
 pub(crate) async fn atomic_write(path: &Path, content: &str) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        StorageError::Validation("atomic_write target has no parent directory".into())
-    })?;
-    let tmp = tempfile::NamedTempFile::new_in(parent)?;
-    async_fs::write(tmp.path(), content).await?;
-    tmp.persist(path)?;
-    Ok(())
+    let path = path.to_path_buf();
+    let content = content.to_owned();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        use std::io::Write;
+
+        let parent = path.parent().ok_or_else(|| {
+            StorageError::Validation("atomic_write target has no parent directory".into())
+        })?;
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+        tmp.as_file_mut().write_all(content.as_bytes())?;
+        // fsync BEFORE rename: otherwise the rename can be persisted without
+        // the file contents.
+        tmp.as_file().sync_all()?;
+        tmp.persist(&path)?;
+        // fsync the directory so the rename (the file's existence under its
+        // final name) is durable. Directories can't be opened for writing on
+        // Windows, so this is Unix-only; the data itself is already synced.
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| StorageError::Validation(format!("atomic_write task failed: {}", e)))?
+}
+
+/// Locate every file in `dir` whose stem matches the given ID (or ID prefix).
+///
+/// Multiple files may legitimately share one full ID: a rename-update (title
+/// or visibility change) writes the new file before removing the old one, so
+/// a crash in between leaves a stale duplicate. All files for the SAME full
+/// ID are returned (callers resolve by mtime or clean them all up); matches
+/// spanning DISTINCT full IDs are a true ambiguous-prefix error.
+///
+/// Returns an empty Vec when the directory does not exist.
+async fn find_memory_files(dir: &Path, id: &str) -> Result<Vec<PathBuf>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut matches = Vec::new();
+    let mut distinct_ids = HashSet::new();
+    let mut entries = async_fs::read_dir(dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            if memory_file::stem_matches_id_prefix(stem, id) {
+                distinct_ids.insert(memory_file::extract_id_from_stem(stem).to_string());
+                matches.push(path);
+            }
+        }
+    }
+
+    if distinct_ids.len() > 1 {
+        return Err(StorageError::Validation(format!(
+            "Ambiguous ID prefix '{}': matches {} memories",
+            id,
+            distinct_ids.len()
+        )));
+    }
+    Ok(matches)
+}
+
+/// Modification time of a file; `UNIX_EPOCH` when unavailable, so a file we
+/// cannot stat loses any newest-wins comparison.
+async fn file_mtime(path: &Path) -> std::time::SystemTime {
+    match async_fs::metadata(path).await {
+        Ok(meta) => meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        Err(_) => std::time::SystemTime::UNIX_EPOCH,
+    }
+}
+
+/// Pick the most recently modified path. `paths` must be non-empty.
+async fn newest_by_mtime(paths: &[PathBuf]) -> &PathBuf {
+    let mut best = &paths[0];
+    let mut best_mtime = file_mtime(best).await;
+    for path in &paths[1..] {
+        let mtime = file_mtime(path).await;
+        if mtime >= best_mtime {
+            best = path;
+            best_mtime = mtime;
+        }
+    }
+    best
 }
 
 /// Count `.md` files in a directory. Returns 0 if the directory doesn't exist.
@@ -960,8 +1105,19 @@ async fn scan_dir_to_map(dir: &Path) -> HashMap<String, PathBuf> {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("md") {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                let id = memory_file::extract_id_from_stem(stem);
-                map.insert(id.to_string(), path);
+                let id = memory_file::extract_id_from_stem(stem).to_string();
+                match map.get(&id) {
+                    // Stale duplicate from a crashed rename-update: keep the
+                    // newest file (the rename path writes the new file last).
+                    Some(existing) => {
+                        if file_mtime(&path).await >= file_mtime(existing).await {
+                            map.insert(id, path);
+                        }
+                    }
+                    None => {
+                        map.insert(id, path);
+                    }
+                }
             }
         }
     }
@@ -1273,6 +1429,256 @@ mod tests {
         let retrieved = store.get("test-update-123").await.unwrap();
         assert_eq!(retrieved.summary, "Updated summary");
         assert_eq!(retrieved.content, "Test content");
+    }
+
+    /// Set a file's mtime `secs` seconds into the past, so newest-wins
+    /// duplicate resolution has an unambiguous ordering.
+    fn age_file(path: &Path, secs: u64) {
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    /// All files in `dir` whose stem matches `id` (same matching rule the
+    /// store uses).
+    fn files_matching_id(dir: &Path, id: &str) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| {
+                let path = e.unwrap().path();
+                let stem = path.file_stem()?.to_str()?.to_owned();
+                memory_file::stem_matches_id_prefix(&stem, id).then_some(path)
+            })
+            .collect()
+    }
+
+    /// Issue-1 contract (a): an update that does not change the filename must
+    /// replace the file in place — the old path still exists afterwards and
+    /// no second file appears (the old delete-then-write order made the file
+    /// briefly absent, so racing lock-free readers saw spurious NotFound).
+    #[tokio::test]
+    async fn test_update_same_filename_replaces_in_place() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let memory = create_test_memory("inplace-update-123", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        let dir = paths::memories_dir(&store.project_dir);
+        let path = dir.join("inplace-update-123.md");
+        assert!(path.exists(), "file must exist after create");
+
+        let mut update = MemoryUpdate::new();
+        update.content = Some("New content".to_string());
+        store.update("inplace-update-123", update).await.unwrap();
+
+        assert!(
+            path.exists(),
+            "same-filename update must keep the file at its original path"
+        );
+        assert_eq!(
+            files_matching_id(&dir, "inplace-update-123").len(),
+            1,
+            "exactly one file for the id"
+        );
+        let retrieved = store.get("inplace-update-123").await.unwrap();
+        assert_eq!(retrieved.content, "New content");
+    }
+
+    /// Issue-1 contract (b): a title-changing update renames the file —
+    /// afterwards exactly one file exists for the id and `get` returns the
+    /// new state.
+    #[tokio::test]
+    async fn test_update_title_change_leaves_single_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "aaaa1111-2222-3333-4444-555566667777";
+        let mut memory = create_test_memory(id, Visibility::Shared);
+        memory.title = Some("First Title".to_string());
+        store.create(&memory).await.unwrap();
+
+        let dir = paths::memories_dir(&store.project_dir);
+        let old_path = dir.join(format!("first-title_{}.md", id));
+        assert!(old_path.exists(), "slugged filename expected after create");
+
+        let mut update = MemoryUpdate::new();
+        update.title = Some("Second Title".to_string());
+        update.content = Some("Renamed content".to_string());
+        store.update(id, update).await.unwrap();
+
+        assert!(!old_path.exists(), "old slug file must be removed");
+        let new_path = dir.join(format!("second-title_{}.md", id));
+        assert!(new_path.exists(), "new slug file must exist");
+        assert_eq!(
+            files_matching_id(&dir, id).len(),
+            1,
+            "exactly one file for the id after a rename-update"
+        );
+
+        let retrieved = store.get(id).await.unwrap();
+        assert_eq!(retrieved.title.as_deref(), Some("Second Title"));
+        assert_eq!(retrieved.content, "Renamed content");
+    }
+
+    /// Issue-1 contract (c): simulate the crash window of a rename-update —
+    /// BOTH the new and the stale old file exist for one id. Readers must
+    /// resolve to the newest file (not error as "ambiguous"), and `delete`
+    /// must sweep both files.
+    #[tokio::test]
+    async fn test_stale_duplicate_resolves_to_newest_and_delete_sweeps_both() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "cccc1111-2222-3333-4444-555566667777";
+        let mut memory = create_test_memory(id, Visibility::Shared);
+        memory.title = Some("New Title".to_string());
+        memory.content = "Current content".to_string();
+        store.create(&memory).await.unwrap();
+
+        // Manually create the stale pre-rename file (old title, old content)
+        // with an unambiguously older mtime.
+        let dir = paths::memories_dir(&store.project_dir);
+        let mut stale = memory.clone();
+        stale.title = Some("Old Title".to_string());
+        stale.content = "Stale content".to_string();
+        let stale_path = dir.join(memory_file::memory_filename(&stale));
+        std::fs::write(&stale_path, memory_file::write_memory_file(&stale).unwrap()).unwrap();
+        age_file(&stale_path, 3600);
+        assert_eq!(files_matching_id(&dir, id).len(), 2);
+
+        // get resolves to the newest file instead of failing as ambiguous.
+        let got = store.get(id).await.unwrap();
+        assert_eq!(got.content, "Current content");
+
+        // get_batch resolves the duplicate the same way.
+        let batch = store.get_batch(&[id]).await.unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].1.content, "Current content");
+
+        // delete removes BOTH files — no orphan left behind.
+        store.delete(id).await.unwrap();
+        assert!(files_matching_id(&dir, id).is_empty());
+        assert!(store.get(id).await.is_err());
+    }
+
+    /// A subsequent update also cleans up a stale duplicate left by a
+    /// crashed rename-update.
+    #[tokio::test]
+    async fn test_update_cleans_up_stale_duplicate() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "dddd1111-2222-3333-4444-555566667777";
+        let mut memory = create_test_memory(id, Visibility::Shared);
+        memory.title = Some("New Title".to_string());
+        store.create(&memory).await.unwrap();
+
+        let dir = paths::memories_dir(&store.project_dir);
+        let mut stale = memory.clone();
+        stale.title = Some("Old Title".to_string());
+        let stale_path = dir.join(memory_file::memory_filename(&stale));
+        std::fs::write(&stale_path, memory_file::write_memory_file(&stale).unwrap()).unwrap();
+        age_file(&stale_path, 3600);
+        assert_eq!(files_matching_id(&dir, id).len(), 2);
+
+        let mut update = MemoryUpdate::new();
+        update.content = Some("Post-crash content".to_string());
+        store.update(id, update).await.unwrap();
+
+        assert_eq!(
+            files_matching_id(&dir, id).len(),
+            1,
+            "update must sweep the stale duplicate"
+        );
+        assert!(!stale_path.exists());
+        let got = store.get(id).await.unwrap();
+        assert_eq!(got.content, "Post-crash content");
+    }
+
+    /// Reindex with a stale duplicate on disk: the newest file wins (its
+    /// content is what gets indexed), the duplicate counts once, and the
+    /// stale file is removed (reindex is the repair path).
+    #[tokio::test]
+    async fn test_reindex_dedupes_and_removes_stale_duplicate() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "eeee1111-2222-3333-4444-555566667777";
+        let mut memory = create_test_memory(id, Visibility::Shared);
+        memory.title = Some("New Title".to_string());
+        memory.summary = "Current summary".to_string();
+        store.create(&memory).await.unwrap();
+
+        let dir = paths::memories_dir(&store.project_dir);
+        let mut stale = memory.clone();
+        stale.title = Some("Old Title".to_string());
+        stale.summary = "Stale summary".to_string();
+        let stale_path = dir.join(memory_file::memory_filename(&stale));
+        std::fs::write(&stale_path, memory_file::write_memory_file(&stale).unwrap()).unwrap();
+        age_file(&stale_path, 3600);
+
+        let count = store.reindex().await.unwrap();
+        assert_eq!(count, 1, "duplicate files for one id must index once");
+        assert!(
+            !stale_path.exists(),
+            "reindex must remove the stale duplicate"
+        );
+        assert_eq!(files_matching_id(&dir, id).len(), 1);
+
+        let got = store.get(id).await.unwrap();
+        assert_eq!(got.summary, "Current summary");
+        assert_eq!(store.list_ids().await.unwrap(), vec![id.to_string()]);
+    }
+
+    /// Issue-3 regression: `set_embedding_fingerprint` racing concurrent
+    /// `create`s must not lose the fingerprint. Both paths do a
+    /// load-modify-save of manifest.toml; without the write lock a create
+    /// could load the pre-stamp manifest and save over the fingerprint.
+    #[tokio::test]
+    async fn test_set_embedding_fingerprint_survives_concurrent_creates() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let fingerprint = manifest::EmbeddingFingerprint {
+            model: "onnx/race-test-model".to_string(),
+            dimensions: 384,
+        };
+
+        let mut tasks = Vec::new();
+        for i in 0..8 {
+            let store = store.clone();
+            tasks.push(tokio::spawn(async move {
+                let mem = create_test_memory(&format!("fp-race-{}", i), Visibility::Shared);
+                store.create(&mem).await.unwrap();
+            }));
+        }
+        let stamp = {
+            let store = store.clone();
+            let fingerprint = fingerprint.clone();
+            tokio::spawn(async move {
+                store.set_embedding_fingerprint(fingerprint).await.unwrap();
+            })
+        };
+
+        for task in tasks {
+            task.await.unwrap();
+        }
+        stamp.await.unwrap();
+
+        assert_eq!(
+            store.embedding_fingerprint().await.unwrap(),
+            Some(fingerprint),
+            "a concurrent create clobbered the fingerprint (manifest RMW race)"
+        );
+        assert_eq!(store.count().await.unwrap(), 8, "all creates must land");
     }
 
     /// The core atomicity property of `update_with`: N concurrent
