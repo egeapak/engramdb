@@ -40,6 +40,48 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      # The `ollama` feature is on by default and gates `#[cfg(feature = "ollama")]`
+      # branches (e.g. in src/ops/mod.rs). The all-features build above never
+      # exercises the pure-ONNX path, so a `--no-default-features` compile break
+      # would otherwise ship unnoticed. Cheap `check` only.
+      - name: Check (no default features)
+        run: cargo check --workspace --no-default-features
+
+  # Linux full tests run in the `test` job below; this matrix only `cargo check`s
+  # the non-Linux targets that `release.yml` actually ships (macOS + Windows) so
+  # that platform-gated code — most importantly the Windows named-pipe daemon
+  # transport (`#[cfg(windows)]` in src/daemon/transport.rs) and the `#[cfg(unix)]`
+  # Unix-socket path — compiles on every PR instead of first failing at release
+  # time. Check only (no link/test): fast, and the ORT binary download +
+  # per-OS protoc install are the only setup differences from the Linux job.
+  check-cross:
+    name: Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install protobuf compiler (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install protobuf compiler (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc -y
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        # ONNX Runtime is downloaded + statically linked by fastembed's
+        # `download-binaries` (same as release.yml), so no manual ORT setup.
+        run: cargo check --workspace --all-features
+
   test:
     name: Test
     runs-on: ubuntu-latest
