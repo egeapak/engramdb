@@ -134,6 +134,99 @@ fn doctor_store_subcommand_runs() {
 }
 
 #[test]
+fn doctor_fix_non_tty_without_yes_lists_fixes_and_exits_zero() {
+    // An uninitialized project has one fixable issue (init). With --fix but no
+    // --yes in a non-TTY context (assert_cmd pipes stdout), nothing is applied
+    // — the fixes are listed and the command exits 0 instead of erroring.
+    let dir = TempDir::new().unwrap();
+
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "plain",
+            "doctor",
+            "--fix",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "doctor --fix without --yes must not error in non-TTY: status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("fixable issue") && combined.contains("--fix --yes"),
+        "must list fixes and point at --yes; got: {combined}"
+    );
+}
+
+#[test]
+fn doctor_fix_yes_on_uninitialized_initializes_project() {
+    // --fix --yes applies the safe fixes without prompting; for an
+    // uninitialized project that means running init, after which .engramdb
+    // exists.
+    let dir = TempDir::new().unwrap();
+
+    helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "plain",
+            "doctor",
+            "--fix",
+            "--yes",
+        ])
+        .assert()
+        .success();
+
+    assert!(
+        dir.path().join(".engramdb").join("manifest.toml").exists(),
+        "doctor --fix --yes should have initialized the project"
+    );
+}
+
+#[test]
+fn doctor_validate_subcommand_runs() {
+    // `doctor validate` loads each downloaded model and test-infers. We don't
+    // assert pass/fail (that depends on which models are cached on the runner),
+    // only that the subcommand wires up and reports per-model results.
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "plain",
+            "doctor",
+            "validate",
+        ])
+        .output()
+        .unwrap();
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("Embedding model"),
+        "validate must report the embedding model; got: {combined}"
+    );
+}
+
+#[test]
 fn doctor_store_unhealthy_exits_nonzero() {
     let dir = TempDir::new().unwrap();
     helpers::init_store(dir.path());

@@ -31,8 +31,8 @@ pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
 pub use daemon_resolve::{resolve_providers, DaemonCell, DaemonPolicy};
 pub use delete::delete_memory;
 pub use doctor::{
-    doctor, doctor_environment, CheckStatus, DoctorResult, DoctorSection, EnvironmentCheck,
-    EnvironmentDoctorResult,
+    doctor, doctor_environment, validate_models, CheckStatus, DoctorResult, DoctorSection,
+    EnvironmentCheck, EnvironmentDoctorResult,
 };
 pub use gc::{execute_gc_plan, gc_memories, plan_gc, GcCandidate, GcMaintenance, GcPlan, GcResult};
 pub use get::get_memory;

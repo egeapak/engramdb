@@ -99,7 +99,7 @@ When integrated with Claude Code:
 | `challenge` | Challenge a memory's validity |
 | `review` | Interactive review of challenged/stale memories |
 | `stats` | Show store statistics |
-| `doctor` | Check environment and store health |
+| `doctor` | Check environment and store health (`--fix` to repair, `validate` to test models) |
 | `gc` | Garbage collect low-relevance memories |
 | `compress` | List compression candidates |
 | `reindex` | Rebuild index and re-embed all memories |
@@ -117,7 +117,15 @@ When integrated with Claude Code:
 groups its report into **Project** (current project health), **Projects** (all
 registered projects), **Global settings & models** (binaries, integration, the
 active models with a short description of what each is for, and whether the
-embedding daemon is enabled and running), and **Stats** (global disk usage).
+embedding daemon is enabled and running), and **Stats** (global disk usage). When
+the current directory isn't an EngramDB project, the report collapses to just the
+"not set up" notice.
+
+`engramdb doctor --fix` offers to repair the issues it finds (reindex, download
+the embedding model, prune stale projects, or initialize the project) — it
+prompts on a terminal and applies non-interactively with `--fix --yes`.
+`engramdb doctor validate` loads each downloaded model and runs a test inference
+to confirm it actually works.
 
 Use `engramdb <command> --help` for detailed options.
 

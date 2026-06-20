@@ -196,13 +196,37 @@ pub async fn doctor_environment(
     let registry_info = load_registry_info(dir).await;
     let store_initialized = dir.join(".engramdb").exists();
 
+    // When this project has no EngramDB setup, none of the project-level
+    // checks apply and the global sections (registry, models, stats) are noise
+    // for someone who just wants to know "is this set up?". Show only the
+    // single "not set up" notice and stop.
+    if !store_initialized {
+        sections.push(DoctorSection {
+            name: "Project".to_string(),
+            checks: vec![EnvironmentCheck {
+                name: "Store initialized".to_string(),
+                passed: false,
+                message: "not found".to_string(),
+                suggestion: Some("Run `engramdb init` to set up this project".to_string()),
+                details: vec![],
+                status: None,
+            }],
+            subsections: vec![],
+        });
+        return EnvironmentDoctorResult {
+            sections,
+            all_passed: false,
+            store_check: None,
+        };
+    }
+
     // === 1. Project section (current project's stats & health) ===
     let store_path = dir
         .canonicalize()
         .unwrap_or_else(|_| dir.to_path_buf())
         .join(".engramdb");
 
-    let store_check = if store_initialized {
+    let store_check = {
         let project_id = crate::storage::project_id::compute_project_id(dir);
         let mut project_checks = Vec::new();
 
@@ -308,20 +332,6 @@ pub async fn doctor_environment(
             subsections: vec![],
         });
         sc
-    } else {
-        sections.push(DoctorSection {
-            name: "Project".to_string(),
-            checks: vec![EnvironmentCheck {
-                name: "Store initialized".to_string(),
-                passed: false,
-                message: "not found".to_string(),
-                suggestion: Some("Run `engramdb init` to set up this project".to_string()),
-                details: vec![],
-                status: None,
-            }],
-            subsections: vec![],
-        });
-        None
     };
 
     // === 2. Projects section (all registered projects) ===
@@ -803,6 +813,212 @@ async fn check_active_models(dir: &Path) -> Vec<EnvironmentCheck> {
             "disabled".to_string(),
             "Automatic title generation is off; no model is loaded.",
         )),
+    }
+
+    checks
+}
+
+/// Load every model the current config would use (plus any optional model
+/// that is already downloaded) and run a tiny inference to confirm it works.
+///
+/// Returns one [`EnvironmentCheck`] per model role:
+/// - `Pass` — the model loaded and a test inference succeeded.
+/// - `Fail` — the model is present/enabled but loading or inference failed.
+/// - `Info` — nothing to validate (the model is neither enabled nor
+///   downloaded), so it is skipped.
+///
+/// A model that is enabled in config *or* already downloaded is exercised, so
+/// a model you pulled but haven't switched on yet is still checked. Download
+/// detection uses the HuggingFace cache layout for hub models (embedding, NLI,
+/// T5); the fastembed reranker is keyed off `[rerank].enabled` because its
+/// cache layout is not probed here.
+pub async fn validate_models(config: &crate::types::EngramConfig) -> Vec<EnvironmentCheck> {
+    use std::time::Instant;
+
+    let mut vcfg = config.clone();
+    vcfg.nli.enabled =
+        config.nli.enabled || crate::storage::paths::hf_repo_cached(&config.nli.model);
+    if config.title.strategy != crate::title::TitleStrategy::T5
+        && crate::storage::paths::hf_repo_cached(crate::title::t5::DEFAULT_T5_MODEL.repo)
+    {
+        vcfg.title.strategy = crate::title::TitleStrategy::T5;
+    }
+
+    // One heavyweight load of the whole bundle (embedding always; the others
+    // per the flags above). The CLI is one-shot, so a single session each.
+    let providers = super::resolve_engine_providers(&vcfg, None, 1);
+
+    let pass = |name: &str, message: String| EnvironmentCheck {
+        name: name.to_string(),
+        passed: true,
+        message,
+        suggestion: None,
+        details: vec![],
+        status: Some(CheckStatus::Pass),
+    };
+    let fail = |name: &str, message: String, hint: &str| EnvironmentCheck {
+        name: name.to_string(),
+        passed: false,
+        message,
+        suggestion: Some(hint.to_string()),
+        details: vec![],
+        status: None,
+    };
+    let skip = |name: &str, message: String| EnvironmentCheck {
+        name: name.to_string(),
+        passed: true,
+        message,
+        suggestion: None,
+        details: vec![],
+        status: Some(CheckStatus::Info),
+    };
+
+    let mut checks = Vec::new();
+
+    // Embedding — always loaded.
+    match &providers.embedding {
+        Some(p) => {
+            let t = Instant::now();
+            match p.embed("EngramDB model validation probe").await {
+                Ok(v)
+                    if !v.is_empty()
+                        && v.len() == p.dimensions()
+                        && v.iter().all(|f| f.is_finite()) =>
+                {
+                    checks.push(pass(
+                        "Embedding model",
+                        format!(
+                            "ok — {} ({}d) in {}ms",
+                            p.model_id(),
+                            v.len(),
+                            t.elapsed().as_millis()
+                        ),
+                    ))
+                }
+                Ok(v) => checks.push(fail(
+                    "Embedding model",
+                    format!(
+                        "produced an unusable vector ({} dims, expected {})",
+                        v.len(),
+                        p.dimensions()
+                    ),
+                    "Run `engramdb reindex --embeddings-only` after fixing the model",
+                )),
+                Err(e) => checks.push(fail(
+                    "Embedding model",
+                    format!("inference failed: {e}"),
+                    "Re-download the embedding model with `engramdb init`",
+                )),
+            }
+        }
+        None => checks.push(fail(
+            "Embedding model",
+            "failed to load".to_string(),
+            "Run `engramdb init` to (re)download the embedding model",
+        )),
+    }
+
+    // NLI — enabled or downloaded.
+    if vcfg.nli.enabled {
+        match &providers.nli {
+            Some(p) => {
+                let t = Instant::now();
+                match p.classify("The sky is blue.", "The sky is not blue.").await {
+                    Ok(_) => checks.push(pass(
+                        "NLI model",
+                        format!("ok — {} in {}ms", config.nli.model, t.elapsed().as_millis()),
+                    )),
+                    Err(e) => checks.push(fail(
+                        "NLI model",
+                        format!("inference failed: {e}"),
+                        "Re-download the NLI model",
+                    )),
+                }
+            }
+            None => checks.push(fail(
+                "NLI model",
+                "present but failed to load".to_string(),
+                "Re-download the NLI model",
+            )),
+        }
+    } else {
+        checks.push(skip(
+            "NLI model",
+            "not enabled and not downloaded (skipped)".to_string(),
+        ));
+    }
+
+    // Reranker — keyed off config (cache layout not probed here).
+    if config.rerank.enabled {
+        match &providers.reranker {
+            Some(p) => {
+                let t = Instant::now();
+                let docs = vec![
+                    "a relevant document about memory stores".to_string(),
+                    "unrelated text".to_string(),
+                ];
+                match p.rerank("memory store health", &docs).await {
+                    Ok(_) => checks.push(pass(
+                        "Reranker model",
+                        format!(
+                            "ok — {} in {}ms",
+                            config.rerank.model,
+                            t.elapsed().as_millis()
+                        ),
+                    )),
+                    Err(e) => checks.push(fail(
+                        "Reranker model",
+                        format!("inference failed: {e}"),
+                        "Re-download the reranker model",
+                    )),
+                }
+            }
+            None => checks.push(fail(
+                "Reranker model",
+                "enabled but failed to load".to_string(),
+                "Re-download the reranker model",
+            )),
+        }
+    } else {
+        checks.push(skip(
+            "Reranker model",
+            "disabled in config (skipped)".to_string(),
+        ));
+    }
+
+    // T5 title — enabled or downloaded.
+    if vcfg.title.strategy == crate::title::TitleStrategy::T5 {
+        match &providers.title {
+            Some(p) => {
+                let t = Instant::now();
+                match p
+                    .generate(
+                        "EngramDB is a project-scoped persistent memory store for coding agents.",
+                    )
+                    .await
+                {
+                    Ok(_) => checks.push(pass(
+                        "Title model",
+                        format!("ok — Xenova/t5-small in {}ms", t.elapsed().as_millis()),
+                    )),
+                    Err(e) => checks.push(fail(
+                        "Title model",
+                        format!("inference failed: {e}"),
+                        "Re-download the T5 title model",
+                    )),
+                }
+            }
+            None => checks.push(fail(
+                "Title model",
+                "present but failed to load".to_string(),
+                "Re-download the T5 title model",
+            )),
+        }
+    } else {
+        checks.push(skip(
+            "Title model",
+            "keyword titling (no model) — skipped".to_string(),
+        ));
     }
 
     checks
@@ -2909,27 +3125,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_environment_no_store_skips_gated_checks() {
+    async fn test_environment_unset_up_shows_only_project_section() {
         let temp_dir = TempDir::new().unwrap();
 
+        // With no .engramdb setup, the report collapses to a single Project
+        // section carrying only the "not set up" notice — the global sections
+        // (Projects / Global settings & models / Stats) are suppressed.
         let result = doctor_environment(temp_dir.path(), None, test_daemon_check()).await;
+        let section_names: Vec<&str> = result.sections.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(section_names, vec!["Project"]);
+
         let names: Vec<&str> = result
             .all_checks()
             .iter()
             .map(|c| c.name.as_str())
             .collect();
+        assert_eq!(names, vec!["Store initialized"]);
+        assert!(!result.all_passed);
 
-        // Gated checks should not appear without a store
-        assert!(
-            !names.contains(&"Manifest stats"),
-            "Manifest stats should not appear without store"
-        );
-        assert!(
-            !names.contains(&"Chunk index integrity"),
-            "Chunk index integrity should not appear without store"
-        );
-        // Global disk usage is always present
-        assert!(names.contains(&"Global disk usage"));
+        // None of the global checks should be computed when unset-up.
+        assert!(!names.contains(&"Global disk usage"));
+        assert!(!names.contains(&"Registered projects"));
+        assert!(!names.contains(&"Manifest stats"));
     }
 
     #[test]
@@ -2985,7 +3202,10 @@ mod tests {
     #[tokio::test]
     async fn test_global_section_has_models_and_embeddings_subsections() {
         let temp_dir = TempDir::new().unwrap();
-        let result = doctor_environment(temp_dir.path(), None, test_daemon_check()).await;
+        // The global sections only render for an initialized project.
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        let result = doctor_environment(temp_dir.path(), Some(&store), test_daemon_check()).await;
         let global = result
             .sections
             .iter()

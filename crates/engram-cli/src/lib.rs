@@ -392,9 +392,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             global,
             daemon,
         } => commands::run_stats(&dir, global, daemon, backend, all_projects, &formatter).await,
-        Command::Doctor { command, global } => {
-            commands::run_doctor(&dir, global, command, &formatter).await
-        }
+        Command::Doctor {
+            command,
+            global,
+            fix,
+            yes,
+        } => commands::run_doctor(&dir, global, command, fix, yes, &prompter, &formatter).await,
         Command::Challenge {
             id,
             evidence,
