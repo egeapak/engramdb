@@ -296,6 +296,29 @@ impl MemoryStore {
         let content = memory_file::write_memory_file(memory)?;
         atomic_write(&file_path, &content).await?;
 
+        // Sweep up any pre-existing file(s) for this exact ID — in BOTH
+        // visibility directories — that are not the file we just wrote. Without
+        // this, `create` for an ID that already exists under a *different*
+        // visibility (worktree consolidation re-runs, or a personal/shared
+        // re-create) would orphan the old file on disk while the index row
+        // simply flips, diverging disk from the index (finding #1). New-file-
+        // first ordering (the `atomic_write` above) means a reader never sees a
+        // spurious NotFound. NotFound on removal is benign (already gone).
+        for dir in [
+            self.get_memories_dir(&Visibility::Shared)?,
+            self.get_memories_dir(&Visibility::Personal)?,
+        ] {
+            for old in find_memory_files(&dir, &memory.id).await? {
+                if old != file_path {
+                    match async_fs::remove_file(&old).await {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+            }
+        }
+
         // Upsert metadata to LanceDB (vectors stored separately in chunks table)
         let entry = IndexEntry::from(memory);
         self.lance_index
@@ -349,10 +372,26 @@ impl MemoryStore {
             let id_str = id.as_ref();
             let path = shared_map.get(id_str).or_else(|| personal_map.get(id_str));
             if let Some(path) = path {
-                if let Ok(content) = async_fs::read_to_string(path).await {
-                    if let Ok(memory) = memory_file::parse_memory_file(&content) {
-                        results.push((id_str.to_owned(), memory));
-                    }
+                // An indexed memory whose file is unreadable/unparseable is a
+                // data-integrity problem. Drop it (as before, so one bad file
+                // doesn't fail a whole batch) but `warn!` rather than swallow it
+                // silently, matching `reindex_dir`'s handling (finding #15).
+                match async_fs::read_to_string(path).await {
+                    Ok(content) => match memory_file::parse_memory_file(&content) {
+                        Ok(memory) => results.push((id_str.to_owned(), memory)),
+                        Err(e) => tracing::warn!(
+                            "get_batch: skipping {} ({}): failed to parse: {}",
+                            id_str,
+                            path.display(),
+                            e
+                        ),
+                    },
+                    Err(e) => tracing::warn!(
+                        "get_batch: skipping {} ({}): failed to read: {}",
+                        id_str,
+                        path.display(),
+                        e
+                    ),
                 }
             }
         }
@@ -906,7 +945,8 @@ impl MemoryStore {
                         None
                     }
                     std::collections::hash_map::Entry::Occupied(mut slot) => {
-                        if mtime >= slot.get().1 {
+                        let (ref slot_path, slot_mtime, _) = *slot.get();
+                        if prefers_newer((mtime, &path), (slot_mtime, slot_path)) {
                             let (old_path, _, _) = slot.insert((path, mtime, memory));
                             Some(old_path)
                         } else {
@@ -954,14 +994,8 @@ impl MemoryStore {
             .count()
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB count failed: {}", e)))?;
-        if md_count != lance_count {
-            Ok(Some(format!(
-                "Index may be stale ({} memories on disk, {} indexed). Run 'engramdb reindex' to rebuild.",
-                md_count, lance_count
-            )))
-        } else {
-            Ok(None)
-        }
+        let has_conflict = self.checkout_conflict().await.is_some();
+        Ok(staleness_message(md_count, lance_count, has_conflict))
     }
 
     /// Recompute and persist manifest stats (load-modify-save of
@@ -1136,18 +1170,65 @@ async fn file_mtime(path: &Path) -> std::time::SystemTime {
     }
 }
 
+/// Whether candidate `a` should be preferred over the current best `b` when
+/// resolving which of several duplicate files for one memory ID is "current".
+///
+/// Newer mtime wins. On a *tie* (identical mtimes — common on filesystems with
+/// 1-second mtime granularity when an update and its stale predecessor are
+/// written in the same second, or when files are copied), the lexicographically
+/// greater path wins. The tiebreak makes duplicate resolution **deterministic**
+/// rather than dependent on directory-iteration order, which would otherwise let
+/// a crash-during-rename resurrect stale content nondeterministically (finding
+/// #14).
+fn prefers_newer(a: (std::time::SystemTime, &Path), b: (std::time::SystemTime, &Path)) -> bool {
+    match a.0.cmp(&b.0) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => a.1 > b.1,
+    }
+}
+
 /// Pick the most recently modified path. `paths` must be non-empty.
 async fn newest_by_mtime(paths: &[PathBuf]) -> &PathBuf {
     let mut best = &paths[0];
     let mut best_mtime = file_mtime(best).await;
     for path in &paths[1..] {
         let mtime = file_mtime(path).await;
-        if mtime >= best_mtime {
+        if prefers_newer((mtime, path), (best_mtime, best)) {
             best = path;
             best_mtime = mtime;
         }
     }
     best
+}
+
+/// Decide the staleness warning, if any. Pure so the checkout-conflict
+/// suppression rule is unit-testable without manipulating the global registry.
+///
+/// Under a shared-ID **checkout conflict** (two clones of the same git remote
+/// share one LanceDB index but keep separate `.engramdb/memories/` trees), the
+/// index legitimately holds the *other* checkout's rows, so `lance_count` is
+/// permanently greater than this checkout's on-disk `md_count`. Emitting a
+/// "run reindex" warning then is wrong: it never clears (reindex degrades to a
+/// non-destructive upsert under conflict, by design) and only confuses the
+/// user. So suppress the warning entirely when a conflict is present (finding
+/// #5).
+fn staleness_message(
+    md_count: usize,
+    lance_count: usize,
+    checkout_conflict: bool,
+) -> Option<String> {
+    if checkout_conflict {
+        return None;
+    }
+    if md_count != lance_count {
+        Some(format!(
+            "Index may be stale ({} memories on disk, {} indexed). Run 'engramdb reindex' to rebuild.",
+            md_count, lance_count
+        ))
+    } else {
+        None
+    }
 }
 
 /// Count `.md` files in a directory. Returns 0 if the directory doesn't exist.
@@ -2571,5 +2652,170 @@ mod tests {
             .await
             .unwrap();
         assert!(!store.is_global());
+    }
+
+    // ===================================================================
+    // Finding #1 (Critical): `create` must not orphan files across
+    // visibility directories.
+    //
+    // Scenario: a memory with ID X is created as Shared. Later the *same* ID
+    // is created again as Personal (e.g. worktree consolidation re-runs, or a
+    // personal/shared re-create). The LanceDB row is keyed on ID so it simply
+    // flips to Personal — but the old Shared `.md` file was never removed,
+    // leaving TWO files for one ID across two directories and diverging disk
+    // from the index.
+    // ===================================================================
+
+    async fn count_files(dir: &Path) -> usize {
+        count_md_files(dir).await
+    }
+
+    #[tokio::test]
+    async fn create_basic_roundtrips_without_orphans() {
+        // POSITIVE: a plain create leaves exactly one file and one index row.
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "0190aaaa-bbbb-7ccc-8ddd-000000000001";
+        store
+            .create(&create_test_memory(id, Visibility::Shared))
+            .await
+            .unwrap();
+
+        let shared = paths::memories_dir(&store.project_dir);
+        let personal = paths::personal_memories_dir(&store.project_id).unwrap();
+        assert_eq!(count_files(&shared).await, 1);
+        assert_eq!(count_files(&personal).await, 0);
+        assert_eq!(store.count().await.unwrap(), 1);
+        assert_eq!(store.get(id).await.unwrap().visibility, Visibility::Shared);
+    }
+
+    #[tokio::test]
+    async fn create_same_id_different_visibility_does_not_orphan() {
+        // NEGATIVE (red before fix): re-creating an existing ID under a new
+        // visibility must remove the old-visibility file, not orphan it.
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "0190aaaa-bbbb-7ccc-8ddd-000000000002";
+
+        store
+            .create(&create_test_memory(id, Visibility::Shared))
+            .await
+            .unwrap();
+        // Re-create the SAME id as Personal.
+        store
+            .create(&create_test_memory(id, Visibility::Personal))
+            .await
+            .unwrap();
+
+        let shared = paths::memories_dir(&store.project_dir);
+        let personal = paths::personal_memories_dir(&store.project_id).unwrap();
+
+        // Exactly one file total, in the new (Personal) dir; no Shared orphan.
+        assert_eq!(
+            count_files(&shared).await,
+            0,
+            "old Shared file must be removed, not orphaned"
+        );
+        assert_eq!(count_files(&personal).await, 1);
+        // Index agrees: one row, resolving to the new visibility.
+        assert_eq!(store.count().await.unwrap(), 1);
+        assert_eq!(
+            store.get(id).await.unwrap().visibility,
+            Visibility::Personal
+        );
+    }
+
+    // ===================================================================
+    // Finding #14 (Medium): tied-mtime duplicate resolution must be
+    // deterministic (not directory-iteration-order dependent).
+    // ===================================================================
+
+    #[test]
+    fn prefers_newer_breaks_mtime_ties_deterministically() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let t = UNIX_EPOCH + Duration::from_secs(1000);
+        let a = Path::new("aaa_id.md");
+        let b = Path::new("bbb_id.md");
+
+        // POSITIVE: strictly newer mtime always wins regardless of path.
+        let newer = t + Duration::from_secs(1);
+        assert!(prefers_newer((newer, a), (t, b)));
+        assert!(!prefers_newer((t, b), (newer, a)));
+
+        // NEGATIVE (red before fix): on an mtime TIE the result must be
+        // order-independent. Lexicographically greater path ("bbb" > "aaa")
+        // wins no matter which side it is on. Before the fix (`a.0 >= b.0`),
+        // the first argument always won on ties → order-dependent.
+        assert!(prefers_newer((t, b), (t, a)), "bbb should win the tie");
+        assert!(
+            !prefers_newer((t, a), (t, b)),
+            "aaa must lose the tie regardless of argument order"
+        );
+    }
+
+    // ===================================================================
+    // Finding #5 (High): staleness warning must be suppressed under a
+    // shared-ID checkout conflict (where lance_count > md_count is normal).
+    // ===================================================================
+
+    #[test]
+    fn staleness_message_reports_real_drift_without_conflict() {
+        // POSITIVE: genuine drift (no conflict) still warns.
+        assert!(staleness_message(3, 5, false).is_some());
+        // POSITIVE: in-sync counts never warn.
+        assert!(staleness_message(5, 5, false).is_none());
+    }
+
+    #[test]
+    fn staleness_message_suppressed_under_checkout_conflict() {
+        // NEGATIVE (red before fix): under a conflict, a count mismatch is
+        // expected (the index holds another checkout's rows) and must NOT warn.
+        assert!(
+            staleness_message(3, 5, true).is_none(),
+            "must not warn about staleness during a checkout conflict"
+        );
+    }
+
+    // ===================================================================
+    // Finding #15 (Medium): get_batch tolerates a corrupt file (skips it,
+    // returns the valid ones) rather than failing the whole batch.
+    // ===================================================================
+
+    #[tokio::test]
+    async fn get_batch_skips_corrupt_file_returns_valid() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let good = "0190aaaa-bbbb-7ccc-8ddd-000000000010";
+        let bad = "0190aaaa-bbbb-7ccc-8ddd-000000000011";
+        store
+            .create(&create_test_memory(good, Visibility::Shared))
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory(bad, Visibility::Shared))
+            .await
+            .unwrap();
+
+        // Corrupt the second file on disk (truncate to garbage that won't parse).
+        let shared = paths::memories_dir(&store.project_dir);
+        for path in find_memory_files(&shared, bad).await.unwrap() {
+            async_fs::write(&path, "this is not a valid memory file")
+                .await
+                .unwrap();
+        }
+
+        let got = store.get_batch(&[good, bad]).await.unwrap();
+        let ids: Vec<&str> = got.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![good],
+            "valid memory returned, corrupt one skipped"
+        );
     }
 }

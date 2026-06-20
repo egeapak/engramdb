@@ -946,8 +946,24 @@ impl EngramConfig {
             );
         }
 
+        // A negative `search.threshold` is always a configuration error: scores
+        // are normalized to [0, 1], so a negative gate is meaningless and — worse
+        // — the consumer's old `min(1.0)` left it negative, which silently
+        // *disabled* the relevance filter (the gate is `if threshold > 0.0`).
+        // Reject it here, and the consumer (`RetrievalEngine`) additionally
+        // clamps defensively for configs built programmatically without
+        // `validate()`. NaN is likewise rejected (it fails every comparison).
+        if self.search.threshold.is_nan() || self.search.threshold < 0.0 {
+            anyhow::bail!(
+                "search.threshold ({}) must be >= 0.0",
+                self.search.threshold
+            );
+        }
+
         // Config migration: if search threshold is > 1.0, it was set for the
-        // old unbounded scoring scale. Warn and treat as if it were 1.0.
+        // old unbounded scoring scale. Warn and treat as if it were 1.0. This is
+        // tolerated (not an error) for backward-compatibility with old configs;
+        // the consumer clamps with `min(1.0)`, so it behaves exactly as 1.0.
         if self.search.threshold > 1.0 {
             tracing::warn!(
                 "search.threshold ({}) exceeds 1.0 — scores are now normalized to [0, 1]. \
@@ -1761,5 +1777,61 @@ weight = 0.7
             ..StatsConfig::default()
         };
         assert!(cfg.validate().is_err(), "above the 3650 cap must fail");
+    }
+
+    // ---- Finding #4 / #20: search.threshold validation -------------------
+    //
+    // Scenario: an operator hand-edits `[search] threshold` in config.toml.
+    // - A negative value is meaningless once scores are normalized to [0, 1]
+    //   and, before the fix, slipped through `validate()` and then through the
+    //   consumer's `min(1.0)` still negative, which silently DISABLED the
+    //   relevance gate (`if threshold > 0.0` is false for negatives) — i.e.
+    //   every result, however irrelevant, was returned.
+    // - A value > 1.0 is a legacy artifact (old unbounded scale) and must stay
+    //   *tolerated* for backward-compat; the consumer clamps it to 1.0.
+
+    fn config_with_search_threshold(t: f64) -> EngramConfig {
+        let mut cfg = EngramConfig::default();
+        cfg.search.threshold = t;
+        cfg
+    }
+
+    #[test]
+    fn search_threshold_negative_is_rejected() {
+        // NEGATIVE test: this must error. Before the fix it returned Ok(()).
+        let err = config_with_search_threshold(-0.1)
+            .validate()
+            .expect_err("negative search.threshold must be rejected");
+        assert!(
+            err.to_string().contains("search.threshold"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn search_threshold_nan_is_rejected() {
+        // NEGATIVE test: NaN fails every comparison and would disable the gate.
+        assert!(config_with_search_threshold(f64::NAN).validate().is_err());
+    }
+
+    #[test]
+    fn search_threshold_valid_range_is_accepted() {
+        // POSITIVE test: the normal [0, 1] domain stays valid.
+        for t in [0.0, 0.2, 0.5, 1.0] {
+            assert!(
+                config_with_search_threshold(t).validate().is_ok(),
+                "{t} should validate"
+            );
+        }
+    }
+
+    #[test]
+    fn search_threshold_above_one_is_tolerated_for_backcompat() {
+        // POSITIVE test: a legacy >1.0 value must NOT be a hard error — it is
+        // migrated/clamped at the use site. This pins the back-compat contract.
+        assert!(
+            config_with_search_threshold(5.0).validate().is_ok(),
+            "legacy >1.0 threshold must remain tolerated"
+        );
     }
 }
