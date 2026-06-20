@@ -21,16 +21,16 @@ Legend: ✅ fixed & green · 🟡 verified non-bug (test added) · ⏳ pending
 | 1 | Critical | storage | `create` unchecked upsert orphans files across visibility | ✅ |
 | 2 | High | cli | `get --global` + `--path`/`--raw` resolves wrong dir for Shared | ⏳ |
 | 3 | High | cli/ops | interactive/editor `add` persists unvalidated criticality/confidence | ⏳ |
-| 4 | High | core/types | negative `search.threshold` disables the relevance gate | 🟡 config validated; engine clamp pending |
+| 4 | High | core/types | negative `search.threshold` disables the relevance gate | ✅ |
 | 5 | High | storage | `check_staleness` false-positives under checkout conflict | ✅ |
 | 6 | High | storage | memory_file blockquote/visibility parsing corruption | ✅ |
 | 7 | Medium | cli | JSON-stdout corruption across several commands | ⏳ |
 | 8 | Medium | cli | `stats --daemon` aborts on protocol mismatch instead of fallback | ⏳ |
 | 9 | Medium | mcp | `query` detail_level case-sensitivity drops `details` | ⏳ |
 | 10 | Medium | models | single-text `embed()` doesn't chunk → silent truncation | ⏳ |
-| 11 | Medium | daemon | per-op counters increment on failed requests | ⏳ |
-| 12 | Medium | scope | mid-segment glob computes wrong proximity depth | ⏳ |
-| 13 | Medium | scope | `matches()` vs `calculate_pattern_score` disagree | ⏳ |
+| 11 | Medium | daemon | per-op counters increment on failed requests | ✅ |
+| 12 | Medium | scope | mid-segment glob computes wrong proximity depth | 🟡 verified non-bug (depth is slash-counted) |
+| 13 | Medium | scope | `matches()` vs `calculate_pattern_score` disagree | ✅ filter loosened to scorer |
 | 14 | Medium | storage | nondeterministic tied-mtime duplicate resolution | ✅ |
 | 15 | Medium | storage | `get_batch`/`batch_exists` silently skip corrupt files | ✅ logging + behaviour test |
 | 16 | Medium | storage | telemetry `load_recent` full-table scan | ⏳ |
@@ -110,3 +110,40 @@ Legend: ✅ fixed & green · 🟡 verified non-bug (test added) · ⏳ pending
   therefore accurate. No production change beyond keeping >1.0 *tolerated*
   (not a hard error) for back-compat; pinned by
   `search_threshold_above_one_is_tolerated_for_backcompat`.
+
+## Details (batch 2: core engramdb)
+
+### #4 — engine clamp (High) ✅
+- **Test:** `retrieval::engine::tests::filter_threshold_is_bounded` (negative for
+  `-0.5`→0 and `NaN`→0, positive for in-range/`>1`).
+- **Fix:** `filter_threshold()` clamps to `[0,1]` and maps NaN→0; the Filter-mode
+  gate uses it instead of `min(1.0)`. Combined with the batch-1 config rejection,
+  the relevance gate can no longer be silently disabled.
+
+### #11 — daemon counters on failure (Medium) ✅
+- **Scenario:** an `Embed`/`Classify`/… that hits an unavailable model or a
+  failing inference still bumped the persisted per-op counter, inflating
+  `stats --daemon`.
+- **Test:** `daemon::tests::failed_request_does_not_increment_counter` — forces
+  embedding unavailable (empty model cache + offline), sends `Embed` (Error),
+  asserts `Status.requests_embed == 0` (red before fix).
+- **Fix:** counters are incremented only inside the success arm of each op.
+
+### #12 — mid-segment glob depth (Medium) 🟡 non-bug
+- **Re-examined:** proximity depth is computed by counting path separators
+  (`directory_depth_from_parent`), which is unaffected by where the partial
+  leading segment before the wildcard is cut — so the numeric score is already
+  correct. The reviewer's specific example (`src/ap*` vs `src/api/handlers.rs`)
+  is additionally a non-match (`*` does not cross `/`), short-circuited at the
+  matcher. Pinned by `glob_midsegment_depth_is_correct` (passes before & after).
+
+### #13 — filter vs scorer same-directory disagreement (Medium) ✅
+- **Decision (user):** loosen the filter to match the scorer.
+- **Scenario:** scope `src/api/a.rs`, query path `src/api/b.rs`. The proximity
+  scorer rewards same-directory siblings (0.82, pinned by
+  `test_proximity_same_directory_non_glob`), but `matches()` excluded them, so
+  such memories never surfaced in Filter mode.
+- **Test:** `matches_agrees_with_scorer_for_same_directory_sibling` (red before
+  fix). `test_matches_exact` updated to the new (consistent) semantics.
+- **Fix:** `matches()` now also returns true for `is_same_directory`. Full core
+  suite (480 tests) still green — no filtering regressions elsewhere.

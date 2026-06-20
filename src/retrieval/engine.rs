@@ -890,7 +890,7 @@ impl RetrievalEngine {
         // flow is "find specific memories" rather than "browse context".
         let threshold = match query.mode {
             RetrievalMode::Rank => self.config.retrieval.relevance_threshold,
-            RetrievalMode::Filter => self.config.search.threshold.min(1.0),
+            RetrievalMode::Filter => filter_threshold(self.config.search.threshold),
         };
         if threshold > 0.0 {
             scored_memories.retain(|sm| sm.score >= threshold);
@@ -977,6 +977,24 @@ impl IngestTelemetry {
     fn record(&self, stage: &'static str, ms: f64) {
         self.stats
             .record_stage(&self.project_id, stage, ms, self.session_id.as_deref());
+    }
+}
+
+/// The effective Filter-mode relevance threshold, defensively bounded to
+/// `[0, 1]`.
+///
+/// Config validation already rejects negative/NaN `search.threshold`, but a
+/// config built programmatically (tests, internal callers) bypasses
+/// `validate()`. A raw negative value left the gate `if threshold > 0.0`
+/// permanently false (the filter silently returned everything) and a NaN made
+/// every `score >= NaN` comparison false (filtering everything out). Clamping
+/// here guarantees a sane bound regardless of how the config was constructed
+/// (finding #4).
+fn filter_threshold(raw: f64) -> f64 {
+    if raw.is_nan() {
+        0.0
+    } else {
+        raw.clamp(0.0, 1.0)
     }
 }
 
@@ -1076,6 +1094,24 @@ mod tests {
     use crate::retrieval::reranker::LocalReranker;
     use crate::storage::InMemoryRegistry;
     use std::sync::{LazyLock, Mutex};
+
+    // Finding #4: the Filter-mode threshold must be bounded to [0, 1] regardless
+    // of how the config was constructed, so the relevance gate can never be
+    // silently disabled (negative) or turned into a filter-everything NaN.
+    #[test]
+    fn filter_threshold_is_bounded() {
+        // POSITIVE: in-range values pass through unchanged.
+        assert_eq!(filter_threshold(0.0), 0.0);
+        assert_eq!(filter_threshold(0.3), 0.3);
+        assert_eq!(filter_threshold(1.0), 1.0);
+        // POSITIVE: >1.0 still clamps to 1.0 (unchanged from before).
+        assert_eq!(filter_threshold(5.0), 1.0);
+        // NEGATIVE (red before fix): a negative must clamp to 0.0, not stay
+        // negative (which left the gate disabled).
+        assert_eq!(filter_threshold(-0.5), 0.0);
+        // NEGATIVE (red before fix): NaN must become 0.0, not propagate.
+        assert_eq!(filter_threshold(f64::NAN), 0.0);
+    }
 
     /// Shared reranker across all tests in this module to avoid loading the
     /// ~100MB ONNX model once per test (which causes OOM when parallel).

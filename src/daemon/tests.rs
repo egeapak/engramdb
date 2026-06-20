@@ -680,6 +680,60 @@ async fn dispatch_rejects_missing_dir() {
     }
 }
 
+/// Finding #11: a request that fails (model unavailable / inference error) must
+/// NOT bump the persisted per-op request counter. Here the embedding model is
+/// forced unavailable (empty model cache + offline), so an `Embed` returns an
+/// error; the subsequent `Status` must still report `requests_embed == 0`.
+#[tokio::test]
+async fn failed_request_does_not_increment_counter() {
+    // Force embedding resolution to fail: point the model cache at an empty dir
+    // and refuse network downloads. (Per-process env; nextest isolates tests.)
+    let empty_cache = TempDir::new().unwrap();
+    std::env::set_var("ENGRAMDB_MODEL_CACHE_DIR", empty_cache.path());
+    std::env::set_var("ENGRAMDB_OFFLINE", "1");
+
+    let store = TempDir::new().unwrap();
+    let dir = store.path().to_string_lossy().to_string();
+
+    let tmp = TempDir::new().unwrap();
+    let socket = tmp.path().join("d.sock");
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+
+    // NEGATIVE (red before fix): the failing Embed must not count.
+    let resp = wait_request(
+        &socket,
+        DaemonRequest {
+            dir: dir.clone(),
+            backend: None,
+            op: DaemonOp::Embed {
+                texts: vec!["hello".to_string()],
+            },
+        },
+    )
+    .await;
+    assert!(
+        matches!(resp, DaemonResponse::Error { .. }),
+        "embedding should be unavailable, got {resp:?}"
+    );
+
+    let status = wait_request(
+        &socket,
+        DaemonRequest {
+            dir,
+            backend: None,
+            op: DaemonOp::Status,
+        },
+    )
+    .await;
+    match status {
+        DaemonResponse::Status(s) => assert_eq!(
+            s.requests_embed, 0,
+            "a failed embed must not increment the counter"
+        ),
+        other => panic!("expected Status, got {other:?}"),
+    }
+}
+
 /// A stale file left at the socket path (crashed daemon) is reclaimed via the
 /// atomic bind-temp + rename path, and the new daemon serves normally.
 ///
