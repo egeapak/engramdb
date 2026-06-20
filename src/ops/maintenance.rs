@@ -177,9 +177,16 @@ mod tests {
 
     // Env mutation is process-global, but nextest runs each test in its own
     // process and the `#[ctor]` arm redirects the data dir per-process, so
-    // setting these vars directly here can't bleed into another test.
+    // setting these vars directly here can't bleed into another test. We still
+    // clear them at the end of each test for hygiene and to keep multiple
+    // `auto_maintain` calls within one test independent.
     fn set_interval(secs: &str) {
         std::env::set_var("ENGRAMDB_AUTO_MAINTENANCE_INTERVAL_SECS", secs);
+    }
+
+    fn clear_env() {
+        std::env::remove_var("ENGRAMDB_AUTO_MAINTENANCE_INTERVAL_SECS");
+        std::env::remove_var("ENGRAMDB_DISABLE_AUTO_MAINTENANCE");
     }
 
     #[tokio::test]
@@ -192,10 +199,58 @@ mod tests {
 
         set_interval("0"); // always due
         let report = auto_maintain(dir.path(), &registry).await;
+        clear_env();
         assert!(report.ran, "a due pass must run");
         assert!(report.prune.is_some(), "cleanup must have run");
         let doctor = report.doctor.expect("doctor must have run");
         assert!(doctor.healthy, "freshly-created store must be healthy");
+    }
+
+    #[tokio::test]
+    async fn auto_maintain_skips_doctor_for_uninitialized_store() {
+        // No `.engramdb/` at `dir` → the store can't be opened, so the health
+        // check is skipped, but cleanup still runs and nothing errors.
+        let dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+
+        set_interval("0");
+        let report = auto_maintain(dir.path(), &registry).await;
+        clear_env();
+        assert!(report.ran, "maintenance runs even without a store");
+        assert!(report.prune.is_some(), "cleanup always runs");
+        assert!(
+            report.doctor.is_none(),
+            "doctor must be skipped for an uninitialized store"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_maintain_reports_unhealthy_store_without_erroring() {
+        let dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(dir.path(), &registry).await.unwrap();
+        let mem = Memory::new(MemoryType::Decision, "T", "C", Provenance::human());
+        let id = store.create(&mem).await.unwrap();
+
+        // Delete the file behind the store's back → a stale index entry, so the
+        // quick doctor must flag the store unhealthy (but auto_maintain must
+        // still complete without erroring).
+        let file = dir
+            .path()
+            .join(".engramdb")
+            .join("memories")
+            .join(format!("{id}.md"));
+        tokio::fs::remove_file(&file).await.unwrap();
+
+        set_interval("0");
+        let report = auto_maintain(dir.path(), &registry).await;
+        clear_env();
+        assert!(report.ran);
+        let doctor = report.doctor.expect("doctor must have run");
+        assert!(
+            !doctor.healthy,
+            "stale index entry must be reported unhealthy"
+        );
     }
 
     #[tokio::test]
@@ -207,7 +262,7 @@ mod tests {
         set_interval("0");
         std::env::set_var("ENGRAMDB_DISABLE_AUTO_MAINTENANCE", "1");
         let report = auto_maintain(dir.path(), &registry).await;
-        std::env::remove_var("ENGRAMDB_DISABLE_AUTO_MAINTENANCE");
+        clear_env();
         assert!(!report.ran, "disabled maintenance must be a no-op");
     }
 
@@ -225,6 +280,7 @@ mod tests {
         // Second pass with a huge interval → throttled (marker is fresh).
         set_interval("100000");
         let second = auto_maintain(dir.path(), &registry).await;
+        clear_env();
         assert!(!second.ran, "a fresh marker must throttle the next pass");
     }
 }
