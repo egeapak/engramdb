@@ -88,30 +88,35 @@ pub async fn run_stats(
 
     formatter.print_stats(&stats);
 
-    // Print embeddings status
-    println!();
-    let config_path = store.project_dir.join(".engramdb/config.toml");
-    let config = engramdb::storage::config::load_config(&config_path)
-        .await
-        .unwrap_or_default();
-    let model = config.embeddings.provider.as_str();
-    let backend = engramdb::ops::resolve_backend(config.embeddings.backend, embedding_backend);
-    print_embeddings_status(model, backend).await;
-
-    if challenged_count > 0 || needs_review_count > 0 {
+    // The embeddings-status and health-warning sections below are human-only
+    // text. In JSON mode they would print raw lines after the JSON document and
+    // corrupt it for scripted consumers, so suppress them entirely (finding #7).
+    if !formatter.is_json() {
+        // Print embeddings status
         println!();
-        println!("Health Warnings:");
-        if challenged_count > 0 {
-            formatter.print_error(&format!(
-                "  {} memories are challenged (run 'engramdb review --challenged-only')",
-                challenged_count
-            ));
-        }
-        if needs_review_count > 0 {
-            formatter.print_error(&format!(
-                "  {} memories need review (run 'engramdb review --stale-only')",
-                needs_review_count
-            ));
+        let config_path = store.project_dir.join(".engramdb/config.toml");
+        let config = engramdb::storage::config::load_config(&config_path)
+            .await
+            .unwrap_or_default();
+        let model = config.embeddings.provider.as_str();
+        let backend = engramdb::ops::resolve_backend(config.embeddings.backend, embedding_backend);
+        print_embeddings_status(model, backend).await;
+
+        if challenged_count > 0 || needs_review_count > 0 {
+            println!();
+            println!("Health Warnings:");
+            if challenged_count > 0 {
+                formatter.print_error(&format!(
+                    "  {} memories are challenged (run 'engramdb review --challenged-only')",
+                    challenged_count
+                ));
+            }
+            if needs_review_count > 0 {
+                formatter.print_error(&format!(
+                    "  {} memories need review (run 'engramdb review --stale-only')",
+                    needs_review_count
+                ));
+            }
         }
     }
 
@@ -131,7 +136,40 @@ async fn run_daemon_stats(dir: &Path, formatter: &OutputFormatter) -> Result<()>
         .await
         .unwrap_or_default();
     let socket = engramdb::daemon::resolve_socket(None, &cfg.daemon);
-    if let Some(s) = engramdb::daemon::query_status(&socket).await? {
+    // A live query failure (e.g. a protocol-version mismatch with an older
+    // daemon) must NOT abort the command — fall back to the persisted snapshot
+    // exactly as the not-running case does (findings #8 graceful fallback).
+    // `.ok().flatten()` collapses both `Err(_)` and `Ok(None)` to "no live
+    // status".
+    let live = engramdb::daemon::query_status(&socket).await.ok().flatten();
+
+    if let Some(s) = live {
+        if formatter.is_json() {
+            // Emit a single JSON object so scripted consumers can parse it
+            // (finding #7) — raw println! lines would corrupt the stream.
+            println!(
+                "{}",
+                serde_json::json!({
+                    "running": true,
+                    "pid": s.pid,
+                    "socket": socket.display().to_string(),
+                    "protocol": s.version,
+                    "uptime_secs": s.uptime_secs,
+                    "idle_secs": s.idle_secs,
+                    "bundles_loaded": s.bundles_loaded,
+                    "requests": {
+                        "embed": s.requests_embed,
+                        "classify": s.requests_classify,
+                        "rerank": s.requests_rerank,
+                        "meta": s.requests_meta,
+                        "status": s.requests_status,
+                        "title": s.requests_title,
+                        "total": s.requests_total,
+                    },
+                })
+            );
+            return Ok(());
+        }
         formatter.print_success(&format!("Embedding daemon: running (pid {})", s.pid));
         println!("  socket:        {}", socket.display());
         println!("  protocol:      v{}", s.version);
@@ -149,7 +187,23 @@ async fn run_daemon_stats(dir: &Path, formatter: &OutputFormatter) -> Result<()>
         return Ok(());
     }
 
-    match engramdb::daemon::metrics::load_latest().await {
+    let persisted = engramdb::daemon::metrics::load_latest().await;
+    if formatter.is_json() {
+        let requests = persisted.as_ref().map(|p| {
+            let s = &p.snapshot;
+            serde_json::json!({
+                "embed": s.embed, "classify": s.classify, "rerank": s.rerank,
+                "meta": s.meta, "status": s.status, "title": s.title, "total": s.total(),
+            })
+        });
+        println!(
+            "{}",
+            serde_json::json!({ "running": false, "requests": requests })
+        );
+        return Ok(());
+    }
+
+    match persisted {
         Some(p) => {
             formatter.print_message("Embedding daemon: not running (last persisted snapshot)");
             println!("  requests (cumulative across restarts):");

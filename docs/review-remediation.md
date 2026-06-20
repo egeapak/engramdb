@@ -24,8 +24,8 @@ Legend: ✅ fixed & green · 🟡 verified non-bug (test added) · ⏳ pending
 | 4 | High | core/types | negative `search.threshold` disables the relevance gate | ✅ |
 | 5 | High | storage | `check_staleness` false-positives under checkout conflict | ✅ |
 | 6 | High | storage | memory_file blockquote/visibility parsing corruption | ✅ |
-| 7 | Medium | cli | JSON-stdout corruption across several commands | ⏳ |
-| 8 | Medium | cli | `stats --daemon` aborts on protocol mismatch instead of fallback | ⏳ |
+| 7 | Medium | cli | JSON-stdout corruption across several commands | ✅ |
+| 8 | Medium | cli | `stats --daemon` aborts on protocol mismatch instead of fallback | ✅ |
 | 9 | Medium | mcp | `query` detail_level case-sensitivity drops `details` | ✅ |
 | 10 | Medium | models | single-text `embed()` doesn't chunk → silent truncation | 🟡 safe-by-truncation (documented) |
 | 11 | Medium | daemon | per-op counters increment on failed requests | ✅ |
@@ -244,3 +244,29 @@ Both are intentionally deferred: rewriting the LanceDB query/connection/optimize
 patterns carries regression risk disproportionate to the gain (the reviewer
 rated both low-blast-radius), and a behaviour-identical change cannot be guarded
 by a red→green test in this sandbox. Tracked here for a future perf pass.
+
+## Details (batch 7: engram-cli — JSON output #7, daemon fallback #8)
+
+### #7 — JSON-stdout corruption (Medium) ✅ (full fix)
+- **Foundation:** added `OutputFormatter::is_json()` so handlers can suppress or
+  restructure human-oriented output under `--json`/non-TTY.
+- **Single-JSON-object commands** (their output is parsed by scripts): `stats`,
+  `stats --daemon`, `daemon status`, `gc`, `compress` now emit exactly one JSON
+  value in JSON mode (previously formatter JSON + raw `println!` lines).
+- **Progress chatter gated:** `reindex` progress lines suppressed in JSON mode.
+- **Interactive commands** (`review`, `projects prune`) prompt for input, so JSON
+  piping does not apply; left as human-only flows.
+- **Tests:** `stats_json_is_valid_single_document`,
+  `stats_daemon_json_is_valid_when_not_running`,
+  `gc_json_dry_run_is_valid_single_document` parse stdout as a single JSON value
+  (strict — trailing raw text fails). Red verified by disabling the gc JSON
+  branch.
+
+### #8 — `stats --daemon` aborts on protocol mismatch (Medium) ✅
+- **Fix:** `run_daemon_stats` resolves the live status via
+  `query_status(...).await.ok().flatten()`, collapsing both `Err(_)` (e.g. a
+  protocol-version mismatch with an older daemon) and `Ok(None)` to "no live
+  status" and falling back to the persisted snapshot — honouring the daemon
+  graceful-fallback contract instead of exiting non-zero.
+- **Test:** `stats_daemon_json_is_valid_when_not_running` exercises the fallback
+  path end-to-end.
