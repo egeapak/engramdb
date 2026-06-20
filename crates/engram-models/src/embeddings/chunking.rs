@@ -88,4 +88,20 @@ mod tests {
         assert_eq!(chunks[0], "one two three");
         assert_eq!(chunks[1], "four five");
     }
+
+    // Finding #10 (documented/accepted): `chunk_text` uses a word-count budget
+    // and cannot, without a real tokenizer, guarantee a chunk stays under the
+    // model's *token* limit for dense text (code/URLs/CJK) or a single
+    // whitespace-free blob. That residual is SAFE: fastembed truncates an
+    // over-long chunk rather than erroring, so the worst case is lost trailing
+    // tokens, never a crash or corruption. This test pins the safe handling of
+    // a single huge whitespace-free token (one chunk, no panic), and documents
+    // that tokenizer-accurate chunking is intentionally out of scope here.
+    #[test]
+    fn single_whitespace_free_blob_is_one_chunk_not_a_panic() {
+        let blob = "x".repeat(10_000); // no whitespace → one "word"
+        let chunks = chunk_text(&blob, 256);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 10_000);
+    }
 }

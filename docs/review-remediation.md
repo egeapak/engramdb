@@ -27,7 +27,7 @@ Legend: ✅ fixed & green · 🟡 verified non-bug (test added) · ⏳ pending
 | 7 | Medium | cli | JSON-stdout corruption across several commands | ⏳ |
 | 8 | Medium | cli | `stats --daemon` aborts on protocol mismatch instead of fallback | ⏳ |
 | 9 | Medium | mcp | `query` detail_level case-sensitivity drops `details` | ⏳ |
-| 10 | Medium | models | single-text `embed()` doesn't chunk → silent truncation | ⏳ |
+| 10 | Medium | models | single-text `embed()` doesn't chunk → silent truncation | 🟡 safe-by-truncation (documented) |
 | 11 | Medium | daemon | per-op counters increment on failed requests | ✅ |
 | 12 | Medium | scope | mid-segment glob computes wrong proximity depth | 🟡 verified non-bug (depth is slash-counted) |
 | 13 | Medium | scope | `matches()` vs `calculate_pattern_score` disagree | ✅ filter loosened to scorer |
@@ -41,8 +41,8 @@ Legend: ✅ fixed & green · 🟡 verified non-bug (test added) · ⏳ pending
 | 21 | Low | cli | `hook --min-criticality` accepts out-of-range/NaN | ⏳ |
 | 22 | Low | cli | `rollback --target-version` math masks bad input | ⏳ |
 | 23 | Low | cli | `conflicts_with` gaps (embeddings/index-only, tags) | ⏳ |
-| 24 | Low | models/cli | byte-vs-char length checks (keyword filter, id slicing) | ⏳ |
-| 25 | Low | models | Ollama batch lacks per-vector dimension check | ⏳ |
+| 24 | Low | models/cli | byte-vs-char length checks (keyword filter, id slicing) | 🟡 keyword fixed; cli id-slice in batch 5 |
+| 25 | Low | models | Ollama batch lacks per-vector dimension check | ✅ |
 
 ---
 
@@ -147,3 +147,27 @@ Legend: ✅ fixed & green · 🟡 verified non-bug (test added) · ⏳ pending
   fix). `test_matches_exact` updated to the new (consistent) semantics.
 - **Fix:** `matches()` now also returns true for `is_same_directory`. Full core
   suite (480 tests) still green — no filtering regressions elsewhere.
+
+## Details (batch 3: engram-models)
+
+### #10 — single-text embed() truncation (Medium) 🟡 documented/accepted
+- Query/probe embedding truncation at the model token limit is standard, and
+  fastembed truncates oversized chunks *safely* (no crash/corruption). A
+  tokenizer-accurate chunker is a larger redesign and a char-budget cap
+  conflicts with the established word-budget contract (existing tests). Pinned a
+  safety test (`single_whitespace_free_blob_is_one_chunk_not_a_panic`) and
+  documented the residual in `chunking.rs`.
+
+### #24 — keyword single-letter filter byte-vs-char (Low) ✅ (models part)
+- **Test:** `extract_keywords_drops_single_multibyte_letter` (red before fix).
+- **Fix:** filter single-letter words by `chars().count() <= 1` instead of byte
+  `len()`, so a single multibyte glyph ("é") is dropped like any other single
+  letter. (Trade-off noted: this also drops lone CJK glyphs, acceptable for this
+  English-RAKE-oriented extractor.) The CLI id-slicing half of #24 is batch 5.
+
+### #25 — Ollama per-vector dimension check (Low) ✅
+- **Test:** `validate_embedding_response_checks_dimensions` (wrong-width vector
+  red before fix).
+- **Fix:** extracted `validate_embedding_response()`; it now rejects any vector
+  whose width ≠ the provider's declared `dimensions`, with a clear error,
+  instead of feeding wrong-width vectors toward LanceDB.
