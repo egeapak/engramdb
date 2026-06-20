@@ -94,6 +94,12 @@ pub async fn create_memory(
     engine: Option<&RetrievalEngine>,
 ) -> Result<CreateResult> {
     validate_summary(&params.summary)?;
+    // Validate scores here, in the shared ops core, so EVERY create path
+    // (direct CLI flags, interactive prompts, editor, MCP) is covered — not
+    // just the CLI direct path. Out-of-range/NaN scores corrupt the scoring
+    // math that assumes the [0,1] domain (finding #3).
+    super::validate_score(params.criticality, "criticality")?;
+    super::validate_score(params.confidence, "confidence")?;
     let summary = params.summary;
 
     // Use default physical scope if empty
@@ -266,6 +272,34 @@ mod tests {
             title_strategy: TitleStrategy::None,
             embed_async: false,
         }
+    }
+
+    // Finding #3: create_memory validates criticality/confidence in the shared
+    // ops core, so every front-end path (interactive/editor/MCP — not just the
+    // CLI direct path) rejects out-of-range/NaN scores.
+    #[tokio::test]
+    async fn create_memory_rejects_out_of_range_scores() {
+        let (_t, store) = setup_test_store().await;
+
+        // POSITIVE: valid scores succeed.
+        assert!(create_memory(&store, minimal_create_params(), None)
+            .await
+            .is_ok());
+
+        // NEGATIVE (red before fix): criticality > 1.0 is rejected.
+        let mut p = minimal_create_params();
+        p.criticality = 5.0;
+        assert!(create_memory(&store, p, None).await.is_err());
+
+        // NEGATIVE: confidence < 0.0 is rejected.
+        let mut p = minimal_create_params();
+        p.confidence = -0.5;
+        assert!(create_memory(&store, p, None).await.is_err());
+
+        // NEGATIVE: NaN criticality is rejected.
+        let mut p = minimal_create_params();
+        p.criticality = f64::NAN;
+        assert!(create_memory(&store, p, None).await.is_err());
     }
 
     /// Title generator that returns a fixed string, to prove `title_for`

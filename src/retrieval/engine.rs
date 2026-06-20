@@ -347,10 +347,13 @@ impl RetrievalEngine {
     /// * `memory` - The memory to embed
     pub async fn embed_memory(&self, memory: &Memory) -> anyhow::Result<()> {
         if let Some(provider) = &self.embedding_provider {
+            let chunk_tokens =
+                effective_chunk_tokens(self.config.embeddings.max_tokens, provider.max_tokens());
             embed_memory_with(
                 provider.as_ref(),
                 &self.store,
                 memory,
+                chunk_tokens,
                 self.ingest_telemetry().as_ref(),
             )
             .await?;
@@ -375,6 +378,8 @@ impl RetrievalEngine {
     /// model inference and NLI classification during memory ingestion.
     pub fn spawn_ingest(&self, memory: Memory) -> Option<tokio::task::JoinHandle<()>> {
         let provider = Arc::clone(self.embedding_provider.as_ref()?);
+        let chunk_tokens =
+            effective_chunk_tokens(self.config.embeddings.max_tokens, provider.max_tokens());
         let store = self.store.clone();
         let nli_provider = if self.config.nli.enabled {
             self.nli_provider.as_ref().map(Arc::clone)
@@ -385,8 +390,14 @@ impl RetrievalEngine {
         let telemetry = self.ingest_telemetry();
 
         Some(tokio::spawn(async move {
-            if let Err(e) =
-                embed_memory_with(provider.as_ref(), &store, &memory, telemetry.as_ref()).await
+            if let Err(e) = embed_memory_with(
+                provider.as_ref(),
+                &store,
+                &memory,
+                chunk_tokens,
+                telemetry.as_ref(),
+            )
+            .await
             {
                 tracing::warn!(
                     memory_id = %memory.id,
@@ -998,16 +1009,28 @@ fn filter_threshold(raw: f64) -> f64 {
     }
 }
 
+/// The token budget used to chunk text before embedding.
+///
+/// `config.embeddings.max_tokens` lets an operator request *smaller* chunks,
+/// but it can never exceed the model's real token limit (going higher would
+/// just be silently truncated by the model). Taking the min makes the config
+/// field actually authoritative instead of dead (finding #19), while staying
+/// safe. Floored at 1 so chunking always makes progress.
+fn effective_chunk_tokens(config_max_tokens: usize, provider_max_tokens: usize) -> usize {
+    config_max_tokens.min(provider_max_tokens).max(1)
+}
+
 async fn embed_memory_with(
     provider: &dyn EmbeddingProvider,
     store: &MemoryStore,
     memory: &Memory,
+    chunk_tokens: usize,
     telemetry: Option<&IngestTelemetry>,
 ) -> anyhow::Result<()> {
     let text = format!("{} {}", memory.summary, memory.content);
 
     let t = std::time::Instant::now();
-    let chunks = crate::embeddings::chunk_text(&text, provider.max_tokens());
+    let chunks = crate::embeddings::chunk_text(&text, chunk_tokens);
     if let Some(t_) = telemetry {
         t_.record("create.chunk_text", t.elapsed().as_secs_f64() * 1000.0);
     }
@@ -1111,6 +1134,15 @@ mod tests {
         assert_eq!(filter_threshold(-0.5), 0.0);
         // NEGATIVE (red before fix): NaN must become 0.0, not propagate.
         assert_eq!(filter_threshold(f64::NAN), 0.0);
+    }
+
+    // Finding #19: `config.embeddings.max_tokens` is now authoritative for
+    // chunking (previously dead config — chunking only used the provider spec).
+    #[test]
+    fn effective_chunk_tokens_respects_config_capped_at_model() {
+        assert_eq!(effective_chunk_tokens(128, 256), 128); // smaller is honoured
+        assert_eq!(effective_chunk_tokens(1000, 256), 256); // never exceeds model
+        assert_eq!(effective_chunk_tokens(0, 256), 1); // floored at 1
     }
 
     /// Shared reranker across all tests in this module to avoid loading the
@@ -2367,9 +2399,15 @@ mod tests {
 
         // Embed the existing memory so vector_search has something to find.
         let embed_arc: Arc<dyn EmbeddingProvider> = Arc::new(embedding);
-        embed_memory_with(embed_arc.as_ref(), &store, &existing, None)
-            .await
-            .unwrap();
+        embed_memory_with(
+            embed_arc.as_ref(),
+            &store,
+            &existing,
+            embed_arc.max_tokens(),
+            None,
+        )
+        .await
+        .unwrap();
 
         // Make a probe memory not yet in the store.
         let mut probe = Memory::new(
@@ -2456,9 +2494,15 @@ mod tests {
         };
         store.create(&existing).await.unwrap();
         let embed_arc: Arc<dyn EmbeddingProvider> = Arc::new(embedding);
-        embed_memory_with(embed_arc.as_ref(), &store, &existing, None)
-            .await
-            .unwrap();
+        embed_memory_with(
+            embed_arc.as_ref(),
+            &store,
+            &existing,
+            embed_arc.max_tokens(),
+            None,
+        )
+        .await
+        .unwrap();
 
         let mut config = EngramConfig::default();
         config.nli.enabled = true;

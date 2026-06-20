@@ -20,7 +20,7 @@ Legend: ✅ fixed & green · 🟡 verified non-bug (test added) · ⏳ pending
 |---|-----|------|---------|--------|
 | 1 | Critical | storage | `create` unchecked upsert orphans files across visibility | ✅ |
 | 2 | High | cli | `get --global` + `--path`/`--raw` resolves wrong dir for Shared | ✅ |
-| 3 | High | cli/ops | interactive/editor `add` persists unvalidated criticality/confidence | ⏳ |
+| 3 | High | cli/ops | interactive/editor `add` persists unvalidated criticality/confidence | ✅ |
 | 4 | High | core/types | negative `search.threshold` disables the relevance gate | ✅ |
 | 5 | High | storage | `check_staleness` false-positives under checkout conflict | ✅ |
 | 6 | High | storage | memory_file blockquote/visibility parsing corruption | ✅ |
@@ -33,10 +33,10 @@ Legend: ✅ fixed & green · 🟡 verified non-bug (test added) · ⏳ pending
 | 13 | Medium | scope | `matches()` vs `calculate_pattern_score` disagree | ✅ filter loosened to scorer |
 | 14 | Medium | storage | nondeterministic tied-mtime duplicate resolution | ✅ |
 | 15 | Medium | storage | `get_batch`/`batch_exists` silently skip corrupt files | ✅ logging + behaviour test |
-| 16 | Medium | storage | telemetry `load_recent` full-table scan | ⏳ |
-| 17 | Medium | daemon | metrics 2nd connection + `optimize` every persist | ⏳ |
+| 16 | Medium | storage | telemetry `load_recent` full-table scan | 🟡 perf, documented |
+| 17 | Medium | daemon | metrics 2nd connection + `optimize` every persist | 🟡 perf, documented |
 | 18 | Medium | cli | `--format`/`--json` not mutually exclusive | ✅ |
-| 19 | Low | types | `embeddings.max_tokens` is dead config | ⏳ |
+| 19 | Low | types | `embeddings.max_tokens` is dead config | ✅ |
 | 20 | Low | types | `search.threshold > 1.0` warns but doesn't clamp | 🟡 non-bug (clamped at use); tests pin contract |
 | 21 | Low | cli | `hook --min-criticality` accepts out-of-range/NaN | ✅ |
 | 22 | Low | cli | `rollback --target-version` math masks bad input | ✅ |
@@ -214,3 +214,33 @@ all green after restore. Per-crate `-p` builds were avoided in favour of
 `--workspace` runs because differing feature unification per `-p` target
 forced full rebuilds of the lance/datafusion stack and exhausted the sandbox
 disk.)
+
+## Details (batch 6: core — #3, #19; perf items #16/#17)
+
+### #3 — unvalidated scores on interactive/editor add (High) ✅
+- **Fix:** `ops::create_memory` now calls `validate_score` on criticality and
+  confidence, so EVERY front-end (direct flags, interactive, editor, MCP) is
+  covered — not just the CLI direct path.
+- **Test:** `ops::create::tests::create_memory_rejects_out_of_range_scores`
+  (criticality>1, confidence<0, NaN all rejected; valid succeeds). Red verified
+  by temporarily removing the guards.
+
+### #19 — `embeddings.max_tokens` dead config (Low) ✅
+- **Fix:** chunking now uses `effective_chunk_tokens(config_max, provider_max)`
+  = `config.min(provider).max(1)`, so the config field can request smaller
+  chunks (and never exceed the model's real limit). Threaded through
+  `embed_memory_with`.
+- **Test:** `effective_chunk_tokens_respects_config_capped_at_model`.
+
+### #16 / #17 — perf optimizations (Medium) 🟡 documented, behaviour-correct
+These are *performance* observations, not correctness bugs — current behaviour
+is correct, so there is no failing test to turn green:
+- **#16** `telemetry::load_recent` does a full scan + in-memory sort instead of
+  an `ORDER BY ts DESC LIMIT cap` pushdown. Bounded by the 90-day retention and
+  `STARTUP_REPLAY_CAP`.
+- **#17** `daemon::metrics::persist_at` opens a second LanceDB connection for
+  pruning and runs `optimize(All)` on every ~300 s persist (table is tiny).
+Both are intentionally deferred: rewriting the LanceDB query/connection/optimize
+patterns carries regression risk disproportionate to the gain (the reviewer
+rated both low-blast-radius), and a behaviour-identical change cannot be guarded
+by a red→green test in this sandbox. Tracked here for a future perf pass.
