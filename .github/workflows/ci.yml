@@ -107,3 +107,54 @@ jobs:
 
       - name: Run tests
         run: cargo nextest run --workspace --all-features
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        # `llvm-tools-preview` ships `llvm-profdata`/`llvm-cov`, which
+        # cargo-llvm-cov shells out to for instrumentation-based coverage.
+        run: rustup toolchain install stable --profile minimal --component llvm-tools-preview
+
+      - name: Install protobuf compiler and lld linker
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install nextest and cargo-llvm-cov
+        # Prebuilt binaries (same rationale as the test job): avoids a
+        # ~7 min from-source compile of each tool on a cache miss.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest,cargo-llvm-cov
+
+      - name: Run tests under coverage instrumentation
+        # Mirror the `test` job's invocation so coverage reflects the real
+        # suite. `--no-report` defers report generation so we can emit
+        # multiple formats from the one profdata set below.
+        run: cargo llvm-cov nextest --workspace --all-features --no-report
+
+      - name: Generate coverage reports
+        # Exclude integration-test harness files and the test-isolation crate
+        # from the denominator so the percentage tracks production code.
+        env:
+          IGNORE: '(/tests?/|test_support|engram-test-support|/benches/|/examples/|/fuzz/)'
+        run: |
+          cargo llvm-cov report --lcov --output-path lcov.info --ignore-filename-regex "$IGNORE"
+          {
+            echo '## Coverage summary'
+            echo ''
+            echo '```'
+            cargo llvm-cov report --summary-only --ignore-filename-regex "$IGNORE"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload lcov report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: error
