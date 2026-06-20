@@ -1538,12 +1538,12 @@ mod tests {
     // Global flags / conflicts (3 tests)
     #[test]
     fn test_json_flag_and_format_json_both_set() {
-        let cli = Cli::try_parse_from(["engramdb", "--json", "--format", "json", "list"]).unwrap();
-        assert!(cli.json);
-        match cli.format {
-            Some(OutputFormat::Json) => {}
-            other => panic!("Expected Json format, got {:?}", other),
-        }
+        // #18: `--json` and `--format` are now mutually exclusive, so supplying
+        // both (even `--format json`) is rejected rather than silently accepted.
+        assert!(
+            Cli::try_parse_from(["engramdb", "--json", "--format", "json", "list"]).is_err(),
+            "--json and --format must conflict even when both request JSON"
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ fn gc_dry_run_default() {
     assert!(
         stdout.contains("eligible")
             || stdout.contains("dry run")
+            || stdout.contains("dry_run") // JSON form (non-TTY default)
             || stdout.contains("no memor")
             || stdout.contains("gc"),
         "gc should report eligibility status: {}",
@@ -47,7 +48,10 @@ fn gc_with_threshold_shows_candidates() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
     assert!(
-        stdout.contains("eligible") || stdout.contains("dry run") || stdout.contains("no memor"),
+        stdout.contains("eligible")
+            || stdout.contains("dry run")
+            || stdout.contains("dry_run")
+            || stdout.contains("no memor"),
         "gc dry-run should mention eligibility or dry run: {}",
         stdout
     );
@@ -101,7 +105,13 @@ fn gc_empty_store() {
     helpers::init_store(dir.path());
 
     helpers::cmd()
-        .args(["--dir", dir.path().to_str().unwrap(), "gc"])
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "plain",
+            "gc",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("No memories").or(predicate::str::contains("no memor")));

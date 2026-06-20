@@ -114,7 +114,13 @@ fn stats_embeddings_status_unknown_provider() {
     );
 
     helpers::cmd()
-        .args(["--dir", dir.path().to_str().unwrap(), "stats"])
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "plain",
+            "stats",
+        ])
         .assert()
         .success()
         // Drives the `other => { ... return; }` early-return arm.
@@ -146,6 +152,8 @@ fn stats_embeddings_status_onnx_backend_model_missing() {
             dir.path().to_str().unwrap(),
             "--embedding-backend",
             "onnx",
+            "--format",
+            "plain",
             "stats",
         ])
         .assert()
@@ -169,6 +177,8 @@ fn stats_embeddings_status_all_minilm_available_via_onnx() {
             dir.path().to_str().unwrap(),
             "--embedding-backend",
             "onnx",
+            "--format",
+            "plain",
             "stats",
         ])
         .assert()
