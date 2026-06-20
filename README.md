@@ -113,9 +113,11 @@ When integrated with Claude Code:
 | `completions` | Generate shell completions |
 
 `stats --daemon` shows the embedding daemon's cumulative request metrics
-(falling back to the last persisted snapshot when no daemon is running), and
-`doctor` includes a **Daemon** section reporting whether it's enabled and
-running.
+(falling back to the last persisted snapshot when no daemon is running). `doctor`
+groups its report into **Project** (current project health), **Projects** (all
+registered projects), **Global settings & models** (binaries, integration, the
+active models with a short description of what each is for, and whether the
+embedding daemon is enabled and running), and **Stats** (global disk usage).
 
 Use `engramdb <command> --help` for detailed options.
 

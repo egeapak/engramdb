@@ -181,7 +181,10 @@ impl EnvironmentDoctorResult {
 
 /// Run a full environment diagnostic organized into sections.
 ///
-/// Sections: System, Project, Agent, Embeddings, Registry.
+/// Sections, in order: Project (current project's stats & health),
+/// Projects (all registered projects), Global settings & models
+/// (binaries, integration, embeddings, the active models, and the daemon),
+/// and Stats (global disk usage).
 pub async fn doctor_environment(
     dir: &Path,
     store: Option<&MemoryStore>,
@@ -189,59 +192,11 @@ pub async fn doctor_environment(
 ) -> EnvironmentDoctorResult {
     let mut sections = Vec::new();
 
-    // --- System section ---
-    let mut system_checks = Vec::new();
-    system_checks.push(check_binary_on_path().await);
-
-    // Global disk usage (informational)
-    match (
-        crate::storage::paths::global_data_dir(),
-        crate::storage::paths::model_cache_dir(),
-    ) {
-        (Ok(data_dir), Ok(cache_dir)) => {
-            system_checks.push(check_global_disk_usage(&data_dir, &cache_dir).await);
-        }
-        _ => {
-            system_checks.push(EnvironmentCheck {
-                name: "Global disk usage".to_string(),
-                passed: false,
-                message: "could not determine global data/cache directories".to_string(),
-                suggestion: Some("Check platform directory configuration".to_string()),
-                details: vec![],
-                status: None,
-            });
-        }
-    }
-
-    // --- Load registry once for Project gating ---
+    // --- Load registry once for Project gating and the Projects section ---
     let registry_info = load_registry_info(dir).await;
-
-    // Registry subsection (just "Registered projects", no per-project check)
-    let registry_checks = build_registry_checks(&registry_info);
-
-    // Gitignore subsection
     let store_initialized = dir.join(".engramdb").exists();
-    let mut gitignore_checks = vec![check_global_gitignore()];
-    if store_initialized && registry_info.in_registry {
-        gitignore_checks.push(check_project_gitignore(dir));
-    }
 
-    sections.push(DoctorSection {
-        name: "System".to_string(),
-        checks: system_checks,
-        subsections: vec![
-            DoctorSubSection {
-                name: "Registry".to_string(),
-                checks: registry_checks,
-            },
-            DoctorSubSection {
-                name: "Gitignore".to_string(),
-                checks: gitignore_checks,
-            },
-        ],
-    });
-
-    // --- Project section ---
+    // === 1. Project section (current project's stats & health) ===
     let store_path = dir
         .canonicalize()
         .unwrap_or_else(|_| dir.to_path_buf())
@@ -335,6 +290,7 @@ pub async fn doctor_environment(
             project_checks.push(check_config_file(dir).await);
             project_checks.push(check_mcp_config_deep(dir));
             project_checks.push(check_write_lock(&project_id).await);
+            project_checks.push(check_project_gitignore(dir));
             project_checks.push(check_project_disk_usage(dir, &project_id).await);
         } else {
             project_checks.push(EnvironmentCheck {
@@ -368,15 +324,29 @@ pub async fn doctor_environment(
         None
     };
 
-    // --- Agent section ---
-    let agent_checks = vec![check_claude_plugin(), check_hook_config()];
+    // === 2. Projects section (all registered projects) ===
     sections.push(DoctorSection {
-        name: "Agent".to_string(),
-        checks: agent_checks,
+        name: "Projects".to_string(),
+        checks: build_registry_checks(&registry_info),
         subsections: vec![],
     });
 
-    // --- Embeddings section ---
+    // === 3. Global settings & models ===
+    //
+    // Machine-wide settings (binary, global gitignore, agent integration),
+    // the embedding config/health, the active models with a short description
+    // of what each is used for, and the optional shared inference daemon. The
+    // daemon probe is built by the caller (`daemon::doctor::check_daemon`) and
+    // injected here so that `ops` does not depend "upward" on `daemon`. The
+    // daemon is optional and auto-spawned, so it never counts as a failure.
+    let global_checks = vec![
+        check_binary_on_path().await,
+        check_global_gitignore(),
+        check_claude_plugin(),
+        check_hook_config(),
+        daemon_check,
+    ];
+
     let mut embeddings_checks = Vec::new();
     embeddings_checks.push(check_embedding_backend(dir).await);
     embeddings_checks.push(check_embedding_model_identity(dir).await);
@@ -385,20 +355,40 @@ pub async fn doctor_environment(
     embeddings_checks.push(check_embedding_model_cached(dir, &cache_dir).await);
     #[cfg(feature = "ollama")]
     embeddings_checks.push(check_ollama_connectivity(dir).await);
+
     sections.push(DoctorSection {
-        name: "Embeddings".to_string(),
-        checks: embeddings_checks,
-        subsections: vec![],
+        name: "Global settings & models".to_string(),
+        checks: global_checks,
+        subsections: vec![
+            DoctorSubSection {
+                name: "Embeddings".to_string(),
+                checks: embeddings_checks,
+            },
+            DoctorSubSection {
+                name: "Models".to_string(),
+                checks: check_active_models(dir).await,
+            },
+        ],
     });
 
-    // --- Daemon section (informational; the daemon is optional and
-    // auto-spawned, so these never count as failures) ---
-    //
-    // The daemon probe is built by the caller (`daemon::doctor::check_daemon`)
-    // and injected here so that `ops` does not depend "upward" on `daemon`.
+    // === 4. Stats section (global disk usage) ===
+    let stats_check = match (
+        crate::storage::paths::global_data_dir(),
+        crate::storage::paths::model_cache_dir(),
+    ) {
+        (Ok(data_dir), Ok(cache_dir)) => check_global_disk_usage(&data_dir, &cache_dir).await,
+        _ => EnvironmentCheck {
+            name: "Global disk usage".to_string(),
+            passed: false,
+            message: "could not determine global data/cache directories".to_string(),
+            suggestion: Some("Check platform directory configuration".to_string()),
+            details: vec![],
+            status: None,
+        },
+    };
     sections.push(DoctorSection {
-        name: "Daemon".to_string(),
-        checks: vec![daemon_check],
+        name: "Stats".to_string(),
+        checks: vec![stats_check],
         subsections: vec![],
     });
 
@@ -738,6 +728,84 @@ async fn check_embedding_backend(dir: &Path) -> EnvironmentCheck {
         details: vec![],
         status: None,
     }
+}
+
+/// Describe each model EngramDB will load for the current config: which
+/// model it is and what it is used for.
+///
+/// All entries are informational (`CheckStatus::Info`) — they report the
+/// configured setup, never a pass/fail. The embedding model is always
+/// listed; the reranker, NLI, and title models only appear when their
+/// feature is enabled in config (otherwise no model is loaded for them).
+async fn check_active_models(dir: &Path) -> Vec<EnvironmentCheck> {
+    let config_path = dir.join(".engramdb").join("config.toml");
+    let config = crate::storage::config::load_config(&config_path)
+        .await
+        .unwrap_or_default();
+
+    let info = |name: &str, message: String, detail: &str| EnvironmentCheck {
+        name: name.to_string(),
+        passed: true,
+        message,
+        suggestion: None,
+        details: vec![detail.to_string()],
+        status: Some(CheckStatus::Info),
+    };
+
+    let mut checks = Vec::new();
+
+    // Embedding model — always loaded; powers semantic search.
+    let embed_model = super::expected_embedding_fingerprint(&config)
+        .map(|fp| fp.model)
+        .unwrap_or_else(|| config.embeddings.provider.clone());
+    checks.push(info(
+        "Embedding model",
+        format!("{embed_model} ({}d)", config.embeddings.dimensions),
+        "Local ONNX bi-encoder; embeds memories and queries into vectors so \
+         search can rank by semantic similarity.",
+    ));
+
+    // Reranker — optional; refines the initial ranking.
+    if config.rerank.enabled {
+        checks.push(info(
+            "Reranker model",
+            config.rerank.model.clone(),
+            "Cross-encoder that re-scores the top candidates by jointly reading \
+             query and document — slower but sharper relevance than the bi-encoder.",
+        ));
+    }
+
+    // NLI — optional; drives the challenge/contradiction flow.
+    if config.nli.enabled {
+        checks.push(info(
+            "NLI model",
+            config.nli.model.clone(),
+            "Natural-language-inference model; flags memories that contradict \
+             each other for the `challenge` review flow.",
+        ));
+    }
+
+    // Title generation — keyword needs no model; T5 loads one; none disables it.
+    match config.title.strategy {
+        crate::types::TitleStrategy::T5 => checks.push(info(
+            "Title model",
+            "Xenova/t5-small (int8)".to_string(),
+            "T5-small abstractive summarizer; generates a memory title when the \
+             caller doesn't supply one.",
+        )),
+        crate::types::TitleStrategy::Keyword => checks.push(info(
+            "Title generation",
+            "keyword (RAKE)".to_string(),
+            "In-process RAKE keyword extraction; no model is loaded.",
+        )),
+        crate::types::TitleStrategy::None => checks.push(info(
+            "Title generation",
+            "disabled".to_string(),
+            "Automatic title generation is off; no model is loaded.",
+        )),
+    }
+
+    checks
 }
 
 /// Check Ollama connectivity with a 3-second timeout.
@@ -1409,7 +1477,7 @@ async fn check_embedding_model_cached(dir: &Path, cache_dir: &Path) -> Environme
     // doesn't mean the store is broken — render it as a warning, not a failure
     // that flips the exit code.
     EnvironmentCheck {
-        name: "Embedding model".to_string(),
+        name: "Embedding model cache".to_string(),
         passed: true,
         message: if has_models {
             format!("{} cached", model_name)
@@ -1913,7 +1981,7 @@ mod tests {
 
         assert_eq!(
             section_names,
-            vec!["System", "Project", "Agent", "Embeddings", "Daemon"]
+            vec!["Project", "Projects", "Global settings & models", "Stats"]
         );
     }
 
@@ -2135,7 +2203,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let cache_dir = TempDir::new().unwrap();
         let result = check_embedding_model_cached(temp_dir.path(), cache_dir.path()).await;
-        assert_eq!(result.name, "Embedding model");
+        assert_eq!(result.name, "Embedding model cache");
         // Advisory: an uncached model is fetched on first use, so it warns
         // rather than failing (does not gate the exit code).
         assert!(result.passed);
@@ -2915,15 +2983,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_environment_has_gitignore_subsection() {
+    async fn test_global_section_has_models_and_embeddings_subsections() {
         let temp_dir = TempDir::new().unwrap();
         let result = doctor_environment(temp_dir.path(), None, test_daemon_check()).await;
-        let system = result.sections.iter().find(|s| s.name == "System").unwrap();
+        let global = result
+            .sections
+            .iter()
+            .find(|s| s.name == "Global settings & models")
+            .unwrap();
         let subsection_names: Vec<&str> =
-            system.subsections.iter().map(|s| s.name.as_str()).collect();
+            global.subsections.iter().map(|s| s.name.as_str()).collect();
         assert!(
-            subsection_names.contains(&"Gitignore"),
-            "missing Gitignore subsection under System"
+            subsection_names.contains(&"Embeddings"),
+            "missing Embeddings subsection under Global settings & models"
         );
+        assert!(
+            subsection_names.contains(&"Models"),
+            "missing Models subsection under Global settings & models"
+        );
+        // The global gitignore moved up to a top-level Global check.
+        assert!(
+            global.checks.iter().any(|c| c.name == "Global gitignore"),
+            "missing Global gitignore check under Global settings & models"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_models_subsection_describes_embedding_model() {
+        let temp_dir = TempDir::new().unwrap();
+        let checks = check_active_models(temp_dir.path()).await;
+        // Embedding model is always present and carries a "what it's for" detail.
+        let embed = checks
+            .iter()
+            .find(|c| c.name == "Embedding model")
+            .expect("embedding model must always be described");
+        assert_eq!(embed.status, Some(CheckStatus::Info));
+        assert!(!embed.details.is_empty(), "model needs a description");
+        // Defaults: NLI and reranker are disabled, so no model is loaded for them.
+        assert!(!checks.iter().any(|c| c.name == "NLI model"));
+        assert!(!checks.iter().any(|c| c.name == "Reranker model"));
+        // Default title strategy is T5.
+        assert!(checks.iter().any(|c| c.name == "Title model"));
     }
 }
