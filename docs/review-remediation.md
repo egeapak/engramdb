@@ -19,7 +19,7 @@ Legend: ✅ fixed & green · 🟡 verified non-bug (test added) · ⏳ pending
 | # | Sev | Area | Finding | Status |
 |---|-----|------|---------|--------|
 | 1 | Critical | storage | `create` unchecked upsert orphans files across visibility | ✅ |
-| 2 | High | cli | `get --global` + `--path`/`--raw` resolves wrong dir for Shared | ⏳ |
+| 2 | High | cli | `get --global` + `--path`/`--raw` resolves wrong dir for Shared | ✅ |
 | 3 | High | cli/ops | interactive/editor `add` persists unvalidated criticality/confidence | ⏳ |
 | 4 | High | core/types | negative `search.threshold` disables the relevance gate | ✅ |
 | 5 | High | storage | `check_staleness` false-positives under checkout conflict | ✅ |
@@ -35,13 +35,13 @@ Legend: ✅ fixed & green · 🟡 verified non-bug (test added) · ⏳ pending
 | 15 | Medium | storage | `get_batch`/`batch_exists` silently skip corrupt files | ✅ logging + behaviour test |
 | 16 | Medium | storage | telemetry `load_recent` full-table scan | ⏳ |
 | 17 | Medium | daemon | metrics 2nd connection + `optimize` every persist | ⏳ |
-| 18 | Medium | cli | `--format`/`--json` not mutually exclusive | ⏳ |
+| 18 | Medium | cli | `--format`/`--json` not mutually exclusive | ✅ |
 | 19 | Low | types | `embeddings.max_tokens` is dead config | ⏳ |
 | 20 | Low | types | `search.threshold > 1.0` warns but doesn't clamp | 🟡 non-bug (clamped at use); tests pin contract |
-| 21 | Low | cli | `hook --min-criticality` accepts out-of-range/NaN | ⏳ |
-| 22 | Low | cli | `rollback --target-version` math masks bad input | ⏳ |
-| 23 | Low | cli | `conflicts_with` gaps (embeddings/index-only, tags) | ⏳ |
-| 24 | Low | models/cli | byte-vs-char length checks (keyword filter, id slicing) | 🟡 keyword fixed; cli id-slice in batch 5 |
+| 21 | Low | cli | `hook --min-criticality` accepts out-of-range/NaN | ✅ |
+| 22 | Low | cli | `rollback --target-version` math masks bad input | ✅ |
+| 23 | Low | cli | `conflicts_with` gaps (embeddings/index-only, tags) | ✅ |
+| 24 | Low | models/cli | byte-vs-char length checks (keyword filter, id slicing) | ✅ |
 | 25 | Low | models | Ollama batch lacks per-vector dimension check | ✅ |
 
 ---
@@ -186,3 +186,31 @@ Legend: ✅ fixed & green · 🟡 verified non-bug (test added) · ⏳ pending
 - **Fix:** derive `include_details` from the already-parsed `DetailLevel` enum
   (`matches!(detail_level, DetailLevel::Full)`), removing the duplicate
   case-sensitive string compare.
+
+## Details (batch 5: engram-cli — clap/validation/path)
+
+- **#2 (High)** `get --global --path/--raw`: resolve Shared memories from
+  `store.project_dir` (the actual store, global or local) instead of the local
+  `dir` param. Integration test `get_global_path_points_to_existing_file`
+  asserts the printed global path exists (red before fix).
+- **#18 (Medium)** `--format` now `conflicts_with = "json"`; clap rejects the
+  combination instead of silently ignoring `--format`. Test `json_and_format_conflict`.
+- **#21 (Low)** `hook session-start` sanitizes `--min-criticality` (clamp to
+  [0,1], NaN→0.6) so a bad value can't filter out everything. Test
+  `sanitize_min_criticality_bounds_and_handles_nan`.
+- **#22 (Low)** `rollback --target-version` resolved via `resolve_rollback_target`,
+  which rejects 0 and unsupported versions instead of silently writing v1. Test
+  `resolve_rollback_target_validates`.
+- **#23 (Low)** clap conflicts: `reindex --embeddings-only`/`--index-only` and
+  `update --tags` vs `--tags-add`/`--tags-remove`. Tests
+  `reindex_embeddings_only_and_index_only_conflict`,
+  `update_tags_replace_conflicts_with_add_remove`.
+- **#24 (Low)** `review` id display now truncates by characters
+  (`chars().take(8)`), matching the char-safe `short_id` helper; keyword half
+  was fixed in batch 3.
+
+(Red runs for #18/#21/#23 demonstrated by temporarily reverting the guards;
+all green after restore. Per-crate `-p` builds were avoided in favour of
+`--workspace` runs because differing feature unification per `-p` target
+forced full rebuilds of the lance/datafusion stack and exhausted the sandbox
+disk.)

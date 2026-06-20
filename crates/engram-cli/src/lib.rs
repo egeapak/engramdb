@@ -444,12 +444,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             dry_run,
             global,
         } => {
-            // Version 1 is represented as None internally (legacy format without version field)
-            let target = if target_version <= 1 {
-                None
-            } else {
-                Some(target_version)
-            };
+            // Version 1 is represented as None internally (legacy format without
+            // version field); unsupported versions are rejected (finding #22).
+            let target = commands::rollback::resolve_rollback_target(target_version)?;
             let target_dir = if global {
                 engramdb::storage::paths::global_store_dir()?
             } else {

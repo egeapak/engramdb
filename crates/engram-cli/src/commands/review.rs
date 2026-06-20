@@ -55,7 +55,7 @@ pub async fn run_review(
     formatter.print_message(&format!("{} memories need review:\n", memories.len()));
 
     for memory in &memories {
-        println!("ID: {}", &memory.id[..8.min(memory.id.len())]);
+        println!("ID: {}", memory.id.chars().take(8).collect::<String>());
         println!("Type: {:?}", memory.type_);
         println!("Summary: {}", memory.summary);
         println!("Status: {:?}", memory.status);
@@ -93,7 +93,7 @@ pub async fn run_review(
                 .await?;
                 formatter.print_success(&format!(
                     "Kept memory {} as Active.",
-                    &memory.id[..8.min(memory.id.len())]
+                    memory.id.chars().take(8).collect::<String>()
                 ));
             }
             Ok("Update") => {
@@ -120,7 +120,7 @@ pub async fn run_review(
                 .await?;
                 formatter.print_success(&format!(
                     "Updated memory {}.",
-                    &memory.id[..8.min(memory.id.len())]
+                    memory.id.chars().take(8).collect::<String>()
                 ));
             }
             Ok("Delete") => {
@@ -136,7 +136,7 @@ pub async fn run_review(
                 .await?;
                 formatter.print_success(&format!(
                     "Deleted memory {}.",
-                    &memory.id[..8.min(memory.id.len())]
+                    memory.id.chars().take(8).collect::<String>()
                 ));
             }
             Ok("Skip") => {

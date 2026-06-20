@@ -38,29 +38,29 @@ pub async fn run_get(
     }
     let memory = get_memory(&store, id).await?;
 
-    // Handle --path flag: print file path and exit
-    if path_only {
+    // Resolve the memory's on-disk path. Shared memories live under the
+    // *store's* project directory — which differs from the `dir` parameter
+    // under `--global` (the global store, not the cwd project). Using `dir`
+    // here resolved a nonexistent path for global Shared memories (finding #2).
+    let memory_file_path = || -> Result<std::path::PathBuf> {
         let filename = memory_file::memory_filename(&memory);
-        let file_path = match memory.visibility {
-            Visibility::Shared => paths::memories_dir(dir).join(&filename),
+        Ok(match memory.visibility {
+            Visibility::Shared => paths::memories_dir(&store.project_dir).join(&filename),
             Visibility::Personal => {
                 paths::personal_memories_dir(&store.project_id)?.join(&filename)
             }
-        };
-        println!("{}", file_path.display());
+        })
+    };
+
+    // Handle --path flag: print file path and exit
+    if path_only {
+        println!("{}", memory_file_path()?.display());
         return Ok(());
     }
 
     // Handle --raw flag: read and print raw markdown file
     if raw {
-        let filename = memory_file::memory_filename(&memory);
-        let file_path = match memory.visibility {
-            Visibility::Shared => paths::memories_dir(dir).join(&filename),
-            Visibility::Personal => {
-                paths::personal_memories_dir(&store.project_id)?.join(&filename)
-            }
-        };
-        let content = fs::read_to_string(&file_path).await?;
+        let content = fs::read_to_string(&memory_file_path()?).await?;
         print!("{}", content);
         return Ok(());
     }

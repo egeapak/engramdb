@@ -284,6 +284,56 @@ fn get_path_returns_md_file() {
     );
 }
 
+// Finding #2: `get --global ... --path` must resolve the file under the GLOBAL
+// store directory, not the local project `dir`. Before the fix the Shared
+// branch built the path from `dir`, so a global Shared memory's printed path
+// pointed at a nonexistent location.
+#[test]
+fn get_global_path_points_to_existing_file() {
+    let dir = TempDir::new().unwrap();
+    // Add a (shared) memory to the GLOBAL store.
+    let add = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "add",
+            "--global",
+            "-t",
+            "decision",
+            "-s",
+            "Global path test",
+            "-c",
+            "Body for global path",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        add.status.success(),
+        "global add failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let id = helpers::extract_id(&add.stdout);
+
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "get",
+            "--global",
+            &id,
+            "--path",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let printed = String::from_utf8_lossy(&output.stdout);
+    let printed = printed.trim();
+    assert!(
+        std::path::Path::new(printed).exists(),
+        "global memory --path must point to an existing file, got: {printed}"
+    );
+}
+
 #[test]
 fn add_missing_required_fields_fails() {
     let dir = TempDir::new().unwrap();
