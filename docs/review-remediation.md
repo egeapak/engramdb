@@ -26,7 +26,7 @@ Legend: ✅ fixed & green · 🟡 verified non-bug (test added) · ⏳ pending
 | 6 | High | storage | memory_file blockquote/visibility parsing corruption | ✅ |
 | 7 | Medium | cli | JSON-stdout corruption across several commands | ⏳ |
 | 8 | Medium | cli | `stats --daemon` aborts on protocol mismatch instead of fallback | ⏳ |
-| 9 | Medium | mcp | `query` detail_level case-sensitivity drops `details` | ⏳ |
+| 9 | Medium | mcp | `query` detail_level case-sensitivity drops `details` | ✅ |
 | 10 | Medium | models | single-text `embed()` doesn't chunk → silent truncation | 🟡 safe-by-truncation (documented) |
 | 11 | Medium | daemon | per-op counters increment on failed requests | ✅ |
 | 12 | Medium | scope | mid-segment glob computes wrong proximity depth | 🟡 verified non-bug (depth is slash-counted) |
@@ -171,3 +171,18 @@ Legend: ✅ fixed & green · 🟡 verified non-bug (test added) · ⏳ pending
 - **Fix:** extracted `validate_embedding_response()`; it now rejects any vector
   whose width ≠ the provider's declared `dimensions`, with a clear error,
   instead of feeding wrong-width vectors toward LanceDB.
+
+## Details (batch 4: engram-mcp)
+
+### #9 — query detail_level case-sensitivity drops details (Medium) ✅
+- **Scenario:** `detail_level: "Full"` (any non-lowercase casing) parses
+  correctly (engine keeps details) but the output gate recomputed inclusion via
+  a case-sensitive `== "full"`, so details were silently stripped from the
+  response.
+- **Test:** `retrieve_detail_level_full_is_case_insensitive` — creates a memory
+  with details, queries (filter + keyword signal) with `"Full"`, asserts details
+  are returned (red before fix). Note: memory fields are flattened into each
+  `memories[i]` object in the response JSON.
+- **Fix:** derive `include_details` from the already-parsed `DetailLevel` enum
+  (`matches!(detail_level, DetailLevel::Full)`), removing the duplicate
+  case-sensitive string compare.
