@@ -5,7 +5,7 @@
 
 use crate::storage::{
     collect_descendants, manifest, paths, resolve_root_project_id, MemoryStore, Registry,
-    RegistryBackend,
+    RegistryBackend, RegistryEntry,
 };
 use crate::types::MemoryType;
 use anyhow::{bail, Result};
@@ -87,6 +87,22 @@ pub async fn get_project_info(dir: &Path) -> Result<ProjectInfo> {
     })
 }
 
+/// Whether a registry entry's project still exists on disk.
+///
+/// Sub-projects (worktrees) don't have their own `.engramdb/` — their storage
+/// lives at the parent — so treat them as alive if the worktree directory
+/// itself still exists. Root projects use the usual `.engramdb/` check. This is
+/// the single source of truth shared by [`list_projects`] (for the `exists`
+/// flag) and [`prune_stale_projects`] (to decide what to remove), so a linked
+/// worktree is never mistaken for a stale entry.
+fn registry_entry_alive(e: &RegistryEntry) -> bool {
+    if e.parent_project_id.is_some() {
+        Path::new(&e.project_path).exists()
+    } else {
+        Path::new(&e.project_path).join(".engramdb").exists()
+    }
+}
+
 /// List all registered projects.
 pub async fn list_projects(registry: &dyn RegistryBackend) -> Result<Vec<ProjectListEntry>> {
     let registry = registry.load().await?;
@@ -95,15 +111,7 @@ pub async fn list_projects(registry: &dyn RegistryBackend) -> Result<Vec<Project
         .projects
         .into_iter()
         .map(|e| {
-            // Sub-projects (worktrees) don't have their own .engramdb/ — their
-            // storage lives at the parent — so treat them as alive if the
-            // worktree directory itself still exists.  Root projects use the
-            // usual .engramdb/ check.
-            let exists = if e.parent_project_id.is_some() {
-                Path::new(&e.project_path).exists()
-            } else {
-                Path::new(&e.project_path).join(".engramdb").exists()
-            };
+            let exists = registry_entry_alive(&e);
             ProjectListEntry {
                 project_id: e.project_id,
                 project_path: e.project_path,
@@ -234,6 +242,7 @@ pub async fn unlink_project(registry: &dyn RegistryBackend, child_id: &str) -> R
 }
 
 /// Result of pruning stale projects.
+#[derive(Debug)]
 pub struct PruneResult {
     /// Number of stale registry entries removed.
     pub stale_removed: usize,
@@ -408,10 +417,7 @@ pub async fn prune_stale_projects(
     let mut reg = registry.load().await?;
 
     // --- Stale registry entries ---
-    let (keep, stale): (Vec<_>, Vec<_>) = reg
-        .projects
-        .into_iter()
-        .partition(|e| Path::new(&e.project_path).join(".engramdb").exists());
+    let (keep, stale): (Vec<_>, Vec<_>) = reg.projects.into_iter().partition(registry_entry_alive);
 
     let projects_dir = paths::global_data_dir()?.join("projects");
 
@@ -727,6 +733,48 @@ mod tests {
         let remaining = registry.load().await.unwrap();
         assert_eq!(remaining.projects.len(), 1);
         assert_ne!(remaining.projects[0].project_id, "stale-proj-001");
+    }
+
+    #[tokio::test]
+    async fn test_prune_keeps_linked_worktree_subproject() {
+        // A linked worktree is registered as a sub-project with no `.engramdb/`
+        // of its own (its memories live at the parent). As long as the worktree
+        // directory still exists, prune must NOT treat it as stale — otherwise
+        // it would churn the very link that routes the worktree to main.
+        let registry = InMemoryRegistry::new();
+
+        let parent_dir = TempDir::new().unwrap();
+        let parent = MemoryStore::init(parent_dir.path(), &registry)
+            .await
+            .unwrap();
+
+        // Worktree dir exists but has no `.engramdb/` (consolidated into main).
+        let worktree_dir = TempDir::new().unwrap();
+        registry
+            .update_with_parent(
+                worktree_dir.path(),
+                "wt-subproject-001",
+                Some(&parent.project_id),
+            )
+            .await
+            .unwrap();
+
+        let result = prune_stale_projects(&registry, |_| {}).await.unwrap();
+        assert!(
+            !result.stale_ids.iter().any(|id| id == "wt-subproject-001"),
+            "a live worktree sub-project must not be pruned as stale"
+        );
+
+        let reg = registry.load().await.unwrap();
+        let wt = reg
+            .projects
+            .iter()
+            .find(|e| e.project_id == "wt-subproject-001")
+            .expect("worktree sub-project must remain registered");
+        assert_eq!(
+            wt.parent_project_id.as_deref(),
+            Some(parent.project_id.as_str())
+        );
     }
 
     #[tokio::test]

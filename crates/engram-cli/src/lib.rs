@@ -139,18 +139,32 @@ pub async fn run(cli: Cli) -> Result<()> {
     // a memory store; `daemon` is a process-wide model host that only reads
     // `dir` for its `[daemon]` config section (each request carries its own
     // resolved store dir).
-    let dir = if matches!(
+    let is_exempt = matches!(
         cli.command,
         Command::Init { .. }
             | Command::Serve { .. }
             | Command::Completions { .. }
             | Command::Setup { .. }
             | Command::Daemon { .. }
-    ) {
+    );
+    // Whether this invocation is on the main worktree (or a plain, non-worktree
+    // project) rather than inside a linked git worktree — decided from the
+    // *original* cwd before resolution rewrites it to the main root.
+    let on_main_worktree = engramdb::storage::detect_worktree_main(&dir).is_none();
+    let dir = if is_exempt {
         dir
     } else {
         engramdb::storage::worktree::resolve_project_root(&dir, &registry).await?
     };
+
+    // When operating directly on the main worktree, run best-effort, throttled
+    // housekeeping: clean up orphan/stale projects and quick-check the store's
+    // health. Linked worktrees only link/consolidate (done by the resolution
+    // above); the cleanup is concentrated on the main checkout. Failures are
+    // logged and swallowed so they never block the actual command.
+    if !is_exempt && on_main_worktree {
+        engramdb::ops::auto_maintain(&dir, &registry).await;
+    }
 
     // Compute the daemon policy once per process using the project config.
     // Best-effort: if the config file is absent/unreadable, use defaults
