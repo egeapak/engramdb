@@ -176,6 +176,12 @@ pub struct Cli {
     /// running (connect-only).
     #[arg(long = "spawn-daemon", global = true)]
     pub spawn_daemon: bool,
+
+    /// Skip the automatic main-worktree maintenance pass (orphan-project
+    /// cleanup + a quick store health check) for this invocation. Equivalent
+    /// to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1.
+    #[arg(long = "no-maintenance", global = true)]
+    pub no_maintenance: bool,
 }
 
 /// Available CLI commands.

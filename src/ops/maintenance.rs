@@ -13,24 +13,25 @@
 //!    have drifted (the user is told to run `engramdb reindex`).
 //!
 //! The pass is **throttled** via a timestamp marker under the global data dir so
-//! it runs at most once per [`maintenance_interval`] regardless of how many
+//! it runs at most once per the resolved interval regardless of how many
 //! commands or sessions fire, and it is **best-effort**: every failure is logged
-//! and swallowed so routine operations are never blocked. Both behaviours can be
-//! tuned with environment variables:
+//! and swallowed so routine operations are never blocked.
 //!
-//! - `ENGRAMDB_DISABLE_AUTO_MAINTENANCE` (truthy: `1`/`true`/`yes`/`on`) — skip
-//!   entirely.
-//! - `ENGRAMDB_AUTO_MAINTENANCE_INTERVAL_SECS` — override the throttle window
-//!   (used by tests to force or suppress a run).
+//! Both behaviours are configured via the `[maintenance]` section of
+//! `config.toml` ([`crate::types::MaintenanceConfig`]), with override ladders:
+//!
+//! - **enabled**: `--no-maintenance` CLI flag (`cli_skip`) >
+//!   `ENGRAMDB_DISABLE_AUTO_MAINTENANCE` env (truthy: `1`/`true`/`yes`/`on`) >
+//!   `config.enabled`.
+//! - **interval**: `ENGRAMDB_AUTO_MAINTENANCE_INTERVAL_SECS` env >
+//!   `config.interval_secs`.
 
 use crate::ops::doctor::{doctor, DoctorResult};
 use crate::ops::projects::{prune_stale_projects, PruneResult};
 use crate::storage::{paths, MemoryStore, RegistryBackend};
+use crate::types::MaintenanceConfig;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-
-/// Default minimum interval between automatic maintenance passes (6 hours).
-const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Throttle marker file, stored under the global data dir.
 const MARKER_FILE: &str = ".last_maintenance";
@@ -47,21 +48,35 @@ pub struct MaintenanceReport {
     pub doctor: Option<DoctorResult>,
 }
 
-/// Whether automatic maintenance has been disabled via the environment.
-fn disabled() -> bool {
+/// Whether maintenance is disabled via the `ENGRAMDB_DISABLE_AUTO_MAINTENANCE`
+/// environment variable (truthy: `1`/`true`/`yes`/`on`).
+fn env_disabled() -> bool {
     std::env::var("ENGRAMDB_DISABLE_AUTO_MAINTENANCE")
         .ok()
         .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
 }
 
-/// The throttle window, honouring the env override.
-fn maintenance_interval() -> Duration {
+/// The throttle window override from the environment, if set and parseable.
+fn env_interval_override() -> Option<Duration> {
     std::env::var("ENGRAMDB_AUTO_MAINTENANCE_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .map(Duration::from_secs)
-        .unwrap_or(DEFAULT_MAINTENANCE_INTERVAL)
+}
+
+/// Resolve whether the maintenance pass should run, applying the override
+/// ladder: CLI flag > env var > config.
+fn resolve_enabled(config: &MaintenanceConfig, cli_skip: bool) -> bool {
+    if cli_skip || env_disabled() {
+        return false;
+    }
+    config.enabled
+}
+
+/// Resolve the throttle window: env override wins over the config value.
+fn resolve_interval(config: &MaintenanceConfig) -> Duration {
+    env_interval_override().unwrap_or_else(|| Duration::from_secs(config.interval_secs))
 }
 
 /// Path to the throttle marker, or `None` when the global data dir can't be
@@ -100,15 +115,23 @@ async fn record_maintenance() {
 
 /// Run automatic maintenance for `dir` (the resolved main project root).
 ///
-/// Callers must only invoke this when operating on the **main** worktree — a
-/// linked worktree should just link/consolidate (handled elsewhere) and skip
-/// this housekeeping. Throttled and best-effort: never returns an error and
-/// never panics, so it is safe to call on the hot path of any command.
-pub async fn auto_maintain(dir: &Path, registry: &dyn RegistryBackend) -> MaintenanceReport {
-    if disabled() {
+/// `config` is the project's `[maintenance]` section and `cli_skip` is the
+/// `--no-maintenance` flag (always `false` for the MCP server, which has no
+/// such flag). Callers must only invoke this when operating on the **main**
+/// worktree — a linked worktree should just link/consolidate (handled
+/// elsewhere) and skip this housekeeping. Throttled and best-effort: never
+/// returns an error and never panics, so it is safe to call on the hot path of
+/// any command.
+pub async fn auto_maintain(
+    dir: &Path,
+    registry: &dyn RegistryBackend,
+    config: &MaintenanceConfig,
+    cli_skip: bool,
+) -> MaintenanceReport {
+    if !resolve_enabled(config, cli_skip) {
         return MaintenanceReport::default();
     }
-    if !maintenance_due(maintenance_interval()).await {
+    if !maintenance_due(resolve_interval(config)).await {
         return MaintenanceReport::default();
     }
     // Stamp the marker up-front so a failure can't spin into a hot retry loop
@@ -175,18 +198,14 @@ mod tests {
     use crate::types::{Memory, MemoryType, Provenance};
     use tempfile::TempDir;
 
-    // Env mutation is process-global, but nextest runs each test in its own
-    // process and the `#[ctor]` arm redirects the data dir per-process, so
-    // setting these vars directly here can't bleed into another test. We still
-    // clear them at the end of each test for hygiene and to keep multiple
-    // `auto_maintain` calls within one test independent.
-    fn set_interval(secs: &str) {
-        std::env::set_var("ENGRAMDB_AUTO_MAINTENANCE_INTERVAL_SECS", secs);
-    }
-
-    fn clear_env() {
-        std::env::remove_var("ENGRAMDB_AUTO_MAINTENANCE_INTERVAL_SECS");
-        std::env::remove_var("ENGRAMDB_DISABLE_AUTO_MAINTENANCE");
+    /// A config with `interval_secs` so a pass is always due — lets most tests
+    /// drive the throttle entirely through config, never touching the
+    /// process-global env vars (only the two env-precedence tests below do).
+    fn cfg(interval_secs: u64) -> MaintenanceConfig {
+        MaintenanceConfig {
+            enabled: true,
+            interval_secs,
+        }
     }
 
     #[tokio::test]
@@ -197,9 +216,7 @@ mod tests {
         let mem = Memory::new(MemoryType::Decision, "T", "C", Provenance::human());
         store.create(&mem).await.unwrap();
 
-        set_interval("0"); // always due
-        let report = auto_maintain(dir.path(), &registry).await;
-        clear_env();
+        let report = auto_maintain(dir.path(), &registry, &cfg(0), false).await;
         assert!(report.ran, "a due pass must run");
         assert!(report.prune.is_some(), "cleanup must have run");
         let doctor = report.doctor.expect("doctor must have run");
@@ -213,9 +230,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();
 
-        set_interval("0");
-        let report = auto_maintain(dir.path(), &registry).await;
-        clear_env();
+        let report = auto_maintain(dir.path(), &registry, &cfg(0), false).await;
         assert!(report.ran, "maintenance runs even without a store");
         assert!(report.prune.is_some(), "cleanup always runs");
         assert!(
@@ -242,9 +257,7 @@ mod tests {
             .join(format!("{id}.md"));
         tokio::fs::remove_file(&file).await.unwrap();
 
-        set_interval("0");
-        let report = auto_maintain(dir.path(), &registry).await;
-        clear_env();
+        let report = auto_maintain(dir.path(), &registry, &cfg(0), false).await;
         assert!(report.ran);
         let doctor = report.doctor.expect("doctor must have run");
         assert!(
@@ -254,16 +267,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_maintain_disabled_by_env() {
+    async fn auto_maintain_disabled_by_cli_flag() {
         let dir = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();
         MemoryStore::init(dir.path(), &registry).await.unwrap();
 
-        set_interval("0");
-        std::env::set_var("ENGRAMDB_DISABLE_AUTO_MAINTENANCE", "1");
-        let report = auto_maintain(dir.path(), &registry).await;
-        clear_env();
-        assert!(!report.ran, "disabled maintenance must be a no-op");
+        // cli_skip=true (the --no-maintenance flag) forces it off even though
+        // config is enabled and the pass would otherwise be due.
+        let report = auto_maintain(dir.path(), &registry, &cfg(0), true).await;
+        assert!(!report.ran, "--no-maintenance must skip the pass");
+    }
+
+    #[tokio::test]
+    async fn auto_maintain_disabled_by_config() {
+        let dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(dir.path(), &registry).await.unwrap();
+
+        let disabled = MaintenanceConfig {
+            enabled: false,
+            interval_secs: 0,
+        };
+        let report = auto_maintain(dir.path(), &registry, &disabled, false).await;
+        assert!(!report.ran, "config.enabled=false must skip the pass");
     }
 
     #[tokio::test]
@@ -272,15 +298,44 @@ mod tests {
         let registry = InMemoryRegistry::new();
         MemoryStore::init(dir.path(), &registry).await.unwrap();
 
-        // First pass with interval 0 → runs and writes the marker.
-        set_interval("0");
-        let first = auto_maintain(dir.path(), &registry).await;
+        // First pass: interval 0 → due → runs and writes the marker.
+        let first = auto_maintain(dir.path(), &registry, &cfg(0), false).await;
         assert!(first.ran);
 
-        // Second pass with a huge interval → throttled (marker is fresh).
-        set_interval("100000");
-        let second = auto_maintain(dir.path(), &registry).await;
-        clear_env();
+        // Second pass: a huge interval → throttled (marker is fresh).
+        let second = auto_maintain(dir.path(), &registry, &cfg(100_000), false).await;
         assert!(!second.ran, "a fresh marker must throttle the next pass");
+    }
+
+    // --- Env-precedence tests ---
+    //
+    // These mutate process-global env vars. They are isolated by nextest's
+    // process-per-test model (each test is its own process; the `#[ctor]` arm
+    // also redirects the data dir per-process), so no save/restore is needed —
+    // that is exactly why this project mandates nextest over `cargo test`.
+
+    #[tokio::test]
+    async fn auto_maintain_disabled_by_env_over_enabled_config() {
+        let dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(dir.path(), &registry).await.unwrap();
+
+        std::env::set_var("ENGRAMDB_DISABLE_AUTO_MAINTENANCE", "1");
+        // config is enabled, but the env var must win and disable it.
+        let report = auto_maintain(dir.path(), &registry, &cfg(0), false).await;
+        assert!(!report.ran, "env disable must override an enabled config");
+    }
+
+    #[tokio::test]
+    async fn auto_maintain_env_interval_overrides_config() {
+        let dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(dir.path(), &registry).await.unwrap();
+
+        // config interval is huge (would never be due), but the env override of
+        // 0 makes the pass due → it runs.
+        std::env::set_var("ENGRAMDB_AUTO_MAINTENANCE_INTERVAL_SECS", "0");
+        let report = auto_maintain(dir.path(), &registry, &cfg(100_000), false).await;
+        assert!(report.ran, "env interval override must win over config");
     }
 }

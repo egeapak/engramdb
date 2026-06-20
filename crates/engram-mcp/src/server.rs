@@ -725,7 +725,20 @@ impl EngramDbServer {
         if self.dir != self.effective_dir {
             return;
         }
-        engramdb::ops::auto_maintain(&self.effective_dir, self.registry.as_ref()).await;
+        // Honor the project's `[maintenance]` config (best-effort: defaults if
+        // absent). The MCP server has no `--no-maintenance` flag, so cli_skip
+        // is always false; the env var and config still apply.
+        let config_path = self.effective_dir.join(".engramdb").join("config.toml");
+        let config = engramdb::storage::config::load_config(&config_path)
+            .await
+            .unwrap_or_default();
+        engramdb::ops::auto_maintain(
+            &self.effective_dir,
+            self.registry.as_ref(),
+            &config.maintenance,
+            false,
+        )
+        .await;
     }
 
     /// Returns `true` if the given project override refers to the global store.
