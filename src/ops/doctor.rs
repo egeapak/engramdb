@@ -3,6 +3,7 @@
 use crate::storage::MemoryStore;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::fs as async_fs;
 
 /// Result of a doctor/health check operation.
@@ -343,9 +344,10 @@ pub async fn doctor_environment(
 
     // === 3. Global settings & models ===
     //
-    // Machine-wide settings (binary, global gitignore, agent integration),
-    // the embedding config/health, the active models with a short description
-    // of what each is used for, and the optional shared inference daemon. The
+    // Machine-wide settings (binary, global gitignore, agent integration,
+    // auto-maintenance status), the embedding config/health, the active models
+    // with a short description of what each is used for, and the optional
+    // shared inference daemon. The
     // daemon probe is built by the caller (`daemon::doctor::check_daemon`) and
     // injected here so that `ops` does not depend "upward" on `daemon`. The
     // daemon is optional and auto-spawned, so it never counts as a failure.
@@ -354,6 +356,7 @@ pub async fn doctor_environment(
         check_global_gitignore(),
         check_claude_plugin(),
         check_hook_config(),
+        check_maintenance(dir).await,
         daemon_check,
     ];
 
@@ -717,6 +720,62 @@ async fn check_embedding_model_identity(dir: &Path) -> EnvironmentCheck {
         suggestion,
         details: vec![],
         status,
+    }
+}
+
+/// Render a duration as a coarse "N unit(s)" string, picking the single largest
+/// whole unit. Diagnostics only, so it favors readability over precision.
+fn humanize_interval(d: Duration) -> String {
+    let secs = d.as_secs();
+    let (value, unit) = if secs < 60 {
+        (secs, "second")
+    } else if secs < 3600 {
+        (secs / 60, "minute")
+    } else if secs < 86_400 {
+        (secs / 3600, "hour")
+    } else {
+        (secs / 86_400, "day")
+    };
+    format!("{value} {unit}{}", if value == 1 { "" } else { "s" })
+}
+
+/// Report auto-maintenance status (the `[maintenance]` section): whether the
+/// throttled main-worktree housekeeping pass is enabled, its interval, and when
+/// it last ran. Always informational — auto-maintenance is best-effort, so it
+/// never counts as a failure.
+async fn check_maintenance(dir: &Path) -> EnvironmentCheck {
+    let config_path = dir.join(".engramdb").join("config.toml");
+    let config = crate::storage::config::load_config(&config_path)
+        .await
+        .unwrap_or_default();
+    let status = crate::ops::maintenance_status(&config.maintenance).await;
+
+    if !status.enabled {
+        return EnvironmentCheck {
+            name: "Auto-maintenance".to_string(),
+            passed: true,
+            message: "disabled".to_string(),
+            suggestion: None,
+            details: vec![],
+            status: Some(CheckStatus::Info),
+        };
+    }
+
+    let last_run = match status.last_run {
+        Some(t) => t
+            .elapsed()
+            .map(|e| format!("{} ago", humanize_interval(e)))
+            .unwrap_or_else(|_| "just now".to_string()),
+        None => "never".to_string(),
+    };
+
+    EnvironmentCheck {
+        name: "Auto-maintenance".to_string(),
+        passed: true,
+        message: format!("enabled (every {})", humanize_interval(status.interval)),
+        suggestion: None,
+        details: vec![format!("last run: {last_run}")],
+        status: Some(CheckStatus::Info),
     }
 }
 
@@ -2612,6 +2671,62 @@ mod tests {
         assert_eq!(result.name, "Embedding backend");
         assert!(result.passed);
         assert!(result.message.contains("auto"));
+    }
+
+    #[test]
+    fn test_humanize_interval_picks_largest_unit() {
+        assert_eq!(humanize_interval(Duration::from_secs(1)), "1 second");
+        assert_eq!(humanize_interval(Duration::from_secs(45)), "45 seconds");
+        assert_eq!(humanize_interval(Duration::from_secs(60)), "1 minute");
+        assert_eq!(humanize_interval(Duration::from_secs(3600)), "1 hour");
+        assert_eq!(
+            humanize_interval(Duration::from_secs(6 * 60 * 60)),
+            "6 hours"
+        );
+        assert_eq!(humanize_interval(Duration::from_secs(86_400)), "1 day");
+        assert_eq!(humanize_interval(Duration::from_secs(3 * 86_400)), "3 days");
+    }
+
+    #[tokio::test]
+    async fn test_check_maintenance_enabled_by_default() {
+        // No config file → defaults: auto-maintenance enabled, 6h interval, and
+        // (in an isolated test data dir) no marker yet → "never".
+        let temp_dir = TempDir::new().unwrap();
+        let check = check_maintenance(temp_dir.path()).await;
+        assert_eq!(check.name, "Auto-maintenance");
+        assert!(check.passed);
+        assert_eq!(check.status, Some(CheckStatus::Info));
+        assert!(
+            check.message.starts_with("enabled (every "),
+            "unexpected message: {}",
+            check.message
+        );
+        assert!(
+            check.details.iter().any(|d| d.contains("last run:")),
+            "expected a last-run detail line, got {:?}",
+            check.details
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_maintenance_disabled_collapses() {
+        // A config that disables maintenance must render the terse "disabled"
+        // form with no interval/last-run noise.
+        let temp_dir = TempDir::new().unwrap();
+        let cfg_dir = temp_dir.path().join(".engramdb");
+        async_fs::create_dir_all(&cfg_dir).await.unwrap();
+        async_fs::write(
+            cfg_dir.join("config.toml"),
+            "[maintenance]\nenabled = false\n",
+        )
+        .await
+        .unwrap();
+
+        let check = check_maintenance(temp_dir.path()).await;
+        assert_eq!(check.name, "Auto-maintenance");
+        assert!(check.passed);
+        assert_eq!(check.message, "disabled");
+        assert!(check.details.is_empty());
     }
 
     #[tokio::test]

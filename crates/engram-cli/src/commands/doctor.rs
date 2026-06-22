@@ -5,7 +5,8 @@ use crate::output::{short_id, OutputFormatter};
 use crate::prompter::Prompter;
 use anyhow::Result;
 use engramdb::ops::{
-    doctor, doctor_environment, validate_models, CheckStatus, DoctorSection, EnvironmentDoctorResult,
+    doctor, doctor_environment, validate_models, CheckStatus, DoctorSection,
+    EnvironmentDoctorResult,
 };
 use engramdb::storage::MemoryStore;
 use std::io::IsTerminal;
