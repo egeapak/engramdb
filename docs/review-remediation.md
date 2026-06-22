@@ -33,8 +33,8 @@ Legend: ✅ fixed & green · 🟡 verified non-bug (test added) · ⏳ pending
 | 13 | Medium | scope | `matches()` vs `calculate_pattern_score` disagree | ✅ filter loosened to scorer |
 | 14 | Medium | storage | nondeterministic tied-mtime duplicate resolution | ✅ |
 | 15 | Medium | storage | `get_batch`/`batch_exists` silently skip corrupt files | ✅ logging + behaviour test |
-| 16 | Medium | storage | telemetry `load_recent` full-table scan | 🟡 perf, documented |
-| 17 | Medium | daemon | metrics 2nd connection + `optimize` every persist | 🟡 perf, documented |
+| 16 | Medium | storage | telemetry `load_recent` full-table scan | 🟡 not actionable (LanceDB lacks ordered pushdown) |
+| 17 | Medium | daemon | metrics 2nd connection + `optimize` every persist | ✅ |
 | 18 | Medium | cli | `--format`/`--json` not mutually exclusive | ✅ |
 | 19 | Low | types | `embeddings.max_tokens` is dead config | ✅ |
 | 20 | Low | types | `search.threshold > 1.0` warns but doesn't clamp | 🟡 non-bug (clamped at use); tests pin contract |
@@ -270,3 +270,31 @@ by a red→green test in this sandbox. Tracked here for a future perf pass.
   graceful-fallback contract instead of exiting non-zero.
 - **Test:** `stats_daemon_json_is_valid_when_not_running` exercises the fallback
   path end-to-end.
+
+## Details (batch 8: deferred perf items, after merging master)
+
+### #17 — daemon metrics: 2nd connection + optimize-every-persist (Medium) ✅
+- **Fix:** `persist_at` now opens the LanceDB table **once** and reuses the handle
+  for both the append and the prune (extracted `append_row(&table, …)`), instead
+  of opening a second connection in the prune path. `prune_snapshots(&table)`
+  first `count_rows(stale_predicate)` and returns early when nothing has aged
+  out, so a steady-state daemon no longer issues an empty `delete` + full-table
+  `optimize` on every ~300 s persist. `persist_row_at` is now `#[cfg(test)]`
+  (only tests seed explicit-timestamp rows; production uses `append_row`).
+- **Validation:** behaviour-preserving — existing `metrics_persist_then_load_latest`
+  and `metrics_persist_prunes_old_snapshots` still pass (prune still removes aged
+  rows; recent rows and cumulative seeding survive).
+
+### #16 — telemetry `load_recent` full-table scan (Medium) 🟡 not actionable
+- **Investigated:** the reviewer suggested pushing `ORDER BY ts DESC LIMIT cap`
+  into LanceDB. Inspecting `lancedb` 0.26's `Query` API shows it exposes
+  `limit`, `offset`, and `only_if` (filter) but **no ordering / sort** — exactly
+  why `load_recent`'s own doc-comment reads every row then sorts in memory: a
+  plain `limit(N)` returns rows in storage order with no recency guarantee.
+- **Why not the offset-from-end trick:** `count_rows()` + `offset(count-cap)`
+  would only return the most-recent rows if storage order matched insertion/ts
+  order, which a background `optimize`/compaction can break — silently returning
+  non-recent events. That trades a bounded perf cost for a correctness hazard.
+- **Conclusion:** the in-memory sort is required for correctness with this
+  LanceDB version, and the scan is bounded by the 90-day retention + prune. Left
+  as-is; revisit if/when LanceDB exposes an ordered scan.

@@ -198,15 +198,21 @@ pub(crate) async fn persist_at(
     uptime_secs: u64,
     snap: MetricsSnapshot,
 ) -> Result<()> {
-    persist_row_at(dir, Utc::now(), pid, uptime_secs, snap).await?;
-    if let Err(e) = prune_snapshots_at(dir).await {
+    // Open the table once and reuse the handle for both the append and the
+    // prune, rather than opening a second LanceDB connection just to prune
+    // (finding #17).
+    let table = open_table_at(dir).await?;
+    append_row(&table, Utc::now(), pid, uptime_secs, snap).await?;
+    if let Err(e) = prune_snapshots(&table).await {
         tracing::debug!("daemon metrics prune failed (non-fatal): {e}");
     }
     Ok(())
 }
 
 /// Append a single snapshot row with an explicit timestamp, without pruning.
-/// Split out so tests can seed old rows deterministically.
+/// Test-only: lets tests seed old rows deterministically (production goes
+/// through [`persist_at`], which reuses one table handle for append + prune).
+#[cfg(test)]
 pub(crate) async fn persist_row_at(
     dir: &std::path::Path,
     ts: chrono::DateTime<Utc>,
@@ -215,6 +221,17 @@ pub(crate) async fn persist_row_at(
     snap: MetricsSnapshot,
 ) -> Result<()> {
     let table = open_table_at(dir).await?;
+    append_row(&table, ts, pid, uptime_secs, snap).await
+}
+
+/// Append one cumulative snapshot row to an already-open table.
+async fn append_row(
+    table: &lancedb::Table,
+    ts: chrono::DateTime<Utc>,
+    pid: u32,
+    uptime_secs: u64,
+    snap: MetricsSnapshot,
+) -> Result<()> {
     let schema = schema();
     let arrays: Vec<ArrayRef> = vec![
         Arc::new(
@@ -244,25 +261,27 @@ pub(crate) async fn persist_row_at(
 
 /// Delete snapshot rows older than [`SNAPSHOT_RETENTION_DAYS`], then run
 /// `Table::optimize()` so the deleted rows' fragments are compacted and old
-/// Lance dataset versions (one per append/delete) are actually reclaimed
-/// from disk (version pruning keeps the lancedb-default 7 days, which is
-/// safe for concurrent readers). The table is tiny, so doing this on every
-/// persist (~300 s cadence) is cheap.
-async fn prune_snapshots_at(dir: &std::path::Path) -> Result<()> {
-    let path = dir.to_str().context("lancedb path is not UTF-8")?;
-    let conn = connect(path)
-        .execute()
-        .await
-        .context("opening LanceDB connection")?;
-    let table = match conn.open_table(TABLE_NAME).execute().await {
-        Ok(t) => t,
-        Err(_) => return Ok(()),
-    };
+/// Lance dataset versions (one per append/delete) are reclaimed from disk
+/// (version pruning keeps the lancedb-default 7 days, safe for concurrent
+/// readers).
+///
+/// Counts the stale rows first and returns early when there are none, so a
+/// steady-state daemon does not issue an empty `delete` + a full-table
+/// `optimize` on every ~300 s persist when nothing has aged out (finding #17).
+/// Reuses the caller's table handle rather than opening a second connection.
+async fn prune_snapshots(table: &lancedb::Table) -> Result<()> {
     let cutoff = Utc::now() - chrono::Duration::days(SNAPSHOT_RETENTION_DAYS);
     let predicate = format!(
         "ts < TIMESTAMP '{}'",
         cutoff.format("%Y-%m-%d %H:%M:%S%.6f%:z")
     );
+    let stale = table
+        .count_rows(Some(predicate.clone()))
+        .await
+        .context("counting stale daemon_metrics snapshots")?;
+    if stale == 0 {
+        return Ok(());
+    }
     table
         .delete(&predicate)
         .await
