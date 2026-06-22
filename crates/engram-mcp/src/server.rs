@@ -713,6 +713,34 @@ impl EngramDbServer {
         Ok(())
     }
 
+    /// Run best-effort, throttled housekeeping for the main project.
+    ///
+    /// Only fires when the server is operating directly on the main worktree
+    /// (`dir == effective_dir`); a session started inside a linked worktree
+    /// just links/consolidates via [`Self::ensure_hierarchy`] and skips this.
+    /// Cleans up orphan/stale projects and quick-checks the main store's
+    /// health. Never errors — failures are logged and swallowed — so it can be
+    /// called unconditionally on startup.
+    pub async fn maintain_main_project(&self) {
+        if self.dir != self.effective_dir {
+            return;
+        }
+        // Honor the project's `[maintenance]` config (best-effort: defaults if
+        // absent). The MCP server has no `--no-maintenance` flag, so cli_skip
+        // is always false; the env var and config still apply.
+        let config_path = self.effective_dir.join(".engramdb").join("config.toml");
+        let config = engramdb::storage::config::load_config(&config_path)
+            .await
+            .unwrap_or_default();
+        engramdb::ops::auto_maintain(
+            &self.effective_dir,
+            self.registry.as_ref(),
+            &config.maintenance,
+            false,
+        )
+        .await;
+    }
+
     /// Returns `true` if the given project override refers to the global store.
     fn is_global(project: Option<&str>) -> bool {
         matches!(project, Some("global"))
@@ -2511,6 +2539,9 @@ pub async fn run_stdio(
     let mut server = EngramDbServer::new_with_stats(dir, embedding_backend, stats.clone())?;
     // Detect git worktrees and register/init the main project if needed.
     server.ensure_hierarchy().await?;
+    // On the main worktree, run throttled housekeeping (orphan cleanup + a
+    // quick store health check). Best-effort: never blocks serving.
+    server.maintain_main_project().await;
     // Embedding-model-change check: warn (default), auto-reindex, or — in
     // `error` mode — leave the warning so embedding tools hard-fail.
     if let Some((mode, report)) = server.embedding_startup_report().await {
@@ -2611,6 +2642,9 @@ pub async fn run_sse(
             EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())?
                 .with_shared_model_caches(provider_cache.clone(), daemon.clone());
         warmup.ensure_hierarchy().await?;
+        // Same throttled main-worktree housekeeping as the stdio path; runs
+        // once here since per-connection servers share this registry.
+        warmup.maintain_main_project().await;
         if let Some((mode, report)) = warmup.embedding_startup_report().await {
             if !report.status.is_consistent() {
                 if let Some(w) = &report.warning {
