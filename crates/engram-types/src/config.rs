@@ -701,6 +701,10 @@ pub struct EngramConfig {
     /// Automatic title-generation settings
     #[serde(default)]
     pub title: TitleConfig,
+
+    /// Automatic main-worktree maintenance settings
+    #[serde(default)]
+    pub maintenance: MaintenanceConfig,
 }
 
 /// Shared embedding-daemon settings.
@@ -776,6 +780,45 @@ impl DaemonConfig {
             );
         }
         Ok(())
+    }
+}
+
+/// Automatic main-worktree maintenance settings.
+///
+/// When a memory operation is invoked directly on a project's *main* worktree
+/// (not a linked git worktree), both front-ends run a throttled, best-effort
+/// housekeeping pass: orphan/stale-project cleanup plus a quick store health
+/// check. A timestamp marker under the global data dir enforces the throttle
+/// across processes and sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceConfig {
+    /// Master switch. When `true` (default) the housekeeping pass runs
+    /// (throttled) on main-worktree invocations. When `false` it never runs.
+    /// Override ladder: `--no-maintenance` CLI flag >
+    /// `ENGRAMDB_DISABLE_AUTO_MAINTENANCE` env > this config value.
+    #[serde(default = "default_maintenance_enabled")]
+    pub enabled: bool,
+
+    /// Minimum seconds between automatic maintenance passes. Override:
+    /// `ENGRAMDB_AUTO_MAINTENANCE_INTERVAL_SECS` env > this config value.
+    #[serde(default = "default_maintenance_interval_secs")]
+    pub interval_secs: u64,
+}
+
+fn default_maintenance_enabled() -> bool {
+    true
+}
+
+fn default_maintenance_interval_secs() -> u64 {
+    6 * 60 * 60
+}
+
+impl Default for MaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_maintenance_enabled(),
+            interval_secs: default_maintenance_interval_secs(),
+        }
     }
 }
 
@@ -1193,6 +1236,31 @@ relevance = 1.0
         assert_eq!(config.scope_proximity.exact_file, 1.0);
         assert_eq!(config.logical_bonus.exact, 0.3);
         assert_eq!(config.thresholds.needs_review, 0.3);
+    }
+
+    #[test]
+    fn test_maintenance_config_defaults() {
+        // Default: enabled with a 6-hour throttle window.
+        let config = EngramConfig::default();
+        assert!(config.maintenance.enabled);
+        assert_eq!(config.maintenance.interval_secs, 6 * 60 * 60);
+
+        // Empty TOML falls back to the same defaults via #[serde(default)].
+        let from_empty: EngramConfig = toml::from_str("").unwrap();
+        assert!(from_empty.maintenance.enabled);
+        assert_eq!(from_empty.maintenance.interval_secs, 6 * 60 * 60);
+    }
+
+    #[test]
+    fn test_maintenance_config_custom_toml() {
+        let toml = r#"
+[maintenance]
+enabled = false
+interval_secs = 60
+"#;
+        let config: EngramConfig = toml::from_str(toml).unwrap();
+        assert!(!config.maintenance.enabled);
+        assert_eq!(config.maintenance.interval_secs, 60);
     }
 
     #[test]
