@@ -15,6 +15,20 @@ pub mod embeddings;
 pub mod nli;
 pub mod title;
 
+/// Strip the `SessionBuilder` payload from an `ort` builder error.
+///
+/// ort rc.12 changed the `SessionBuilder` configuration methods to return
+/// `Error<SessionBuilder>` (the error carries the builder back so the caller
+/// can recover it). That payload is `!Send`/`!Sync`, so propagating it with `?`
+/// into an `anyhow::Result` fails `anyhow`'s `Send + Sync` bound. Converting to
+/// the unit-payload `ort::Error` (which is `Send + Sync`) via the crate's
+/// `From` impl restores `?`-propagation while preserving the error message/code.
+pub(crate) fn erase_builder_err(
+    e: ort::Error<ort::session::builder::SessionBuilder>,
+) -> ort::Error {
+    e.into()
+}
+
 // Test isolation: link `engram-test-support` so its `#[ctor]` redirects the
 // global data/config dirs before any test runs (the nli/challenge tests build
 // real `MemoryStore`s). The `arm()` reference prevents dead-stripping.
