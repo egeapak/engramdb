@@ -96,7 +96,7 @@ rustix = { version = "1", features = ["process"] }
 # this crate's tests; `#[cfg(test)]` items don't cross crate boundaries.
 engram-storage = { path = "crates/engram-storage", features = ["test-support"] }
 engram-test-support = { path = "crates/engram-test-support" }
-ctor = "0.4"
+ctor = "1"
 rand = "0.9"
 # Criterion benches live in this core crate (`benches/`); they exercise the
 # re-exported model/ops/scoring APIs.

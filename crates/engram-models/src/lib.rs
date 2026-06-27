@@ -33,7 +33,7 @@ pub(crate) fn erase_builder_err(
 // global data/config dirs before any test runs (the nli/challenge tests build
 // real `MemoryStore`s). The `arm()` reference prevents dead-stripping.
 #[cfg(test)]
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn arm_test_isolation() {
     engram_test_support::arm();
 }

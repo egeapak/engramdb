@@ -41,7 +41,7 @@ pub use worktree::{consolidate_worktree_into_main, resolve_project_root};
 // any test runs. The explicit `arm()` reference keeps the linker from
 // dead-stripping the constructor out of this crate's test binary.
 #[cfg(test)]
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn arm_test_isolation() {
     engram_test_support::arm();
 }

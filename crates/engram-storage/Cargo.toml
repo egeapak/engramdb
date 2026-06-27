@@ -47,4 +47,4 @@ tempfile = "3"
 
 [dev-dependencies]
 engram-test-support = { path = "../engram-test-support" }
-ctor = "0.4"
+ctor = "1"
