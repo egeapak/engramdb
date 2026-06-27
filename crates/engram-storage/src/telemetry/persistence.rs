@@ -48,8 +48,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Float64Array, RecordBatch, RecordBatchIterator, StringArray,
-    TimestampMicrosecondArray,
+    Array, ArrayRef, BooleanArray, Float64Array, RecordBatch, RecordBatchIterator,
+    RecordBatchReader, StringArray, TimestampMicrosecondArray,
 };
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use chrono::{DateTime, Utc};
@@ -217,8 +217,11 @@ async fn append_events_inner(project_id: &str, events: &[EventRow]) -> Result<()
     let batch = events_to_batch(events)?;
     let schema = batch.schema();
     let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+    // lancedb 0.30's `add<T: Scannable>` no longer infers through the concrete
+    // iterator type; coerce to the trait object it implements `Scannable` for.
+    let reader: Box<dyn RecordBatchReader + Send> = Box::new(batches);
     table
-        .add(Box::new(batches))
+        .add(reader)
         .execute()
         .await
         .context("appending stats_events rows")?;

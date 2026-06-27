@@ -19,9 +19,9 @@ test-support = []
 [dependencies]
 engram-types = { path = "../engram-types" }
 
-lancedb = { version = "0.26", default-features = false }
-arrow-array = "57"
-arrow-schema = "57"
+lancedb = { version = "0.30", default-features = false }
+arrow-array = "58"
+arrow-schema = "58"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

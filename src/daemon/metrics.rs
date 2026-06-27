@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arrow_array::{
-    Array, ArrayRef, Int64Array, RecordBatch, RecordBatchIterator, StringArray,
+    Array, ArrayRef, Int64Array, RecordBatch, RecordBatchIterator, RecordBatchReader, StringArray,
     TimestampMicrosecondArray,
 };
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
@@ -234,8 +234,11 @@ pub(crate) async fn persist_row_at(
     let batch =
         RecordBatch::try_new(schema.clone(), arrays).context("building daemon_metrics batch")?;
     let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+    // lancedb 0.30's `add<T: Scannable>` no longer infers through the concrete
+    // iterator type; coerce to the trait object it implements `Scannable` for.
+    let reader: Box<dyn RecordBatchReader + Send> = Box::new(batches);
     table
-        .add(Box::new(batches))
+        .add(reader)
         .execute()
         .await
         .context("appending daemon_metrics row")?;
