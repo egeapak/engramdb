@@ -13,8 +13,10 @@ path = "src/lib.rs"
 [dependencies]
 engramdb = { path = "../..", default-features = false }
 
-rmcp = { version = "0.15", features = ["macros", "server", "transport-io", "transport-streamable-http-server"] }
-axum = { version = "0.8", default-features = false, features = ["tokio"] }
+rmcp = { version = "1", features = ["macros", "server", "transport-io", "transport-streamable-http-server"] }
+# `http1` is needed for `axum::serve` (streamable-HTTP transport); rmcp 0.15
+# enabled it transitively, rmcp 1.x no longer does, so request it explicitly.
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
 schemars = "1"
 
 serde = { version = "1", features = ["derive"] }
@@ -34,6 +36,6 @@ engramdb = { path = "../..", default-features = false, features = ["test-support
 # the in-crate global-store tests don't race on the real global dir.
 engram-test-support = { path = "../engram-test-support" }
 ctor = "1"
-rmcp = { version = "0.15", features = ["client"] }
+rmcp = { version = "1", features = ["client"] }
 tempfile = "3"
 toml = "1"
