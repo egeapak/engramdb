@@ -36,4 +36,4 @@ engram-test-support = { path = "../engram-test-support" }
 ctor = "0.4"
 rmcp = { version = "0.15", features = ["client"] }
 tempfile = "3"
-toml = "0.8"
+toml = "1"
