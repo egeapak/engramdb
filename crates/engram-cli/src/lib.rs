@@ -66,7 +66,7 @@ pub fn cli_daemon_policy(
 // this they would touch the *real* global data dir under nextest. The explicit
 // `arm()` reference keeps the linker from dead-stripping the constructor.
 #[cfg(test)]
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn arm_test_isolation() {
     engram_test_support::arm();
 }
@@ -407,9 +407,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             global,
             daemon,
         } => commands::run_stats(&dir, global, daemon, backend, all_projects, &formatter).await,
-        Command::Doctor { command, global } => {
-            commands::run_doctor(&dir, global, command, &formatter).await
-        }
+        Command::Doctor {
+            command,
+            global,
+            fix,
+            yes,
+        } => commands::run_doctor(&dir, global, command, fix, yes, &prompter, &formatter).await,
         Command::Challenge {
             id,
             evidence,

@@ -166,8 +166,12 @@ fn hash_string(s: &str) -> String {
     hasher.update(s.as_bytes());
     let result = hasher.finalize();
 
-    // Take first 16 hex chars
-    format!("{:x}", result)[..16].to_string()
+    // Take first 16 hex chars (the first 8 bytes, each as two lowercase hex
+    // digits). sha2 0.11's `finalize` returns a `hybrid_array::Array` that no
+    // longer implements `LowerHex`, so format the bytes explicitly rather than
+    // via `{:x}` — the output is byte-for-byte identical, keeping project IDs
+    // stable.
+    result.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

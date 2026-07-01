@@ -11,5 +11,5 @@ name = "engram_test_support"
 path = "src/lib.rs"
 
 [dependencies]
-ctor = "0.4"
+ctor = "1"
 tempfile = "3"

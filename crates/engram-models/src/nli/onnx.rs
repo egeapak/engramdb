@@ -135,8 +135,10 @@ impl OnnxNliProvider {
 
         let builder = engram_onnx::apply_backend(Session::builder()?, backend)?;
         let session = builder
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(engram_onnx::intra_threads())?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(crate::erase_builder_err)?
+            .with_intra_threads(engram_onnx::intra_threads())
+            .map_err(crate::erase_builder_err)?
             .commit_from_file(&model_path)
             .context("Failed to load NLI ONNX model")?;
 

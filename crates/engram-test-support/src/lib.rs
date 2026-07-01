@@ -24,7 +24,7 @@ static TEST_DATA_DIR: LazyLock<tempfile::TempDir> =
 static TEST_CONFIG_DIR: LazyLock<tempfile::TempDir> =
     LazyLock::new(|| tempfile::TempDir::new().expect("failed to create test config dir"));
 
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn init() {
     std::env::set_var("ENGRAMDB_DATA_DIR", TEST_DATA_DIR.path());
     std::env::set_var("ENGRAMDB_CONFIG_DIR", TEST_CONFIG_DIR.path());
