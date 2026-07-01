@@ -141,7 +141,10 @@ pub fn apply_backend(builder: SessionBuilder, backend: Backend) -> ort::Result<S
     if eps.is_empty() {
         Ok(builder)
     } else {
-        builder.with_execution_providers(eps)
+        // ort rc.12 changed `with_execution_providers` to return
+        // `Error<SessionBuilder>` (the error carries the builder back for reuse);
+        // `?` coerces it into the plain `ort::Error` of our return type.
+        Ok(builder.with_execution_providers(eps)?)
     }
 }
 

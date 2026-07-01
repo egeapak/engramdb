@@ -21,7 +21,7 @@ pub use engram_types as types;
 // any test runs (nextest's process-per-test makes this load-bearing). The
 // `arm()` reference keeps the linker from dead-stripping the constructor.
 #[cfg(test)]
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn arm_test_isolation() {
     engram_test_support::arm();
 }

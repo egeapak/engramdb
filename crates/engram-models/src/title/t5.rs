@@ -170,14 +170,18 @@ impl T5TitleGenerator {
         let intra = intra_threads.max(1);
 
         let encoder = engram_onnx::apply_backend(Session::builder()?, backend)?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(intra)?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(crate::erase_builder_err)?
+            .with_intra_threads(intra)
+            .map_err(crate::erase_builder_err)?
             .commit_from_file(&encoder_path)
             .context("Failed to load T5 encoder ONNX model")?;
 
         let decoder = engram_onnx::apply_backend(Session::builder()?, backend)?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(intra)?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(crate::erase_builder_err)?
+            .with_intra_threads(intra)
+            .map_err(crate::erase_builder_err)?
             .commit_from_file(&decoder_path)
             .context("Failed to load T5 decoder ONNX model")?;
 

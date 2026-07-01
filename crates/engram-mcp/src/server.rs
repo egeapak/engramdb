@@ -2194,23 +2194,16 @@ impl EngramDbServer {
 #[tool_handler]
 impl ServerHandler for EngramDbServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::LATEST,
-            capabilities: ServerCapabilities::builder()
-                .enable_tools()
-                .enable_resources()
-                .enable_prompts()
-                .build(),
-            server_info: Implementation {
-                name: "engramdb".to_string(),
-                title: None,
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                description: None,
-                icons: None,
-                website_url: None,
-            },
-            instructions: Some({
-                let mut s = "Project-scoped persistent memory store for coding agents. \
+        let capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .enable_prompts()
+            .build();
+        // rmcp 1.x marks these result/info structs `#[non_exhaustive]`, so build
+        // them via the provided constructors/builders instead of struct literals.
+        let server_info = Implementation::new("engramdb", env!("CARGO_PKG_VERSION"));
+        let instructions = {
+            let mut s = "Project-scoped persistent memory store for coding agents. \
                  Stores decisions, hazards, conventions, and context about the codebase. \
                  IMPORTANT: Query memories (query) before answering project questions, \
                  investigating workflows, or researching how things work — not only before \
@@ -2227,15 +2220,18 @@ impl ServerHandler for EngramDbServer {
                  about the project, the environment/tooling, or the user's preferences came \
                  up (not task minutiae), query existing memories, then create the new ones \
                  and challenge contradictions. Suggested, not required."
-                    .to_string();
-                if let Some(w) = &self.embedding_warning {
-                    s.push_str("\n\nIMPORTANT — ACTION NEEDED: ");
-                    s.push_str(w);
-                    s.push_str(" Tell the user.");
-                }
-                s
-            }),
-        }
+                .to_string();
+            if let Some(w) = &self.embedding_warning {
+                s.push_str("\n\nIMPORTANT — ACTION NEEDED: ");
+                s.push_str(w);
+                s.push_str(" Tell the user.");
+            }
+            s
+        };
+        InitializeResult::new(capabilities)
+            .with_protocol_version(ProtocolVersion::LATEST)
+            .with_server_info(server_info)
+            .with_instructions(instructions)
     }
 
     fn list_resources(
@@ -2324,9 +2320,10 @@ impl ServerHandler for EngramDbServer {
                 let json = serde_json::to_string(&index)
                     .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-                Ok(ReadResourceResult {
-                    contents: vec![ResourceContents::text(json, "memory://index")],
-                })
+                Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                    json,
+                    "memory://index",
+                )]))
             } else if let Some(path) = uri.strip_prefix("memory://context/") {
                 let engine = self
                     .build_engine()
@@ -2361,9 +2358,9 @@ impl ServerHandler for EngramDbServer {
                 let json = serde_json::to_string(&memories)
                     .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-                Ok(ReadResourceResult {
-                    contents: vec![ResourceContents::text(json, &uri)],
-                })
+                Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                    json, &uri,
+                )]))
             } else {
                 Err(rmcp::ErrorData::invalid_params(
                     format!("Unknown resource URI: {}", uri),
@@ -2386,14 +2383,9 @@ impl ServerHandler for EngramDbServer {
                 Prompt::new(
                     "memory-session-start",
                     Some("Orientation prompt for the start of a coding session."),
-                    Some(vec![PromptArgument {
-                        name: "path".to_string(),
-                        title: None,
-                        description: Some(
-                            "The file or directory the agent will be working on.".to_string(),
-                        ),
-                        required: Some(false),
-                    }]),
+                    Some(vec![PromptArgument::new("path")
+                        .with_description("The file or directory the agent will be working on.")
+                        .with_required(false)]),
                 ),
                 Prompt::new(
                     "memory-session-end",
@@ -2459,10 +2451,12 @@ impl ServerHandler for EngramDbServer {
                     memory_text
                 );
 
-                Ok(GetPromptResult {
-                    description: Some("Session start briefing".to_string()),
-                    messages: vec![PromptMessage::new_text(PromptMessageRole::User, prompt)],
-                })
+                let mut result = GetPromptResult::new(vec![PromptMessage::new_text(
+                    PromptMessageRole::User,
+                    prompt,
+                )]);
+                result.description = Some("Session start briefing".to_string());
+                Ok(result)
             }
             "memory-session-end" => {
                 let mut stats_text = String::new();
@@ -2492,10 +2486,12 @@ impl ServerHandler for EngramDbServer {
                     stats_text
                 );
 
-                Ok(GetPromptResult {
-                    description: Some("Session end review".to_string()),
-                    messages: vec![PromptMessage::new_text(PromptMessageRole::User, prompt)],
-                })
+                let mut result = GetPromptResult::new(vec![PromptMessage::new_text(
+                    PromptMessageRole::User,
+                    prompt,
+                )]);
+                result.description = Some("Session end review".to_string());
+                Ok(result)
             }
             _ => Err(rmcp::ErrorData::invalid_params(
                 format!("Unknown prompt: {}", request.name),
@@ -6354,11 +6350,7 @@ mod tests {
 
         let result = client
             .peer()
-            .get_prompt(GetPromptRequestParams {
-                meta: None,
-                name: "memory-session-start".to_string(),
-                arguments: None,
-            })
+            .get_prompt(GetPromptRequestParams::new("memory-session-start"))
             .await
             .expect("get_prompt must succeed");
 
@@ -6392,11 +6384,7 @@ mod tests {
 
         let result = client
             .peer()
-            .get_prompt(GetPromptRequestParams {
-                meta: None,
-                name: "memory-session-end".to_string(),
-                arguments: None,
-            })
+            .get_prompt(GetPromptRequestParams::new("memory-session-end"))
             .await
             .expect("get_prompt must succeed");
 
@@ -6427,11 +6415,7 @@ mod tests {
 
         let err = client
             .peer()
-            .get_prompt(GetPromptRequestParams {
-                meta: None,
-                name: "this-prompt-does-not-exist".to_string(),
-                arguments: None,
-            })
+            .get_prompt(GetPromptRequestParams::new("this-prompt-does-not-exist"))
             .await
             .expect_err("unknown prompt must error");
         let msg = format!("{err}");
@@ -6455,10 +6439,7 @@ mod tests {
 
         let result = client
             .peer()
-            .read_resource(ReadResourceRequestParams {
-                meta: None,
-                uri: "memory://index".to_string(),
-            })
+            .read_resource(ReadResourceRequestParams::new("memory://index"))
             .await
             .expect("read_resource must succeed");
 
@@ -6485,10 +6466,9 @@ mod tests {
 
         let result = client
             .peer()
-            .read_resource(ReadResourceRequestParams {
-                meta: None,
-                uri: "memory://context/src/lib.rs".to_string(),
-            })
+            .read_resource(ReadResourceRequestParams::new(
+                "memory://context/src/lib.rs",
+            ))
             .await
             .expect("read_resource must succeed");
 
@@ -6511,10 +6491,7 @@ mod tests {
 
         let err = client
             .peer()
-            .read_resource(ReadResourceRequestParams {
-                meta: None,
-                uri: "memory://nope/whatever".to_string(),
-            })
+            .read_resource(ReadResourceRequestParams::new("memory://nope/whatever"))
             .await
             .expect_err("unknown URI must error");
         let msg = format!("{err}");

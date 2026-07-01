@@ -17,4 +17,14 @@ coreml = ["ort/coreml"]
 xnnpack = ["ort/xnnpack"]
 
 [dependencies]
-ort = { version = "2.0.0-rc.11", default-features = false, features = ["download-binaries", "ndarray", "std"] }
+# `tls-rustls` is required alongside `download-binaries`: the `ort-sys` build
+# script always compiles its binary-download path (even under
+# `ORT_STRATEGY=system`), and that code calls `ureq`'s `tls_config(..)`, which
+# only exists when a TLS feature is enabled on `ort`. `ort`'s *default* features
+# would supply `tls-native`, but we set `default-features = false`, so we must
+# opt back in explicitly. rustls matches the rest of the workspace
+# (fastembed/hf-hub/reqwest all use rustls). Without it, building this crate in
+# isolation (`cargo check -p engram-onnx`) fails; the full workspace only
+# happened to compile because `fastembed` pulls rustls into `ort` via
+# feature unification.
+ort = { version = "2.0.0-rc.11", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }
