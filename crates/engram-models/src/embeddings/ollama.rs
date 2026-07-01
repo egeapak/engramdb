@@ -54,6 +54,39 @@ struct EmbedResponse {
     embeddings: Vec<Vec<f32>>,
 }
 
+/// Validate an Ollama embed response against the expected input count and the
+/// provider's declared dimensionality.
+///
+/// A misconfigured Ollama model (wrong `dimensions` in config vs the actual
+/// model) would otherwise feed wrong-width vectors downstream toward LanceDB;
+/// catching it here with a clear error beats a confusing index-write failure
+/// later (finding #25).
+fn validate_embedding_response(
+    embeddings: &[Vec<f32>],
+    expected_count: usize,
+    expected_dim: usize,
+) -> Result<()> {
+    if embeddings.len() != expected_count {
+        anyhow::bail!(
+            "Ollama returned {} embeddings for {} inputs",
+            embeddings.len(),
+            expected_count
+        );
+    }
+    for (i, emb) in embeddings.iter().enumerate() {
+        if emb.len() != expected_dim {
+            anyhow::bail!(
+                "Ollama embedding {} has dimension {} (expected {}) — check the model's \
+                 configured `dimensions`",
+                i,
+                emb.len(),
+                expected_dim
+            );
+        }
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct TagsResponse {
     models: Vec<TagModel>,
@@ -197,13 +230,7 @@ impl EmbeddingProvider for OllamaProvider {
             .await
             .context("Failed to parse Ollama embed response")?;
 
-        if embed_resp.embeddings.len() != texts.len() {
-            anyhow::bail!(
-                "Ollama returned {} embeddings for {} inputs",
-                embed_resp.embeddings.len(),
-                texts.len()
-            );
-        }
+        validate_embedding_response(&embed_resp.embeddings, texts.len(), self.spec.dimensions)?;
 
         Ok(embed_resp.embeddings)
     }
@@ -224,6 +251,25 @@ impl EmbeddingProvider for OllamaProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Finding #25: validate per-vector dimensions, not just the count.
+    #[test]
+    fn validate_embedding_response_checks_dimensions() {
+        // POSITIVE: correct count and width passes.
+        let good = vec![vec![0.0_f32; 4], vec![1.0_f32; 4]];
+        assert!(validate_embedding_response(&good, 2, 4).is_ok());
+
+        // NEGATIVE: wrong count fails (already worked before the fix).
+        assert!(validate_embedding_response(&good, 3, 4).is_err());
+
+        // NEGATIVE (red before fix): right count, but a vector has the wrong
+        // width — must be rejected.
+        let wrong_dim = vec![vec![0.0_f32; 4], vec![0.0_f32; 3]];
+        assert!(
+            validate_embedding_response(&wrong_dim, 2, 4).is_err(),
+            "a wrong-width vector must be rejected"
+        );
+    }
 
     #[test]
     fn test_model_spec_constants() {

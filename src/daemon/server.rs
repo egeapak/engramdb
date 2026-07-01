@@ -316,46 +316,49 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
         DaemonOp::Ping | DaemonOp::Status | DaemonOp::Shutdown => {
             unreachable!("handled above")
         }
-        DaemonOp::Meta => {
-            ctx.counters.incr_meta();
-            match providers.embedding {
-                Some(p) => DaemonResponse::Meta {
+        // Per-op counters are incremented only on a *successful* response, so
+        // `stats --daemon` (persisted) reflects served work, not failed or
+        // model-unavailable attempts (finding #11).
+        DaemonOp::Meta => match providers.embedding {
+            Some(p) => {
+                ctx.counters.incr_meta();
+                DaemonResponse::Meta {
                     dimensions: p.dimensions(),
                     max_tokens: p.max_tokens(),
                     model_id: p.model_id(),
-                },
-                None => DaemonResponse::Error {
-                    message: "embedding model unavailable".to_string(),
-                },
-            }
-        }
-        DaemonOp::Embed { texts } => {
-            ctx.counters.incr_embed();
-            match providers.embedding {
-                Some(p) => {
-                    let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-                    match p.embed_batch(&refs).await {
-                        Ok(vectors) => DaemonResponse::Embedded { vectors },
-                        Err(e) => DaemonResponse::Error {
-                            message: format!("embed failed: {e}"),
-                        },
-                    }
                 }
-                None => DaemonResponse::Error {
-                    message: "embedding model unavailable".to_string(),
-                },
             }
-        }
-        DaemonOp::Classify { pairs } => {
-            ctx.counters.incr_classify();
-            match providers.nli {
-                Some(n) => {
-                    let refs: Vec<(&str, &str)> = pairs
-                        .iter()
-                        .map(|(a, b)| (a.as_str(), b.as_str()))
-                        .collect();
-                    match n.classify_batch(&refs).await {
-                        Ok(results) => DaemonResponse::Classified {
+            None => DaemonResponse::Error {
+                message: "embedding model unavailable".to_string(),
+            },
+        },
+        DaemonOp::Embed { texts } => match providers.embedding {
+            Some(p) => {
+                let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+                match p.embed_batch(&refs).await {
+                    Ok(vectors) => {
+                        ctx.counters.incr_embed();
+                        DaemonResponse::Embedded { vectors }
+                    }
+                    Err(e) => DaemonResponse::Error {
+                        message: format!("embed failed: {e}"),
+                    },
+                }
+            }
+            None => DaemonResponse::Error {
+                message: "embedding model unavailable".to_string(),
+            },
+        },
+        DaemonOp::Classify { pairs } => match providers.nli {
+            Some(n) => {
+                let refs: Vec<(&str, &str)> = pairs
+                    .iter()
+                    .map(|(a, b)| (a.as_str(), b.as_str()))
+                    .collect();
+                match n.classify_batch(&refs).await {
+                    Ok(results) => {
+                        ctx.counters.incr_classify();
+                        DaemonResponse::Classified {
                             results: results
                                 .into_iter()
                                 .map(|r| NliWire {
@@ -364,46 +367,46 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                                     contradiction: r.contradiction,
                                 })
                                 .collect(),
-                        },
-                        Err(e) => DaemonResponse::Error {
-                            message: format!("classify failed: {e}"),
-                        },
+                        }
+                    }
+                    Err(e) => DaemonResponse::Error {
+                        message: format!("classify failed: {e}"),
+                    },
+                }
+            }
+            None => DaemonResponse::Error {
+                message: "nli model unavailable".to_string(),
+            },
+        },
+        DaemonOp::Rerank { query, documents } => match providers.reranker {
+            Some(r) => match r.rerank(&query, &documents).await {
+                Ok(scores) => {
+                    ctx.counters.incr_rerank();
+                    DaemonResponse::Reranked {
+                        scores: scores.into_iter().map(|s| (s.index, s.score)).collect(),
                     }
                 }
-                None => DaemonResponse::Error {
-                    message: "nli model unavailable".to_string(),
+                Err(e) => DaemonResponse::Error {
+                    message: format!("rerank failed: {e}"),
                 },
-            }
-        }
-        DaemonOp::Rerank { query, documents } => {
-            ctx.counters.incr_rerank();
-            match providers.reranker {
-                Some(r) => match r.rerank(&query, &documents).await {
-                    Ok(scores) => DaemonResponse::Reranked {
-                        scores: scores.into_iter().map(|s| (s.index, s.score)).collect(),
-                    },
-                    Err(e) => DaemonResponse::Error {
-                        message: format!("rerank failed: {e}"),
-                    },
+            },
+            None => DaemonResponse::Error {
+                message: "reranker model unavailable".to_string(),
+            },
+        },
+        DaemonOp::Title { text } => match providers.title {
+            Some(t) => match t.generate(&text).await {
+                Ok(title) => {
+                    ctx.counters.incr_title();
+                    DaemonResponse::Title { title }
+                }
+                Err(e) => DaemonResponse::Error {
+                    message: format!("title generation failed: {e}"),
                 },
-                None => DaemonResponse::Error {
-                    message: "reranker model unavailable".to_string(),
-                },
-            }
-        }
-        DaemonOp::Title { text } => {
-            ctx.counters.incr_title();
-            match providers.title {
-                Some(t) => match t.generate(&text).await {
-                    Ok(title) => DaemonResponse::Title { title },
-                    Err(e) => DaemonResponse::Error {
-                        message: format!("title generation failed: {e}"),
-                    },
-                },
-                None => DaemonResponse::Error {
-                    message: "title model unavailable".to_string(),
-                },
-            }
-        }
+            },
+            None => DaemonResponse::Error {
+                message: "title model unavailable".to_string(),
+            },
+        },
     }
 }

@@ -347,10 +347,13 @@ impl RetrievalEngine {
     /// * `memory` - The memory to embed
     pub async fn embed_memory(&self, memory: &Memory) -> anyhow::Result<()> {
         if let Some(provider) = &self.embedding_provider {
+            let chunk_tokens =
+                effective_chunk_tokens(self.config.embeddings.max_tokens, provider.max_tokens());
             embed_memory_with(
                 provider.as_ref(),
                 &self.store,
                 memory,
+                chunk_tokens,
                 self.ingest_telemetry().as_ref(),
             )
             .await?;
@@ -375,6 +378,8 @@ impl RetrievalEngine {
     /// model inference and NLI classification during memory ingestion.
     pub fn spawn_ingest(&self, memory: Memory) -> Option<tokio::task::JoinHandle<()>> {
         let provider = Arc::clone(self.embedding_provider.as_ref()?);
+        let chunk_tokens =
+            effective_chunk_tokens(self.config.embeddings.max_tokens, provider.max_tokens());
         let store = self.store.clone();
         let nli_provider = if self.config.nli.enabled {
             self.nli_provider.as_ref().map(Arc::clone)
@@ -385,8 +390,14 @@ impl RetrievalEngine {
         let telemetry = self.ingest_telemetry();
 
         Some(tokio::spawn(async move {
-            if let Err(e) =
-                embed_memory_with(provider.as_ref(), &store, &memory, telemetry.as_ref()).await
+            if let Err(e) = embed_memory_with(
+                provider.as_ref(),
+                &store,
+                &memory,
+                chunk_tokens,
+                telemetry.as_ref(),
+            )
+            .await
             {
                 tracing::warn!(
                     memory_id = %memory.id,
@@ -890,7 +901,7 @@ impl RetrievalEngine {
         // flow is "find specific memories" rather than "browse context".
         let threshold = match query.mode {
             RetrievalMode::Rank => self.config.retrieval.relevance_threshold,
-            RetrievalMode::Filter => self.config.search.threshold.min(1.0),
+            RetrievalMode::Filter => filter_threshold(self.config.search.threshold),
         };
         if threshold > 0.0 {
             scored_memories.retain(|sm| sm.score >= threshold);
@@ -980,16 +991,46 @@ impl IngestTelemetry {
     }
 }
 
+/// The effective Filter-mode relevance threshold, defensively bounded to
+/// `[0, 1]`.
+///
+/// Config validation already rejects negative/NaN `search.threshold`, but a
+/// config built programmatically (tests, internal callers) bypasses
+/// `validate()`. A raw negative value left the gate `if threshold > 0.0`
+/// permanently false (the filter silently returned everything) and a NaN made
+/// every `score >= NaN` comparison false (filtering everything out). Clamping
+/// here guarantees a sane bound regardless of how the config was constructed
+/// (finding #4).
+fn filter_threshold(raw: f64) -> f64 {
+    if raw.is_nan() {
+        0.0
+    } else {
+        raw.clamp(0.0, 1.0)
+    }
+}
+
+/// The token budget used to chunk text before embedding.
+///
+/// `config.embeddings.max_tokens` lets an operator request *smaller* chunks,
+/// but it can never exceed the model's real token limit (going higher would
+/// just be silently truncated by the model). Taking the min makes the config
+/// field actually authoritative instead of dead (finding #19), while staying
+/// safe. Floored at 1 so chunking always makes progress.
+fn effective_chunk_tokens(config_max_tokens: usize, provider_max_tokens: usize) -> usize {
+    config_max_tokens.min(provider_max_tokens).max(1)
+}
+
 async fn embed_memory_with(
     provider: &dyn EmbeddingProvider,
     store: &MemoryStore,
     memory: &Memory,
+    chunk_tokens: usize,
     telemetry: Option<&IngestTelemetry>,
 ) -> anyhow::Result<()> {
     let text = format!("{} {}", memory.summary, memory.content);
 
     let t = std::time::Instant::now();
-    let chunks = crate::embeddings::chunk_text(&text, provider.max_tokens());
+    let chunks = crate::embeddings::chunk_text(&text, chunk_tokens);
     if let Some(t_) = telemetry {
         t_.record("create.chunk_text", t.elapsed().as_secs_f64() * 1000.0);
     }
@@ -1076,6 +1117,33 @@ mod tests {
     use crate::retrieval::reranker::LocalReranker;
     use crate::storage::InMemoryRegistry;
     use std::sync::{LazyLock, Mutex};
+
+    // Finding #4: the Filter-mode threshold must be bounded to [0, 1] regardless
+    // of how the config was constructed, so the relevance gate can never be
+    // silently disabled (negative) or turned into a filter-everything NaN.
+    #[test]
+    fn filter_threshold_is_bounded() {
+        // POSITIVE: in-range values pass through unchanged.
+        assert_eq!(filter_threshold(0.0), 0.0);
+        assert_eq!(filter_threshold(0.3), 0.3);
+        assert_eq!(filter_threshold(1.0), 1.0);
+        // POSITIVE: >1.0 still clamps to 1.0 (unchanged from before).
+        assert_eq!(filter_threshold(5.0), 1.0);
+        // NEGATIVE (red before fix): a negative must clamp to 0.0, not stay
+        // negative (which left the gate disabled).
+        assert_eq!(filter_threshold(-0.5), 0.0);
+        // NEGATIVE (red before fix): NaN must become 0.0, not propagate.
+        assert_eq!(filter_threshold(f64::NAN), 0.0);
+    }
+
+    // Finding #19: `config.embeddings.max_tokens` is now authoritative for
+    // chunking (previously dead config — chunking only used the provider spec).
+    #[test]
+    fn effective_chunk_tokens_respects_config_capped_at_model() {
+        assert_eq!(effective_chunk_tokens(128, 256), 128); // smaller is honoured
+        assert_eq!(effective_chunk_tokens(1000, 256), 256); // never exceeds model
+        assert_eq!(effective_chunk_tokens(0, 256), 1); // floored at 1
+    }
 
     /// Shared reranker across all tests in this module to avoid loading the
     /// ~100MB ONNX model once per test (which causes OOM when parallel).
@@ -2331,9 +2399,15 @@ mod tests {
 
         // Embed the existing memory so vector_search has something to find.
         let embed_arc: Arc<dyn EmbeddingProvider> = Arc::new(embedding);
-        embed_memory_with(embed_arc.as_ref(), &store, &existing, None)
-            .await
-            .unwrap();
+        embed_memory_with(
+            embed_arc.as_ref(),
+            &store,
+            &existing,
+            embed_arc.max_tokens(),
+            None,
+        )
+        .await
+        .unwrap();
 
         // Make a probe memory not yet in the store.
         let mut probe = Memory::new(
@@ -2420,9 +2494,15 @@ mod tests {
         };
         store.create(&existing).await.unwrap();
         let embed_arc: Arc<dyn EmbeddingProvider> = Arc::new(embedding);
-        embed_memory_with(embed_arc.as_ref(), &store, &existing, None)
-            .await
-            .unwrap();
+        embed_memory_with(
+            embed_arc.as_ref(),
+            &store,
+            &existing,
+            embed_arc.max_tokens(),
+            None,
+        )
+        .await
+        .unwrap();
 
         let mut config = EngramConfig::default();
         config.nli.enabled = true;

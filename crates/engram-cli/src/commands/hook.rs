@@ -326,16 +326,42 @@ async fn process_session_start(dir: &Path, min_criticality: f64) -> Result<Optio
 /// Retrieves high-criticality active memories and prints them as
 /// additionalContext JSON to stdout so they are surfaced at session start.
 pub async fn run_hook_session_start(dir: &Path, min_criticality: f64) -> Result<()> {
+    let min_criticality = sanitize_min_criticality(min_criticality);
     if let Some(json) = process_session_start(dir, min_criticality).await? {
         println!("{}", json);
     }
     Ok(())
 }
 
+/// Bound the SessionStart criticality threshold into `[0, 1]`, mapping NaN to
+/// the default 0.6. The hook is machine-invoked and must stay robust (an
+/// out-of-range or NaN value otherwise filtered out every memory or made every
+/// comparison false), so we sanitize rather than error (finding #21).
+fn sanitize_min_criticality(v: f64) -> f64 {
+    if v.is_nan() {
+        0.6
+    } else {
+        v.clamp(0.0, 1.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use engramdb::storage::{InMemoryRegistry, MemoryStore};
+
+    // Finding #21: the SessionStart criticality threshold must be sanitized.
+    #[test]
+    fn sanitize_min_criticality_bounds_and_handles_nan() {
+        // POSITIVE: in-range values pass through.
+        assert_eq!(sanitize_min_criticality(0.0), 0.0);
+        assert_eq!(sanitize_min_criticality(0.6), 0.6);
+        assert_eq!(sanitize_min_criticality(1.0), 1.0);
+        // NEGATIVE (red before fix): out-of-range clamps, NaN → default 0.6.
+        assert_eq!(sanitize_min_criticality(5.0), 1.0);
+        assert_eq!(sanitize_min_criticality(-1.0), 0.0);
+        assert_eq!(sanitize_min_criticality(f64::NAN), 0.6);
+    }
     use engramdb::types::{Memory, MemoryType, Provenance};
     use tempfile::TempDir;
 

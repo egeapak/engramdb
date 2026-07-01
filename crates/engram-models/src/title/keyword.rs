@@ -67,7 +67,7 @@ fn extract_keywords(text: &str, max_phrases: usize) -> Vec<String> {
 
     for word in &words {
         let lower = word.to_lowercase();
-        if stop_set.contains(lower.as_str()) || lower.len() <= 1 {
+        if stop_set.contains(lower.as_str()) || lower.chars().count() <= 1 {
             if !current.is_empty() {
                 phrases.push(current.clone());
                 current.clear();
@@ -179,6 +179,21 @@ mod tests {
         assert!(extract_keywords("", 3).is_empty());
         assert!(extract_keywords("   ", 3).is_empty());
         assert!(extract_keywords("the a an", 3).is_empty());
+    }
+
+    // Finding #24: single-letter words are noise and must be dropped by
+    // *character* count, not byte length. A single accented glyph ("é") is one
+    // character but two bytes, so the old `len() <= 1` byte check let it slip
+    // through as a keyword.
+    #[test]
+    fn extract_keywords_drops_single_multibyte_letter() {
+        // "é" is a single character (2 bytes). It must be treated like any
+        // other single letter and excluded from the extracted phrases.
+        let keywords = extract_keywords("é programming", 3);
+        assert!(
+            !keywords.iter().any(|k| k.contains('é')),
+            "single-letter 'é' should be filtered, got {keywords:?}"
+        );
     }
 
     #[test]

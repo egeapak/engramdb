@@ -19,6 +19,7 @@ fn gc_dry_run_default() {
     assert!(
         stdout.contains("eligible")
             || stdout.contains("dry run")
+            || stdout.contains("dry_run") // JSON form (non-TTY default)
             || stdout.contains("no memor")
             || stdout.contains("gc"),
         "gc should report eligibility status: {}",
@@ -47,7 +48,10 @@ fn gc_with_threshold_shows_candidates() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
     assert!(
-        stdout.contains("eligible") || stdout.contains("dry run") || stdout.contains("no memor"),
+        stdout.contains("eligible")
+            || stdout.contains("dry run")
+            || stdout.contains("dry_run")
+            || stdout.contains("no memor"),
         "gc dry-run should mention eligibility or dry run: {}",
         stdout
     );
@@ -101,8 +105,44 @@ fn gc_empty_store() {
     helpers::init_store(dir.path());
 
     helpers::cmd()
-        .args(["--dir", dir.path().to_str().unwrap(), "gc"])
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "plain",
+            "gc",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("No memories").or(predicate::str::contains("no memor")));
+}
+
+// Finding #7: `gc --json` dry-run plan must be a single valid JSON document
+// (scripts parse it); previously per-id lines were printed raw after the
+// formatter's JSON messages.
+#[test]
+fn gc_json_dry_run_is_valid_single_document() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    helpers::seed_store(dir.path());
+
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--json",
+            "gc",
+            "--threshold",
+            "0.99",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "gc --json must be valid JSON: {e}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    assert_eq!(v["dry_run"], true);
 }

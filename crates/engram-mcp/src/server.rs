@@ -1432,6 +1432,11 @@ impl EngramDbServer {
         } else {
             engramdb::retrieval::engine::DetailLevel::Content
         };
+        // Derive output detail inclusion from the *parsed* enum so it honours
+        // the same case-insensitive parsing as the engine (finding #9). A raw
+        // `== "full"` compare here dropped details for e.g. "Full"/"FULL".
+        let include_details =
+            matches!(detail_level, engramdb::retrieval::engine::DetailLevel::Full);
 
         if let Some(mc) = input.min_criticality {
             ops::validate_score(mc, "min_criticality")
@@ -1466,7 +1471,6 @@ impl EngramDbServer {
             }
         }
 
-        let include_details = input.detail_level.as_deref() == Some("full");
         let memories: Vec<ScoredMemoryOutput> = result
             .memories
             .iter()
@@ -3545,6 +3549,42 @@ mod tests {
             .await;
         // Should succeed without error
         parse_ok(&result);
+    }
+
+    // Finding #9: detail_level is parsed case-insensitively, so a capitalized
+    // "Full" must also include details in the output. Before the fix,
+    // include_details used a case-sensitive `== "full"` compare and silently
+    // stripped details for any non-lowercase casing.
+    #[tokio::test]
+    async fn retrieve_detail_level_full_is_case_insensitive() {
+        let (_dir, server) = setup().await;
+        let mut input = create_input("decision", "Case test", "Body content");
+        input.details = Some("These are the detailed notes".to_string());
+        server
+            .memory_create(Parameters(input))
+            .await
+            .expect("create should succeed");
+
+        let result = server
+            .memory_query(Parameters(QueryInput {
+                // Filter mode + a query signal reliably returns the match.
+                query: Some("Body content".to_string()),
+                detail_level: Some("Full".to_string()), // capitalized on purpose
+                ..query_input("filter")
+            }))
+            .await;
+        let val = parse_ok(&result);
+        assert!(
+            val["memories"].as_array().is_some_and(|m| !m.is_empty()),
+            "expected the created memory to be returned: {val}"
+        );
+        // NEGATIVE (red before fix): capitalized "Full" dropped the details.
+        // (Memory fields are flattened into each `memories[i]` object.)
+        assert_eq!(
+            val["memories"][0]["details"].as_str(),
+            Some("These are the detailed notes"),
+            "detail_level=Full (any case) must include details"
+        );
     }
 
     #[tokio::test]

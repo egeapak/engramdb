@@ -33,6 +33,43 @@ pub async fn run_gc(
     let dry_run = !confirm;
     let result = gc_memories(&store, &config, dry_run, threshold).await?;
 
+    // JSON mode: emit a single parseable object (the human flow below mixes
+    // print_* JSON with raw per-id println! lines, which corrupts the stream for
+    // scripted consumers — finding #7). The dry-run plan is exactly what a
+    // script wants to parse.
+    if formatter.is_json() {
+        let mut removed = Vec::with_capacity(result.removed.len());
+        for id in &result.removed {
+            match store.get(id).await {
+                Ok(m) => removed.push(serde_json::json!({
+                    "id": id,
+                    "type": format!("{:?}", m.type_),
+                    "summary": m.summary,
+                    "criticality": m.criticality,
+                })),
+                Err(_) => removed.push(serde_json::json!({ "id": id })),
+            }
+        }
+        let maintenance = result.maintenance.as_ref().map(|m| {
+            serde_json::json!({
+                "bytes_removed": m.bytes_removed,
+                "old_versions_removed": m.old_versions_removed,
+            })
+        });
+        println!(
+            "{}",
+            serde_json::json!({
+                "dry_run": dry_run,
+                "count": result.count,
+                "removed": removed,
+                "skipped": result.skipped,
+                "stale_entries": result.stale_entries.len(),
+                "maintenance": maintenance,
+            })
+        );
+        return Ok(());
+    }
+
     if !result.stale_entries.is_empty() {
         formatter.print_warning(&format!(
             "Found {} stale index entries (missing data). Run `engramdb reindex` to fix.",

@@ -154,8 +154,13 @@ pub fn parse_body_sections(body: &str) -> HashMap<String, String> {
             }
         }
 
-        // Blockquote (collect all `>` lines)
-        if line.starts_with("> ") || line == ">" {
+        // Blockquote (collect `>` lines) — ONLY in the preamble, before any
+        // `## ` section. Inside a section a `> ` line is ordinary content and
+        // must stay there; harvesting it everywhere silently dropped quoted
+        // lines from `## Content`/`## Details` (finding #6). No writer ever
+        // emits a blockquote, so this branch only ever matched hand-edited or
+        // legacy files.
+        if current_section.is_none() && (line.starts_with("> ") || line == ">") {
             let text = line.strip_prefix("> ").unwrap_or("").trim();
             if let Some(existing) = sections.get_mut("__blockquote__") {
                 existing.push(' ');
@@ -292,5 +297,38 @@ pub fn format_provenance_source(source: ProvenanceSource) -> &'static str {
         ProvenanceSource::Agent => "agent",
         ProvenanceSource::Inferred => "inferred",
         ProvenanceSource::Imported => "imported",
+    }
+}
+
+#[cfg(test)]
+mod blockquote_tests {
+    use super::*;
+
+    // Finding #6: a `> ` blockquote line that appears *inside* a `## ` section
+    // must remain section content; only a blockquote in the preamble (before any
+    // section) is harvested as `__blockquote__`. Before the fix, every `> ` line
+    // anywhere was stolen into `__blockquote__`, silently dropping it from the
+    // section (content loss for hand-edited/legacy files).
+    #[test]
+    fn blockquote_inside_section_stays_in_section() {
+        let body =
+            "# Title\n\n> preamble quote\n\n## Content\n\n> quoted content line\nplain line\n";
+        let sections = parse_body_sections(body);
+
+        // POSITIVE: the preamble blockquote is harvested as-is.
+        assert_eq!(
+            sections.get("__blockquote__").map(String::as_str),
+            Some("preamble quote"),
+            "only the preamble blockquote should be harvested"
+        );
+
+        // NEGATIVE (red before fix): the blockquote inside ## Content must be
+        // preserved as content, not stolen into __blockquote__.
+        let content = sections.get("Content").map(String::as_str).unwrap_or("");
+        assert!(
+            content.contains("> quoted content line"),
+            "blockquote inside a section was dropped; content = {content:?}"
+        );
+        assert!(content.contains("plain line"));
     }
 }

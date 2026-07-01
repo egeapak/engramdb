@@ -26,6 +26,32 @@ pub async fn run_compress(
     };
     let result = ops::compress_candidates(&store, scope.as_deref(), threshold).await?;
 
+    // JSON mode: one parseable object (the human flow below prints the candidate
+    // list via raw println!, which would corrupt the JSON stream — finding #7).
+    if formatter.is_json() {
+        let candidates: Vec<_> = result
+            .candidates
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id,
+                    "type": c.type_,
+                    "summary": c.summary,
+                    "criticality": c.criticality,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "total": result.total,
+                "threshold": result.threshold,
+                "candidates": candidates,
+            })
+        );
+        return Ok(());
+    }
+
     if result.candidates.is_empty() {
         formatter.print_message("No compression candidates found.");
         return Ok(());

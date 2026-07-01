@@ -66,6 +66,11 @@ impl OutputFormatter {
     }
 
     /// Whether output is JSON (machine-consumed; never prompt interactively).
+    ///
+    /// Command handlers use this to suppress or redirect human-oriented
+    /// `println!` chatter that would otherwise corrupt the JSON document on
+    /// stdout (finding #7): when this is true, a handler must emit exactly one
+    /// JSON value on stdout (sending any human text to stderr).
     pub fn is_json(&self) -> bool {
         matches!(self.format, OutputFormat::Json)
     }

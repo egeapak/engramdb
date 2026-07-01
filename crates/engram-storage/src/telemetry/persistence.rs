@@ -54,7 +54,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use chrono::{DateTime, Utc};
 use futures_util::stream::StreamExt;
-use lancedb::query::ExecutableQuery;
+use lancedb::query::{ColumnOrdering, ExecutableQuery, QueryBase};
 use lancedb::{connect, Connection, Table};
 use tokio::sync::mpsc;
 
@@ -271,10 +271,10 @@ fn events_to_batch(events: &[EventRow]) -> Result<RecordBatch> {
 /// Read up to `cap` most-recent rows for the given project, returned in
 /// chronological order (oldest first) for safe replay.
 ///
-/// LanceDB's plain `query().limit(N)` returns rows in **storage order** with
-/// no recency guarantee, so we must read every row and then truncate after
-/// sorting. For typical workloads (≤ a few hundred thousand events) the
-/// scan is fast; pruning + retention bound the cost in steady state.
+/// Uses LanceDB's `ORDER BY ts DESC LIMIT cap` pushdown (via `order_by`, added
+/// in lancedb 0.30) so only the newest `cap` rows are read, then reverses them
+/// into chronological order — rather than scanning the whole table and sorting
+/// in memory.
 ///
 /// Returns `Ok(empty)` when no data exists for the project, including the
 /// case where the project's parent directory hasn't been initialized.
@@ -293,8 +293,17 @@ pub async fn load_recent(project_id: &str, cap: usize) -> Result<Vec<EventRow>> 
         Err(_) => return Ok(Vec::new()),
     };
 
+    // Push `ORDER BY ts DESC LIMIT cap` into LanceDB so only the most-recent
+    // `cap` rows are scanned/returned, instead of reading the whole table and
+    // sorting in memory. `order_by` (via `ColumnOrdering`) was added in
+    // lancedb 0.30 — before that the query builder had no ordering, which is
+    // why this used to be a full scan + in-memory sort (finding #16).
     let mut stream = table
         .query()
+        .order_by(Some(vec![ColumnOrdering::desc_nulls_last(
+            "ts".to_string(),
+        )]))
+        .limit(cap)
         .execute()
         .await
         .context("querying stats_events table")?;
@@ -304,13 +313,9 @@ pub async fn load_recent(project_id: &str, cap: usize) -> Result<Vec<EventRow>> 
         let batch = batch_result.context("reading stats_events batch")?;
         events.extend(batch_to_events(&batch)?);
     }
-    // Sort chronologically (stable sort preserves insertion order for
-    // identical timestamps).
-    events.sort_by_key(|e| e.ts);
-    if events.len() > cap {
-        let tail_start = events.len() - cap;
-        events.drain(0..tail_start);
-    }
+    // The query returns newest-first; the caller's contract is ascending
+    // chronological order.
+    events.reverse();
     Ok(events)
 }
 
@@ -764,6 +769,41 @@ mod tests {
         assert_eq!(read.len(), 2, "only the 120-day-old row is pruned");
         assert_eq!(read[0].session_id.as_deref(), Some("kept"));
         assert_eq!(read[1].session_id.as_deref(), Some("fresh"));
+    }
+
+    /// #16: `load_recent` returns the `cap` MOST-RECENT rows (not the oldest
+    /// `cap`), in ascending chronological order — exercising the pushed-down
+    /// `ORDER BY ts DESC LIMIT cap`.
+    #[tokio::test]
+    async fn load_recent_returns_newest_cap_in_chronological_order() {
+        let pid = unique_pid("recent-cap");
+        ensure_project_dir(&pid).await;
+        let now = Utc::now();
+        // Five events at strictly increasing timestamps, labelled by rank.
+        let events: Vec<_> = (0..5)
+            .map(|i| {
+                tool_event(
+                    now + chrono::Duration::seconds(i),
+                    "query",
+                    1.0,
+                    true,
+                    &format!("s{i}"),
+                )
+            })
+            .collect();
+        append_events(&pid, &events, None).await;
+
+        // cap = 3 must return the THREE newest (s2, s3, s4), oldest-first.
+        let read = load_recent(&pid, 3).await.unwrap();
+        let sessions: Vec<&str> = read
+            .iter()
+            .map(|e| e.session_id.as_deref().unwrap())
+            .collect();
+        assert_eq!(
+            sessions,
+            vec!["s2", "s3", "s4"],
+            "must return the newest cap rows, chronologically"
+        );
     }
 
     /// R4 regression: project IDs without an initialized parent directory

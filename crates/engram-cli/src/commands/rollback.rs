@@ -8,6 +8,26 @@ use engramdb::storage::memory_file::{
 use engramdb::storage::paths;
 use std::path::Path;
 
+/// Resolve a user-supplied `--target-version` to the internal representation
+/// (`1` ⇒ `None`, the legacy no-version format), rejecting versions outside the
+/// supported range instead of silently writing the wrong format.
+///
+/// Before this, `target_version <= 1` became `None` (so `0` silently rolled to
+/// v1) and any larger unknown version (e.g. `5`) fell through to the V1 writer
+/// while messages claimed "v5" (finding #22).
+pub(crate) fn resolve_rollback_target(target_version: u32) -> Result<Option<u32>> {
+    match target_version {
+        0 => anyhow::bail!(
+            "Invalid rollback target version 0; valid versions are 1..={CURRENT_FORMAT_VERSION}"
+        ),
+        1 => Ok(None),
+        v if v <= CURRENT_FORMAT_VERSION => Ok(Some(v)),
+        v => anyhow::bail!(
+            "Unsupported rollback target version {v}; valid versions are 1..={CURRENT_FORMAT_VERSION}"
+        ),
+    }
+}
+
 /// Run the rollback command.
 ///
 /// Scans all memory files (shared and personal) and rewrites them using the
@@ -193,6 +213,22 @@ mod tests {
 
     fn json_formatter() -> OutputFormatter {
         OutputFormatter::new(Some(OutputFormat::Json), false, false)
+    }
+
+    // Finding #22: rollback target-version resolution rejects unsupported
+    // versions instead of silently writing the wrong format.
+    #[test]
+    fn resolve_rollback_target_validates() {
+        // POSITIVE: 1 → None (legacy), valid versions → Some.
+        assert_eq!(resolve_rollback_target(1).unwrap(), None);
+        assert_eq!(
+            resolve_rollback_target(CURRENT_FORMAT_VERSION).unwrap(),
+            Some(CURRENT_FORMAT_VERSION)
+        );
+        // NEGATIVE (red before fix): 0 and out-of-range versions are errors,
+        // not a silent fall-through to the v1 writer.
+        assert!(resolve_rollback_target(0).is_err());
+        assert!(resolve_rollback_target(CURRENT_FORMAT_VERSION + 1).is_err());
     }
 
     fn engramdb_layout(root: &std::path::Path) -> std::path::PathBuf {

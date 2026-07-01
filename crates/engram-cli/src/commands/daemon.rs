@@ -63,6 +63,34 @@ pub async fn run_daemon_cmd(
                         "It is auto-spawned on demand by the next MCP run when [daemon] is enabled.",
                     );
                 }
+                Some(s) if formatter.is_json() => {
+                    // One JSON object so scripted consumers get parseable output
+                    // instead of print_success's JSON followed by raw text lines
+                    // (finding #7).
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "running": true,
+                            "pid": s.pid,
+                            "socket": socket.display().to_string(),
+                            "protocol": s.version,
+                            "uptime_secs": s.uptime_secs,
+                            "idle_secs": s.idle_secs,
+                            "bundles_loaded": s.bundles_loaded,
+                            "ping_count": s.ping_count,
+                            "last_ping_secs_ago": s.last_ping_secs_ago,
+                            "requests": {
+                                "embed": s.requests_embed,
+                                "classify": s.requests_classify,
+                                "rerank": s.requests_rerank,
+                                "meta": s.requests_meta,
+                                "status": s.requests_status,
+                                "title": s.requests_title,
+                                "total": s.requests_total,
+                            },
+                        })
+                    );
+                }
                 Some(s) => {
                     formatter.print_success(&format!("Daemon: running (pid {})", s.pid));
                     println!("  socket:          {}", socket.display());

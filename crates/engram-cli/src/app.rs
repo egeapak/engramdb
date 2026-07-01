@@ -141,7 +141,9 @@ pub struct Cli {
     pub command: Command,
 
     /// Output format
-    #[arg(long, global = true, value_enum)]
+    // `--json` is a shorthand for `--format json`; rejecting the combination
+    // avoids the silently-ignored `--json --format pretty` case (finding #18).
+    #[arg(long, global = true, value_enum, conflicts_with = "json")]
     pub format: Option<OutputFormat>,
 
     /// Output as JSON
@@ -438,7 +440,9 @@ pub enum Command {
         logical: Vec<String>,
 
         /// New tags (comma-separated or repeated, replaces existing)
-        #[arg(long, value_delimiter = ',')]
+        // Replacing is mutually exclusive with incremental add/remove
+        // (combining them is order-dependent and surprising) — finding #23.
+        #[arg(long, value_delimiter = ',', conflicts_with_all = ["tags_add", "tags_remove"])]
         tags: Vec<String>,
 
         /// Tags to add (comma-separated)
@@ -657,7 +661,7 @@ pub enum Command {
     /// Rebuild index and re-embed memories
     Reindex {
         /// Only re-embed, don't rebuild index
-        #[arg(long)]
+        #[arg(long, conflicts_with = "index_only")]
         embeddings_only: bool,
 
         /// Only rebuild index, don't re-embed
@@ -788,6 +792,43 @@ mod tests {
             Some(OutputFormat::Json) => {} // expected
             other => panic!("Expected Json, got {:?}", other),
         }
+    }
+
+    // Finding #18: `--json` and `--format` are mutually exclusive (so a
+    // silently-ignored `--json --format pretty` is rejected instead).
+    #[test]
+    fn json_and_format_conflict() {
+        // POSITIVE: each alone still parses.
+        assert!(Cli::try_parse_from(["engramdb", "--json", "list"]).is_ok());
+        assert!(Cli::try_parse_from(["engramdb", "--format", "pretty", "list"]).is_ok());
+        // NEGATIVE (red before fix): together they must be rejected.
+        assert!(
+            Cli::try_parse_from(["engramdb", "--json", "--format", "pretty", "list"]).is_err(),
+            "--json and --format must conflict"
+        );
+    }
+
+    // Finding #23: incompatible flag combinations are rejected at parse time.
+    #[test]
+    fn reindex_embeddings_only_and_index_only_conflict() {
+        assert!(Cli::try_parse_from(["engramdb", "reindex", "--embeddings-only"]).is_ok());
+        assert!(Cli::try_parse_from(["engramdb", "reindex", "--index-only"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["engramdb", "reindex", "--embeddings-only", "--index-only"])
+                .is_err(),
+            "--embeddings-only and --index-only must conflict"
+        );
+    }
+
+    #[test]
+    fn update_tags_replace_conflicts_with_add_remove() {
+        assert!(Cli::try_parse_from(["engramdb", "update", "id", "--tags", "a,b"]).is_ok());
+        assert!(Cli::try_parse_from(["engramdb", "update", "id", "--tags-add", "a"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["engramdb", "update", "id", "--tags", "a", "--tags-add", "b"])
+                .is_err(),
+            "--tags (replace) must conflict with --tags-add"
+        );
     }
 
     #[test]
@@ -1514,12 +1555,12 @@ mod tests {
     // Global flags / conflicts (3 tests)
     #[test]
     fn test_json_flag_and_format_json_both_set() {
-        let cli = Cli::try_parse_from(["engramdb", "--json", "--format", "json", "list"]).unwrap();
-        assert!(cli.json);
-        match cli.format {
-            Some(OutputFormat::Json) => {}
-            other => panic!("Expected Json format, got {:?}", other),
-        }
+        // #18: `--json` and `--format` are now mutually exclusive, so supplying
+        // both (even `--format json`) is rejected rather than silently accepted.
+        assert!(
+            Cli::try_parse_from(["engramdb", "--json", "--format", "json", "list"]).is_err(),
+            "--json and --format must conflict even when both request JSON"
+        );
     }
 
     #[test]

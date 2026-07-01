@@ -114,7 +114,13 @@ fn stats_embeddings_status_unknown_provider() {
     );
 
     helpers::cmd()
-        .args(["--dir", dir.path().to_str().unwrap(), "stats"])
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "plain",
+            "stats",
+        ])
         .assert()
         .success()
         // Drives the `other => { ... return; }` early-return arm.
@@ -146,6 +152,8 @@ fn stats_embeddings_status_onnx_backend_model_missing() {
             dir.path().to_str().unwrap(),
             "--embedding-backend",
             "onnx",
+            "--format",
+            "plain",
             "stats",
         ])
         .assert()
@@ -169,9 +177,60 @@ fn stats_embeddings_status_all_minilm_available_via_onnx() {
             dir.path().to_str().unwrap(),
             "--embedding-backend",
             "onnx",
+            "--format",
+            "plain",
             "stats",
         ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Available (all-minilm via ONNX)"));
+}
+
+// Finding #7: `stats --json` must emit a single valid JSON document on stdout
+// (previously the embeddings-status / health lines were printed raw after the
+// JSON object, corrupting it for scripted consumers).
+#[test]
+fn stats_json_is_valid_single_document() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    helpers::seed_store(dir.path());
+
+    let output = helpers::cmd()
+        .args(["--dir", dir.path().to_str().unwrap(), "--json", "stats"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    // Parses as exactly one JSON value (trailing raw text would fail this).
+    let _: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stats --json must be valid JSON: {e}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+}
+
+// Finding #7/#8: `stats --daemon --json` with no daemon running must still emit
+// valid JSON (the persisted-snapshot fallback path), not abort or print raw text.
+#[test]
+fn stats_daemon_json_is_valid_when_not_running() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--json",
+            "stats",
+            "--daemon",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let _: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stats --daemon --json must be valid JSON: {e}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
 }

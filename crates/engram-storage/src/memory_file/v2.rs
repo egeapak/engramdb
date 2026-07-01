@@ -149,11 +149,7 @@ fn parse_v2(frontmatter: &str, body: &str) -> Result<Memory> {
     let tags = parse_list_field(scope_text, "Tags");
     let criticality = parse_score_field(scope_text, "Criticality").unwrap_or(0.5);
     let confidence = parse_score_field(scope_text, "Confidence").unwrap_or(0.8);
-    let visibility_from_scope = if scope_text.contains("**Visibility:** personal") {
-        Visibility::Personal
-    } else {
-        Visibility::Shared
-    };
+    let visibility_from_scope = visibility_from_scope_text(scope_text);
 
     // Parse provenance
     let prov_text = sections.get("Provenance").map(String::as_str).unwrap_or("");
@@ -294,6 +290,30 @@ fn write_v2(memory: &Memory) -> Result<String> {
 /// Only the region before the first `## ` section heading is scanned — the
 /// writer emits these lines right after the H1, so a `**Field:**` line inside
 /// content can never hijack the value.
+/// Determine visibility from the `## Scope` section text.
+///
+/// Reads the value of the `- **Visibility:** <value>` field on its own line,
+/// rather than a substring `contains` over the whole section. A bare substring
+/// match (the pre-fix behaviour) would flip a memory to Personal if the literal
+/// text "**Visibility:** personal" appeared anywhere in the scope — e.g. inside
+/// another field's value — even when the actual Visibility field said Shared
+/// (finding #6).
+fn visibility_from_scope_text(scope_text: &str) -> Visibility {
+    for line in scope_text.lines() {
+        // Match a `- **Visibility:** <value>` field line (leading `- ` and
+        // surrounding whitespace tolerated), then read its value exactly.
+        let trimmed = line.trim().trim_start_matches('-').trim();
+        if let Some(rest) = trimmed.strip_prefix("**Visibility:**") {
+            return if rest.trim().eq_ignore_ascii_case("personal") {
+                Visibility::Personal
+            } else {
+                Visibility::Shared
+            };
+        }
+    }
+    Visibility::Shared
+}
+
 fn extract_bold_field(body: &str, field: &str) -> Option<String> {
     let prefix = format!("**{field}:** ");
     for line in body.lines() {
@@ -348,4 +368,44 @@ fn parse_hidden_meta(body: &str) -> HiddenMeta {
     }
 
     HiddenMeta::default()
+}
+
+#[cfg(test)]
+mod visibility_tests {
+    use super::*;
+
+    // Finding #6: visibility must be read from the `**Visibility:**` field's
+    // value on its own line, not via a substring `contains` over the whole
+    // Scope section.
+    #[test]
+    fn visibility_reads_the_field_value() {
+        // POSITIVE: explicit field values parse correctly.
+        assert_eq!(
+            visibility_from_scope_text("- **Visibility:** personal"),
+            Visibility::Personal
+        );
+        assert_eq!(
+            visibility_from_scope_text("- **Visibility:** shared"),
+            Visibility::Shared
+        );
+        // POSITIVE: absent field defaults to Shared.
+        assert_eq!(
+            visibility_from_scope_text("- **Files:** `/`"),
+            Visibility::Shared
+        );
+    }
+
+    #[test]
+    fn visibility_not_flipped_by_substring_in_other_text() {
+        // NEGATIVE (red before fix): the real Visibility field says shared, but
+        // another line merely *mentions* the personal-visibility text. A bare
+        // `contains` would wrongly flip this memory to Personal.
+        let scope = "- **Logical:** `note about **Visibility:** personal mode`\n\
+                     - **Visibility:** shared";
+        assert_eq!(
+            visibility_from_scope_text(scope),
+            Visibility::Shared,
+            "visibility must come from the field line, not any substring"
+        );
+    }
 }

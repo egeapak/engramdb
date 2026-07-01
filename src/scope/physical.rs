@@ -49,9 +49,14 @@ pub fn matches(patterns: &[String], path: &str) -> bool {
         return true;
     }
 
-    // Check for parent directory prefixes (e.g. "src/cli/" matches "src/cli/commands/add.rs")
+    // A pattern matches when it is a parent directory prefix
+    // (e.g. "src/cli/" matches "src/cli/commands/add.rs") OR shares the file's
+    // directory. The same-directory case keeps the hard Filter-mode predicate
+    // consistent with the proximity scorer, which rewards same-directory
+    // siblings (finding #13); excluding them here meant memories that the
+    // scorer would rank never surfaced in Filter mode.
     for pattern in patterns {
-        if is_parent_directory(pattern, path) {
+        if is_parent_directory(pattern, path) || is_same_directory(pattern, path) {
             return true;
         }
     }
@@ -259,7 +264,12 @@ mod tests {
     #[test]
     fn test_matches_exact() {
         assert!(matches(&["src/main.rs".to_string()], "src/main.rs"));
-        assert!(!matches(&["src/main.rs".to_string()], "src/lib.rs"));
+        // #13: matches() now agrees with the proximity scorer — a sibling in
+        // the SAME directory matches (it was previously excluded, contradicting
+        // the scorer which rewards it). A file in a DIFFERENT directory still
+        // does not match.
+        assert!(matches(&["src/main.rs".to_string()], "src/lib.rs"));
+        assert!(!matches(&["src/main.rs".to_string()], "tests/lib.rs"));
     }
 
     #[test]
@@ -309,6 +319,40 @@ mod tests {
     fn test_matches_empty_patterns() {
         assert!(!matches(&[], "src/main.rs"));
         assert!(!matches(&[], "any/path/file.rs"));
+    }
+
+    // Finding #13: the hard Filter-mode predicate `matches()` must not exclude
+    // a scope that the proximity scorer rewards. The scorer treats files in the
+    // same directory as related (see `test_proximity_same_directory_non_glob`),
+    // so `matches()` must agree (decision: loosen the filter to the scorer).
+    #[test]
+    fn matches_agrees_with_scorer_for_same_directory_sibling() {
+        let scope = ["src/api/a.rs".to_string()];
+        let path = "src/api/b.rs";
+        // The scorer rewards the sibling...
+        assert!(proximity(&scope, path, BASE, FLOOR) > 0.0);
+        // ...so the hard filter must let it through (red before fix).
+        assert!(
+            matches(&scope, path),
+            "filter must not exclude a same-directory sibling the scorer ranks"
+        );
+        // Consistency holds the other way too: a different directory neither
+        // scores nor matches.
+        let other = "tests/api/b.rs";
+        assert_eq!(proximity(&scope, other, BASE, FLOOR), 0.0);
+        assert!(!matches(&scope, other));
+    }
+
+    // Finding #12 (verified non-bug): a mid-segment glob measures proximity
+    // depth by counting path separators, so the partial leading segment before
+    // the wildcard does not distort the depth. This pins that the score is
+    // correct (the reviewer's worry does not manifest in the numeric result).
+    #[test]
+    fn glob_midsegment_depth_is_correct() {
+        // `src/a*/x.rs` matches `src/api/x.rs`; the file is 2 levels below the
+        // glob's real base directory `src/`.
+        let score = proximity(&["src/a*/x.rs".to_string()], "src/api/x.rs", BASE, FLOOR);
+        assert_approx(score, depth_decay_score(2, BASE, FLOOR), "mid-segment glob");
     }
 
     // --- directory_depth helper tests ---

@@ -88,12 +88,15 @@ pub async fn run_reindex_with_daemon(
         None
     };
 
-    // Print progress before starting
-    if !embeddings_only {
-        println!("Reindexing...");
-    }
-    if !index_only && engine.is_some() {
-        println!("Regenerating embeddings...");
+    // Print progress before starting (human-only; raw println! would corrupt
+    // the JSON document the formatter emits below — finding #7).
+    if !formatter.is_json() {
+        if !embeddings_only {
+            println!("Reindexing...");
+        }
+        if !index_only && engine.is_some() {
+            println!("Regenerating embeddings...");
+        }
     }
 
     let result = reindex(&store, engine.as_ref(), embeddings_only).await?;
