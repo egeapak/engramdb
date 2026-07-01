@@ -2487,6 +2487,55 @@ mod tests {
         assert!(result.suggestion.is_some());
     }
 
+    // `validate_models` (added in #54) is otherwise only exercised end-to-end
+    // by one happy-path CLI integration test, so its failure/skip branches were
+    // uncovered. Force the embedding model unavailable (empty model cache +
+    // offline) and assert the deterministic shape: all four model checks are
+    // reported, and the embedding check fails rather than the whole call
+    // erroring. This drives the `None`/`Err` embedding arm plus the
+    // disabled-feature `skip` arms without needing any model staged.
+    #[tokio::test]
+    async fn test_validate_models_reports_all_sections_when_unavailable() {
+        let empty_cache = TempDir::new().unwrap();
+        std::env::set_var("ENGRAMDB_MODEL_CACHE_DIR", empty_cache.path());
+        std::env::set_var("ENGRAMDB_OFFLINE", "1");
+
+        let config = crate::types::EngramConfig::default();
+        let checks = validate_models(&config).await;
+
+        let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "Embedding model",
+                "NLI model",
+                "Reranker model",
+                "Title model"
+            ],
+            "validate_models must report every model section"
+        );
+
+        let embedding = checks
+            .iter()
+            .find(|c| c.name == "Embedding model")
+            .expect("embedding check present");
+        assert!(
+            !embedding.passed,
+            "an unavailable embedding model must fail, got: {}",
+            embedding.message
+        );
+        assert!(
+            embedding.suggestion.is_some(),
+            "a failed model check should carry a remediation hint"
+        );
+
+        // Disabled-by-default features are skipped (Info), not failed.
+        let nli = checks.iter().find(|c| c.name == "NLI model").unwrap();
+        assert!(nli.passed && nli.status == Some(CheckStatus::Info));
+        let rerank = checks.iter().find(|c| c.name == "Reranker model").unwrap();
+        assert!(rerank.passed && rerank.status == Some(CheckStatus::Info));
+    }
+
     // --- Group 4: new check functions ---
 
     #[tokio::test]
