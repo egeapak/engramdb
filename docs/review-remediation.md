@@ -33,7 +33,7 @@ Legend: ✅ fixed & green · 🟡 verified non-bug (test added) · ⏳ pending
 | 13 | Medium | scope | `matches()` vs `calculate_pattern_score` disagree | ✅ filter loosened to scorer |
 | 14 | Medium | storage | nondeterministic tied-mtime duplicate resolution | ✅ |
 | 15 | Medium | storage | `get_batch`/`batch_exists` silently skip corrupt files | ✅ logging + behaviour test |
-| 16 | Medium | storage | telemetry `load_recent` full-table scan | 🟡 not actionable (LanceDB lacks ordered pushdown) |
+| 16 | Medium | storage | telemetry `load_recent` full-table scan | ✅ (unlocked by lancedb 0.30) |
 | 17 | Medium | daemon | metrics 2nd connection + `optimize` every persist | ✅ |
 | 18 | Medium | cli | `--format`/`--json` not mutually exclusive | ✅ |
 | 19 | Low | types | `embeddings.max_tokens` is dead config | ✅ |
@@ -298,3 +298,27 @@ by a red→green test in this sandbox. Tracked here for a future perf pass.
 - **Conclusion:** the in-memory sort is required for correctness with this
   LanceDB version, and the scan is bounded by the 90-day retention + prune. Left
   as-is; revisit if/when LanceDB exposes an ordered scan.
+
+## Details (batch 9: after merging master a second time — deps #53 + doctor #54)
+
+### #16 — telemetry `load_recent` full scan (Medium) ✅ now implemented
+- **Previously** documented as not-actionable because lancedb 0.26's `Query`
+  had no ordering. **The #53 dependency upgrade (lancedb 0.26 → 0.30) added
+  `order_by(Vec<ColumnOrdering>)`**, so the pushdown is now available.
+- **Fix:** `load_recent` now issues `ORDER BY ts DESC LIMIT cap` via
+  `.order_by(Some(vec![ColumnOrdering::desc_nulls_last("ts")])).limit(cap)` and
+  reverses the newest-first result into chronological order — instead of
+  scanning the whole table and sorting in memory.
+- **Test:** `load_recent_returns_newest_cap_in_chronological_order` (writes 5
+  events, `cap = 3`, asserts the three *newest* are returned oldest-first).
+  Existing ordering/prune tests remain green (behaviour-preserving).
+
+### #54 doctor — added `validate_models` failure-path coverage
+- The new `validate_models` diagnostic was only exercised by one happy-path CLI
+  integration test; added `test_validate_models_reports_all_sections_when_unavailable`
+  (forces the embedding model unavailable) to cover the failure + skip arms.
+
+### #53 deps — no new coverage required
+- Mechanical upgrade (rmcp 0.15→1.7 MCP-SDK rework, lancedb 0.26→0.30, arrow
+  57→58, ONNX Runtime 1.24). No new logic; the reworked `server.rs` holds at
+  ~89% line coverage and the whole suite (1546 passing) validates the adaptation.
