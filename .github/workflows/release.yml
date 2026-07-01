@@ -160,42 +160,6 @@ jobs:
             engramdb-x86_64-unknown-linux-gnu.tar.gz
             engramdb-x86_64-unknown-linux-gnu.tar.gz.sha256
 
-  build-linux-arm:
-    needs: version-check
-    # Native ARM Linux runner — no cross-compilation or qemu needed, so the
-    # build matches `build-linux` exactly (statically-linked, self-contained).
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install protobuf compiler and lld linker
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
-
-      - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build release binary
-        # `--bin engramdb` resolves via workspace `default-members` (see build-arm).
-        # ONNX Runtime is statically linked via fastembed's `download-binaries`,
-        # so the binary is self-contained (no separate library to ship).
-        run: cargo build --release --bin engramdb
-
-      - name: Package binary
-        run: |
-          cd target/release
-          tar czf ../../engramdb-aarch64-unknown-linux-gnu.tar.gz engramdb
-          cd ../..
-          sha256sum engramdb-aarch64-unknown-linux-gnu.tar.gz > engramdb-aarch64-unknown-linux-gnu.tar.gz.sha256
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: engramdb-aarch64-unknown-linux-gnu
-          path: |
-            engramdb-aarch64-unknown-linux-gnu.tar.gz
-            engramdb-aarch64-unknown-linux-gnu.tar.gz.sha256
-
   build-windows:
     needs: version-check
     runs-on: windows-latest
@@ -233,7 +197,7 @@ jobs:
             engramdb-x86_64-pc-windows-msvc.zip.sha256
 
   release:
-    needs: [build-arm, build-intel, build-linux, build-linux-arm, build-windows]
+    needs: [build-arm, build-intel, build-linux, build-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
