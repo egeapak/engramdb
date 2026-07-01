@@ -10,7 +10,7 @@ default-members = [".", "crates/*"]
 # Single source of truth for the workspace version. Every crate sets
 # `version.workspace = true`, so a release bump is a one-line change here.
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 
 [package]
 name = "engramdb"

@@ -8,7 +8,7 @@
     {
       "name": "engram",
       "source": "./",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "description": "Project-scoped persistent memory store for coding agents. Stores decisions, hazards, conventions, and context about the codebase."
     }
   ]

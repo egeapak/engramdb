@@ -2197,7 +2197,7 @@ dependencies = [
 
 [[package]]
 name = "engram-cli"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2228,7 +2228,7 @@ dependencies = [
 
 [[package]]
 name = "engram-mcp"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2248,7 +2248,7 @@ dependencies = [
 
 [[package]]
 name = "engram-models"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2273,14 +2273,14 @@ dependencies = [
 
 [[package]]
 name = "engram-onnx"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ort",
 ]
 
 [[package]]
 name = "engram-storage"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -2310,7 +2310,7 @@ dependencies = [
 
 [[package]]
 name = "engram-test-support"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ctor",
  "tempfile",
@@ -2318,7 +2318,7 @@ dependencies = [
 
 [[package]]
 name = "engram-types"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2331,7 +2331,7 @@ dependencies = [
 
 [[package]]
 name = "engramdb"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arrow-array",
