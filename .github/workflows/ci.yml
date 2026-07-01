@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
 
 env:
@@ -19,6 +19,33 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
+  # Cheap, toolchain-free guard: the plugin version lives in TWO manifests
+  # (.claude-plugin/plugin.json and .claude-plugin/marketplace.json). If they
+  # drift, `/plugin update` compares the marketplace entry and silently keeps
+  # the stale install pinned — the plugin's MCP server then loads an old cached
+  # version. Fail fast when they disagree so releases can't ship the mismatch.
+  manifest-version:
+    name: Manifest version parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check plugin.json == marketplace.json version
+        run: |
+          plugin_ver=$(jq -r '.version' .claude-plugin/plugin.json)
+          market_ver=$(jq -r '.plugins[] | select(.name == "engram") | .version' .claude-plugin/marketplace.json)
+          echo "plugin.json:      $plugin_ver"
+          echo "marketplace.json: $market_ver"
+          if [ -z "$plugin_ver" ] || [ "$plugin_ver" = "null" ]; then
+            echo "::error file=.claude-plugin/plugin.json::missing .version"; exit 1
+          fi
+          if [ -z "$market_ver" ] || [ "$market_ver" = "null" ]; then
+            echo "::error file=.claude-plugin/marketplace.json::engram plugin entry is missing .version (add it, matching plugin.json)"; exit 1
+          fi
+          if [ "$plugin_ver" != "$market_ver" ]; then
+            echo "::error::plugin.json ($plugin_ver) and marketplace.json ($market_ver) disagree — bump both together"; exit 1
+          fi
+          echo "OK: versions match ($plugin_ver)"
+
   check:
     name: Check & Lint
     runs-on: ubuntu-latest

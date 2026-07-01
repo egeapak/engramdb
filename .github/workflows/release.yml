@@ -12,7 +12,28 @@ env:
   ORT_VERSION: "1.23.2"
 
 jobs:
+  # Gate the whole release on version consistency: the pushed tag (v0.7.0), the
+  # plugin manifest, and the marketplace manifest must all agree. Catches a
+  # tag/manifest drift before any binary is built or published.
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert tag matches manifest versions
+        run: |
+          tag_ver="${GITHUB_REF_NAME#v}"
+          plugin_ver=$(jq -r '.version' .claude-plugin/plugin.json)
+          market_ver=$(jq -r '.plugins[] | select(.name == "engram") | .version' .claude-plugin/marketplace.json)
+          echo "tag:              $tag_ver"
+          echo "plugin.json:      $plugin_ver"
+          echo "marketplace.json: $market_ver"
+          fail=0
+          [ "$plugin_ver" = "$tag_ver" ] || { echo "::error::plugin.json ($plugin_ver) != tag ($tag_ver)"; fail=1; }
+          [ "$market_ver" = "$tag_ver" ] || { echo "::error::marketplace.json ($market_ver) != tag ($tag_ver)"; fail=1; }
+          exit $fail
+
   build-arm:
+    needs: version-check
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +74,7 @@ jobs:
             engramdb-aarch64-apple-darwin.tar.gz.sha256
 
   build-intel:
+    needs: version-check
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
@@ -105,6 +127,7 @@ jobs:
             engramdb-x86_64-apple-darwin.tar.gz.sha256
 
   build-linux:
+    needs: version-check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -138,6 +161,7 @@ jobs:
             engramdb-x86_64-unknown-linux-gnu.tar.gz.sha256
 
   build-linux-arm:
+    needs: version-check
     # Native ARM Linux runner — no cross-compilation or qemu needed, so the
     # build matches `build-linux` exactly (statically-linked, self-contained).
     runs-on: ubuntu-24.04-arm
@@ -173,6 +197,7 @@ jobs:
             engramdb-aarch64-unknown-linux-gnu.tar.gz.sha256
 
   build-windows:
+    needs: version-check
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
