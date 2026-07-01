@@ -65,6 +65,11 @@ impl OutputFormatter {
         Self { format, use_color }
     }
 
+    /// Whether output is JSON (machine-consumed; never prompt interactively).
+    pub fn is_json(&self) -> bool {
+        matches!(self.format, OutputFormat::Json)
+    }
+
     /// Print a generic message.
     pub fn print_message(&self, message: &str) {
         match self.format {

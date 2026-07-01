@@ -31,7 +31,7 @@ use crate::ops::projects::{prune_stale_projects, PruneResult};
 use crate::storage::{paths, MemoryStore, RegistryBackend};
 use crate::types::MaintenanceConfig;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// Throttle marker file, stored under the global data dir.
 const MARKER_FILE: &str = ".last_maintenance";
@@ -46,6 +46,40 @@ pub struct MaintenanceReport {
     pub prune: Option<PruneResult>,
     /// Result of the main store's health check, if it ran and succeeded.
     pub doctor: Option<DoctorResult>,
+}
+
+/// Effective auto-maintenance status, for diagnostics (`engramdb doctor`).
+///
+/// Reflects the same override ladders [`auto_maintain`] applies — env over
+/// config — so the report matches what an actual command-path pass would do
+/// (with `cli_skip = false`, since `--no-maintenance` scopes to one invocation,
+/// not the configured state). Best-effort: an unreadable marker reads as "never
+/// run".
+#[derive(Debug, Clone)]
+pub struct MaintenanceStatus {
+    /// Whether auto-maintenance is currently enabled (after the override ladder).
+    pub enabled: bool,
+    /// The resolved throttle window between passes.
+    pub interval: Duration,
+    /// When the last pass ran (from the marker), if it has ever run on this
+    /// machine.
+    pub last_run: Option<SystemTime>,
+}
+
+/// Resolve the effective [`MaintenanceStatus`] for the given config.
+pub async fn maintenance_status(config: &MaintenanceConfig) -> MaintenanceStatus {
+    let last_run = match marker_path() {
+        Some(path) => tokio::fs::metadata(&path)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok()),
+        None => None,
+    };
+    MaintenanceStatus {
+        enabled: resolve_enabled(config, false),
+        interval: resolve_interval(config),
+        last_run,
+    }
 }
 
 /// Whether maintenance is disabled via the `ENGRAMDB_DISABLE_AUTO_MAINTENANCE`

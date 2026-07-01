@@ -24,6 +24,8 @@ pub enum HookCommand {
 pub enum DoctorCommand {
     /// Fast store health check (index consistency only)
     Store,
+    /// Load each downloaded model and run a test inference to confirm it works
+    Validate,
 }
 
 /// Subcommands for `engramdb daemon`.
@@ -537,6 +539,15 @@ pub enum Command {
         /// Check the global (cross-project) memory store instead of the current project
         #[arg(long)]
         global: bool,
+
+        /// Offer to fix detected issues (reindex, download model, prune registry, init).
+        /// Prompts on a terminal; in non-interactive contexts pair with --yes.
+        #[arg(long)]
+        fix: bool,
+
+        /// Apply fixes without prompting (use with --fix; required to fix in non-TTY contexts)
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Manage registered EngramDB projects

@@ -32,13 +32,13 @@ pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
 pub use daemon_resolve::{resolve_providers, DaemonCell, DaemonPolicy};
 pub use delete::delete_memory;
 pub use doctor::{
-    doctor, doctor_environment, CheckStatus, DoctorResult, DoctorSection, EnvironmentCheck,
-    EnvironmentDoctorResult,
+    doctor, doctor_environment, validate_models, CheckStatus, DoctorResult, DoctorSection,
+    EnvironmentCheck, EnvironmentDoctorResult,
 };
 pub use gc::{execute_gc_plan, gc_memories, plan_gc, GcCandidate, GcMaintenance, GcPlan, GcResult};
 pub use get::get_memory;
 pub use list::{list_memories, parse_sort_field, ListParams, SortField};
-pub use maintenance::{auto_maintain, MaintenanceReport};
+pub use maintenance::{auto_maintain, maintenance_status, MaintenanceReport, MaintenanceStatus};
 pub use parsing::{
     parse_decay_strategy, parse_detail_level, parse_memory_type, parse_status, parse_visibility,
     validate_score,
