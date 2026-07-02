@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
-use crate::daemon::DaemonHandle;
-use crate::ops::{resolve_backend, resolve_engine_providers, EngineProviders};
+use super::DaemonHandle;
+use crate::ops::{resolve_backend, resolve_engine_providers, EngineProviders, ProviderCache};
 use crate::types::{EmbeddingBackend, EngramConfig};
 
 /// How a front-end may obtain model providers.
@@ -131,32 +131,51 @@ impl Default for DaemonCell {
     }
 }
 
+/// What to load when the daemon path is unavailable (disabled, unreachable,
+/// or forbidden by policy).
+pub enum InProcessFallback<'a> {
+    /// Load a single-session bundle. Right for one-shot callers (the CLI):
+    /// no concurrency, process exits after the call.
+    Single,
+    /// Serve pooled bundles from the given process-wide cache. Right for
+    /// long-lived multi-session callers (the MCP server).
+    Pool(&'a ProviderCache),
+}
+
 /// Resolve model-backed providers for a retrieval engine, routing through the
-/// daemon when available and `policy` permits, or loading in-process as a
-/// fallback.
+/// daemon when available and `policy` permits, or loading in-process per
+/// `fallback`.
 ///
-/// This is the **single shared resolver** for both the MCP server and the CLI.
-/// The `policy` parameter is the only behavioral difference between front-ends:
-/// - MCP uses `ConnectOrSpawn` (auto-spawns the daemon when absent).
-/// - CLI uses `ConnectOnly` by default (uses a live daemon, else in-process).
+/// This is the **single shared resolver** for both the MCP server and the
+/// CLI; the front-ends differ only in the `policy` and `fallback` they pass:
+/// - MCP uses `ConnectOrSpawn` + `Pool` (auto-spawns the daemon when absent;
+///   pooled in-process providers when it can't).
+/// - CLI uses `ConnectOnly` + `Single` by default (uses a live daemon, else a
+///   one-shot in-process load).
 /// - Either front-end can be overridden to `InProcess` to skip the daemon.
 ///
 /// Graceful fallback is the contract: if the daemon is disabled in config,
 /// the policy is `InProcess`, or the daemon is unreachable, this returns
-/// in-process providers exactly as `resolve_engine_providers(config, backend, 1)`.
-pub async fn resolve_providers(
+/// in-process providers.
+pub async fn resolve_providers_with(
     cell: &DaemonCell,
     config: &EngramConfig,
     backend: Option<EmbeddingBackend>,
     dir: &Path,
     policy: DaemonPolicy,
+    fallback: InProcessFallback<'_>,
 ) -> EngineProviders {
     if config.daemon.enabled && policy != DaemonPolicy::InProcess {
         let idle = config.daemon.idle_timeout_secs;
-        let socket = crate::daemon::resolve_socket(None, &config.daemon);
+        let socket = super::resolve_socket(None, &config.daemon);
+        // The re-resolvable cell health-checks a cached handle and re-spawns
+        // a dead daemon, so a session that outlived its daemon heals here
+        // instead of degrading to in-process forever.
         if let Some(handle) = cell.get(&socket, idle, policy).await {
+            // Send the resolved concrete backend so the daemon's provider
+            // key matches ours regardless of the daemon's environment.
             let resolved_backend = Some(resolve_backend(config.embeddings.backend, backend));
-            if let Some(providers) = crate::daemon::remote_providers(
+            if let Some(providers) = super::remote_providers(
                 handle,
                 dir.to_string_lossy().into_owned(),
                 resolved_backend,
@@ -168,8 +187,28 @@ pub async fn resolve_providers(
             }
         }
     }
-    // In-process fallback: identical to the original CLI path.
-    // pool=1 because one-shot callers (CLI) have no concurrency, and the
-    // MCP server uses its own ProviderCache for pooled in-process providers.
-    resolve_engine_providers(config, backend, 1)
+    match fallback {
+        InProcessFallback::Single => resolve_engine_providers(config, backend, 1),
+        InProcessFallback::Pool(cache) => cache.get(config, backend).await,
+    }
+}
+
+/// [`resolve_providers_with`] with the one-shot [`InProcessFallback::Single`]
+/// fallback — the CLI's default shape.
+pub async fn resolve_providers(
+    cell: &DaemonCell,
+    config: &EngramConfig,
+    backend: Option<EmbeddingBackend>,
+    dir: &Path,
+    policy: DaemonPolicy,
+) -> EngineProviders {
+    resolve_providers_with(
+        cell,
+        config,
+        backend,
+        dir,
+        policy,
+        InProcessFallback::Single,
+    )
+    .await
 }

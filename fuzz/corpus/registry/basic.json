@@ -1,0 +1,13 @@
+{
+  "projects": [
+    {
+      "project_id": "a1b2c3d4e5f60718",
+      "project_path": "/home/user/projects/engramdb"
+    },
+    {
+      "project_id": "0f1e2d3c4b5a6978",
+      "project_path": "/home/user/projects/engramdb-wt",
+      "parent_project_id": "a1b2c3d4e5f60718"
+    }
+  ]
+}

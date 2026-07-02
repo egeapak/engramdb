@@ -10,7 +10,12 @@ on:
       max_total_time:
         description: "Seconds to run each fuzz target"
         required: false
-        default: "120"
+        default: "300"
+
+permissions:
+  contents: read
+  # Needed by the issue-on-failure step below.
+  issues: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -30,6 +35,8 @@ jobs:
           - scope_proximity
           - decay
           - composite_score
+          - registry
+          - slug
     steps:
       - uses: actions/checkout@v4
 
@@ -43,13 +50,26 @@ jobs:
         with:
           workspaces: ". -> target\nfuzz -> target"
 
+      - name: Restore fuzz corpus
+        # The corpus grows as libfuzzer discovers new coverage; persist it
+        # across weekly runs so each run resumes from accumulated coverage
+        # instead of restarting from the curated seeds in git. Caches are
+        # immutable, so key on run_id to save a fresh snapshot every run and
+        # let restore-keys pick up the most recent previous one.
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
       - name: Run ${{ matrix.target }}
         run: |
           cargo +nightly fuzz run ${{ matrix.target }} -- \
-            -max_total_time=${{ github.event.inputs.max_total_time || '120' }}
+            -max_total_time=${{ github.event.inputs.max_total_time || '300' }}
 
       - name: Upload crash artifacts
         if: failure()
@@ -58,3 +78,62 @@ jobs:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts/
           if-no-files-found: ignore
+
+      - name: File or update fuzz-failure issue
+        # Scheduled runs have no human watching them; route failures to an
+        # issue so a crash found on a Monday run isn't silently forgotten.
+        # One open issue per target: repeat failures append a comment.
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const target = '${{ matrix.target }}';
+            const label = 'fuzz-failure';
+            const title = `Fuzz failure: ${target}`;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              `The scheduled fuzz run failed for target \`${target}\`.`,
+              '',
+              `Run: ${runUrl}`,
+              '',
+              'Crash inputs (if any) are in the run\'s `fuzz-artifacts-' + target + '` artifact.',
+              'Reproduce locally with:',
+              '```',
+              `cargo +nightly fuzz run ${target} fuzz/artifacts/${target}/<crash-file>`,
+              '```',
+              'Per fuzz/ policy, commit the failing input as a corpus seed once fixed.',
+            ].join('\n');
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: label,
+                color: 'b60205',
+                description: 'A scheduled fuzz run found a failure',
+              });
+            } catch (e) {
+              if (e.status !== 422) throw e; // 422 = label already exists
+            }
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: label,
+            });
+            const existing = issues.find((i) => i.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                labels: [label],
+                body,
+              });
+            }

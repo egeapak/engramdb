@@ -20,6 +20,12 @@ pub mod doctor;
 pub mod metrics;
 pub mod protocol;
 pub mod remote;
+// The shared daemon-or-in-process provider resolver (DaemonCell, DaemonPolicy,
+// resolve_providers). Lives here rather than in `ops` because it necessarily
+// reaches daemon internals (DaemonHandle, resolve_socket, remote_providers):
+// keeping it in `ops` created the crate's only two-way module edge
+// (ops <-> daemon). `daemon` may depend on `ops`, never the reverse.
+pub mod resolve;
 pub mod server;
 // Platform IPC transport: Unix domain sockets on Unix, named pipes on Windows.
 // Both `server` and `client` go through this so the daemon has the same
@@ -30,6 +36,9 @@ pub use client::{query_status, request_shutdown, DaemonHandle};
 pub use doctor::check_daemon;
 pub use protocol::{DaemonStatus, PROTOCOL_VERSION};
 pub use remote::remote_providers;
+pub use resolve::{
+    resolve_providers, resolve_providers_with, DaemonCell, DaemonPolicy, InProcessFallback,
+};
 pub use server::run_daemon;
 
 // The daemon tests drive the transport through the cross-platform `transport`

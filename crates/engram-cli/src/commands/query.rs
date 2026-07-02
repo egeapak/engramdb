@@ -2,9 +2,8 @@
 
 use crate::output::OutputFormatter;
 use anyhow::Result;
-use engramdb::ops::{
-    parse_detail_level, parse_memory_type, validate_score, DaemonCell, DaemonPolicy,
-};
+use engramdb::daemon::{DaemonCell, DaemonPolicy};
+use engramdb::ops::validate_score;
 use engramdb::retrieval::engine::{RetrievalMode, RetrievalQuery, RetrievalResult};
 use engramdb::storage::MemoryStore;
 use std::path::Path;
@@ -137,28 +136,22 @@ async fn compute_query_result_with_cell(
 ) -> Result<RetrievalResult> {
     let config_path = store.project_dir.join(".engramdb").join("config.toml");
     let engine = if let Some(c) = cell {
-        let config = engramdb::storage::config::load_config(&config_path)
-            .await
-            .unwrap_or_default();
+        let config = engramdb::storage::config::load_config_or_default(&config_path).await;
         let project_dir = store.project_dir.clone();
-        let providers =
-            engramdb::ops::resolve_providers(c, &config, embedding_backend, &project_dir, policy)
-                .await;
+        let providers = engramdb::daemon::resolve_providers(
+            c,
+            &config,
+            embedding_backend,
+            &project_dir,
+            policy,
+        )
+        .await;
         engramdb::ops::assemble_engine(store, config, providers)
     } else {
         engramdb::ops::build_engine(store, &config_path, embedding_backend).await
     };
 
-    let types = if !params.type_filter.is_empty() {
-        let parsed_types: Result<Vec<_>> = params
-            .type_filter
-            .iter()
-            .map(|s| parse_memory_type(s))
-            .collect();
-        Some(parsed_types?)
-    } else {
-        None
-    };
+    let types = engramdb::ops::parse_type_filter(Some(&params.type_filter))?;
 
     let tags = if !params.tags.is_empty() {
         Some(params.tags)
@@ -166,11 +159,8 @@ async fn compute_query_result_with_cell(
         None
     };
 
-    let detail_level = if let Some(ref level_str) = params.detail_level {
-        parse_detail_level(level_str)?
-    } else {
-        engramdb::retrieval::engine::DetailLevel::Content
-    };
+    let detail_level =
+        engramdb::ops::parse_detail_level_or_default(params.detail_level.as_deref())?;
 
     if let Some(mc) = params.min_criticality {
         validate_score(mc, "min_criticality")?;
@@ -189,40 +179,32 @@ async fn compute_query_result_with_cell(
         detail_level,
     };
 
-    let mut result = engramdb::ops::query_memories(&engine, &query).await?;
-
-    // Optionally fold in global-store memories. Skipped when already
-    // querying the global store (`--global`) — nothing extra to merge.
-    if params.include_global && !global {
-        if let Ok(global_store) = MemoryStore::open_global().await {
+    // Optionally fold in global-store memories via the shared band
+    // (ops::query_memories_with_global). Skipped when already querying the
+    // global store (`--global`) — nothing extra to merge.
+    let include_global = params.include_global && !global;
+    let result =
+        engramdb::ops::query_memories_with_global(&engine, &query, include_global, || async {
+            let global_store = MemoryStore::open_global().await.ok()?;
             let global_config_path = global_store
                 .project_dir
                 .join(".engramdb")
                 .join("config.toml");
             let global_engine = if let Some(c) = cell {
-                let gcfg = engramdb::storage::config::load_config(&global_config_path)
-                    .await
-                    .unwrap_or_default();
+                let gcfg =
+                    engramdb::storage::config::load_config_or_default(&global_config_path).await;
                 let gdir = global_store.project_dir.clone();
                 let gproviders =
-                    engramdb::ops::resolve_providers(c, &gcfg, embedding_backend, &gdir, policy)
+                    engramdb::daemon::resolve_providers(c, &gcfg, embedding_backend, &gdir, policy)
                         .await;
                 engramdb::ops::assemble_engine(global_store, gcfg, gproviders)
             } else {
                 engramdb::ops::build_engine(global_store, &global_config_path, embedding_backend)
                     .await
             };
-            if let Ok(global_result) = engramdb::ops::query_memories(&global_engine, &query).await {
-                let max = query.max_results.unwrap_or(params.max_results);
-                engramdb::ops::merge_scored_memories(
-                    &mut result.memories,
-                    global_result.memories,
-                    max,
-                );
-                result.total += global_result.total;
-            }
-        }
-    }
+            Some(global_engine)
+        })
+        .await?;
 
     Ok(result)
 }

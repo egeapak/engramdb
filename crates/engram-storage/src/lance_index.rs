@@ -302,6 +302,30 @@ impl LanceIndex {
         Ok(())
     }
 
+    /// Upsert a batch of entries in ONE `merge_insert` commit.
+    ///
+    /// LanceDB commits a new immutable dataset version per mutating call, so
+    /// upserting N entries one-by-one (as reindex once did) costs N commit
+    /// round-trips and creates N versions that `optimize` must then compact
+    /// away. One batched call does one commit.
+    pub async fn upsert_batch(&self, entries: &[IndexEntry]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let batch = self.entries_to_batch(entries)?;
+        let table = self.open_table().await?;
+
+        let schema_ref = batch.schema();
+        let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema_ref);
+        let mut op = table.merge_insert(&["id"]);
+        op.when_matched_update_all(None);
+        op.when_not_matched_insert_all();
+        op.execute(Box::new(batches))
+            .await
+            .context("Failed to upsert entry batch")?;
+        Ok(())
+    }
+
     /// Delete an entry by ID from the memories table.
     pub async fn delete(&self, id: &str) -> Result<()> {
         let table = self.open_table().await?;
@@ -333,6 +357,44 @@ impl LanceIndex {
             count += batch.num_rows();
         }
         Ok(count)
+    }
+
+    /// Count rows and collect the distinct logical scopes in one
+    /// single-column scan (`logical` only).
+    ///
+    /// Backs the per-mutation manifest-stats refresh, which needs exactly
+    /// these two aggregates — deriving them from the 7-column summary
+    /// projection made every create/update/delete pay a full-row scan.
+    pub async fn count_and_logical_scopes(
+        &self,
+    ) -> Result<(usize, std::collections::HashSet<String>)> {
+        let table = self.open_table().await?;
+
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec!["logical".into()]))
+            .execute()
+            .await
+            .context("Failed to query LanceDB table for logical scopes")?;
+
+        let mut count = 0usize;
+        let mut scopes = std::collections::HashSet::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read batch")?;
+            count += batch.num_rows();
+            let logicals = batch
+                .column_by_name("logical")
+                .context("Missing 'logical' column")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("Failed to cast 'logical'")?;
+            for i in 0..batch.num_rows() {
+                let parsed: Vec<String> = serde_json::from_str(logicals.value(i))
+                    .context("Failed to parse 'logical' JSON")?;
+                scopes.extend(parsed);
+            }
+        }
+        Ok((count, scopes))
     }
 
     /// List all memory IDs in the memories table.
@@ -660,6 +722,25 @@ impl LanceIndex {
         Ok(())
     }
 
+    /// Delete the chunks of many memories in ONE delete commit
+    /// (`memory_id IN (...)`), instead of one dataset version per ID.
+    pub async fn delete_chunks_batch(&self, memory_ids: &[String]) -> Result<()> {
+        if memory_ids.is_empty() {
+            return Ok(());
+        }
+        let table = self.open_chunks_table().await?;
+        let list = memory_ids
+            .iter()
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        table
+            .delete(&format!("memory_id IN ({list})"))
+            .await
+            .context("Failed to delete chunk batch")?;
+        Ok(())
+    }
+
     /// Perform ANN vector search against the chunks table.
     ///
     /// Queries the chunks table, groups results by memory_id, and takes the
@@ -855,54 +936,65 @@ impl LanceIndex {
     // ---- Arrow conversion helpers ----
 
     fn entry_to_batch(&self, entry: &IndexEntry) -> Result<RecordBatch> {
-        let id_array = StringArray::from(vec![entry.id.as_str()]);
-        let summary_array = StringArray::from(vec![entry.summary.as_str()]);
-        let type_array = StringArray::from(vec![format!("{:?}", entry.type_).to_lowercase()]);
-        let status_array = StringArray::from(vec![format!("{:?}", entry.status).to_lowercase()]);
-        let provenance_array =
-            StringArray::from(vec![format!("{:?}", entry.provenance_source).to_lowercase()]);
-        let visibility_array =
-            StringArray::from(vec![format!("{:?}", entry.visibility).to_lowercase()]);
-        let criticality_array = Float64Array::from(vec![entry.criticality]);
-        let confidence_array = Float64Array::from(vec![entry.confidence]);
+        self.entries_to_batch(std::slice::from_ref(entry))
+    }
 
-        let physical_json =
-            serde_json::to_string(&entry.physical).context("Failed to serialize physical")?;
-        let logical_json =
-            serde_json::to_string(&entry.logical).context("Failed to serialize logical")?;
-        let tags_json = serde_json::to_string(&entry.tags).context("Failed to serialize tags")?;
+    /// Build one RecordBatch holding every entry (columnar, N rows).
+    fn entries_to_batch(&self, entries: &[IndexEntry]) -> Result<RecordBatch> {
+        let n = entries.len();
+        let mut ids = Vec::with_capacity(n);
+        let mut summaries = Vec::with_capacity(n);
+        let mut types = Vec::with_capacity(n);
+        let mut statuses = Vec::with_capacity(n);
+        let mut provenances = Vec::with_capacity(n);
+        let mut visibilities = Vec::with_capacity(n);
+        let mut criticalities = Vec::with_capacity(n);
+        let mut confidences = Vec::with_capacity(n);
+        let mut physicals = Vec::with_capacity(n);
+        let mut logicals = Vec::with_capacity(n);
+        let mut tags = Vec::with_capacity(n);
+        let mut created_ats = Vec::with_capacity(n);
+        let mut updated_ats = Vec::with_capacity(n);
+        let mut expires_ats: Vec<Option<String>> = Vec::with_capacity(n);
 
-        let physical_array = StringArray::from(vec![physical_json.as_str()]);
-        let logical_array = StringArray::from(vec![logical_json.as_str()]);
-        let tags_array = StringArray::from(vec![tags_json.as_str()]);
-
-        let created_at_str = entry.created_at.to_rfc3339();
-        let updated_at_str = entry.updated_at.to_rfc3339();
-        let created_at_array = StringArray::from(vec![created_at_str.as_str()]);
-        let updated_at_array = StringArray::from(vec![updated_at_str.as_str()]);
-        let expires_at_str = entry.expires_at.map(|dt| dt.to_rfc3339());
-        let expires_at_array: StringArray = match &expires_at_str {
-            Some(s) => StringArray::from(vec![Some(s.as_str())]),
-            None => StringArray::from(vec![Option::<&str>::None]),
-        };
+        for entry in entries {
+            ids.push(entry.id.clone());
+            summaries.push(entry.summary.clone());
+            types.push(format!("{:?}", entry.type_).to_lowercase());
+            statuses.push(format!("{:?}", entry.status).to_lowercase());
+            provenances.push(format!("{:?}", entry.provenance_source).to_lowercase());
+            visibilities.push(format!("{:?}", entry.visibility).to_lowercase());
+            criticalities.push(entry.criticality);
+            confidences.push(entry.confidence);
+            physicals.push(
+                serde_json::to_string(&entry.physical).context("Failed to serialize physical")?,
+            );
+            logicals.push(
+                serde_json::to_string(&entry.logical).context("Failed to serialize logical")?,
+            );
+            tags.push(serde_json::to_string(&entry.tags).context("Failed to serialize tags")?);
+            created_ats.push(entry.created_at.to_rfc3339());
+            updated_ats.push(entry.updated_at.to_rfc3339());
+            expires_ats.push(entry.expires_at.map(|dt| dt.to_rfc3339()));
+        }
 
         let batch = RecordBatch::try_new(
             self.memories_schema(),
             vec![
-                Arc::new(id_array) as ArrayRef,
-                Arc::new(summary_array) as ArrayRef,
-                Arc::new(type_array) as ArrayRef,
-                Arc::new(status_array) as ArrayRef,
-                Arc::new(provenance_array) as ArrayRef,
-                Arc::new(visibility_array) as ArrayRef,
-                Arc::new(criticality_array) as ArrayRef,
-                Arc::new(confidence_array) as ArrayRef,
-                Arc::new(physical_array) as ArrayRef,
-                Arc::new(logical_array) as ArrayRef,
-                Arc::new(tags_array) as ArrayRef,
-                Arc::new(created_at_array) as ArrayRef,
-                Arc::new(updated_at_array) as ArrayRef,
-                Arc::new(expires_at_array) as ArrayRef,
+                Arc::new(StringArray::from(ids)) as ArrayRef,
+                Arc::new(StringArray::from(summaries)) as ArrayRef,
+                Arc::new(StringArray::from(types)) as ArrayRef,
+                Arc::new(StringArray::from(statuses)) as ArrayRef,
+                Arc::new(StringArray::from(provenances)) as ArrayRef,
+                Arc::new(StringArray::from(visibilities)) as ArrayRef,
+                Arc::new(Float64Array::from(criticalities)) as ArrayRef,
+                Arc::new(Float64Array::from(confidences)) as ArrayRef,
+                Arc::new(StringArray::from(physicals)) as ArrayRef,
+                Arc::new(StringArray::from(logicals)) as ArrayRef,
+                Arc::new(StringArray::from(tags)) as ArrayRef,
+                Arc::new(StringArray::from(created_ats)) as ArrayRef,
+                Arc::new(StringArray::from(updated_ats)) as ArrayRef,
+                Arc::new(StringArray::from(expires_ats)) as ArrayRef,
             ],
         )
         .context("Failed to create RecordBatch")?;

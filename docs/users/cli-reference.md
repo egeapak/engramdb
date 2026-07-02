@@ -15,6 +15,16 @@ These apply to every subcommand and must appear **before** the subcommand:
 | `-q, --quiet` | off | Suppress non-essential output. |
 | `-v, --verbose` | off | Verbose output. |
 | `--embedding-backend <auto\|onnx\|ollama>` | (from config) | Override the embedding backend for this invocation. |
+| `--in-process` | off | Force in-process model loading — never contact the shared embedding daemon. Equivalent to `ENGRAMDB_IN_PROCESS=1`. |
+| `--spawn-daemon` | off | Spawn the shared embedding daemon if it isn't already running, then route through it (by default the CLI is connect-only). |
+| `--no-maintenance` | off | Skip the automatic main-worktree maintenance pass (orphan-project cleanup + quick store health check). Equivalent to `ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1`. |
+
+## Exit codes
+
+All commands exit `0` on success and non-zero on error, so they can gate scripts and CI:
+
+- `doctor` (and `doctor store` / `doctor validate`) exits non-zero when any check fails — advisory findings render as warnings and don't affect the exit code.
+- `migrate` and `rollback` exit non-zero when the store is missing or when any per-file migration error occurred.
 
 ## `init` — initialize a store
 
@@ -35,7 +45,7 @@ Positional argument: content. Alternatively `-c, --content <text>`, or `-i, --in
 | Flag | Description |
 |------|-------------|
 | `-t, --type <T>` | `decision`, `convention`, `hazard`, `context`, `intent`, `relationship`, `debug`, `preference`. Required. |
-| `-s, --summary <text>` | One-line summary (≤100 chars). Auto-generated if omitted. |
+| `-s, --summary <text>` | One-line summary (≤100 chars). Required — if omitted, you're prompted for it interactively in a terminal; non-interactive runs fail without it. |
 | `-T, --title <text>` | Short title used in the on-disk filename. |
 | `-c, --content <text>` | Content body. Alternative to positional. |
 | `-p, --physical <glob>` | File path or glob. Repeatable. Default `/`. |
@@ -165,12 +175,20 @@ engramdb stats [--all-projects] [--global] [--daemon]
 ## `doctor` — health check
 
 ```bash
-engramdb doctor [store] [--global]
+engramdb doctor [store|validate] [--fix] [--yes] [--global]
 ```
 
 Without a subcommand: full environment diagnostics (paths, embedding backend, daemon, model files, store consistency).
 
-`engramdb doctor store` is a fast project-scoped check (index vs disk only). Use it as a CI/script smoke test.
+| Flag / subcommand | Description |
+|-------------------|-------------|
+| `store` | Fast project-scoped check (index vs disk only). Use it as a CI/script smoke test. |
+| `validate` | Load each downloaded model and run a test inference to confirm it works. |
+| `--fix` | Offer to fix detected issues (reindex, download model, prune registry, init). Prompts on a terminal; in non-interactive contexts pair with `--yes`. |
+| `--yes` | Apply fixes without prompting (use with `--fix`; required to fix in non-TTY contexts). |
+| `--global` | Check the global cross-project store instead of the current project. |
+
+`doctor` exits non-zero when any check fails (see [Exit codes](#exit-codes)).
 
 ## `gc` — garbage collect
 
@@ -207,7 +225,7 @@ engramdb migrate [--dry-run] [--global]
 engramdb rollback --target-version <N> [--dry-run] [--global]
 ```
 
-Move memory files between format versions.
+Move memory files between format versions. Both exit non-zero when the store is missing or when any per-file error occurred, so they can gate scripts (see [Exit codes](#exit-codes)).
 
 ## `serve` — start the MCP server
 

@@ -9,9 +9,16 @@
 
 use super::error::Result;
 use engram_types::EngramConfig;
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 /// Load configuration from config.toml, or return defaults if file doesn't exist
+///
+/// A config that parses but fails [`EngramConfig::validate`] (weights not
+/// summing to 1.0, out-of-range timeouts, …) is returned as-is with a loud
+/// warning: runtime behavior stays permissive (score math clamps; `doctor`
+/// is the diagnostic surface), but the problem is no longer invisible.
 pub async fn load_config(config_path: &Path) -> Result<EngramConfig> {
     if !config_path.exists() {
         return Ok(EngramConfig::default());
@@ -19,7 +26,58 @@ pub async fn load_config(config_path: &Path) -> Result<EngramConfig> {
 
     let content = tokio::fs::read_to_string(config_path).await?;
     let config: EngramConfig = toml::from_str(&content)?;
+    if let Err(e) = config.validate() {
+        warn_once(
+            config_path,
+            &format!(
+                "config file {} is invalid ({e}); continuing with the values as written — \
+                 run `engramdb doctor` for details",
+                config_path.display()
+            ),
+        );
+    }
     Ok(config)
+}
+
+/// Load configuration, falling back to defaults on ANY failure — loudly.
+///
+/// This is the shared replacement for the `load_config(...).unwrap_or_default()`
+/// pattern: front-ends that must never fail because of a bad config (the MCP
+/// server, provider resolution, store open) still get defaults, but a config
+/// file that fails to parse is reported once per path per process instead of
+/// being silently ignored wholesale. A partial section (e.g. `[nli]` with
+/// required fields missing) fails the whole-file parse, so without the
+/// warning a user's entire config — including valid sections — vanished
+/// without a trace.
+pub async fn load_config_or_default(config_path: &Path) -> EngramConfig {
+    match load_config(config_path).await {
+        Ok(config) => config,
+        Err(e) => {
+            warn_once(
+                config_path,
+                &format!(
+                    "ignoring config file {}: {e}; ALL settings in it are falling back to \
+                     defaults — fix the file (see `engramdb doctor`) to restore them",
+                    config_path.display()
+                ),
+            );
+            EngramConfig::default()
+        }
+    }
+}
+
+/// Emit `tracing::warn!` for a config problem once per path per process, so
+/// per-tool-call config loads don't flood the log with the same diagnosis.
+fn warn_once(config_path: &Path, message: &str) {
+    static WARNED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let fresh = warned
+        .lock()
+        .map(|mut set| set.insert(config_path.to_path_buf()))
+        .unwrap_or(true);
+    if fresh {
+        tracing::warn!("{message}");
+    }
 }
 
 #[cfg(test)]

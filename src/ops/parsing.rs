@@ -69,6 +69,31 @@ pub fn validate_score(value: f64, field_name: &str) -> Result<f64> {
     Ok(value)
 }
 
+/// Parse an optional list of memory-type strings into a type filter.
+///
+/// `None` or an empty list means "no type filter". Shared by the CLI
+/// (`--type`, repeated) and the MCP `types` array so both boundaries parse
+/// and reject identically.
+pub fn parse_type_filter(types: Option<&[String]>) -> Result<Option<Vec<MemoryType>>> {
+    match types {
+        None | Some([]) => Ok(None),
+        Some(list) => Ok(Some(
+            list.iter()
+                .map(|t| parse_memory_type(t))
+                .collect::<Result<Vec<_>>>()?,
+        )),
+    }
+}
+
+/// Parse an optional detail-level string, defaulting to
+/// [`DetailLevel::Content`] — the shared default for both front-ends.
+pub fn parse_detail_level_or_default(s: Option<&str>) -> Result<DetailLevel> {
+    match s {
+        Some(s) => parse_detail_level(s),
+        None => Ok(DetailLevel::Content),
+    }
+}
+
 /// Parse a string into a DetailLevel enum.
 pub fn parse_detail_level(s: &str) -> Result<DetailLevel> {
     match s.to_lowercase().as_str() {

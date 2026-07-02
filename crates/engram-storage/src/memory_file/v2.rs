@@ -129,6 +129,7 @@ impl MemoryWriter for V2Writer {
 
 fn parse_v2(frontmatter: &str, body: &str) -> Result<Memory> {
     let fm: MinimalFrontmatter = serde_yaml_ng::from_str(frontmatter)?;
+    super::validate_id_shape(&fm.id)?;
 
     let sections = parse_body_sections(body);
 

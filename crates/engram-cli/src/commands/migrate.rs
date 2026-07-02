@@ -22,8 +22,9 @@ pub async fn run_migrate(
 ) -> Result<()> {
     let engramdb_dir = dir.join(".engramdb");
     if !engramdb_dir.exists() {
-        formatter.print_error("No .engramdb directory found. Run `engramdb init` first.");
-        return Ok(());
+        // Exit non-zero so scripts can gate on `migrate` (matches `doctor`):
+        // a missing store is a failed migration, not a successful no-op.
+        anyhow::bail!("No .engramdb directory found. Run `engramdb init` first.");
     }
 
     let shared_dir = paths::memories_dir(dir);
@@ -92,6 +93,11 @@ pub async fn run_migrate(
         for err in &errors {
             eprintln!("  {err}");
         }
+        // The per-file findings were already printed; the error sets the exit
+        // code (main maps Err → exit 1) so `engramdb migrate && deploy`
+        // cannot proceed past a partially failed migration. Failed files are
+        // left untouched in their (still parseable) older format.
+        anyhow::bail!("{} file(s) failed to migrate", errors.len());
     }
 
     Ok(())
@@ -212,12 +218,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migrate_no_engramdb_dir_is_noop() {
+    async fn migrate_no_engramdb_dir_exits_nonzero() {
         let tmp = TempDir::new().unwrap();
-        // No .engramdb subdir — early return, no error.
-        run_migrate(tmp.path(), false, false, &json_formatter())
+        // No .engramdb subdir — scripts must be able to gate on migrate, so a
+        // missing store is an error (exit 1 via main), not a silent no-op.
+        let err = run_migrate(tmp.path(), false, false, &json_formatter())
             .await
-            .unwrap();
+            .expect_err("missing store must fail");
+        assert!(err.to_string().contains("No .engramdb directory"));
         assert!(!tmp.path().join(".engramdb").exists());
     }
 
@@ -326,11 +334,13 @@ mod tests {
         let file = memories_dir.join("garbage.md");
         std::fs::write(&file, "this is not a valid memory file\n").unwrap();
 
-        // Must not panic. The error is collected internally and printed
-        // via the formatter; the returned Result is still Ok(()).
-        run_migrate(tmp.path(), false, false, &json_formatter())
+        // Must not panic. The per-file error is printed via the formatter and
+        // the command exits non-zero so scripted migrations can't silently
+        // proceed past a partial failure.
+        let err = run_migrate(tmp.path(), false, false, &json_formatter())
             .await
-            .unwrap();
+            .expect_err("per-file failures must set a non-zero exit");
+        assert!(err.to_string().contains("failed to migrate"));
 
         // The file should be left as-is on parse failure.
         assert_eq!(

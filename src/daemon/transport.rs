@@ -155,20 +155,44 @@ mod unix {
         // No listener — the socket file is stale. Reclaim it atomically: bind a
         // private per-pid path, then `rename` it over the target. `rename` is
         // atomic and replaces the entry in-place, so there's never a window
-        // where the target has no listener, and we can't unlink a socket a
-        // competing daemon just bound at the target (we only ever touch our own
-        // temp path).
-        let tmp = socket.with_extension(format!("tmp.{}", std::process::id()));
-        let _ = std::fs::remove_file(&tmp);
-        let listener = UnixListener::bind(&tmp)?;
-        // chmod the temp-path socket BEFORE renaming it over the target, so
-        // the target path never exposes a group/world-accessible socket, even
-        // for an instant.
-        if let Err(e) = restrict_socket(&tmp).and_then(|()| std::fs::rename(&tmp, socket)) {
+        // where the target has no listener.
+        //
+        // Reclaim itself is serialized by an advisory flock on a sibling lock
+        // file: `rename(2)` REPLACES the target, so two processes that both
+        // observed the socket stale would otherwise both bind+rename, the
+        // second replacing the first's just-bound socket — orphaning a live
+        // daemon that keeps its models resident (receiving no pings, winning
+        // no clients) until its idle timeout. Under the lock, the loser
+        // re-probes and yields to the winner instead. The lock is held only
+        // for the probe+bind+rename instants; the lock *file* (not the
+        // socket) is left behind, which is harmless.
+        let reclaim_lock = socket.with_extension("reclaim.lock");
+        let lock_file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&reclaim_lock)?;
+        fs4::fs_std::FileExt::lock_exclusive(&lock_file)?;
+        let result = (|| {
+            // Re-probe under the lock: if we lost the reclaim race, the
+            // winner's daemon now answers on the target path.
+            if std::os::unix::net::UnixStream::connect(socket).is_ok() {
+                return Ok(None);
+            }
+            let tmp = socket.with_extension(format!("tmp.{}", std::process::id()));
             let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
-        Ok(Some(Listener(listener)))
+            let listener = UnixListener::bind(&tmp)?;
+            // chmod the temp-path socket BEFORE renaming it over the target,
+            // so the target path never exposes a group/world-accessible
+            // socket, even for an instant.
+            if let Err(e) = restrict_socket(&tmp).and_then(|()| std::fs::rename(&tmp, socket)) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+            Ok(Some(Listener(listener)))
+        })();
+        let _ = fs4::fs_std::FileExt::unlock(&lock_file);
+        result
     }
 
     /// Connect to the daemon's socket.

@@ -1048,7 +1048,18 @@ async fn embed_memory_with(
     }
 
     let t = std::time::Instant::now();
-    store.upsert_chunks(&memory.id, vectors).await?;
+    // Freshness-guarded: this runs in detached ingest tasks with no ordering
+    // guarantee, so an embed of an older snapshot must not overwrite newer
+    // vectors, and an embed racing a delete must not re-insert orphan chunks.
+    let written = store
+        .upsert_chunks_if_current(&memory.id, vectors, memory.updated_at)
+        .await?;
+    if !written {
+        tracing::debug!(
+            memory_id = %memory.id,
+            "skipped chunk upsert: memory changed or was deleted since this snapshot"
+        );
+    }
     if let Some(t_) = telemetry {
         t_.record("create.upsert_chunks", t.elapsed().as_secs_f64() * 1000.0);
     }

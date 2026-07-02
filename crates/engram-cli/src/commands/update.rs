@@ -3,9 +3,8 @@
 use crate::output::OutputFormatter;
 use crate::validation::validate_score;
 use anyhow::{Context, Result};
-use engramdb::ops::{
-    self, parse_memory_type, parse_status, parse_visibility, DaemonCell, DaemonPolicy,
-};
+use engramdb::daemon::{DaemonCell, DaemonPolicy};
+use engramdb::ops::{self, parse_memory_type, parse_status, parse_visibility};
 use engramdb::ops::{update_memory, UpdateParams as OpsUpdateParams};
 use engramdb::storage::paths::memory_path;
 use engramdb::storage::MemoryStore;
@@ -148,12 +147,16 @@ pub async fn run_update_with_daemon(
         MemoryStore::open(dir).await?
     };
     let engine = if let Some(c) = cell {
-        let config = engramdb::storage::config::load_config(&config_path)
-            .await
-            .unwrap_or_default();
+        let config = engramdb::storage::config::load_config_or_default(&config_path).await;
         let project_dir = engine_store.project_dir.clone();
-        let providers =
-            ops::resolve_providers(c, &config, embedding_backend, &project_dir, policy).await;
+        let providers = engramdb::daemon::resolve_providers(
+            c,
+            &config,
+            embedding_backend,
+            &project_dir,
+            policy,
+        )
+        .await;
         ops::assemble_engine(engine_store, config, providers)
     } else {
         ops::build_engine(engine_store, &config_path, embedding_backend).await

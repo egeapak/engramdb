@@ -13,15 +13,51 @@ use super::protocol::{
     PROTOCOL_VERSION,
 };
 use crate::ops::ProviderCache;
+use crate::types::EngramConfig;
 
 /// Snapshot is persisted to the global store at least this often while the
 /// daemon runs (plus on idle-exit and on graceful shutdown), so `stats
 /// --daemon` stays reasonably fresh even without a clean shutdown.
 const PERSIST_INTERVAL: Duration = Duration::from_secs(300);
 
+/// Parsed-config cache keyed by path, invalidated by file mtime.
+///
+/// Every Embed/Classify/Rerank/Title/Meta request resolves the caller's
+/// project config before the provider-cache lookup; re-reading and
+/// TOML-parsing the file on the daemon's hot path is pure waste when it
+/// hasn't changed. An mtime mismatch (including the file appearing or
+/// disappearing) refreshes the entry, so config edits still take effect on
+/// the next request.
+#[derive(Default)]
+struct ConfigCache {
+    inner: Mutex<std::collections::HashMap<PathBuf, (Option<std::time::SystemTime>, EngramConfig)>>,
+}
+
+impl ConfigCache {
+    async fn load(&self, path: &Path) -> EngramConfig {
+        let mtime = tokio::fs::metadata(path)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok());
+        if let Ok(guard) = self.inner.lock() {
+            if let Some((cached_mtime, cfg)) = guard.get(path) {
+                if *cached_mtime == mtime {
+                    return cfg.clone();
+                }
+            }
+        }
+        let cfg = crate::storage::config::load_config_or_default(path).await;
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.insert(path.to_path_buf(), (mtime, cfg.clone()));
+        }
+        cfg
+    }
+}
+
 /// Shared per-process daemon state.
 struct Ctx {
     cache: ProviderCache,
+    configs: ConfigCache,
     counters: Arc<Counters>,
     start: Instant,
     pid: u32,
@@ -86,6 +122,7 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let ctx = Arc::new(Ctx {
         cache: ProviderCache::new(),
+        configs: ConfigCache::default(),
         counters: Arc::new(Counters::seeded(base)),
         start: Instant::now(),
         pid: std::process::id(),
@@ -128,18 +165,25 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
                     _ = tokio::time::sleep(tick) => {}
                     _ = shutdown.changed() => return,
                 }
-                if active.load(Ordering::SeqCst) == 0 {
-                    let idle_for = ctx
-                        .last_activity
-                        .lock()
-                        .map(|t| t.elapsed())
-                        .unwrap_or_default();
-                    if idle_for >= idle_timeout {
-                        tracing::info!("engramdb daemon idle for {idle_for:?}; shutting down");
-                        ctx.persist().await;
-                        ctx.request_shutdown();
-                        return;
-                    }
+                // Read `last_activity` BEFORE `active`: the accept loop
+                // writes in the order increment-then-stamp, so a connection
+                // accepted between our two reads is observed as `active >= 1`
+                // and vetoes this tick — reading in the other order could see
+                // (active == 0, stale timestamp) and reap a just-accepted
+                // client. A connection that both started and finished inside
+                // the gap can still slip through, but the drain in
+                // `run_daemon` turns that into a premature-but-safe exit
+                // (in-flight work completes; refused clients fall back).
+                let idle_for = ctx
+                    .last_activity
+                    .lock()
+                    .map(|t| t.elapsed())
+                    .unwrap_or_default();
+                if idle_for >= idle_timeout && active.load(Ordering::SeqCst) == 0 {
+                    tracing::info!("engramdb daemon idle for {idle_for:?}; shutting down");
+                    ctx.persist().await;
+                    ctx.request_shutdown();
+                    return;
                 }
             }
         });
@@ -148,12 +192,17 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
     loop {
         let stream = tokio::select! {
             // Shutdown (requested by a client or the idle watchdog): stop
-            // accepting and return. Dropping the listener refuses any further
-            // connections; the socket *file* stays behind exactly as a killed
-            // daemon would leave it, and the next daemon reclaims it.
+            // accepting, drain in-flight connections (bounded), and return.
+            // Dropping the listener refuses any further connections; the
+            // socket *file* stays behind exactly as a killed daemon would
+            // leave it, and the next daemon reclaims it. The drain matters
+            // because the `engramdb daemon run` front-end exits the process
+            // when we return — without it, spawned `handle_conn` tasks die
+            // mid-request and their clients see "daemon closed connection
+            // without a response" on work that was already accepted.
             _ = shutdown_rx.changed() => {
                 tracing::info!("engramdb daemon stopped accepting connections");
-                return Ok(());
+                break;
             }
             res = listener.accept() => match res {
                 Ok(v) => v,
@@ -202,6 +251,36 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
             }
             active.fetch_sub(1, Ordering::SeqCst);
         });
+    }
+
+    // Refuse new connections immediately, then give in-flight requests a
+    // bounded window to finish before the front-end exits the process.
+    drop(listener);
+    drain_connections(&active, Duration::from_secs(30)).await;
+    Ok(())
+}
+
+/// Wait (bounded) for all in-flight connections to finish.
+///
+/// The `Shutdown` handler returns from `handle_conn` right after writing its
+/// ack, so the connection that requested the shutdown drains itself and this
+/// cannot deadlock on it. If a connection is still running at the deadline
+/// (e.g. a wedged client holding the stream open), exit anyway — graceful
+/// fallback on the client side is the contract.
+async fn drain_connections(active: &AtomicUsize, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let in_flight = active.load(Ordering::SeqCst);
+        if in_flight == 0 {
+            return;
+        }
+        if Instant::now() >= deadline {
+            tracing::warn!(
+                "daemon shutdown: {in_flight} connection(s) still in flight after {timeout:?}; exiting anyway"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -304,9 +383,7 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
         };
     }
     let config_path = Path::new(&req.dir).join(".engramdb").join("config.toml");
-    let config = crate::storage::config::load_config(&config_path)
-        .await
-        .unwrap_or_default();
+    let config = ctx.configs.load(&config_path).await;
     // `req.backend` is the backend the client already resolved; trust it over
     // this daemon process's own environment so the provider-cache key (and
     // thus the loaded model) matches what the client expects.

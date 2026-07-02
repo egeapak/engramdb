@@ -36,8 +36,8 @@ pub fn cli_daemon_policy(
     in_process: bool,
     spawn: bool,
     config: &engramdb::types::EngramConfig,
-) -> engramdb::ops::DaemonPolicy {
-    use engramdb::ops::DaemonPolicy;
+) -> engramdb::daemon::DaemonPolicy {
+    use engramdb::daemon::DaemonPolicy;
 
     // Master switch: daemon globally disabled → always in-process.
     if !config.daemon.enabled {
@@ -80,7 +80,7 @@ use app::{Cli, Command, HookCommand};
 use commands::{AddParams, ChallengeParams, QueryParams, UpdateParams};
 use output::OutputFormatter;
 
-use engramdb::ops::DaemonCell;
+use engramdb::daemon::DaemonCell;
 use engramdb::storage::FileRegistry;
 use prompter::InquirePrompter;
 
@@ -160,9 +160,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     // Load the project config once (best-effort: defaults if absent/unreadable)
     // — used for both the maintenance policy and the daemon policy below.
     let config_path = dir.join(".engramdb").join("config.toml");
-    let config = engramdb::storage::config::load_config(&config_path)
-        .await
-        .unwrap_or_default();
+    let config = engramdb::storage::config::load_config_or_default(&config_path).await;
 
     // When operating directly on the main worktree, run best-effort, throttled
     // housekeeping: clean up orphan/stale projects and quick-check the store's
@@ -202,6 +200,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Add {
             type_,
             content,
+            content_pos,
             summary,
             title,
             physical,
@@ -227,7 +226,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 &registry,
                 AddParams {
                     type_str: type_,
-                    content,
+                    // The Quick Start's trailing positional form; --content
+                    // wins (clap rejects both via conflicts_with anyway).
+                    content: content.or(content_pos),
                     summary,
                     title,
                     physical,
@@ -542,7 +543,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engramdb::ops::DaemonPolicy;
+    use engramdb::daemon::DaemonPolicy;
     use engramdb::types::EngramConfig;
 
     #[test]

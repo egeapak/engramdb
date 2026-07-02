@@ -59,9 +59,10 @@ engramdb setup
 # Initialize a store in the current project
 engramdb init
 
-# Add a memory
+# Add a memory (summary is required; omit it and a terminal will prompt for one)
 engramdb add --type decision --title "Use PostgreSQL for persistence" \
-  "Chose PostgreSQL over SQLite for concurrent write support."
+  --summary "Chose PostgreSQL over SQLite for concurrent write support" \
+  "The app needs many concurrent writers and SQLite serializes all writes."
 
 # Find memories by keyword (filter mode requires a query signal)
 engramdb query --mode filter "database choice"
@@ -74,7 +75,7 @@ engramdb query --mode rank --path src/db/connection.rs
 
 EngramDB stores memories as structured files (TOML + markdown) in `.engramdb/memories/` within your project. Each memory has:
 
-- **Type** — decision, hazard, convention, context, preference, reference
+- **Type** — decision, convention, hazard, context, intent, relationship, debug, preference
 - **Visibility** — project, team, or personal scope
 - **Criticality** — 0.0 to 1.0 score that decays over time
 - **Embeddings** — vector representations stored in a LanceDB index for semantic search
@@ -150,6 +151,10 @@ When running as an MCP server (`engramdb serve`), the following tools are availa
 | `reindex` | Rebuild the vector index |
 | `compress_candidates` | List memories eligible for compression |
 | `compress_apply` | Merge multiple memories into a summary |
+| `projects_list` | List all registered projects, including hierarchy |
+| `projects_info` | Info about a specific project (id, name, path, memory count, scopes) |
+| `projects_link` | Link a registered project as a sub-project of another |
+| `projects_unlink` | Remove a project's parent link, promoting it back to a root project |
 
 ## Configuration
 
@@ -262,7 +267,7 @@ Contributions are welcome. Please open an issue to discuss significant changes b
 
 1. Fork the repository
 2. Create a feature branch
-3. Ensure `cargo fmt --all` and `cargo clippy --all-targets --all-features -- -D warnings` pass
+3. Ensure `cargo fmt --all` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass
 4. Submit a pull request
 
 ## License

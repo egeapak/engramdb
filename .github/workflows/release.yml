@@ -13,27 +13,67 @@ env:
 
 jobs:
   # Gate the whole release on version consistency: the pushed tag (v0.7.0), the
-  # plugin manifest, and the marketplace manifest must all agree. Catches a
-  # tag/manifest drift before any binary is built or published.
+  # plugin manifest, the marketplace manifest, and the workspace version in
+  # Cargo.toml (what `engramdb --version` actually reports) must all agree.
+  # Catches a tag/manifest/binary drift before any binary is built or published.
   version-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Assert tag matches manifest versions
+      - name: Assert tag matches manifest and workspace versions
         run: |
           tag_ver="${GITHUB_REF_NAME#v}"
           plugin_ver=$(jq -r '.version' .claude-plugin/plugin.json)
           market_ver=$(jq -r '.plugins[] | select(.name == "engram") | .version' .claude-plugin/marketplace.json)
+          # [workspace.package] version is the single source of truth every
+          # crate inherits (version.workspace = true); grep it out of the raw
+          # TOML so this job stays toolchain-free.
+          cargo_ver=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
           echo "tag:              $tag_ver"
           echo "plugin.json:      $plugin_ver"
           echo "marketplace.json: $market_ver"
+          echo "Cargo.toml:       $cargo_ver"
           fail=0
           [ "$plugin_ver" = "$tag_ver" ] || { echo "::error::plugin.json ($plugin_ver) != tag ($tag_ver)"; fail=1; }
           [ "$market_ver" = "$tag_ver" ] || { echo "::error::marketplace.json ($market_ver) != tag ($tag_ver)"; fail=1; }
+          [ "$cargo_ver" = "$tag_ver" ] || { echo "::error::Cargo.toml [workspace.package] version ($cargo_ver) != tag ($tag_ver)"; fail=1; }
           exit $fail
 
+  # Release binaries must come from a commit the test suite passed on: a tag
+  # can point at any commit (including one that never went through a PR), so
+  # run the same suite CI runs (see ci.yml `test`) before any build starts.
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    env:
+      # Mirror ci.yml: drop debuginfo so the ~8 heavy test binaries stay
+      # within the runner's disk, and skip dead-weight incremental state.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install protobuf compiler and lld linker
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install nextest
+        # Prebuilt binary, same rationale as ci.yml: `cargo install` compiles
+        # nextest from source (~7 min on a cache miss).
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Run tests
+        run: cargo nextest run --workspace --all-features --locked
+
   build-arm:
-    needs: version-check
+    needs: [version-check, test]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -57,7 +97,9 @@ jobs:
       - name: Build release binary
         # `--bin engramdb` resolves to the `engram-cli` crate via the workspace's
         # `default-members` (the binary is not in the root core-lib package).
-        run: cargo build --release --bin engramdb
+        # `--locked` ensures the shipped binary uses exactly the committed
+        # Cargo.lock instead of silently re-resolving newer dependency versions.
+        run: cargo build --release --bin engramdb --locked
 
       - name: Package binary
         run: |
@@ -74,7 +116,7 @@ jobs:
             engramdb-aarch64-apple-darwin.tar.gz.sha256
 
   build-intel:
-    needs: version-check
+    needs: [version-check, test]
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
@@ -107,7 +149,7 @@ jobs:
           ORT_PREFER_DYNAMIC_LINK: "1"
           RUSTFLAGS: "-C link-arg=-Wl,-rpath,@executable_path"
         # `--bin engramdb` resolves via workspace `default-members` (see build-arm).
-        run: cargo build --release --bin engramdb
+        run: cargo build --release --bin engramdb --locked
 
       - name: Package binary with ONNX Runtime
         run: |
@@ -127,7 +169,7 @@ jobs:
             engramdb-x86_64-apple-darwin.tar.gz.sha256
 
   build-linux:
-    needs: version-check
+    needs: [version-check, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -144,7 +186,7 @@ jobs:
         # `--bin engramdb` resolves via workspace `default-members` (see build-arm).
         # ONNX Runtime is statically linked via fastembed's `download-binaries`,
         # so the binary is self-contained (no separate library to ship).
-        run: cargo build --release --bin engramdb
+        run: cargo build --release --bin engramdb --locked
 
       - name: Package binary
         run: |
@@ -161,7 +203,7 @@ jobs:
             engramdb-x86_64-unknown-linux-gnu.tar.gz.sha256
 
   build-windows:
-    needs: version-check
+    needs: [version-check, test]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -180,7 +222,7 @@ jobs:
         # Runtime is statically linked, so `engramdb.exe` is self-contained.
         # The release profile keeps the main thread under Windows' 1 MiB default
         # stack, so no `/STACK` linker flag is needed.
-        run: cargo build --release --bin engramdb
+        run: cargo build --release --bin engramdb --locked
 
       - name: Package binary
         shell: pwsh

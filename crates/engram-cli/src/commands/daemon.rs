@@ -15,9 +15,8 @@ use std::time::Duration;
 /// command — not a separate `current_dir()` lookup that would ignore `--dir`.
 async fn daemon_config_at(dir: &Path) -> DaemonConfig {
     let path = dir.join(".engramdb").join("config.toml");
-    engramdb::storage::config::load_config(&path)
+    engramdb::storage::config::load_config_or_default(&path)
         .await
-        .unwrap_or_default()
         .daemon
 }
 

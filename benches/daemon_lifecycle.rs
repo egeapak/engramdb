@@ -20,8 +20,8 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
+use engramdb::daemon::{resolve_providers, DaemonCell, DaemonPolicy};
 use engramdb::embeddings::OnnxProvider;
-use engramdb::ops::daemon_resolve::{resolve_providers, DaemonCell, DaemonPolicy};
 use engramdb::ops::resolve_engine_providers;
 use engramdb::types::EngramConfig;
 

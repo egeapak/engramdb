@@ -43,8 +43,9 @@ pub async fn run_rollback(
 ) -> Result<()> {
     let engramdb_dir = dir.join(".engramdb");
     if !engramdb_dir.exists() {
-        formatter.print_error("No .engramdb directory found. Run `engramdb init` first.");
-        return Ok(());
+        // Exit non-zero so scripts can gate on `rollback` (matches `doctor`
+        // and `migrate`): a missing store is a failure, not a no-op.
+        anyhow::bail!("No .engramdb directory found. Run `engramdb init` first.");
     }
 
     let target_label = target_version.map_or("v1 (legacy)".to_string(), |v| format!("v{v}"));
@@ -119,6 +120,9 @@ pub async fn run_rollback(
         for err in &errors {
             eprintln!("  {err}");
         }
+        // Findings already printed; the error sets the exit code (main maps
+        // Err → exit 1) so scripts cannot proceed past a partial rollback.
+        anyhow::bail!("{} file(s) failed to roll back", errors.len());
     }
 
     Ok(())
@@ -249,11 +253,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rollback_no_engramdb_dir_is_noop() {
+    async fn rollback_no_engramdb_dir_exits_nonzero() {
         let tmp = TempDir::new().unwrap();
-        run_rollback(tmp.path(), false, None, false, &json_formatter())
+        // Scripts must be able to gate on `rollback`: a missing store is an
+        // error (exit 1 via main), not a silent no-op.
+        let err = run_rollback(tmp.path(), false, None, false, &json_formatter())
             .await
-            .unwrap();
+            .expect_err("missing store must fail");
+        assert!(err.to_string().contains("No .engramdb directory"));
         assert!(!tmp.path().join(".engramdb").exists());
     }
 

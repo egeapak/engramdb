@@ -7,7 +7,6 @@
 pub mod challenge;
 pub mod compress;
 pub mod create;
-pub mod daemon_resolve;
 pub mod delete;
 pub mod doctor;
 pub mod gc;
@@ -29,7 +28,6 @@ pub use compress::{
     CompressCandidatesResult,
 };
 pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
-pub use daemon_resolve::{resolve_providers, DaemonCell, DaemonPolicy};
 pub use delete::delete_memory;
 pub use doctor::{
     doctor, doctor_environment, validate_models, CheckStatus, DoctorResult, DoctorSection,
@@ -40,10 +38,10 @@ pub use get::get_memory;
 pub use list::{list_memories, parse_sort_field, ListParams, SortField};
 pub use maintenance::{auto_maintain, maintenance_status, MaintenanceReport, MaintenanceStatus};
 pub use parsing::{
-    parse_decay_strategy, parse_detail_level, parse_memory_type, parse_status, parse_visibility,
-    validate_score,
+    parse_decay_strategy, parse_detail_level, parse_detail_level_or_default, parse_memory_type,
+    parse_status, parse_type_filter, parse_visibility, validate_score,
 };
-pub use query::{merge_scored_memories, query_memories};
+pub use query::{merge_scored_memories, query_memories, query_memories_with_global};
 pub use reindex::{reindex, ReindexResult};
 pub use resolve::{resolve_memory, ResolveAction, ResolveParams, ResolveResult};
 pub use review::{review_memories, ReviewParams};
@@ -439,9 +437,7 @@ pub async fn build_engine(
     config_path: &std::path::Path,
     backend_override: Option<EmbeddingBackend>,
 ) -> RetrievalEngine {
-    let config = crate::storage::config::load_config(config_path)
-        .await
-        .unwrap_or_default();
+    let config = crate::storage::config::load_config_or_default(config_path).await;
     // The CLI is one-shot (one op, then exit) with no concurrency, so a pool
     // would only pay N× the ~240ms model load for no throughput gain. Force
     // a single embedding session here regardless of config; pool auto-sizing
@@ -463,9 +459,7 @@ pub async fn build_engine_without_providers(
     store: MemoryStore,
     config_path: &std::path::Path,
 ) -> RetrievalEngine {
-    let config = crate::storage::config::load_config(config_path)
-        .await
-        .unwrap_or_default();
+    let config = crate::storage::config::load_config_or_default(config_path).await;
     assemble_engine(store, config, EngineProviders::default())
 }
 
@@ -474,27 +468,59 @@ pub async fn build_engine_without_providers(
 /// Two configs with the same key resolve to interchangeable model sessions, so
 /// the bundle can be shared. The resolved embedding backend is folded in so a
 /// CLI/env backend override doesn't collide with the config-default backend.
+///
+/// The four model-selecting config sections are destructured **exhaustively**
+/// (no `..`): adding a field to any of them fails compilation here, forcing
+/// an explicit decision about whether the new field affects which models get
+/// loaded. This key drifted behind the config twice before (title.strategy,
+/// title.pool_size — each a stale-bundle bug); the destructuring makes the
+/// third drift impossible to miss.
 pub fn provider_cache_key(
     config: &EngramConfig,
     backend_override: Option<EmbeddingBackend>,
     embedding_pool_size: usize,
 ) -> String {
-    let backend = resolve_backend(config.embeddings.backend, backend_override);
-    format!(
-        "{backend}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}",
-        config.embeddings.provider,
-        config.embeddings.dimensions,
-        embedding_pool_size,
-        config.nli.enabled,
-        config.nli.model,
-        config.rerank.enabled,
-        config.rerank.model,
-        config.title.strategy,
+    // Every field must be bound (or explicitly discarded with a reason).
+    let crate::types::config::EmbeddingsConfig {
+        backend: config_backend,
+        provider,
+        dimensions,
+        // Chunking width, not a model identity: the same loaded session
+        // serves any max_tokens (effective_chunk_tokens clamps per call).
+        max_tokens: _,
+        // Reindex *policy* — what to do on a model change, not which model.
+        reindex_on_model_change: _,
+        // The caller passes the RESOLVED pool size (auto `cores/2` applied),
+        // which is what actually sizes the bundle.
+        pool_size: _,
+    } = &config.embeddings;
+    let crate::types::config::NliConfig {
+        enabled: nli_enabled,
+        model: nli_model,
+        // Inference-time thresholds, applied per call — not model identity.
+        contradiction_threshold: _,
+        max_comparisons: _,
+        similarity_threshold: _,
+    } = &config.nli;
+    let crate::types::config::RerankConfig {
+        enabled: rerank_enabled,
+        model: rerank_model,
+        // Query-time knobs on an already-loaded reranker.
+        top_n: _,
+        weight: _,
+    } = &config.rerank;
+    let crate::types::config::TitleConfig {
+        strategy: title_strategy,
         // The T5 title pool is sized from this inside
         // `resolve_engine_providers`, so two configs with different title
         // pool sizes are NOT interchangeable bundles — omitting it would
         // serve a stale wrong-sized title pool after a config change.
-        config.title.pool_size,
+        pool_size: title_pool_size,
+    } = &config.title;
+
+    let backend = resolve_backend(*config_backend, backend_override);
+    format!(
+        "{backend}|{provider}|{dimensions}|{embedding_pool_size}|{nli_enabled}|{nli_model}|{rerank_enabled}|{rerank_model}|{title_strategy:?}|{title_pool_size:?}",
     )
 }
 
@@ -507,9 +533,40 @@ pub fn provider_cache_key(
 /// fallback path and the shared embedding daemon, so both share identical
 /// load-once semantics. `providers` carry no per-store state, so one bundle is
 /// reused across every project and call.
+///
+/// A bundle that failed to resolve everything the config requested (e.g. the
+/// embedding model lost a concurrent download race, or the model cache was
+/// not yet staged) is cached only for [`FAILED_BUNDLE_RETRY_AFTER`]: the
+/// heartbeat-kept-alive daemon and long-lived MCP fallback must recover once
+/// the cause is fixed, not serve the dead bundle for the process lifetime —
+/// the same "cached a `None` failure forever" class `DaemonCell` fixed for
+/// daemon handles.
 #[derive(Clone, Default)]
 pub struct ProviderCache {
-    inner: Arc<tokio::sync::Mutex<std::collections::HashMap<String, EngineProviders>>>,
+    inner: Arc<tokio::sync::Mutex<std::collections::HashMap<String, CachedProviders>>>,
+}
+
+/// How long a bundle with failed providers is served from cache before the
+/// next caller re-attempts the model load. Long enough that a broken machine
+/// isn't paying a failed load per request, short enough that fixing the model
+/// cache heals live daemons/sessions promptly.
+const FAILED_BUNDLE_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+struct CachedProviders {
+    providers: EngineProviders,
+    /// Whether every provider the config requested actually resolved.
+    complete: bool,
+    built_at: std::time::Instant,
+}
+
+/// True when every provider requested by `config` resolved: embeddings are
+/// always attempted; NLI/reranker only count when enabled; a title generator
+/// only counts under the T5 strategy.
+fn providers_complete(config: &EngramConfig, providers: &EngineProviders) -> bool {
+    providers.embedding.is_some()
+        && (!config.nli.enabled || providers.nli.is_some())
+        && (!config.rerank.enabled || providers.reranker.is_some())
+        && (config.title.strategy != crate::title::TitleStrategy::T5 || providers.title.is_some())
 }
 
 impl ProviderCache {
@@ -548,8 +605,12 @@ impl ProviderCache {
             .resolved_pool_size(crate::types::config::available_cores());
         let key = provider_cache_key(config, backend_override, pool_size);
         let mut guard = self.inner.lock().await;
-        if let Some(p) = guard.get(&key) {
-            return p.clone();
+        if let Some(entry) = guard.get(&key) {
+            if entry.complete || entry.built_at.elapsed() < FAILED_BUNDLE_RETRY_AFTER {
+                return entry.providers.clone();
+            }
+            // Incomplete bundle past its retry window: fall through and
+            // re-attempt the load (overwriting the cached failure).
         }
         let cfg = config.clone();
         let providers = tokio::task::spawn_blocking(move || {
@@ -560,8 +621,47 @@ impl ProviderCache {
             tracing::warn!("engine provider init task panicked: {e}");
             EngineProviders::default()
         });
-        guard.insert(key, providers.clone());
+        let complete = providers_complete(config, &providers);
+        if !complete {
+            tracing::warn!(
+                "provider bundle resolved incompletely (embedding: {}, nli: {}, rerank: {}, title: {}); \
+                 will re-attempt after {}s",
+                providers.embedding.is_some(),
+                providers.nli.is_some(),
+                providers.reranker.is_some(),
+                providers.title.is_some(),
+                FAILED_BUNDLE_RETRY_AFTER.as_secs(),
+            );
+        }
+        guard.insert(
+            key,
+            CachedProviders {
+                providers: providers.clone(),
+                complete,
+                built_at: std::time::Instant::now(),
+            },
+        );
         providers
+    }
+
+    /// Test seam: insert a pre-built bundle with an explicit completeness and
+    /// age, so retry semantics are testable without loading models.
+    #[cfg(test)]
+    async fn insert_for_test(
+        &self,
+        key: String,
+        providers: EngineProviders,
+        complete: bool,
+        built_at: std::time::Instant,
+    ) {
+        self.inner.lock().await.insert(
+            key,
+            CachedProviders {
+                providers,
+                complete,
+                built_at,
+            },
+        );
     }
 }
 
@@ -639,6 +739,128 @@ mod provider_cache_tests {
     async fn provider_cache_starts_empty() {
         let cache = ProviderCache::new();
         assert_eq!(cache.loaded_count().await, 0);
+    }
+
+    /// Deterministically fast-failing config: unknown embedding provider
+    /// (resolve_provider returns None without touching any model), NLI and
+    /// rerank disabled, keyword titles (nothing to load).
+    fn failing_config() -> EngramConfig {
+        let mut config = EngramConfig::default();
+        config.embeddings.provider = "definitely-not-a-model".to_string();
+        config.nli.enabled = false;
+        config.rerank.enabled = false;
+        config.title.strategy = crate::title::TitleStrategy::Keyword;
+        config
+    }
+
+    struct MarkerEmbedding;
+
+    #[async_trait::async_trait]
+    impl crate::embeddings::EmbeddingProvider for MarkerEmbedding {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.0; 4])
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.0; 4]).collect())
+        }
+        fn dimensions(&self) -> usize {
+            4
+        }
+        fn max_tokens(&self) -> usize {
+            16
+        }
+        fn model_id(&self) -> String {
+            "test/marker".to_string()
+        }
+    }
+
+    fn marker_bundle() -> EngineProviders {
+        EngineProviders {
+            embedding: Some(Arc::new(MarkerEmbedding)),
+            ..EngineProviders::default()
+        }
+    }
+
+    fn key_for(config: &EngramConfig) -> String {
+        let pool = config
+            .embeddings
+            .resolved_pool_size(crate::types::config::available_cores());
+        provider_cache_key(config, None, pool)
+    }
+
+    #[test]
+    fn providers_complete_tracks_requested_providers() {
+        let config = failing_config();
+        // Only embeddings are requested: empty bundle is incomplete, a bundle
+        // with an embedding provider is complete.
+        assert!(!providers_complete(&config, &EngineProviders::default()));
+        assert!(providers_complete(&config, &marker_bundle()));
+
+        // Enabling NLI makes a missing NLI provider incomplete again.
+        let mut config = failing_config();
+        config.nli.enabled = true;
+        assert!(!providers_complete(&config, &marker_bundle()));
+
+        // T5 titles require a title generator.
+        let mut config = failing_config();
+        config.title.strategy = crate::title::TitleStrategy::T5;
+        assert!(!providers_complete(&config, &marker_bundle()));
+    }
+
+    /// A failed (incomplete) bundle must not be cached forever: within the
+    /// retry window it is served from cache, past the window the next get()
+    /// re-attempts the load. A complete bundle never expires.
+    #[tokio::test]
+    async fn provider_cache_retries_failed_bundles_after_window() {
+        let config = failing_config();
+        let key = key_for(&config);
+        // Instant is monotonic-since-boot; on a very fresh machine there may
+        // be no representable instant this far in the past — skip then.
+        let Some(stale) = std::time::Instant::now().checked_sub(FAILED_BUNDLE_RETRY_AFTER * 2)
+        else {
+            return;
+        };
+
+        // Fresh incomplete entry: served from cache (marker survives).
+        let cache = ProviderCache::new();
+        cache
+            .insert_for_test(
+                key.clone(),
+                marker_bundle(),
+                false,
+                std::time::Instant::now(),
+            )
+            .await;
+        let got = cache.get(&config, None).await;
+        assert_eq!(
+            got.embedding.map(|e| e.model_id()),
+            Some("test/marker".to_string()),
+            "incomplete bundle inside the retry window must be served from cache"
+        );
+
+        // Stale incomplete entry: get() re-resolves (the failing config
+        // resolves to an empty bundle, so the marker disappears).
+        let cache = ProviderCache::new();
+        cache
+            .insert_for_test(key.clone(), marker_bundle(), false, stale)
+            .await;
+        let got = cache.get(&config, None).await;
+        assert!(
+            got.embedding.is_none(),
+            "incomplete bundle past the retry window must be re-resolved"
+        );
+
+        // Stale but complete entry: never re-resolved.
+        let cache = ProviderCache::new();
+        cache
+            .insert_for_test(key.clone(), marker_bundle(), true, stale)
+            .await;
+        let got = cache.get(&config, None).await;
+        assert_eq!(
+            got.embedding.map(|e| e.model_id()),
+            Some("test/marker".to_string()),
+            "complete bundles must be cached for the process lifetime"
+        );
     }
 }
 

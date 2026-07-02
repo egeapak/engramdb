@@ -4,10 +4,8 @@ use crate::output::OutputFormatter;
 use crate::prompter::Prompter;
 use crate::validation::validate_score;
 use anyhow::{anyhow, bail, Context, Result};
-use engramdb::ops::{
-    self, create_memory, parse_memory_type, parse_visibility, CreateParams, DaemonCell,
-    DaemonPolicy,
-};
+use engramdb::daemon::{DaemonCell, DaemonPolicy};
+use engramdb::ops::{self, create_memory, parse_memory_type, parse_visibility, CreateParams};
 use engramdb::storage::{MemoryStore, RegistryBackend};
 use engramdb::title::TitleStrategy;
 use engramdb::types::{MemoryType, Provenance, Visibility};
@@ -100,12 +98,16 @@ pub async fn run_add_with_daemon(
     // Build engine for auto-embedding on create
     let config_path = store.project_dir.join(".engramdb").join("config.toml");
     let engine = if let Some(c) = cell {
-        let config = engramdb::storage::config::load_config(&config_path)
-            .await
-            .unwrap_or_default();
+        let config = engramdb::storage::config::load_config_or_default(&config_path).await;
         let project_dir = store.project_dir.clone();
-        let providers =
-            ops::resolve_providers(c, &config, embedding_backend, &project_dir, policy).await;
+        let providers = engramdb::daemon::resolve_providers(
+            c,
+            &config,
+            embedding_backend,
+            &project_dir,
+            policy,
+        )
+        .await;
         ops::assemble_engine(store.clone(), config, providers)
     } else {
         ops::build_engine(store.clone(), &config_path, embedding_backend).await

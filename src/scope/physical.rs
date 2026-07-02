@@ -23,7 +23,32 @@
 //! - [`matches`]: Check if a path matches any pattern
 //! - [`proximity`]: Calculate proximity score between scopes and current path
 
-use globset::{Glob, GlobSetBuilder};
+use globset::{Glob, GlobMatcher};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+/// Process-wide cache of compiled glob matchers, keyed by pattern string.
+///
+/// `matches` runs for every index entry on every query — including the
+/// PreToolUse hook path — and compiling a glob is a regex build, so without
+/// caching each query pays O(entries × patterns) compilations even though
+/// scope patterns repeat heavily across entries and queries. Long-lived MCP
+/// processes amortize this to one compile per distinct pattern. Invalid
+/// patterns cache as `None` so they are not re-parsed either. Growth is
+/// bounded by the number of distinct physical scopes across the stores the
+/// process touches.
+fn cached_matcher(pattern: &str) -> Option<GlobMatcher> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<GlobMatcher>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut guard) = cache.lock() else {
+        // Poisoned lock: fall back to a one-off compile.
+        return Glob::new(pattern).ok().map(|g| g.compile_matcher());
+    };
+    guard
+        .entry(pattern.to_string())
+        .or_insert_with(|| Glob::new(pattern).ok().map(|g| g.compile_matcher()))
+        .clone()
+}
 
 /// Checks if a file path matches any of the given patterns.
 ///
@@ -61,19 +86,11 @@ pub fn matches(patterns: &[String], path: &str) -> bool {
         }
     }
 
-    // Build a GlobSet from all patterns
-    let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
-        if let Ok(glob) = Glob::new(pattern) {
-            builder.add(glob);
-        }
-    }
-
-    if let Ok(globset) = builder.build() {
-        globset.is_match(path)
-    } else {
-        false
-    }
+    // Glob patterns, via the per-pattern matcher cache (equivalent to the
+    // old build-a-GlobSet-per-call, without recompiling every query).
+    patterns
+        .iter()
+        .any(|p| cached_matcher(p).is_some_and(|m| m.is_match(path)))
 }
 
 /// Calculates proximity score between memory scopes and current file path.
@@ -173,13 +190,10 @@ fn directory_depth_from_parent(pattern: &str, current_path: &str) -> usize {
 }
 
 fn calculate_glob_score(pattern: &str, current_path: &str, base: f64, floor: f64) -> f64 {
-    // Try to match the glob
-    let glob = match Glob::new(pattern) {
-        Ok(g) => g,
-        Err(_) => return 0.0,
+    // Try to match the glob (compiled once per distinct pattern, memoized)
+    let Some(matcher) = cached_matcher(pattern) else {
+        return 0.0;
     };
-
-    let matcher = glob.compile_matcher();
     if !matcher.is_match(current_path) {
         return 0.0;
     }

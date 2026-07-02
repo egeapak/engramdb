@@ -34,6 +34,22 @@ fn extract_file_path(input: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// `visibility/provenance` marker for injected memory content, e.g.
+/// `shared/agent` or `personal/human`.
+///
+/// Shared memories arrive with a `git clone` (`.engramdb/memories/` is
+/// repo-adjacent), so their content is repo-authored, not necessarily the
+/// local user's. Injecting them into agent context unmarked made
+/// repo-shipped text indistinguishable from the user's own notes; the
+/// marker lets the agent (and a reviewing human) weigh trust.
+fn source_marker(m: &engramdb::types::Memory) -> String {
+    format!(
+        "{}/{}",
+        format!("{:?}", m.visibility).to_lowercase(),
+        format!("{:?}", m.provenance.source).to_lowercase()
+    )
+}
+
 /// Format scored memories into a compact additionalContext string (for PreToolUse).
 fn format_additional_context(header: &str, memories: &[ScoredMemory]) -> String {
     let mut lines: Vec<String> = vec![header.into()];
@@ -41,8 +57,12 @@ fn format_additional_context(header: &str, memories: &[ScoredMemory]) -> String 
         let m = &scored.memory;
         let type_str = format!("{:?}", m.type_).to_lowercase();
         lines.push(format!(
-            "- [{}] {} (criticality: {:.1}, score: {:.2})",
-            type_str, m.summary, m.criticality, scored.score
+            "- [{}] {} (criticality: {:.1}, score: {:.2}, source: {})",
+            type_str,
+            m.summary,
+            m.criticality,
+            scored.score,
+            source_marker(m)
         ));
     }
     lines.join("\n")
@@ -163,7 +183,10 @@ fn group_by_type(memories: &[ScoredMemory]) -> Vec<(String, Vec<&ScoredMemory>)>
 /// Format a single memory entry as one or two lines (summary + optional preview).
 fn format_memory_entry(scored: &ScoredMemory) -> Vec<String> {
     let m = &scored.memory;
-    let mut meta_parts: Vec<String> = vec![format!("criticality: {:.1}", m.criticality)];
+    let mut meta_parts: Vec<String> = vec![
+        format!("criticality: {:.1}", m.criticality),
+        format!("source: {}", source_marker(m)),
+    ];
     if !m.tags.is_empty() {
         meta_parts.push(format!("tags: {}", m.tags.join(", ")));
     }
@@ -602,6 +625,46 @@ mod tests {
         assert!(ctx.contains("scope: workflow.pr"));
         assert!(ctx.contains("criticality: 0.8"));
         assert!(ctx.contains("PR templates are stored in"));
+    }
+
+    /// Injected memory content must carry a `visibility/provenance` marker:
+    /// shared memories arrive with a `git clone`, so the agent (and a
+    /// reviewing human) must be able to tell repo-shipped content from the
+    /// user's own personal notes.
+    #[test]
+    fn test_injected_context_marks_visibility_and_provenance() {
+        let mut shared = Memory::new(
+            MemoryType::Convention,
+            "Repo-shipped convention",
+            "Content that arrived with the clone",
+            Provenance::agent("mcp"),
+        );
+        shared.visibility = engramdb::types::Visibility::Shared;
+        let mut personal = Memory::new(
+            MemoryType::Preference,
+            "My own preference",
+            "Local-only note",
+            Provenance::human(),
+        );
+        personal.visibility = engramdb::types::Visibility::Personal;
+        let scored: Vec<ScoredMemory> = [shared, personal]
+            .into_iter()
+            .map(|memory| ScoredMemory {
+                memory,
+                score: 0.9,
+                score_breakdown: Default::default(),
+            })
+            .collect();
+
+        // Detailed (SessionStart) format.
+        let ctx = format_detailed_context("[EngramDB] Key project memories:", &scored);
+        assert!(ctx.contains("source: shared/agent"), "{ctx}");
+        assert!(ctx.contains("source: personal/human"), "{ctx}");
+
+        // Compact (PreToolUse) format.
+        let ctx = format_additional_context("[EngramDB]", &scored);
+        assert!(ctx.contains("source: shared/agent"), "{ctx}");
+        assert!(ctx.contains("source: personal/human"), "{ctx}");
     }
 
     #[test]

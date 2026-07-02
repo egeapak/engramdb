@@ -84,7 +84,7 @@ Returns the full memory object including `details` (which is lazy-loaded in `que
 | `decay_ttl?` | `u64` | Seconds, for linear/step. |
 | `decay_floor?` | `f64` | Min decay factor 0..1. |
 | `title?` | `string` | Short title used in the file name. |
-| `title_strategy?` | `"keyword"` \| `"t5"` \| `"none"` | Title generation strategy if `title` omitted. Default `"keyword"`. |
+| `title_strategy?` | `"keyword"` \| `"t5"` \| `"none"` | Title generation strategy if `title` omitted. Defaults to the project's `[title].strategy` config (`t5` unless overridden). |
 | `project?` | `string` | See conventions. |
 
 If NLI contradiction detection is enabled, the response may include auto-challenges against conflicting existing memories.

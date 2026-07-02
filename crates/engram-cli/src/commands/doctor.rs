@@ -130,10 +130,10 @@ async fn run_validate(dir: &Path, global: bool, formatter: &OutputFormatter) -> 
         .as_ref()
         .map(|s| s.project_dir.clone())
         .unwrap_or_else(|| dir.to_path_buf());
-    let config =
-        engramdb::storage::config::load_config(&config_dir.join(".engramdb").join("config.toml"))
-            .await
-            .unwrap_or_default();
+    let config = engramdb::storage::config::load_config_or_default(
+        &config_dir.join(".engramdb").join("config.toml"),
+    )
+    .await;
 
     let checks = validate_models(&config).await;
     let all_passed = checks.iter().all(|c| c.passed);

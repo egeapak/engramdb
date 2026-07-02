@@ -2,7 +2,8 @@
 
 use crate::output::OutputFormatter;
 use anyhow::Result;
-use engramdb::ops::{reindex, DaemonCell, DaemonPolicy};
+use engramdb::daemon::{DaemonCell, DaemonPolicy};
+use engramdb::ops::reindex;
 use engramdb::storage::MemoryStore;
 use std::path::Path;
 use std::sync::Arc;
@@ -64,11 +65,9 @@ pub async fn run_reindex_with_daemon(
             MemoryStore::open(dir).await?
         };
         if let Some(c) = cell {
-            let config = engramdb::storage::config::load_config(&config_path)
-                .await
-                .unwrap_or_default();
+            let config = engramdb::storage::config::load_config_or_default(&config_path).await;
             let project_dir = engine_store.project_dir.clone();
-            let providers = engramdb::ops::resolve_providers(
+            let providers = engramdb::daemon::resolve_providers(
                 c,
                 &config,
                 embedding_backend,

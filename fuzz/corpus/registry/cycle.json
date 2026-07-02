@@ -1,0 +1,19 @@
+{
+  "projects": [
+    {
+      "project_id": "aaaaaaaaaaaaaaaa",
+      "project_path": "/tmp/a",
+      "parent_project_id": "bbbbbbbbbbbbbbbb"
+    },
+    {
+      "project_id": "bbbbbbbbbbbbbbbb",
+      "project_path": "/tmp/b",
+      "parent_project_id": "aaaaaaaaaaaaaaaa"
+    },
+    {
+      "project_id": "cccccccccccccccc",
+      "project_path": "/tmp/c",
+      "parent_project_id": "cccccccccccccccc"
+    }
+  ]
+}

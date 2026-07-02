@@ -16,6 +16,40 @@ pub async fn query_memories(
     Ok(result)
 }
 
+/// Run `query` on `engine` and, when `include_global` is set, fold in the
+/// global store's results for the same query.
+///
+/// This is the shared `include_global` band that both front-ends used to
+/// hand-roll separately (the CLI copy even carried a comment "mirroring the
+/// MCP include_global option" — the drift pattern this module exists to
+/// prevent). `global_engine` is invoked lazily, only when the merge will
+/// actually run; callers already querying the global store should pass
+/// `include_global = false`. A `None` global engine or a failed global query
+/// degrades to project-only results — the global merge is best-effort by
+/// contract.
+pub async fn query_memories_with_global<F, Fut>(
+    engine: &RetrievalEngine,
+    query: &RetrievalQuery,
+    include_global: bool,
+    global_engine: F,
+) -> Result<RetrievalResult>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Option<RetrievalEngine>>,
+{
+    let mut result = query_memories(engine, query).await?;
+    if include_global {
+        if let Some(global_engine) = global_engine().await {
+            if let Ok(global_result) = query_memories(&global_engine, query).await {
+                let max = query.max_results.unwrap_or(10);
+                merge_scored_memories(&mut result.memories, global_result.memories, max);
+                result.total += global_result.total;
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// Merge `global` scored memories into `project`, deduplicating by ID,
 /// re-sorting by score descending, and truncating to `max`.
 ///

@@ -1029,7 +1029,7 @@ async fn health_check_of_wedged_daemon_fails_fast() {
 
 #[tokio::test]
 async fn daemon_cell_respawns_after_handle_lost() {
-    use crate::ops::daemon_resolve::{DaemonCell, DaemonPolicy};
+    use crate::daemon::resolve::{DaemonCell, DaemonPolicy};
 
     let tmp = TempDir::new().unwrap();
     let socket = tmp.path().join("cell.sock");
@@ -1105,7 +1105,7 @@ async fn wait_request(socket: &std::path::Path, req: DaemonRequest) -> DaemonRes
 /// socket activity.
 #[tokio::test]
 async fn resolve_providers_in_process_never_touches_socket() {
-    use crate::ops::daemon_resolve::{resolve_providers, DaemonCell, DaemonPolicy};
+    use crate::daemon::resolve::{resolve_providers, DaemonCell, DaemonPolicy};
 
     let tmp = TempDir::new().unwrap();
     // Deliberately absent socket — any connect attempt would fail.
@@ -1136,7 +1136,7 @@ async fn resolve_providers_in_process_never_touches_socket() {
 #[tokio::test]
 async fn cli_connect_only_uses_daemon_and_in_process_override_does_not() {
     use super::protocol::DaemonOp;
-    use crate::ops::daemon_resolve::{resolve_providers, DaemonCell, DaemonPolicy};
+    use crate::daemon::resolve::{resolve_providers, DaemonCell, DaemonPolicy};
 
     let tmp = TempDir::new().unwrap();
     let socket = tmp.path().join("cli-e2e.sock");
@@ -1199,7 +1199,7 @@ async fn cli_connect_only_uses_daemon_and_in_process_override_does_not() {
 #[tokio::test]
 async fn resolve_providers_connect_only_uses_live_daemon() {
     use super::protocol::DaemonOp;
-    use crate::ops::daemon_resolve::{resolve_providers, DaemonCell, DaemonPolicy};
+    use crate::daemon::resolve::{resolve_providers, DaemonCell, DaemonPolicy};
 
     let tmp = TempDir::new().unwrap();
     let socket = tmp.path().join("rp.sock");
@@ -1301,7 +1301,7 @@ async fn heartbeat_pings_keep_daemon_alive_past_idle() {
 /// assertion rather than spawning the test binary as a daemon.
 #[tokio::test]
 async fn daemon_cell_get_keeps_daemon_alive_past_idle() {
-    use crate::ops::daemon_resolve::{DaemonCell, DaemonPolicy};
+    use crate::daemon::resolve::{DaemonCell, DaemonPolicy};
 
     let tmp = TempDir::new().unwrap();
     let socket = tmp.path().join("hbcell.sock");
@@ -1331,7 +1331,7 @@ async fn daemon_cell_get_keeps_daemon_alive_past_idle() {
 /// (`poll_until_connectable` only opens a socket; it does not send a `Ping`.)
 #[tokio::test]
 async fn daemon_cell_get_pings_the_daemon() {
-    use crate::ops::daemon_resolve::{DaemonCell, DaemonPolicy};
+    use crate::daemon::resolve::{DaemonCell, DaemonPolicy};
 
     let tmp = TempDir::new().unwrap();
     let socket = tmp.path().join("cellping.sock");
@@ -1384,7 +1384,7 @@ async fn daemon_status_reports_ping_count_and_last_ping() {
 /// we start the replacement in-process to keep the test binary clean.)
 #[tokio::test]
 async fn cell_self_heals_after_daemon_killed() {
-    use crate::ops::daemon_resolve::{DaemonCell, DaemonPolicy};
+    use crate::daemon::resolve::{DaemonCell, DaemonPolicy};
 
     let tmp = TempDir::new().unwrap();
     let socket = tmp.path().join("heal.sock");

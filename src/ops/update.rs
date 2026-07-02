@@ -51,6 +51,19 @@ pub async fn update_memory(
     params: UpdateParams,
     engine: Option<&RetrievalEngine>,
 ) -> Result<bool> {
+    // Validate score fields in the shared core so every front-end path is
+    // covered (mirrors create_memory — see finding #3 there): a new caller
+    // must not be able to persist NaN/out-of-range scores that skew ranking.
+    if let Some(criticality) = params.criticality {
+        super::validate_score(criticality, "criticality")?;
+    }
+    if let Some(confidence) = params.confidence {
+        super::validate_score(confidence, "confidence")?;
+    }
+    if let Some(floor) = params.decay_floor {
+        super::validate_score(floor, "decay_floor")?;
+    }
+
     // Parse the decay strategy up front (it doesn't depend on the stored
     // memory) so invalid input fails before taking the write lock.
     let parsed_decay_strategy = match params.decay_strategy.as_deref() {
@@ -474,6 +487,45 @@ mod tests {
         assert_eq!(decay.strategy, DecayStrategy::Exponential); // Kept from original
         assert_eq!(decay.half_life, Some(Duration::days(14))); // Kept from original
         assert_eq!(decay.floor, 0.25); // Updated
+    }
+
+    /// Score validation must live in the ops core, not only in the
+    /// front-ends: out-of-range or non-finite values are rejected before the
+    /// write lock, and the stored memory is untouched.
+    #[tokio::test]
+    async fn test_update_rejects_invalid_scores_in_core() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
+
+        for (field, params) in [
+            ("criticality", {
+                let mut p = empty_update_params();
+                p.criticality = Some(5.0);
+                p
+            }),
+            ("confidence", {
+                let mut p = empty_update_params();
+                p.confidence = Some(-0.1);
+                p
+            }),
+            ("decay_floor", {
+                let mut p = empty_update_params();
+                p.decay_floor = Some(f64::NAN);
+                p
+            }),
+        ] {
+            let err = update_memory(&store, &id, params, None)
+                .await
+                .expect_err(&format!("invalid {field} must be rejected"));
+            assert!(
+                err.to_string().contains(field),
+                "error should name the offending field {field}: {err}"
+            );
+        }
+
+        // The memory is unchanged.
+        let memory = store.get(&id).await.unwrap();
+        assert_eq!(memory.criticality, 0.5);
     }
 
     #[tokio::test]

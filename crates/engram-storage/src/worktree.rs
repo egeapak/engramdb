@@ -28,8 +28,16 @@ use tokio::fs as async_fs;
 /// re-embedding. Returns the number of memories migrated.
 ///
 /// Files that can't be read or parsed are skipped (a single corrupt file
-/// must not abort consolidation). `create` is keyed by memory id, so a
-/// re-run after a partial migration simply overwrites — idempotent.
+/// must not abort consolidation). Re-runs are made safe two ways:
+/// - **newest wins**: when main already holds the same ID with an
+///   `updated_at` at least as new, the stray copy is dropped instead of
+///   migrated — `create` is a full overwrite, so migrating unconditionally
+///   would resurrect a stale snapshot (file, index row, AND vectors) over
+///   changes made in the main store after a partial run (a crash or a failed
+///   `remove_dir_all` leaves the stray store behind while main keeps moving);
+/// - **per-file deletion**: each source file is removed right after its
+///   successful migration, so a crash mid-loop leaves only not-yet-migrated
+///   files for the next run instead of the whole set.
 async fn migrate_dir(
     src_dir: &Path,
     wt_store: &MemoryStore,
@@ -53,6 +61,16 @@ async fn migrate_dir(
             continue;
         };
 
+        // Newest wins (see doc comment): a copy already in main that is at
+        // least as new means this stray file is a leftover from an earlier
+        // (partial) consolidation — drop it, don't resurrect it.
+        if let Ok(existing) = main_store.get(&memory.id).await {
+            if existing.updated_at >= memory.updated_at {
+                let _ = async_fs::remove_file(&path).await;
+                continue;
+            }
+        }
+
         // Write the memory (file + metadata) into the main project.
         main_store.create(&memory).await?;
 
@@ -63,6 +81,8 @@ async fn migrate_dir(
             main_store.upsert_chunks(&memory.id, chunks).await?;
         }
 
+        // Source file is consumed the moment its migration is durable.
+        let _ = async_fs::remove_file(&path).await;
         migrated += 1;
     }
     Ok(migrated)
@@ -291,6 +311,67 @@ mod tests {
         assert!(
             hits.iter().any(|m| m.id == mem_id),
             "migrated memory must be vector-searchable in main"
+        );
+    }
+
+    /// Regression: a consolidation re-run (crash / failed `remove_dir_all`
+    /// left the stray store behind) must NOT resurrect the stale worktree
+    /// snapshot over a copy that was updated in the main store since.
+    #[tokio::test]
+    async fn consolidate_rerun_does_not_resurrect_stale_content() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree(tmp.path());
+        let registry = InMemoryRegistry::new();
+
+        let main_store = MemoryStore::init(&main, &registry).await.unwrap();
+        let wt_store = MemoryStore::init(&wt, &registry).await.unwrap();
+        let mem = Memory::new(
+            MemoryType::Decision,
+            "Original summary",
+            "Original content",
+            Provenance::human(),
+        );
+        let mem_id = wt_store.create(&mem).await.unwrap();
+
+        // First consolidation migrates the memory into main.
+        assert_eq!(consolidate_worktree_into_main(&wt, &main).await.unwrap(), 1);
+
+        // Simulate the partial-run leftover: the stray store reappears with
+        // the ORIGINAL (now stale) snapshot still in it.
+        let wt_store = MemoryStore::init(&wt, &registry).await.unwrap();
+        wt_store.create(&mem).await.unwrap();
+        wt_store
+            .upsert_chunks(&mem_id, vec![vec![0.1f32; 384]])
+            .await
+            .unwrap();
+
+        // The main copy moves on (newer updated_at).
+        main_store
+            .update_with(&mem_id, |m| {
+                m.summary = "Updated in main".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        main_store
+            .upsert_chunks(&mem_id, vec![vec![0.9f32; 384]])
+            .await
+            .unwrap();
+
+        // Re-run: the stale stray copy must be dropped, not migrated.
+        assert_eq!(consolidate_worktree_into_main(&wt, &main).await.unwrap(), 0);
+        assert!(!wt.join(".engramdb").exists());
+
+        let after = main_store.get(&mem_id).await.unwrap();
+        assert_eq!(
+            after.summary, "Updated in main",
+            "newer main copy must survive a consolidation re-run"
+        );
+        let chunks = main_store.export_chunks(&mem_id).await.unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert!(
+            (chunks[0][0] - 0.9).abs() < f32::EPSILON,
+            "main's newer vectors must not be overwritten by the stale copy"
         );
     }
 
