@@ -733,6 +733,37 @@ fn scale_benchmarks(c: &mut Criterion) {
         });
     }
 
+    // --- query_filtered: Rank mode with a selective scalar filter ---
+    //
+    // Exercises the LanceDB scalar-filter pushdown (type + min_criticality):
+    // instead of streaming all 1k index rows into Rust and filtering there,
+    // the predicate narrows the scan to the ~1/8 matching subset before any
+    // Rust work or file reads. Rank mode (not Filter) because a scalar-only
+    // filter carries no Filter-mode relevance signal.
+    //
+    // NOTE on the values: in the synthetic bench dataset `generate_memory`
+    // makes criticality a pure function of `index % 8` — the SAME modulus that
+    // picks the type — so each type has one fixed criticality (Decision=0.3,
+    // Convention=1.0, Hazard=0.9, ...). `[Decision] + min_criticality 0.9`
+    // would therefore select ZERO rows here, so we use `[Convention]`
+    // (criticality 1.0) with `min_criticality 0.9`: both predicates hold and
+    // ~125 of the 1k memories survive.
+    {
+        let engine = RetrievalEngine::new(store.clone(), default_config());
+        let query = RetrievalQuery {
+            mode: RetrievalMode::Rank,
+            types: Some(vec![MemoryType::Convention]),
+            min_criticality: Some(0.9),
+            max_results: Some(10),
+            detail_level: DetailLevel::Summary,
+            ..Default::default()
+        };
+        group.bench_function("query_filtered", |b| {
+            b.to_async(&rt)
+                .iter(|| async { engine.query(&query).await.unwrap() });
+        });
+    }
+
     // --- vector_search: raw flat-KNN over the 1k-chunk table ---
 
     {

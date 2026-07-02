@@ -670,6 +670,23 @@ impl MemoryStore {
         })
     }
 
+    /// Like [`Self::list_for_filtering`], but pushes an optional LanceDB
+    /// `WHERE`-clause predicate into the index scan so selective scalar
+    /// filters (type, criticality, expiry) narrow the row set before any
+    /// disk I/O. See [`LanceIndex::list_for_filtering_where`] for the
+    /// predicate-safety contract (trusted, escaped inputs only).
+    pub async fn list_for_filtering_where(
+        &self,
+        predicate: Option<String>,
+    ) -> Result<Vec<IndexForFiltering>> {
+        self.lance_index
+            .list_for_filtering_where(predicate)
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB list_for_filtering_where failed: {}", e))
+            })
+    }
+
     /// List lightweight metadata summaries for all memories (7 columns).
     pub async fn list_summary(&self) -> Result<Vec<IndexSummary>> {
         self.lance_index

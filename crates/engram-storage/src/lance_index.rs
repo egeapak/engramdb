@@ -529,19 +529,44 @@ impl LanceIndex {
     /// by `apply_index_filters`: id, type, physical, logical, tags, criticality.
     /// Skips summary, status, visibility, dates — saving disk I/O and parsing.
     pub async fn list_for_filtering(&self) -> Result<Vec<IndexForFiltering>> {
+        self.list_for_filtering_where(None).await
+    }
+
+    /// Like [`Self::list_for_filtering`], but with an optional LanceDB
+    /// `WHERE`-clause pushdown so selective scalar filters (type, criticality,
+    /// expiry) narrow the row set inside the index scan instead of streaming
+    /// every row into Rust.
+    ///
+    /// The `predicate` string is a DataFusion SQL boolean expression over the
+    /// `memories` table columns. Callers MUST build it from trusted, already
+    /// validated data (e.g. enum-formatted type names, numeric literals) using
+    /// the same single-quote-escaping discipline as [`Self::vector_search`] and
+    /// [`Self::find_ids_by_prefix`] — no raw user strings. A `None` predicate
+    /// scans the whole table (identical to `list_for_filtering`).
+    ///
+    /// The pushdown is a pure narrowing optimization: the caller still applies
+    /// the equivalent filters in Rust (`apply_index_filters`), so a
+    /// conservatively-permissive predicate never changes the final result set.
+    pub async fn list_for_filtering_where(
+        &self,
+        predicate: Option<String>,
+    ) -> Result<Vec<IndexForFiltering>> {
         let table = self.open_table().await?;
 
-        let mut stream = table
-            .query()
-            .select(lancedb::query::Select::Columns(vec![
-                "id".into(),
-                "type".into(),
-                "physical".into(),
-                "logical".into(),
-                "tags".into(),
-                "criticality".into(),
-                "expires_at".into(),
-            ]))
+        let mut query = table.query().select(lancedb::query::Select::Columns(vec![
+            "id".into(),
+            "type".into(),
+            "physical".into(),
+            "logical".into(),
+            "tags".into(),
+            "criticality".into(),
+            "expires_at".into(),
+        ]));
+        if let Some(pred) = predicate {
+            query = query.only_if(pred);
+        }
+
+        let mut stream = query
             .execute()
             .await
             .context("Failed to query LanceDB table for filtering entries")?;
