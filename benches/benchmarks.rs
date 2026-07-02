@@ -1,5 +1,7 @@
 mod helpers;
 
+use std::cell::RefCell;
+use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
@@ -7,6 +9,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use engramdb::embeddings::{EmbeddingProvider, OnnxProvider};
 use engramdb::nli::{NliProvider, OnnxNliProvider};
 use engramdb::onnx_ep::Backend;
+use engramdb::retrieval::engine::RetrievalMode;
 use engramdb::retrieval::{
     apply_index_filters, DetailLevel, RetrievalEngine, RetrievalQuery, SearchFilters,
 };
@@ -598,7 +601,200 @@ fn ops_benchmarks(c: &mut Criterion) {
 }
 
 // ===========================================================================
-// Group 7: ONNX Backend Benchmarks — CPU vs Core ML (Apple GPU/ANE)
+// Group 7: Scale Benchmarks — O(n) costs at 1k memories
+// ===========================================================================
+//
+// Makes the review-identified O(n) costs visible to perf tooling ahead of two
+// planned changes (deferring query-path file reads; ANN indexing):
+//
+// - `query_rank`      — Rank mode, no query text (the SessionStart hook
+//                       shape): full-store filterable scan + per-result file
+//                       reads at 1k memories.
+// - `query_semantic`  — Filter mode WITH query text through the real engine
+//                       pipeline (embed → per-query chunk-id scan →
+//                       vector_search → composite scoring). A stub embedding
+//                       provider returns deterministic vectors so no ONNX
+//                       model runs inside the loop.
+// - `vector_search`   — `store.vector_search` over a 1k-chunk table: the raw
+//                       flat-KNN cost in isolation.
+// - `create_one`      — a single `store.create` into a store already holding
+//                       1k memories (per-mutation manifest-stats + index
+//                       upsert cost at scale).
+// - `reindex`         — `store.reindex()` over 1k memory files (metadata
+//                       rebuild, chunk-preserving).
+//
+// The store is seeded ONCE for the whole group (untimed); each memory gets
+// one synthetic 384-dim chunk vector seeded from its index. Sample counts are
+// small — these numbers are for before/after comparison, not statistics.
+
+const SCALE_COUNT: usize = 1_000;
+
+/// Deterministic, L2-normalized 384-dim vector derived from `seed`
+/// (xorshift64 over a splitmix-scrambled seed). No embedding model involved.
+fn synth_vector(seed: u64) -> Vec<f32> {
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut v: Vec<f32> = (0..384)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 40) as f32) / ((1u64 << 24) as f32) - 0.5
+        })
+        .collect();
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+    for x in &mut v {
+        *x /= norm;
+    }
+    v
+}
+
+/// Embedding provider stub for the semantic-path bench: deterministic
+/// vectors, zero model-load cost. Mirrors the shape of the stub in
+/// `ops::reindex` tests.
+struct StubEmbeddingProvider;
+
+#[async_trait::async_trait]
+impl EmbeddingProvider for StubEmbeddingProvider {
+    async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        Ok(synth_vector(text.len() as u64 + 7))
+    }
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        Ok(texts
+            .iter()
+            .map(|t| synth_vector(t.len() as u64 + 7))
+            .collect())
+    }
+    fn dimensions(&self) -> usize {
+        384
+    }
+    fn max_tokens(&self) -> usize {
+        256
+    }
+    fn model_id(&self) -> String {
+        "bench/stub-embedding".to_string()
+    }
+}
+
+fn scale_benchmarks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scale_1k");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(5));
+    let rt = runtime();
+
+    // One-time (untimed) seeding for the whole group: SCALE_COUNT memories,
+    // one synthetic chunk vector each, then a compaction pass so the timed
+    // scans measure steady state rather than 2k accumulated table versions.
+    let (temp_dir, store) = rt.block_on(async {
+        let (td, s) = setup_store(SCALE_COUNT).await;
+        let ids = s.list_ids().await.expect("failed to list seeded ids");
+        for (i, id) in ids.iter().enumerate() {
+            s.upsert_chunks(id, vec![synth_vector(i as u64)])
+                .await
+                .expect("failed to upsert bench chunks");
+        }
+        s.optimize().await.expect("failed to optimize seeded store");
+        (td, s)
+    });
+
+    // --- query_rank: Rank mode, no query text (SessionStart shape) ---
+
+    {
+        let engine = RetrievalEngine::new(store.clone(), default_config());
+        let query = RetrievalQuery {
+            mode: RetrievalMode::Rank,
+            path: Some("src/main.rs".to_string()),
+            logical: vec!["api.auth".to_string()],
+            max_results: Some(10),
+            detail_level: DetailLevel::Summary,
+            ..Default::default()
+        };
+        group.bench_function("query_rank", |b| {
+            b.to_async(&rt)
+                .iter(|| async { engine.query(&query).await.unwrap() });
+        });
+    }
+
+    // --- query_semantic: Filter mode with query text + stub embeddings ---
+
+    {
+        let engine = RetrievalEngine::new(store.clone(), default_config())
+            .with_embedding_provider(Arc::new(StubEmbeddingProvider));
+        let query = RetrievalQuery {
+            mode: RetrievalMode::Filter,
+            query: Some("authentication handler validates JWT tokens".to_string()),
+            max_results: Some(10),
+            detail_level: DetailLevel::Summary,
+            ..Default::default()
+        };
+        group.bench_function("query_semantic", |b| {
+            b.to_async(&rt)
+                .iter(|| async { engine.query(&query).await.unwrap() });
+        });
+    }
+
+    // --- vector_search: raw flat-KNN over the 1k-chunk table ---
+
+    {
+        let query_vec = synth_vector(0xBEEF);
+        group.bench_function("vector_search", |b| {
+            b.to_async(&rt).iter(|| {
+                let store = store.clone();
+                let q = query_vec.clone();
+                async move { store.vector_search(q, 20, None).await.unwrap() }
+            });
+        });
+    }
+
+    // --- create_one: single create into a store already holding 1k ---
+    //
+    // The previous iteration's memory is deleted in the (untimed) setup so
+    // the store stays at ~SCALE_COUNT for every sample. PerIteration keeps
+    // setup and routine strictly alternating, which the delete-previous
+    // scheme requires.
+
+    {
+        let last_id: RefCell<Option<String>> = RefCell::new(None);
+        let mut idx = SCALE_COUNT;
+        group.bench_function("create_one", |b| {
+            b.iter_batched(
+                || {
+                    if let Some(id) = last_id.borrow_mut().take() {
+                        rt.block_on(store.delete(&id))
+                            .expect("failed to delete previous bench memory");
+                    }
+                    let memory = generate_memory(idx);
+                    idx += 1;
+                    *last_id.borrow_mut() = Some(memory.id.clone());
+                    memory
+                },
+                |memory| {
+                    rt.block_on(store.create(&memory)).unwrap();
+                },
+                criterion::BatchSize::PerIteration,
+            );
+        });
+        // Remove the trailing memory so the reindex bench sees exactly 1k.
+        let trailing = last_id.borrow_mut().take();
+        if let Some(id) = trailing {
+            rt.block_on(store.delete(&id))
+                .expect("failed to delete trailing bench memory");
+        }
+    }
+
+    // --- reindex: full metadata rebuild from 1k files (chunk-preserving) ---
+
+    group.bench_function("reindex", |b| {
+        b.to_async(&rt)
+            .iter(|| async { store.reindex().await.unwrap() });
+    });
+
+    group.finish();
+    drop(temp_dir);
+}
+
+// ===========================================================================
+// Group 8: ONNX Backend Benchmarks — CPU vs Core ML (Apple GPU/ANE)
 // ===========================================================================
 //
 // A/B the same ONNX inference workloads (embeddings, NLI contradiction
@@ -689,6 +885,7 @@ criterion_group!(
     retrieval_benchmarks,
     hook_path_benchmarks,
     ops_benchmarks,
+    scale_benchmarks,
     onnx_backend_benchmarks,
 );
 criterion_main!(benches);
