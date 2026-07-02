@@ -172,7 +172,32 @@ mod unix {
             .truncate(false)
             .write(true)
             .open(&reclaim_lock)?;
-        fs4::fs_std::FileExt::lock_exclusive(&lock_file)?;
+        // Bounded acquisition: a competing reclaimer holds this only for the
+        // probe+bind+rename instants, so contention resolves in milliseconds.
+        // If the holder is wedged (stopped mid-reclaim), proceeding WITHOUT
+        // the lock after the deadline restores the pre-lock behavior (a
+        // narrow orphan-a-daemon race) — strictly better than hanging every
+        // future daemon startup behind a dead process's lock.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut locked = false;
+        loop {
+            match fs4::fs_std::FileExt::try_lock_exclusive(&lock_file) {
+                Ok(()) => {
+                    locked = true;
+                    break;
+                }
+                Err(_) if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "daemon socket reclaim lock unavailable after 2s ({e}); \
+                         proceeding unlocked"
+                    );
+                    break;
+                }
+            }
+        }
         let result = (|| {
             // Re-probe under the lock: if we lost the reclaim race, the
             // winner's daemon now answers on the target path.
@@ -191,7 +216,9 @@ mod unix {
             }
             Ok(Some(Listener(listener)))
         })();
-        let _ = fs4::fs_std::FileExt::unlock(&lock_file);
+        if locked {
+            let _ = fs4::fs_std::FileExt::unlock(&lock_file);
+        }
         result
     }
 

@@ -20,35 +20,40 @@ use crate::types::EngramConfig;
 /// --daemon` stays reasonably fresh even without a clean shutdown.
 const PERSIST_INTERVAL: Duration = Duration::from_secs(300);
 
-/// Parsed-config cache keyed by path, invalidated by file mtime.
+/// Parsed-config cache keyed by path, invalidated by file mtime + length.
 ///
 /// Every Embed/Classify/Rerank/Title/Meta request resolves the caller's
 /// project config before the provider-cache lookup; re-reading and
 /// TOML-parsing the file on the daemon's hot path is pure waste when it
-/// hasn't changed. An mtime mismatch (including the file appearing or
-/// disappearing) refreshes the entry, so config edits still take effect on
-/// the next request.
+/// hasn't changed. A stamp mismatch (including the file appearing or
+/// disappearing) refreshes the entry, so config edits take effect on the
+/// next request. Length is folded in alongside mtime so a same-second
+/// rewrite on coarse-timestamp filesystems still invalidates unless it is
+/// also byte-length-identical (an accepted residual staleness).
 #[derive(Default)]
 struct ConfigCache {
-    inner: Mutex<std::collections::HashMap<PathBuf, (Option<std::time::SystemTime>, EngramConfig)>>,
+    #[allow(clippy::type_complexity)]
+    inner: Mutex<
+        std::collections::HashMap<PathBuf, (Option<(std::time::SystemTime, u64)>, EngramConfig)>,
+    >,
 }
 
 impl ConfigCache {
     async fn load(&self, path: &Path) -> EngramConfig {
-        let mtime = tokio::fs::metadata(path)
+        let stamp = tokio::fs::metadata(path)
             .await
             .ok()
-            .and_then(|m| m.modified().ok());
+            .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
         if let Ok(guard) = self.inner.lock() {
-            if let Some((cached_mtime, cfg)) = guard.get(path) {
-                if *cached_mtime == mtime {
+            if let Some((cached_stamp, cfg)) = guard.get(path) {
+                if *cached_stamp == stamp {
                     return cfg.clone();
                 }
             }
         }
         let cfg = crate::storage::config::load_config_or_default(path).await;
         if let Ok(mut guard) = self.inner.lock() {
-            guard.insert(path.to_path_buf(), (mtime, cfg.clone()));
+            guard.insert(path.to_path_buf(), (stamp, cfg.clone()));
         }
         cfg
     }

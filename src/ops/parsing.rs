@@ -223,6 +223,22 @@ mod tests {
         assert!(validate_score(f64::INFINITY, "x").is_err());
     }
 
+    /// Pins the boundary contract both front-ends share: an ABSENT or EMPTY
+    /// type list means "no type filter" (all types), never "match nothing".
+    /// The MCP tool historically mapped `types: []` to `Some(vec![])`, which
+    /// the index filter treats as match-nothing — a front-end-only surprise
+    /// this helper deliberately unified away (CLI semantics won).
+    #[test]
+    fn test_parse_type_filter_empty_means_no_filter() {
+        assert_eq!(parse_type_filter(None).unwrap(), None);
+        assert_eq!(parse_type_filter(Some(&[])).unwrap(), None);
+        assert_eq!(
+            parse_type_filter(Some(&["decision".to_string()])).unwrap(),
+            Some(vec![MemoryType::Decision])
+        );
+        assert!(parse_type_filter(Some(&["nope".to_string()])).is_err());
+    }
+
     #[test]
     fn test_parse_detail_level_valid() {
         assert_eq!(parse_detail_level("summary").unwrap(), DetailLevel::Summary);

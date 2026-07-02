@@ -61,11 +61,16 @@ async fn migrate_dir(
             continue;
         };
 
-        // Newest wins (see doc comment): a copy already in main that is at
-        // least as new means this stray file is a leftover from an earlier
-        // (partial) consolidation — drop it, don't resurrect it.
+        // Newest wins (see doc comment): a STRICTLY newer copy in main means
+        // this stray file is a leftover from an earlier (partial)
+        // consolidation whose memory has since been edited — drop it, don't
+        // resurrect it. Equal timestamps re-migrate: a crash between main's
+        // `create` and the chunk relocation below leaves an equal-updated_at
+        // copy in main with NO vectors, and dropping the stray file then
+        // would lose them; re-migrating the identical snapshot is idempotent
+        // (create is a full overwrite, chunk upsert replaces in place).
         if let Ok(existing) = main_store.get(&memory.id).await {
-            if existing.updated_at >= memory.updated_at {
+            if existing.updated_at > memory.updated_at {
                 let _ = async_fs::remove_file(&path).await;
                 continue;
             }

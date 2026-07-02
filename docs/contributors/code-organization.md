@@ -102,7 +102,6 @@ re-exported from it).
 │
 ├── ops/                 # the shared operations layer
 │   ├── mod.rs           # provider_specs, ProviderCache, embedding_model_report
-│   ├── daemon_resolve.rs# DaemonPolicy, re-resolvable DaemonCell, resolve_providers (CLI+MCP)
 │   ├── create.rs        # CreateParams, create_memory, validate_summary
 │   ├── query.rs         # query_memories, merge_scored_memories
 │   ├── update.rs        # UpdateParams, update_memory
@@ -142,6 +141,7 @@ re-exported from it).
 │
 └── daemon/              # shared embedding daemon
     ├── mod.rs           # socket-path resolution
+    ├── resolve.rs       # DaemonPolicy, re-resolvable DaemonCell, resolve_providers (CLI+MCP)
     ├── server.rs        # daemon event loop
     ├── client.rs        # DaemonHandle, query_status, request_shutdown
     ├── protocol.rs      # wire protocol enums + PROTOCOL_VERSION
@@ -157,6 +157,7 @@ re-exported from it).
 ```
 ├── lib.rs
 ├── server.rs            # EngramDbServer: rmcp #[tool] macros + transports (large)
+├── server_tests.rs      # the server's test module (same `server::tests` path, own file)
 └── error.rs             # MCP-specific error mapping
 ```
 

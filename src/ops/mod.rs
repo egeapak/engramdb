@@ -550,6 +550,13 @@ pub struct ProviderCache {
 /// next caller re-attempts the model load. Long enough that a broken machine
 /// isn't paying a failed load per request, short enough that fixing the model
 /// cache heals live daemons/sessions promptly.
+///
+/// Known tradeoff: the cache's single mutex is held across the load (the
+/// pre-existing single-flight design), so on a machine where a provider is
+/// *permanently* unavailable every retry briefly stalls concurrent lookups —
+/// for every key — behind the failed attempt. Offline-mode loads fail fast,
+/// bounding the stall; a per-key in-flight guard would remove it entirely if
+/// this ever shows up in practice.
 const FAILED_BUNDLE_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 
 struct CachedProviders {
