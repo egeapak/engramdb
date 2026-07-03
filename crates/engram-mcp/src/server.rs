@@ -889,6 +889,61 @@ impl EngramDbServer {
         Ok(load_config_or_default(&config_path).await)
     }
 
+    /// Confused-deputy guard for MCP mutating tools.
+    ///
+    /// Nearly every tool accepts an optional `project` override that
+    /// [`Self::resolve_dir`] resolves to *any* project in the global registry,
+    /// not just the session's own. A steered agent could therefore mutate a
+    /// different registered project on the same machine. This gate — consulted
+    /// at the top of every mutating handler — enforces the session's
+    /// `[security].allow_cross_project_writes` policy.
+    ///
+    /// Always `Ok` when:
+    /// - `project` is `None` (the session's own project), or
+    /// - `project` is `"global"` (the shared global store is the intended
+    ///   cross-project store), or
+    /// - the override resolves to the session's *own* root project id (a
+    ///   worktree of the session's own project is not cross-project), or
+    /// - the session's config allows cross-project writes (the default).
+    ///
+    /// Otherwise (a different registered project, gate off) returns a
+    /// structured error and the write is refused.
+    async fn check_cross_project_write(&self, project: Option<&str>) -> Result<(), String> {
+        // The session's own project and the shared global store are always
+        // permitted, without touching the registry or config.
+        match project {
+            None => return Ok(()),
+            Some("global") => return Ok(()),
+            Some(_) => {}
+        }
+
+        // Resolve the override to its project root exactly as `resolve_dir`
+        // does, then compute the root id so a worktree of the target maps to
+        // its main project (and a worktree of *our own* project maps to us).
+        let target_dir = self.resolve_dir(project).await?;
+        let target_id = engramdb::storage::project_id::compute_project_id(&target_dir);
+        let own_id = engramdb::storage::project_id::compute_project_id(&self.effective_dir);
+        if target_id == own_id {
+            return Ok(());
+        }
+
+        // Different project: consult the SESSION's own project config.
+        let config = self.load_config_for(None).await?;
+        if config.security.allow_cross_project_writes {
+            return Ok(());
+        }
+
+        Err(error_response(
+            ErrorCode::ValidationError,
+            &format!(
+                "Cross-project writes are disabled by [security].allow_cross_project_writes = false. \
+                 This session's project (id: {own_id}) may not write to a different registered \
+                 project (id: {target_id}). Omit the `project` parameter to write to your own \
+                 project, or use project=\"global\" for the shared store.",
+            ),
+        ))
+    }
+
     /// Build a RetrievalEngine for the given project override.
     ///
     /// Model-backed providers come from the shared embedding daemon when
@@ -1316,6 +1371,8 @@ impl EngramDbServer {
         Parameters(input): Parameters<CreateInput>,
     ) -> Result<String, String> {
         let _scope = self.scope("create", input.project.as_deref());
+        self.check_cross_project_write(input.project.as_deref())
+            .await?;
         let store = self.open_store_for(input.project.as_deref()).await?;
         let engine = self.build_engine_for(input.project.as_deref()).await?;
         // The configured strategy is the deployment default; an explicit
@@ -1510,6 +1567,8 @@ impl EngramDbServer {
         Parameters(input): Parameters<UpdateInput>,
     ) -> Result<String, String> {
         let _scope = self.scope("update", input.project.as_deref());
+        self.check_cross_project_write(input.project.as_deref())
+            .await?;
         let store = self.open_store_for(input.project.as_deref()).await?;
         let engine = self.build_engine_for(input.project.as_deref()).await?;
 
@@ -1598,6 +1657,8 @@ impl EngramDbServer {
         Parameters(input): Parameters<DeleteInput>,
     ) -> Result<String, String> {
         let _scope = self.scope("delete", input.project.as_deref());
+        self.check_cross_project_write(input.project.as_deref())
+            .await?;
         let store = self.open_store_for(input.project.as_deref()).await?;
         ops::delete_memory(&store, &input.id)
             .await
@@ -1621,6 +1682,8 @@ impl EngramDbServer {
         Parameters(input): Parameters<ChallengeInput>,
     ) -> Result<String, String> {
         let _scope = self.scope("challenge", input.project.as_deref());
+        self.check_cross_project_write(input.project.as_deref())
+            .await?;
         let store = self.open_store_for(input.project.as_deref()).await?;
         let result = ops::challenge_memory(
             &store,
@@ -1693,6 +1756,8 @@ impl EngramDbServer {
         Parameters(input): Parameters<ResolveInput>,
     ) -> Result<String, String> {
         let _scope = self.scope("resolve", input.project.as_deref());
+        self.check_cross_project_write(input.project.as_deref())
+            .await?;
         let store = self.open_store_for(input.project.as_deref()).await?;
 
         let action = match input.action.as_str() {
@@ -1769,6 +1834,8 @@ impl EngramDbServer {
         Parameters(input): Parameters<CompressApplyInput>,
     ) -> Result<String, String> {
         let _scope = self.scope("compress_apply", input.project.as_deref());
+        self.check_cross_project_write(input.project.as_deref())
+            .await?;
         let store = self.open_store_for(input.project.as_deref()).await?;
         let result = ops::compress_apply(
             &store,
@@ -1878,6 +1945,8 @@ impl EngramDbServer {
     )]
     async fn memory_gc(&self, Parameters(input): Parameters<GcInput>) -> Result<String, String> {
         let _scope = self.scope("gc", input.project.as_deref());
+        self.check_cross_project_write(input.project.as_deref())
+            .await?;
         if let Some(t) = input.threshold {
             ops::validate_score(t, "threshold")
                 .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
@@ -1924,6 +1993,8 @@ impl EngramDbServer {
         Parameters(input): Parameters<ReindexInput>,
     ) -> Result<String, String> {
         let _scope = self.scope("reindex", input.project.as_deref());
+        self.check_cross_project_write(input.project.as_deref())
+            .await?;
         let store = self.open_store_for(input.project.as_deref()).await?;
         let embeddings_only = input.embeddings_only.unwrap_or(false);
         let index_only = input.index_only.unwrap_or(false);

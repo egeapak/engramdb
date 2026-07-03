@@ -705,6 +705,10 @@ pub struct EngramConfig {
     /// Automatic main-worktree maintenance settings
     #[serde(default)]
     pub maintenance: MaintenanceConfig,
+
+    /// Security / access-control settings
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 /// Shared embedding-daemon settings.
@@ -819,6 +823,49 @@ impl Default for MaintenanceConfig {
             enabled: default_maintenance_enabled(),
             interval_secs: default_maintenance_interval_secs(),
         }
+    }
+}
+
+/// Security / access-control settings.
+///
+/// Guards the confused-deputy surface of the MCP server: nearly every tool
+/// accepts an optional `project` override that `resolve_dir` resolves to *any*
+/// project registered in the global registry — not just the session's own
+/// project. An MCP agent operating in project A, if steered (e.g. by injected
+/// memory content) with project B's path/id, could otherwise mutate a
+/// different registered project B on the same machine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    /// Whether MCP mutating tools may write to a *different* registered
+    /// project than the session's own. Default `true` (preserves historical
+    /// behavior — cross-project writes allowed). When `false`, MCP mutating
+    /// tools (`create`, `update`, `delete`, `challenge`, `resolve`,
+    /// `compress_apply`, `gc`, `reindex`) are rejected when their `project`
+    /// override resolves to a project id other than the session's own. The
+    /// session's own project (`project` omitted) and the shared global store
+    /// (`project = "global"`) are always allowed.
+    #[serde(default = "default_allow_cross_project_writes")]
+    pub allow_cross_project_writes: bool,
+}
+
+fn default_allow_cross_project_writes() -> bool {
+    true
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            allow_cross_project_writes: default_allow_cross_project_writes(),
+        }
+    }
+}
+
+impl SecurityConfig {
+    /// Validate security configuration. There are no numeric bounds, so this
+    /// is trivially `Ok`; it exists to mirror the other sections' `validate`
+    /// pattern and give `EngramConfig::validate` a uniform call site.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        Ok(())
     }
 }
 
@@ -948,6 +995,7 @@ impl EngramConfig {
         self.rerank.validate()?;
         self.stats.validate()?;
         self.daemon.validate()?;
+        self.security.validate()?;
 
         if !(0.0..=1.0).contains(&self.retrieval.scoring.scope_multiplier_floor) {
             anyhow::bail!("scoring.scope_multiplier_floor must be in [0.0, 1.0]");
@@ -1277,6 +1325,51 @@ interval_secs = 60
         let config: EngramConfig = toml::from_str(toml).unwrap();
         assert!(!config.maintenance.enabled);
         assert_eq!(config.maintenance.interval_secs, 60);
+    }
+
+    #[test]
+    fn test_security_config_defaults() {
+        // Default: cross-project writes allowed (preserves historical behavior).
+        let config = EngramConfig::default();
+        assert!(config.security.allow_cross_project_writes);
+        assert!(SecurityConfig::default().allow_cross_project_writes);
+
+        // A config.toml with NO [security] section parses to the default true.
+        let from_empty: EngramConfig = toml::from_str("").unwrap();
+        assert!(from_empty.security.allow_cross_project_writes);
+    }
+
+    #[test]
+    fn test_security_config_partial_toml_defaults_field() {
+        // A partial [security] section (present but empty) still defaults the
+        // field to true via the field-level `#[serde(default = "...")]`.
+        let config: EngramConfig = toml::from_str("[security]\n").unwrap();
+        assert!(config.security.allow_cross_project_writes);
+    }
+
+    #[test]
+    fn test_security_config_custom_toml() {
+        let toml = r#"
+[security]
+allow_cross_project_writes = false
+"#;
+        let config: EngramConfig = toml::from_str(toml).unwrap();
+        assert!(!config.security.allow_cross_project_writes);
+        // Validation is trivially Ok regardless of the flag.
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn test_security_config_toml_roundtrip() {
+        let mut config = EngramConfig::default();
+        config.security.allow_cross_project_writes = false;
+
+        let temp_path = std::env::temp_dir().join("test_security_config_roundtrip.toml");
+        config.to_toml_file(&temp_path).unwrap();
+        let loaded = EngramConfig::from_toml_file(&temp_path).unwrap();
+        std::fs::remove_file(&temp_path).ok();
+
+        assert!(!loaded.security.allow_cross_project_writes);
     }
 
     #[test]

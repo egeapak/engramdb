@@ -1623,6 +1623,184 @@ async fn cross_project_delete() {
     assert!(get_result.is_err());
 }
 
+// -----------------------------------------------------------------------
+// Cross-project write gate ([security].allow_cross_project_writes)
+// -----------------------------------------------------------------------
+
+/// Write a `[security]` config into a project's `.engramdb/config.toml`.
+async fn write_security_config(dir: &std::path::Path, allow_cross_project_writes: bool) {
+    let engramdb_dir = dir.join(".engramdb");
+    tokio::fs::create_dir_all(&engramdb_dir).await.unwrap();
+    let toml = format!("[security]\nallow_cross_project_writes = {allow_cross_project_writes}\n");
+    tokio::fs::write(engramdb_dir.join("config.toml"), toml)
+        .await
+        .unwrap();
+}
+
+/// Build an `UpdateInput` with only `id`/`project` set (all else `None`).
+fn update_input(id: &str, project: Option<String>) -> UpdateInput {
+    UpdateInput {
+        id: id.to_string(),
+        type_: None,
+        content: Some("changed".to_string()),
+        summary: None,
+        details: None,
+        physical: None,
+        logical: None,
+        tags: None,
+        tags_add: None,
+        tags_remove: None,
+        criticality: None,
+        confidence: None,
+        visibility: None,
+        title: None,
+        status: None,
+        supersedes: None,
+        decay_strategy: None,
+        decay_half_life: None,
+        decay_ttl: None,
+        decay_floor: None,
+        project,
+    }
+}
+
+/// Default config (gate on): the helper does not block a write to a different
+/// registered project — by project id or by path.
+#[tokio::test]
+async fn cross_project_write_gate_allows_by_default() {
+    let (_dir_a, dir_b, server) = setup_cross_project().await;
+    let project_b_path = dir_b.path().to_string_lossy().to_string();
+    let project_id_b = engramdb::storage::project_id::compute_project_id(dir_b.path());
+
+    // No [security] section => default true => not blocked.
+    server
+        .check_cross_project_write(Some(&project_b_path))
+        .await
+        .expect("gate should allow by default (path)");
+    server
+        .check_cross_project_write(Some(&project_id_b))
+        .await
+        .expect("gate should allow by default (id)");
+
+    // And a real cross-project create actually succeeds under the default.
+    let mut input = create_input("decision", "Allowed by default", "In B");
+    input.project = Some(project_b_path);
+    let result = server.memory_create(Parameters(input)).await;
+    assert!(parse_ok(&result)["created"].as_bool().unwrap());
+}
+
+/// Gate off: create/update/delete/challenge targeting a DIFFERENT registered
+/// project are all rejected with the VALIDATION_ERROR gate error, before any
+/// store/model work.
+#[tokio::test]
+async fn cross_project_write_gate_rejects_when_disabled() {
+    let (dir_a, dir_b, server) = setup_cross_project().await;
+    write_security_config(dir_a.path(), false).await;
+    let project_b = dir_b.path().to_string_lossy().to_string();
+
+    let assert_blocked = |result: &Result<String, String>| {
+        let err = result.as_ref().unwrap_err();
+        assert!(err.contains("VALIDATION_ERROR"), "got: {err}");
+        assert!(
+            err.contains("allow_cross_project_writes"),
+            "gate message expected, got: {err}"
+        );
+    };
+
+    // create
+    let mut c = create_input("decision", "Blocked", "In B");
+    c.project = Some(project_b.clone());
+    assert_blocked(&server.memory_create(Parameters(c)).await);
+
+    // delete (id need not exist — the gate rejects before opening the store)
+    let del = server
+        .memory_delete(Parameters(DeleteInput {
+            id: "deadbeefdeadbeef".to_string(),
+            project: Some(project_b.clone()),
+        }))
+        .await;
+    assert_blocked(&del);
+
+    // update
+    let upd = server
+        .memory_update(Parameters(update_input(
+            "deadbeefdeadbeef",
+            Some(project_b.clone()),
+        )))
+        .await;
+    assert_blocked(&upd);
+
+    // challenge
+    let ch = server
+        .memory_challenge(Parameters(ChallengeInput {
+            id: "deadbeefdeadbeef".to_string(),
+            evidence: "contradiction".to_string(),
+            source_file: None,
+            project: Some(project_b),
+        }))
+        .await;
+    assert_blocked(&ch);
+}
+
+/// Gate off: the session's OWN project (`project = None`) and the shared
+/// global store (`project = "global"`) are always allowed.
+#[tokio::test]
+async fn cross_project_write_gate_allows_own_and_global_when_disabled() {
+    let (dir_a, _dir_b, server) = setup_cross_project().await;
+    write_security_config(dir_a.path(), false).await;
+
+    server
+        .check_cross_project_write(None)
+        .await
+        .expect("own project (None) must always be allowed");
+    server
+        .check_cross_project_write(Some("global"))
+        .await
+        .expect("global store must always be allowed");
+}
+
+/// Gate off: targeting the session's OWN project by explicit id/path resolves
+/// to the session's own root id and is NOT treated as cross-project. This is
+/// the same resolution path a linked worktree of the session's own project
+/// takes (its id resolves to the main project's id via
+/// `resolve_root_project_id`), so worktree parity is covered here without a
+/// real git worktree.
+#[tokio::test]
+async fn cross_project_write_gate_allows_own_project_by_id_when_disabled() {
+    let dir_a = TempDir::new().unwrap();
+    let dir_b = TempDir::new().unwrap();
+    let project_id_a = engramdb::storage::project_id::compute_project_id(dir_a.path());
+    let project_id_b = engramdb::storage::project_id::compute_project_id(dir_b.path());
+
+    let registry = InMemoryRegistry::new();
+    registry.update(dir_a.path(), &project_id_a).await.unwrap();
+    registry.update(dir_b.path(), &project_id_b).await.unwrap();
+    let registry: Arc<dyn RegistryBackend> = Arc::new(registry);
+
+    let server = EngramDbServer::new_with_registry(
+        dir_a.path().to_path_buf(),
+        Some(EmbeddingBackend::Onnx),
+        registry,
+    );
+    write_security_config(dir_a.path(), false).await;
+
+    // Own project referenced explicitly by id/path: allowed.
+    server
+        .check_cross_project_write(Some(&project_id_a))
+        .await
+        .expect("own project by id must be allowed even when gate is off");
+    let own_path = dir_a.path().to_string_lossy().to_string();
+    server
+        .check_cross_project_write(Some(&own_path))
+        .await
+        .expect("own project by path must be allowed even when gate is off");
+
+    // A different registered project: rejected.
+    let result = server.check_cross_project_write(Some(&project_id_b)).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("VALIDATION_ERROR"));
+}
+
 #[tokio::test]
 async fn cross_project_stats() {
     let (_dir_a, dir_b, server) = setup_cross_project().await;

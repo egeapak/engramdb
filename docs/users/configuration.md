@@ -109,6 +109,9 @@ use_for_cli = true             # route model-needing CLI commands through a runn
 [title]
 strategy = "t5"                # "t5" (default) | "keyword" | "none"
 # pool_size = 2                # T5 sessions to pool when strategy = "t5"; omit to auto-size (2, clamped to cores)
+
+[security]
+allow_cross_project_writes = true   # allow MCP tools to write to a different registered project
 ```
 
 ## Notes on selected sections
@@ -121,6 +124,7 @@ strategy = "t5"                # "t5" (default) | "keyword" | "none"
 - **`[stats]`** — telemetry events persist to a per-project LanceDB table. `retention_days` defaults to **90** so the event log cannot grow without bound; events older than the window are pruned periodically (by the background flush task and by `engramdb gc`). Set up to the maximum of 3650 (10 years) to effectively retain forever. `0` is rejected by validation — older versions documented it as "retain forever" but actually deleted everything, so an explicit positive value is now required. Lifetime counters in `engramdb stats` cover "since the oldest non-pruned event".
 - **`[title]`** — how a memory's title is generated when the caller doesn't supply one. `t5` (default) is abstractive T5-small summarization; the shared daemon / MCP server loads (and pools) the encoder+decoder **once machine-wide**, so the per-`create` cost is amortized. `keyword` is in-process RAKE extraction (no model); `none` skips automatic titling. The one-shot CLI's `engramdb add` always uses `keyword` so a single command never pays a cold T5 load. The MCP `create` tool's per-call `title_strategy` overrides this.
 - **`[daemon]`** — see [daemon.md](./daemon.md). `use_for_cli` (default `true`) lets model-needing CLI commands route through a *running* daemon; `--in-process` / `ENGRAMDB_IN_PROCESS` / `use_for_cli = false` force in-process loading.
+- **`[security]`** — `allow_cross_project_writes` (default `true`, preserving historical behavior) gates the MCP server's confused-deputy surface. Nearly every MCP tool accepts an optional `project` override that resolves to *any* project in the global registry, so a steered agent operating in project A could otherwise mutate a different registered project B on the same machine. Setting it to `false` blocks the MCP mutating tools (`create`, `update`, `delete`, `challenge`, `resolve`, `compress_apply`, `gc`, `reindex`) from writing to a **different** registered project. The session's own project (`project` omitted) and the shared global store (`project = "global"`) are always allowed; a linked worktree of the session's own project is not treated as cross-project. Read-only tools (`query`, `get`, `list`, `stats`, `review`, `compress_candidates`, `projects_*`, `doctor`) are never gated.
 
 ## Environment variables
 

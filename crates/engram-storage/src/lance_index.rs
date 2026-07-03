@@ -1952,8 +1952,11 @@ mod tests {
         let vectors = seeded_vectors(seed, count, 384);
         let table = lance.open_chunks_table().await.unwrap();
         let schema = lance.chunks_schema();
-        let memory_id_array =
-            StringArray::from((0..count).map(|i| format!("{prefix}-{i:04}")).collect::<Vec<_>>());
+        let memory_id_array = StringArray::from(
+            (0..count)
+                .map(|i| format!("{prefix}-{i:04}"))
+                .collect::<Vec<_>>(),
+        );
         let chunk_index_array = UInt32Array::from(vec![0u32; count]);
         let all_values: Vec<f32> = vectors.iter().flatten().copied().collect();
         let vector_array = FixedSizeListArray::new(
