@@ -802,6 +802,17 @@ impl RetrievalEngine {
         // LanceDB single-column scan of the chunks table per semantic query —
         // cheap next to the vector search itself. If the scan fails we fall
         // back to the legacy no-evidence path rather than failing the query.
+        //
+        // Deferred (Part B of finding performance-3): replacing this O(n)
+        // per-query chunk-table scan with a `has_embedding` boolean column on
+        // the MEMORIES table would let this set be read straight from the index
+        // projection with no separate scan. It is intentionally NOT done here:
+        // it is a memories-table SCHEMA MIGRATION with the same risk profile as
+        // the deferred `decay` column (finding performance-0, see Step 3 above)
+        // — existing stores would need a reindex to backfill the column, and a
+        // half-migrated store would mis-score. The two columns should land
+        // together as a single schema-version bump rather than piecemeal, so
+        // this scan stays until that migration.
         let embedded_ids: Option<std::collections::HashSet<String>> =
             if semantic_scores_map.is_some() {
                 match self.store.list_chunk_memory_ids().await {
