@@ -1,5 +1,6 @@
 //! Rebuild index and re-embed memories.
 
+use crate::engine::engine_for;
 use crate::output::OutputFormatter;
 use anyhow::Result;
 use engramdb::daemon::{DaemonCell, DaemonPolicy};
@@ -17,6 +18,7 @@ use std::sync::Arc;
 /// * `embeddings_only` - If true, only re-embed memories (skip index rebuild)
 /// * `index_only` - If true, only rebuild index (skip embeddings)
 /// * `formatter` - Output formatter for success/error messages
+#[allow(clippy::too_many_arguments)]
 pub async fn run_reindex(
     dir: &Path,
     global: bool,
@@ -24,30 +26,7 @@ pub async fn run_reindex(
     index_only: bool,
     embedding_backend: Option<engramdb::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
-) -> Result<()> {
-    run_reindex_with_daemon(
-        dir,
-        global,
-        embeddings_only,
-        index_only,
-        embedding_backend,
-        formatter,
-        None,
-        DaemonPolicy::InProcess,
-    )
-    .await
-}
-
-/// Like [`run_reindex`] but routes model resolution through the shared daemon cell.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_reindex_with_daemon(
-    dir: &Path,
-    global: bool,
-    embeddings_only: bool,
-    index_only: bool,
-    embedding_backend: Option<engramdb::types::EmbeddingBackend>,
-    formatter: &OutputFormatter,
-    cell: Option<&Arc<DaemonCell>>,
+    cell: &Arc<DaemonCell>,
     policy: DaemonPolicy,
 ) -> Result<()> {
     let store = if global {
@@ -55,7 +34,6 @@ pub async fn run_reindex_with_daemon(
     } else {
         MemoryStore::open(dir).await?
     };
-    let config_path = store.project_dir.join(".engramdb").join("config.toml");
 
     // Set up engine with embeddings if not index_only
     let engine = if !index_only {
@@ -64,25 +42,7 @@ pub async fn run_reindex_with_daemon(
         } else {
             MemoryStore::open(dir).await?
         };
-        if let Some(c) = cell {
-            let config = engramdb::storage::config::load_config_or_default(&config_path).await;
-            let project_dir = engine_store.project_dir.clone();
-            let providers = engramdb::daemon::resolve_providers(
-                c,
-                &config,
-                embedding_backend,
-                &project_dir,
-                policy,
-            )
-            .await;
-            Some(engramdb::ops::assemble_engine(
-                engine_store,
-                config,
-                providers,
-            ))
-        } else {
-            Some(engramdb::ops::build_engine(engine_store, &config_path, embedding_backend).await)
-        }
+        Some(engine_for(engine_store, embedding_backend, cell, policy).await)
     } else {
         None
     };
@@ -153,9 +113,18 @@ mod tests {
             .await
             .unwrap();
 
-        run_reindex(tmp.path(), false, false, true, None, &fmt())
-            .await
-            .unwrap();
+        run_reindex(
+            tmp.path(),
+            false,
+            false,
+            true,
+            None,
+            &fmt(),
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
+        )
+        .await
+        .unwrap();
     }
 
     /// `index_only=true` skips engine construction entirely (the
@@ -178,9 +147,18 @@ mod tests {
         store.create(&mem).await.unwrap();
 
         // index_only=true → engine is None → no embedding load attempted.
-        run_reindex(tmp.path(), false, false, true, None, &fmt())
-            .await
-            .unwrap();
+        run_reindex(
+            tmp.path(),
+            false,
+            false,
+            true,
+            None,
+            &fmt(),
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
+        )
+        .await
+        .unwrap();
     }
 
     /// Open-uninitialized-store path: must surface the error rather than
@@ -190,7 +168,17 @@ mod tests {
     async fn run_reindex_against_uninitialized_dir_errors() {
         let tmp = TempDir::new().unwrap();
         // Note: NO init.
-        let result = run_reindex(tmp.path(), false, false, true, None, &fmt()).await;
+        let result = run_reindex(
+            tmp.path(),
+            false,
+            false,
+            true,
+            None,
+            &fmt(),
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
+        )
+        .await;
         assert!(result.is_err(), "uninitialized store must error");
     }
 }

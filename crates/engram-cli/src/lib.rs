@@ -19,6 +19,7 @@
 
 pub mod app;
 pub mod commands;
+pub mod engine;
 pub mod output;
 pub mod prompter;
 pub mod validation;
@@ -220,7 +221,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             details_file,
             global,
         } => {
-            commands::add::run_add_with_daemon(
+            commands::add::run_add(
                 &dir,
                 global,
                 &registry,
@@ -250,7 +251,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 backend,
                 &formatter,
                 &prompter,
-                Some(&daemon_cell),
+                &daemon_cell,
                 daemon_policy,
             )
             .await
@@ -292,7 +293,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             // Explicit --query wins over positional.
             let query_text = query.or(query_pos);
 
-            commands::query::run_query_with_daemon(
+            commands::query::run_query(
                 &dir,
                 global,
                 QueryParams {
@@ -366,7 +367,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             editor,
             global,
         } => {
-            commands::update::run_update_with_daemon(
+            commands::update::run_update(
                 &dir,
                 global,
                 UpdateParams {
@@ -395,7 +396,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 },
                 backend,
                 &formatter,
-                Some(&daemon_cell),
+                &daemon_cell,
                 daemon_policy,
             )
             .await
@@ -478,14 +479,14 @@ pub async fn run(cli: Cli) -> Result<()> {
             index_only,
             global,
         } => {
-            commands::reindex::run_reindex_with_daemon(
+            commands::reindex::run_reindex(
                 &dir,
                 global,
                 embeddings_only,
                 index_only,
                 backend,
                 &formatter,
-                Some(&daemon_cell),
+                &daemon_cell,
                 daemon_policy,
             )
             .await

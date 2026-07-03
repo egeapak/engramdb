@@ -1,11 +1,12 @@
 //! Add a new memory to the store.
 
+use crate::engine::engine_for;
 use crate::output::OutputFormatter;
 use crate::prompter::Prompter;
 use crate::validation::validate_score;
 use anyhow::{anyhow, bail, Context, Result};
 use engramdb::daemon::{DaemonCell, DaemonPolicy};
-use engramdb::ops::{self, create_memory, parse_memory_type, parse_visibility, CreateParams};
+use engramdb::ops::{create_memory, parse_memory_type, parse_visibility, CreateParams};
 use engramdb::storage::{MemoryStore, RegistryBackend};
 use engramdb::title::TitleStrategy;
 use engramdb::types::{MemoryType, Provenance, Visibility};
@@ -49,6 +50,7 @@ pub struct AddParams {
 /// * `registry` - The registry backend to use for project registration
 /// * `params` - Memory creation parameters
 /// * `formatter` - Output formatter for success/error messages
+#[allow(clippy::too_many_arguments)]
 pub async fn run_add(
     dir: &Path,
     global: bool,
@@ -57,32 +59,7 @@ pub async fn run_add(
     embedding_backend: Option<engramdb::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
     prompter: &dyn Prompter,
-) -> Result<()> {
-    run_add_with_daemon(
-        dir,
-        global,
-        registry,
-        params,
-        embedding_backend,
-        formatter,
-        prompter,
-        None,
-        DaemonPolicy::InProcess,
-    )
-    .await
-}
-
-/// Like [`run_add`] but routes model resolution through the shared daemon cell.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_add_with_daemon(
-    dir: &Path,
-    global: bool,
-    registry: &dyn RegistryBackend,
-    params: AddParams,
-    embedding_backend: Option<engramdb::types::EmbeddingBackend>,
-    formatter: &OutputFormatter,
-    prompter: &dyn Prompter,
-    cell: Option<&Arc<DaemonCell>>,
+    cell: &Arc<DaemonCell>,
     policy: DaemonPolicy,
 ) -> Result<()> {
     // Open or initialize store. The global store auto-initializes on open.
@@ -96,22 +73,7 @@ pub async fn run_add_with_daemon(
     };
 
     // Build engine for auto-embedding on create
-    let config_path = store.project_dir.join(".engramdb").join("config.toml");
-    let engine = if let Some(c) = cell {
-        let config = engramdb::storage::config::load_config_or_default(&config_path).await;
-        let project_dir = store.project_dir.clone();
-        let providers = engramdb::daemon::resolve_providers(
-            c,
-            &config,
-            embedding_backend,
-            &project_dir,
-            policy,
-        )
-        .await;
-        ops::assemble_engine(store.clone(), config, providers)
-    } else {
-        ops::build_engine(store.clone(), &config_path, embedding_backend).await
-    };
+    let engine = engine_for(store.clone(), embedding_backend, cell, policy).await;
 
     // Handle details file
     let details_from_file = if let Some(ref details_file) = params.details_file {

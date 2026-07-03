@@ -1,5 +1,6 @@
 //! Unified memory query command.
 
+use crate::engine::engine_for;
 use crate::output::OutputFormatter;
 use anyhow::Result;
 use engramdb::daemon::{DaemonCell, DaemonPolicy};
@@ -38,48 +39,7 @@ pub async fn run_query(
     params: QueryParams,
     embedding_backend: Option<engramdb::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
-) -> Result<()> {
-    run_query_with_cell(
-        dir,
-        global,
-        params,
-        embedding_backend,
-        formatter,
-        None,
-        DaemonPolicy::InProcess,
-    )
-    .await
-}
-
-/// Like [`run_query`] but routes model resolution through the shared daemon cell.
-pub async fn run_query_with_daemon(
-    dir: &Path,
-    global: bool,
-    params: QueryParams,
-    embedding_backend: Option<engramdb::types::EmbeddingBackend>,
-    formatter: &OutputFormatter,
     cell: &Arc<DaemonCell>,
-    policy: DaemonPolicy,
-) -> Result<()> {
-    run_query_with_cell(
-        dir,
-        global,
-        params,
-        embedding_backend,
-        formatter,
-        Some(cell),
-        policy,
-    )
-    .await
-}
-
-async fn run_query_with_cell(
-    dir: &Path,
-    global: bool,
-    params: QueryParams,
-    embedding_backend: Option<engramdb::types::EmbeddingBackend>,
-    formatter: &OutputFormatter,
-    cell: Option<&Arc<DaemonCell>>,
     policy: DaemonPolicy,
 ) -> Result<()> {
     let store = if global {
@@ -93,8 +53,7 @@ async fn run_query_with_cell(
 
     let show_scores = params.show_scores;
     let result =
-        compute_query_result_with_cell(store, global, params, embedding_backend, cell, policy)
-            .await?;
+        compute_query_result(store, global, params, embedding_backend, cell, policy).await?;
 
     formatter.print_retrieval_result(&result, show_scores);
 
@@ -106,50 +65,15 @@ async fn run_query_with_cell(
 /// global store) merge in global-store hits — mirroring the MCP
 /// `include_global` option. Returned separately from rendering so the merge
 /// behavior is unit-testable offline.
-///
-/// Used from tests; production callers go through [`compute_query_result_with_cell`].
-#[cfg(test)]
-pub(crate) async fn compute_query_result(
+async fn compute_query_result(
     store: MemoryStore,
     global: bool,
     params: QueryParams,
     embedding_backend: Option<engramdb::types::EmbeddingBackend>,
-) -> Result<RetrievalResult> {
-    compute_query_result_with_cell(
-        store,
-        global,
-        params,
-        embedding_backend,
-        None,
-        DaemonPolicy::InProcess,
-    )
-    .await
-}
-
-async fn compute_query_result_with_cell(
-    store: MemoryStore,
-    global: bool,
-    params: QueryParams,
-    embedding_backend: Option<engramdb::types::EmbeddingBackend>,
-    cell: Option<&Arc<DaemonCell>>,
+    cell: &Arc<DaemonCell>,
     policy: DaemonPolicy,
 ) -> Result<RetrievalResult> {
-    let config_path = store.project_dir.join(".engramdb").join("config.toml");
-    let engine = if let Some(c) = cell {
-        let config = engramdb::storage::config::load_config_or_default(&config_path).await;
-        let project_dir = store.project_dir.clone();
-        let providers = engramdb::daemon::resolve_providers(
-            c,
-            &config,
-            embedding_backend,
-            &project_dir,
-            policy,
-        )
-        .await;
-        engramdb::ops::assemble_engine(store, config, providers)
-    } else {
-        engramdb::ops::build_engine(store, &config_path, embedding_backend).await
-    };
+    let engine = engine_for(store, embedding_backend, cell, policy).await;
 
     let types = engramdb::ops::parse_type_filter(Some(&params.type_filter))?;
 
@@ -186,23 +110,7 @@ async fn compute_query_result_with_cell(
     let result =
         engramdb::ops::query_memories_with_global(&engine, &query, include_global, || async {
             let global_store = MemoryStore::open_global().await.ok()?;
-            let global_config_path = global_store
-                .project_dir
-                .join(".engramdb")
-                .join("config.toml");
-            let global_engine = if let Some(c) = cell {
-                let gcfg =
-                    engramdb::storage::config::load_config_or_default(&global_config_path).await;
-                let gdir = global_store.project_dir.clone();
-                let gproviders =
-                    engramdb::daemon::resolve_providers(c, &gcfg, embedding_backend, &gdir, policy)
-                        .await;
-                engramdb::ops::assemble_engine(global_store, gcfg, gproviders)
-            } else {
-                engramdb::ops::build_engine(global_store, &global_config_path, embedding_backend)
-                    .await
-            };
-            Some(global_engine)
+            Some(engine_for(global_store, embedding_backend, cell, policy).await)
         })
         .await?;
 
@@ -287,7 +195,16 @@ mod tests {
             ..base_params()
         };
 
-        let result = run_query(temp_dir.path(), false, params, None, &formatter).await;
+        let result = run_query(
+            temp_dir.path(),
+            false,
+            params,
+            None,
+            &formatter,
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -302,7 +219,16 @@ mod tests {
             ..base_params()
         };
 
-        let result = run_query(temp_dir.path(), false, params, None, &formatter).await;
+        let result = run_query(
+            temp_dir.path(),
+            false,
+            params,
+            None,
+            &formatter,
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
+        )
+        .await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -321,7 +247,16 @@ mod tests {
             ..base_params()
         };
 
-        let result = run_query(temp_dir.path(), false, params, None, &formatter).await;
+        let result = run_query(
+            temp_dir.path(),
+            false,
+            params,
+            None,
+            &formatter,
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -336,7 +271,16 @@ mod tests {
             ..base_params()
         };
 
-        let result = run_query(temp_dir.path(), false, params, None, &formatter).await;
+        let result = run_query(
+            temp_dir.path(),
+            false,
+            params,
+            None,
+            &formatter,
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -366,9 +310,16 @@ mod tests {
 
         // include_global = true → the global memory is folded in.
         let store = MemoryStore::open(temp_dir.path()).await.unwrap();
-        let merged = compute_query_result(store, false, mk(true), None)
-            .await
-            .unwrap();
+        let merged = compute_query_result(
+            store,
+            false,
+            mk(true),
+            None,
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
+        )
+        .await
+        .unwrap();
         assert!(
             merged
                 .memories
@@ -379,9 +330,16 @@ mod tests {
 
         // include_global = false → negative control: it must NOT appear.
         let store = MemoryStore::open(temp_dir.path()).await.unwrap();
-        let project_only = compute_query_result(store, false, mk(false), None)
-            .await
-            .unwrap();
+        let project_only = compute_query_result(
+            store,
+            false,
+            mk(false),
+            None,
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
+        )
+        .await
+        .unwrap();
         assert!(
             !project_only
                 .memories
@@ -403,7 +361,16 @@ mod tests {
             ..base_params()
         };
 
-        let result = run_query(temp_dir.path(), false, params, None, &formatter).await;
+        let result = run_query(
+            temp_dir.path(),
+            false,
+            params,
+            None,
+            &formatter,
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
+        )
+        .await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(

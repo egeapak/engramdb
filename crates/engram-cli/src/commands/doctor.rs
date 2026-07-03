@@ -192,8 +192,19 @@ impl FixAction {
                 crate::commands::run_init(dir, &registry, false, None, None, formatter).await
             }
             FixAction::Reindex { embeddings_only } => {
-                crate::commands::run_reindex(dir, global, *embeddings_only, false, None, formatter)
-                    .await
+                // The doctor fix flow has no daemon cell; run in-process
+                // (matches the old `run_reindex` default).
+                crate::commands::run_reindex(
+                    dir,
+                    global,
+                    *embeddings_only,
+                    false,
+                    None,
+                    formatter,
+                    &std::sync::Arc::new(engramdb::daemon::DaemonCell::new()),
+                    engramdb::daemon::DaemonPolicy::InProcess,
+                )
+                .await
             }
             FixAction::DownloadEmbedding => {
                 let config = engramdb::storage::config::load_config(
