@@ -16,6 +16,21 @@ Install the Protocol Buffers compiler. macOS: `brew install protobuf`. Debian/Ub
 **`ort-sys` download fails with `UnknownIssuer` / certificate error.**
 You're behind a corporate proxy or in a restricted-egress sandbox that the rustls-based downloader doesn't trust. See the `CLAUDE.md` "Building & testing in Claude Code on the web" section for the curl + `ORT_STRATEGY=system` workaround.
 
+**`The requested API version [24] is not available, only API versions [1, 23]... Current ORT Version is: 1.23.x` (Intel Mac).**
+EngramDB builds against ONNX Runtime **1.24.x** (API 24, pinned via `fastembed`/`ort 2.0.0-rc.12`). The prebuilt runtime that `ort`'s `download-binaries` fetches covers Windows, Linux, and **Apple Silicon** macOS — but there is **no prebuilt ONNX Runtime for `x86_64-apple-darwin` (Intel Mac)** upstream. On Intel Mac the build silently falls back to a *system* `libonnxruntime`, and Homebrew ships **1.23.x** (API 23), which the API-24 build rejects at startup with this error. You must provide a **1.24.x** runtime yourself. Either:
+
+- **Build ONNX Runtime from source** (most reliable) — set `ORT_STRATEGY=compile` for the build; `ort-sys` compiles a matching 1.24 runtime (needs `cmake` + a C++ toolchain, and is slow):
+  ```bash
+  ORT_STRATEGY=compile cargo install --git https://github.com/egeapak/engramdb
+  ```
+- **Point at a locally-obtained 1.24.x `libonnxruntime`** — e.g. from a `pip install onnxruntime==1.24.*` wheel or a source build — via:
+  ```bash
+  ORT_STRATEGY=system ORT_LIB_LOCATION=/path/to/onnxruntime-1.24 cargo install --git https://github.com/egeapak/engramdb
+  ```
+  The library **must be 1.24.x** — a Homebrew `onnxruntime` at 1.23.x will reproduce the same error (API 23 ≠ 24).
+
+Apple Silicon (`aarch64-apple-darwin`) is unaffected: `download-binaries` ships a prebuilt 1.24 runtime for it. If you don't need Intel-Mac support, running on Apple Silicon (or Linux/Windows) avoids this entirely.
+
 **Long compile times on first build.**
 LanceDB and `ort` pull in heavy native code. Subsequent builds are cached. Use `cargo build --release` for the production binary; debug builds are slower at runtime but compile faster.
 

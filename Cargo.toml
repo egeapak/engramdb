@@ -109,7 +109,7 @@ criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 # `tls-rustls` pairs with `download-binaries` (the `ort-sys` build script's
 # download path needs a TLS provider on `ureq`); see the note in
 # `crates/engram-onnx/Cargo.toml`.
-ort = { version = "2.0.0-rc.11", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 hf-hub = { version = "0.5", default-features = false, features = ["rustls-tls", "tokio", "ureq"] }
 toml = "1"
