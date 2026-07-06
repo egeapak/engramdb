@@ -11,7 +11,7 @@
 
 ### Platform support
 
-ONNX Runtime is fetched as a prebuilt binary for **Linux (x86_64/aarch64)**, **Windows (x86_64/aarch64)**, and **Apple Silicon macOS (aarch64)**. **Intel Mac (`x86_64-apple-darwin`) has no upstream prebuilt runtime** — the build falls back to a system `libonnxruntime`, which must be **1.24.x** (API 24). A default Homebrew `onnxruntime` (1.23.x) will fail at startup with `The requested API version [24] is not available`; see [troubleshooting.md](./troubleshooting.md#build--install) for the `ORT_STRATEGY=compile` / `ORT_LIB_LOCATION` fix.
+ONNX Runtime is fetched as a prebuilt binary for **Linux (x86_64/aarch64)**, **Windows (x86_64/aarch64)**, and **Apple Silicon macOS (aarch64)** — these are the platforms with official release binaries. **Intel Mac (`x86_64-apple-darwin`) is not supported by a prebuilt**: the runtime must be ONNX Runtime **1.24.x (API 24)**, and no prebuilt 1.24 exists for Intel Mac (Microsoft dropped x86_64 macOS builds after 1.23.x). A Homebrew `onnxruntime` (1.23.x) fails at startup with `The requested API version [24] is not available`. Intel-Mac users must build ONNX Runtime 1.24.x from source and link against it — see [troubleshooting.md](./troubleshooting.md#build--install).
 
 ## Install
 

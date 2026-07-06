@@ -8,9 +8,6 @@ on:
 permissions:
   contents: write
 
-env:
-  ORT_VERSION: "1.23.2"
-
 jobs:
   # Gate the whole release on version consistency: the pushed tag (v0.7.0), the
   # plugin manifest, the marketplace manifest, and the workspace version in
@@ -115,58 +112,20 @@ jobs:
             engramdb-aarch64-apple-darwin.tar.gz
             engramdb-aarch64-apple-darwin.tar.gz.sha256
 
-  build-intel:
-    needs: [version-check, test]
-    runs-on: macos-15-intel
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache Homebrew packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/Library/Caches/Homebrew
-            /usr/local/Cellar/protobuf
-          key: brew-protobuf-macos-15-intel
-
-      - name: Install protobuf compiler
-        run: brew install protobuf
-
-      - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Download ONNX Runtime
-        run: |
-          curl -L -o /tmp/onnxruntime.tgz \
-            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-x86_64-${ORT_VERSION}.tgz"
-          tar xzf /tmp/onnxruntime.tgz -C /tmp
-
-      - name: Build release binary
-        env:
-          ORT_LIB_LOCATION: /tmp/onnxruntime-osx-x86_64-1.23.2/lib
-          ORT_PREFER_DYNAMIC_LINK: "1"
-          RUSTFLAGS: "-C link-arg=-Wl,-rpath,@executable_path"
-        # `--bin engramdb` resolves via workspace `default-members` (see build-arm).
-        run: cargo build --release --bin engramdb --locked
-
-      - name: Package binary with ONNX Runtime
-        run: |
-          mkdir -p staging
-          cp target/release/engramdb staging/
-          cp /tmp/onnxruntime-osx-x86_64-${ORT_VERSION}/lib/libonnxruntime.${ORT_VERSION}.dylib staging/
-          cd staging
-          tar czf ../engramdb-x86_64-apple-darwin.tar.gz engramdb libonnxruntime.${ORT_VERSION}.dylib
-          cd ..
-          shasum -a 256 engramdb-x86_64-apple-darwin.tar.gz > engramdb-x86_64-apple-darwin.tar.gz.sha256
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: engramdb-x86_64-apple-darwin
-          path: |
-            engramdb-x86_64-apple-darwin.tar.gz
-            engramdb-x86_64-apple-darwin.tar.gz.sha256
+  # NOTE: there is intentionally no Intel-Mac (`x86_64-apple-darwin`) release
+  # binary. `fastembed` pins `ort = "=2.0.0-rc.12"`, which requires ONNX Runtime
+  # **1.24.x (ABI/API 24)** at runtime, and NO prebuilt ORT 1.24 exists for
+  # Intel Mac anywhere: Microsoft dropped x86_64 macOS builds after 1.23.x
+  # (1.24.1+ ship arm64 only; there are zero x86_64 macOS wheels/artifacts for
+  # any 1.24.x), pyke's `download-binaries` CDN never carried `x86_64-apple-darwin`,
+  # and `ort-sys` rc.12 has no compile-from-source strategy. This job used to
+  # download ORT **1.23.2 (API 23)** and ship it next to an API-24 binary, which
+  # built cleanly but **crashed on first model load** with "The requested API
+  # version [24] is not available, only API versions [1, 23]". Shipping that is
+  # worse than shipping nothing, so the target is dropped until an ORT 1.24
+  # Intel prebuilt exists (or the stack moves off `download-binaries`). Intel-Mac
+  # users build from source against a self-built ORT 1.24 — see
+  # docs/users/troubleshooting.md.
 
   build-linux:
     needs: [version-check, test]
@@ -239,7 +198,7 @@ jobs:
             engramdb-x86_64-pc-windows-msvc.zip.sha256
 
   release:
-    needs: [build-arm, build-intel, build-linux, build-windows]
+    needs: [build-arm, build-linux, build-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
