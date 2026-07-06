@@ -1220,7 +1220,7 @@ mod tests {
     use super::*;
     use crate::retrieval::reranker::LocalReranker;
     use crate::storage::InMemoryRegistry;
-    use std::sync::{LazyLock, Mutex};
+    use std::sync::LazyLock;
 
     // Finding #4: the Filter-mode threshold must be bounded to [0, 1] regardless
     // of how the config was constructed, so the relevance gate can never be
@@ -1251,20 +1251,13 @@ mod tests {
 
     /// Shared reranker across all tests in this module to avoid loading the
     /// ~100MB ONNX model once per test (which causes OOM when parallel).
-    static SHARED_RERANKER: LazyLock<Option<Arc<Mutex<fastembed::TextRerank>>>> =
-        LazyLock::new(|| {
-            let cache_dir = crate::storage::paths::model_cache_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from(".cache/engramdb/models"));
-            let options = fastembed::RerankInitOptions::default().with_cache_dir(cache_dir);
-            fastembed::TextRerank::try_new(options)
-                .ok()
-                .map(|r| Arc::new(Mutex::new(r)))
-        });
+    /// Built through the `engram-models` loader (default BGE reranker base) so
+    /// the core crate needs no direct `fastembed` dependency, even in tests.
+    static SHARED_RERANKER: LazyLock<Option<Arc<dyn Reranker>>> =
+        LazyLock::new(|| LocalReranker::load("bge-reranker-base").ok());
 
     fn try_reranker() -> Option<Arc<dyn Reranker>> {
-        SHARED_RERANKER
-            .as_ref()
-            .map(|r| LocalReranker::shared(Arc::clone(r)))
+        SHARED_RERANKER.clone()
     }
 
     /// Filter-mode query with only a text query set, mirroring the shape

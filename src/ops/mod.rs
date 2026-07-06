@@ -61,9 +61,7 @@ use crate::retrieval::engine::RetrievalEngine;
 use crate::retrieval::reranker::{LocalReranker, Reranker};
 use crate::storage::{embedding_status, EmbeddingFingerprint, EmbeddingModelStatus, MemoryStore};
 use crate::types::{EmbeddingBackend, EngramConfig};
-use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Resolve the effective embedding backend from the layered override chain.
 ///
@@ -243,16 +241,6 @@ fn try_onnx_then_ollama(
     None
 }
 
-/// Map a reranker model name string to a fastembed `RerankerModel` enum variant.
-fn resolve_reranker_model(name: &str) -> RerankerModel {
-    match name {
-        "bge-reranker-v2-m3" => RerankerModel::BGERerankerV2M3,
-        "jina-reranker-v1-turbo-en" => RerankerModel::JINARerankerV1TurboEn,
-        "jina-reranker-v2-base-multilingual" => RerankerModel::JINARerankerV2BaseMultiligual,
-        _ => RerankerModel::BGERerankerBase, // default
-    }
-}
-
 /// The model-backed providers a [`RetrievalEngine`] is wired with.
 ///
 /// Each field is an `Arc` over an in-memory model session (ONNX embedding
@@ -337,22 +325,8 @@ pub fn resolve_engine_providers(
     }
 
     if config.rerank.enabled {
-        let cache_dir = crate::storage::paths::model_cache_dir()
-            .unwrap_or_else(|_| PathBuf::from(".cache/engramdb/models"));
-
-        let model = resolve_reranker_model(&config.rerank.model);
-        let mut options = RerankInitOptions::new(model)
-            .with_cache_dir(cache_dir)
-            .with_show_download_progress(false);
-        let eps = crate::onnx_ep::execution_providers();
-        if !eps.is_empty() {
-            options = options.with_execution_providers(eps);
-        }
-
-        match TextRerank::try_new(options) {
-            Ok(reranker) => {
-                providers.reranker = Some(LocalReranker::shared(Arc::new(Mutex::new(reranker))))
-            }
+        match LocalReranker::load(&config.rerank.model) {
+            Ok(reranker) => providers.reranker = Some(reranker),
             Err(e) => eprintln!("Warning: reranker init failed, continuing without: {}", e),
         }
     }

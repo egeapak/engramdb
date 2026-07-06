@@ -89,6 +89,7 @@ re-exported from it).
 ├── nli/                 # NLI for contradiction detection
 │   ├── onnx.rs          # OnnxNliProvider (tokenizers + ort)
 │   └── challenge.rs     # challenge_memory, challenge_for_contradictions
+├── rerank.rs            # Reranker trait, RerankScore, LocalReranker (BGE/Jina) via fastembed
 └── title/               # automatic memory title generation
     ├── keyword.rs       # RAKE keyword titles
     ├── t5.rs            # T5-based titles
@@ -123,7 +124,7 @@ re-exported from it).
 ├── retrieval/           # query pipeline
 │   ├── engine.rs        # RetrievalEngine, RetrievalQuery, ScoredMemory (large)
 │   ├── filters.rs       # apply_index_filters, SearchFilters
-│   └── reranker.rs      # Reranker trait, LocalReranker (BGE/Jina)
+│   └── reranker.rs      # thin re-export of engram-models' rerank (Reranker, LocalReranker)
 │
 ├── scoring/             # composite scoring
 │   ├── mod.rs           # docs of the formula

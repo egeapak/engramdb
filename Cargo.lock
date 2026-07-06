@@ -2346,7 +2346,6 @@ dependencies = [
  "engram-storage",
  "engram-test-support",
  "engram-types",
- "fastembed",
  "fs4",
  "futures-util",
  "globset",
