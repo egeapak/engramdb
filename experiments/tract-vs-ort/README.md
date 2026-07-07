@@ -36,6 +36,17 @@ tract/ort slowdown (fp32): **~3.1× single, ~6.2× batch**.
 1. **tract cannot load the int8-quantized MiniLM** — shape-inference failure on a dynamic
    `Unsqueeze` (node #293) on both the optimized and typed paths. The tract path must use the
    **fp32 model** (`Qdrant/all-MiniLM-L6-v2-onnx`).
+
+   This is **not** a missing-int8-op problem. The graph uses `DynamicQuantizeLinear ×24`,
+   `MatMulInteger ×36`, `DequantizeLinear ×3` — ops tract *implements*. It fails earlier, in
+   tract's **ahead-of-time static shape analysis** (its design for optimization/streaming), which
+   is stricter than ORT's **runtime, lazy** shape resolution: tract must prove every symbolic dim
+   before building the model, and it can't unify the shapes derived through the attention-mask
+   `Unsqueeze` chain in *this* (optimum / transformers.js) quantized export. The clean fp32 export
+   keeps that subgraph fully symbolic and tract optimizes it fine — so the trigger is the quantized
+   export's graph structure + tract's static analyser, not int8 arithmetic. (The `128` constants in
+   the graph are embedding-table quantization *zero-points*, not a sequence length.) int8 on tract
+   would need a tract-friendly re-export (static/fixed shapes); not worth it when fp32 works.
 2. **tract's fp32 output is bit-identical to ONNX Runtime** (cosine 1.00000).
 3. **~3× slower** single-encode — acceptable for an on-demand memory store (embed on
    create/query), and it *works* where ORT has no runtime at all.
