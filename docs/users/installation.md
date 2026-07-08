@@ -9,6 +9,10 @@
   - Fedora: `sudo dnf install protobuf-compiler`
 - Outbound network access on first run to download the embedding model (~90 MB). After that, engramdb is fully offline.
 
+### Platform support
+
+ONNX Runtime is fetched as a prebuilt binary for **Linux (x86_64/aarch64)**, **Windows (x86_64/aarch64)**, and **Apple Silicon macOS (aarch64)** — these are the platforms with official release binaries. **Intel Mac (`x86_64-apple-darwin`) is not supported by a prebuilt**: the runtime must be ONNX Runtime **1.24.x (API 24)**, and no prebuilt 1.24 exists for Intel Mac (Microsoft dropped x86_64 macOS builds after 1.23.x). A Homebrew `onnxruntime` (1.23.x) fails at startup with `The requested API version [24] is not available`. Intel-Mac users must build ONNX Runtime 1.24.x from source and link against it — see [troubleshooting.md](./troubleshooting.md#build--install).
+
 ## Install
 
 ### From the GitHub repository

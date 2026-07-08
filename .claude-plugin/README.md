@@ -40,9 +40,9 @@ engramdb --version
 
 ### MCP Server
 
-A full MCP server (`engramdb serve`) starts automatically, providing 15 tools for memory management:
+A full MCP server (`engramdb serve`) starts automatically, providing 19 tools for memory and project management:
 
-`query`, `create`, `get`, `list`, `update`, `delete`, `challenge`, `review`, `resolve`, `stats`, `doctor`, `gc`, `reindex`, `compress_candidates`, `compress_apply`
+`query`, `create`, `get`, `list`, `update`, `delete`, `challenge`, `review`, `resolve`, `stats`, `doctor`, `gc`, `reindex`, `compress_candidates`, `compress_apply`, `projects_list`, `projects_info`, `projects_link`, `projects_unlink`
 
 ### Shared embedding daemon
 
@@ -83,6 +83,7 @@ You can also use the CLI directly:
 
 ```bash
 engramdb add --type hazard --title "Vector store needs reindex after schema changes" \
+  --summary "Schema changes require a reindex to rebuild embeddings" \
   "Changing memory schema requires running engramdb reindex to rebuild embeddings."
 
 engramdb query --mode filter "schema migration"

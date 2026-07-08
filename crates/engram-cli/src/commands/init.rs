@@ -88,9 +88,7 @@ pub async fn run_init(
     // Initialize embeddings unless --no-embeddings
     if !no_embeddings {
         let config_path = dir.join(".engramdb/config.toml");
-        let config = engramdb::storage::config::load_config(&config_path)
-            .await
-            .unwrap_or_default();
+        let config = engramdb::storage::config::load_config_or_default(&config_path).await;
 
         let backend = engramdb::ops::resolve_backend(config.embeddings.backend, embedding_backend);
 

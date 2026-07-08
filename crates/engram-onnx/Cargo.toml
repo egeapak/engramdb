@@ -27,4 +27,17 @@ xnnpack = ["ort/xnnpack"]
 # isolation (`cargo check -p engram-onnx`) fails; the full workspace only
 # happened to compile because `fastembed` pulls rustls into `ort` via
 # feature unification.
-ort = { version = "2.0.0-rc.11", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }
+#
+# Version is pinned to `2.0.0-rc.12` to match `fastembed`, which requires it
+# exactly (`ort = "=2.0.0-rc.12"`). rc.12 targets ONNX Runtime 1.24.x
+# (**ABI/API version 24**); a mismatched runtime fails at *startup* with
+# "The requested API version [24] is not available, only API versions [1, N]".
+# `download-binaries` ships prebuilt ORT 1.24 for Windows, Linux, and
+# **aarch64** macOS/iOS — but NOT `x86_64-apple-darwin` (Intel Mac), and no ORT
+# 1.24 Intel-Mac prebuilt exists anywhere (Microsoft dropped x86_64 macOS builds
+# after 1.23.x; ort-sys rc.12 has no compile strategy). On Intel Mac the build
+# falls back to a *system* libonnxruntime, and the newest Intel-Mac ORT is
+# 1.23.x (API 23) → the API-24 error above. Intel-Mac users must build ORT
+# **1.24.x** from source and point `ORT_LIB_LOCATION` at it. See
+# docs/users/troubleshooting.md.
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }

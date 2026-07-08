@@ -6,13 +6,16 @@
 //! - [`embeddings`] — the `EmbeddingProvider` trait and its ONNX / Ollama impls.
 //! - [`nli`] — natural-language-inference contradiction detection plus the
 //!   challenge-writing flow that the retrieval layer drives.
+//! - [`rerank`] — the cross-encoder `Reranker` trait and its `fastembed` loader.
 //! - [`title`] — automatic title generation (keyword extraction or T5-small).
 //!
 //! Re-exported by the top-level `engramdb` crate under its historical
-//! `embeddings` / `nli` / `title` module paths.
+//! `embeddings` / `nli` / `title` module paths (and `retrieval::reranker` for
+//! [`rerank`]).
 
 pub mod embeddings;
 pub mod nli;
+pub mod rerank;
 pub mod title;
 
 /// Strip the `SessionBuilder` payload from an `ort` builder error.

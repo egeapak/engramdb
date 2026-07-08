@@ -4,7 +4,7 @@
 //! contextual queries. It combines multiple retrieval strategies including scope matching,
 //! semantic search (when embeddings are available), and keyword search.
 
-use super::filters::{apply_index_filters, SearchFilters};
+use super::filters::{apply_index_filters, build_filter_predicate, SearchFilters};
 use super::reranker::Reranker;
 use crate::embeddings::EmbeddingProvider;
 use crate::nli::{NliProvider, NliResult};
@@ -112,6 +112,19 @@ pub struct ScoredMemory {
     pub score: f64,
     /// Detailed breakdown of score components
     pub score_breakdown: ScoreBreakdown,
+}
+
+/// A scored candidate carrying only what threshold/sort/rerank/truncate need,
+/// so the full [`Memory`] is *not* cloned for every candidate — only the
+/// survivors are materialized into [`ScoredMemory`] after truncation.
+///
+/// `id` (a 16-char store id) is cloned instead of the whole memory (content,
+/// details, scope vecs); the actual memory is looked up from `memory_map` at
+/// materialization time. See finding performance-0.
+struct ScoredCandidate {
+    id: String,
+    score: f64,
+    breakdown: ScoreBreakdown,
 }
 
 /// Result of a retrieval operation.
@@ -464,7 +477,8 @@ impl RetrievalEngine {
     async fn apply_rerank(
         &self,
         query_text: &str,
-        candidates: &mut [ScoredMemory],
+        candidates: &mut [ScoredCandidate],
+        memory_map: &HashMap<String, Memory>,
     ) -> anyhow::Result<()> {
         let reranker = match &self.reranker {
             Some(r) if self.config.rerank.enabled => Arc::clone(r),
@@ -483,16 +497,24 @@ impl RetrievalEngine {
             return Ok(());
         }
 
-        // Build document strings for the top N candidates, including details when available
+        // Build document strings for the top N candidates, including details when
+        // available. The memory is fetched from `memory_map` by id (the
+        // candidate carries only the id, not a cloned memory); every candidate
+        // id came from `memory_map` in the scoring loop, so a miss is
+        // impossible — treat it defensively as an empty document rather than
+        // panicking.
         let documents: Vec<String> = candidates[..top_n]
             .iter()
-            .map(|sm| {
-                let mut doc = format!("{} {}", sm.memory.summary, sm.memory.content);
-                if let Some(ref details) = sm.memory.details {
-                    doc.push(' ');
-                    doc.push_str(details);
+            .map(|c| match memory_map.get(&c.id) {
+                Some(memory) => {
+                    let mut doc = format!("{} {}", memory.summary, memory.content);
+                    if let Some(ref details) = memory.details {
+                        doc.push(' ');
+                        doc.push_str(details);
+                    }
+                    doc
                 }
-                doc
+                None => String::new(),
             })
             .collect();
 
@@ -520,8 +542,8 @@ impl RetrievalEngine {
                 // Other ScoreBreakdown fields (semantic, relevance, trust, etc.)
                 // retain their pre-rerank values for diagnostic transparency.
                 candidates[idx].score = blended;
-                candidates[idx].score_breakdown.final_score = blended;
-                candidates[idx].score_breakdown.rerank = Some(raw_rerank);
+                candidates[idx].breakdown.final_score = blended;
+                candidates[idx].breakdown.rerank = Some(raw_rerank);
             }
         }
 
@@ -598,8 +620,33 @@ impl RetrievalEngine {
             }
         }
 
+        // Step 0.5: Resolve the expiry gate up front so it can feed both the
+        // LanceDB pushdown predicate (Step 1) and the Rust pre-filter (Step
+        // 2.5b). Captured `now` for the predicate is taken before the scan; the
+        // Rust re-filter later recomputes its own `now`, which is >= this one,
+        // so the predicate is never stricter than the authoritative Rust gate.
+        let include_expired = query
+            .include_expired
+            .unwrap_or(self.config.retrieval.include_expired);
+
         // Step 1: Load lightweight index entries (6 columns).
-        let all_entries = self.store.list_for_filtering().await?;
+        //
+        // Push the clean scalar filters — memory type, minimum criticality, and
+        // (when not including expired) expiry — down into the LanceDB scan so
+        // selective filters cut the row set before it streams into Rust. Tags,
+        // physical globs, and logical hierarchy stay in Rust and are applied by
+        // `apply_index_filters` / the pre-filters below, which remain the
+        // authoritative gate — the predicate is a pure narrowing, so results and
+        // scores are identical whether or not it fires.
+        let pushdown_predicate = build_filter_predicate(
+            query.types.as_deref(),
+            query.min_criticality,
+            (!include_expired).then(Utc::now),
+        );
+        let all_entries = self
+            .store
+            .list_for_filtering_where(pushdown_predicate)
+            .await?;
         let total_entry_count = all_entries.len();
 
         // Step 1.5: Relativize the query path against the project root.
@@ -652,10 +699,9 @@ impl RetrievalEngine {
             filtered_entries
         };
 
-        // Step 2.5b: Pre-filter expired entries at the index level.
-        let include_expired = query
-            .include_expired
-            .unwrap_or(self.config.retrieval.include_expired);
+        // Step 2.5b: Pre-filter expired entries at the index level. This is the
+        // authoritative expiry gate (`include_expired` resolved in Step 0.5);
+        // the Step 1 pushdown predicate only pre-narrowed the scan.
         let filtered_entries = if include_expired {
             filtered_entries
         } else {
@@ -667,6 +713,19 @@ impl RetrievalEngine {
         };
 
         // Step 3: Batch-load surviving memories (single dir scan).
+        //
+        // Performance note (finding performance-0): on the no-query Rank path
+        // this reads + parses every surviving `.md` file only to score it, even
+        // though scope-only scoring needs almost nothing off disk. We cannot yet
+        // skip these reads: `composite_score` consults `memory.decay` (via
+        // `effective_relevance` / `decay_factor`), and `decay` is the ONE
+        // scoring input NOT carried in the LanceDB index schema
+        // (`memories_schema` has type/criticality/scope/timestamps but no decay
+        // column). Serving scope-only scoring from the index alone would require
+        // adding a `decay` column — a schema migration that would silently
+        // mis-score decay-configured memories in existing stores until they were
+        // reindexed — so it is deferred to a separate change. The scalar-filter
+        // pushdown (Step 1) shrinks this batch when those filters are selective.
         let ids: Vec<&str> = filtered_entries.iter().map(|e| e.id.as_str()).collect();
         let loaded = self.store.get_batch(&ids).await?;
         let memory_map: HashMap<String, Memory> = loaded.into_iter().collect();
@@ -743,6 +802,17 @@ impl RetrievalEngine {
         // LanceDB single-column scan of the chunks table per semantic query —
         // cheap next to the vector search itself. If the scan fails we fall
         // back to the legacy no-evidence path rather than failing the query.
+        //
+        // Deferred (Part B of finding performance-3): replacing this O(n)
+        // per-query chunk-table scan with a `has_embedding` boolean column on
+        // the MEMORIES table would let this set be read straight from the index
+        // projection with no separate scan. It is intentionally NOT done here:
+        // it is a memories-table SCHEMA MIGRATION with the same risk profile as
+        // the deferred `decay` column (finding performance-0, see Step 3 above)
+        // — existing stores would need a reindex to backfill the column, and a
+        // half-migrated store would mis-score. The two columns should land
+        // together as a single schema-version bump rather than piecemeal, so
+        // this scan stays until that migration.
         let embedded_ids: Option<std::collections::HashSet<String>> =
             if semantic_scores_map.is_some() {
                 match self.store.list_chunk_memory_ids().await {
@@ -791,7 +861,12 @@ impl RetrievalEngine {
             "scope_only"
         };
 
-        let mut scored_memories: Vec<ScoredMemory> = Vec::new();
+        // Score by reference into lightweight candidates (id + score +
+        // breakdown) — NOT full `ScoredMemory` — so we don't clone every
+        // memory. Only the survivors of threshold + sort + rerank + truncate
+        // are materialized (cloned) into `ScoredMemory` at the end. On a large
+        // no-filter Rank query this turns N memory clones into `max_results`.
+        let mut candidates: Vec<ScoredCandidate> = Vec::new();
         let query_path = query_path.as_deref();
         let now = Utc::now();
 
@@ -887,10 +962,10 @@ impl RetrievalEngine {
                 }
             }
 
-            scored_memories.push(ScoredMemory {
-                memory: memory.clone(),
+            candidates.push(ScoredCandidate {
+                id: memory.id.clone(),
                 score: breakdown.final_score,
-                score_breakdown: breakdown,
+                breakdown,
             });
         }
 
@@ -904,39 +979,57 @@ impl RetrievalEngine {
             RetrievalMode::Filter => filter_threshold(self.config.search.threshold),
         };
         if threshold > 0.0 {
-            scored_memories.retain(|sm| sm.score >= threshold);
+            candidates.retain(|c| c.score >= threshold);
         }
 
         // Step 7: Sort by score descending.
-        scored_memories.sort_by(|a, b| {
+        candidates.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Step 8: Apply reranking if query text is present.
+        // Step 8: Apply reranking if query text is present. Rerank runs on the
+        // full sorted candidate set BEFORE truncation (identical to before);
+        // it reads memory text from `memory_map` by id, so it needs no cloned
+        // memories.
         // Only timed when the reranker is actually configured + enabled to
         // avoid recording bogus 0ms samples for the no-op path.
         if let Some(ref q) = query.query {
-            if self.reranking_available() && !scored_memories.is_empty() {
+            if self.reranking_available() && !candidates.is_empty() {
                 let t_rerank = std::time::Instant::now();
-                let rerank_result = self.apply_rerank(q, &mut scored_memories).await;
+                let rerank_result = self.apply_rerank(q, &mut candidates, &memory_map).await;
                 self.record_stage("rerank", t_rerank.elapsed().as_secs_f64() * 1000.0);
                 if let Err(e) = rerank_result {
                     tracing::warn!("Reranking failed, using original scores: {}", e);
                 }
-            } else if let Err(e) = self.apply_rerank(q, &mut scored_memories).await {
+            } else if let Err(e) = self.apply_rerank(q, &mut candidates, &memory_map).await {
                 tracing::warn!("Reranking failed, using original scores: {}", e);
             }
         }
 
-        let total = scored_memories.len();
+        let total = candidates.len();
 
-        // Step 9: Apply max_results limit.
+        // Step 9: Apply max_results limit, THEN materialize survivors. Cloning
+        // the memory is deferred to here so only the returned memories are
+        // cloned, not every scored candidate (finding performance-0).
         let max_results = query
             .max_results
             .unwrap_or(self.config.retrieval.max_results);
-        scored_memories.truncate(max_results);
+        candidates.truncate(max_results);
+
+        let mut scored_memories: Vec<ScoredMemory> = candidates
+            .into_iter()
+            .filter_map(|c| {
+                // Every candidate id came from `memory_map`, so the lookup
+                // always hits; `filter_map` guards defensively without panicking.
+                memory_map.get(&c.id).map(|memory| ScoredMemory {
+                    memory: memory.clone(),
+                    score: c.score,
+                    score_breakdown: c.breakdown,
+                })
+            })
+            .collect();
 
         // Step 10: Strip detail per detail_level.
         for sm in &mut scored_memories {
@@ -1048,7 +1141,18 @@ async fn embed_memory_with(
     }
 
     let t = std::time::Instant::now();
-    store.upsert_chunks(&memory.id, vectors).await?;
+    // Freshness-guarded: this runs in detached ingest tasks with no ordering
+    // guarantee, so an embed of an older snapshot must not overwrite newer
+    // vectors, and an embed racing a delete must not re-insert orphan chunks.
+    let written = store
+        .upsert_chunks_if_current(&memory.id, vectors, memory.updated_at)
+        .await?;
+    if !written {
+        tracing::debug!(
+            memory_id = %memory.id,
+            "skipped chunk upsert: memory changed or was deleted since this snapshot"
+        );
+    }
     if let Some(t_) = telemetry {
         t_.record("create.upsert_chunks", t.elapsed().as_secs_f64() * 1000.0);
     }
@@ -1116,7 +1220,7 @@ mod tests {
     use super::*;
     use crate::retrieval::reranker::LocalReranker;
     use crate::storage::InMemoryRegistry;
-    use std::sync::{LazyLock, Mutex};
+    use std::sync::LazyLock;
 
     // Finding #4: the Filter-mode threshold must be bounded to [0, 1] regardless
     // of how the config was constructed, so the relevance gate can never be
@@ -1147,20 +1251,13 @@ mod tests {
 
     /// Shared reranker across all tests in this module to avoid loading the
     /// ~100MB ONNX model once per test (which causes OOM when parallel).
-    static SHARED_RERANKER: LazyLock<Option<Arc<Mutex<fastembed::TextRerank>>>> =
-        LazyLock::new(|| {
-            let cache_dir = crate::storage::paths::model_cache_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from(".cache/engramdb/models"));
-            let options = fastembed::RerankInitOptions::default().with_cache_dir(cache_dir);
-            fastembed::TextRerank::try_new(options)
-                .ok()
-                .map(|r| Arc::new(Mutex::new(r)))
-        });
+    /// Built through the `engram-models` loader (default BGE reranker base) so
+    /// the core crate needs no direct `fastembed` dependency, even in tests.
+    static SHARED_RERANKER: LazyLock<Option<Arc<dyn Reranker>>> =
+        LazyLock::new(|| LocalReranker::load("bge-reranker-base").ok());
 
     fn try_reranker() -> Option<Arc<dyn Reranker>> {
-        SHARED_RERANKER
-            .as_ref()
-            .map(|r| LocalReranker::shared(Arc::clone(r)))
+        SHARED_RERANKER.clone()
     }
 
     /// Filter-mode query with only a text query set, mirroring the shape
@@ -1444,6 +1541,95 @@ mod tests {
 
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].memory.type_, MemoryType::Decision);
+    }
+
+    /// The LanceDB scalar-filter pushdown must be a pure narrowing: for a mixed
+    /// store (multiple types, varied criticality, some expired), the id set
+    /// surviving `list_for_filtering_where(predicate)` + the Rust filters must
+    /// be byte-identical to the pre-pushdown path (`list_for_filtering()` with
+    /// no predicate + the same Rust filters). If the predicate ever dropped a
+    /// row the Rust gate would have kept, the result set — and every downstream
+    /// score — would change.
+    #[tokio::test]
+    async fn test_filter_pushdown_matches_rust_path() {
+        use crate::retrieval::filters::build_filter_predicate;
+        use crate::types::{Memory, MemoryType, Provenance, Visibility};
+        use chrono::{Duration, Utc};
+        use std::collections::BTreeSet;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        // Mixed store: 3 types, criticality spanning the min bound, and one
+        // expired + one active per relevant case.
+        let specs: &[(MemoryType, f64, bool)] = &[
+            (MemoryType::Decision, 0.95, false),
+            (MemoryType::Decision, 0.30, false), // below min_criticality
+            (MemoryType::Decision, 0.95, true),  // expired -> excluded by expiry
+            (MemoryType::Hazard, 0.99, false),
+            (MemoryType::Hazard, 0.50, false), // below min_criticality
+            (MemoryType::Context, 0.99, false), // wrong type
+            (MemoryType::Convention, 0.90, false), // wrong type
+        ];
+        for (i, (ty, crit, expired)) in specs.iter().enumerate() {
+            let mut m = Memory::new(
+                *ty,
+                format!("summary {i}"),
+                format!("content {i}"),
+                Provenance::human(),
+            );
+            m.visibility = Visibility::Shared;
+            m.criticality = *crit;
+            if *expired {
+                m.expires_at = Some(Utc::now() - Duration::days(1));
+            }
+            store.create(&m).await.unwrap();
+        }
+
+        // The exact filter the engine would build for this query.
+        let types = vec![MemoryType::Decision, MemoryType::Hazard];
+        let min_criticality = Some(0.9_f64);
+        let include_expired = false;
+        let filters = SearchFilters {
+            types: Some(types.clone()),
+            tags: None,
+            physical: None,
+            min_criticality,
+        };
+
+        // Apply the Rust-only gate (physical/tags none here) plus expiry.
+        let apply_rust = |entries: Vec<crate::storage::IndexForFiltering>| -> BTreeSet<String> {
+            let now = Utc::now();
+            apply_index_filters(entries, &filters)
+                .into_iter()
+                .filter(|e| include_expired || e.expires_at.is_none_or(|exp| exp > now))
+                .map(|e| e.id)
+                .collect()
+        };
+
+        // Baseline: whole-table scan, filtered entirely in Rust.
+        let baseline_ids = apply_rust(store.list_for_filtering().await.unwrap());
+
+        // Pushdown: predicate pre-narrows the scan, then the identical Rust gate.
+        let predicate = build_filter_predicate(
+            Some(&types),
+            min_criticality,
+            (!include_expired).then(Utc::now),
+        );
+        assert!(predicate.is_some(), "expected a non-empty predicate");
+        let pushdown_entries = store.list_for_filtering_where(predicate).await.unwrap();
+        let pushdown_ids = apply_rust(pushdown_entries);
+
+        assert_eq!(
+            pushdown_ids, baseline_ids,
+            "pushdown predicate must agree with the Rust filter path"
+        );
+        // Sanity: the selective filter really did select the two high-criticality
+        // active Decision/Hazard memories (summary 0 and 3).
+        assert_eq!(baseline_ids.len(), 2);
     }
 
     #[tokio::test]

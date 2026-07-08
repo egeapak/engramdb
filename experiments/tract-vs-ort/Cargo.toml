@@ -1,0 +1,16 @@
+[package]
+name = "tract-vs-ort"
+version = "0.0.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }
+tract-onnx = "0.23"
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+ndarray = "0.16"
+anyhow = "1"
+
+[profile.release]
+debug = 0

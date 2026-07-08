@@ -1967,6 +1967,7 @@ dependencies = [
  "chrono",
  "engramdb",
  "libfuzzer-sys",
+ "serde_json",
 ]
 
 [[package]]

@@ -48,9 +48,10 @@ engram-onnx = { path = "crates/engram-onnx" }
 engram-storage = { path = "crates/engram-storage" }
 engram-models = { path = "crates/engram-models", default-features = false }
 
-# Vector DB & Embeddings (the core's daemon metrics + reranker selection)
+# Vector DB (the core's daemon metrics + LanceDB index). The embedding /
+# reranker / NLI models all live in the `engram-models` crate, so the core
+# no longer depends on `fastembed` directly.
 lancedb = { version = "0.30", default-features = false }
-fastembed = { version = "5", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
 arrow-array = "58"
 arrow-schema = "58"
@@ -102,12 +103,13 @@ rand = "0.9"
 # re-exported model/ops/scoring APIs.
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 # The `examples/` are low-level ONNX/model benchmarks that drive `ort` /
-# `tokenizers` / `hf-hub` / `fastembed` directly (alongside the re-exported
-# engramdb model APIs), so they need those crates at dev time.
+# `tokenizers` / `hf-hub` directly (alongside the re-exported engramdb model
+# APIs, which own the `fastembed` embedding/reranker paths), so they need those
+# crates at dev time.
 # `tls-rustls` pairs with `download-binaries` (the `ort-sys` build script's
 # download path needs a TLS provider on `ureq`); see the note in
 # `crates/engram-onnx/Cargo.toml`.
-ort = { version = "2.0.0-rc.11", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 hf-hub = { version = "0.5", default-features = false, features = ["rustls-tls", "tokio", "ureq"] }
 toml = "1"

@@ -9,7 +9,7 @@ For developers hacking on EngramDB itself. To use EngramDB, go to [../users/](..
 3. [testing.md](./testing.md) — nextest, isolation, the `ml-models` group.
 4. [extending.md](./extending.md) — recipes: new embedding provider, MCP tool, memory type, config field, daemon RPC.
 
-The CI gate (`cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo nextest run --all-features`) is enforced — see [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) for the canonical version.
+The CI gate (`cargo fmt --all`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo nextest run --workspace --all-features`) is enforced — see [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) for the canonical version.
 
 ## Repo conventions
 

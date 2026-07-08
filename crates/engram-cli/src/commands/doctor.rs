@@ -130,10 +130,10 @@ async fn run_validate(dir: &Path, global: bool, formatter: &OutputFormatter) -> 
         .as_ref()
         .map(|s| s.project_dir.clone())
         .unwrap_or_else(|| dir.to_path_buf());
-    let config =
-        engramdb::storage::config::load_config(&config_dir.join(".engramdb").join("config.toml"))
-            .await
-            .unwrap_or_default();
+    let config = engramdb::storage::config::load_config_or_default(
+        &config_dir.join(".engramdb").join("config.toml"),
+    )
+    .await;
 
     let checks = validate_models(&config).await;
     let all_passed = checks.iter().all(|c| c.passed);
@@ -192,8 +192,19 @@ impl FixAction {
                 crate::commands::run_init(dir, &registry, false, None, None, formatter).await
             }
             FixAction::Reindex { embeddings_only } => {
-                crate::commands::run_reindex(dir, global, *embeddings_only, false, None, formatter)
-                    .await
+                // The doctor fix flow has no daemon cell; run in-process
+                // (matches the old `run_reindex` default).
+                crate::commands::run_reindex(
+                    dir,
+                    global,
+                    *embeddings_only,
+                    false,
+                    None,
+                    formatter,
+                    &std::sync::Arc::new(engramdb::daemon::DaemonCell::new()),
+                    engramdb::daemon::DaemonPolicy::InProcess,
+                )
+                .await
             }
             FixAction::DownloadEmbedding => {
                 let config = engramdb::storage::config::load_config(

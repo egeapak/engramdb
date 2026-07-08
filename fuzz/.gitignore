@@ -2,6 +2,8 @@ target/
 artifacts/
 coverage/
 
-# Auto-grown fuzzer corpus state — keep only curated .md seeds.
+# Auto-grown fuzzer corpus state — keep only curated seeds (.md for the
+# memory-file targets, .json for the registry target).
 corpus/*/*
 !corpus/*/*.md
+!corpus/*/*.json

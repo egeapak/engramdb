@@ -11,18 +11,18 @@
                         │ stdio MCP
                         ▼
    ┌────────────────────┴────────────────────┐    ┌───────────────────┐
-   │  src/cli/  ─────► src/cli/commands/ ◄── │    │  src/cli/        │
-   │  (Clap + dispatch)                      │    │  commands/hook.rs│
+   │  crates/engram-cli/  (Clap + dispatch   │    │  engram-cli/src/  │
+   │  ─────► src/commands/ handlers)     ◄── │    │  commands/hook.rs │
    │                                         │    └────────┬──────────┘
    └─────────────────┬───────────────────────┘             │
                      │                                     │
    ┌─────────────────┴────────────────┐                   │
-   │  src/mcp/server.rs               │ ◄─────────────────┘
+   │  crates/engram-mcp/src/server.rs │ ◄─────────────────┘
    │  (rmcp tool surface)             │
    └─────────────────┬────────────────┘
                      │
    ┌─────────────────▼────────────────────────┐
-   │  src/ops/                                │  Typed ops: create/query/update/
+   │  src/ops/  (the engramdb core lib)       │  Typed ops: create/query/update/
    │   - typed Params/Result for every op     │  delete/challenge/resolve/gc/
    │   - no formatting, no serialization      │  compress/reindex/doctor/stats/
    │   - one place each op lives              │  projects/...
@@ -39,7 +39,7 @@
             └────────┬───────┘
                      ▼
    ┌──────────────────────────────────────────┐
-   │  src/storage/                            │
+   │  crates/engram-storage/                  │
    │   - MemoryStore (orchestrator)           │
    │   - LanceDB index (metadata + vectors)   │
    │   - registry, manifest, paths            │
@@ -48,11 +48,12 @@
 
            Shared model providers (optional, gated by config):
 
-   ┌──────────────────┐ ┌────────────────┐ ┌────────────────────────────┐
-   │ src/embeddings/  │ │ src/nli/onnx.rs│ │ src/retrieval/reranker.rs  │
-   │ - ONNX (default) │ │ - NLI for      │ │ - BGE / Jina cross-encoder │
-   │ - Ollama (opt.)  │ │   challenges   │ └────────────────────────────┘
-   └────────┬─────────┘ └────────┬───────┘
+   ┌────────────────────┐ ┌──────────────────┐ ┌───────────────────────────┐
+   │ engram-models/src/ │ │ engram-models/   │ │ src/retrieval/reranker.rs │
+   │ embeddings/        │ │ src/nli/onnx.rs  │ │ - BGE / Jina cross-encoder│
+   │ - ONNX (default)   │ │ - NLI for        │ └───────────────────────────┘
+   │ - Ollama (opt.)    │ │   challenges     │
+   └────────┬───────────┘ └────────┬─────────┘
             │                    │
             ▼                    ▼
    ┌──────────────────────────────────────────┐
@@ -66,6 +67,13 @@
 
 The arrows are dependency direction. The layers above only depend on the layers below.
 
+The layers are real Cargo workspace crates: `engram-cli` and `engram-mcp` are
+front-ends over the `engramdb` core lib (the root crate, `src/`), and the core
+re-exports the extracted leaf crates (`engram-storage`, `engram-models`,
+`engram-types`, `engram-onnx`) under their historical module paths
+(`engramdb::storage`, `::embeddings`, `::types`, …). See
+[code-organization.md](./code-organization.md) for the full crate map.
+
 ## The one big rule: ops is shared
 
 The CLI and the MCP server are **two surfaces over the same operations**. Every memory operation lives in `src/ops/<name>.rs` with typed input/output structs. The CLI parses Clap args, builds the typed params, calls ops, formats the result via `OutputFormatter`. The MCP server parses MCP tool arguments, builds the typed params, calls ops, serializes the result as MCP tool output.
@@ -73,17 +81,17 @@ The CLI and the MCP server are **two surfaces over the same operations**. Every 
 Concretely, for a single operation like `create`:
 
 ```
-src/cli/app.rs               # Clap struct for `add`
-src/cli/commands/add.rs      # parses args, builds CreateParams, calls ops, formats
-src/mcp/server.rs            # parses MCP args, builds CreateParams, calls ops, serializes
-src/ops/create.rs            # the actual logic: validate, embed, persist
+crates/engram-cli/src/app.rs           # Clap struct for `add`
+crates/engram-cli/src/commands/add.rs  # parses args, builds CreateParams, calls ops, formats
+crates/engram-mcp/src/server.rs        # parses MCP args, builds CreateParams, calls ops, serializes
+src/ops/create.rs                      # the actual logic: validate, embed, persist
 ```
 
-If you put logic in `src/cli/commands/add.rs` instead of `src/ops/create.rs`, the MCP tool will diverge from the CLI command. This has happened — don't repeat it. The single-ops-impl rule prevents silent skew.
+If you put logic in `crates/engram-cli/src/commands/add.rs` instead of `src/ops/create.rs`, the MCP tool will diverge from the CLI command. This has happened — don't repeat it. The single-ops-impl rule prevents silent skew.
 
 ## Storage and LanceDB
 
-`MemoryStore` (in `src/storage/store.rs`) is the orchestrator. It owns:
+`MemoryStore` (in `crates/engram-storage/src/store.rs`) is the orchestrator. It owns:
 
 - the project's `.engramdb/` directory,
 - a single LanceDB table holding **both** metadata-for-filtering and vectors,
@@ -92,11 +100,11 @@ If you put logic in `src/cli/commands/add.rs` instead of `src/ops/create.rs`, th
 
 ### One table, not two
 
-There is no separate metadata DB. The LanceDB table has both the columns we filter on (`type`, `tags`, `criticality`, `physical`, `logical`, `status`, …) and the vector column. Filtering happens at the LanceDB layer; vector search is the same table with an ANN query. This is why `IndexFilterable` / `VectorMatch` / `IndexSummary` types are in `src/storage/lance_index.rs` — they're the API into that one table.
+There is no separate metadata DB. The LanceDB table has both the columns we filter on (`type`, `tags`, `criticality`, `physical`, `logical`, `status`, …) and the vector column. Filtering happens at the LanceDB layer; vector search is the same table with an ANN query. This is why `IndexFilterable` / `VectorMatch` / `IndexSummary` types are in `crates/engram-storage/src/lance_index.rs` — they're the API into that one table.
 
 ### Concurrency model
 
-Mutating ops (`create`, `update`, `delete`, `reindex`, `upsert_chunks`, `delete_chunks`) take a **per-project** advisory `flock(2)` from `src/storage/write_lock.rs`. This serializes concurrent writes across processes — multiple Claude Code sessions can safely write to the same store.
+Mutating ops (`create`, `update`, `delete`, `reindex`, `upsert_chunks`, `delete_chunks`) take a **per-project** advisory `flock(2)` from `crates/engram-storage/src/write_lock.rs`. This serializes concurrent writes across processes — multiple Claude Code sessions can safely write to the same store.
 
 Reads are lock-free. LanceDB's MVCC handles concurrent readers.
 
@@ -104,7 +112,7 @@ File writes use atomic temp-then-rename to prevent partial reads — even a hard
 
 ### Worktree routing
 
-When you run a memory command inside a git worktree, `cli::run` checks `storage::worktree::resolve_project_root` first. If the cwd is a linked worktree, it:
+When you run a memory command inside a git worktree, the CLI dispatch (`engram_cli::run`) checks `storage::worktree::resolve_project_root` first. If the cwd is a linked worktree, it:
 
 1. Locates the main worktree's project.
 2. Ensures the main project is initialized (init it if needed).
@@ -146,6 +154,6 @@ Two modes, `Filter` and `Rank`, gate stage 1's signal requirement: `Filter` requ
 | One map for `provider_str → (onnx_spec, ollama_spec)` | `src/ops/mod.rs::provider_specs` | Fingerprint and resolver can't disagree about which model a config selects. |
 | `provider_cache_key` includes every model-affecting config field, none of the daemon-only fields | `src/ops/mod.rs::provider_cache_key` | Avoid stale model bundles after a config change. |
 | Daemon failures never break operations | `src/daemon/remote.rs` falls back to local providers | Daemon is a perf optimization, not a dependency. |
-| All model downloads cache to `dirs::cache_dir() / "engramdb" / "models"` | `src/storage/paths.rs::model_cache_dir` | Restricted-egress environments pre-stage models into one known location. |
+| All model downloads cache to `dirs::cache_dir() / "engramdb" / "models"` | `crates/engram-storage/src/paths.rs::model_cache_dir` | Restricted-egress environments pre-stage models into one known location. |
 | `provider_specs` keys are stable on disk via `model_id()` | `EmbeddingProvider::model_id` | Manifests written today must keep meaning the same model tomorrow. |
-| Mutating ops take `flock`, reads are lock-free | `src/storage/write_lock.rs`, `MemoryStore` impls | Cross-process write safety without read penalty. |
+| Mutating ops take `flock`, reads are lock-free | `crates/engram-storage/src/write_lock.rs`, `MemoryStore` impls | Cross-process write safety without read penalty. |

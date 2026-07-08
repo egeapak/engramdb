@@ -133,6 +133,79 @@ pub fn apply_index_filters<T: Filterable>(entries: Vec<T>, filters: &SearchFilte
         .collect()
 }
 
+/// Build a LanceDB `WHERE`-clause predicate for the scalar filters that push
+/// down cleanly into the index scan: memory `type`, minimum `criticality`, and
+/// (optionally) expiry.
+///
+/// Returns `None` when no clause applies (whole-table scan). The predicate is a
+/// *conservative narrowing* of [`apply_index_filters`] + the engine's expiry
+/// pre-filter: the caller still runs those Rust filters afterwards, so an
+/// over-permissive predicate never changes the final result set — it only
+/// reduces how many rows reach `get_batch`.
+///
+/// Only clean scalar columns are pushed down here. `tags` (a JSON-encoded Utf8
+/// column with no SQL `contains`), `physical` (glob matching), and `logical`
+/// (hierarchical dot-notation) stay in Rust.
+///
+/// # Inputs and escaping
+/// * `types` — pushed as `type IN ('decision', ...)`. Values are formatted from
+///   the [`MemoryType`] enum (never raw user strings) and single-quote-escaped,
+///   matching the discipline in `LanceIndex::vector_search` /
+///   `find_ids_by_prefix`. `type` is stored lowercased-Debug (e.g. `'decision'`).
+/// * `min_criticality` — pushed as `criticality >= X` (Float64 column). Skipped
+///   for a non-finite bound so we never emit `criticality >= NaN`; the Rust
+///   filter (`< min_crit` is always false for NaN, i.e. keeps everything)
+///   remains authoritative in that degenerate case.
+/// * `exclude_expired_before` — `Some(now)` when expired memories must be
+///   dropped, producing `(expires_at IS NULL OR expires_at > '<now>')`.
+///   `expires_at` is a nullable rfc3339 Utf8 column; chrono's canonical UTC
+///   rfc3339 strings (fixed `+00:00` offset, AutoSi fractions) sort
+///   lexicographically in chronological order, so the string `>` agrees with a
+///   `DateTime` comparison. `None` leaves expiry entirely to the caller.
+pub fn build_filter_predicate(
+    types: Option<&[MemoryType]>,
+    min_criticality: Option<f64>,
+    exclude_expired_before: Option<DateTime<Utc>>,
+) -> Option<String> {
+    let mut clauses: Vec<String> = Vec::new();
+
+    if let Some(types) = types {
+        if !types.is_empty() {
+            let list = types
+                .iter()
+                .map(|t| {
+                    // `type` is persisted as the lowercased Debug name (see
+                    // `batch_from_entries` in lance_index.rs). Format from the
+                    // enum, then reuse the single-quote escaping discipline.
+                    let name = format!("{:?}", t).to_lowercase().replace('\'', "''");
+                    format!("'{}'", name)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            clauses.push(format!("type IN ({})", list));
+        }
+    }
+
+    if let Some(min_crit) = min_criticality {
+        if min_crit.is_finite() {
+            clauses.push(format!("criticality >= {}", min_crit));
+        }
+    }
+
+    if let Some(now) = exclude_expired_before {
+        clauses.push(format!(
+            "(expires_at IS NULL OR expires_at > '{}')",
+            now.to_rfc3339()
+        ));
+    }
+
+    if clauses.is_empty() {
+        None
+    } else {
+        Some(clauses.join(" AND "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +234,51 @@ mod tests {
             updated_at: Utc::now(),
             expires_at: None,
         }
+    }
+
+    #[test]
+    fn test_build_filter_predicate() {
+        // No inputs -> whole-table scan.
+        assert_eq!(build_filter_predicate(None, None, None), None);
+        assert_eq!(build_filter_predicate(Some(&[]), None, None), None);
+
+        // Types format from the enum as lowercased Debug, single-quoted.
+        assert_eq!(
+            build_filter_predicate(
+                Some(&[MemoryType::Decision, MemoryType::Hazard]),
+                None,
+                None
+            ),
+            Some("type IN ('decision', 'hazard')".to_string())
+        );
+
+        // Criticality is a plain Float64 comparison.
+        assert_eq!(
+            build_filter_predicate(None, Some(0.9), None),
+            Some("criticality >= 0.9".to_string())
+        );
+
+        // A non-finite criticality bound is skipped (never emit `>= NaN`).
+        assert_eq!(build_filter_predicate(None, Some(f64::NAN), None), None);
+
+        // Expiry clause guards the nullable rfc3339 column.
+        let now = "2026-07-02T00:00:00+00:00"
+            .parse::<DateTime<Utc>>()
+            .unwrap();
+        assert_eq!(
+            build_filter_predicate(None, None, Some(now)),
+            Some("(expires_at IS NULL OR expires_at > '2026-07-02T00:00:00+00:00')".to_string())
+        );
+
+        // All three AND-combined in a stable order.
+        assert_eq!(
+            build_filter_predicate(Some(&[MemoryType::Decision]), Some(0.5), Some(now)),
+            Some(
+                "type IN ('decision') AND criticality >= 0.5 AND \
+                 (expires_at IS NULL OR expires_at > '2026-07-02T00:00:00+00:00')"
+                    .to_string()
+            )
+        );
     }
 
     #[test]

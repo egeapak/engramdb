@@ -23,7 +23,7 @@ use super::lance_index::{
 };
 use super::registry::RegistryBackend;
 use super::{manifest, memory_file, paths, project_id, write_lock};
-use crate::config::load_config;
+use crate::config::{load_config, load_config_or_default};
 use engram_types::{Memory, MemoryUpdate, Visibility};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -196,8 +196,7 @@ impl MemoryStore {
         let lance_path = paths::global_lancedb_dir()?;
         async_fs::create_dir_all(&lance_path).await?;
 
-        let config: engram_types::EngramConfig =
-            load_config(&config_path).await.unwrap_or_default();
+        let config: engram_types::EngramConfig = load_config_or_default(&config_path).await;
 
         let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
             .await
@@ -224,8 +223,7 @@ impl MemoryStore {
         async_fs::create_dir_all(&lance_path).await?;
 
         let config_path = engramdb_dir.join("config.toml");
-        let config: engram_types::EngramConfig =
-            load_config(&config_path).await.unwrap_or_default();
+        let config: engram_types::EngramConfig = load_config_or_default(&config_path).await;
 
         let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
             .await
@@ -423,10 +421,7 @@ impl MemoryStore {
 
         match matches.len() {
             0 => Err(StorageError::NotFound(id.to_string())),
-            1 => {
-                let content = async_fs::read_to_string(&matches[0]).await?;
-                memory_file::parse_memory_file(&content)
-            }
+            1 => Self::read_found_file(&matches[0], id).await,
             _ => {
                 // Multiple files for ONE full ID (`find_memory_files` already
                 // rejected distinct IDs as ambiguous): a stale duplicate left
@@ -434,9 +429,25 @@ impl MemoryStore {
                 // and removing the old one. The newest file is the current
                 // state — the rename path always writes the new file last.
                 let newest = newest_by_mtime(&matches).await;
-                let content = async_fs::read_to_string(newest).await?;
-                memory_file::parse_memory_file(&content)
+                Self::read_found_file(newest, id).await
             }
+        }
+    }
+
+    /// Read + parse a memory file found by a directory scan.
+    ///
+    /// Reads are lock-free, so a concurrent rename-update (title/visibility
+    /// change writes the new file then unlinks the old) or delete can remove
+    /// the scanned path before we read it. That is the documented `NotFound`
+    /// condition — `get` relies on it to fall through to the personal dir —
+    /// not an opaque I/O failure.
+    async fn read_found_file(path: &Path, id: &str) -> Result<Memory> {
+        match async_fs::read_to_string(path).await {
+            Ok(content) => memory_file::parse_memory_file(&content),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(StorageError::NotFound(id.to_string()))
+            }
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -659,6 +670,23 @@ impl MemoryStore {
         })
     }
 
+    /// Like [`Self::list_for_filtering`], but pushes an optional LanceDB
+    /// `WHERE`-clause predicate into the index scan so selective scalar
+    /// filters (type, criticality, expiry) narrow the row set before any
+    /// disk I/O. See [`LanceIndex::list_for_filtering_where`] for the
+    /// predicate-safety contract (trusted, escaped inputs only).
+    pub async fn list_for_filtering_where(
+        &self,
+        predicate: Option<String>,
+    ) -> Result<Vec<IndexForFiltering>> {
+        self.lance_index
+            .list_for_filtering_where(predicate)
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB list_for_filtering_where failed: {}", e))
+            })
+    }
+
     /// List lightweight metadata summaries for all memories (7 columns).
     pub async fn list_summary(&self) -> Result<Vec<IndexSummary>> {
         self.lance_index
@@ -767,16 +795,17 @@ impl MemoryStore {
                 .map_err(|e| {
                     StorageError::Validation(format!("LanceDB list_chunk_memory_ids failed: {}", e))
                 })?;
-            for chunk_id in chunk_ids {
-                if !indexed_set.contains(chunk_id.as_str()) {
-                    self.lance_index
-                        .delete_chunks(&chunk_id)
-                        .await
-                        .map_err(|e| {
-                            StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e))
-                        })?;
-                }
-            }
+            let orphans: Vec<String> = chunk_ids
+                .into_iter()
+                .filter(|id| !indexed_set.contains(id.as_str()))
+                .collect();
+            // One IN-list delete commit for all orphans, not one per ID.
+            self.lance_index
+                .delete_chunks_batch(&orphans)
+                .await
+                .map_err(|e| {
+                    StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e))
+                })?;
         }
 
         // Update manifest stats
@@ -806,6 +835,49 @@ impl MemoryStore {
             .upsert_chunks(memory_id, chunks)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB upsert_chunks failed: {}", e)))
+    }
+
+    /// Upsert embedding chunks only if the memory still matches the snapshot
+    /// they were computed from. Returns `true` when the chunks were written.
+    ///
+    /// Detached ingest tasks embed a `Memory` snapshot with no ordering
+    /// guarantee: two rapid updates spawn two tasks whose `upsert_chunks`
+    /// commits the flock serializes but does not order, so the task carrying
+    /// the OLDER content can commit last (vectors then describe v1 while the
+    /// file holds v2 until the next update/reindex); and a create-then-delete
+    /// leaves a late embed re-inserting chunks for a deleted memory (orphan
+    /// rows occupying top-k slots until doctor/reindex prunes them). This
+    /// variant re-reads the memory UNDER the write lock and skips the write
+    /// when the memory is gone or its `updated_at` no longer equals
+    /// `snapshot_updated_at`.
+    pub async fn upsert_chunks_if_current(
+        &self,
+        memory_id: &str,
+        chunks: Vec<Vec<f32>>,
+        snapshot_updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+        match self.get(memory_id).await {
+            Ok(current) if current.updated_at == snapshot_updated_at => {}
+            Ok(_) => {
+                tracing::debug!(
+                    "skipping stale chunk upsert for {memory_id}: memory changed since snapshot"
+                );
+                return Ok(false);
+            }
+            Err(StorageError::NotFound(_)) => {
+                tracing::debug!("skipping chunk upsert for deleted memory {memory_id}");
+                return Ok(false);
+            }
+            Err(e) => return Err(e),
+        }
+        self.lance_index
+            .upsert_chunks(memory_id, chunks)
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB upsert_chunks failed: {}", e))
+            })?;
+        Ok(true)
     }
 
     /// Delete all embedding chunks for a memory.
@@ -970,15 +1042,20 @@ impl MemoryStore {
             }
         }
 
+        // One batched merge_insert instead of one commit (and one LanceDB
+        // dataset version) per memory — reindexing a 1,000-memory store used
+        // to perform 1,000 sequential commits that optimize() then compacted.
+        let mut entries_batch = Vec::with_capacity(by_id.len());
         for (id, (_path, _mtime, memory)) in by_id {
             let mut index_entry = IndexEntry::from(&memory);
             index_entry.visibility = visibility;
-            self.lance_index
-                .upsert(&index_entry)
-                .await
-                .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
+            entries_batch.push(index_entry);
             indexed_ids.push(id);
         }
+        self.lance_index
+            .upsert_batch(&entries_batch)
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
         Ok(())
     }
 
@@ -1005,18 +1082,31 @@ impl MemoryStore {
     /// (`create`, `write_updated_locked`, `delete`, `reindex`) already runs
     /// inside it. Calling this unlocked could race another manifest writer
     /// (e.g. [`Self::set_embedding_fingerprint`]) and clobber its fields.
+    ///
+    /// This runs on every mutation while the lock is held, so it is kept
+    /// deliberately cheap: one single-column index scan (no 7-column
+    /// deserialize, no per-row summary allocation), and the `manifest.toml`
+    /// rewrite is skipped entirely when the stats did not change (the common
+    /// case for updates).
     async fn update_manifest_stats(&self) -> Result<()> {
         let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
         let mut manifest = manifest::load_manifest(&manifest_path).await?;
 
-        let summaries = self.list_summary().await?;
-        let memory_count = summaries.len();
-        let logical_scopes: Vec<String> = summaries
-            .iter()
-            .flat_map(|e| e.logical.iter().cloned())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
+        let (memory_count, scope_set) = self
+            .lance_index
+            .count_and_logical_scopes()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB stats scan failed: {}", e)))?;
+        // Sorted for a deterministic manifest (HashSet order used to make
+        // the scope list churn between otherwise-identical rewrites).
+        let mut logical_scopes: Vec<String> = scope_set.into_iter().collect();
+        logical_scopes.sort();
+
+        let mut current = manifest.stats.logical_scopes.clone();
+        current.sort();
+        if manifest.stats.memory_count == memory_count && current == logical_scopes {
+            return Ok(());
+        }
 
         manifest::update_stats(&mut manifest, memory_count, logical_scopes);
         manifest::save_manifest(&manifest_path, &manifest).await?;
@@ -2160,6 +2250,67 @@ mod tests {
             vec!["reindex-chunks-live".to_string()],
             "ghost chunks must be pruned, live chunks kept"
         );
+    }
+
+    /// The freshness-guarded upsert used by detached ingest tasks: a stale
+    /// snapshot (older updated_at) or a deleted memory must not write chunks;
+    /// the current snapshot must.
+    #[tokio::test]
+    async fn test_upsert_chunks_if_current_guards_stale_and_deleted() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let memory = create_test_memory("guarded-chunks", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        // Current snapshot: written.
+        let written = store
+            .upsert_chunks_if_current("guarded-chunks", vec![vec![0.1f32; 384]], memory.updated_at)
+            .await
+            .unwrap();
+        assert!(written);
+
+        // The memory moves on (updated_at bumps)...
+        let newer = store
+            .update_with("guarded-chunks", |m| {
+                m.summary = "v2".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let written = store
+            .upsert_chunks_if_current("guarded-chunks", vec![vec![0.9f32; 384]], newer.updated_at)
+            .await
+            .unwrap();
+        assert!(written);
+
+        // ...so the OLD snapshot's late-arriving vectors are refused.
+        let written = store
+            .upsert_chunks_if_current("guarded-chunks", vec![vec![0.1f32; 384]], memory.updated_at)
+            .await
+            .unwrap();
+        assert!(!written, "stale snapshot must not overwrite newer vectors");
+        let chunks = store.export_chunks("guarded-chunks").await.unwrap();
+        assert!(
+            (chunks[0][0] - 0.9).abs() < f32::EPSILON,
+            "newer vectors survive"
+        );
+
+        // Deleted memory: a late embed must not re-insert orphan chunks.
+        store.delete("guarded-chunks").await.unwrap();
+        let written = store
+            .upsert_chunks_if_current("guarded-chunks", vec![vec![0.5f32; 384]], newer.updated_at)
+            .await
+            .unwrap();
+        assert!(!written, "deleted memory must not get orphan chunks");
+        assert!(store
+            .list_chunk_memory_ids()
+            .await
+            .unwrap()
+            .iter()
+            .all(|id| id != "guarded-chunks"));
     }
 
     #[tokio::test]

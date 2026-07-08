@@ -46,6 +46,8 @@ pub struct MaintenanceReport {
     pub prune: Option<PruneResult>,
     /// Result of the main store's health check, if it ran and succeeded.
     pub doctor: Option<DoctorResult>,
+    /// Result of LanceDB compaction/version pruning, if it ran and succeeded.
+    pub optimize: Option<crate::storage::IndexOptimizeStats>,
 }
 
 /// Effective auto-maintenance status, for diagnostics (`engramdb doctor`).
@@ -199,22 +201,46 @@ pub async fn auto_maintain(
     // 2) Quick health check of the main project's store (skip if not yet init'd).
     if paths::project_dir(dir).exists() {
         match MemoryStore::open(dir).await {
-            Ok(store) => match doctor(&store).await {
-                Ok(result) => {
-                    if !result.healthy {
-                        tracing::warn!(
-                            "engramdb auto-maintenance: store at {} is unhealthy ({} stale index entr(ies), {} orphaned file(s)) — run `engramdb reindex` to repair",
-                            dir.display(),
-                            result.stale_entries.len(),
-                            result.orphaned_files.len()
-                        );
+            Ok(store) => {
+                match doctor(&store).await {
+                    Ok(result) => {
+                        if !result.healthy {
+                            tracing::warn!(
+                                "engramdb auto-maintenance: store at {} is unhealthy ({} stale index entr(ies), {} orphaned file(s)) — run `engramdb reindex` to repair",
+                                dir.display(),
+                                result.stale_entries.len(),
+                                result.orphaned_files.len()
+                            );
+                        }
+                        report.doctor = Some(result);
                     }
-                    report.doctor = Some(result);
+                    Err(e) => {
+                        tracing::warn!("engramdb auto-maintenance: store health check failed: {e}")
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("engramdb auto-maintenance: store health check failed: {e}")
+
+                // 3) Compact fragments and prune old dataset versions. Every
+                // mutation commits a new immutable LanceDB version, so a
+                // create/update-heavy workload that never runs `gc`/`reindex`
+                // (the only other optimize() callers) grows disk monotonically.
+                // This pass is already throttled and best-effort, which is
+                // exactly the contract optimize() wants.
+                match store.optimize().await {
+                    Ok(stats) => {
+                        if stats.old_versions_removed > 0 || stats.fragments_removed > 0 {
+                            tracing::info!(
+                                "engramdb auto-maintenance: compacted {} fragment(s), pruned {} old version(s)",
+                                stats.fragments_removed,
+                                stats.old_versions_removed
+                            );
+                        }
+                        report.optimize = Some(stats);
+                    }
+                    Err(e) => {
+                        tracing::warn!("engramdb auto-maintenance: index optimize failed: {e}")
+                    }
                 }
-            },
+            }
             Err(e) => tracing::warn!(
                 "engramdb auto-maintenance: could not open store at {}: {e}",
                 dir.display()

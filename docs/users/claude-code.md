@@ -85,7 +85,7 @@ If you already had an `engramdb` `mcpServers` entry, `setup` updates it in place
 
 ### `SessionStart`
 
-Reads the event JSON from stdin and emits `additionalContext` listing high-criticality memories (criticality ≥ `--min-criticality`, default `0.6`). The output is capped at ~2000 characters so it doesn't blow up the prompt. Only the most relevant memories survive the budget — see `SESSION_CONTEXT_BUDGET` in `src/cli/commands/hook.rs`.
+Reads the event JSON from stdin and emits `additionalContext` listing high-criticality memories (criticality ≥ `--min-criticality`, default `0.6`). The output is capped at ~2000 characters so it doesn't blow up the prompt. Only the most relevant memories survive the budget — see `SESSION_CONTEXT_BUDGET` in `crates/engram-cli/src/commands/hook.rs`.
 
 A typical session-start injection looks like:
 

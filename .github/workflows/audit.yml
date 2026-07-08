@@ -1,0 +1,35 @@
+name: Audit
+
+# Supply-chain gate: RustSec advisories, license allow-list, duplicate/banned
+# crates, and source provenance via cargo-deny (config: deny.toml at the repo
+# root). Runs on PRs/pushes so new dependencies get checked when introduced,
+# and on a weekly schedule so advisories published *after* a dependency was
+# merged still surface without waiting for the next PR.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "0 5 * * 1" # Mondays 05:00 UTC (after the fuzz run)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    # Advisory-only for now: the license allow-list in deny.toml was written
+    # from the known ecosystem (Rust/Arrow/DataFusion/ONNX), not confirmed by
+    # a full `cargo deny` pass over the resolved dependency tree, so an
+    # unlisted-but-permissive license must not block unrelated PRs. Remove
+    # this flag once a green scheduled run confirms the list is complete.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources

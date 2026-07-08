@@ -24,6 +24,47 @@ use chrono::{DateTime, Utc};
 use engram_types::{Memory, MemoryType, ProvenanceSource, Status, Visibility};
 use serde::{Deserialize, Serialize};
 
+/// Minimum chunk-table row count before [`LanceIndex::optimize`] will
+/// opportunistically build an ANN (IVF) vector index.
+///
+/// An IVF index makes vector search APPROXIMATE (recall < 100%), which would
+/// change result ordering that the test suite and the NLI/contradiction flow
+/// assert exactly. LanceDB automatically falls back to EXACT flat KNN whenever
+/// no index exists, so gating creation behind this deliberately high threshold
+/// keeps every small/normal store — hundreds to low-thousands of chunks — on
+/// unchanged, 100%-recall exact search. The index is a large-scale scaling
+/// win only; it never touches the row counts real projects or tests operate at.
+pub const VECTOR_INDEX_MIN_ROWS: usize = 8192;
+
+/// Minimum rows before an IVF index can be trained at all. IVF k-means needs a
+/// population to cluster into partitions; below this [`LanceIndex::create_vector_index`]
+/// is a graceful no-op (the store keeps using exact flat search).
+const IVF_TRAINING_MIN_ROWS: usize = 256;
+
+/// At/above this row count [`LanceIndex::create_vector_index`] builds an IVF-PQ
+/// index (product quantization → compressed vectors, the memory win at scale).
+/// Between [`IVF_TRAINING_MIN_ROWS`] and this, PQ codebook training has too few
+/// samples to be reliable, so it falls back to IVF-Flat (raw vectors, highest
+/// recall) — the "fall back to IvfFlat if PQ needs more rows than practical"
+/// case.
+const IVF_PQ_MIN_ROWS: usize = 4096;
+
+/// `nprobes` for indexed vector search: how many IVF partitions to probe.
+/// Higher = higher recall at more cost. Chosen generously — for the partition
+/// counts a typical EngramDB store reaches (num_partitions ≈ sqrt(rows), so a
+/// few tens up to a few hundred) this probes most/all partitions, keeping
+/// recall near-exact. Correctness dominates raw speed here: an index must never
+/// silently drop the true nearest neighbor. Harmless when no index exists —
+/// LanceDB ignores it for flat KNN.
+const VECTOR_SEARCH_NPROBES: usize = 48;
+
+/// `refine_factor` for indexed vector search: after the IVF/PQ shortlist,
+/// re-rank the top `refine_factor * limit` candidates using the ORIGINAL
+/// (un-quantized) vectors before returning. This restores the recall an IVF-PQ
+/// index would otherwise lose to quantization. Harmless for IVF-Flat / flat KNN
+/// (their stored vectors are already exact).
+const VECTOR_SEARCH_REFINE_FACTOR: u32 = 4;
+
 /// Full metadata entry stored in LanceDB (all 14 columns).
 ///
 /// Used only for writing to LanceDB. For reads, prefer the narrower
@@ -302,6 +343,30 @@ impl LanceIndex {
         Ok(())
     }
 
+    /// Upsert a batch of entries in ONE `merge_insert` commit.
+    ///
+    /// LanceDB commits a new immutable dataset version per mutating call, so
+    /// upserting N entries one-by-one (as reindex once did) costs N commit
+    /// round-trips and creates N versions that `optimize` must then compact
+    /// away. One batched call does one commit.
+    pub async fn upsert_batch(&self, entries: &[IndexEntry]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let batch = self.entries_to_batch(entries)?;
+        let table = self.open_table().await?;
+
+        let schema_ref = batch.schema();
+        let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema_ref);
+        let mut op = table.merge_insert(&["id"]);
+        op.when_matched_update_all(None);
+        op.when_not_matched_insert_all();
+        op.execute(Box::new(batches))
+            .await
+            .context("Failed to upsert entry batch")?;
+        Ok(())
+    }
+
     /// Delete an entry by ID from the memories table.
     pub async fn delete(&self, id: &str) -> Result<()> {
         let table = self.open_table().await?;
@@ -333,6 +398,44 @@ impl LanceIndex {
             count += batch.num_rows();
         }
         Ok(count)
+    }
+
+    /// Count rows and collect the distinct logical scopes in one
+    /// single-column scan (`logical` only).
+    ///
+    /// Backs the per-mutation manifest-stats refresh, which needs exactly
+    /// these two aggregates — deriving them from the 7-column summary
+    /// projection made every create/update/delete pay a full-row scan.
+    pub async fn count_and_logical_scopes(
+        &self,
+    ) -> Result<(usize, std::collections::HashSet<String>)> {
+        let table = self.open_table().await?;
+
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec!["logical".into()]))
+            .execute()
+            .await
+            .context("Failed to query LanceDB table for logical scopes")?;
+
+        let mut count = 0usize;
+        let mut scopes = std::collections::HashSet::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read batch")?;
+            count += batch.num_rows();
+            let logicals = batch
+                .column_by_name("logical")
+                .context("Missing 'logical' column")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("Failed to cast 'logical'")?;
+            for i in 0..batch.num_rows() {
+                let parsed: Vec<String> = serde_json::from_str(logicals.value(i))
+                    .context("Failed to parse 'logical' JSON")?;
+                scopes.extend(parsed);
+            }
+        }
+        Ok((count, scopes))
     }
 
     /// List all memory IDs in the memories table.
@@ -467,19 +570,44 @@ impl LanceIndex {
     /// by `apply_index_filters`: id, type, physical, logical, tags, criticality.
     /// Skips summary, status, visibility, dates — saving disk I/O and parsing.
     pub async fn list_for_filtering(&self) -> Result<Vec<IndexForFiltering>> {
+        self.list_for_filtering_where(None).await
+    }
+
+    /// Like [`Self::list_for_filtering`], but with an optional LanceDB
+    /// `WHERE`-clause pushdown so selective scalar filters (type, criticality,
+    /// expiry) narrow the row set inside the index scan instead of streaming
+    /// every row into Rust.
+    ///
+    /// The `predicate` string is a DataFusion SQL boolean expression over the
+    /// `memories` table columns. Callers MUST build it from trusted, already
+    /// validated data (e.g. enum-formatted type names, numeric literals) using
+    /// the same single-quote-escaping discipline as [`Self::vector_search`] and
+    /// [`Self::find_ids_by_prefix`] — no raw user strings. A `None` predicate
+    /// scans the whole table (identical to `list_for_filtering`).
+    ///
+    /// The pushdown is a pure narrowing optimization: the caller still applies
+    /// the equivalent filters in Rust (`apply_index_filters`), so a
+    /// conservatively-permissive predicate never changes the final result set.
+    pub async fn list_for_filtering_where(
+        &self,
+        predicate: Option<String>,
+    ) -> Result<Vec<IndexForFiltering>> {
         let table = self.open_table().await?;
 
-        let mut stream = table
-            .query()
-            .select(lancedb::query::Select::Columns(vec![
-                "id".into(),
-                "type".into(),
-                "physical".into(),
-                "logical".into(),
-                "tags".into(),
-                "criticality".into(),
-                "expires_at".into(),
-            ]))
+        let mut query = table.query().select(lancedb::query::Select::Columns(vec![
+            "id".into(),
+            "type".into(),
+            "physical".into(),
+            "logical".into(),
+            "tags".into(),
+            "criticality".into(),
+            "expires_at".into(),
+        ]));
+        if let Some(pred) = predicate {
+            query = query.only_if(pred);
+        }
+
+        let mut stream = query
             .execute()
             .await
             .context("Failed to query LanceDB table for filtering entries")?;
@@ -660,6 +788,25 @@ impl LanceIndex {
         Ok(())
     }
 
+    /// Delete the chunks of many memories in ONE delete commit
+    /// (`memory_id IN (...)`), instead of one dataset version per ID.
+    pub async fn delete_chunks_batch(&self, memory_ids: &[String]) -> Result<()> {
+        if memory_ids.is_empty() {
+            return Ok(());
+        }
+        let table = self.open_chunks_table().await?;
+        let list = memory_ids
+            .iter()
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        table
+            .delete(&format!("memory_id IN ({list})"))
+            .await
+            .context("Failed to delete chunk batch")?;
+        Ok(())
+    }
+
     /// Perform ANN vector search against the chunks table.
     ///
     /// Queries the chunks table, groups results by memory_id, and takes the
@@ -703,7 +850,17 @@ impl LanceIndex {
         // for absurd limits still get the best `MAX_CHUNK_FETCH` chunks.
         const MAX_CHUNK_FETCH: usize = 65_536;
         let chunk_limit = limit.saturating_mul(5).min(MAX_CHUNK_FETCH);
-        let mut vector_query = table.vector_search(query)?.limit(chunk_limit);
+        // Recall knobs: only meaningful once an IVF index exists on the vector
+        // column (see `create_vector_index`); harmless for the exact flat-KNN
+        // path every small/normal store uses, where LanceDB ignores them. They
+        // are tuned to preserve recall — probe many partitions and re-rank the
+        // shortlist with un-quantized vectors — so an index never silently
+        // changes which memories the search returns.
+        let mut vector_query = table
+            .vector_search(query)?
+            .limit(chunk_limit)
+            .nprobes(VECTOR_SEARCH_NPROBES)
+            .refine_factor(VECTOR_SEARCH_REFINE_FACTOR);
         if let Some(ids) = restrict_to {
             // Memory ids are server-generated UUIDs, but reuse the same
             // single-quote escaping discipline as every other predicate in
@@ -849,60 +1006,183 @@ impl LanceIndex {
                 total.old_versions_removed += p.old_versions;
             }
         }
+
+        // Opportunistically build an ANN vector index once the chunks table is
+        // large enough that exhaustive flat KNN would dominate query latency.
+        // Best-effort, exactly like the compaction/prune loop above: any failure
+        // is logged and swallowed — indexing is a scaling optimization, not
+        // correctness (search stays exact flat until an index exists). Gated on
+        // VECTOR_INDEX_MIN_ROWS so every normal-sized store keeps 100%-recall
+        // exact search with unchanged result ordering; only stores past the
+        // threshold ever get the approximate index. `optimize` is already the
+        // single maintenance entry point (gc / reindex / auto-maintain all call
+        // it), so no new call site is needed.
+        match self.open_chunks_table().await {
+            Ok(chunks) => match chunks.count_rows(None).await {
+                Ok(rows) if rows >= VECTOR_INDEX_MIN_ROWS => {
+                    if let Err(e) = self.create_vector_index().await {
+                        tracing::warn!("optimize: vector index creation failed (continuing): {e}");
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("optimize: failed to count chunk rows for indexing: {e}");
+                }
+            },
+            Err(e) => {
+                tracing::warn!("optimize: failed to open chunks table for indexing: {e}");
+            }
+        }
+
         Ok(total)
+    }
+
+    /// Create an approximate-nearest-neighbor (IVF) index on the chunks table's
+    /// `vector` column.
+    ///
+    /// Idempotent and graceful. Returns `Ok(())` without building anything when
+    /// either documented no-op condition holds (both logged at debug):
+    /// - the table has fewer than [`IVF_TRAINING_MIN_ROWS`] rows (IVF k-means
+    ///   has nothing to cluster), or
+    /// - an index already covers the `vector` column.
+    ///
+    /// Neither "too few rows" nor "already indexed" is ever surfaced as a hard
+    /// error, because index creation is a best-effort scaling optimization:
+    /// LanceDB falls back to exact flat KNN whenever no index is present, so a
+    /// skipped build is a correctness-preserving outcome, not a failure.
+    ///
+    /// Uses IVF-PQ at/above [`IVF_PQ_MIN_ROWS`] (product-quantized, compact) and
+    /// IVF-Flat below it (raw vectors, highest recall — PQ codebook training is
+    /// unreliable with too few samples). `num_partitions` follows the LanceDB
+    /// default of sqrt(rows), floored to at least 1.
+    ///
+    /// NOTE: an IVF index makes vector search APPROXIMATE. Callers that must
+    /// preserve exact ordering rely on this only being built past
+    /// [`VECTOR_INDEX_MIN_ROWS`] (see [`Self::optimize`]); the recall knobs in
+    /// [`Self::vector_search`] (`nprobes` + `refine_factor`) keep recall high
+    /// once it exists.
+    pub async fn create_vector_index(&self) -> Result<()> {
+        let table = self.open_chunks_table().await?;
+
+        let rows = table
+            .count_rows(None)
+            .await
+            .context("Failed to count chunk rows before vector indexing")?;
+        if rows < IVF_TRAINING_MIN_ROWS {
+            tracing::debug!(
+                "create_vector_index: {rows} chunk rows < {IVF_TRAINING_MIN_ROWS} IVF training \
+                 minimum; keeping exact flat search"
+            );
+            return Ok(());
+        }
+
+        // Idempotent: skip if any index already covers the vector column.
+        let existing = table
+            .list_indices()
+            .await
+            .context("Failed to list existing chunk-table indices")?;
+        if existing
+            .iter()
+            .any(|idx| idx.columns.iter().any(|c| c == "vector"))
+        {
+            tracing::debug!("create_vector_index: vector index already exists; nothing to do");
+            return Ok(());
+        }
+
+        // num_partitions ≈ sqrt(rows) (the LanceDB default), floored so a table
+        // just past the training minimum still gets a sane cluster count.
+        let num_partitions = ((rows as f64).sqrt().round() as u32).max(1);
+
+        let index = if rows >= IVF_PQ_MIN_ROWS {
+            lancedb::index::Index::IvfPq(
+                lancedb::index::vector::IvfPqIndexBuilder::default().num_partitions(num_partitions),
+            )
+        } else {
+            lancedb::index::Index::IvfFlat(
+                lancedb::index::vector::IvfFlatIndexBuilder::default()
+                    .num_partitions(num_partitions),
+            )
+        };
+        let index_kind = if rows >= IVF_PQ_MIN_ROWS {
+            "IVF-PQ"
+        } else {
+            "IVF-Flat"
+        };
+
+        table
+            .create_index(&["vector"], index)
+            .execute()
+            .await
+            .context("Failed to create IVF vector index on chunks table")?;
+        tracing::debug!(
+            "create_vector_index: built {index_kind} index on {rows} chunk rows \
+             ({num_partitions} partitions)"
+        );
+        Ok(())
     }
 
     // ---- Arrow conversion helpers ----
 
     fn entry_to_batch(&self, entry: &IndexEntry) -> Result<RecordBatch> {
-        let id_array = StringArray::from(vec![entry.id.as_str()]);
-        let summary_array = StringArray::from(vec![entry.summary.as_str()]);
-        let type_array = StringArray::from(vec![format!("{:?}", entry.type_).to_lowercase()]);
-        let status_array = StringArray::from(vec![format!("{:?}", entry.status).to_lowercase()]);
-        let provenance_array =
-            StringArray::from(vec![format!("{:?}", entry.provenance_source).to_lowercase()]);
-        let visibility_array =
-            StringArray::from(vec![format!("{:?}", entry.visibility).to_lowercase()]);
-        let criticality_array = Float64Array::from(vec![entry.criticality]);
-        let confidence_array = Float64Array::from(vec![entry.confidence]);
+        self.entries_to_batch(std::slice::from_ref(entry))
+    }
 
-        let physical_json =
-            serde_json::to_string(&entry.physical).context("Failed to serialize physical")?;
-        let logical_json =
-            serde_json::to_string(&entry.logical).context("Failed to serialize logical")?;
-        let tags_json = serde_json::to_string(&entry.tags).context("Failed to serialize tags")?;
+    /// Build one RecordBatch holding every entry (columnar, N rows).
+    fn entries_to_batch(&self, entries: &[IndexEntry]) -> Result<RecordBatch> {
+        let n = entries.len();
+        let mut ids = Vec::with_capacity(n);
+        let mut summaries = Vec::with_capacity(n);
+        let mut types = Vec::with_capacity(n);
+        let mut statuses = Vec::with_capacity(n);
+        let mut provenances = Vec::with_capacity(n);
+        let mut visibilities = Vec::with_capacity(n);
+        let mut criticalities = Vec::with_capacity(n);
+        let mut confidences = Vec::with_capacity(n);
+        let mut physicals = Vec::with_capacity(n);
+        let mut logicals = Vec::with_capacity(n);
+        let mut tags = Vec::with_capacity(n);
+        let mut created_ats = Vec::with_capacity(n);
+        let mut updated_ats = Vec::with_capacity(n);
+        let mut expires_ats: Vec<Option<String>> = Vec::with_capacity(n);
 
-        let physical_array = StringArray::from(vec![physical_json.as_str()]);
-        let logical_array = StringArray::from(vec![logical_json.as_str()]);
-        let tags_array = StringArray::from(vec![tags_json.as_str()]);
-
-        let created_at_str = entry.created_at.to_rfc3339();
-        let updated_at_str = entry.updated_at.to_rfc3339();
-        let created_at_array = StringArray::from(vec![created_at_str.as_str()]);
-        let updated_at_array = StringArray::from(vec![updated_at_str.as_str()]);
-        let expires_at_str = entry.expires_at.map(|dt| dt.to_rfc3339());
-        let expires_at_array: StringArray = match &expires_at_str {
-            Some(s) => StringArray::from(vec![Some(s.as_str())]),
-            None => StringArray::from(vec![Option::<&str>::None]),
-        };
+        for entry in entries {
+            ids.push(entry.id.clone());
+            summaries.push(entry.summary.clone());
+            types.push(format!("{:?}", entry.type_).to_lowercase());
+            statuses.push(format!("{:?}", entry.status).to_lowercase());
+            provenances.push(format!("{:?}", entry.provenance_source).to_lowercase());
+            visibilities.push(format!("{:?}", entry.visibility).to_lowercase());
+            criticalities.push(entry.criticality);
+            confidences.push(entry.confidence);
+            physicals.push(
+                serde_json::to_string(&entry.physical).context("Failed to serialize physical")?,
+            );
+            logicals.push(
+                serde_json::to_string(&entry.logical).context("Failed to serialize logical")?,
+            );
+            tags.push(serde_json::to_string(&entry.tags).context("Failed to serialize tags")?);
+            created_ats.push(entry.created_at.to_rfc3339());
+            updated_ats.push(entry.updated_at.to_rfc3339());
+            expires_ats.push(entry.expires_at.map(|dt| dt.to_rfc3339()));
+        }
 
         let batch = RecordBatch::try_new(
             self.memories_schema(),
             vec![
-                Arc::new(id_array) as ArrayRef,
-                Arc::new(summary_array) as ArrayRef,
-                Arc::new(type_array) as ArrayRef,
-                Arc::new(status_array) as ArrayRef,
-                Arc::new(provenance_array) as ArrayRef,
-                Arc::new(visibility_array) as ArrayRef,
-                Arc::new(criticality_array) as ArrayRef,
-                Arc::new(confidence_array) as ArrayRef,
-                Arc::new(physical_array) as ArrayRef,
-                Arc::new(logical_array) as ArrayRef,
-                Arc::new(tags_array) as ArrayRef,
-                Arc::new(created_at_array) as ArrayRef,
-                Arc::new(updated_at_array) as ArrayRef,
-                Arc::new(expires_at_array) as ArrayRef,
+                Arc::new(StringArray::from(ids)) as ArrayRef,
+                Arc::new(StringArray::from(summaries)) as ArrayRef,
+                Arc::new(StringArray::from(types)) as ArrayRef,
+                Arc::new(StringArray::from(statuses)) as ArrayRef,
+                Arc::new(StringArray::from(provenances)) as ArrayRef,
+                Arc::new(StringArray::from(visibilities)) as ArrayRef,
+                Arc::new(Float64Array::from(criticalities)) as ArrayRef,
+                Arc::new(Float64Array::from(confidences)) as ArrayRef,
+                Arc::new(StringArray::from(physicals)) as ArrayRef,
+                Arc::new(StringArray::from(logicals)) as ArrayRef,
+                Arc::new(StringArray::from(tags)) as ArrayRef,
+                Arc::new(StringArray::from(created_ats)) as ArrayRef,
+                Arc::new(StringArray::from(updated_ats)) as ArrayRef,
+                Arc::new(StringArray::from(expires_ats)) as ArrayRef,
             ],
         )
         .context("Failed to create RecordBatch")?;
@@ -1646,6 +1926,138 @@ mod tests {
             .unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].id, quoted);
+    }
+
+    /// Deterministic vectors from a fixed-seed xorshift64* PRNG (no external
+    /// rng dependency). 384-dim random floats in [-1, 1); collisions are
+    /// statistically impossible, so every generated vector is distinct.
+    fn seeded_vectors(seed: u64, n: usize, dim: usize) -> Vec<Vec<f32>> {
+        let mut state = seed;
+        let mut next = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let x = state.wrapping_mul(0x2545F4914F6CDD1D);
+            // Top 24 bits → [0, 1) → [-1, 1).
+            ((x >> 40) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
+        };
+        (0..n).map(|_| (0..dim).map(|_| next()).collect()).collect()
+    }
+
+    /// Seed `count` single-chunk memories (`{prefix}-NNNN`) into the chunks
+    /// table in ONE commit. Seeding via per-memory `upsert_chunks` is one
+    /// LanceDB merge_insert commit each (~0.3s), so 300-500 rows would take
+    /// minutes and dominate index tests; one batched commit keeps them fast.
+    async fn seed_chunks_batch(lance: &LanceIndex, prefix: &str, seed: u64, count: usize) {
+        let vectors = seeded_vectors(seed, count, 384);
+        let table = lance.open_chunks_table().await.unwrap();
+        let schema = lance.chunks_schema();
+        let memory_id_array = StringArray::from(
+            (0..count)
+                .map(|i| format!("{prefix}-{i:04}"))
+                .collect::<Vec<_>>(),
+        );
+        let chunk_index_array = UInt32Array::from(vec![0u32; count]);
+        let all_values: Vec<f32> = vectors.iter().flatten().copied().collect();
+        let vector_array = FixedSizeListArray::new(
+            Arc::new(Field::new("item", DataType::Float32, true)),
+            384,
+            Arc::new(Float32Array::from(all_values)) as ArrayRef,
+            None,
+        );
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(memory_id_array) as ArrayRef,
+                Arc::new(chunk_index_array) as ArrayRef,
+                Arc::new(vector_array) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+        let mut op = table.merge_insert(&["memory_id", "chunk_index"]);
+        op.when_not_matched_insert_all();
+        op.execute(Box::new(batches)).await.unwrap();
+    }
+
+    /// The IVF index is APPROXIMATE, so this proves the index plus the
+    /// `nprobes` + `refine_factor` recall knobs still return the true nearest
+    /// neighbor(s). Builds ~512 distinct 384-dim vectors, records the EXACT
+    /// flat-KNN top-5 for a query BEFORE any index exists, builds the index via
+    /// `create_vector_index` (bypassing the 8192 opportunistic gate), then
+    /// re-runs the same query and asserts the top-1 NN survives and recall@5 is
+    /// >= 4/5. Fixed RNG seed → deterministic.
+    #[tokio::test]
+    async fn test_vector_index_preserves_recall() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        // Seed 512 single-chunk memories in ONE batch commit (see helper).
+        seed_chunks_batch(&lance, "mem", 0x9E3779B97F4A7C15, 512).await;
+
+        // A deterministic query vector from a different seed (not identical to
+        // any stored vector).
+        let query = seeded_vectors(0xD1B54A32D192ED03, 1, 384).pop().unwrap();
+
+        // Ground truth: exact flat KNN, since no index exists yet.
+        let before = lance.vector_search(query.clone(), 5, None).await.unwrap();
+        assert_eq!(before.len(), 5, "expected 5 flat-search neighbors");
+        let before_ids: Vec<String> = before.iter().map(|m| m.id.clone()).collect();
+
+        // Build the ANN index explicitly (bypasses the VECTOR_INDEX_MIN_ROWS gate).
+        lance.create_vector_index().await.unwrap();
+
+        // Same query, now with the index + recall knobs active.
+        let after = lance.vector_search(query, 5, None).await.unwrap();
+        assert_eq!(
+            after.len(),
+            5,
+            "indexed search must still return 5 neighbors"
+        );
+        let after_ids: Vec<String> = after.iter().map(|m| m.id.clone()).collect();
+
+        // True nearest neighbor must survive indexing.
+        assert_eq!(
+            after_ids[0], before_ids[0],
+            "top-1 NN must survive indexing: before={before_ids:?} after={after_ids:?}"
+        );
+
+        // recall@5 must be >= 4/5.
+        let overlap = after_ids
+            .iter()
+            .filter(|id| before_ids.contains(id))
+            .count();
+        assert!(
+            overlap >= 4,
+            "indexed recall@5 too low: {overlap}/5 (before={before_ids:?} after={after_ids:?})"
+        );
+    }
+
+    /// `create_vector_index` is idempotent and a graceful no-op below the IVF
+    /// training minimum: a tiny table (well under 256 rows) returns Ok without
+    /// building anything, and a second call after a real build is also Ok.
+    #[tokio::test]
+    async fn test_create_vector_index_idempotent_and_small_store_noop() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        // Empty / tiny table: no-op, no error.
+        lance.create_vector_index().await.unwrap();
+        seed_chunks_batch(&lance, "small", 1, 8).await;
+        lance.create_vector_index().await.unwrap();
+        // Search still works (exact flat) after the no-op.
+        let hits = lance
+            .vector_search(vec![0.1f32; 384], 3, None)
+            .await
+            .unwrap();
+        assert!(!hits.is_empty());
+
+        // A real build followed by a second call must both be Ok (idempotent).
+        let temp_dir2 = TempDir::new().unwrap();
+        let lance2 = LanceIndex::new(temp_dir2.path(), 384).await.unwrap();
+        seed_chunks_batch(&lance2, "big", 2, 300).await;
+        lance2.create_vector_index().await.unwrap();
+        lance2.create_vector_index().await.unwrap(); // already indexed → Ok no-op
     }
 
     #[tokio::test]

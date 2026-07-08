@@ -26,6 +26,27 @@ pub use v2::{V2Parser, V2Writer};
 /// Current memory file format version.
 pub const CURRENT_FORMAT_VERSION: u32 = 2;
 
+/// Reject frontmatter `id` values that could escape the memories directory
+/// when composed into a filename (`memory_filename` → `dir.join(...)`).
+///
+/// Server-generated IDs are UUIDv7, but memory files can arrive with a
+/// cloned repo, so the parser is an untrusted-input boundary. Deliberately
+/// shape-loose (legacy stores may carry non-UUID ids): only path-hostile
+/// content is rejected.
+pub(crate) fn validate_id_shape(id: &str) -> Result<()> {
+    let hostile = id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains("..")
+        || id.chars().any(|c| c.is_control());
+    if hostile {
+        return Err(super::error::StorageError::Validation(format!(
+            "memory id {id:?} is empty or contains path-hostile characters"
+        )));
+    }
+    Ok(())
+}
+
 // ===========================================================================
 // Filename helpers
 // ===========================================================================
@@ -62,8 +83,16 @@ pub fn slugify(title: &str) -> String {
     if trimmed.len() <= 50 {
         trimmed.to_string()
     } else {
-        // Break at last hyphen before 50 chars
-        let truncated = &trimmed[..50];
+        // Truncate to at most 50 bytes WITHOUT slicing mid-character:
+        // is_alphanumeric() keeps multibyte chars (CJK, accented Latin), so
+        // byte offset 50 may not be a char boundary and `&trimmed[..50]`
+        // would panic on e.g. a 17-char CJK title.
+        let mut end = 50;
+        while !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        let truncated = &trimmed[..end];
+        // Break at last hyphen boundary when there is one
         match truncated.rfind('-') {
             Some(pos) => truncated[..pos].to_string(),
             None => truncated.to_string(),

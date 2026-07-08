@@ -55,6 +55,7 @@ impl MemoryWriter for V1Writer {
 
 fn parse_v1(frontmatter: &str, body: &str) -> Result<Memory> {
     let mut memory: Memory = serde_yaml_ng::from_str(frontmatter)?;
+    super::validate_id_shape(&memory.id)?;
     let sections = parse_body_sections(body);
 
     // H1 title in body overrides frontmatter title

@@ -662,9 +662,7 @@ async fn check_embedding_model_identity(dir: &Path) -> EnvironmentCheck {
 
     let name = "Embedding model identity".to_string();
     let config_path = dir.join(".engramdb").join("config.toml");
-    let config = crate::storage::config::load_config(&config_path)
-        .await
-        .unwrap_or_default();
+    let config = crate::storage::config::load_config_or_default(&config_path).await;
     let manifest_path = dir.join(".engramdb").join("manifest.toml");
     let stored = crate::storage::manifest::load_manifest(&manifest_path)
         .await
@@ -745,9 +743,7 @@ fn humanize_interval(d: Duration) -> String {
 /// never counts as a failure.
 async fn check_maintenance(dir: &Path) -> EnvironmentCheck {
     let config_path = dir.join(".engramdb").join("config.toml");
-    let config = crate::storage::config::load_config(&config_path)
-        .await
-        .unwrap_or_default();
+    let config = crate::storage::config::load_config_or_default(&config_path).await;
     let status = crate::ops::maintenance_status(&config.maintenance).await;
 
     if !status.enabled {
@@ -782,9 +778,7 @@ async fn check_maintenance(dir: &Path) -> EnvironmentCheck {
 /// Informational check showing the active embedding backend and model from config.
 async fn check_embedding_backend(dir: &Path) -> EnvironmentCheck {
     let config_path = dir.join(".engramdb").join("config.toml");
-    let config = crate::storage::config::load_config(&config_path)
-        .await
-        .unwrap_or_default();
+    let config = crate::storage::config::load_config_or_default(&config_path).await;
 
     EnvironmentCheck {
         name: "Embedding backend".to_string(),
@@ -808,9 +802,7 @@ async fn check_embedding_backend(dir: &Path) -> EnvironmentCheck {
 /// feature is enabled in config (otherwise no model is loaded for them).
 async fn check_active_models(dir: &Path) -> Vec<EnvironmentCheck> {
     let config_path = dir.join(".engramdb").join("config.toml");
-    let config = crate::storage::config::load_config(&config_path)
-        .await
-        .unwrap_or_default();
+    let config = crate::storage::config::load_config_or_default(&config_path).await;
 
     let info = |name: &str, message: String, detail: &str| EnvironmentCheck {
         name: name.to_string(),
@@ -1087,9 +1079,7 @@ pub async fn validate_models(config: &crate::types::EngramConfig) -> Vec<Environ
 #[cfg(feature = "ollama")]
 async fn check_ollama_connectivity(dir: &Path) -> EnvironmentCheck {
     let config_path = dir.join(".engramdb").join("config.toml");
-    let config = crate::storage::config::load_config(&config_path)
-        .await
-        .unwrap_or_default();
+    let config = crate::storage::config::load_config_or_default(&config_path).await;
     let ollama_is_backend = config.embeddings.backend == crate::types::EmbeddingBackend::Ollama;
 
     let client = match reqwest::Client::builder()

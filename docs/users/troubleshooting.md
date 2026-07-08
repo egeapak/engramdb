@@ -16,6 +16,28 @@ Install the Protocol Buffers compiler. macOS: `brew install protobuf`. Debian/Ub
 **`ort-sys` download fails with `UnknownIssuer` / certificate error.**
 You're behind a corporate proxy or in a restricted-egress sandbox that the rustls-based downloader doesn't trust. See the `CLAUDE.md` "Building & testing in Claude Code on the web" section for the curl + `ORT_STRATEGY=system` workaround.
 
+**`The requested API version [24] is not available, only API versions [1, 23]... Current ORT Version is: 1.23.x` (Intel Mac).**
+EngramDB builds against ONNX Runtime **1.24.x** (ABI/API 24, pinned via `fastembed`/`ort 2.0.0-rc.12`). **There is no prebuilt ONNX Runtime 1.24 for Intel Mac (`x86_64-apple-darwin`) anywhere** — Microsoft dropped x86_64 macOS builds after 1.23.x (1.24.1+ ship arm64 only, and there are zero x86_64 macOS artifacts for any 1.24.x), and `ort`'s `download-binaries` CDN never carried Intel Mac. So the build falls back to a *system* `libonnxruntime`, and the newest Intel-Mac ORT that exists is **1.23.x (API 23)** (Homebrew's, or a bundled one), which the API-24 build rejects at startup with this error. There is no version of Homebrew `onnxruntime` or `pip install onnxruntime` that fixes this — none ship a 1.24 x86_64 macOS build.
+
+The only way to run on Intel Mac is to **build ONNX Runtime 1.24.x from source** and link against it (`ort-sys` rc.12 has no automatic compile mode, so this is a manual step):
+
+```bash
+# 1. Build ONNX Runtime 1.24.x for x86_64 macOS from source (~30–60 min; needs cmake + Xcode CLT).
+git clone --depth 1 --branch v1.24.2 https://github.com/microsoft/onnxruntime
+cd onnxruntime
+./build.sh --config Release --build_shared_lib --parallel --skip_tests \
+  --osx_arch x86_64 --compile_no_warning_as_error
+# libonnxruntime.dylib lands under build/MacOS/Release/
+
+# 2. Build engramdb against it (point ORT at the lib dir; dynamic link keeps the dylib external).
+ORT_LIB_LOCATION="$PWD/build/MacOS/Release" ORT_PREFER_DYNAMIC_LINK=1 \
+  cargo install --git https://github.com/egeapak/engramdb
+```
+
+The library **must be 1.24.x** — a 1.23.x lib reproduces the same error (API 23 ≠ 24).
+
+**Apple Silicon (`aarch64-apple-darwin`) is unaffected** — `download-binaries` ships a prebuilt 1.24 runtime for it. If you don't specifically need Intel-Mac support, running on Apple Silicon (or Linux/Windows, which also have prebuilts) avoids this entirely. For the same reason, official releases do **not** include an Intel-Mac binary.
+
 **Long compile times on first build.**
 LanceDB and `ort` pull in heavy native code. Subsequent builds are cached. Use `cargo build --release` for the production binary; debug builds are slower at runtime but compile faster.
 

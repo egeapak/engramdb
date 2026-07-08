@@ -80,7 +80,7 @@ Example:
     "type": "hazard",
     "summary": "LanceDB connector drops table on conflicting schema upsert",
     "content": "Calling Connector::upsert with a schema that differs from the existing table (even by Arrow metadata) silently drops and recreates the table, losing data. Always read the existing schema first and match it exactly.",
-    "physical": ["src/storage/lance_index.rs"],
+    "physical": ["crates/engram-storage/src/lance_index.rs"],
     "logical": ["storage.lancedb"],
     "tags": ["lancedb", "data-loss"],
     "criticality": 0.9

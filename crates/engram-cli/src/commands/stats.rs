@@ -61,10 +61,10 @@ pub async fn run_stats(
     // CLI is process-scoped so we won't see in-flight counters from a running
     // MCP server, but we do see counters that the server has flushed to disk
     // (default flush interval 60s + on shutdown).
-    let cfg =
-        engramdb::storage::config::load_config(&store.project_dir.join(".engramdb/config.toml"))
-            .await
-            .unwrap_or_default();
+    let cfg = engramdb::storage::config::load_config_or_default(
+        &store.project_dir.join(".engramdb/config.toml"),
+    )
+    .await;
     let collector = StatsCollector::new(cfg.stats);
     let _ = engramdb::telemetry::persistence::hydrate_collector(&collector).await;
     let project_id = store.project_id.clone();
@@ -95,9 +95,7 @@ pub async fn run_stats(
         // Print embeddings status
         println!();
         let config_path = store.project_dir.join(".engramdb/config.toml");
-        let config = engramdb::storage::config::load_config(&config_path)
-            .await
-            .unwrap_or_default();
+        let config = engramdb::storage::config::load_config_or_default(&config_path).await;
         let model = config.embeddings.provider.as_str();
         let backend = engramdb::ops::resolve_backend(config.embeddings.backend, embedding_backend);
         print_embeddings_status(model, backend).await;
@@ -132,9 +130,10 @@ async fn run_daemon_stats(dir: &Path, formatter: &OutputFormatter) -> Result<()>
     // `dir` is the dispatcher-resolved project directory (`--dir` or cwd),
     // matching every other command — not a second `current_dir()` lookup
     // that would ignore an explicit `--dir`.
-    let cfg = engramdb::storage::config::load_config(&dir.join(".engramdb").join("config.toml"))
-        .await
-        .unwrap_or_default();
+    let cfg = engramdb::storage::config::load_config_or_default(
+        &dir.join(".engramdb").join("config.toml"),
+    )
+    .await;
     let socket = engramdb::daemon::resolve_socket(None, &cfg.daemon);
     // A live query failure (e.g. a protocol-version mismatch with an older
     // daemon) must NOT abort the command — fall back to the persisted snapshot

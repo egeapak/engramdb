@@ -1092,6 +1092,58 @@ fn test_slugify_truncation_at_word_boundary() {
     assert!(!slug.ends_with('-'));
 }
 
+/// Memory files can arrive with a cloned repo, so a frontmatter `id`
+/// containing path separators or dot-dot must be rejected at parse time —
+/// it would otherwise flow into `memory_filename` and compose a path
+/// outside `.engramdb/memories/` on the next write.
+#[test]
+fn test_parse_rejects_path_hostile_ids() {
+    let mem = Memory::new(MemoryType::Decision, "S", "C", Provenance::human());
+    let good = write_memory_file(&mem).unwrap();
+    assert!(parse_memory_file(&good).is_ok());
+
+    for bad_id in ["../../../etc/x", "a/b", "a\\b", "", "x\u{0}y"] {
+        let doctored = good.replace(&mem.id, bad_id);
+        // Empty-string replace is a no-op; craft that case directly.
+        let content = if bad_id.is_empty() {
+            good.replace(&format!("id: {}", mem.id), "id: \"\"")
+        } else {
+            doctored
+        };
+        let result = parse_memory_file(&content);
+        assert!(
+            result.is_err(),
+            "id {bad_id:?} must be rejected at parse time"
+        );
+    }
+}
+
+/// Regression: multibyte titles must not panic the truncation slice.
+/// `is_alphanumeric()` keeps CJK/accented chars, so a long non-ASCII title
+/// used to hit `&trimmed[..50]` at a non-char boundary and panic — reachable
+/// from every create/update via `memory_filename`.
+#[test]
+fn test_slugify_multibyte_truncation_no_panic() {
+    // 20 CJK chars = 60 bytes, no hyphens: byte 50 is mid-character.
+    let cjk = "\u{5B58}".repeat(20); // 存
+    let slug = slugify(&cjk);
+    assert!(slug.len() <= 50);
+    assert!(!slug.is_empty());
+
+    // Mixed multibyte + separators still truncates on a boundary.
+    let mixed = "caf\u{E9} ".repeat(12); // "café " x12 = 72 bytes
+    let slug = slugify(&mixed);
+    assert!(slug.len() <= 50);
+    assert!(!slug.ends_with('-'));
+
+    // Exhaustive-ish sweep around the boundary: 2- and 3-byte chars at
+    // every length near 50 bytes must never panic.
+    for n in 10..30 {
+        let _ = slugify(&"\u{E9}".repeat(n)); // é (2 bytes)
+        let _ = slugify(&"\u{4E2D}".repeat(n)); // 中 (3 bytes)
+    }
+}
+
 #[test]
 fn test_slugify_empty() {
     assert_eq!(slugify(""), "");

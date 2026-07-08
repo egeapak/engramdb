@@ -18,6 +18,11 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
 
+# Criterion benches ([[bench]] in Cargo.toml) are deliberately NOT run in CI:
+# they need the full ONNX runtime plus downloaded embedding models, and
+# shared-runner variance makes any timing threshold flaky. They are local
+# tools — run `cargo bench` and diff target/criterion reports across commits.
+
 jobs:
   # Cheap, toolchain-free guard: the plugin version lives in TWO manifests
   # (.claude-plugin/plugin.json and .claude-plugin/marketplace.json). If they
@@ -65,22 +70,25 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       # The `ollama` feature is on by default and gates `#[cfg(feature = "ollama")]`
       # branches (e.g. in src/ops/mod.rs). The all-features build above never
       # exercises the pure-ONNX path, so a `--no-default-features` compile break
       # would otherwise ship unnoticed. Cheap `check` only.
       - name: Check (no default features)
-        run: cargo check --workspace --no-default-features
+        run: cargo check --workspace --no-default-features --locked
 
-  # Linux full tests run in the `test` job below; this matrix only `cargo check`s
-  # the non-Linux targets that `release.yml` actually ships (macOS + Windows) so
-  # that platform-gated code — most importantly the Windows named-pipe daemon
-  # transport (`#[cfg(windows)]` in src/daemon/transport.rs) and the `#[cfg(unix)]`
-  # Unix-socket path — compiles on every PR instead of first failing at release
-  # time. Check only (no link/test): fast, and the ORT binary download +
-  # per-OS protoc install are the only setup differences from the Linux job.
+  # Linux full tests run in the `test` job below; this matrix covers the
+  # non-Linux targets that `release.yml` actually ships (macOS + Windows):
+  # a full-workspace `cargo check` so every platform-gated line compiles on
+  # every PR, plus a small filtered nextest subset so the platform-divergent
+  # IPC/filesystem code — most importantly the Windows named-pipe daemon
+  # transport (`#[cfg(windows)]` in src/daemon/transport.rs) vs the
+  # `#[cfg(unix)]` Unix-socket path, path resolution, and the advisory write
+  # lock — is actually EXECUTED off Linux instead of first failing at release
+  # time. The subset must stay model-free: no ONNX models are staged on these
+  # runners, so any model-loading test would fail here.
   check-cross:
     name: Check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -107,7 +115,23 @@ jobs:
       - name: Check
         # ONNX Runtime is downloaded + statically linked by fastembed's
         # `download-binaries` (same as release.yml), so no manual ORT setup.
-        run: cargo check --workspace --all-features
+        run: cargo check --workspace --all-features --locked
+
+      - name: Install nextest
+        # Prebuilt binary, same rationale as the `test` job below.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Test platform-gated IPC and filesystem code
+        # `daemon::transport` exercises the Unix-socket/named-pipe transports
+        # (bind/yield/reclaim/permissions), `paths::tests` the platform dir
+        # resolution, `write_lock::tests` the fs4 advisory-lock semantics.
+        # All three use only temp dirs — no models, no network (see the job
+        # comment above before adding filters).
+        run: >-
+          cargo nextest run --workspace --all-features --locked
+          -E 'test(daemon::transport) + test(paths::tests) + test(write_lock::tests)'
 
   test:
     name: Test
@@ -133,7 +157,7 @@ jobs:
           tool: nextest
 
       - name: Run tests
-        run: cargo nextest run --workspace --all-features
+        run: cargo nextest run --workspace --all-features --locked
 
   coverage:
     name: Coverage
@@ -162,7 +186,7 @@ jobs:
         # Mirror the `test` job's invocation so coverage reflects the real
         # suite. `--no-report` defers report generation so we can emit
         # multiple formats from the one profdata set below.
-        run: cargo llvm-cov nextest --workspace --all-features --no-report
+        run: cargo llvm-cov nextest --workspace --all-features --locked --no-report
 
       - name: Generate coverage reports
         # Exclude integration-test harness files and the test-isolation crate

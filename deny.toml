@@ -1,0 +1,57 @@
+# cargo-deny configuration, checked in CI by .github/workflows/audit.yml.
+# Run locally with:
+#   cargo install cargo-deny --locked
+#   cargo deny check
+
+[graph]
+# Match CI's `--all-features` convention so feature-gated dependencies
+# (ollama/reqwest, coreml, xnnpack) are part of the audited graph.
+all-features = true
+
+[advisories]
+# RustSec advisories (vulnerabilities, unmaintained, unsound) are errors by
+# default. Yanked crates only warn: a yank often lands before a fixed release
+# exists, and the committed Cargo.lock pins what we actually build.
+yanked = "warn"
+
+[licenses]
+# Permissive allow-list for the licenses expected in this dependency tree
+# (Rust / Arrow / DataFusion / ONNX ecosystem). Anything outside the list
+# fails the check so a new license gets a deliberate review before it enters
+# the tree. Copyleft is limited to file-level MPL-2.0.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "CC0-1.0",
+  "MPL-2.0",
+  "OpenSSL",
+  "BSL-1.0",
+  "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+# ring ships a combined LICENSE (ISC + MIT + OpenSSL) that SPDX detection
+# scores below the confidence threshold; this is the community-standard
+# clarification (the hash pins the exact LICENSE file cargo-deny verified).
+[[licenses.clarify]]
+crate = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[bans]
+# The arrow/datafusion/ort stack inevitably drags in duplicate crate versions;
+# report them without blocking.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+# Everything must come from crates.io — no unvetted registries or git deps.
+unknown-registry = "deny"
+unknown-git = "deny"

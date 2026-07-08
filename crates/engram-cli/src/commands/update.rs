@@ -1,11 +1,11 @@
 //! Update an existing memory.
 
+use crate::engine::engine_for;
 use crate::output::OutputFormatter;
 use crate::validation::validate_score;
 use anyhow::{Context, Result};
-use engramdb::ops::{
-    self, parse_memory_type, parse_status, parse_visibility, DaemonCell, DaemonPolicy,
-};
+use engramdb::daemon::{DaemonCell, DaemonPolicy};
+use engramdb::ops::{parse_memory_type, parse_status, parse_visibility};
 use engramdb::ops::{update_memory, UpdateParams as OpsUpdateParams};
 use engramdb::storage::paths::memory_path;
 use engramdb::storage::MemoryStore;
@@ -53,27 +53,7 @@ pub async fn run_update(
     params: UpdateParams,
     embedding_backend: Option<engramdb::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
-) -> Result<()> {
-    run_update_with_daemon(
-        dir,
-        global,
-        params,
-        embedding_backend,
-        formatter,
-        None,
-        DaemonPolicy::InProcess,
-    )
-    .await
-}
-
-/// Like [`run_update`] but routes model resolution through the shared daemon cell.
-pub async fn run_update_with_daemon(
-    dir: &Path,
-    global: bool,
-    params: UpdateParams,
-    embedding_backend: Option<engramdb::types::EmbeddingBackend>,
-    formatter: &OutputFormatter,
-    cell: Option<&Arc<DaemonCell>>,
+    cell: &Arc<DaemonCell>,
     policy: DaemonPolicy,
 ) -> Result<()> {
     // Resolve the directory backing the target store (global or project).
@@ -141,23 +121,12 @@ pub async fn run_update_with_daemon(
     };
 
     // Build engine for auto-embedding on update
-    let config_path = store.project_dir.join(".engramdb").join("config.toml");
     let engine_store = if global {
         MemoryStore::open_global().await?
     } else {
         MemoryStore::open(dir).await?
     };
-    let engine = if let Some(c) = cell {
-        let config = engramdb::storage::config::load_config(&config_path)
-            .await
-            .unwrap_or_default();
-        let project_dir = engine_store.project_dir.clone();
-        let providers =
-            ops::resolve_providers(c, &config, embedding_backend, &project_dir, policy).await;
-        ops::assemble_engine(engine_store, config, providers)
-    } else {
-        ops::build_engine(engine_store, &config_path, embedding_backend).await
-    };
+    let engine = engine_for(engine_store, embedding_backend, cell, policy).await;
 
     let type_ = params.type_.map(|s| parse_memory_type(&s)).transpose()?;
     let visibility = params

@@ -212,7 +212,12 @@ pub enum Command {
         #[arg(long, short = 'c')]
         content: Option<String>,
 
-        /// Brief summary (auto-generated if not provided)
+        /// Memory content as a trailing positional (alternative to --content).
+        /// This is the form the Quick Start uses: `engramdb add -t decision -s "..." "content"`.
+        #[arg(value_name = "CONTENT", conflicts_with = "content")]
+        content_pos: Option<String>,
+
+        /// Brief summary (required; prompted for in an interactive terminal)
         #[arg(long, short = 's')]
         summary: Option<String>,
 
@@ -880,6 +885,42 @@ mod tests {
             }
             _ => panic!("Expected Add command"),
         }
+    }
+
+    /// The Quick Start / README form: content as a trailing positional
+    /// (`engramdb add -t decision -s "..." "content"`). Locks the documented
+    /// examples to the parser so doc drift fails tests instead of users.
+    #[test]
+    fn test_add_trailing_positional_content_parses() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "add",
+            "-t",
+            "decision",
+            "-s",
+            "Use rustls",
+            "We chose rustls over openssl for static builds",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add {
+                content,
+                content_pos,
+                ..
+            } => {
+                assert_eq!(content, None);
+                assert_eq!(
+                    content_pos,
+                    Some("We chose rustls over openssl for static builds".to_string())
+                );
+            }
+            _ => panic!("Expected Add command"),
+        }
+
+        // --content and the positional are mutually exclusive.
+        assert!(
+            Cli::try_parse_from(["engramdb", "add", "-t", "decision", "-c", "x", "y"]).is_err()
+        );
     }
 
     #[test]
