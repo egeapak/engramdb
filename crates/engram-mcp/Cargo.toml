@@ -10,6 +10,15 @@ repository = "https://github.com/egeapak/engramdb"
 name = "engram_mcp"
 path = "src/lib.rs"
 
+[features]
+# Forward the model/backend feature flags to the engramdb core. `onnxruntime`
+# (ONNX Runtime) is on by default; a pure-Rust build uses
+# `--no-default-features --features tract`.
+default = ["onnxruntime", "ollama"]
+onnxruntime = ["engramdb/onnxruntime"]
+tract = ["engramdb/tract"]
+ollama = ["engramdb/ollama"]
+
 [dependencies]
 engramdb = { path = "../..", default-features = false }
 

@@ -6,4 +6,8 @@
 //! `crate::retrieval::reranker::{Reranker, RerankScore, LocalReranker}` keeps
 //! resolving for the engine, `ops`, and the daemon's `RemoteReranker` impl.
 
-pub use engram_models::rerank::{LocalReranker, RerankScore, Reranker};
+pub use engram_models::rerank::{RerankScore, Reranker};
+// `LocalReranker` is the `fastembed` in-process loader — only present when the
+// ONNX Runtime stack is compiled in (a pure-`tract` build has no reranker).
+#[cfg(feature = "onnxruntime")]
+pub use engram_models::rerank::LocalReranker;

@@ -362,6 +362,11 @@ pub enum EmbeddingBackend {
     Onnx,
     /// Only use an Ollama server.
     Ollama,
+    /// Only use the pure-Rust `tract` engine (fp32 MiniLM). No native ONNX
+    /// Runtime — the fallback backend for platforms with no prebuilt `ort`
+    /// (notably Intel Mac, `x86_64-apple-darwin`). ~3× slower than ONNX;
+    /// selected automatically on those targets, or explicitly here.
+    Tract,
 }
 
 impl std::fmt::Display for EmbeddingBackend {
@@ -370,6 +375,7 @@ impl std::fmt::Display for EmbeddingBackend {
             Self::Auto => write!(f, "auto"),
             Self::Onnx => write!(f, "onnx"),
             Self::Ollama => write!(f, "ollama"),
+            Self::Tract => write!(f, "tract"),
         }
     }
 }
@@ -381,8 +387,9 @@ impl std::str::FromStr for EmbeddingBackend {
             "auto" => Ok(Self::Auto),
             "onnx" => Ok(Self::Onnx),
             "ollama" => Ok(Self::Ollama),
+            "tract" => Ok(Self::Tract),
             other => Err(format!(
-                "unknown embedding backend '{}': expected auto, onnx, or ollama",
+                "unknown embedding backend '{}': expected auto, onnx, ollama, or tract",
                 other
             )),
         }

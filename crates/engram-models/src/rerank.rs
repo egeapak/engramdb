@@ -12,8 +12,11 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+#[cfg(feature = "onnxruntime")]
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
+#[cfg(feature = "onnxruntime")]
 use std::path::PathBuf;
+#[cfg(feature = "onnxruntime")]
 use std::sync::{Arc, Mutex};
 
 /// A cross-encoder score for one input document.
@@ -38,10 +41,12 @@ pub trait Reranker: Send + Sync {
 ///
 /// `TextRerank::rerank` needs `&mut self` and is CPU-bound, so it is wrapped in
 /// an `Arc<Mutex<_>>` and driven on a blocking thread.
+#[cfg(feature = "onnxruntime")]
 pub struct LocalReranker {
     inner: Arc<Mutex<TextRerank>>,
 }
 
+#[cfg(feature = "onnxruntime")]
 impl LocalReranker {
     /// Wrap an already-loaded cross-encoder as a shared trait object.
     pub fn shared(inner: Arc<Mutex<TextRerank>>) -> Arc<dyn Reranker> {
@@ -72,6 +77,7 @@ impl LocalReranker {
     }
 }
 
+#[cfg(feature = "onnxruntime")]
 #[async_trait]
 impl Reranker for LocalReranker {
     async fn rerank(&self, query: &str, documents: &[String]) -> Result<Vec<RerankScore>> {
@@ -100,6 +106,7 @@ impl Reranker for LocalReranker {
 }
 
 /// Map a reranker model name string to a fastembed `RerankerModel` enum variant.
+#[cfg(feature = "onnxruntime")]
 fn resolve_reranker_model(name: &str) -> RerankerModel {
     match name {
         "bge-reranker-v2-m3" => RerankerModel::BGERerankerV2M3,
