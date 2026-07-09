@@ -11,7 +11,14 @@
 
 ### Platform support
 
-ONNX Runtime is fetched as a prebuilt binary for **Linux (x86_64/aarch64)**, **Windows (x86_64/aarch64)**, and **Apple Silicon macOS (aarch64)** — these are the platforms with official release binaries. **Intel Mac (`x86_64-apple-darwin`) is not supported by a prebuilt**: the runtime must be ONNX Runtime **1.24.x (API 24)**, and no prebuilt 1.24 exists for Intel Mac (Microsoft dropped x86_64 macOS builds after 1.23.x). A Homebrew `onnxruntime` (1.23.x) fails at startup with `The requested API version [24] is not available`. Intel-Mac users must build ONNX Runtime 1.24.x from source and link against it — see [troubleshooting.md](./troubleshooting.md#build--install).
+The default build uses **ONNX Runtime**, fetched as a prebuilt binary for **Linux (x86_64/aarch64)**, **Windows (x86_64/aarch64)**, and **Apple Silicon macOS (aarch64)** — the platforms with official release binaries.
+
+**Intel Mac (`x86_64-apple-darwin`)** has no prebuilt ONNX Runtime 1.24 (the version required; Microsoft dropped x86_64 macOS builds after 1.23.x, and a Homebrew `onnxruntime` 1.23.x crashes at startup with `The requested API version [24] is not available`). On Intel Mac, EngramDB uses the **pure-Rust `tract` embedding backend** instead — no native runtime to install:
+
+- **Prebuilt Intel-Mac release binaries just work** — they ship with the tract backend built in.
+- **Building from source on Intel Mac:** use `cargo build --release --bin engramdb --no-default-features --features tract`. A default build there links an unusable ONNX Runtime and emits a build warning pointing you here.
+
+The tract backend uses the **fp32** MiniLM model (the int8 default does not load under tract), embeds at roughly **3× the latency** of ONNX (fine for on-demand memory writes/queries), and disables the optional NLI / reranker / T5-title features (all ONNX-only). Its vectors are numerically identical to ONNX fp32 (cosine ≈ 1.0). Because the fp32 model has a distinct fingerprint, a store first used on Intel Mac (or moved between an Intel and a non-Intel machine) will prompt a one-time `engramdb reindex --embeddings-only`. See [embeddings.md](./embeddings.md#backends).
 
 ## Install
 

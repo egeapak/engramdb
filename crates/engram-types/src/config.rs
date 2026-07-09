@@ -1098,6 +1098,28 @@ impl EngramConfig {
 mod tests {
     use super::*;
 
+    /// Every `EmbeddingBackend` variant round-trips through `Display`/`FromStr`
+    /// (case-insensitively), and an unknown string errors. Locks the `tract`
+    /// variant added for the Intel-Mac pure-Rust backend.
+    #[test]
+    fn embedding_backend_roundtrips() {
+        use std::str::FromStr;
+        for (variant, name) in [
+            (EmbeddingBackend::Auto, "auto"),
+            (EmbeddingBackend::Onnx, "onnx"),
+            (EmbeddingBackend::Ollama, "ollama"),
+            (EmbeddingBackend::Tract, "tract"),
+        ] {
+            assert_eq!(variant.to_string(), name);
+            assert_eq!(EmbeddingBackend::from_str(name).unwrap(), variant);
+            assert_eq!(
+                EmbeddingBackend::from_str(&name.to_uppercase()).unwrap(),
+                variant
+            );
+        }
+        assert!(EmbeddingBackend::from_str("nonsense").is_err());
+    }
+
     /// Guards the single-source-of-truth: `NliConfig::default().model` is
     /// derived from [`DEFAULT_NLI_MODEL_REPO`], never a hand-copied literal.
     /// The complementary half — that `nli::DEFAULT_NLI_MODEL.repo` equals

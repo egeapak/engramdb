@@ -112,20 +112,59 @@ jobs:
             engramdb-aarch64-apple-darwin.tar.gz
             engramdb-aarch64-apple-darwin.tar.gz.sha256
 
-  # NOTE: there is intentionally no Intel-Mac (`x86_64-apple-darwin`) release
-  # binary. `fastembed` pins `ort = "=2.0.0-rc.12"`, which requires ONNX Runtime
-  # **1.24.x (ABI/API 24)** at runtime, and NO prebuilt ORT 1.24 exists for
-  # Intel Mac anywhere: Microsoft dropped x86_64 macOS builds after 1.23.x
-  # (1.24.1+ ship arm64 only; there are zero x86_64 macOS wheels/artifacts for
-  # any 1.24.x), pyke's `download-binaries` CDN never carried `x86_64-apple-darwin`,
-  # and `ort-sys` rc.12 has no compile-from-source strategy. This job used to
-  # download ORT **1.23.2 (API 23)** and ship it next to an API-24 binary, which
-  # built cleanly but **crashed on first model load** with "The requested API
-  # version [24] is not available, only API versions [1, 23]". Shipping that is
-  # worse than shipping nothing, so the target is dropped until an ORT 1.24
-  # Intel prebuilt exists (or the stack moves off `download-binaries`). Intel-Mac
-  # users build from source against a self-built ORT 1.24 — see
-  # docs/users/troubleshooting.md.
+  # Intel Mac (`x86_64-apple-darwin`) ships the **pure-Rust `tract` backend**
+  # instead of ONNX Runtime. `fastembed` pins `ort = "=2.0.0-rc.12"` (needs ONNX
+  # Runtime 1.24 / API-24), and no prebuilt ORT 1.24 exists for Intel Mac
+  # anywhere — the old ORT-based Intel binary crashed on first model load. `tract`
+  # has no native library, so this cross-build from the arm64 runner needs no ORT
+  # download and produces a self-contained binary that works out of the box. It
+  # uses the fp32 MiniLM (int8 does not load under tract) at ~3× the embedding
+  # latency; NLI / reranker / T5 are compiled out (embeddings-only). See
+  # docs/users/installation.md.
+  build-intel:
+    needs: [version-check, test]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Homebrew packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            /opt/homebrew/Cellar/protobuf
+          key: brew-protobuf-macos-15
+
+      - name: Install protobuf compiler
+        run: brew install protobuf
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Add Intel macOS target
+        run: rustup target add x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary (pure-Rust tract, no ONNX Runtime)
+        # `--no-default-features --features tract` drops the entire `ort` /
+        # `fastembed` stack (no prebuilt runtime for this target) and selects the
+        # pure-Rust tract embedding backend, which cross-compiles cleanly.
+        run: cargo build --release --bin engramdb --locked --target x86_64-apple-darwin --no-default-features --features tract
+
+      - name: Package binary
+        run: |
+          cd target/x86_64-apple-darwin/release
+          tar czf ../../../engramdb-x86_64-apple-darwin.tar.gz engramdb
+          cd ../../..
+          shasum -a 256 engramdb-x86_64-apple-darwin.tar.gz > engramdb-x86_64-apple-darwin.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engramdb-x86_64-apple-darwin
+          path: |
+            engramdb-x86_64-apple-darwin.tar.gz
+            engramdb-x86_64-apple-darwin.tar.gz.sha256
 
   build-linux:
     needs: [version-check, test]
@@ -198,7 +237,7 @@ jobs:
             engramdb-x86_64-pc-windows-msvc.zip.sha256
 
   release:
-    needs: [build-arm, build-linux, build-windows]
+    needs: [build-arm, build-intel, build-linux, build-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
