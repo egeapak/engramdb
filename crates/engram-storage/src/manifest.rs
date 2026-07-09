@@ -15,10 +15,25 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Current memories-table schema version. Bumped when the LanceDB `memories`
+/// table gains columns so an existing store can be migrated (rebuilt from its
+/// `.md` files) on open. `0.2.0` added the `decay` + `has_embedding` columns
+/// (R2/R3). A store whose manifest records an older version is transparently
+/// re-indexed once on open (seconds, no re-embed) and stamped up to this.
+pub const CURRENT_SCHEMA_VERSION: &str = "0.2.0";
+
+/// The pre-migration baseline, used as the serde default so a manifest written
+/// before the field existed parses as "needs migration" rather than failing.
+fn default_schema_version() -> String {
+    "0.1.0".to_string()
+}
+
 /// Project manifest stored in manifest.toml.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Manifest {
-    /// Schema version for future compatibility
+    /// Schema version for the on-disk LanceDB memories table (see
+    /// [`CURRENT_SCHEMA_VERSION`]).
+    #[serde(default = "default_schema_version")]
     pub schema_version: String,
     /// Project name
     pub project: String,
@@ -119,7 +134,9 @@ pub struct ManifestStats {
 impl Default for Manifest {
     fn default() -> Self {
         Self {
-            schema_version: "0.1.0".to_string(),
+            // New stores are born at the current schema (their empty tables
+            // already have the latest columns), so they never migrate.
+            schema_version: CURRENT_SCHEMA_VERSION.to_string(),
             project: "engramdb-project".to_string(),
             created_at: Utc::now(),
             description: "Agent memory store. See config.toml for retrieval settings.".to_string(),
@@ -162,9 +179,26 @@ mod tests {
     #[test]
     fn test_manifest_default() {
         let manifest = Manifest::default();
-        assert_eq!(manifest.schema_version, "0.1.0");
+        assert_eq!(manifest.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(manifest.stats.memory_count, 0);
         assert!(manifest.stats.logical_scopes.is_empty());
+    }
+
+    /// A manifest written before `schema_version` existed parses as the
+    /// pre-migration baseline (so it triggers migration), not a parse error.
+    #[test]
+    fn legacy_manifest_without_schema_version_defaults_to_baseline() {
+        let toml = r#"
+project = "p"
+created_at = "2020-01-01T00:00:00Z"
+description = "d"
+[stats]
+memory_count = 0
+logical_scopes = []
+"#;
+        let m: Manifest = toml::from_str(toml).unwrap();
+        assert_eq!(m.schema_version, "0.1.0");
+        assert_ne!(m.schema_version, CURRENT_SCHEMA_VERSION);
     }
 
     #[tokio::test]

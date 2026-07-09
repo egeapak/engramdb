@@ -1,12 +1,25 @@
 # R2/R3: `decay` + `has_embedding` memories-table columns (schema-version bump)
 
-> **Status: specified, not started.** The tract Intel-Mac work (embeddings +
-> reranker + release + docs) is complete and merged separately. This is the
-> other deferred item from PR #56 — a memories-table **schema migration** plus a
-> retrieval hot-path change. It is written up in full here because it is riskier
-> than it looks and should land as its own benchmarked change, not rushed.
+> **Status: IMPLEMENTED (schema `0.2.0`).** Both columns, the backfill-on-open
+> migration, the `has_embedding` write-path invariant, and both retrieval
+> consumers (R2 no-query-Rank fast path, R3 chunk-scan elimination) are in the
+> tree with tests. The design below is retained as the rationale; the one
+> deliberate change from the original plan is that **migration is automatic on
+> store open** (a reindex — seconds, no re-embed — triggered when the manifest's
+> `schema_version` is behind), rather than a manual step, so the columns are
+> always authoritative and consumers never see a half-migrated store.
+>
+> **Key symbols:** `manifest::CURRENT_SCHEMA_VERSION`,
+> `MemoryStore::migrate_schema_if_needed` (store.rs), the `decay`/`has_embedding`
+> fields on `IndexEntry`/`IndexForFiltering` + `LanceIndex::{has_chunks,
+> set_has_embedding}` (lance_index.rs), `scoring::ScoreTarget` +
+> `composite_score_target*`, and `RetrievalEngine::rank_scope_only_from_index`.
+> **Tests:** `store::tests::{schema_migration_on_open_backfills_decay_and_has_embedding,
+> has_embedding_flag_tracks_chunk_lifecycle}`,
+> `retrieval::engine::tests::rank_from_index_matches_file_load`, and the
+> `manifest` legacy-version test.
 
-## Why it's deferred (the honest risk picture)
+## Original risk picture (why it was deferred)
 
 PR #56 landed the safe R2/R3 wins (filter pushdown, gated IVF index) and left
 two columns documented at their call sites as "one schema-version bump with a
