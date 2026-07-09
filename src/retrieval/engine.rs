@@ -1322,9 +1322,7 @@ async fn detect_contradictions_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::retrieval::reranker::LocalReranker;
     use crate::storage::InMemoryRegistry;
-    use std::sync::LazyLock;
 
     // Finding #4: the Filter-mode threshold must be bounded to [0, 1] regardless
     // of how the config was constructed, so the relevance gate can never be
@@ -1357,11 +1355,22 @@ mod tests {
     /// ~100MB ONNX model once per test (which causes OOM when parallel).
     /// Built through the `engram-models` loader (default BGE reranker base) so
     /// the core crate needs no direct `fastembed` dependency, even in tests.
-    static SHARED_RERANKER: LazyLock<Option<Arc<dyn Reranker>>> =
-        LazyLock::new(|| LocalReranker::load("bge-reranker-base").ok());
-
+    ///
+    /// The `fastembed` loader (`LocalReranker`) only exists with `onnxruntime`;
+    /// on a pure-`tract` build there is no in-process reranker, so `try_reranker`
+    /// returns `None` and the reranker tests skip (they `return` early on `None`).
+    #[cfg(feature = "onnxruntime")]
     fn try_reranker() -> Option<Arc<dyn Reranker>> {
+        use crate::retrieval::reranker::LocalReranker;
+        use std::sync::LazyLock;
+        static SHARED_RERANKER: LazyLock<Option<Arc<dyn Reranker>>> =
+            LazyLock::new(|| LocalReranker::load("bge-reranker-base").ok());
         SHARED_RERANKER.clone()
+    }
+
+    #[cfg(not(feature = "onnxruntime"))]
+    fn try_reranker() -> Option<Arc<dyn Reranker>> {
+        None
     }
 
     /// Filter-mode query with only a text query set, mirroring the shape
@@ -2733,6 +2742,9 @@ mod tests {
     /// Before this test the entire `detect_contradictions_with` body
     /// (vector_search + classify_batch + threshold filter) was at 0%
     /// coverage despite CRAP 110.
+    // Loads the real ONNX embedding + NLI models, so it only exists on an
+    // `onnxruntime` build (there is no in-process ONNX on a pure-`tract` build).
+    #[cfg(feature = "onnxruntime")]
     #[tokio::test]
     async fn test_detect_contradictions_end_to_end_finds_real_contradiction() {
         use crate::embeddings::OnnxProvider;
@@ -2817,6 +2829,9 @@ mod tests {
     /// Drive the early-return at detect_contradictions_with where no
     /// candidates pass the similarity_threshold. Locks the threshold
     /// filter so it can't regress into returning all vector neighbours.
+    // Loads the real ONNX embedding model, so it only exists on an
+    // `onnxruntime` build.
+    #[cfg(feature = "onnxruntime")]
     #[tokio::test]
     async fn test_detect_contradictions_returns_empty_when_no_similar_candidates() {
         use crate::embeddings::OnnxProvider;

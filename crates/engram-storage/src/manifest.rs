@@ -28,6 +28,30 @@ fn default_schema_version() -> String {
     "0.1.0".to_string()
 }
 
+/// True when a store recording `stored` needs **no** schema migration — i.e. it
+/// is at or ahead of [`CURRENT_SCHEMA_VERSION`].
+///
+/// The comparison is by semantic-version ordering, not string equality: a
+/// version *behind* current (or an unparseable one) needs migration, but a
+/// version *ahead* — written by a newer binary against the same store — must
+/// **not** be "migrated". Reindexing a newer store with this binary's older
+/// column set would rebuild the table without the newer columns and stamp the
+/// version backwards, silently dropping data. When ahead, we leave it untouched.
+pub fn schema_version_is_current(stored: &str) -> bool {
+    fn parse(v: &str) -> Option<(u64, u64, u64)> {
+        let mut it = v.split('.').map(|p| p.parse::<u64>().ok());
+        let major = it.next()??;
+        let minor = it.next().unwrap_or(Some(0))?;
+        let patch = it.next().unwrap_or(Some(0))?;
+        Some((major, minor, patch))
+    }
+    match (parse(stored), parse(CURRENT_SCHEMA_VERSION)) {
+        (Some(s), Some(c)) => s >= c,
+        // Unparseable stored version → treat as needing migration.
+        _ => false,
+    }
+}
+
 /// Project manifest stored in manifest.toml.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Manifest {
@@ -199,6 +223,26 @@ logical_scopes = []
         let m: Manifest = toml::from_str(toml).unwrap();
         assert_eq!(m.schema_version, "0.1.0");
         assert_ne!(m.schema_version, CURRENT_SCHEMA_VERSION);
+    }
+
+    /// The migration gate compares by version *ordering*, not equality: a store
+    /// behind current migrates, one at/ahead of current does not (so a newer
+    /// binary's store is never silently downgraded), and garbage migrates.
+    #[test]
+    fn schema_version_ordering_gates_migration() {
+        // At current → no migration.
+        assert!(schema_version_is_current(CURRENT_SCHEMA_VERSION));
+        // Behind current → needs migration.
+        assert!(!schema_version_is_current("0.1.0"));
+        assert!(!schema_version_is_current("0.1.9"));
+        // Ahead of current → must NOT migrate (no silent downgrade).
+        assert!(schema_version_is_current("0.3.0"));
+        assert!(schema_version_is_current("1.0.0"));
+        // Short / unparseable forms.
+        assert!(schema_version_is_current("0.2")); // 0.2.0, equal
+        assert!(!schema_version_is_current("0.1")); // 0.1.0, behind
+        assert!(!schema_version_is_current("garbage"));
+        assert!(!schema_version_is_current(""));
     }
 
     #[tokio::test]
