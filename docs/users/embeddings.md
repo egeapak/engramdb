@@ -14,7 +14,7 @@ Every memory's `summary + content` is embedded into a fixed-dimensional vector a
 
 - **ONNX** (default) — local inference via ONNX Runtime. Models cache to `<cache_dir>/engramdb/models/`; first use downloads from Hugging Face.
 - **Ollama** — calls a local Ollama instance on `http://localhost:11434`.
-- **tract** — pure-Rust local inference, no native ONNX Runtime. The fallback for platforms with no prebuilt ORT (**Intel Mac**), where it is selected automatically. Uses the **fp32** MiniLM (`all-minilm` only; the int8 default and the nomic/mxbai models do not have a tract build), at ~3× ONNX latency, with numerically identical output (cosine ≈ 1.0 vs ONNX fp32). NLI, reranker, and T5 titling are unavailable on a tract build. Only present when compiled with `--features tract`.
+- **tract** — pure-Rust local inference, no native ONNX Runtime. The fallback for platforms with no prebuilt ORT (**Intel Mac**), where it is selected automatically. Uses the **fp32** MiniLM (`all-minilm` only; the int8 default and the nomic/mxbai models do not have a tract build), at ~3× ONNX latency, with numerically identical output (cosine ≈ 1.0 vs ONNX fp32). NLI and T5 titling are unavailable on a tract build. The optional cross-encoder **reranker works on tract** (`bge-reranker-base` only, fp32 ~1.1 GB) but is off by default. Only present when compiled with `--features tract`.
 - **auto** (default) — tries ONNX first, falls back to Ollama; on a build with no ONNX Runtime (the Intel-Mac / `--features tract` build) it resolves to tract.
 
 Set `[embeddings]` in `config.toml` (see [configuration.md](./configuration.md)) or override per-invocation with `--embedding-backend` / `ENGRAMDB_EMBEDDING_BACKEND` (`auto` | `onnx` | `ollama` | `tract`).

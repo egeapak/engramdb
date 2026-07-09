@@ -450,11 +450,30 @@ pub fn resolve_engine_providers(
     }
     #[cfg(not(feature = "onnxruntime"))]
     {
-        if config.nli.enabled || config.rerank.enabled {
+        // NLI and T5 titling are ONNX-Runtime-only. The cross-encoder reranker,
+        // however, has a pure-Rust tract path (fp32 BGE), so honor
+        // `[rerank].enabled` when the `tract` backend is compiled in.
+        if config.nli.enabled {
             eprintln!(
-                "Warning: NLI / reranker are enabled but this build has no ONNX Runtime \
-                 (pure-tract build); continuing without them"
+                "Warning: NLI contradiction detection is enabled but unavailable on a \
+                 pure-tract build (no ONNX Runtime); continuing without it"
             );
+        }
+        #[cfg(feature = "tract")]
+        if config.rerank.enabled {
+            match crate::retrieval::reranker::TractReranker::load(&config.rerank.model) {
+                Ok(reranker) => providers.reranker = Some(reranker),
+                Err(e) => {
+                    eprintln!(
+                        "Warning: tract reranker init failed, continuing without: {}",
+                        e
+                    )
+                }
+            }
+        }
+        #[cfg(not(feature = "tract"))]
+        if config.rerank.enabled {
+            eprintln!("Warning: reranker is enabled but unavailable on this build");
         }
     }
 

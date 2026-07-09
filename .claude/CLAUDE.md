@@ -71,7 +71,7 @@ cargo +nightly fuzz run memory_file -- -max_total_time=60
 
 Feature flags from `Cargo.toml`:
 
-- `onnxruntime` (default) — the ONNX Runtime stack (`ort` + `fastembed` + `engram-onnx`). Turn OFF (with `--no-default-features`) on a platform with no prebuilt ORT and enable `tract` instead. When off, NLI / reranker / T5 titling compile out (all ORT-only); keyword titling remains.
+- `onnxruntime` (default) — the ONNX Runtime stack (`ort` + `fastembed` + `engram-onnx`). Turn OFF (with `--no-default-features`) on a platform with no prebuilt ORT and enable `tract` instead. When off, NLI and T5 titling compile out (ORT-only) and keyword titling remains; the reranker has a pure-Rust tract path (`bge-reranker-base` fp32) that stays off by default.
 - `tract` — pure-Rust `tract-onnx` embedding backend (fp32 MiniLM). No native ONNX Runtime; the Intel-Mac (`x86_64-apple-darwin`) fallback. Composable with `onnxruntime` (both engines, runtime-chosen) or standalone (`--no-default-features --features tract`). The release workflow's `build-intel` job builds this; `engram-cli/build.rs` warns on a default Intel-Mac build.
 - `ollama` (default) — Ollama embedding backend via `reqwest`. Disable for pure offline ONNX.
 - `coreml` (macOS only) — Apple Neural Engine EP for `ort` (implies `onnxruntime`).

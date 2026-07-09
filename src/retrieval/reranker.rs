@@ -8,6 +8,10 @@
 
 pub use engram_models::rerank::{RerankScore, Reranker};
 // `LocalReranker` is the `fastembed` in-process loader — only present when the
-// ONNX Runtime stack is compiled in (a pure-`tract` build has no reranker).
+// ONNX Runtime stack is compiled in.
 #[cfg(feature = "onnxruntime")]
 pub use engram_models::rerank::LocalReranker;
+// `TractReranker` is the pure-Rust fp32 BGE loader for the Intel-Mac / tract
+// build (used only when ONNX Runtime is absent).
+#[cfg(feature = "tract")]
+pub use engram_models::rerank::TractReranker;
