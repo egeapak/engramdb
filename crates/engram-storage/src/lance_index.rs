@@ -381,23 +381,15 @@ impl LanceIndex {
 
     /// Return the number of entries in the memories table.
     ///
-    /// Selects only the `id` column and counts rows without deserialization.
+    /// Uses `count_rows` (O(table metadata)) rather than streaming a column —
+    /// this backs `check_staleness`, which runs on every CLI `list`/`query`/
+    /// `get`, so a full column scan here scaled every command with store size.
     pub async fn count(&self) -> Result<usize> {
         let table = self.open_table().await?;
-
-        let mut stream = table
-            .query()
-            .select(lancedb::query::Select::Columns(vec!["id".into()]))
-            .execute()
+        table
+            .count_rows(None)
             .await
-            .context("Failed to query LanceDB table for count")?;
-
-        let mut count = 0usize;
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.context("Failed to read batch")?;
-            count += batch.num_rows();
-        }
-        Ok(count)
+            .context("Failed to count LanceDB table rows")
     }
 
     /// Count rows and collect the distinct logical scopes in one
@@ -795,15 +787,23 @@ impl LanceIndex {
             return Ok(());
         }
         let table = self.open_chunks_table().await?;
-        let list = memory_ids
-            .iter()
-            .map(|id| format!("'{}'", id.replace('\'', "''")))
-            .collect::<Vec<_>>()
-            .join(", ");
-        table
-            .delete(&format!("memory_id IN ({list})"))
-            .await
-            .context("Failed to delete chunk batch")?;
+        // Bound the predicate size: a GC sweep can pass thousands of 36-char
+        // UUIDs, and an unbounded `IN (...)` builds a hundreds-of-KB SQL
+        // string DataFusion must parse in one go. Chunked deletes keep each
+        // statement small; each chunk commits separately, which is fine —
+        // callers treat chunk deletion as idempotent cleanup.
+        const DELETE_CHUNK_SIZE: usize = 500;
+        for batch in memory_ids.chunks(DELETE_CHUNK_SIZE) {
+            let list = batch
+                .iter()
+                .map(|id| format!("'{}'", id.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            table
+                .delete(&format!("memory_id IN ({list})"))
+                .await
+                .context("Failed to delete chunk batch")?;
+        }
         Ok(())
     }
 
@@ -951,6 +951,37 @@ impl LanceIndex {
             .context("Failed to recreate LanceDB memories table")?;
 
         Ok(())
+    }
+
+    /// The vector width of the on-disk chunks table, or `None` when the
+    /// table doesn't exist (or has no vector column).
+    ///
+    /// `ensure_chunks_table_exists` opens an existing table AS-IS, so after
+    /// a `[embeddings].dimensions` change the stored width can differ from
+    /// the configured `self.dimensions` — every upsert then fails against
+    /// the old schema. Callers about to re-embed everything use this to
+    /// decide whether the table must be recreated first (`clear_chunks`).
+    pub async fn chunks_table_dimensions(&self) -> Result<Option<usize>> {
+        let connection = Arc::clone(&self.connection);
+        let table = match connection
+            .open_table(&self.chunks_table_name)
+            .execute()
+            .await
+        {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+        let schema = table
+            .schema()
+            .await
+            .context("Failed to read LanceDB chunks table schema")?;
+        Ok(schema
+            .field_with_name("vector")
+            .ok()
+            .and_then(|field| match field.data_type() {
+                DataType::FixedSizeList(_, width) => Some(*width as usize),
+                _ => None,
+            }))
     }
 
     /// Drop and recreate only the chunks (vectors) table.

@@ -302,16 +302,33 @@ impl MemoryStore {
         // simply flips, diverging disk from the index (finding #1). New-file-
         // first ordering (the `atomic_write` above) means a reader never sees a
         // spurious NotFound. NotFound on removal is benign (already gone).
-        for dir in [
-            self.get_memories_dir(&Visibility::Shared)?,
-            self.get_memories_dir(&Visibility::Personal)?,
-        ] {
-            for old in find_memory_files(&dir, &memory.id).await? {
-                if old != file_path {
-                    match async_fs::remove_file(&old).await {
-                        Ok(()) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(e) => return Err(e.into()),
+        //
+        // Gate the sweep on a cheap index probe: every store-managed file has
+        // an index row (create/update upsert one synchronously), so a fresh
+        // ID — the overwhelmingly common case, since IDs are new UUIDs —
+        // skips both full directory scans. This is what kept bulk creates
+        // (worktree consolidation, imports) from being O(n²) in dirents. A
+        // crash-orphaned file with no index row is doctor's territory either
+        // way — the sweep never saw files the index didn't know about
+        // re-created under colliding fresh UUIDs in practice.
+        let id_preexisting = !self
+            .lance_index
+            .find_ids_by_prefix(&memory.id)
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB id probe failed: {}", e)))?
+            .is_empty();
+        if id_preexisting {
+            for dir in [
+                self.get_memories_dir(&Visibility::Shared)?,
+                self.get_memories_dir(&Visibility::Personal)?,
+            ] {
+                for old in find_memory_files(&dir, &memory.id).await? {
+                    if old != file_path {
+                        match async_fs::remove_file(&old).await {
+                            Ok(()) => {}
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(e) => return Err(e.into()),
+                        }
                     }
                 }
             }
@@ -365,35 +382,51 @@ impl MemoryStore {
         let shared_map = scan_dir_to_map(&shared_dir).await;
         let personal_map = scan_dir_to_map(&personal_dir).await;
 
-        let mut results = Vec::with_capacity(ids.len());
-        for id in ids {
+        // Overlap the per-file reads (bounded) instead of awaiting each in
+        // sequence — this backs the retrieval hot path, where serializing
+        // dozens of read latencies adds up. `buffered` (not
+        // `buffer_unordered`) preserves the caller's id order.
+        use futures_util::{stream, StreamExt};
+        let results: Vec<Option<(String, Memory)>> = stream::iter(ids.iter().filter_map(|id| {
             let id_str = id.as_ref();
-            let path = shared_map.get(id_str).or_else(|| personal_map.get(id_str));
-            if let Some(path) = path {
-                // An indexed memory whose file is unreadable/unparseable is a
-                // data-integrity problem. Drop it (as before, so one bad file
-                // doesn't fail a whole batch) but `warn!` rather than swallow it
-                // silently, matching `reindex_dir`'s handling (finding #15).
-                match async_fs::read_to_string(path).await {
-                    Ok(content) => match memory_file::parse_memory_file(&content) {
-                        Ok(memory) => results.push((id_str.to_owned(), memory)),
-                        Err(e) => tracing::warn!(
+            let path = shared_map
+                .get(id_str)
+                .or_else(|| personal_map.get(id_str))?;
+            Some((id_str.to_owned(), path.clone()))
+        }))
+        .map(|(id_str, path)| async move {
+            // An indexed memory whose file is unreadable/unparseable is a
+            // data-integrity problem. Drop it (as before, so one bad file
+            // doesn't fail a whole batch) but `warn!` rather than swallow it
+            // silently, matching `reindex_dir`'s handling (finding #15).
+            match async_fs::read_to_string(&path).await {
+                Ok(content) => match memory_file::parse_memory_file(&content) {
+                    Ok(memory) => Some((id_str, memory)),
+                    Err(e) => {
+                        tracing::warn!(
                             "get_batch: skipping {} ({}): failed to parse: {}",
                             id_str,
                             path.display(),
                             e
-                        ),
-                    },
-                    Err(e) => tracing::warn!(
+                        );
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
                         "get_batch: skipping {} ({}): failed to read: {}",
                         id_str,
                         path.display(),
                         e
-                    ),
+                    );
+                    None
                 }
             }
-        }
-        Ok(results)
+        })
+        .buffered(16)
+        .collect()
+        .await;
+        Ok(results.into_iter().flatten().collect())
     }
 
     /// Check which of the given IDs have `.md` files on disk.
@@ -828,6 +861,17 @@ impl MemoryStore {
             .map_err(|e| StorageError::Validation(format!("LanceDB clear_chunks failed: {}", e)))
     }
 
+    /// The vector width of the on-disk chunks table, or `None` when the
+    /// table doesn't exist yet. See `LanceIndex::chunks_table_dimensions`.
+    pub async fn chunks_table_dimensions(&self) -> Result<Option<usize>> {
+        self.lance_index
+            .chunks_table_dimensions()
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB chunks schema read failed: {}", e))
+            })
+    }
+
     /// Upsert embedding chunks for a memory.
     pub async fn upsert_chunks(&self, memory_id: &str, chunks: Vec<Vec<f32>>) -> Result<()> {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
@@ -966,6 +1010,10 @@ impl MemoryStore {
         match matches.len() {
             0 => Err(StorageError::NotFound(id.to_string())),
             1 => Ok(matches.into_iter().next().unwrap()),
+            // Exact full-ID match beats prefix ambiguity (legacy non-UUID
+            // ids can be prefixes of each other) — mirrors
+            // `find_memory_files` and `paths::find_memory_in_dir`.
+            _ if matches.iter().any(|m| m == id) => Ok(id.to_string()),
             _ => Err(StorageError::Validation(format!(
                 "Ambiguous ID prefix '{}': matches {} memories",
                 id,
@@ -1090,7 +1138,30 @@ impl MemoryStore {
     /// case for updates).
     async fn update_manifest_stats(&self) -> Result<()> {
         let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
-        let mut manifest = manifest::load_manifest(&manifest_path).await?;
+        // Stats refresh runs AFTER the mutation (file + index row) is durable,
+        // so a missing/corrupt manifest must not fail the operation — the
+        // caller would report failure for a create/update/delete that in fact
+        // succeeded, and nothing would ever self-heal the manifest. Rebuild a
+        // default one instead (the project id is known) and let the stats
+        // write below recreate the file.
+        let mut manifest = match manifest::load_manifest(&manifest_path).await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    "manifest.toml missing or unreadable ({e}); recreating with fresh stats"
+                );
+                manifest::Manifest {
+                    // Same derivation as `init` (the manifest records the
+                    // human project NAME; the registry owns the id).
+                    project: self
+                        .project_dir
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "unnamed-project".to_string()),
+                    ..Default::default()
+                }
+            }
+        };
 
         let (memory_count, scope_set) = self
             .lance_index
@@ -1188,7 +1259,12 @@ impl MemoryStore {
 ///
 /// The blocking syscalls (write/fsync/rename) run on the blocking thread
 /// pool so the async executor is never stalled.
-pub(crate) async fn atomic_write(path: &Path, content: &str) -> Result<()> {
+///
+/// Public because every writer of store-managed files — including the CLI's
+/// `migrate`/`rollback` bulk rewrites — must honor the same atomicity
+/// contract; a plain `std::fs::write` can leave a truncated memory file on
+/// crash.
+pub async fn atomic_write(path: &Path, content: &str) -> Result<()> {
     let path = path.to_path_buf();
     let content = content.to_owned();
     tokio::task::spawn_blocking(move || -> Result<()> {
@@ -1242,6 +1318,18 @@ async fn find_memory_files(dir: &Path, id: &str) -> Result<Vec<PathBuf>> {
     }
 
     if distinct_ids.len() > 1 {
+        // An exact full-ID match beats prefix ambiguity: with legacy
+        // non-UUID ids, "abc" and "abcd" can coexist, and `get("abc")` must
+        // resolve to the exact memory rather than erroring (mirrors
+        // `paths::find_memory_in_dir`).
+        if distinct_ids.contains(id) {
+            matches.retain(|path| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|stem| memory_file::extract_id_from_stem(stem) == id)
+            });
+            return Ok(matches);
+        }
         return Err(StorageError::Validation(format!(
             "Ambiguous ID prefix '{}': matches {} memories",
             id,

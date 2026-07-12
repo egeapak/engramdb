@@ -382,14 +382,20 @@ impl StatsCollector {
         }
         // last_query_at is the source of truth for recency.
         if p.last_query_at.len() > max {
-            // Sort by timestamp ascending and drop the oldest until at cap.
+            // Sort by timestamp ascending and drop the oldest — down to 90%
+            // of the cap, not exactly to it. Evicting to the cap meant that
+            // at steady state EVERY new session cloned + sorted the whole
+            // map (O(max·log max) under the collector mutex, on the query
+            // recording path) to evict a single entry; the 10% slack
+            // amortizes one sort across max/10 insertions.
+            let target = (max * 9 / 10).max(1);
             let mut by_age: Vec<(DateTime<Utc>, String)> = p
                 .last_query_at
                 .iter()
                 .map(|(k, v)| (*v, k.clone()))
                 .collect();
             by_age.sort_by_key(|(ts, _)| *ts);
-            let drop_count = p.last_query_at.len() - max;
+            let drop_count = p.last_query_at.len() - target;
             for (_, sid) in by_age.into_iter().take(drop_count) {
                 p.last_query_at.remove(&sid);
                 p.sessions.remove(&sid);
