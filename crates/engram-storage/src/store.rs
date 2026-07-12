@@ -385,47 +385,54 @@ impl MemoryStore {
         // Overlap the per-file reads (bounded) instead of awaiting each in
         // sequence — this backs the retrieval hot path, where serializing
         // dozens of read latencies adds up. `buffered` (not
-        // `buffer_unordered`) preserves the caller's id order.
+        // `buffer_unordered`) preserves the caller's id order. The (id, path)
+        // pairs are materialized first — an owned Vec, not a lazy iterator —
+        // which also sidesteps the higher-ranked lifetime bound the stream
+        // adapters would otherwise demand of the map-lookup closure.
         use futures_util::{stream, StreamExt};
-        let results: Vec<Option<(String, Memory)>> = stream::iter(ids.iter().filter_map(|id| {
-            let id_str = id.as_ref();
-            let path = shared_map
-                .get(id_str)
-                .or_else(|| personal_map.get(id_str))?;
-            Some((id_str.to_owned(), path.clone()))
-        }))
-        .map(|(id_str, path)| async move {
-            // An indexed memory whose file is unreadable/unparseable is a
-            // data-integrity problem. Drop it (as before, so one bad file
-            // doesn't fail a whole batch) but `warn!` rather than swallow it
-            // silently, matching `reindex_dir`'s handling (finding #15).
-            match async_fs::read_to_string(&path).await {
-                Ok(content) => match memory_file::parse_memory_file(&content) {
-                    Ok(memory) => Some((id_str, memory)),
+        let to_read: Vec<(String, PathBuf)> = ids
+            .iter()
+            .filter_map(|id| {
+                let id_str = id.as_ref();
+                let path = shared_map
+                    .get(id_str)
+                    .or_else(|| personal_map.get(id_str))?;
+                Some((id_str.to_owned(), path.clone()))
+            })
+            .collect();
+        let results: Vec<Option<(String, Memory)>> = stream::iter(to_read)
+            .map(|(id_str, path)| async move {
+                // An indexed memory whose file is unreadable/unparseable is a
+                // data-integrity problem. Drop it (as before, so one bad file
+                // doesn't fail a whole batch) but `warn!` rather than swallow it
+                // silently, matching `reindex_dir`'s handling (finding #15).
+                match async_fs::read_to_string(&path).await {
+                    Ok(content) => match memory_file::parse_memory_file(&content) {
+                        Ok(memory) => Some((id_str, memory)),
+                        Err(e) => {
+                            tracing::warn!(
+                                "get_batch: skipping {} ({}): failed to parse: {}",
+                                id_str,
+                                path.display(),
+                                e
+                            );
+                            None
+                        }
+                    },
                     Err(e) => {
                         tracing::warn!(
-                            "get_batch: skipping {} ({}): failed to parse: {}",
+                            "get_batch: skipping {} ({}): failed to read: {}",
                             id_str,
                             path.display(),
                             e
                         );
                         None
                     }
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        "get_batch: skipping {} ({}): failed to read: {}",
-                        id_str,
-                        path.display(),
-                        e
-                    );
-                    None
                 }
-            }
-        })
-        .buffered(16)
-        .collect()
-        .await;
+            })
+            .buffered(16)
+            .collect()
+            .await;
         Ok(results.into_iter().flatten().collect())
     }
 
