@@ -1084,6 +1084,21 @@ impl LanceIndex {
             .await
             .context("Failed to recreate LanceDB chunks table")?;
 
+        // Every vector is gone — reset the memories-table `has_embedding`
+        // mirror to match. Callers re-embed and re-set it per success;
+        // without this, a memory whose re-embed then FAILS (or a crash
+        // mid-loop) stays flagged `true` with zero chunks and is scored as
+        // "checked, found nothing" (sem = 0.0) instead of "no evidence"
+        // (sem = None) until a full reindex rebuilds the flags.
+        let table = self.open_table().await?;
+        table
+            .update()
+            .only_if("has_embedding = true")
+            .column("has_embedding", "false")
+            .execute()
+            .await
+            .context("Failed to reset has_embedding after chunk clear")?;
+
         Ok(())
     }
 
@@ -1599,10 +1614,29 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
                     .with_timezone(&Utc),
             )
         };
+        // Degrade a bad row, don't brick the store: memory files are
+        // untrusted input, and a hand-edited `floor = nan` survives the
+        // write side (serde_json emits non-finite floats as `null` without
+        // error) but fails deserialization here. Erroring would fail the
+        // whole batch — and this function feeds `list_for_filtering`, the
+        // entry point of EVERY retrieval — so one corrupt memory file would
+        // take down every query on the store with an error naming no
+        // memory. Score the row as undecayed instead and say which one.
         let decay: Option<Decay> = if decays.is_null(i) {
             None
         } else {
-            Some(serde_json::from_str(decays.value(i)).context("Failed to parse decay JSON")?)
+            match serde_json::from_str(decays.value(i)) {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    tracing::warn!(
+                        "ignoring unparseable decay JSON for memory {} (scoring it undecayed; \
+                         fix the memory file and reindex): {}",
+                        ids.value(i),
+                        e
+                    );
+                    None
+                }
+            }
         };
         let created_at: DateTime<Utc> = chrono::DateTime::parse_from_rfc3339(created_ats.value(i))
             .context("Failed to parse created_at")?

@@ -862,6 +862,15 @@ impl MemoryStore {
         // succeeded (mirrors how the embedding fingerprint is stamped only on
         // success). Propagate a load failure rather than clobbering the store's
         // identity with a default manifest.
+        //
+        // Stamp under the write lock: like `set_embedding_fingerprint`, this
+        // is a load-modify-save of `manifest.toml` racing every mutating op's
+        // `update_manifest_stats` — unlocked, the stamp could be lost to a
+        // concurrent stats rewrite (forcing a redundant re-migration) or
+        // itself clobber a fingerprint a parallel `reindex --embeddings-only`
+        // just stamped. `reindex_with` released its lock above, so acquiring
+        // here cannot self-deadlock.
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
         let mut manifest = manifest::load_manifest(&manifest_path).await?;
         manifest.schema_version = manifest::CURRENT_SCHEMA_VERSION.to_string();
         manifest::save_manifest(&manifest_path, &manifest).await?;
@@ -890,10 +899,18 @@ impl MemoryStore {
         let foreign_checkout = self.checkout_conflict().await;
         if let Some(other) = &foreign_checkout {
             if force_schema_reset {
+                // Order matters in the shared-table case: the OTHER checkout's
+                // rows rebuild on its next open only if it hasn't migrated yet
+                // (its manifest is per-checkout, so its own migration re-runs
+                // this clear+rebuild). A checkout that already migrated won't
+                // migrate again, so THIS clear leaves it unindexed until it
+                // runs `engramdb reindex` — say so instead of promising a
+                // self-heal that only holds for the first migrator.
                 tracing::warn!(
                     "Project ID is shared with another checkout at {} — migrating the \
-                     shared memories table to the current schema; that checkout's index \
-                     rows rebuild on its next open (its vectors are preserved)",
+                     shared memories table to the current schema; that checkout's vectors \
+                     are preserved, and its index rows rebuild on its next open (or via \
+                     `engramdb reindex` there if it already migrated)",
                     other.display()
                 );
                 self.lance_index.clear_memories().await.map_err(|e| {
@@ -1676,6 +1693,63 @@ mod tests {
             .find(|e| e.id == id)
             .unwrap()
             .has_embedding
+    }
+
+    /// A non-finite `decay.floor` (hand-edited memory file; serde_json writes
+    /// it as `null` without error) must not brick retrieval: the poisoned row
+    /// degrades to undecayed with a warning instead of failing the whole
+    /// `list_for_filtering` batch — the entry point of every query.
+    #[tokio::test]
+    async fn nonfinite_decay_floor_degrades_instead_of_failing_the_batch() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut poisoned = create_test_memory("decay-nan", Visibility::Shared);
+        poisoned.decay = Some(engram_types::Decay {
+            floor: f64::NAN,
+            ..engram_types::Decay::linear(chrono::Duration::days(30))
+        });
+        store.create(&poisoned).await.unwrap();
+        let mut healthy = create_test_memory("decay-ok", Visibility::Shared);
+        healthy.decay = Some(engram_types::Decay::linear(chrono::Duration::days(30)));
+        store.create(&healthy).await.unwrap();
+
+        let entries = store.lance_index.list_for_filtering().await.unwrap();
+        assert_eq!(entries.len(), 2, "both rows must survive");
+        let get = |id: &str| entries.iter().find(|e| e.id == id).unwrap();
+        assert!(
+            get("decay-nan").decay.is_none(),
+            "poisoned decay degrades to undecayed"
+        );
+        assert!(get("decay-ok").decay.is_some(), "healthy decay intact");
+    }
+
+    /// `clear_chunks` drops every vector, so it must also reset the
+    /// memories-table `has_embedding` mirror: a memory whose re-embed then
+    /// fails must score as "no evidence" (sem = None), not "checked, found
+    /// nothing" (sem = 0.0).
+    #[tokio::test]
+    async fn clear_chunks_resets_has_embedding_flags() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let memory = create_test_memory("clear-flag", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+        store
+            .upsert_chunks("clear-flag", vec![vec![0.5f32; 384]])
+            .await
+            .unwrap();
+        assert!(has_embedding_flag(&store, "clear-flag").await);
+
+        store.clear_chunks().await.unwrap();
+        assert!(
+            !has_embedding_flag(&store, "clear-flag").await,
+            "flag must not claim embeddings that were just dropped"
+        );
     }
 
     /// The R2/R3 schema migration: an older-version store is transparently

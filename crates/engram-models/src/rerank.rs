@@ -195,8 +195,19 @@ mod tract_reranker {
                 .get(BGE_TOKENIZER_FILE)
                 .context("fetch BGE tokenizer")?;
 
-            let tokenizer = Tokenizer::from_file(&tokenizer_path)
+            let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
                 .map_err(|e| anyhow::anyhow!("load tokenizer: {e}"))?;
+            // Don't trust the repo tokenizer.json's baked-in truncation or
+            // padding (the sibling MiniLM export ships a 128-token cap —
+            // see `embeddings::tract`). Truncate pairs at this model's real
+            // window; `score_blocking` pads to the fixed shape itself.
+            tokenizer
+                .with_truncation(Some(tokenizers::TruncationParams {
+                    max_length: MAX_TOKENS,
+                    ..Default::default()
+                }))
+                .map_err(|e| anyhow::anyhow!("set tokenizer truncation: {e}"))?;
+            tokenizer.with_padding(None);
 
             let mut infer = tract_onnx::onnx()
                 .model_for_path(&model_path)
