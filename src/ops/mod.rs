@@ -24,8 +24,8 @@ pub mod update;
 
 pub use challenge::{challenge_for_contradictions, challenge_memory, ChallengeResult};
 pub use compress::{
-    compress_apply, compress_candidates, CompressApplyResult, CompressCandidate,
-    CompressCandidatesResult,
+    compress_apply, compress_candidates, CompressApplyParams, CompressApplyResult,
+    CompressCandidate, CompressCandidatesResult,
 };
 pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
 pub use delete::delete_memory;

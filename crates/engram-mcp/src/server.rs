@@ -1883,13 +1883,15 @@ impl EngramDbServer {
         let engine = self.build_engine_for(input.project.as_deref()).await?;
         let result = ops::compress_apply(
             engine.store(),
-            input.source_ids,
-            input.summary,
-            input.content,
-            input.scope,
-            input.tags,
+            ops::CompressApplyParams {
+                source_ids: input.source_ids,
+                summary: input.summary,
+                content: input.content,
+                scope: input.scope,
+                tags: input.tags,
+                embed_async: true,
+            },
             Some(&engine),
-            true,
         )
         .await
         .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
