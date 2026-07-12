@@ -204,7 +204,10 @@ fn format_memory_entry(scored: &ScoredMemory) -> Vec<String> {
 /// Truncate content to a maximum character length, appending "..." if truncated.
 fn truncate_content(content: &str, max_chars: usize) -> String {
     let single_line = content.replace('\n', " ");
-    if single_line.len() <= max_chars {
+    // Guard on chars, not bytes: truncation takes chars, so a byte-length
+    // guard sent multibyte content under the char limit down the truncate
+    // branch — keeping every char but appending a spurious "...".
+    if single_line.chars().count() <= max_chars {
         single_line
     } else {
         let truncated: String = single_line.chars().take(max_chars).collect();
@@ -920,6 +923,23 @@ mod tests {
     fn test_truncate_content_newlines_collapsed() {
         let content = "line1\nline2\nline3";
         assert_eq!(truncate_content(content, 200), "line1 line2 line3");
+    }
+
+    #[test]
+    fn test_truncate_content_multibyte_under_char_limit_not_truncated() {
+        // 10 chars but 20 bytes: a byte-length guard would take the truncate
+        // branch, keep all 10 chars, and append a spurious "...".
+        let content = "éééééééééé";
+        assert_eq!(truncate_content(content, 10), content);
+        assert_eq!(truncate_content(content, 200), content);
+    }
+
+    #[test]
+    fn test_truncate_content_multibyte_over_char_limit_truncates() {
+        let content = "é".repeat(15);
+        let result = truncate_content(&content, 10);
+        assert_eq!(result, format!("{}...", "é".repeat(10)));
+        assert_eq!(result.chars().count(), 13); // 10 chars + "..."
     }
 
     // --- Unit tests for build_hook_response ---

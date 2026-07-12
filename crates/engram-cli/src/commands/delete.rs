@@ -34,11 +34,24 @@ pub async fn run_delete(
 
     // Confirm deletion unless --force
     if !force {
-        print!("Delete memory {} ({})? [y/N] ", memory.id, memory.summary);
-        io::stdout().flush()?;
+        // JSON is machine-consumed: never prompt (mirrors the doctor --fix
+        // interactivity rule) — require an explicit --force instead.
+        if formatter.is_json() {
+            anyhow::bail!("deletion requires confirmation; re-run with --force in JSON mode");
+        }
+
+        // Prompt on stderr so a piped/redirected stdout stays clean.
+        eprint!("Delete memory {} ({})? [y/N] ", memory.id, memory.summary);
+        io::stderr().flush()?;
 
         let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
+        let bytes_read = io::stdin().read_line(&mut input)?;
+
+        // EOF (closed stdin): no answer was given, so nothing is deleted —
+        // but exit non-zero rather than reporting silent success.
+        if bytes_read == 0 {
+            anyhow::bail!("could not obtain confirmation (stdin closed); memory not deleted");
+        }
 
         if !input.trim().eq_ignore_ascii_case("y") {
             formatter.print_message("Deletion cancelled");
