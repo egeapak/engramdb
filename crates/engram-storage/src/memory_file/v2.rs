@@ -49,8 +49,8 @@ use serde::{Deserialize, Serialize};
 
 use super::helpers::{
     escape_body_text, format_provenance_source, parse_body_sections, parse_datetime_field,
-    parse_list_field, parse_provenance_section, parse_score_field, split_frontmatter,
-    HIDDEN_META_END, HIDDEN_META_START,
+    parse_list_field, parse_provenance_section, parse_score_field, sanitize_list_item,
+    sanitize_single_line, split_frontmatter, HIDDEN_META_END, HIDDEN_META_START,
 };
 use super::{MemoryParser, MemoryWriter, CURRENT_FORMAT_VERSION};
 use crate::error::Result;
@@ -204,12 +204,20 @@ fn write_v2(memory: &Memory) -> Result<String> {
     out.push_str("---\n\n");
 
     // -- H1: title (if set) or summary --
-    let heading = memory.title.as_deref().unwrap_or(&memory.summary);
+    //
+    // Heading and summary are single-line constructs: collapse any embedded
+    // newlines (see `sanitize_single_line`) so a hostile/malformed value
+    // can't inject structural lines (`## Content`, `<!-- engramdb`) into the
+    // body and shadow the real sections on re-parse.
+    let heading = sanitize_single_line(memory.title.as_deref().unwrap_or(&memory.summary));
     out.push_str(&format!("# {heading}\n\n"));
 
     // When title is used as H1, write summary separately so it round-trips
     if memory.title.is_some() {
-        out.push_str(&format!("**Summary:** {}\n\n", memory.summary));
+        out.push_str(&format!(
+            "**Summary:** {}\n\n",
+            sanitize_single_line(&memory.summary)
+        ));
     }
 
     // -- ## Content --
@@ -225,17 +233,36 @@ fn write_v2(memory: &Memory) -> Result<String> {
     }
 
     // -- ## Scope --
+    //
+    // List items are backtick-delimited on a single structural line, so each
+    // item is passed through `sanitize_list_item` (newlines collapsed,
+    // delimiter backticks stripped) and empties are dropped — otherwise a
+    // pathological item would desynchronize write→parse→write.
+    let list_items = |items: &[String]| -> Vec<String> {
+        items
+            .iter()
+            .map(|i| sanitize_list_item(i))
+            .filter(|i| !i.is_empty())
+            .map(|i| format!("`{i}`"))
+            .collect()
+    };
     out.push_str("\n## Scope\n\n");
-    if !memory.physical.is_empty() {
-        let paths: Vec<String> = memory.physical.iter().map(|p| format!("`{p}`")).collect();
-        out.push_str(&format!("- **Files:** {}\n", paths.join(", ")));
+    // Note `list_items` also decides line presence: a list whose every item
+    // sanitizes away writes no line at all, matching what a re-parse yields.
+    let files = list_items(&memory.physical);
+    if !files.is_empty() {
+        out.push_str(&format!("- **Files:** {}\n", files.join(", ")));
     }
-    if !memory.logical.is_empty() {
-        let scopes: Vec<String> = memory.logical.iter().map(|l| format!("`{l}`")).collect();
-        out.push_str(&format!("- **Logical:** {}\n", scopes.join(", ")));
+    let logical = list_items(&memory.logical);
+    if !logical.is_empty() {
+        out.push_str(&format!("- **Logical:** {}\n", logical.join(", ")));
     }
-    if !memory.tags.is_empty() {
-        out.push_str(&format!("- **Tags:** {}\n", memory.tags.join(", ")));
+    // Tags are backtick-wrapped like Files/Logical so a tag containing a
+    // comma survives the round trip (the parser splits plain values on
+    // commas).
+    let tags = list_items(&memory.tags);
+    if !tags.is_empty() {
+        out.push_str(&format!("- **Tags:** {}\n", tags.join(", ")));
     }
     out.push_str(&format!("- **Criticality:** {}\n", memory.criticality));
     out.push_str(&format!("- **Confidence:** {}\n", memory.confidence));
@@ -249,17 +276,27 @@ fn write_v2(memory: &Memory) -> Result<String> {
         "- **Source:** {}\n",
         format_provenance_source(memory.provenance.source)
     ));
+    // Provenance values are caller-supplied free text on single-line fields:
+    // collapse newlines so they can't inject structural lines (and so a
+    // multi-line Reason can't smuggle a `- **Created:** …` line that would
+    // hijack the timestamps on re-parse).
     if let Some(ref agent_id) = memory.provenance.agent_id {
-        out.push_str(&format!("- **Agent:** {agent_id}\n"));
+        out.push_str(&format!(
+            "- **Agent:** {}\n",
+            sanitize_single_line(agent_id)
+        ));
     }
     if let Some(ref model) = memory.provenance.model {
-        out.push_str(&format!("- **Model:** {model}\n"));
+        out.push_str(&format!("- **Model:** {}\n", sanitize_single_line(model)));
     }
     if let Some(ref session_id) = memory.provenance.session_id {
-        out.push_str(&format!("- **Session:** {session_id}\n"));
+        out.push_str(&format!(
+            "- **Session:** {}\n",
+            sanitize_single_line(session_id)
+        ));
     }
     if let Some(ref reason) = memory.provenance.reason {
-        out.push_str(&format!("- **Reason:** {reason}\n"));
+        out.push_str(&format!("- **Reason:** {}\n", sanitize_single_line(reason)));
     }
     out.push_str(&format!(
         "- **Created:** {}\n",
@@ -351,8 +388,19 @@ fn parse_hidden_meta(body: &str) -> HiddenMeta {
             .position(|line| line.trim_end() == HIDDEN_META_END)
         {
             let yaml_content = lines[start + 1..start + 1 + len].join("\n");
-            if let Ok(meta) = serde_yaml_ng::from_str(yaml_content.trim()) {
-                return meta;
+            match serde_yaml_ng::from_str(yaml_content.trim()) {
+                Ok(meta) => return meta,
+                Err(e) => {
+                    // Falling through to defaults silently ERASES the block's
+                    // fields (challenges, supersedes, decay, expires_at,
+                    // verified_at, visibility) on the next rewrite. A present-
+                    // but-unparseable block (hand edit, merge-conflict marker)
+                    // deserves at least a loud warning.
+                    tracing::warn!(
+                        "memory file has an unparseable engramdb metadata block \
+                         (challenges/decay/expiry will reset to defaults): {e}"
+                    );
+                }
             }
         }
     }

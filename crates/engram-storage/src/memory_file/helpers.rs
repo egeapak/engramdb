@@ -103,6 +103,32 @@ pub fn escape_body_text(text: &str) -> String {
     out
 }
 
+/// Collapse a value that the writer emits on a single structural line
+/// (`# {heading}`, `**Summary:** {v}`, `- **Reason:** {v}`, …) down to one
+/// line: newlines become spaces. Without this, a multi-line summary/title/
+/// provenance value injects raw lines into the body — a value containing
+/// `\n## Content` writes a fake section heading that, on re-parse, shadows
+/// the real content (first-occurrence-wins), silently replacing it.
+pub fn sanitize_single_line(value: &str) -> String {
+    if !value.contains(['\n', '\r']) {
+        return value.to_string();
+    }
+    value
+        .split(['\n', '\r'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Sanitize one item of a backtick-delimited list field (Files/Logical/Tags):
+/// collapse newlines like any single-line field, and strip backticks — the
+/// backtick is the item delimiter, so an embedded one would desynchronize the
+/// writer and parser (write→parse→write must be a fixed point).
+pub fn sanitize_list_item(item: &str) -> String {
+    sanitize_single_line(item).replace('`', "")
+}
+
 /// Reverse of [`escape_body_text`] for a single line: strip exactly one
 /// leading backslash, but only when it guards a structural prefix (so
 /// genuinely-backslashed user content is left intact).
@@ -209,26 +235,77 @@ fn flush_section(
     }
 }
 
-/// Parse a numeric score from text like `- **Criticality:** 0.95`
+/// Match a `**Field:** value` line and return the value part — but only when
+/// the marker sits at the START of the line (after an optional `- ` list
+/// bullet and whitespace). The writer always puts fields there; requiring it
+/// stops a field VALUE containing the marker of a later field (e.g. a Reason
+/// of `**Created:** 1999-…`) from hijacking that field on re-parse.
+fn field_value_at_line_start<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+    let head = line.trim_start();
+    let head = head.strip_prefix('-').map(str::trim_start).unwrap_or(head);
+    head.strip_prefix(marker)
+}
+
+/// Parse a numeric score from a line like `- **Criticality:** 0.95`
 pub fn parse_score_field(text: &str, field: &str) -> Option<f64> {
     let marker = format!("**{field}:**");
-    let pos = text.find(&marker)?;
-    let after = &text[pos + marker.len()..];
-    let value_str = after
-        .trim_start()
-        .split(|c: char| c == '|' || c == '*' || c.is_whitespace())
-        .next()?
-        .trim();
-    value_str.parse().ok()
+    let parse_after = |after: &str| -> Option<f64> {
+        after
+            .trim_start()
+            .split(|c: char| c == '|' || c == '*' || c.is_whitespace())
+            .next()?
+            .trim()
+            .parse()
+            .ok()
+    };
+    // Anchored pass: field at line start (the current writer's layout).
+    for line in text.lines() {
+        if let Some(after) = field_value_at_line_start(line, &marker) {
+            return parse_after(after);
+        }
+    }
+    // Legacy pass: several fields on one `|`-separated line
+    // (`**Criticality:** 0.95 | **Confidence:** 1.0`). Still anchored to
+    // segment starts so a field VALUE elsewhere in the section (e.g. inside
+    // a backticked tag) can't hijack the score.
+    for line in text.lines() {
+        for seg in line.split('|') {
+            let seg = seg.trim();
+            let seg = seg.strip_prefix('-').map(str::trim_start).unwrap_or(seg);
+            if let Some(after) = seg.strip_prefix(&marker) {
+                return parse_after(after);
+            }
+        }
+    }
+    None
 }
 
 /// Parse a markdown list field like `- **Files:** \`src/db/**\`, \`src/lib.rs\``
 /// Returns individual items (backtick-wrapped items are unwrapped).
+///
+/// When the value contains backticks, items are the backtick-delimited spans —
+/// splitting on every comma would corrupt items with embedded commas, e.g. the
+/// glob `src/**/*.{ts,tsx}` or a tag literally containing a comma. Legacy
+/// values without backticks keep the plain comma split.
 pub fn parse_list_field(text: &str, field: &str) -> Vec<String> {
     let marker = format!("**{field}:**");
     for line in text.lines() {
-        if let Some(pos) = line.find(&marker) {
-            let after = &line[pos + marker.len()..];
+        if let Some(after) = field_value_at_line_start(line, &marker) {
+            if after.contains('`') {
+                let mut items = Vec::new();
+                let mut rest = after;
+                while let Some(start) = rest.find('`') {
+                    let Some(len) = rest[start + 1..].find('`') else {
+                        break;
+                    };
+                    let item = rest[start + 1..start + 1 + len].trim();
+                    if !item.is_empty() {
+                        items.push(item.to_string());
+                    }
+                    rest = &rest[start + 1 + len + 1..];
+                }
+                return items;
+            }
             return after
                 .split(',')
                 .map(|s| s.trim().trim_matches('`').to_string())
@@ -243,8 +320,8 @@ pub fn parse_list_field(text: &str, field: &str) -> Vec<String> {
 pub fn parse_datetime_field(text: &str, field: &str) -> Option<DateTime<Utc>> {
     let marker = format!("**{field}:**");
     for line in text.lines() {
-        if let Some(pos) = line.find(&marker) {
-            let after = line[pos + marker.len()..].trim();
+        if let Some(after) = field_value_at_line_start(line, &marker) {
+            let after = after.trim();
             if let Ok(dt) = DateTime::parse_from_rfc3339(after) {
                 return Some(dt.with_timezone(&Utc));
             }
@@ -261,8 +338,8 @@ pub fn parse_datetime_field(text: &str, field: &str) -> Option<DateTime<Utc>> {
 pub fn parse_string_field(text: &str, field: &str) -> Option<String> {
     let marker = format!("**{field}:**");
     for line in text.lines() {
-        if let Some(pos) = line.find(&marker) {
-            let val = line[pos + marker.len()..].trim().to_string();
+        if let Some(after) = field_value_at_line_start(line, &marker) {
+            let val = after.trim().to_string();
             if !val.is_empty() {
                 return Some(val);
             }
