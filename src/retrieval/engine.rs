@@ -745,7 +745,12 @@ impl RetrievalEngine {
         // / semantic paths still load candidates below (they need content).
         if query.query.is_none() && query.mode == RetrievalMode::Rank {
             return self
-                .rank_scope_only_from_index(query, &filtered_entries, query_started)
+                .rank_scope_only_from_index(
+                    query,
+                    query_path.as_deref(),
+                    &filtered_entries,
+                    query_started,
+                )
                 .await;
         }
 
@@ -1089,18 +1094,19 @@ impl RetrievalEngine {
     /// Byte-identical to the main `query` path for
     /// `query.query == None && mode == Rank` — every scoring input is carried
     /// in the projection (schema v0.2.0), so this only skips the full file load.
+    /// `ctx_path` is the caller's Step-1.5 normalized query path — already
+    /// project-relativized and with `Some("")` collapsed to `None`. Deriving it
+    /// again here from `query.path` once dropped the empty-string collapse, so
+    /// the no-query Rank shape (the SessionStart hook) with `path: ""` zeroed
+    /// every scope multiplier and returned nothing.
     async fn rank_scope_only_from_index(
         &self,
         query: &RetrievalQuery,
+        ctx_path: Option<&str>,
         filtered_entries: &[crate::storage::IndexForFiltering],
         query_started: std::time::Instant,
     ) -> Result<RetrievalResult> {
         let now = Utc::now();
-        let query_path: Option<String> = query
-            .path
-            .as_ref()
-            .map(|p| crate::storage::paths::relativize_path(p, &self.store.project_dir));
-        let ctx_path = query_path.as_deref();
 
         let t_score = std::time::Instant::now();
         let mut candidates: Vec<ScoredCandidate> = filtered_entries
@@ -1493,6 +1499,50 @@ mod tests {
             assert_eq!(sm.score_breakdown.criticality, expected.criticality);
             assert!((sm.score_breakdown.scope - expected.scope).abs() < 1e-9);
         }
+    }
+
+    /// The R2 fast path must honor Step 1.5's empty-path collapse: a no-query
+    /// Rank with `path: ""` (the natural MCP/hook degenerate) must rank like
+    /// `path: None`, not zero every scope multiplier and return nothing.
+    #[tokio::test]
+    async fn rank_from_index_empty_path_ranks_like_no_path() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut m = Memory::new(MemoryType::Decision, "D", "content", Provenance::human());
+        m.visibility = Visibility::Shared;
+        m.criticality = 0.9;
+        m.physical = vec!["src/**".to_string()];
+        store.create(&m).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, EngramConfig::default());
+        let base = RetrievalQuery {
+            mode: RetrievalMode::Rank,
+            query: None,
+            ..Default::default()
+        };
+        let no_path = engine.query(&base).await.unwrap();
+        assert_eq!(no_path.retrieval_quality, "scope_only");
+        assert_eq!(no_path.memories.len(), 1);
+
+        let empty_path = engine
+            .query(&RetrievalQuery {
+                path: Some(String::new()),
+                ..base
+            })
+            .await
+            .unwrap();
+        assert_eq!(empty_path.retrieval_quality, "scope_only");
+        assert_eq!(
+            empty_path.memories.len(),
+            1,
+            "empty-string path must not zero the scope multiplier on the fast path"
+        );
+        assert_eq!(no_path.memories[0].score, empty_path.memories[0].score);
     }
 
     // Note: These tests would require a real MemoryStore instance,
