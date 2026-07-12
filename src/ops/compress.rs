@@ -83,6 +83,11 @@ pub async fn compress_candidates(
 ///
 /// The new memory is created as type Context with provenance agent("compress").
 /// The caller (typically an LLM agent) provides the summary and content.
+///
+/// `engine` embeds the replacement memory: compression deletes sources that
+/// had vectors, so leaving the consolidated summary UN-embedded would make
+/// exactly the compressed knowledge invisible to semantic search until a
+/// manual reindex. Pass the same engine the front-end uses for `create`.
 pub async fn compress_apply(
     store: &MemoryStore,
     source_ids: Vec<String>,
@@ -90,6 +95,8 @@ pub async fn compress_apply(
     content: String,
     scope: Option<Vec<String>>,
     tags: Option<Vec<String>>,
+    engine: Option<&crate::retrieval::engine::RetrievalEngine>,
+    embed_async: bool,
 ) -> Result<CompressApplyResult> {
     if source_ids.is_empty() {
         bail!("source_ids must not be empty");
@@ -132,9 +139,9 @@ pub async fn compress_apply(
             decay_ttl: None,
             decay_floor: None,
             title_strategy: TitleStrategy::None,
-            embed_async: false,
+            embed_async,
         },
-        None,
+        engine,
     )
     .await?;
 
@@ -324,6 +331,8 @@ mod tests {
             "Merged content from debug 1 and 2".to_string(),
             None,
             None,
+            None,
+            false,
         )
         .await
         .unwrap();
@@ -378,6 +387,8 @@ mod tests {
             "Content".to_string(),
             None,
             None,
+            None,
+            false,
         )
         .await
         .unwrap();
@@ -438,6 +449,8 @@ mod tests {
             "Content".to_string(),
             None,
             None,
+            None,
+            false,
         )
         .await
         .unwrap_err();
@@ -483,6 +496,8 @@ mod tests {
             "Content".to_string(),
             None,
             None,
+            None,
+            false,
         )
         .await;
 
@@ -571,6 +586,8 @@ mod tests {
             "Content".to_string(),
             None,
             None,
+            None,
+            false,
         )
         .await;
 
@@ -594,6 +611,8 @@ mod tests {
             "Compressed content".to_string(),
             None,
             None,
+            None,
+            false,
         )
         .await
         .unwrap();
@@ -617,6 +636,8 @@ mod tests {
             "Scoped content".to_string(),
             Some(vec!["app.auth".to_string(), "app.core".to_string()]),
             Some(vec!["compressed".to_string(), "auth".to_string()]),
+            None,
+            false,
         )
         .await
         .unwrap();
@@ -646,6 +667,8 @@ mod tests {
             "Content".to_string(),
             None,
             None,
+            None,
+            false,
         )
         .await;
 
