@@ -58,6 +58,17 @@ pub async fn request_shutdown(socket: &Path) -> anyhow::Result<bool> {
     }
 }
 
+/// Whether `daemon` is a strictly older protocol version than `client`.
+/// Versions are small integers serialized as strings; anything unparseable is
+/// treated as NOT older (likely a future format — never kill what we can't
+/// compare).
+fn version_is_older(daemon: &str, client: &str) -> bool {
+    match (daemon.trim().parse::<u64>(), client.trim().parse::<u64>()) {
+        (Ok(d), Ok(c)) => d < c,
+        _ => false,
+    }
+}
+
 /// A connection factory for the shared daemon.
 ///
 /// Each request opens a short-lived connection (connecting to a Unix socket is
@@ -145,9 +156,26 @@ impl DaemonHandle {
         {
             Ok(DaemonResponse::Pong { version }) if version == PROTOCOL_VERSION => true,
             Ok(DaemonResponse::Pong { version }) => {
-                tracing::warn!(
-                    "engramdb daemon protocol mismatch (daemon {version}, client {PROTOCOL_VERSION}); using in-process models"
-                );
+                // A stale daemon would otherwise live forever: every health
+                // check that rejects it is itself a served request that
+                // refreshes its idle clock, and the socket stays bound so a
+                // replacement can never start ("falls back until the old
+                // daemon reaps" never happens — the pings prevent reaping).
+                // When the daemon is provably OLDER than this client, ask it
+                // to shut down so an up-to-date one can be spawned. The
+                // reverse direction (daemon newer than this client) must NOT
+                // kill it — an old CLI would repeatedly assassinate the
+                // daemon that newer sessions keep respawning.
+                if version_is_older(&version, PROTOCOL_VERSION) {
+                    tracing::warn!(
+                        "engramdb daemon protocol {version} is older than client {PROTOCOL_VERSION}; requesting shutdown so a current daemon can start"
+                    );
+                    let _ = oneshot(&self.socket, DaemonOp::Shutdown).await;
+                } else {
+                    tracing::warn!(
+                        "engramdb daemon protocol mismatch (daemon {version}, client {PROTOCOL_VERSION}); using in-process models"
+                    );
+                }
                 false
             }
             _ => false,

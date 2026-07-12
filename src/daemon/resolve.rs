@@ -25,24 +25,33 @@ pub enum DaemonPolicy {
     InProcess,
 }
 
+/// Cooldown imposed after a spawn that *succeeded* (the daemon answered
+/// Ping). Deliberately short — a healthy daemon that later dies should be
+/// recoverable quickly — but non-zero: "success" only means the daemon
+/// bound the socket and ponged, which requires no model load. A daemon that
+/// ponges and then crashes on its first model load (bad ORT runtime, OOM)
+/// would otherwise reset the backoff on every cycle and every tool call
+/// would fork a fresh doomed daemon.
+const SPAWN_SUCCESS_COOLDOWN: Duration = Duration::from_secs(10);
+
 /// Internal state of the [`DaemonCell`].
 struct State {
     /// The most recently verified-live daemon handle, or `None` if none is
     /// cached or if the cached one was found dead.
     current: Option<Arc<DaemonHandle>>,
-    /// When the most recent *failed* spawn attempt occurred. Reset to `None`
-    /// after a successful spawn so a confirmed-dead daemon can be respawned
-    /// immediately — only failed spawns are rate-limited.
-    last_spawn_attempt: Option<Instant>,
+    /// The most recent spawn attempt, paired with the backoff window it
+    /// imposes: `idle/3` for a failed spawn, the short
+    /// [`SPAWN_SUCCESS_COOLDOWN`] for a successful one.
+    last_spawn: Option<(Instant, Duration)>,
 }
 
 /// A re-resolvable cell holding an optional live [`DaemonHandle`].
 ///
 /// Unlike a `OnceCell`, this re-validates the cached handle on every call and
-/// can re-spawn a dead daemon. Spawn attempts are rate-limited to at most one
-/// per `idle_timeout/3` window to prevent spawn storms, but only *failed*
-/// spawns consume the window — a confirmed-successful spawn resets the timer
-/// so the next death is recoverable immediately.
+/// can re-spawn a dead daemon. Spawn attempts are rate-limited: a failed
+/// spawn imposes an `idle_timeout/3` backoff window, a successful one only
+/// the short [`SPAWN_SUCCESS_COOLDOWN`] — so a daemon death is recovered
+/// quickly without letting a ponge-then-crash daemon trigger a spawn storm.
 pub struct DaemonCell {
     state: Mutex<State>,
 }
@@ -53,7 +62,7 @@ impl DaemonCell {
         Self {
             state: Mutex::new(State {
                 current: None,
-                last_spawn_attempt: None,
+                last_spawn: None,
             }),
         }
     }
@@ -62,10 +71,10 @@ impl DaemonCell {
     ///
     /// - Re-validates the cached handle each call (a cached handle whose daemon
     ///   died is dropped).
-    /// - Rate-limits spawn attempts to one per `max(1s, idle_secs/3)` window,
-    ///   but only for *failed* spawns — a confirmed successful spawn resets
-    ///   `last_spawn_attempt` to `None` so a newly-dead daemon can be
-    ///   respawned immediately.
+    /// - Rate-limits spawn attempts: one per `max(1s, idle_secs/3)` window
+    ///   after a *failed* spawn, one per [`SPAWN_SUCCESS_COOLDOWN`] after a
+    ///   successful one — quick recovery from a daemon death without a spawn
+    ///   storm when the daemon crash-loops right after binding.
     pub async fn get(
         &self,
         socket: &Path,
@@ -99,25 +108,29 @@ impl DaemonCell {
             return None;
         }
 
-        // ConnectOrSpawn, with backoff. Only failed spawns consume the window.
-        let window = Duration::from_secs((idle_secs / 3).max(1));
-        if let Some(t) = st.last_spawn_attempt {
+        // ConnectOrSpawn, with backoff: failed spawns impose the long
+        // `idle/3` window, successful ones the short crash-loop cooldown.
+        if let Some((t, window)) = st.last_spawn {
             if t.elapsed() < window {
                 return None;
             }
         }
 
-        // Mark the attempt before we try, so a concurrent waiter (if the
-        // lock were not held) would see it. The lock serialises this anyway,
-        // but the stamp must precede the spawn, not follow it.
-        st.last_spawn_attempt = Some(Instant::now());
+        // Mark the attempt (pessimistically, with the failure window) before
+        // we try, so a concurrent waiter (if the lock were not held) would
+        // see it. The lock serialises this anyway, but the stamp must
+        // precede the spawn, not follow it.
+        let failure_window = Duration::from_secs((idle_secs / 3).max(1));
+        st.last_spawn = Some((Instant::now(), failure_window));
 
         let h = DaemonHandle::connect_or_spawn(sock, idle_secs).await;
 
         if h.is_some() {
-            // Confirmed successful spawn: reset the backoff timer so the next
-            // death can be recovered from immediately without waiting a window.
-            st.last_spawn_attempt = None;
+            // Confirmed successful spawn: shrink the backoff to the short
+            // cooldown so a daemon that later dies is recovered quickly —
+            // but never immediately, or a ponge-then-crash daemon would be
+            // respawned on every single resolve (spawn storm).
+            st.last_spawn = Some((Instant::now(), SPAWN_SUCCESS_COOLDOWN));
         }
 
         st.current = h.clone();
