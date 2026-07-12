@@ -48,17 +48,25 @@ pub use review::{review_memories, ReviewParams};
 pub use stats::{compute_stats, StoreStats};
 pub use update::{update_memory, UpdateParams};
 
-use crate::embeddings::{
-    EmbeddingProvider, OnnxModelSpec, OnnxProvider, DEFAULT_ONNX_EMBEDDING, ONNX_MXBAI_EMBED_LARGE,
-    ONNX_NOMIC_EMBED_TEXT,
-};
+use crate::embeddings::EmbeddingProvider;
 #[cfg(feature = "ollama")]
 use crate::embeddings::{
     OllamaModelSpec, OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT,
 };
-use crate::nli::{NliProvider, OnnxNliProvider};
+#[cfg(feature = "onnxruntime")]
+use crate::embeddings::{
+    OnnxModelSpec, OnnxProvider, DEFAULT_ONNX_EMBEDDING, ONNX_MXBAI_EMBED_LARGE,
+    ONNX_NOMIC_EMBED_TEXT,
+};
+#[cfg(feature = "tract")]
+use crate::embeddings::{TractEmbeddingProvider, TractModelSpec, TRACT_ALL_MINILM};
+use crate::nli::NliProvider;
+#[cfg(feature = "onnxruntime")]
+use crate::nli::OnnxNliProvider;
 use crate::retrieval::engine::RetrievalEngine;
-use crate::retrieval::reranker::{LocalReranker, Reranker};
+#[cfg(feature = "onnxruntime")]
+use crate::retrieval::reranker::LocalReranker;
+use crate::retrieval::reranker::Reranker;
 use crate::storage::{embedding_status, EmbeddingFingerprint, EmbeddingModelStatus, MemoryStore};
 use crate::types::{EmbeddingBackend, EngramConfig};
 use std::sync::Arc;
@@ -95,28 +103,43 @@ pub fn resolve_backend(
 /// one place but not the other was a silent-vector-corruption footgun
 /// flagged in branch review.
 struct ProviderSpecs {
+    #[cfg(feature = "onnxruntime")]
     onnx: OnnxModelSpec,
+    /// The tract fp32 spec for this provider, when one exists. `None` for
+    /// providers with no fp32 tract export (nomic / mxbai) — tract only ships
+    /// the MiniLM fp32 model in the MVP.
+    #[cfg(feature = "tract")]
+    tract: Option<TractModelSpec>,
     #[cfg(feature = "ollama")]
     ollama: OllamaModelSpec,
 }
 
-/// Map a configured provider string to its ONNX (and, when compiled in,
-/// Ollama) model spec. `None` ⇒ unknown provider string (embeddings
-/// disabled). The ONE place the provider→spec table lives.
+/// Map a configured provider string to its ONNX / tract / Ollama model spec
+/// (whichever backends are compiled in). `None` ⇒ unknown provider string
+/// (embeddings disabled). The ONE place the provider→spec table lives.
 fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
     Some(match provider {
         "onnx" | "all-minilm" => ProviderSpecs {
+            #[cfg(feature = "onnxruntime")]
             onnx: DEFAULT_ONNX_EMBEDDING,
+            #[cfg(feature = "tract")]
+            tract: Some(TRACT_ALL_MINILM),
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
         },
         "nomic-embed-text" => ProviderSpecs {
+            #[cfg(feature = "onnxruntime")]
             onnx: ONNX_NOMIC_EMBED_TEXT,
+            #[cfg(feature = "tract")]
+            tract: None,
             #[cfg(feature = "ollama")]
             ollama: NOMIC_EMBED_TEXT,
         },
         "mxbai-embed-large" => ProviderSpecs {
+            #[cfg(feature = "onnxruntime")]
             onnx: ONNX_MXBAI_EMBED_LARGE,
+            #[cfg(feature = "tract")]
+            tract: None,
             #[cfg(feature = "ollama")]
             ollama: MXBAI_EMBED_LARGE,
         },
@@ -130,10 +153,15 @@ fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
 /// open-time check (cheap); the enforcement guard uses the live provider's
 /// `model_id()` instead. Returns `None` for an unknown provider string
 /// (embeddings disabled).
+// `return`s are load-bearing across feature combinations (later cfg blocks
+// exist when ONNX Runtime is off) even though one combo makes the last one the
+// tail expression.
+#[allow(clippy::needless_return)]
 pub fn expected_embedding_fingerprint(config: &EngramConfig) -> Option<EmbeddingFingerprint> {
     let backend = resolve_backend(config.embeddings.backend, None);
     let specs = provider_specs(config.embeddings.provider.as_str())?;
 
+    // Explicit Ollama.
     #[cfg(feature = "ollama")]
     if backend == EmbeddingBackend::Ollama {
         return Some(EmbeddingFingerprint {
@@ -141,11 +169,48 @@ pub fn expected_embedding_fingerprint(config: &EngramConfig) -> Option<Embedding
             dimensions: specs.ollama.dimensions,
         });
     }
-    let _ = backend; // onnx/auto both record the ONNX identity
-    Some(EmbeddingFingerprint {
-        model: format!("onnx/{}", specs.onnx.name),
-        dimensions: specs.onnx.dimensions,
-    })
+
+    // Explicit tract.
+    #[cfg(feature = "tract")]
+    if backend == EmbeddingBackend::Tract {
+        let spec = specs.tract?;
+        return Some(EmbeddingFingerprint {
+            model: format!("tract/{}", spec.name),
+            dimensions: spec.dimensions,
+        });
+    }
+
+    // Auto / Onnx: prefer the ONNX identity when ONNX Runtime is compiled in
+    // (Auto records the ONNX identity even if it would fall back to Ollama at
+    // load, matching historical behavior).
+    #[cfg(feature = "onnxruntime")]
+    {
+        let _ = backend;
+        return Some(EmbeddingFingerprint {
+            model: format!("onnx/{}", specs.onnx.name),
+            dimensions: specs.onnx.dimensions,
+        });
+    }
+
+    // No ONNX Runtime compiled in: Auto (the Intel-Mac default) resolves to
+    // tract when available.
+    #[cfg(all(not(feature = "onnxruntime"), feature = "tract"))]
+    {
+        let _ = backend;
+        let spec = specs.tract?;
+        return Some(EmbeddingFingerprint {
+            model: format!("tract/{}", spec.name),
+            dimensions: spec.dimensions,
+        });
+    }
+
+    // Neither ONNX nor tract compiled in and backend isn't Ollama → embeddings
+    // disabled.
+    #[cfg(all(not(feature = "onnxruntime"), not(feature = "tract")))]
+    {
+        let _ = (backend, &specs);
+        None
+    }
 }
 
 /// Comparison of a store's stored embedding fingerprint vs the model in use.
@@ -196,15 +261,10 @@ pub async fn embedding_model_report(
 /// Goes through [`provider_specs`] — the same table
 /// [`expected_embedding_fingerprint`] uses — so the loaded model's identity
 /// always matches the fingerprint recorded for the store.
+// `return`s are load-bearing across feature combinations (fallback cfg blocks
+// follow when a backend isn't compiled in).
+#[allow(clippy::needless_return)]
 fn resolve_provider(model: &str, backend: EmbeddingBackend) -> Option<Arc<dyn EmbeddingProvider>> {
-    #[cfg(not(feature = "ollama"))]
-    if backend == EmbeddingBackend::Ollama {
-        eprintln!(
-            "Warning: embedding backend 'ollama' selected but Ollama support is not compiled in"
-        );
-        return None;
-    }
-
     let Some(specs) = provider_specs(model) else {
         eprintln!(
             "Warning: unknown embedding model '{}', embeddings disabled",
@@ -212,32 +272,80 @@ fn resolve_provider(model: &str, backend: EmbeddingBackend) -> Option<Arc<dyn Em
         );
         return None;
     };
-    try_onnx_then_ollama(
-        backend,
-        || OnnxProvider::try_with_model(specs.onnx).map(|p| Arc::new(p) as _),
-        #[cfg(feature = "ollama")]
-        || OllamaProvider::try_new(specs.ollama).map(|p| Arc::new(p) as _),
-    )
-}
 
-/// Shared logic: try ONNX and/or Ollama based on the backend preference.
-fn try_onnx_then_ollama(
-    backend: EmbeddingBackend,
-    try_onnx: impl FnOnce() -> Option<Arc<dyn EmbeddingProvider>>,
-    #[cfg(feature = "ollama")] try_ollama: impl FnOnce() -> Option<Arc<dyn EmbeddingProvider>>,
-) -> Option<Arc<dyn EmbeddingProvider>> {
-    if backend != EmbeddingBackend::Ollama {
-        if let Some(p) = try_onnx() {
+    // Explicit Ollama backend.
+    if backend == EmbeddingBackend::Ollama {
+        #[cfg(feature = "ollama")]
+        {
+            return OllamaProvider::try_new(specs.ollama).map(|p| Arc::new(p) as _);
+        }
+        #[cfg(not(feature = "ollama"))]
+        {
+            eprintln!("Warning: embedding backend 'ollama' selected but Ollama support is not compiled in");
+            return None;
+        }
+    }
+
+    // Explicit tract backend (pure-Rust fp32).
+    if backend == EmbeddingBackend::Tract {
+        #[cfg(feature = "tract")]
+        {
+            return match specs.tract.and_then(TractEmbeddingProvider::try_with_model) {
+                Some(p) => Some(Arc::new(p) as _),
+                None => {
+                    eprintln!(
+                        "Warning: tract backend selected but no fp32 tract model available for '{}'",
+                        model
+                    );
+                    None
+                }
+            };
+        }
+        #[cfg(not(feature = "tract"))]
+        {
+            eprintln!(
+                "Warning: embedding backend 'tract' selected but tract support is not compiled in"
+            );
+            return None;
+        }
+    }
+
+    // Auto / Onnx: try ONNX Runtime first when it is compiled in.
+    #[cfg(feature = "onnxruntime")]
+    {
+        if let Some(p) = OnnxProvider::try_with_model(specs.onnx.clone())
+            .map(|p| Arc::new(p) as Arc<dyn EmbeddingProvider>)
+        {
             return Some(p);
         }
         if backend == EmbeddingBackend::Onnx {
-            return None;
+            return None; // explicit Onnx: no fallback
+        }
+    }
+    #[cfg(not(feature = "onnxruntime"))]
+    if backend == EmbeddingBackend::Onnx {
+        eprintln!("Warning: embedding backend 'onnx' selected but ONNX Runtime is not compiled in");
+        return None;
+    }
+
+    // Auto fallback (ONNX unavailable / not compiled): tract, then Ollama. On a
+    // pure-`tract` build this is how `Auto` — the Intel-Mac default — resolves.
+    #[cfg(feature = "tract")]
+    if backend != EmbeddingBackend::Onnx {
+        if let Some(p) = specs
+            .tract
+            .and_then(TractEmbeddingProvider::try_with_model)
+            .map(|p| Arc::new(p) as Arc<dyn EmbeddingProvider>)
+        {
+            return Some(p);
         }
     }
     #[cfg(feature = "ollama")]
     if backend != EmbeddingBackend::Onnx {
-        return try_ollama();
+        return OllamaProvider::try_new(specs.ollama).map(|p| Arc::new(p) as _);
     }
+
+    let _ = &specs;
     None
 }
 
@@ -315,22 +423,71 @@ pub fn resolve_engine_providers(
         providers.embedding = Some(provider);
     }
 
-    if config.nli.enabled {
-        match OnnxNliProvider::try_new(&config.nli.model) {
-            Some(provider) => providers.nli = Some(Arc::new(provider)),
-            None => {
-                eprintln!("Warning: NLI contradiction detection enabled but model unavailable")
+    // NLI, cross-encoder reranker, and T5 titling are all ONNX-Runtime-only.
+    // On a pure-`tract` build they are unavailable (deberta/BGE/T5 are quantized
+    // ONNX exports that either need ORT or hit tract's static-shape wall), so
+    // the whole block compiles out and those features stay off — matching the
+    // MVP's "embeddings only on tract" contract.
+    #[cfg(feature = "onnxruntime")]
+    {
+        if config.nli.enabled {
+            match OnnxNliProvider::try_new(&config.nli.model) {
+                Some(provider) => providers.nli = Some(Arc::new(provider)),
+                None => {
+                    eprintln!("Warning: NLI contradiction detection enabled but model unavailable")
+                }
             }
         }
-    }
 
-    if config.rerank.enabled {
-        match LocalReranker::load(&config.rerank.model) {
-            Ok(reranker) => providers.reranker = Some(reranker),
-            Err(e) => eprintln!("Warning: reranker init failed, continuing without: {}", e),
+        if config.rerank.enabled {
+            match LocalReranker::load(&config.rerank.model) {
+                Ok(reranker) => providers.reranker = Some(reranker),
+                Err(e) => eprintln!("Warning: reranker init failed, continuing without: {}", e),
+            }
+        }
+
+        resolve_t5_title_provider(config, embedding_pool_size, &mut providers);
+    }
+    #[cfg(not(feature = "onnxruntime"))]
+    {
+        // NLI and T5 titling are ONNX-Runtime-only. The cross-encoder reranker,
+        // however, has a pure-Rust tract path (fp32 BGE), so honor
+        // `[rerank].enabled` when the `tract` backend is compiled in.
+        if config.nli.enabled {
+            eprintln!(
+                "Warning: NLI contradiction detection is enabled but unavailable on a \
+                 pure-tract build (no ONNX Runtime); continuing without it"
+            );
+        }
+        #[cfg(feature = "tract")]
+        if config.rerank.enabled {
+            match crate::retrieval::reranker::TractReranker::load(&config.rerank.model) {
+                Ok(reranker) => providers.reranker = Some(reranker),
+                Err(e) => {
+                    eprintln!(
+                        "Warning: tract reranker init failed, continuing without: {}",
+                        e
+                    )
+                }
+            }
+        }
+        #[cfg(not(feature = "tract"))]
+        if config.rerank.enabled {
+            eprintln!("Warning: reranker is enabled but unavailable on this build");
         }
     }
 
+    providers
+}
+
+/// Build the cached T5 title generator pool. Split out so the whole ORT-only
+/// path (T5 is a quantized ONNX model) compiles out of a pure-`tract` build.
+#[cfg(feature = "onnxruntime")]
+fn resolve_t5_title_provider(
+    config: &crate::types::EngramConfig,
+    embedding_pool_size: usize,
+    providers: &mut EngineProviders,
+) {
     // Only T5 is worth caching: keyword titling is in-process and cheap, and
     // `none` builds nothing. Loading T5 here (an encoder+decoder ONNX init)
     // means the long-lived daemon / MCP server loads it once into the bundle
@@ -366,8 +523,6 @@ pub fn resolve_engine_providers(
             }
         }
     }
-
-    providers
 }
 
 /// Assemble a [`RetrievalEngine`] from a store, config, and pre-built
@@ -867,6 +1022,7 @@ mod tests {
         assert!(provider_specs("definitely-not-a-model").is_none());
     }
 
+    #[cfg(feature = "onnxruntime")]
     #[test]
     fn expected_fingerprint_matches_spec_for_every_provider_string() {
         for (name, spec) in [
@@ -913,6 +1069,7 @@ mod tests {
     /// ever diverge, model-change detection silently passes mismatched
     /// vectors (the footgun flagged by 3 review agents). Locks the
     /// fingerprint path and the resolve path to the same table.
+    #[cfg(feature = "onnxruntime")]
     #[test]
     fn expected_fingerprint_matches_live_default_provider() {
         let provider = OnnxProvider::try_new().expect("default ONNX model available in test env");

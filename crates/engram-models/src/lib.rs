@@ -26,6 +26,7 @@ pub mod title;
 /// into an `anyhow::Result` fails `anyhow`'s `Send + Sync` bound. Converting to
 /// the unit-payload `ort::Error` (which is `Send + Sync`) via the crate's
 /// `From` impl restores `?`-propagation while preserving the error message/code.
+#[cfg(feature = "onnxruntime")]
 pub(crate) fn erase_builder_err(
     e: ort::Error<ort::session::builder::SessionBuilder>,
 ) -> ort::Error {

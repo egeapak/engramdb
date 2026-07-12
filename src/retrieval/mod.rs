@@ -35,4 +35,6 @@ pub mod reranker;
 // Re-export main types and functions
 pub use engine::{DetailLevel, RetrievalEngine, RetrievalQuery, RetrievalResult, ScoredMemory};
 pub use filters::{apply_index_filters, build_filter_predicate, Filterable, SearchFilters};
-pub use reranker::{LocalReranker, RerankScore, Reranker};
+#[cfg(feature = "onnxruntime")]
+pub use reranker::LocalReranker;
+pub use reranker::{RerankScore, Reranker};

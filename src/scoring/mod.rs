@@ -47,7 +47,8 @@ mod trust;
 
 // Re-export public API
 pub use composite::{
-    composite_score, composite_score_ignore_decay, ScoreBreakdown, ScoringContext,
+    composite_score, composite_score_ignore_decay, composite_score_target,
+    composite_score_target_ignore_decay, ScoreBreakdown, ScoreTarget, ScoringContext,
 };
 pub use decay::{decay_factor, effective_relevance};
 pub use trust::{trust_weight, trust_weight_from_config};

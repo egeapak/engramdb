@@ -151,11 +151,17 @@ impl MemoryStore {
             }
         }
 
-        Ok(Self {
+        let store = Self {
             project_dir: dir.to_path_buf(),
             project_id,
             lance_index,
-        })
+        };
+        // Release the init lock before migrating: the schema migration runs a
+        // reindex, which re-acquires the per-project write lock (a second
+        // acquire in this process would deadlock).
+        drop(_lock);
+        store.migrate_schema_if_needed().await?;
+        Ok(store)
     }
 
     /// Initialize the global memory store.
@@ -202,11 +208,13 @@ impl MemoryStore {
             .await
             .map_err(|e| StorageError::Validation(format!("Global LanceDB init failed: {}", e)))?;
 
-        Ok(Self {
+        let store = Self {
             project_dir: global_dir,
             project_id,
             lance_index,
-        })
+        };
+        store.migrate_schema_if_needed().await?;
+        Ok(store)
     }
 
     /// Open the global memory store, creating it if necessary.
@@ -229,11 +237,13 @@ impl MemoryStore {
             .await
             .map_err(|e| StorageError::Validation(format!("Global LanceDB open failed: {}", e)))?;
 
-        Ok(Self {
+        let store = Self {
             project_dir: global_dir,
             project_id,
             lance_index,
-        })
+        };
+        store.migrate_schema_if_needed().await?;
+        Ok(store)
     }
 
     /// Returns `true` if this store is the global memory store.
@@ -274,11 +284,17 @@ impl MemoryStore {
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB open failed: {}", e)))?;
 
-        Ok(Self {
+        let store = Self {
             project_dir: dir.to_path_buf(),
             project_id,
             lance_index,
-        })
+        };
+        // Every open (the hot path for all CLI commands and the MCP server) must
+        // migrate a store that predates the current schema, exactly like the
+        // init/global paths — otherwise reads that project the new columns fail
+        // and writes hit a schema mismatch on an un-upgraded table.
+        store.migrate_schema_if_needed().await?;
+        Ok(store)
     }
 
     /// Create a new memory.
@@ -334,8 +350,18 @@ impl MemoryStore {
             }
         }
 
-        // Upsert metadata to LanceDB (vectors stored separately in chunks table)
-        let entry = IndexEntry::from(memory);
+        // Upsert metadata to LanceDB (vectors stored separately in chunks table).
+        // A re-create of an existing memory (worktree consolidation, or a
+        // personal/shared visibility flip — see the sweep above) must not reset
+        // `has_embedding`: the chunks table is untouched here, so carry the
+        // current chunk-presence state forward. A fresh `IndexEntry`'s default
+        // `false` would otherwise drop an already-embedded memory from semantic
+        // ranking (R3). For a brand-new memory this is `false` as expected.
+        let mut entry = IndexEntry::from(memory);
+        entry.has_embedding =
+            self.lance_index.has_chunks(&memory.id).await.map_err(|e| {
+                StorageError::Validation(format!("LanceDB has_chunks failed: {}", e))
+            })?;
         self.lance_index
             .upsert(&entry)
             .await
@@ -586,8 +612,19 @@ impl MemoryStore {
             }
         }
 
-        // Upsert metadata to LanceDB (chunks are managed separately)
-        let entry = IndexEntry::from(memory);
+        // Upsert metadata to LanceDB (chunks are managed separately). An update
+        // must not reset `has_embedding`: the memory may already have chunks
+        // that this update isn't touching. Carry the current chunk-presence
+        // state forward (a content-changing update's re-embed will set it true
+        // again via `upsert_chunks` regardless).
+        let mut entry = IndexEntry::from(memory);
+        // Propagate a chunk-presence read error rather than defaulting to
+        // `false`: silently clearing the flag would drop a still-embedded memory
+        // from `has_embedding`-gated semantic ranking (R3) until the next reindex.
+        entry.has_embedding =
+            self.lance_index.has_chunks(&memory.id).await.map_err(|e| {
+                StorageError::Validation(format!("LanceDB has_chunks failed: {}", e))
+            })?;
         self.lance_index
             .upsert(&entry)
             .await
@@ -783,17 +820,93 @@ impl MemoryStore {
     /// orphan chunks are not pruned, so the other checkout's rows and
     /// vectors survive. Index rows have no per-checkout ownership column,
     /// so a clear here would be unrecoverable data loss for the other clone.
+    /// Migrate the on-disk index schema when the manifest records an older
+    /// [`manifest::CURRENT_SCHEMA_VERSION`].
+    ///
+    /// The migration is a plain **reindex**: the memories table is rebuilt from
+    /// the authoritative `.md` files (populating new columns like `decay` and
+    /// `has_embedding`) while the chunks/vectors table is preserved untouched —
+    /// so it takes seconds and never re-embeds. Idempotent: a store already at
+    /// the current version is a no-op, and a second open after a successful
+    /// migration does nothing. Callers MUST NOT hold the write lock (reindex
+    /// acquires it). Migration failures propagate so a broken store is loud
+    /// rather than silently half-migrated.
+    async fn migrate_schema_if_needed(&self) -> Result<()> {
+        let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
+        let stored = manifest::load_manifest(&manifest_path)
+            .await
+            .ok()
+            .map(|m| m.schema_version);
+        // Migrate only when the store is genuinely behind: a version at or ahead
+        // of current (a newer binary's store) is left untouched, and a
+        // manifest-less store is treated as pre-migration.
+        let needs_migration = stored
+            .as_deref()
+            .is_none_or(|v| !manifest::schema_version_is_current(v));
+        if !needs_migration {
+            return Ok(());
+        }
+        tracing::info!(
+            "Migrating EngramDB store schema ({} -> {}): rebuilding index from memory files \
+             (vectors preserved, no re-embed)",
+            stored.as_deref().unwrap_or("<none>"),
+            manifest::CURRENT_SCHEMA_VERSION
+        );
+        // `force_schema_reset`: a schema migration must recreate the memories
+        // table with the current columns. The default (upsert-only) reindex path
+        // taken under a foreign checkout can't add columns and would fail on a
+        // schema mismatch, so migration forces the table rebuild even then.
+        self.reindex_with(true).await?;
+        // reindex's `update_manifest_stats` rewrote the manifest but preserved
+        // the old `schema_version`; stamp the new one now that the rebuild
+        // succeeded (mirrors how the embedding fingerprint is stamped only on
+        // success). Propagate a load failure rather than clobbering the store's
+        // identity with a default manifest.
+        let mut manifest = manifest::load_manifest(&manifest_path).await?;
+        manifest.schema_version = manifest::CURRENT_SCHEMA_VERSION.to_string();
+        manifest::save_manifest(&manifest_path, &manifest).await?;
+        Ok(())
+    }
+
     pub async fn reindex(&self) -> Result<usize> {
+        self.reindex_with(false).await
+    }
+
+    /// Rebuild the memories table from the on-disk `.md` files, preserving
+    /// vectors.
+    ///
+    /// `force_schema_reset` controls the foreign-checkout case: normally
+    /// (`false`) a store whose project ID is shared with another live checkout
+    /// runs a non-destructive, upsert-only rebuild so the other checkout's rows
+    /// survive. A schema migration passes `true`: the memories table must be
+    /// recreated with the current column set (upsert-only can't add columns and
+    /// would fail on a schema mismatch), so the table is rebuilt from this
+    /// checkout's files even under a conflict. The other checkout's **vectors**
+    /// are still preserved (the chunks table is never dropped and orphan-pruning
+    /// stays skipped); its index rows are rebuilt when it runs its own migration.
+    async fn reindex_with(&self, force_schema_reset: bool) -> Result<usize> {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
 
         let foreign_checkout = self.checkout_conflict().await;
         if let Some(other) = &foreign_checkout {
-            tracing::warn!(
-                "Project ID is shared with another checkout at {} — running a \
-                 non-destructive (upsert-only) reindex; index rows and vectors \
-                 belonging to the other checkout are preserved",
-                other.display()
-            );
+            if force_schema_reset {
+                tracing::warn!(
+                    "Project ID is shared with another checkout at {} — migrating the \
+                     shared memories table to the current schema; that checkout's index \
+                     rows rebuild on its next open (its vectors are preserved)",
+                    other.display()
+                );
+                self.lance_index.clear_memories().await.map_err(|e| {
+                    StorageError::Validation(format!("LanceDB clear failed: {}", e))
+                })?;
+            } else {
+                tracing::warn!(
+                    "Project ID is shared with another checkout at {} — running a \
+                     non-destructive (upsert-only) reindex; index rows and vectors \
+                     belonging to the other checkout are preserved",
+                    other.display()
+                );
+            }
         } else {
             // Clear only the metadata table — never the vectors. Dropping the
             // chunks table here would silently destroy all embeddings whenever
@@ -806,18 +919,42 @@ impl MemoryStore {
 
         let mut indexed_ids = Vec::new();
 
+        // The set of memories that currently have embedding chunks. Gathered
+        // once, up front (the chunks table is untouched by the metadata
+        // rebuild), and used both to stamp each rebuilt row's `has_embedding`
+        // flag (R3) and to prune orphan chunks below.
+        let chunk_ids: std::collections::HashSet<String> = self
+            .lance_index
+            .list_chunk_memory_ids()
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB list_chunk_memory_ids failed: {}", e))
+            })?
+            .into_iter()
+            .collect();
+
         // Reindex shared memories
         let shared_dir = paths::memories_dir(&self.project_dir);
         if shared_dir.exists() {
-            self.reindex_dir(&shared_dir, Visibility::Shared, &mut indexed_ids)
-                .await?;
+            self.reindex_dir(
+                &shared_dir,
+                Visibility::Shared,
+                &chunk_ids,
+                &mut indexed_ids,
+            )
+            .await?;
         }
 
         // Reindex personal memories
         let personal_dir = paths::personal_memories_dir(&self.project_id)?;
         if personal_dir.exists() {
-            self.reindex_dir(&personal_dir, Visibility::Personal, &mut indexed_ids)
-                .await?;
+            self.reindex_dir(
+                &personal_dir,
+                Visibility::Personal,
+                &chunk_ids,
+                &mut indexed_ids,
+            )
+            .await?;
         }
 
         // Prune chunks for memories that no longer exist on disk, so the
@@ -828,16 +965,10 @@ impl MemoryStore {
         if foreign_checkout.is_none() {
             let indexed_set: std::collections::HashSet<&str> =
                 indexed_ids.iter().map(|s| s.as_str()).collect();
-            let chunk_ids = self
-                .lance_index
-                .list_chunk_memory_ids()
-                .await
-                .map_err(|e| {
-                    StorageError::Validation(format!("LanceDB list_chunk_memory_ids failed: {}", e))
-                })?;
             let orphans: Vec<String> = chunk_ids
-                .into_iter()
+                .iter()
                 .filter(|id| !indexed_set.contains(id.as_str()))
+                .cloned()
                 .collect();
             // One IN-list delete commit for all orphans, not one per ID.
             self.lance_index
@@ -1043,6 +1174,7 @@ impl MemoryStore {
         &self,
         dir: &Path,
         visibility: Visibility,
+        chunk_ids: &std::collections::HashSet<String>,
         indexed_ids: &mut Vec<String>,
     ) -> Result<()> {
         let mut by_id: HashMap<String, (PathBuf, std::time::SystemTime, Memory)> = HashMap::new();
@@ -1104,6 +1236,10 @@ impl MemoryStore {
         for (id, (_path, _mtime, memory)) in by_id {
             let mut index_entry = IndexEntry::from(&memory);
             index_entry.visibility = visibility;
+            // R3: stamp the embedding flag from the chunk-table snapshot so a
+            // reindex (including the on-open schema migration) leaves
+            // `has_embedding` authoritative.
+            index_entry.has_embedding = chunk_ids.contains(&id);
             entries_batch.push(index_entry);
             indexed_ids.push(id);
         }
@@ -1528,6 +1664,193 @@ mod tests {
         memory.id = id.to_string();
         memory.visibility = visibility;
         memory
+    }
+
+    async fn has_embedding_flag(store: &MemoryStore, id: &str) -> bool {
+        store
+            .lance_index
+            .list_for_filtering()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == id)
+            .unwrap()
+            .has_embedding
+    }
+
+    /// The R2/R3 schema migration: an older-version store is transparently
+    /// re-indexed on open, backfilling `decay` + `has_embedding` from the
+    /// authoritative `.md` files and chunk table, and stamping the current
+    /// version. A second open is a no-op.
+    #[tokio::test]
+    async fn schema_migration_on_open_backfills_decay_and_has_embedding() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+
+        // One decayed + embedded memory, one with decay explicitly disabled and
+        // no chunks.
+        let mut decayed = create_test_memory("mig-decayed", Visibility::Shared);
+        decayed.decay = Some(engram_types::Decay::linear(chrono::Duration::days(30)));
+        store.create(&decayed).await.unwrap();
+        store
+            .upsert_chunks("mig-decayed", vec![vec![0.1f32; 384]])
+            .await
+            .unwrap();
+        let mut plain = create_test_memory("mig-plain", Visibility::Shared);
+        plain.decay = None;
+        store.create(&plain).await.unwrap();
+
+        // Simulate a pre-migration store by downgrading the recorded version.
+        let manifest_path = paths::project_dir(tmp.path()).join("manifest.toml");
+        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
+        m.schema_version = "0.1.0".to_string();
+        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+
+        // Re-open → migration runs (reindex from files, vectors preserved).
+        let store2 = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        assert_eq!(
+            manifest::load_manifest(&manifest_path)
+                .await
+                .unwrap()
+                .schema_version,
+            manifest::CURRENT_SCHEMA_VERSION,
+            "migration must stamp the current schema version"
+        );
+
+        let entries = store2.lance_index.list_for_filtering().await.unwrap();
+        let decayed = entries.iter().find(|e| e.id == "mig-decayed").unwrap();
+        assert!(
+            matches!(
+                decayed.decay.as_ref().map(|d| &d.strategy),
+                Some(engram_types::DecayStrategy::Linear)
+            ),
+            "decay strategy backfilled from the .md file"
+        );
+        assert!(
+            decayed.has_embedding,
+            "embedded memory → has_embedding=true"
+        );
+        let plain = entries.iter().find(|e| e.id == "mig-plain").unwrap();
+        assert!(plain.decay.is_none(), "decay=None round-trips as null");
+        assert!(
+            !plain.has_embedding,
+            "unembedded memory → has_embedding=false"
+        );
+
+        // Idempotent: opening again does not re-migrate.
+        let _store3 = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        assert_eq!(
+            manifest::load_manifest(&manifest_path)
+                .await
+                .unwrap()
+                .schema_version,
+            manifest::CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    /// The `has_embedding` projection flag tracks the chunk lifecycle: false at
+    /// create, true after chunks are written, preserved across a metadata-only
+    /// update, false after chunks are deleted.
+    #[tokio::test]
+    async fn has_embedding_flag_tracks_chunk_lifecycle() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("he-1", Visibility::Shared))
+            .await
+            .unwrap();
+        assert!(!has_embedding_flag(&store, "he-1").await, "no chunks yet");
+
+        store
+            .upsert_chunks("he-1", vec![vec![0.2f32; 384]])
+            .await
+            .unwrap();
+        assert!(has_embedding_flag(&store, "he-1").await, "chunks written");
+
+        // A metadata-only update must not reset the flag.
+        store
+            .update_with("he-1", |m| {
+                m.criticality = 0.9;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(
+            has_embedding_flag(&store, "he-1").await,
+            "update must preserve has_embedding"
+        );
+
+        store.delete_chunks("he-1").await.unwrap();
+        assert!(!has_embedding_flag(&store, "he-1").await, "chunks deleted");
+    }
+
+    /// Migration must also run on the plain `open` path — the hot path for every
+    /// CLI command and the MCP server — not just `init`/global. A pre-migration
+    /// store opened via `open` is transparently re-indexed and stamped current.
+    #[tokio::test]
+    async fn schema_migration_runs_on_open_hot_path() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        // Create + embed a memory, then downgrade the recorded schema version.
+        {
+            let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+            store
+                .create(&create_test_memory("open-mig", Visibility::Shared))
+                .await
+                .unwrap();
+            store
+                .upsert_chunks("open-mig", vec![vec![0.3f32; 384]])
+                .await
+                .unwrap();
+        }
+        let manifest_path = paths::project_dir(tmp.path()).join("manifest.toml");
+        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
+        m.schema_version = "0.1.0".to_string();
+        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+
+        // Open via the hot path (NOT init) → migration must run.
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+        assert_eq!(
+            manifest::load_manifest(&manifest_path)
+                .await
+                .unwrap()
+                .schema_version,
+            manifest::CURRENT_SCHEMA_VERSION,
+            "open() must migrate a pre-migration store"
+        );
+        assert!(
+            has_embedding_flag(&store, "open-mig").await,
+            "has_embedding backfilled from chunks on the open() migration"
+        );
+    }
+
+    /// Re-creating an existing memory (worktree consolidation / visibility flip)
+    /// must not reset `has_embedding` to false — the chunks table is untouched,
+    /// so a fresh `IndexEntry`'s default would otherwise drop the memory from
+    /// semantic ranking (R3) until a reindex.
+    #[tokio::test]
+    async fn recreate_preserves_has_embedding() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mem = create_test_memory("recreate-1", Visibility::Shared);
+        store.create(&mem).await.unwrap();
+        store
+            .upsert_chunks("recreate-1", vec![vec![0.4f32; 384]])
+            .await
+            .unwrap();
+        assert!(has_embedding_flag(&store, "recreate-1").await, "embedded");
+
+        // Re-create the same id without touching chunks (e.g. a re-run).
+        store.create(&mem).await.unwrap();
+        assert!(
+            has_embedding_flag(&store, "recreate-1").await,
+            "re-create must preserve has_embedding while chunks still exist"
+        );
     }
 
     #[tokio::test]

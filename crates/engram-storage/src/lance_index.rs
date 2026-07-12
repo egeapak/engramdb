@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arrow_array::{
-    Array, ArrayRef, FixedSizeListArray, Float32Array, Float64Array, RecordBatch,
+    Array, ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, RecordBatch,
     RecordBatchIterator, StringArray, UInt32Array,
 };
 use arrow_schema::{DataType, Field, Schema};
@@ -21,7 +21,7 @@ use lancedb::table::OptimizeAction;
 use lancedb::{connect, Connection, Table};
 
 use chrono::{DateTime, Utc};
-use engram_types::{Memory, MemoryType, ProvenanceSource, Status, Visibility};
+use engram_types::{Decay, Memory, MemoryType, ProvenanceSource, Status, Visibility};
 use serde::{Deserialize, Serialize};
 
 /// Minimum chunk-table row count before [`LanceIndex::optimize`] will
@@ -90,6 +90,15 @@ pub struct IndexEntry {
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
+    /// Decay configuration (JSON-encoded in the index). Lets the no-query Rank
+    /// path score from the projection without reading the `.md` file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decay: Option<Decay>,
+    /// Whether this memory currently has embedding chunks. Maintained on
+    /// chunk write/delete and rebuilt on reindex; mirrors chunk-table presence
+    /// so a semantic query can read it from the memories projection.
+    #[serde(default)]
+    pub has_embedding: bool,
 }
 
 /// Lightweight metadata for aggregation/stats queries (7 columns).
@@ -121,6 +130,14 @@ pub struct IndexForFiltering {
     pub tags: Vec<String>,
     pub criticality: f64,
     pub expires_at: Option<DateTime<Utc>>,
+    // R2/R3 scoring-from-projection fields (schema v0.2.0). Together with the
+    // fields above these are exactly what `composite_score` reads, so the
+    // no-query Rank path can score without loading the `.md` file.
+    pub decay: Option<Decay>,
+    pub created_at: DateTime<Utc>,
+    pub provenance_source: ProvenanceSource,
+    pub status: Status,
+    pub has_embedding: bool,
 }
 
 /// Filterable/displayable entry (12 columns).
@@ -166,6 +183,13 @@ impl From<&Memory> for IndexEntry {
             created_at: memory.created_at,
             updated_at: memory.updated_at,
             expires_at: memory.expires_at,
+            decay: memory.decay.clone(),
+            // Chunks are written separately (and asynchronously), so a
+            // from-Memory entry can't know embedding state. The write
+            // orchestration sets this: `create`/`update` via a chunk-presence
+            // check, `upsert_chunks`/`delete_chunks` via a targeted update, and
+            // reindex from the chunk-id set. Defaults to false (no chunks yet).
+            has_embedding: false,
         }
     }
 }
@@ -248,6 +272,13 @@ impl LanceIndex {
             Field::new("created_at", DataType::Utf8, false),
             Field::new("updated_at", DataType::Utf8, false),
             Field::new("expires_at", DataType::Utf8, true),
+            // Added in schema v0.2.0 (R2/R3). `decay` is the JSON of
+            // `Option<Decay>` (null when None) — the last scoring input not
+            // previously in the index, letting the no-query Rank path score
+            // straight from the projection. `has_embedding` mirrors chunk-table
+            // presence so a semantic query needn't scan the chunks table.
+            Field::new("decay", DataType::Utf8, true),
+            Field::new("has_embedding", DataType::Boolean, false),
         ]))
     }
 
@@ -594,6 +625,11 @@ impl LanceIndex {
             "tags".into(),
             "criticality".into(),
             "expires_at".into(),
+            "decay".into(),
+            "created_at".into(),
+            "provenance_source".into(),
+            "status".into(),
+            "has_embedding".into(),
         ]));
         if let Some(pred) = predicate {
             query = query.only_if(pred);
@@ -689,6 +725,9 @@ impl LanceIndex {
             .await
             .context("Failed to upsert chunks")?;
 
+        // Keep the memories-table R3 flag in sync: this memory now has chunks.
+        self.set_has_embedding(memory_id, true).await?;
+
         Ok(())
     }
 
@@ -777,6 +816,10 @@ impl LanceIndex {
             .delete(&format!("memory_id = '{}'", escaped_id))
             .await
             .context("Failed to delete chunks")?;
+
+        // Keep the memories-table R3 flag in sync (no-op if the memory row is
+        // gone, e.g. this is part of a full delete).
+        self.set_has_embedding(memory_id, false).await?;
         Ok(())
     }
 
@@ -804,6 +847,47 @@ impl LanceIndex {
                 .await
                 .context("Failed to delete chunk batch")?;
         }
+        Ok(())
+    }
+
+    /// Whether the chunks table has any row for `memory_id`.
+    ///
+    /// Used by the `create`/`update` write path to set the memories-table
+    /// `has_embedding` flag correctly (an update to a memory that already has
+    /// chunks must not reset the flag to false).
+    pub async fn has_chunks(&self, memory_id: &str) -> Result<bool> {
+        let table = self.open_chunks_table().await?;
+        let escaped_id = memory_id.replace('\'', "''");
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec!["memory_id".into()]))
+            .only_if(format!("memory_id = '{}'", escaped_id))
+            .limit(1)
+            .execute()
+            .await
+            .context("Failed to query chunks for has_chunks")?;
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read chunk batch")?;
+            if batch.num_rows() > 0 {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Set the memories-table `has_embedding` flag for one memory. A no-op when
+    /// no row matches (e.g. the memory was concurrently deleted). Keeps the
+    /// R3 projection column in sync with chunk-table presence.
+    pub async fn set_has_embedding(&self, memory_id: &str, value: bool) -> Result<()> {
+        let table = self.open_table().await?;
+        let escaped_id = memory_id.replace('\'', "''");
+        table
+            .update()
+            .only_if(format!("id = '{}'", escaped_id))
+            .column("has_embedding", if value { "true" } else { "false" })
+            .execute()
+            .await
+            .context("Failed to update has_embedding")?;
         Ok(())
     }
 
@@ -1175,6 +1259,8 @@ impl LanceIndex {
         let mut created_ats = Vec::with_capacity(n);
         let mut updated_ats = Vec::with_capacity(n);
         let mut expires_ats: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut decays: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut has_embeddings = Vec::with_capacity(n);
 
         for entry in entries {
             ids.push(entry.id.clone());
@@ -1195,6 +1281,11 @@ impl LanceIndex {
             created_ats.push(entry.created_at.to_rfc3339());
             updated_ats.push(entry.updated_at.to_rfc3339());
             expires_ats.push(entry.expires_at.map(|dt| dt.to_rfc3339()));
+            decays.push(match &entry.decay {
+                Some(d) => Some(serde_json::to_string(d).context("Failed to serialize decay")?),
+                None => None,
+            });
+            has_embeddings.push(entry.has_embedding);
         }
 
         let batch = RecordBatch::try_new(
@@ -1214,6 +1305,8 @@ impl LanceIndex {
                 Arc::new(StringArray::from(created_ats)) as ArrayRef,
                 Arc::new(StringArray::from(updated_ats)) as ArrayRef,
                 Arc::new(StringArray::from(expires_ats)) as ArrayRef,
+                Arc::new(StringArray::from(decays)) as ArrayRef,
+                Arc::new(BooleanArray::from(has_embeddings)) as ArrayRef,
             ],
         )
         .context("Failed to create RecordBatch")?;
@@ -1458,6 +1551,36 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
         .as_any()
         .downcast_ref::<StringArray>()
         .context("Failed to cast 'expires_at'")?;
+    let decays = batch
+        .column_by_name("decay")
+        .context("Missing 'decay' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'decay'")?;
+    let created_ats = batch
+        .column_by_name("created_at")
+        .context("Missing 'created_at' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'created_at'")?;
+    let provenances = batch
+        .column_by_name("provenance_source")
+        .context("Missing 'provenance_source' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'provenance_source'")?;
+    let statuses = batch
+        .column_by_name("status")
+        .context("Missing 'status' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'status'")?;
+    let has_embeddings = batch
+        .column_by_name("has_embedding")
+        .context("Missing 'has_embedding' column")?
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .context("Failed to cast 'has_embedding'")?;
 
     let mut entries = Vec::with_capacity(batch.num_rows());
     for i in 0..batch.num_rows() {
@@ -1476,6 +1599,14 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
                     .with_timezone(&Utc),
             )
         };
+        let decay: Option<Decay> = if decays.is_null(i) {
+            None
+        } else {
+            Some(serde_json::from_str(decays.value(i)).context("Failed to parse decay JSON")?)
+        };
+        let created_at: DateTime<Utc> = chrono::DateTime::parse_from_rfc3339(created_ats.value(i))
+            .context("Failed to parse created_at")?
+            .with_timezone(&Utc);
 
         entries.push(IndexForFiltering {
             id: ids.value(i).to_string(),
@@ -1485,6 +1616,11 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
             tags,
             criticality: criticalities.value(i),
             expires_at,
+            decay,
+            created_at,
+            provenance_source: parse_provenance_source(provenances.value(i))?,
+            status: parse_status(statuses.value(i))?,
+            has_embedding: has_embeddings.value(i),
         });
     }
     Ok(entries)
@@ -1520,6 +1656,16 @@ fn parse_visibility(s: &str) -> Result<Visibility> {
         "shared" => Ok(Visibility::Shared),
         "personal" => Ok(Visibility::Personal),
         _ => anyhow::bail!("Unknown visibility: {}", s),
+    }
+}
+
+fn parse_provenance_source(s: &str) -> Result<ProvenanceSource> {
+    match s {
+        "human" => Ok(ProvenanceSource::Human),
+        "agent" => Ok(ProvenanceSource::Agent),
+        "inferred" => Ok(ProvenanceSource::Inferred),
+        "imported" => Ok(ProvenanceSource::Imported),
+        _ => anyhow::bail!("Unknown provenance source: {}", s),
     }
 }
 

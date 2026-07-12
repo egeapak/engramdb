@@ -8,6 +8,7 @@
 
 pub mod keyword;
 mod pool;
+#[cfg(feature = "onnxruntime")]
 pub mod t5;
 
 pub use pool::PooledTitleGenerator;
@@ -40,10 +41,16 @@ pub trait TitleGenerator: Send + Sync {
 pub fn create_generator(strategy: TitleStrategy) -> Result<Option<Box<dyn TitleGenerator>>> {
     match strategy {
         TitleStrategy::Keyword => Ok(Some(Box::new(keyword::KeywordTitleGenerator::new()))),
+        #[cfg(feature = "onnxruntime")]
         TitleStrategy::T5 => {
             let gen = t5::T5TitleGenerator::new()?;
             Ok(Some(Box::new(gen)))
         }
+        // On a pure-`tract` build there is no ONNX Runtime, so T5 (a quantized
+        // ONNX export) is unavailable — fall back to keyword titling rather
+        // than failing the create path.
+        #[cfg(not(feature = "onnxruntime"))]
+        TitleStrategy::T5 => Ok(Some(Box::new(keyword::KeywordTitleGenerator::new()))),
         TitleStrategy::None => Ok(None),
     }
 }

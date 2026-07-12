@@ -889,6 +889,9 @@ pub async fn validate_models(config: &crate::types::EngramConfig) -> Vec<Environ
     let mut vcfg = config.clone();
     vcfg.nli.enabled =
         config.nli.enabled || crate::storage::paths::hf_repo_cached(&config.nli.model);
+    // T5 titling is ONNX-Runtime-only; on a pure-`tract` build the `t5` module
+    // is compiled out, so only probe for it when ORT is present.
+    #[cfg(feature = "onnxruntime")]
     if config.title.strategy != crate::title::TitleStrategy::T5
         && crate::storage::paths::hf_repo_cached(crate::title::t5::DEFAULT_T5_MODEL.repo)
     {

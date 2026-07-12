@@ -6,7 +6,6 @@ use anyhow::{Context, Result};
 use engramdb::embeddings::{
     OllamaModelSpec, OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT,
 };
-use engramdb::embeddings::{OnnxProvider, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT};
 use engramdb::storage::{project_id, MemoryStore, RegistryBackend};
 use engramdb::types::EmbeddingBackend;
 use std::fs;
@@ -98,7 +97,7 @@ pub async fn run_init(
                     backend,
                     "all-minilm",
                     "~23MB",
-                    || OnnxProvider::new().map(|_| ()),
+                    || warm_embedding("all-minilm"),
                     #[cfg(feature = "ollama")]
                     ALL_MINILM,
                     formatter,
@@ -110,7 +109,7 @@ pub async fn run_init(
                     backend,
                     "nomic-embed-text",
                     "~270MB",
-                    || OnnxProvider::with_model(ONNX_NOMIC_EMBED_TEXT).map(|_| ()),
+                    || warm_embedding("nomic-embed-text"),
                     #[cfg(feature = "ollama")]
                     NOMIC_EMBED_TEXT,
                     formatter,
@@ -122,7 +121,7 @@ pub async fn run_init(
                     backend,
                     "mxbai-embed-large",
                     "~650MB",
-                    || OnnxProvider::with_model(ONNX_MXBAI_EMBED_LARGE).map(|_| ()),
+                    || warm_embedding("mxbai-embed-large"),
                     #[cfg(feature = "ollama")]
                     MXBAI_EMBED_LARGE,
                     formatter,
@@ -169,6 +168,32 @@ pub async fn run_init(
         );
     }
 
+    Ok(())
+}
+
+/// Warm the on-disk model cache for the configured embedding `provider` by
+/// constructing it once (the first construction downloads the model). Picks the
+/// engine compiled into this build: ONNX Runtime when present, otherwise the
+/// pure-`tract` fp32 MiniLM (a pure-tract build ships no nomic/mxbai model, so
+/// those warm to a no-op there).
+#[allow(unused_variables)]
+#[allow(clippy::needless_return)]
+fn warm_embedding(provider: &str) -> anyhow::Result<()> {
+    #[cfg(feature = "onnxruntime")]
+    {
+        use engramdb::embeddings::{OnnxProvider, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT};
+        return match provider {
+            "nomic-embed-text" => OnnxProvider::with_model(ONNX_NOMIC_EMBED_TEXT).map(|_| ()),
+            "mxbai-embed-large" => OnnxProvider::with_model(ONNX_MXBAI_EMBED_LARGE).map(|_| ()),
+            _ => OnnxProvider::new().map(|_| ()),
+        };
+    }
+    #[cfg(all(not(feature = "onnxruntime"), feature = "tract"))]
+    {
+        use engramdb::embeddings::TractEmbeddingProvider;
+        return TractEmbeddingProvider::new().map(|_| ());
+    }
+    #[cfg(all(not(feature = "onnxruntime"), not(feature = "tract")))]
     Ok(())
 }
 

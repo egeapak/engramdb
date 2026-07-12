@@ -71,9 +71,11 @@ cargo +nightly fuzz run memory_file -- -max_total_time=60
 
 Feature flags from `Cargo.toml`:
 
+- `onnxruntime` (default) — the ONNX Runtime stack (`ort` + `fastembed` + `engram-onnx`). Turn OFF (with `--no-default-features`) on a platform with no prebuilt ORT and enable `tract` instead. When off, NLI and T5 titling compile out (ORT-only) and keyword titling remains; the reranker has a pure-Rust tract path (`bge-reranker-base` fp32) that stays off by default.
+- `tract` — pure-Rust `tract-onnx` embedding backend (fp32 MiniLM). No native ONNX Runtime; the Intel-Mac (`x86_64-apple-darwin`) fallback. Composable with `onnxruntime` (both engines, runtime-chosen) or standalone (`--no-default-features --features tract`). The release workflow's `build-intel` job builds this; `engram-cli/build.rs` warns on a default Intel-Mac build.
 - `ollama` (default) — Ollama embedding backend via `reqwest`. Disable for pure offline ONNX.
-- `coreml` (macOS only) — Apple Neural Engine EP for `ort`.
-- `xnnpack` — portable CPU-kernel EP for A/B benchmarking.
+- `coreml` (macOS only) — Apple Neural Engine EP for `ort` (implies `onnxruntime`).
+- `xnnpack` — portable CPU-kernel EP for A/B benchmarking (implies `onnxruntime`).
 
 ### Nextest test groups
 
@@ -191,6 +193,7 @@ MCP (engram-mcp)  ─┘                  └─► scoring  ─► scope
 ### Storage (`crates/engram-storage/src/`, crate `engram-storage`, re-exported as `engramdb::storage`)
 
 - **`MemoryStore`** (`store.rs`) is the orchestrator. Memories live on disk as TOML-frontmatter markdown files in `.engramdb/memories/`. A single LanceDB table (`lance_index.rs`) holds both metadata-for-filtering and (optional) embedding vectors — there is no separate metadata DB.
+- **Schema migration (`manifest::CURRENT_SCHEMA_VERSION`, currently `0.2.0`).** The memories-table column set is versioned in the manifest. `MemoryStore::migrate_schema_if_needed` runs on every store open (`init`/`init_global`/`open_global`): when the recorded version is behind, it reindexes (rebuild the memories table from the `.md` files — seconds, vectors preserved, no re-embed) and stamps the current version. New stores are born current. Adding a memories-table column ⇒ bump `CURRENT_SCHEMA_VERSION` so existing stores backfill on open. The `decay` (JSON `Option<Decay>`) and `has_embedding` columns were added this way (R2/R3); `has_embedding` mirrors chunk-table presence and is maintained via `LanceIndex::{has_chunks,set_has_embedding}` on the write path.
 - **Concurrency:** mutating ops acquire a per-project advisory `flock(2)` (`write_lock.rs`); reads are lock-free and rely on LanceDB MVCC. File writes are atomic temp-then-rename.
 - **Paths (`paths.rs`)** resolve platform dirs via the `dirs` crate. Project-local data lives in `<project>/.engramdb/`; **personal** memories and LanceDB indices live in `<global_data_dir>/projects/<id>/{personal,lancedb}/`. `ENGRAMDB_DATA_DIR` and `ENGRAMDB_CONFIG_DIR` override these (the test harness uses them).
 - **`project_id.rs` / `registry.rs`** — every project gets a 16-char SHA-256-derived ID; a global `FileRegistry` tracks them. The well-known global store ID starts with underscores so it cannot collide.
@@ -202,7 +205,7 @@ MCP (engram-mcp)  ─┘                  └─► scoring  ─► scope
 - **`src/retrieval/engine.rs`** — the `RetrievalEngine` runs queries in two modes: `Filter` (narrow by query/path/logical/tags, query signal required) and `Rank` (rank everything by relevance to a context). Pipeline: index-level filter → optional vector search via LanceDB → composite scoring → optional cross-encoder rerank.
 - **`src/scoring/`** — composite score formula depends on mode (see `scoring/mod.rs` doc-comment). Final = `base * scope_multiplier * trust_multiplier - challenge_penalty`, clamped to `[0,1]`. Decay strategies are `None | Linear | Exponential | Step`.
 - **`src/scope/`** — physical (file path with depth-decay) + logical (dot-notation hierarchy, max bonus 0.3). Combined score is capped at 1.0.
-- **`crates/engram-models/src/embeddings/`** — `EmbeddingProvider` trait, implemented by `OnnxProvider` (fastembed; default) and `OllamaProvider` (gated by the `ollama` feature). The `model_id()` method is what gets persisted to the manifest — distinct fp32 vs int8 IDs are required so quantization swaps are detected.
+- **`crates/engram-models/src/embeddings/`** — `EmbeddingProvider` trait, implemented by `OnnxProvider` (fastembed; default, gated by `onnxruntime`), `OllamaProvider` (gated by `ollama`), and `TractEmbeddingProvider` (pure-Rust tract fp32 MiniLM, gated by `tract`; `embeddings/tract.rs`). The `model_id()` method is what gets persisted to the manifest — distinct fp32 vs int8 IDs are required so quantization swaps are detected, and the tract provider's `tract/all-MiniLM-L6-v2-fp32` id is what makes an ONNX↔tract backend swap trigger a `reindex`.
 - **`crates/engram-models/src/nli/onnx.rs`** + **`crates/engram-models/src/rerank.rs`** — optional ONNX NLI for contradiction detection (`challenge` flow) and a cross-encoder reranker (BGE family by default). Both are loaded only when `[nli].enabled` / `[rerank].enabled` are true in `config.toml`. The reranker's `Reranker` trait and its `fastembed` loader (`LocalReranker::load`) live in `engram-models` next to the embedding/NLI/T5 loaders (so the core `engramdb` crate carries **no** direct `fastembed` dep); `src/retrieval/reranker.rs` is a thin re-export keeping `crate::retrieval::reranker::{Reranker, RerankScore, LocalReranker}` resolving for the engine, `ops`, and the daemon's `RemoteReranker`.
 
 ### Shared embedding daemon (`src/daemon/`)
