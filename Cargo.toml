@@ -122,6 +122,20 @@ harness = false
 name = "daemon_lifecycle"
 harness = false
 
+# Dev/test disk diet: full debug info across the ~400-crate dependency tree
+# (lance, datafusion, arrow, ort, …) made a single `--all-features` debug
+# build ~25 GB — enough to exhaust CI sandboxes and small dev machines.
+# Workspace crates keep line tables so panic backtraces still resolve to
+# file:line; dependencies build with no debug info at all (their internals
+# are rarely stepped through, and dropping symbols also speeds up linking).
+# Debug a dependency by temporarily overriding, e.g.
+# `[profile.dev.package.lance] debug = true`.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = true
 opt-level = "z"
