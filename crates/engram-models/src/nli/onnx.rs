@@ -67,6 +67,10 @@ const IDX_CONTRADICTION: usize = 0;
 const IDX_ENTAILMENT: usize = 1;
 const IDX_NEUTRAL: usize = 2;
 
+/// Token cap for a premise/hypothesis pair — the DeBERTa NLI models are
+/// trained on 512-token sequences; see the truncation setup in `build`.
+const NLI_MAX_TOKENS: usize = 512;
+
 /// ONNX-based NLI provider using DeBERTa v3 xsmall cross-encoder.
 ///
 /// Classifies sentence pairs as entailment, neutral, or contradiction.
@@ -142,8 +146,25 @@ impl OnnxNliProvider {
             .commit_from_file(&model_path)
             .context("Failed to load NLI ONNX model")?;
 
-        let tokenizer = Tokenizer::from_file(&tokenizer_path)
+        let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load NLI tokenizer: {}", e))?;
+
+        // The shipped repos' tokenizer.json carries `"truncation": null`, so
+        // without an explicit cap the encoding is as long as the input.
+        // DeBERTa (relative positions) won't hard-fail on an oversized pair,
+        // but attention is O(n²) — one multi-KB summary (update paths and
+        // hand-edited files don't enforce the 100-char create limit
+        // historically) stalls every NLI check while holding the session
+        // mutex — and scores past the 512-token training regime are noise.
+        // `LongestFirst` trims the longer of premise/hypothesis first,
+        // matching standard HF pair handling.
+        tokenizer
+            .with_truncation(Some(tokenizers::TruncationParams {
+                max_length: NLI_MAX_TOKENS,
+                strategy: tokenizers::TruncationStrategy::LongestFirst,
+                ..Default::default()
+            }))
+            .map_err(|e| anyhow::anyhow!("Failed to configure NLI truncation: {}", e))?;
 
         Ok(Self {
             session: Arc::new(Mutex::new(session)),
@@ -211,17 +232,22 @@ fn download_model_files(
     Ok((model_path, tokenizer_path))
 }
 
-/// Run NLI inference on a single sentence pair with an already-locked session.
-fn classify_one(
-    session: &mut Session,
+/// Tokenize a premise/hypothesis pair. Kept separate from inference so
+/// callers can tokenize BEFORE taking the session mutex — tokenization is
+/// pure CPU work that would otherwise extend the critical section every
+/// other session (and the daemon) serializes on.
+fn encode_pair(
     tokenizer: &Tokenizer,
     premise: &str,
     hypothesis: &str,
-) -> Result<NliResult> {
-    let encoding = tokenizer
+) -> Result<tokenizers::Encoding> {
+    tokenizer
         .encode((premise, hypothesis), true)
-        .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))
+}
 
+/// Run NLI inference on a pre-tokenized pair with an already-locked session.
+fn classify_one(session: &mut Session, encoding: &tokenizers::Encoding) -> Result<NliResult> {
     let length = encoding.len();
     let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
     let attention_mask: Vec<i64> = encoding
@@ -262,6 +288,17 @@ fn classify_one(
     let slice = row
         .as_slice()
         .ok_or_else(|| anyhow::anyhow!("Expected contiguous logits array from NLI model"))?;
+    // `nli.model` is a free-form config string: a repo that isn't a 3-class
+    // NLI cross-encoder would otherwise panic on the index below (surfacing
+    // as an opaque "task panicked" JoinError). Label ORDER still can't be
+    // verified here — see the contract on IDX_* above.
+    if slice.len() < 3 {
+        anyhow::bail!(
+            "NLI model produced {} logits per pair, expected 3 \
+             (contradiction/entailment/neutral) — is [nli].model an NLI cross-encoder?",
+            slice.len()
+        );
+    }
     let probs = softmax(slice);
 
     Ok(NliResult::from_probs(
@@ -271,34 +308,41 @@ fn classify_one(
     ))
 }
 
-/// Run NLI inference on a single sentence pair (blocking). Locks the session mutex.
+/// Run NLI inference on a single sentence pair (blocking). Tokenizes before
+/// locking the session mutex.
 fn classify_sync(
     session: &Mutex<Session>,
     tokenizer: &Tokenizer,
     premise: &str,
     hypothesis: &str,
 ) -> Result<NliResult> {
+    let encoding = encode_pair(tokenizer, premise, hypothesis)?;
     let mut session = session
         .lock()
         .map_err(|e| anyhow::anyhow!("Failed to acquire NLI session lock: {}", e))?;
-    classify_one(&mut session, tokenizer, premise, hypothesis)
+    classify_one(&mut session, &encoding)
 }
 
 /// Run NLI inference on multiple sentence pairs (blocking).
 ///
-/// Acquires the session lock once and processes all pairs sequentially,
-/// avoiding per-pair lock overhead.
+/// Tokenizes every pair BEFORE acquiring the session lock, then holds the
+/// lock once across the inference-only loop — the critical section other
+/// sessions (and the shared daemon) serialize on stays as short as possible.
 fn classify_batch_sync(
     session: &Mutex<Session>,
     tokenizer: &Tokenizer,
     pairs: &[(&str, &str)],
 ) -> Result<Vec<NliResult>> {
+    let encodings: Vec<tokenizers::Encoding> = pairs
+        .iter()
+        .map(|(premise, hypothesis)| encode_pair(tokenizer, premise, hypothesis))
+        .collect::<Result<_>>()?;
     let mut session = session
         .lock()
         .map_err(|e| anyhow::anyhow!("Failed to acquire NLI session lock: {}", e))?;
-    pairs
+    encodings
         .iter()
-        .map(|(premise, hypothesis)| classify_one(&mut session, tokenizer, premise, hypothesis))
+        .map(|encoding| classify_one(&mut session, encoding))
         .collect()
 }
 

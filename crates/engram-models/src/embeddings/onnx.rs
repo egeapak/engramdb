@@ -112,7 +112,13 @@ impl OnnxProvider {
             }
         }
 
-        let mut options = InitOptions::new(spec.fastembed_model).with_cache_dir(cache_dir);
+        // Propagate the spec's context window: fastembed defaults tokenizer
+        // truncation to 512, so without this a long-context model (nomic's
+        // 8192) silently drops everything past token 512 — while the chunker
+        // budgets chunks against `max_tokens()` and trusts the full window.
+        let mut options = InitOptions::new(spec.fastembed_model)
+            .with_cache_dir(cache_dir)
+            .with_max_length(spec.max_tokens);
         let eps = engram_onnx::providers_for(backend);
         if !eps.is_empty() {
             options = options.with_execution_providers(eps);

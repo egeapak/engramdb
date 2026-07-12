@@ -267,13 +267,22 @@ fn encode(
         .encode(input.as_str(), true)
         .map_err(|e| anyhow::anyhow!("T5 tokenization failed: {}", e))?;
 
-    // Truncate to max input tokens
-    let ids: Vec<i64> = encoding
+    // Truncate to max input tokens. When truncation fires it cuts the
+    // trailing `</s>` the tokenizer appended, but T5 is trained on
+    // EOS-terminated inputs (standard HF truncation preserves EOS) — so put
+    // it back in the last slot instead of feeding an unterminated sequence.
+    let truncated = encoding.get_ids().len() > MAX_INPUT_TOKENS;
+    let mut ids: Vec<i64> = encoding
         .get_ids()
         .iter()
         .take(MAX_INPUT_TOKENS)
         .map(|&id| id as i64)
         .collect();
+    if truncated {
+        if let Some(last) = ids.last_mut() {
+            *last = 1; // T5 EOS token id (matches `eos_token_id` in decode)
+        }
+    }
     let mask: Vec<i64> = encoding
         .get_attention_mask()
         .iter()

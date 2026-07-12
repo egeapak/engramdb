@@ -49,8 +49,30 @@ pub struct ScoringWeights {
 }
 
 impl ScoringWeights {
-    /// Validate that active weights sum to 1.0 ± 0.001.
+    /// Validate that each weight is a finite value in `[0, 1]` and that the
+    /// active weights sum to 1.0 ± 0.001.
+    ///
+    /// The per-weight range check must come first: with a NaN weight the sum
+    /// is NaN and `NaN > 0.001` is false, so the sum check alone would
+    /// ACCEPT `semantic = nan` (TOML parses the `nan` literal) — and every
+    /// composite score downstream would be NaN, silently emptying results.
     pub fn validate(&self, mode_name: &str) -> Result<(), anyhow::Error> {
+        for (name, weight) in [
+            ("keyword", self.keyword),
+            ("semantic", self.semantic),
+            ("relevance", Some(self.relevance)),
+        ] {
+            if let Some(w) = weight {
+                if !(0.0..=1.0).contains(&w) {
+                    anyhow::bail!(
+                        "scoring.{}.{} must be between 0.0 and 1.0 (got {})",
+                        mode_name,
+                        name,
+                        w
+                    );
+                }
+            }
+        }
         let sum = self.keyword.unwrap_or(0.0) + self.semantic.unwrap_or(0.0) + self.relevance;
         if (sum - 1.0).abs() > 0.001 {
             anyhow::bail!(
@@ -445,8 +467,14 @@ pub struct EmbeddingsConfig {
 
 impl EmbeddingsConfig {
     /// Resolve the configured embedding pool size for a machine with
-    /// `cores` logical CPUs: the configured value (only floored at 1 so it
-    /// can never disable embeddings), else auto `cores/2` (also ≥ 1).
+    /// `cores` logical CPUs: the configured value clamped to `[1, cores]`,
+    /// else auto `cores/2` (also ≥ 1).
+    ///
+    /// The upper clamp matches the title pool's policy: each pooled
+    /// `TextEmbedding` is a full ONNX session with its own threadpool, so a
+    /// typo like `pool_size = 512` would otherwise load 512 sessions —
+    /// memory blow-up and thread oversubscription with no error. The floor
+    /// of 1 means a configured value can never disable embeddings.
     ///
     /// `cores` is passed in (not read from the machine here) so the policy
     /// is deterministically unit-testable. Callers in one-shot contexts
@@ -454,7 +482,9 @@ impl EmbeddingsConfig {
     /// long-lived multi-tenant daemon / MCP server, where extra sessions
     /// pay back across many concurrent callers.
     pub fn resolved_pool_size(&self, cores: usize) -> usize {
-        self.pool_size.unwrap_or((cores / 2).max(1)).max(1)
+        self.pool_size
+            .unwrap_or((cores / 2).max(1))
+            .clamp(1, cores.max(1))
     }
 }
 
@@ -1048,6 +1078,17 @@ impl EngramConfig {
             anyhow::bail!(
                 "search.threshold ({}) must be >= 0.0",
                 self.search.threshold
+            );
+        }
+
+        // Same contract for the Rank-mode gate: the engine applies
+        // `retrieval.relevance_threshold` unclamped, so a NaN would silently
+        // empty every Rank query (every `score >= NaN` is false) and a
+        // negative value would silently disable the gate.
+        if self.retrieval.relevance_threshold.is_nan() || self.retrieval.relevance_threshold < 0.0 {
+            anyhow::bail!(
+                "retrieval.relevance_threshold ({}) must be >= 0.0",
+                self.retrieval.relevance_threshold
             );
         }
 
@@ -1850,14 +1891,16 @@ weight = 0.7
         assert_eq!(cfg.embeddings.resolved_pool_size(1), 1); // cores/2 floored at 1
         assert_eq!(cfg.embeddings.resolved_pool_size(0), 1); // (cores/2).max(1) guard
 
-        // Explicit value is honored verbatim regardless of cores (only a
-        // floor of 1 so it can't disable embeddings).
+        // Explicit value is clamped to [1, cores] (matching the title
+        // pool): honored when it fits, capped at the core count so a typo
+        // can't oversubscribe, floored at 1 so it can't disable embeddings.
         let cfg: EngramConfig =
             toml::from_str("[embeddings]\nprovider = \"onnx\"\ndimensions = 384\nmax_tokens = 256\npool_size = 3\n")
                 .unwrap();
         assert_eq!(cfg.embeddings.pool_size, Some(3));
-        assert_eq!(cfg.embeddings.resolved_pool_size(2), 3);
-        assert_eq!(cfg.embeddings.resolved_pool_size(64), 3);
+        assert_eq!(cfg.embeddings.resolved_pool_size(2), 2); // capped at cores
+        assert_eq!(cfg.embeddings.resolved_pool_size(64), 3); // honored when it fits
+        assert_eq!(cfg.embeddings.resolved_pool_size(0), 1); // degenerate cores guard
 
         // Legacy `[embeddings]` without the field still parses (back-compat).
         let legacy: EmbeddingsConfig =
