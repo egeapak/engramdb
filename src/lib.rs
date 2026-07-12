@@ -11,6 +11,7 @@ pub mod search;
 // (`engram-cli`, `engram-mcp`) that depend on this core, so they are not
 // re-exported here (that would invert the dependency).
 pub use engram_models::{embeddings, nli, title};
+#[cfg(feature = "onnxruntime")]
 pub use engram_onnx as onnx_ep;
 pub use engram_storage as storage;
 pub use engram_storage::telemetry;

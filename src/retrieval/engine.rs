@@ -9,7 +9,8 @@ use super::reranker::Reranker;
 use crate::embeddings::EmbeddingProvider;
 use crate::nli::{NliProvider, NliResult};
 use crate::scoring::{
-    composite_score, composite_score_ignore_decay, ScoreBreakdown, ScoringContext,
+    composite_score, composite_score_ignore_decay, composite_score_target,
+    composite_score_target_ignore_decay, ScoreBreakdown, ScoreTarget, ScoringContext,
 };
 use crate::storage::{MemoryStore, Result};
 use crate::types::{EngramConfig, Memory, MemoryType};
@@ -712,20 +713,26 @@ impl RetrievalEngine {
                 .collect()
         };
 
-        // Step 3: Batch-load surviving memories (single dir scan).
-        //
-        // Performance note (finding performance-0): on the no-query Rank path
-        // this reads + parses every surviving `.md` file only to score it, even
-        // though scope-only scoring needs almost nothing off disk. We cannot yet
-        // skip these reads: `composite_score` consults `memory.decay` (via
-        // `effective_relevance` / `decay_factor`), and `decay` is the ONE
-        // scoring input NOT carried in the LanceDB index schema
-        // (`memories_schema` has type/criticality/scope/timestamps but no decay
-        // column). Serving scope-only scoring from the index alone would require
-        // adding a `decay` column — a schema migration that would silently
-        // mis-score decay-configured memories in existing stores until they were
-        // reindexed — so it is deferred to a separate change. The scalar-filter
-        // pushdown (Step 1) shrinks this batch when those filters are selective.
+        // R2 fast path (finding performance-0): the no-query Rank path (the
+        // SessionStart-hook shape) needs nothing off disk to *score* — every
+        // scoring input is in the index projection now that `decay` is a column
+        // (schema v0.2.0). Score straight from `filtered_entries`, then load
+        // ONLY the survivors' `.md` files. On a large store this reads
+        // `max_results` files instead of all N. This is a pure optimization:
+        // scoring a `ScoreTarget` built from the projection is byte-identical to
+        // scoring the loaded `Memory` (asserted by
+        // `tests::rank_from_index_matches_file_load`). Query / Filter / keyword
+        // / semantic paths still load candidates below (they need content).
+        if query.query.is_none() && query.mode == RetrievalMode::Rank {
+            return self
+                .rank_scope_only_from_index(query, &filtered_entries, query_started)
+                .await;
+        }
+
+        // Step 3: Batch-load surviving memories (single dir scan). Needed on the
+        // query / Filter paths for keyword search and result materialization.
+        // The scalar-filter pushdown (Step 1) shrinks this batch when those
+        // filters are selective.
         let ids: Vec<&str> = filtered_entries.iter().map(|e| e.id.as_str()).collect();
         let loaded = self.store.get_batch(&ids).await?;
         let memory_map: HashMap<String, Memory> = loaded.into_iter().collect();
@@ -798,34 +805,22 @@ impl RetrievalEngine {
         // sem = None — the legacy no-evidence path (see
         // scoring::composite::tests::test_semantic_none_vs_zero_differ).
         //
-        // Index entries carry no has-embedding flag, so this costs one extra
-        // LanceDB single-column scan of the chunks table per semantic query —
-        // cheap next to the vector search itself. If the scan fails we fall
-        // back to the legacy no-evidence path rather than failing the query.
-        //
-        // Deferred (Part B of finding performance-3): replacing this O(n)
-        // per-query chunk-table scan with a `has_embedding` boolean column on
-        // the MEMORIES table would let this set be read straight from the index
-        // projection with no separate scan. It is intentionally NOT done here:
-        // it is a memories-table SCHEMA MIGRATION with the same risk profile as
-        // the deferred `decay` column (finding performance-0, see Step 3 above)
-        // — existing stores would need a reindex to backfill the column, and a
-        // half-migrated store would mis-score. The two columns should land
-        // together as a single schema-version bump rather than piecemeal, so
-        // this scan stays until that migration.
+        // The `has_embedding` column (schema v0.2.0, finding performance-3
+        // Part B) carries this per memory in the index projection, so the set
+        // is read straight from `filtered_entries` with **no** chunks-table
+        // scan. It covers exactly the memories being scored (memory_map's ids
+        // come from filtered_entries), which is all `embedded_ids` is consulted
+        // for. The migration keeps the column authoritative (a reindex rebuilds
+        // it), so there is no half-migrated mis-scoring window.
         let embedded_ids: Option<std::collections::HashSet<String>> =
             if semantic_scores_map.is_some() {
-                match self.store.list_chunk_memory_ids().await {
-                    Ok(ids) => Some(ids.into_iter().collect()),
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to list embedded memory ids ({}); memories outside the \
-                             vector top-k will use no-semantic-evidence scoring",
-                            e
-                        );
-                        None
-                    }
-                }
+                Some(
+                    filtered_entries
+                        .iter()
+                        .filter(|e| e.has_embedding)
+                        .map(|e| e.id.clone())
+                        .collect(),
+                )
             } else {
                 None
             };
@@ -1059,6 +1054,115 @@ impl RetrievalEngine {
 
         Ok(result)
     }
+
+    /// R2 no-query Rank fast path: score every candidate straight from the
+    /// index projection ([`ScoreTarget`]) and load only the survivors' files.
+    /// Byte-identical to the main `query` path for
+    /// `query.query == None && mode == Rank` — every scoring input is carried
+    /// in the projection (schema v0.2.0), so this only skips the full file load.
+    async fn rank_scope_only_from_index(
+        &self,
+        query: &RetrievalQuery,
+        filtered_entries: &[crate::storage::IndexForFiltering],
+        query_started: std::time::Instant,
+    ) -> Result<RetrievalResult> {
+        let now = Utc::now();
+        let query_path: Option<String> = query
+            .path
+            .as_ref()
+            .map(|p| crate::storage::paths::relativize_path(p, &self.store.project_dir));
+        let ctx_path = query_path.as_deref();
+
+        let t_score = std::time::Instant::now();
+        let mut candidates: Vec<ScoredCandidate> = filtered_entries
+            .iter()
+            .map(|e| {
+                let target = ScoreTarget {
+                    created_at: e.created_at,
+                    decay: &e.decay,
+                    criticality: e.criticality,
+                    physical: &e.physical,
+                    logical: &e.logical,
+                    provenance_source: e.provenance_source,
+                    status: e.status,
+                };
+                let context = ScoringContext::scope_only(ctx_path, &query.logical);
+                // Mirror the main loop: expired entries (present only under
+                // include_expired) score ignoring decay.
+                let breakdown = if e.expires_at.is_some_and(|exp| now > exp) {
+                    composite_score_target_ignore_decay(target, &context, &self.config, now)
+                } else {
+                    composite_score_target(target, &context, &self.config, now)
+                };
+                ScoredCandidate {
+                    id: e.id.clone(),
+                    score: breakdown.final_score,
+                    breakdown,
+                }
+            })
+            .collect();
+        self.record_stage("score", t_score.elapsed().as_secs_f64() * 1000.0);
+
+        let threshold = self.config.retrieval.relevance_threshold;
+        if threshold > 0.0 {
+            candidates.retain(|c| c.score >= threshold);
+        }
+        candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let total = candidates.len();
+        let max_results = query
+            .max_results
+            .unwrap_or(self.config.retrieval.max_results);
+        candidates.truncate(max_results);
+
+        // Materialize ONLY the survivors — the whole point of this path.
+        let survivor_ids: Vec<&str> = candidates.iter().map(|c| c.id.as_str()).collect();
+        let loaded: HashMap<String, Memory> = self
+            .store
+            .get_batch(&survivor_ids)
+            .await?
+            .into_iter()
+            .collect();
+        let mut scored_memories: Vec<ScoredMemory> = candidates
+            .into_iter()
+            .filter_map(|c| {
+                loaded.get(&c.id).map(|memory| ScoredMemory {
+                    memory: memory.clone(),
+                    score: c.score,
+                    score_breakdown: c.breakdown,
+                })
+            })
+            .collect();
+
+        for sm in &mut scored_memories {
+            match query.detail_level {
+                DetailLevel::Summary => {
+                    sm.memory.content = String::new();
+                    sm.memory.details = None;
+                }
+                DetailLevel::Content => {
+                    sm.memory.details = None;
+                }
+                DetailLevel::Full => {}
+            }
+        }
+
+        let result = RetrievalResult {
+            memories: scored_memories,
+            total,
+            retrieval_quality: "scope_only".to_string(),
+        };
+        self.record_stage(
+            "query.total",
+            query_started.elapsed().as_secs_f64() * 1000.0,
+        );
+        self.record_query_outcome(!result.memories.is_empty(), &result.retrieval_quality);
+        Ok(result)
+    }
 }
 
 /// Chunk, embed, and upsert a memory's vectors into the store.
@@ -1218,9 +1322,7 @@ async fn detect_contradictions_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::retrieval::reranker::LocalReranker;
     use crate::storage::InMemoryRegistry;
-    use std::sync::LazyLock;
 
     // Finding #4: the Filter-mode threshold must be bounded to [0, 1] regardless
     // of how the config was constructed, so the relevance gate can never be
@@ -1253,11 +1355,22 @@ mod tests {
     /// ~100MB ONNX model once per test (which causes OOM when parallel).
     /// Built through the `engram-models` loader (default BGE reranker base) so
     /// the core crate needs no direct `fastembed` dependency, even in tests.
-    static SHARED_RERANKER: LazyLock<Option<Arc<dyn Reranker>>> =
-        LazyLock::new(|| LocalReranker::load("bge-reranker-base").ok());
-
+    ///
+    /// The `fastembed` loader (`LocalReranker`) only exists with `onnxruntime`;
+    /// on a pure-`tract` build there is no in-process reranker, so `try_reranker`
+    /// returns `None` and the reranker tests skip (they `return` early on `None`).
+    #[cfg(feature = "onnxruntime")]
     fn try_reranker() -> Option<Arc<dyn Reranker>> {
+        use crate::retrieval::reranker::LocalReranker;
+        use std::sync::LazyLock;
+        static SHARED_RERANKER: LazyLock<Option<Arc<dyn Reranker>>> =
+            LazyLock::new(|| LocalReranker::load("bge-reranker-base").ok());
         SHARED_RERANKER.clone()
+    }
+
+    #[cfg(not(feature = "onnxruntime"))]
+    fn try_reranker() -> Option<Arc<dyn Reranker>> {
+        None
     }
 
     /// Filter-mode query with only a text query set, mirroring the shape
@@ -1269,6 +1382,84 @@ mod tests {
             ..Default::default()
         };
         engine.query(&query).await.unwrap().memories
+    }
+
+    /// R2 fast-path equivalence: the no-query Rank path scores straight from the
+    /// index projection (`ScoreTarget`). Its per-memory breakdown must equal
+    /// re-scoring the returned (file-loaded) memory with `composite_score` — i.e.
+    /// projection scoring == file-load scoring — across decay, criticality,
+    /// logical scope, provenance, and challenged status.
+    #[tokio::test]
+    async fn rank_from_index_matches_file_load() {
+        use crate::types::{
+            Decay, EngramConfig, Memory, MemoryType, Provenance, Status, Visibility,
+        };
+        use chrono::{Duration, Utc};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0; // keep all candidates
+
+        let mut a = Memory::new(MemoryType::Decision, "A", "content a", Provenance::human());
+        a.visibility = Visibility::Shared;
+        a.criticality = 0.9;
+        a.logical = vec!["auth.oauth".to_string()];
+        store.create(&a).await.unwrap();
+
+        let mut b = Memory::new(
+            MemoryType::Context,
+            "B",
+            "content b",
+            Provenance::agent("x"),
+        );
+        b.visibility = Visibility::Shared;
+        b.criticality = 0.5;
+        b.created_at = Utc::now() - Duration::days(7);
+        b.decay = Some(Decay::exponential(Duration::days(7)));
+        store.create(&b).await.unwrap();
+
+        let mut c = Memory::new(MemoryType::Hazard, "C", "content c", Provenance::human());
+        c.visibility = Visibility::Shared;
+        c.criticality = 0.7;
+        c.status = Status::Challenged;
+        store.create(&c).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, config.clone());
+        let query = RetrievalQuery {
+            mode: RetrievalMode::Rank,
+            query: None,
+            logical: vec!["auth".to_string()],
+            ..Default::default()
+        };
+        let results = engine.query(&query).await.unwrap();
+        assert_eq!(results.memories.len(), 3, "all three memories ranked");
+        assert_eq!(results.retrieval_quality, "scope_only");
+
+        let now = Utc::now();
+        let ctx_logical = vec!["auth".to_string()];
+        for sm in &results.memories {
+            let ctx = ScoringContext::scope_only(None, &ctx_logical);
+            let expected = if sm.memory.is_expired_at(now) {
+                composite_score_ignore_decay(&sm.memory, &ctx, &config, now)
+            } else {
+                composite_score(&sm.memory, &ctx, &config, now)
+            };
+            // final_score matches within decay-timing drift; the decay-free
+            // components match exactly.
+            assert!(
+                (sm.score - expected.final_score).abs() < 1e-4,
+                "projection score {} != file-load score {} for {}",
+                sm.score,
+                expected.final_score,
+                sm.memory.summary
+            );
+            assert_eq!(sm.score_breakdown.criticality, expected.criticality);
+            assert!((sm.score_breakdown.scope - expected.scope).abs() < 1e-9);
+        }
     }
 
     // Note: These tests would require a real MemoryStore instance,
@@ -2551,6 +2742,9 @@ mod tests {
     /// Before this test the entire `detect_contradictions_with` body
     /// (vector_search + classify_batch + threshold filter) was at 0%
     /// coverage despite CRAP 110.
+    // Loads the real ONNX embedding + NLI models, so it only exists on an
+    // `onnxruntime` build (there is no in-process ONNX on a pure-`tract` build).
+    #[cfg(feature = "onnxruntime")]
     #[tokio::test]
     async fn test_detect_contradictions_end_to_end_finds_real_contradiction() {
         use crate::embeddings::OnnxProvider;
@@ -2635,6 +2829,9 @@ mod tests {
     /// Drive the early-return at detect_contradictions_with where no
     /// candidates pass the similarity_threshold. Locks the threshold
     /// filter so it can't regress into returning all vector neighbours.
+    // Loads the real ONNX embedding model, so it only exists on an
+    // `onnxruntime` build.
+    #[cfg(feature = "onnxruntime")]
     #[tokio::test]
     async fn test_detect_contradictions_returns_empty_when_no_similar_candidates() {
         use crate::embeddings::OnnxProvider;

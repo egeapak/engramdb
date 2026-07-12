@@ -5,9 +5,11 @@
 //! It is used to automatically detect contradictions between new and existing memories.
 
 pub mod challenge;
+#[cfg(feature = "onnxruntime")]
 pub mod onnx;
 
 pub use challenge::{challenge_for_contradictions, challenge_memory, ChallengeResult};
+#[cfg(feature = "onnxruntime")]
 pub use onnx::{
     NliModelSpec, OnnxNliProvider, DEFAULT_NLI_MODEL, NLI_DEBERTA_XSMALL, NLI_DEBERTA_XSMALL_Q,
 };
@@ -116,6 +118,7 @@ mod tests {
     /// Single-source-of-truth guard (the loader half): the model the NLI loader
     /// selects by default must equal the repo `types::config` uses for the
     /// `[nli].model` default. The config half is asserted in `types::config`.
+    #[cfg(feature = "onnxruntime")]
     #[test]
     fn default_nli_model_tracks_config_default_repo() {
         assert_eq!(DEFAULT_NLI_MODEL.repo, engram_types::DEFAULT_NLI_MODEL_REPO);

@@ -25,17 +25,23 @@ name = "engramdb"
 path = "src/lib.rs"
 
 [features]
-default = ["ollama"]
+default = ["onnxruntime", "ollama"]
+# ONNX Runtime stack (`ort` + `fastembed` + the `engram-onnx` EP wiring). On by
+# default. A pure-Rust build for a platform with no prebuilt ORT (Intel Mac)
+# uses `--no-default-features --features tract` instead.
+onnxruntime = ["engram-models/onnxruntime", "dep:engram-onnx"]
+# Pure-Rust `tract` embedding backend (fp32 MiniLM). No native ONNX Runtime.
+tract = ["engram-models/tract"]
 ollama = ["reqwest", "engram-models/ollama"]
 # Apple Core ML (GPU / Neural Engine) acceleration for all ONNX models.
 # Enable on macOS only: `cargo build --features coreml`. Off by default so
 # the Linux/CI build and prebuilt-binary download are unchanged. Forwarded to
 # the model crates, which own the `ort` EP wiring.
-coreml = ["engram-onnx/coreml", "engram-models/coreml"]
+coreml = ["onnxruntime", "engram-onnx/coreml", "engram-models/coreml"]
 # XNNPACK portable CPU-kernel EP (per-node MLAS fallback). Off by default;
 # the provider ships in the prebuilt `ort` binary so only this feature is
 # needed (no source build, same downloaded binary). For A/B benchmarking.
-xnnpack = ["engram-onnx/xnnpack", "engram-models/xnnpack"]
+xnnpack = ["onnxruntime", "engram-onnx/xnnpack", "engram-models/xnnpack"]
 # Re-exports `engram-storage`'s `test_support` (global-store serialization lock)
 # so downstream crates (engram-mcp, engram-cli) can use it in their test builds.
 test-support = ["engram-storage/test-support"]
@@ -44,7 +50,9 @@ test-support = ["engram-storage/test-support"]
 # Workspace sub-crates (extracted layers; re-exported from lib.rs so the
 # `engramdb::<module>` and `crate::<module>` paths stay stable in the core).
 engram-types = { path = "crates/engram-types" }
-engram-onnx = { path = "crates/engram-onnx" }
+# ONNX Runtime EP wiring, re-exported as `engramdb::onnx_ep`. Optional so a
+# pure-`tract` build (Intel Mac) drops ORT entirely. Gated by `onnxruntime`.
+engram-onnx = { path = "crates/engram-onnx", optional = true }
 engram-storage = { path = "crates/engram-storage" }
 engram-models = { path = "crates/engram-models", default-features = false }
 

@@ -15,10 +15,49 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Current memories-table schema version. Bumped when the LanceDB `memories`
+/// table gains columns so an existing store can be migrated (rebuilt from its
+/// `.md` files) on open. `0.2.0` added the `decay` + `has_embedding` columns
+/// (R2/R3). A store whose manifest records an older version is transparently
+/// re-indexed once on open (seconds, no re-embed) and stamped up to this.
+pub const CURRENT_SCHEMA_VERSION: &str = "0.2.0";
+
+/// The pre-migration baseline, used as the serde default so a manifest written
+/// before the field existed parses as "needs migration" rather than failing.
+fn default_schema_version() -> String {
+    "0.1.0".to_string()
+}
+
+/// True when a store recording `stored` needs **no** schema migration — i.e. it
+/// is at or ahead of [`CURRENT_SCHEMA_VERSION`].
+///
+/// The comparison is by semantic-version ordering, not string equality: a
+/// version *behind* current (or an unparseable one) needs migration, but a
+/// version *ahead* — written by a newer binary against the same store — must
+/// **not** be "migrated". Reindexing a newer store with this binary's older
+/// column set would rebuild the table without the newer columns and stamp the
+/// version backwards, silently dropping data. When ahead, we leave it untouched.
+pub fn schema_version_is_current(stored: &str) -> bool {
+    fn parse(v: &str) -> Option<(u64, u64, u64)> {
+        let mut it = v.split('.').map(|p| p.parse::<u64>().ok());
+        let major = it.next()??;
+        let minor = it.next().unwrap_or(Some(0))?;
+        let patch = it.next().unwrap_or(Some(0))?;
+        Some((major, minor, patch))
+    }
+    match (parse(stored), parse(CURRENT_SCHEMA_VERSION)) {
+        (Some(s), Some(c)) => s >= c,
+        // Unparseable stored version → treat as needing migration.
+        _ => false,
+    }
+}
+
 /// Project manifest stored in manifest.toml.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Manifest {
-    /// Schema version for future compatibility
+    /// Schema version for the on-disk LanceDB memories table (see
+    /// [`CURRENT_SCHEMA_VERSION`]).
+    #[serde(default = "default_schema_version")]
     pub schema_version: String,
     /// Project name
     pub project: String,
@@ -119,7 +158,9 @@ pub struct ManifestStats {
 impl Default for Manifest {
     fn default() -> Self {
         Self {
-            schema_version: "0.1.0".to_string(),
+            // New stores are born at the current schema (their empty tables
+            // already have the latest columns), so they never migrate.
+            schema_version: CURRENT_SCHEMA_VERSION.to_string(),
             project: "engramdb-project".to_string(),
             created_at: Utc::now(),
             description: "Agent memory store. See config.toml for retrieval settings.".to_string(),
@@ -162,9 +203,46 @@ mod tests {
     #[test]
     fn test_manifest_default() {
         let manifest = Manifest::default();
-        assert_eq!(manifest.schema_version, "0.1.0");
+        assert_eq!(manifest.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(manifest.stats.memory_count, 0);
         assert!(manifest.stats.logical_scopes.is_empty());
+    }
+
+    /// A manifest written before `schema_version` existed parses as the
+    /// pre-migration baseline (so it triggers migration), not a parse error.
+    #[test]
+    fn legacy_manifest_without_schema_version_defaults_to_baseline() {
+        let toml = r#"
+project = "p"
+created_at = "2020-01-01T00:00:00Z"
+description = "d"
+[stats]
+memory_count = 0
+logical_scopes = []
+"#;
+        let m: Manifest = toml::from_str(toml).unwrap();
+        assert_eq!(m.schema_version, "0.1.0");
+        assert_ne!(m.schema_version, CURRENT_SCHEMA_VERSION);
+    }
+
+    /// The migration gate compares by version *ordering*, not equality: a store
+    /// behind current migrates, one at/ahead of current does not (so a newer
+    /// binary's store is never silently downgraded), and garbage migrates.
+    #[test]
+    fn schema_version_ordering_gates_migration() {
+        // At current → no migration.
+        assert!(schema_version_is_current(CURRENT_SCHEMA_VERSION));
+        // Behind current → needs migration.
+        assert!(!schema_version_is_current("0.1.0"));
+        assert!(!schema_version_is_current("0.1.9"));
+        // Ahead of current → must NOT migrate (no silent downgrade).
+        assert!(schema_version_is_current("0.3.0"));
+        assert!(schema_version_is_current("1.0.0"));
+        // Short / unparseable forms.
+        assert!(schema_version_is_current("0.2")); // 0.2.0, equal
+        assert!(!schema_version_is_current("0.1")); // 0.1.0, behind
+        assert!(!schema_version_is_current("garbage"));
+        assert!(!schema_version_is_current(""));
     }
 
     #[tokio::test]

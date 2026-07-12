@@ -1,9 +1,40 @@
 use chrono::{DateTime, Utc};
 
-use crate::types::{EngramConfig, Memory, Status};
+use crate::types::{Decay, EngramConfig, Memory, ProvenanceSource, Status};
 
-use super::decay::effective_relevance;
 use super::trust::trust_weight_from_config;
+
+/// The exact set of fields [`composite_score`] reads off a memory.
+///
+/// Introduced so the no-query Rank path can score straight from the LanceDB
+/// index projection (`storage::IndexForFiltering`) without reading and parsing
+/// the memory's `.md` file — every field here is carried in the memories-table
+/// schema (`decay` and the scope/timestamp/provenance/status columns), so an
+/// index-derived target scores byte-identically to the file-loaded one.
+#[derive(Debug, Clone, Copy)]
+pub struct ScoreTarget<'a> {
+    pub created_at: DateTime<Utc>,
+    pub decay: &'a Option<Decay>,
+    pub criticality: f64,
+    pub physical: &'a [String],
+    pub logical: &'a [String],
+    pub provenance_source: ProvenanceSource,
+    pub status: Status,
+}
+
+impl<'a> From<&'a Memory> for ScoreTarget<'a> {
+    fn from(m: &'a Memory) -> Self {
+        Self {
+            created_at: m.created_at,
+            decay: &m.decay,
+            criticality: m.criticality,
+            physical: &m.physical,
+            logical: &m.logical,
+            provenance_source: m.provenance.source,
+            status: m.status,
+        }
+    }
+}
 
 /// Breakdown of composite score components.
 ///
@@ -202,7 +233,20 @@ pub fn composite_score(
     config: &EngramConfig,
     now: DateTime<Utc>,
 ) -> ScoreBreakdown {
-    composite_score_inner(memory, context, config, now, false)
+    composite_score_inner(memory.into(), context, config, now, false)
+}
+
+/// Like [`composite_score`] but scores a [`ScoreTarget`] (e.g. built from the
+/// LanceDB index projection) instead of a full `Memory`. Produces an identical
+/// breakdown for the same field values — the no-query Rank path uses this to
+/// avoid loading every candidate's `.md` file.
+pub fn composite_score_target(
+    target: ScoreTarget<'_>,
+    context: &ScoringContext<'_>,
+    config: &EngramConfig,
+    now: DateTime<Utc>,
+) -> ScoreBreakdown {
+    composite_score_inner(target, context, config, now, false)
 }
 
 /// Like [`composite_score`] but ignores time-based decay when scoring.
@@ -217,29 +261,41 @@ pub fn composite_score_ignore_decay(
     config: &EngramConfig,
     now: DateTime<Utc>,
 ) -> ScoreBreakdown {
-    composite_score_inner(memory, context, config, now, true)
+    composite_score_inner(memory.into(), context, config, now, true)
+}
+
+/// [`composite_score_target`] variant that ignores time-based decay (for
+/// scoring expired memories by scope + criticality alone).
+pub fn composite_score_target_ignore_decay(
+    target: ScoreTarget<'_>,
+    context: &ScoringContext<'_>,
+    config: &EngramConfig,
+    now: DateTime<Utc>,
+) -> ScoreBreakdown {
+    composite_score_inner(target, context, config, now, true)
 }
 
 fn composite_score_inner(
-    memory: &Memory,
+    target: ScoreTarget<'_>,
     context: &ScoringContext<'_>,
     config: &EngramConfig,
     now: DateTime<Utc>,
     ignore_decay: bool,
 ) -> ScoreBreakdown {
     // Calculate decay factor (always computed for the breakdown)
-    let decay_factor_value = super::decay::decay_factor(memory.created_at, now, &memory.decay);
+    let decay_factor_value = super::decay::decay_factor(target.created_at, now, target.decay);
 
-    // Calculate relevance: when ignoring decay, use criticality directly
+    // Calculate relevance: when ignoring decay, use criticality directly.
+    // (Otherwise `criticality * decay_factor`, i.e. `effective_relevance`.)
     let relevance = if ignore_decay {
-        memory.criticality
+        target.criticality
     } else {
-        effective_relevance(memory, now)
+        target.criticality * decay_factor_value
     };
 
     let scope_score = crate::scope::scope_proximity(
-        &memory.physical,
-        &memory.logical,
+        target.physical,
+        target.logical,
         context.path,
         context.logical,
         config.retrieval.scoring.depth_decay_base,
@@ -247,7 +303,7 @@ fn composite_score_inner(
         config.retrieval.scoring.scope_multiplier_floor,
     );
 
-    let trust = trust_weight_from_config(memory.provenance.source, &config.trust_weights);
+    let trust = trust_weight_from_config(target.provenance_source, &config.trust_weights);
 
     // Determine which weights to use based on context.
     // Priority: keyword > semantic (any value) > degraded (query but no signals) > scope_only
@@ -316,7 +372,7 @@ fn composite_score_inner(
     score *= trust_multiplier;
 
     // Apply challenge penalty as flat subtraction
-    if memory.status == Status::Challenged {
+    if target.status == Status::Challenged {
         score -= config.retrieval.scoring.challenge_penalty;
     }
 
@@ -342,7 +398,7 @@ fn composite_score_inner(
         trust,
         trust_multiplier,
         decay: 1.0 - decay_factor_value,
-        criticality: memory.criticality,
+        criticality: target.criticality,
     }
 }
 

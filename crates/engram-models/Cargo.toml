@@ -11,24 +11,42 @@ name = "engram_models"
 path = "src/lib.rs"
 
 [features]
-default = ["ollama"]
+default = ["onnxruntime", "ollama"]
+# ONNX Runtime stack (`ort` + `fastembed` + the `engram-onnx` EP wiring). On by
+# default. Turn OFF (with `--no-default-features`) on platforms with no prebuilt
+# ORT — e.g. Intel Mac — and enable `tract` instead for a pure-Rust build.
+onnxruntime = ["dep:fastembed", "dep:ort", "dep:engram-onnx"]
+# Pure-Rust `tract` embedding backend (fp32 MiniLM). No native ONNX Runtime.
+# Composable with `onnxruntime` (both engines available; backend chosen at
+# runtime) or standalone (`--no-default-features --features tract`).
+tract = ["dep:tract-onnx"]
 # Ollama embedding backend via `reqwest`. Disable for pure offline ONNX.
 ollama = ["reqwest"]
-# ORT execution-provider flags, forwarded to engram-onnx + ort.
-coreml = ["ort/coreml", "engram-onnx/coreml"]
-xnnpack = ["ort/xnnpack", "engram-onnx/xnnpack"]
+# ORT execution-provider flags, forwarded to engram-onnx + ort. Imply the
+# `onnxruntime` stack they configure.
+coreml = ["onnxruntime", "ort/coreml", "engram-onnx/coreml"]
+xnnpack = ["onnxruntime", "ort/xnnpack", "engram-onnx/xnnpack"]
 
 [dependencies]
 engram-types = { path = "../engram-types" }
-engram-onnx = { path = "../engram-onnx" }
+# ORT execution-provider wiring — optional so a `tract`-only build (no ONNX
+# Runtime) drops it entirely. Gated by the `onnxruntime` feature.
+engram-onnx = { path = "../engram-onnx", optional = true }
 engram-storage = { path = "../engram-storage" }
 
-fastembed = { version = "5", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
+# ONNX Runtime stack, optional under `onnxruntime` (default). A pure-Rust
+# `--features tract` build excludes both.
+fastembed = { version = "5", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"], optional = true }
 # `tls-rustls` is needed with `download-binaries` so this crate builds in
 # isolation: the `ort-sys` build script's download path calls `ureq`'s
 # `tls_config(..)`, which only exists when a TLS feature is on. See the longer
 # note in `crates/engram-onnx/Cargo.toml`.
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"], optional = true }
+# Pure-Rust ONNX engine for the `tract` embedding backend. No native library,
+# builds anywhere Rust builds. Optional under the `tract` feature.
+tract-onnx = { version = "0.23", optional = true }
+# `tokenizers` and `hf-hub` are mandatory: BOTH the ONNX and tract paths
+# tokenize and fetch models through them.
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 hf-hub = { version = "0.5", default-features = false, features = ["rustls-tls", "tokio", "ureq"] }
 ndarray = { version = "0.17", default-features = false }

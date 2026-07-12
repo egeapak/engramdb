@@ -6,7 +6,7 @@ Every memory's `summary + content` is embedded into a fixed-dimensional vector a
 
 | Provider string | Backend | Dimensions | Notes |
 |-----------------|---------|------------|-------|
-| `all-minilm` (alias `onnx`) | ONNX | 384 | **Default.** all-MiniLM-L6-v2. ~90 MB. Fast, decent quality for short snippets. |
+| `all-minilm` (alias `onnx`) | ONNX / tract | 384 | **Default.** all-MiniLM-L6-v2. ~90 MB. Fast, decent quality for short snippets. |
 | `nomic-embed-text` | ONNX or Ollama | 768 | Better quality, longer context support, slower. |
 | `mxbai-embed-large` | ONNX or Ollama | 1024 | Best quality, biggest model, slowest. |
 
@@ -14,9 +14,12 @@ Every memory's `summary + content` is embedded into a fixed-dimensional vector a
 
 - **ONNX** (default) — local inference via ONNX Runtime. Models cache to `<cache_dir>/engramdb/models/`; first use downloads from Hugging Face.
 - **Ollama** — calls a local Ollama instance on `http://localhost:11434`.
-- **auto** — tries ONNX first, falls back to Ollama.
+- **tract** — pure-Rust local inference, no native ONNX Runtime. The fallback for platforms with no prebuilt ORT (**Intel Mac**), where it is selected automatically. Uses the **fp32** MiniLM (`all-minilm` only; the int8 default and the nomic/mxbai models do not have a tract build), at ~3× ONNX latency, with numerically identical output (cosine ≈ 1.0 vs ONNX fp32). NLI and T5 titling are unavailable on a tract build. The optional cross-encoder **reranker works on tract** (`bge-reranker-base` only, fp32 ~1.1 GB) but is off by default. Only present when compiled with `--features tract`.
+- **auto** (default) — tries ONNX first, falls back to Ollama; on a build with no ONNX Runtime (the Intel-Mac / `--features tract` build) it resolves to tract.
 
-Set `[embeddings]` in `config.toml` (see [configuration.md](./configuration.md)) or override per-invocation with `--embedding-backend` / `ENGRAMDB_EMBEDDING_BACKEND`.
+Set `[embeddings]` in `config.toml` (see [configuration.md](./configuration.md)) or override per-invocation with `--embedding-backend` / `ENGRAMDB_EMBEDDING_BACKEND` (`auto` | `onnx` | `ollama` | `tract`).
+
+> **Cross-machine note.** ONNX (int8, `onnx/all-MiniLM-L6-v2-q`) and tract (fp32, `tract/all-MiniLM-L6-v2-fp32`) record distinct model fingerprints. A store shared between an Intel Mac (tract) and a non-Intel machine (ONNX) will detect the change and prompt `engramdb reindex --embeddings-only` on each switch. To pin one backend across machines, set `[embeddings].backend` explicitly in `config.toml`.
 
 ## Model fingerprinting
 
