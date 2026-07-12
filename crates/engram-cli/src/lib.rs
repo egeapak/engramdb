@@ -148,6 +148,14 @@ pub async fn run(cli: Cli) -> Result<()> {
             | Command::Setup { .. }
             | Command::Daemon { .. }
     );
+    // Hooks are dispatched below with a fail-open backstop, but that can't
+    // catch errors raised BEFORE dispatch — and worktree resolution hard-
+    // errors on a corrupt registry.json (user-writable, untrusted) or an
+    // unwritable global data dir. A failing PreToolUse hook breaks every
+    // Read/Write/Edit in the Claude Code session, so for hooks a resolution
+    // failure degrades to the unresolved dir (worst case: empty context)
+    // instead of exiting non-zero.
+    let is_hook = matches!(cli.command, Command::Hook { .. });
     // Whether this invocation is on the main worktree (or a plain, non-worktree
     // project) rather than inside a linked git worktree — decided from the
     // *original* cwd before resolution rewrites it to the main root.
@@ -155,7 +163,16 @@ pub async fn run(cli: Cli) -> Result<()> {
     let dir = if is_exempt {
         dir
     } else {
-        engramdb::storage::worktree::resolve_project_root(&dir, &registry).await?
+        match engramdb::storage::worktree::resolve_project_root(&dir, &registry).await {
+            Ok(resolved) => resolved,
+            Err(e) if is_hook => {
+                tracing::warn!(
+                    "engramdb hook: worktree resolution failed (continuing unresolved): {e}"
+                );
+                dir
+            }
+            Err(e) => return Err(e.into()),
+        }
     };
 
     // Load the project config once (best-effort: defaults if absent/unreadable)
@@ -169,7 +186,12 @@ pub async fn run(cli: Cli) -> Result<()> {
     // above); the cleanup is concentrated on the main checkout. Honors the
     // `[maintenance]` config and the `--no-maintenance` flag. Failures are
     // logged and swallowed so they never block the actual command.
-    if !is_exempt && on_main_worktree {
+    // Hooks are additionally excluded: auto-maintenance is synchronous (a
+    // registry prune + store doctor scan when the throttle window expires)
+    // and hooks sit on Claude Code's PreToolUse hot path where that latency
+    // is paid before every Read/Write/Edit. Any ordinary CLI command still
+    // triggers maintenance on schedule.
+    if !is_exempt && !is_hook && on_main_worktree {
         engramdb::ops::auto_maintain(&dir, &registry, &config.maintenance, cli.no_maintenance)
             .await;
     }
@@ -526,15 +548,26 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Command::Hook { command } => match command {
+        Command::Hook { command } => {
             // Hooks fire on every Read/Write/Edit, never embed (query: None)
             // and never create memories — they deliberately skip provider
             // resolution (no `backend`), see `build_engine_without_providers`.
-            HookCommand::PreToolUse => commands::run_hook_pre_tool_use(&dir).await,
-            HookCommand::SessionStart { min_criticality } => {
-                commands::run_hook_session_start(&dir, min_criticality).await
+            let result = match command {
+                HookCommand::PreToolUse => commands::run_hook_pre_tool_use(&dir).await,
+                HookCommand::SessionStart { min_criticality } => {
+                    commands::run_hook_session_start(&dir, min_criticality).await
+                }
+            };
+            // Fail-open backstop: a hook that exits non-zero surfaces as an
+            // error on EVERY Read/Write/Edit in Claude Code. The handlers
+            // already swallow store/retrieval errors themselves; this catches
+            // what they can't (non-UTF-8 stdin, JSON emit failures) so the
+            // hook degrades to "no context" instead of breaking the session.
+            if let Err(e) = result {
+                tracing::warn!("engramdb hook failed (continuing without context): {e}");
             }
-        },
+            Ok(())
+        }
         Command::Projects { command } => {
             commands::run_projects(&dir, &registry, command, &formatter, &prompter).await
         }
