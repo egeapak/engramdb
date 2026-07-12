@@ -538,6 +538,14 @@ impl RetrievalEngine {
                     (1.0 - weight) * candidates[idx].score + weight * norm_rerank
                 };
 
+                // The blend happens AFTER composite_score's non-finite guard,
+                // so a NaN cross-encoder logit (in-process model or daemon
+                // socket) would otherwise write NaN into the final score and
+                // scramble the ordering. Keep the original score instead.
+                if !blended.is_finite() {
+                    continue;
+                }
+
                 // NOTE: Only final_score and rerank are updated here.
                 // Other ScoreBreakdown fields (semantic, relevance, trust, etc.)
                 // retain their pre-rerank values for diagnostic transparency.
@@ -643,6 +651,11 @@ impl RetrievalEngine {
             query.min_criticality,
             (!include_expired).then(Utc::now),
         );
+        // Remember whether the predicate fired: when it did, the scan itself
+        // already narrowed the row set, so `total_entry_count` below counts
+        // post-predicate rows — NOT the whole store — and can no longer be
+        // used on its own to detect "the filters narrowed the candidates".
+        let pushdown_applied = pushdown_predicate.is_some();
         let all_entries = self
             .store
             .list_for_filtering_where(pushdown_predicate)
@@ -656,9 +669,16 @@ impl RetrievalEngine {
         // every front-end (CLI, MCP, hooks) identically. Relative paths and
         // absolute paths NOT under the project root pass through unchanged —
         // an outside path legitimately matches no repo-relative scope.
+        // `Some("")` is normalized to no-path here: Step 0's signal check
+        // already treats an empty path as absent, but the scoring path
+        // (`composite_score` counts `path.is_some()` as scope context while
+        // `calculate_pattern_score` returns 0.0 for an empty current path)
+        // would zero out every memory's scope multiplier — a Rank query with
+        // an empty-string path silently returned nothing.
         let query_path: Option<String> = query
             .path
             .as_ref()
+            .filter(|p| !p.is_empty())
             .map(|p| crate::storage::paths::relativize_path(p, &self.store.project_dir));
 
         // Step 2: Apply filters. Logical is NOT a filter — it only scores.
@@ -762,8 +782,14 @@ impl RetrievalEngine {
                     // whole-store search, where the windowing artifact is
                     // mild because little or nothing in the window is
                     // discarded.
-                    let restrict_ids: Option<Vec<String>> = (filtered_entries.len()
-                        < total_entry_count
+                    //
+                    // Narrowing happens in two places and both must count: the
+                    // Rust-side filters (visible as `filtered < total`) and the
+                    // LanceDB predicate pushdown (which narrows the scan before
+                    // `total_entry_count` is measured, so `filtered == total`
+                    // even though the store holds more rows).
+                    let narrowed = pushdown_applied || filtered_entries.len() < total_entry_count;
+                    let restrict_ids: Option<Vec<String>> = (narrowed
                         && filtered_entries.len() <= VECTOR_RESTRICT_MAX_IDS)
                         .then(|| filtered_entries.iter().map(|e| e.id.clone()).collect());
 
@@ -956,7 +982,10 @@ impl RetrievalEngine {
                 let has_tag = query.tags.as_ref().is_some_and(|filter_tags| {
                     !filter_tags.is_empty() && filter_tags.iter().any(|t| memory.tags.contains(t))
                 });
-                let user_scope_supplied = query.path.is_some() || !query.logical.is_empty();
+                // `query_path` (not `query.path`): an empty-string path was
+                // normalized away in Step 1.5 and must not count as a
+                // sufficiency signal — it filtered nothing.
+                let user_scope_supplied = query_path.is_some() || !query.logical.is_empty();
                 if !(has_kw || has_tag || user_scope_supplied) {
                     continue;
                 }
@@ -1187,12 +1216,16 @@ async fn detect_contradictions_with(
         return Ok(vec![]);
     }
 
-    let mut candidate_memories: Vec<Memory> = Vec::new();
-    for candidate in &candidates {
-        if let Ok(mem) = store.get(&candidate.id).await {
-            candidate_memories.push(mem);
-        }
-    }
+    // Single batched load (one dir scan) instead of a per-candidate
+    // `store.get` (a full dir scan each) — this runs on every create/update
+    // with NLI enabled. Ids missing on disk are silently skipped, matching
+    // the old per-get error swallowing.
+    let candidate_ids: Vec<&str> = candidates.iter().map(|c| c.id.as_str()).collect();
+    let candidate_memories: Vec<Memory> = store
+        .get_batch(&candidate_ids)
+        .await
+        .map(|loaded| loaded.into_iter().map(|(_, m)| m).collect())
+        .unwrap_or_default();
 
     if candidate_memories.is_empty() {
         return Ok(vec![]);
@@ -3730,6 +3763,73 @@ mod tests {
              mid={mid_sem} far={far_sem}"
         );
         // And the ranking follows: the more-similar survivor ranks first.
+        assert_eq!(
+            result.memories[0].memory.id, tagged_mid.id,
+            "more-similar survivor must rank first"
+        );
+    }
+
+    /// Regression: a filter that is ENTIRELY served by the LanceDB predicate
+    /// pushdown (here `types`) must still restrict the vector search. After
+    /// the pushdown landed, `total_entry_count` counted post-predicate rows,
+    /// so `filtered == total` and the restriction never fired — the window
+    /// saturated with filtered-out fillers and both survivors degraded to
+    /// weak (sem = 0.0) evidence, exactly the mis-ranking the restriction
+    /// exists to prevent. Tags (the sibling test above) never regressed
+    /// because they are filtered Rust-side.
+    #[tokio::test]
+    async fn test_vector_search_pushdown_only_filter_still_restricts() {
+        use crate::types::MemoryType;
+
+        let (_dir, engine, mut tagged_mid, mut tagged_far) = pushdown_fixture().await;
+
+        // Re-type the two tagged memories as hazards so a `types` filter —
+        // which is pushed down into the scan predicate — is the only
+        // narrowing signal. The 8 closevec fillers stay Context.
+        for m in [&mut tagged_mid, &mut tagged_far] {
+            m.type_ = MemoryType::Hazard;
+            let mut update = crate::types::MemoryUpdate::new();
+            update.type_ = Some(MemoryType::Hazard);
+            engine.store().update(&m.id, update).await.unwrap();
+            engine.embed_memory(m).await.unwrap();
+        }
+
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Rank,
+                query: Some("queryvec".to_string()),
+                types: Some(vec![MemoryType::Hazard]),
+                max_results: Some(2),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.memories.len(), 2, "both hazards survive");
+        let by_id = |id: &str| {
+            result
+                .memories
+                .iter()
+                .find(|sm| sm.memory.id == id)
+                .unwrap()
+        };
+        let mid_sem = by_id(&tagged_mid.id)
+            .score_breakdown
+            .semantic
+            .expect("survivor must carry semantic evidence");
+        let far_sem = by_id(&tagged_far.id)
+            .score_breakdown
+            .semantic
+            .expect("survivor must carry semantic evidence");
+        assert!(
+            mid_sem > 0.0,
+            "pushdown-filtered survivor must get its REAL semantic score, got {mid_sem}"
+        );
+        assert!(
+            mid_sem > far_sem,
+            "semantic ordering must be preserved within the filter set: \
+             mid={mid_sem} far={far_sem}"
+        );
         assert_eq!(
             result.memories[0].memory.id, tagged_mid.id,
             "more-similar survivor must rank first"

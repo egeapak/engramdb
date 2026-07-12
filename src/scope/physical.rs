@@ -44,10 +44,27 @@ fn cached_matcher(pattern: &str) -> Option<GlobMatcher> {
         // Poisoned lock: fall back to a one-off compile.
         return Glob::new(pattern).ok().map(|g| g.compile_matcher());
     };
+    // Fast path first: `entry()` would allocate an owned key on EVERY call
+    // (hit or miss), and this runs per pattern per index entry per query.
+    if let Some(cached) = guard.get(pattern) {
+        return cached.clone();
+    }
     guard
         .entry(pattern.to_string())
         .or_insert_with(|| Glob::new(pattern).ok().map(|g| g.compile_matcher()))
         .clone()
+}
+
+/// Whether a physical scope pattern uses glob syntax that globset
+/// understands: `*`, `?`, `[...]` character classes, `{a,b}` alternation.
+///
+/// Used to route scoring through [`calculate_glob_score`]. Checking only
+/// `*` (the old behavior) made the filter and the scorer disagree: a scope
+/// like `src/{api,db}/**` passed the hard `matches()` filter (globset
+/// handles it) but scored as a literal path — proximity 0.0 — so the memory
+/// was silently dropped by the relevance threshold despite matching.
+fn is_glob_pattern(pattern: &str) -> bool {
+    pattern.contains(['*', '?', '[', '{'])
 }
 
 /// Checks if a file path matches any of the given patterns.
@@ -129,8 +146,8 @@ fn calculate_pattern_score(pattern: &str, current_path: &str, base: f64, floor: 
         return 1.0;
     }
 
-    // Check if pattern is a glob
-    if pattern.contains('*') {
+    // Check if pattern is a glob (any globset metachar, not just `*`)
+    if is_glob_pattern(pattern) {
         return calculate_glob_score(pattern, current_path, base, floor);
     }
 
@@ -198,8 +215,8 @@ fn calculate_glob_score(pattern: &str, current_path: &str, base: f64, floor: f64
         return 0.0;
     }
 
-    // Extract the directory part before the glob pattern
-    let pattern_dir = if let Some(pos) = pattern.find('*') {
+    // Extract the directory part before the first glob metachar
+    let pattern_dir = if let Some(pos) = pattern.find(['*', '?', '[', '{']) {
         &pattern[..pos]
     } else {
         pattern
@@ -535,6 +552,29 @@ mod tests {
         // "src/api/a.rs" and "src/api/b.rs" are same directory → depth 1
         let score = proximity(&["src/api/a.rs".to_string()], "src/api/b.rs", BASE, FLOOR);
         assert_approx(score, 0.82, "same dir non-glob");
+    }
+
+    // Filter/scorer consistency for glob metachars other than `*`: brace
+    // alternation and character classes pass the hard `matches()` filter
+    // (globset supports them), so the proximity scorer must score them as
+    // globs too — treating them as literal paths returned 0.0 and the
+    // memory was dropped by the relevance threshold despite matching.
+    #[test]
+    fn non_star_glob_metachars_score_as_globs() {
+        for scope in [
+            "src/{api,db}/**",
+            "src/[ab]pi/**",
+            "src/?pi/**",
+            "src/**/*.{ts,rs}",
+        ] {
+            let scope = [scope.to_string()];
+            let path = "src/api/handlers.rs";
+            assert!(matches(&scope, path), "{scope:?} must match {path}");
+            assert!(
+                proximity(&scope, path, BASE, FLOOR) > 0.0,
+                "{scope:?} passed the filter, so the scorer must score it > 0"
+            );
+        }
     }
 
     #[test]
