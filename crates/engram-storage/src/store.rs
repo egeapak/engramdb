@@ -1379,6 +1379,15 @@ impl MemoryStore {
         Ok(manifest.embedding)
     }
 
+    /// Whether the store holds ANY embedding vectors (cheap `count_rows`).
+    /// See [`LanceIndex::has_any_chunks`].
+    pub async fn has_any_chunks(&self) -> Result<bool> {
+        self.lance_index
+            .has_any_chunks()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB chunk count failed: {}", e)))
+    }
+
     /// Stamp the store with the embedding-model fingerprint its vectors
     /// were produced with. Called after a successful full (re)embed.
     ///

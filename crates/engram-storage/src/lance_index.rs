@@ -875,6 +875,21 @@ impl LanceIndex {
         Ok(false)
     }
 
+    /// Whether the chunks table holds ANY vectors at all (O(table metadata)
+    /// via `count_rows`).
+    ///
+    /// Distinguishes a store that has never embedded (a fresh project — no
+    /// fingerprint AND no vectors is normal, not "legacy") from a genuinely
+    /// legacy store whose existing vectors are of unknown model vintage.
+    pub async fn has_any_chunks(&self) -> Result<bool> {
+        let table = self.open_chunks_table().await?;
+        let rows = table
+            .count_rows(None)
+            .await
+            .context("Failed to count chunk rows")?;
+        Ok(rows > 0)
+    }
+
     /// Set the memories-table `has_embedding` flag for one memory. A no-op when
     /// no row matches (e.g. the memory was concurrently deleted). Keeps the
     /// R3 projection column in sync with chunk-table presence.

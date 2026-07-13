@@ -1273,6 +1273,20 @@ async fn embed_memory_with(
     }
     let chunk_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
 
+    // First-embed fingerprint stamp. Only `ops::reindex` ever stamped the
+    // manifest, so a store was born unstamped and STAYED unstamped through
+    // ordinary use — every query on a brand-new project then warned
+    // "no recorded embedding model (legacy store) — run
+    // `engramdb reindex --embeddings-only`". The vectors written here are by
+    // definition the current provider's, so if the store is unstamped and
+    // held no vectors before this write, this IS the moment its embedding
+    // model becomes known — record it. A genuinely legacy store (unstamped
+    // WITH pre-existing vectors of unknown vintage) must stay unstamped so
+    // the warning keeps pointing at the real remediation. Checked before the
+    // upsert (afterwards our own chunks make the store non-empty).
+    let stamp_first_embed = matches!(store.embedding_fingerprint().await, Ok(None))
+        && matches!(store.has_any_chunks().await, Ok(false));
+
     let t = std::time::Instant::now();
     let vectors = provider.embed_batch(&chunk_refs).await?;
     if let Some(t_) = telemetry {
@@ -1294,6 +1308,17 @@ async fn embed_memory_with(
     }
     if let Some(t_) = telemetry {
         t_.record("create.upsert_chunks", t.elapsed().as_secs_f64() * 1000.0);
+    }
+    if written && stamp_first_embed {
+        let fingerprint = crate::storage::manifest::EmbeddingFingerprint {
+            model: provider.model_id(),
+            dimensions: provider.dimensions(),
+        };
+        // Best-effort: a failed stamp only means the Untracked warning can
+        // still appear; never fail the embed over it.
+        if let Err(e) = store.set_embedding_fingerprint(fingerprint).await {
+            tracing::warn!("failed to stamp embedding fingerprint on first embed: {e}");
+        }
     }
     Ok(())
 }
@@ -1543,6 +1568,69 @@ mod tests {
             "empty-string path must not zero the scope multiplier on the fast path"
         );
         assert_eq!(no_path.memories[0].score, empty_path.memories[0].score);
+    }
+
+    /// A fresh store must be stamped with the live provider's fingerprint by
+    /// its FIRST embed. Only `ops::reindex` ever stamped, so brand-new
+    /// projects stayed Untracked forever and every MCP query prescribed a
+    /// pointless `reindex --embeddings-only` ("legacy store").
+    #[tokio::test]
+    async fn first_embed_stamps_embedding_fingerprint() {
+        use crate::types::EngramConfig;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        assert!(store.embedding_fingerprint().await.unwrap().is_none());
+
+        let memory = stub_memory("first ever memory", 0.5);
+        store.create(&memory).await.unwrap();
+        let engine = RetrievalEngine::new(store.clone(), EngramConfig::default())
+            .with_embedding_provider(Arc::new(MarkerEmbeddingProvider));
+        engine.embed_memory(&memory).await.unwrap();
+
+        let fp = store
+            .embedding_fingerprint()
+            .await
+            .unwrap()
+            .expect("first embed must stamp the fingerprint");
+        assert_eq!(fp.model, "stub/marker");
+        assert_eq!(fp.dimensions, 384);
+    }
+
+    /// A genuinely legacy store — unstamped but holding vectors of unknown
+    /// model vintage — must NOT be stamped by a later embed: the Untracked
+    /// warning has to keep pointing at the real remediation (reindex).
+    #[tokio::test]
+    async fn embed_leaves_legacy_store_unstamped() {
+        use crate::types::EngramConfig;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        // Pre-existing vectors with no fingerprint = legacy store.
+        let old = stub_memory("legacy memory", 0.5);
+        store.create(&old).await.unwrap();
+        store
+            .upsert_chunks(&old.id, vec![vec![0.7f32; 384]])
+            .await
+            .unwrap();
+
+        let new = stub_memory("new memory", 0.5);
+        store.create(&new).await.unwrap();
+        let engine = RetrievalEngine::new(store.clone(), EngramConfig::default())
+            .with_embedding_provider(Arc::new(MarkerEmbeddingProvider));
+        engine.embed_memory(&new).await.unwrap();
+
+        assert!(
+            store.embedding_fingerprint().await.unwrap().is_none(),
+            "legacy vectors of unknown vintage must keep the store Untracked"
+        );
     }
 
     // Note: These tests would require a real MemoryStore instance,

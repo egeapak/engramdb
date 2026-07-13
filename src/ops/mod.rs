@@ -235,6 +235,20 @@ pub async fn embedding_model_report(
     };
     let stored = store.embedding_fingerprint().await.ok().flatten();
     let status = embedding_status(stored.as_ref(), &current.model, current.dimensions);
+    // Untracked warns about vectors of unknown model vintage — but a store
+    // with NO vectors has nothing stale to warn about. A brand-new project
+    // is unstamped until its first embed (which stamps it — see
+    // `embed_memory_with`), and without this gate every query on it claimed
+    // "legacy store" and prescribed a pointless `reindex --embeddings-only`.
+    // On a count failure keep the warning: false alarm beats false silence.
+    if matches!(status, EmbeddingModelStatus::Untracked { .. })
+        && matches!(store.has_any_chunks().await, Ok(false))
+    {
+        return EmbeddingModelReport {
+            status: EmbeddingModelStatus::Match,
+            warning: None,
+        };
+    }
     let warning = match &status {
         EmbeddingModelStatus::Match => None,
         EmbeddingModelStatus::Untracked { current } => Some(format!(
@@ -1041,6 +1055,54 @@ mod tests {
     #[test]
     fn expected_fingerprint_is_none_for_unknown_provider() {
         assert!(expected_embedding_fingerprint(&onnx_config("nope")).is_none());
+    }
+
+    /// An unstamped store with NO vectors is a fresh project, not a "legacy
+    /// store": the report must say Match with no warning (there is nothing
+    /// stale to re-embed). Once unknown-vintage vectors exist, the Untracked
+    /// warning — and its `reindex --embeddings-only` remediation — is real
+    /// and must come back.
+    #[tokio::test]
+    async fn untracked_report_requires_existing_vectors() {
+        use crate::storage::manifest::EmbeddingFingerprint;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &crate::storage::InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let current = EmbeddingFingerprint {
+            model: "onnx/all-MiniLM-L6-v2-q".to_string(),
+            dimensions: 384,
+        };
+
+        // Fresh store: unstamped, zero vectors — quiet.
+        let report = embedding_model_report(&store, Some(current.clone())).await;
+        assert!(matches!(report.status, EmbeddingModelStatus::Match));
+        assert!(report.warning.is_none(), "fresh store must not warn");
+
+        // Same store with vectors of unknown vintage — the warning is real.
+        let mut memory = crate::types::Memory::new(
+            crate::types::MemoryType::Context,
+            "legacy",
+            "body",
+            crate::types::Provenance::human(),
+        );
+        memory.visibility = crate::types::Visibility::Shared;
+        store.create(&memory).await.unwrap();
+        store
+            .upsert_chunks(&memory.id, vec![vec![0.3f32; 384]])
+            .await
+            .unwrap();
+
+        let report = embedding_model_report(&store, Some(current)).await;
+        assert!(matches!(
+            report.status,
+            EmbeddingModelStatus::Untracked { .. }
+        ));
+        assert!(
+            report.warning.is_some(),
+            "unknown-vintage vectors must warn"
+        );
     }
 
     /// The hook handlers' construction path: no embedding/NLI/reranker/title
