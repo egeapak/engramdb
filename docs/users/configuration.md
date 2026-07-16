@@ -79,6 +79,11 @@ needs_review = 0.3             # composite score below this → mark needs-revie
 gc = 0.05                      # score below this → eligible for gc
 compress = 0.4                 # criticality below this → eligible for compression
 
+[review]
+recency_days = 90              # active memories not updated in > N days are suggested
+                               # for review (recency trigger). Omit the field to keep
+                               # the 90-day default; set to a large value to soften it.
+
 [nli]
 enabled = false
 model = "Xenova/nli-deberta-v3-xsmall"
@@ -121,6 +126,7 @@ allow_cross_project_writes = true   # allow MCP tools to write to a different re
 - **`[trust_weights]`** — `Provenance` source maps to a trust weight (`human` highest, `inferred` lowest). The multiplier is `floor + (1 - floor) * weight`, so even fully `inferred` memories keep ≥50% of their raw score.
 - **`[nli]`** — off by default. Downloads ~50 MB and adds latency to `create`. When enabled, every `create` checks the top-`max_comparisons` similar memories and auto-challenges contradictions above `contradiction_threshold`.
 - **`[rerank]`** — off by default. Downloads ~100 MB. Final score blends original and reranker: `(1 - weight) * original + weight * rerank_score`.
+- **`[review]`** — the recency trigger for reviewing old memories. `recency_days` (default **90**) is the age past which an *active* memory that hasn't been updated (every edit and every `resolve`/keep/update bumps `updated_at`) is suggested for review. It never deletes or hides anything — it only surfaces a suggestion: the MCP `review` tool folds these stale memories in alongside flagged (challenged / needs-review) ones by default, and the MCP `memory-session-end` prompt reports how many are due so an agent can offer to revisit them. Stale memories are ranked by criticality so the ones most worth re-verifying come first. Omit the field to keep the 90-day default; validation accepts 1–3650. On the CLI, `engramdb review --stale-after-days [N]` opts a single run into the trigger (bare flag = 90).
 - **`[stats]`** — telemetry events persist to a per-project LanceDB table. `retention_days` defaults to **90** so the event log cannot grow without bound; events older than the window are pruned periodically (by the background flush task and by `engramdb gc`). Set up to the maximum of 3650 (10 years) to effectively retain forever. `0` is rejected by validation — older versions documented it as "retain forever" but actually deleted everything, so an explicit positive value is now required. Lifetime counters in `engramdb stats` cover "since the oldest non-pruned event".
 - **`[title]`** — how a memory's title is generated when the caller doesn't supply one. `t5` (default) is abstractive T5-small summarization; the shared daemon / MCP server loads (and pools) the encoder+decoder **once machine-wide**, so the per-`create` cost is amortized. `keyword` is in-process RAKE extraction (no model); `none` skips automatic titling. The one-shot CLI's `engramdb add` always uses `keyword` so a single command never pays a cold T5 load. The MCP `create` tool's per-call `title_strategy` overrides this.
 - **`[daemon]`** — see [daemon.md](./daemon.md). `use_for_cli` (default `true`) lets model-needing CLI commands route through a *running* daemon; `--in-process` / `ENGRAMDB_IN_PROCESS` / `use_for_cli = false` force in-process loading.

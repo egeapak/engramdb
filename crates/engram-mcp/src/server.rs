@@ -271,6 +271,11 @@ struct ReviewInput {
     stale_only: Option<bool>,
 
     #[schemars(
+        description = "Recency trigger: also surface active memories not updated in more than N days. Omit to use the project's [review].recency_days (default 90); set 0 or a very large value to effectively disable."
+    )]
+    stale_after_days: Option<u64>,
+
+    #[schemars(
         description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
@@ -1705,7 +1710,7 @@ impl EngramDbServer {
 
     #[tool(
         name = "review",
-        description = "List memories needing review (stale or challenged)."
+        description = "List memories needing review: flagged (challenged/needs-review) plus, by the recency trigger, active memories not updated in more than [review].recency_days (default 90). Highest-criticality first."
     )]
     async fn memory_review(
         &self,
@@ -1721,12 +1726,25 @@ impl EngramDbServer {
             .transpose()
             .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
+        // When the caller omits `stale_after_days`, fall back to the project's
+        // configured recency window so the recency trigger is on by default.
+        let stale_after_days = match input.stale_after_days {
+            Some(days) => Some(days),
+            None => {
+                self.load_config_for(input.project.as_deref())
+                    .await?
+                    .review
+                    .recency_days
+            }
+        };
+
         let params = ops::ReviewParams {
             scope: input.scope,
             max_results: input.max_results,
             type_filter,
             challenged_only: input.challenged_only.unwrap_or(false),
             stale_only: input.stale_only.unwrap_or(false),
+            stale_after_days,
         };
 
         let memories = ops::review_memories(&store, &params)
@@ -1740,7 +1758,8 @@ impl EngramDbServer {
 
         let r = serde_json::to_string(&serde_json::json!({
             "memories": outputs,
-            "total": memories.len()
+            "total": memories.len(),
+            "recency_days": stale_after_days,
         }))
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
@@ -2516,6 +2535,7 @@ impl ServerHandler for EngramDbServer {
             }
             "memory-session-end" => {
                 let mut stats_text = String::new();
+                let mut recency_hint = String::new();
                 if let Ok(store) = self.open_store().await {
                     if let Ok(stats) = ops::compute_stats(&store).await {
                         let review_count = stats
@@ -2529,6 +2549,32 @@ impl ServerHandler for EngramDbServer {
                             stats.total, review_count
                         );
                     }
+
+                    // Recency trigger: nudge the agent to revisit memories that
+                    // have gone stale (active, untouched past the configured
+                    // window) so long-lived stores don't quietly rot.
+                    let recency_days = self
+                        .load_config_for(None)
+                        .await
+                        .ok()
+                        .and_then(|c| c.review.recency_days);
+                    if let Some(days) = recency_days {
+                        if let Ok(stale) = ops::count_recency_stale(&store, Some(days)).await {
+                            if stale > 0 {
+                                recency_hint =
+                                    format!(
+                                    "\n{} active {} not been touched in over {} days and may be \
+                                     stale — run review (or review stale_after_days: {}) to \
+                                     confirm or retire {}.",
+                                    stale,
+                                    if stale == 1 { "memory has" } else { "memories have" },
+                                    days,
+                                    days,
+                                    if stale == 1 { "it" } else { "them" },
+                                );
+                            }
+                        }
+                    }
                 }
 
                 let prompt = format!(
@@ -2538,8 +2584,8 @@ impl ServerHandler for EngramDbServer {
                          3. Did you encounter non-obvious behavior? -> create type: debug\n\
                          4. Did anything contradict existing memories? -> challenge\n\n\
                          {}\n\
-                         Run review if you'd like to address flagged memories with the user.",
-                    stats_text
+                         Run review if you'd like to address flagged memories with the user.{}",
+                    stats_text, recency_hint
                 );
 
                 let mut result = GetPromptResult::new(vec![PromptMessage::new_text(

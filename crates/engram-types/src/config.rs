@@ -321,6 +321,56 @@ impl Default for ThresholdsConfig {
     }
 }
 
+/// Recency-based review-suggestion settings.
+///
+/// EngramDB nudges agents and users to revisit memories that have gone stale —
+/// active memories that have not been touched (updated or verified) in a while.
+/// This is a *review* trigger, not a TTL: nothing is deleted or hidden. The
+/// suggestion is surfaced by the MCP session-end prompt and the `review` tool,
+/// and stale memories are ranked by criticality so the ones most worth
+/// re-verifying float to the top (recency by itself is indifferent to utility).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewConfig {
+    /// Active memories whose last update is older than this many days are
+    /// surfaced as review suggestions. `None` disables the recency trigger.
+    #[serde(default = "default_review_recency_days")]
+    pub recency_days: Option<u64>,
+}
+
+/// Default recency window before an untouched active memory is suggested for
+/// review. 90 days matches the default telemetry retention window and is long
+/// enough that routinely-referenced memories (which bump `updated_at` on every
+/// edit/resolve) never trip it.
+fn default_review_recency_days() -> Option<u64> {
+    Some(90)
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            recency_days: default_review_recency_days(),
+        }
+    }
+}
+
+impl ReviewConfig {
+    /// Validate the recency window bounds (mirrors `stats.retention_days`).
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if let Some(days) = self.recency_days {
+            if days == 0 {
+                anyhow::bail!(
+                    "review.recency_days must be >= 1 (0 is ambiguous). Set a positive \
+                     number of days, or omit the field to use the default (90)."
+                );
+            }
+            if days > 3650 {
+                anyhow::bail!("review.recency_days ({}) must be <= 3650", days);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Retrieval configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievalConfig {
@@ -689,6 +739,10 @@ pub struct EngramConfig {
     #[serde(default)]
     pub thresholds: ThresholdsConfig,
 
+    /// Recency-based review-suggestion settings
+    #[serde(default)]
+    pub review: ReviewConfig,
+
     /// NLI contradiction detection settings
     #[serde(default)]
     pub nli: NliConfig,
@@ -1003,6 +1057,7 @@ impl EngramConfig {
         self.stats.validate()?;
         self.daemon.validate()?;
         self.security.validate()?;
+        self.review.validate()?;
 
         if !(0.0..=1.0).contains(&self.retrieval.scoring.scope_multiplier_floor) {
             anyhow::bail!("scoring.scope_multiplier_floor must be in [0.0, 1.0]");
@@ -1200,6 +1255,9 @@ mod tests {
         assert_eq!(config.thresholds.needs_review, 0.3);
         assert_eq!(config.thresholds.gc, 0.05);
         assert_eq!(config.thresholds.compress, 0.4);
+
+        // Review recency trigger
+        assert_eq!(config.review.recency_days, Some(90));
 
         // Scoring weights - with_query
         assert_eq!(config.retrieval.scoring.with_query.semantic, Some(0.55));
@@ -1811,6 +1869,45 @@ weight = 0.7
         let mut cfg = EngramConfig::default();
         cfg.daemon.idle_timeout_secs = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_review_config_validate() {
+        let mut r = ReviewConfig::default();
+        assert_eq!(r.recency_days, Some(90));
+        assert!(r.validate().is_ok());
+
+        // Disabled trigger is valid.
+        r.recency_days = None;
+        assert!(r.validate().is_ok());
+
+        // Zero is ambiguous → rejected.
+        r.recency_days = Some(0);
+        assert!(r.validate().is_err());
+
+        // Upper bound mirrors stats.retention_days (10 years).
+        r.recency_days = Some(3650);
+        assert!(r.validate().is_ok());
+        r.recency_days = Some(3651);
+        assert!(r.validate().is_err());
+
+        // Surfaced through the top-level config validate too.
+        let mut cfg = EngramConfig::default();
+        cfg.review.recency_days = Some(0);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_review_config_serde_default() {
+        // Absent `[review]` ⇒ default 90-day recency trigger.
+        let cfg: EngramConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.review.recency_days, Some(90));
+        // A `[review]` table present but without `recency_days` ⇒ default too.
+        let cfg: EngramConfig = toml::from_str("[review]\n").unwrap();
+        assert_eq!(cfg.review.recency_days, Some(90));
+        // Explicit override parses.
+        let cfg: EngramConfig = toml::from_str("[review]\nrecency_days = 30\n").unwrap();
+        assert_eq!(cfg.review.recency_days, Some(30));
     }
 
     #[test]

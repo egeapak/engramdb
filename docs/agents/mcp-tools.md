@@ -143,7 +143,7 @@ If NLI contradiction detection is enabled, the response may include auto-challen
 
 ### `review` (read-only)
 
-**List memories needing review** (stale or challenged).
+**List memories needing review** — flagged (`challenged` / `needsreview`) plus, via the recency trigger, active memories not updated in more than `[review].recency_days` (default 90). Results are highest-criticality first, and the response echoes the effective window as `recency_days`.
 
 | Param | Type | Description |
 |-------|------|-------------|
@@ -152,7 +152,10 @@ If NLI contradiction detection is enabled, the response may include auto-challen
 | `type?` | `string` | Filter by memory type. |
 | `challenged_only?` | `bool` | Only `challenged`. |
 | `stale_only?` | `bool` | Only `needsreview`. |
+| `stale_after_days?` | `u64` | Recency window override in days. Omit to use `[review].recency_days`; `0` disables the recency arm (flagged only). |
 | `project?` | `string` | See conventions. |
+
+The `memory-session-end` prompt also reports how many active memories are past the recency window, so an agent can proactively offer to revisit them.
 
 ### `resolve` (mutates)
 

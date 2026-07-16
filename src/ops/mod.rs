@@ -44,7 +44,7 @@ pub use parsing::{
 pub use query::{merge_scored_memories, query_memories, query_memories_with_global};
 pub use reindex::{reindex, ReindexResult};
 pub use resolve::{resolve_memory, ResolveAction, ResolveParams, ResolveResult};
-pub use review::{review_memories, ReviewParams};
+pub use review::{count_recency_stale, review_memories, ReviewParams};
 pub use stats::{compute_stats, StoreStats};
 pub use update::{update_memory, UpdateParams};
 

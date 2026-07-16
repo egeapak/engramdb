@@ -496,6 +496,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             type_,
             challenged_only,
             stale_only,
+            stale_after_days,
             global,
         } => {
             commands::run_review(
@@ -505,6 +506,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 type_,
                 challenged_only,
                 stale_only,
+                stale_after_days,
                 &formatter,
                 &prompter,
             )
