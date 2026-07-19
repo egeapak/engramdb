@@ -633,7 +633,7 @@ impl LanceIndex {
         Ok(entries)
     }
 
-    /// List entries with all filterable/displayable columns (14 columns).
+    /// List entries with all filterable/displayable columns (15 columns).
     ///
     /// Omits only `provenance_source` and `confidence` which no caller reads.
     pub async fn list_filterable(&self) -> Result<Vec<IndexFilterable>> {
@@ -645,6 +645,7 @@ impl LanceIndex {
                 "id".into(),
                 "summary".into(),
                 "type".into(),
+                "epistemic".into(),
                 "status".into(),
                 "visibility".into(),
                 "criticality".into(),
