@@ -1854,3 +1854,32 @@ fn provenance_reason_cannot_hijack_created_at() {
     let parsed = parse_memory_file(&text).unwrap();
     assert_eq!(parsed.created_at, memory.created_at);
 }
+
+/// Free-text validity fields live in the hidden `<!-- engramdb -->` YAML
+/// block. A premise containing the closing marker (inline or on its own
+/// embedded line) must not terminate the block early: the parser only
+/// accepts a line that IS exactly `-->`, and YAML block scalars indent their
+/// content, so the marker can never land at column 0. Pin it.
+#[test]
+fn premise_with_comment_terminator_roundtrips() {
+    let mut memory = sample_memory();
+    memory.valid_while = Some(engram_types::Validity {
+        premise: Some("beware --> of arrows\nand a lone\n-->\nline".to_string()),
+        invalidated_by: vec!["src/**/*.{ts,tsx}".to_string()],
+        ..Default::default()
+    });
+
+    let text = write_memory_file(&memory).unwrap();
+    let parsed = parse_memory_file(&text).unwrap();
+
+    let v = parsed.valid_while.expect("validity must survive");
+    assert_eq!(
+        v.premise.as_deref(),
+        Some("beware --> of arrows\nand a lone\n-->\nline")
+    );
+    assert_eq!(v.invalidated_by, vec!["src/**/*.{ts,tsx}"]);
+    // The rest of the hidden block survives too (an early terminator would
+    // have silently reset these to defaults).
+    assert_eq!(parsed.visibility, memory.visibility);
+    assert_eq!(parsed.decay.is_some(), memory.decay.is_some());
+}

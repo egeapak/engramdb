@@ -746,6 +746,9 @@ pub struct ConsolidationReport {
     /// True when embedding/NLI providers were unavailable and the pass
     /// skipped (§14.11 graceful-skip contract).
     pub skipped_no_providers: bool,
+    /// True when the store had more active observations than one throttled
+    /// pass will pairwise-compare (O(n²) bound); nothing was clustered.
+    pub skipped_too_many: bool,
 }
 
 /// Union-find clustering over similarity pairs. Returns clusters of size ≥
@@ -858,6 +861,19 @@ pub async fn consolidation_pass(
     if observations.len() < min_sources.max(2) {
         return Ok(report);
     }
+    // Pairwise-similarity bound: n observations cost n(n-1)/2 cosines. Past
+    // this size the throttled maintenance pass is the wrong tool — defer with
+    // a notice instead of stalling (same gated-O(n²) discipline as #58).
+    const MAX_OBSERVATIONS_PER_PASS: usize = 500;
+    if observations.len() > MAX_OBSERVATIONS_PER_PASS {
+        tracing::info!(
+            count = observations.len(),
+            "consolidation: more than {MAX_OBSERVATIONS_PER_PASS} active observations; \
+             skipping this pass (use compress for bulk cleanup)"
+        );
+        report.skipped_too_many = true;
+        return Ok(report);
+    }
 
     // Embed each observation (summary + content). Failures drop the entry.
     let mut vectors: Vec<Option<Vec<f32>>> = Vec::with_capacity(observations.len());
@@ -879,7 +895,22 @@ pub async fn consolidation_pass(
     }
     let clusters = cluster_pairs(observations.len(), &pairs, min_sources);
 
+    // Pairwise-NLI bound per cluster: k sources cost k(k-1)/2 cross-encoder
+    // inferences, so an unbounded near-duplicate cluster would stall the
+    // (synchronous) maintenance pass for minutes. Oversized clusters are
+    // deferred with a notice rather than half-checked — mirroring the
+    // gated-O(n²) discipline from the workspace robustness pass (#58).
+    const MAX_CLUSTER_SOURCES: usize = 12;
+
     for cluster in clusters {
+        if cluster.len() > MAX_CLUSTER_SOURCES {
+            tracing::info!(
+                size = cluster.len(),
+                "consolidation: cluster exceeds {MAX_CLUSTER_SOURCES} sources; skipping this pass \
+                 (compress it manually or raise consolidation_similarity)"
+            );
+            continue;
+        }
         // NLI gate: any pairwise contradiction disqualifies the cluster
         // (contradictory observations are a dispute, not a consolidation).
         let mut nli_pairs: Vec<(&str, &str)> = Vec::new();
@@ -1310,6 +1341,27 @@ mod consolidation_tests {
             third.clusters.len(),
             1,
             "retracted derivation reopens the cluster"
+        );
+    }
+
+    /// O(n²) bound (#58 discipline): a cluster larger than the per-pass NLI
+    /// budget is deferred with a notice, not half-checked or consolidated.
+    #[tokio::test]
+    async fn consolidation_defers_oversized_clusters() {
+        let (_t, store, engine, config) = gate_fixture().await;
+
+        // 13 same-group observations: one cluster of 13 > MAX_CLUSTER_SOURCES.
+        for i in 0..13 {
+            observation(&store, &format!("gx-{i}"), &format!("groupA repeated pattern {i}")).await;
+        }
+
+        let report = consolidation_pass(&store, &engine, &config, true)
+            .await
+            .unwrap();
+        assert!(
+            report.clusters.is_empty() && report.created.is_empty(),
+            "oversized cluster must be deferred: {:?}",
+            report.clusters
         );
     }
 }
