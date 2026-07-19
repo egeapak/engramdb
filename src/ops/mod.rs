@@ -21,6 +21,7 @@ pub mod resolve;
 pub mod review;
 pub mod stats;
 pub mod update;
+pub mod verify;
 
 pub use challenge::{challenge_for_contradictions, challenge_memory, ChallengeResult};
 pub use compress::{
@@ -47,6 +48,7 @@ pub use resolve::{resolve_memory, ResolveAction, ResolveParams, ResolveResult};
 pub use review::{review_memories, ReviewParams};
 pub use stats::{compute_stats, StoreStats};
 pub use update::{update_memory, UpdateParams};
+pub use verify::{verify_memory, VerifyResult};
 
 use crate::embeddings::EmbeddingProvider;
 #[cfg(feature = "ollama")]
@@ -70,6 +72,54 @@ use crate::retrieval::reranker::Reranker;
 use crate::storage::{embedding_status, EmbeddingFingerprint, EmbeddingModelStatus, MemoryStore};
 use crate::types::{EmbeddingBackend, EngramConfig};
 use std::sync::Arc;
+
+/// Close the validity windows of memories superseded by `new_id` (§2.4
+/// writer 1): each referenced LIVE memory gets `invalidated_at = now`,
+/// `superseded_by = new_id`. Missing and already-invalidated ids are skipped
+/// with a log line, matching the existing tolerance in `compress_apply` —
+/// supersession is best-effort metadata maintenance, never a reason to fail
+/// the create/update that carried it.
+pub(crate) async fn close_superseded_windows(
+    store: &MemoryStore,
+    supersedes: &[String],
+    new_id: &str,
+) {
+    let now = chrono::Utc::now();
+    for old_id in supersedes {
+        if old_id.as_str() == new_id {
+            tracing::debug!(id = %new_id, "memory lists itself in supersedes; skipping");
+            continue;
+        }
+        match store.get(old_id).await {
+            Ok(old) if old.is_invalidated_at(now) => {
+                tracing::debug!(
+                    superseded = %old_id,
+                    by = %new_id,
+                    "supersedes target already invalidated; skipping window close"
+                );
+            }
+            Ok(_) => {
+                if let Err(e) = store
+                    .invalidate_with(old_id, Some(new_id.to_string()), now)
+                    .await
+                {
+                    tracing::warn!(
+                        superseded = %old_id,
+                        by = %new_id,
+                        "failed to close superseded memory's validity window: {e}"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    superseded = %old_id,
+                    by = %new_id,
+                    "supersedes target not found; skipping window close: {e}"
+                );
+            }
+        }
+    }
+}
 
 /// Resolve the effective embedding backend from the layered override chain.
 ///

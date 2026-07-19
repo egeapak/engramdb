@@ -127,6 +127,12 @@ pub async fn compress_apply(
             visibility: Visibility::Shared,
             provenance: Provenance::agent("compress"),
             supersedes: source_ids.clone(),
+            epistemic: None,
+            premise: None,
+            invalidated_by: vec![],
+            origin_task: None,
+            generality: None,
+            valid_from: None,
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,
@@ -138,41 +144,42 @@ pub async fn compress_apply(
     )
     .await?;
 
-    // Delete source memories now that the compressed memory exists.
-    //
-    // From here on the summary memory is durable, so deletion failures must
-    // not abort the sweep mid-way (that would strand an arbitrary suffix of
-    // un-deleted sources). Instead:
-    // - a source that is already gone (deleted concurrently) is skipped and
-    //   reported in `skipped_sources`;
-    // - a real deletion error (I/O) is recorded, the REMAINING sources are
-    //   still attempted, and a partial-failure error listing the un-deleted
-    //   IDs (and the new memory's ID) is returned so the user can clean up
-    //   or re-run. The summary memory remains valid either way.
+    // Sources are INVALIDATED, not deleted (§2.4 writer 3): `create_memory`
+    // already closed each live source's validity window (`invalidated_at =
+    // now`, `superseded_by = <summary id>`) via its supersession pass. The
+    // files stay on disk — queryable under `include_invalidated`, purged
+    // eventually by gc's retention rule. Here we verify the outcome so
+    // partial failures surface exactly like the old delete loop did:
+    // - a source that vanished concurrently is skipped and reported in
+    //   `skipped_sources`;
+    // - a source still live (its window-close failed, e.g. I/O) is recorded,
+    //   the REMAINING sources are still checked, and a partial-failure error
+    //   listing the un-invalidated IDs (and the new memory's ID) is returned
+    //   so the user can re-run. The summary memory remains valid either way.
     let mut skipped_sources = Vec::new();
-    let mut failed_sources: Vec<(String, crate::storage::StorageError)> = Vec::new();
+    let mut failed_sources: Vec<String> = Vec::new();
     for id in &source_ids {
-        match store.delete(id).await {
-            Ok(()) => {}
+        match store.get(id).await {
             Err(crate::storage::StorageError::NotFound(_)) => {
                 skipped_sources.push(id.clone());
             }
-            Err(e) => failed_sources.push((id.clone(), e)),
+            Err(e) => failed_sources.push(format!("{} ({})", id, e)),
+            // Invalidated — by this compress or an earlier writer; either
+            // way the window is closed.
+            Ok(m) if m.is_invalidated() => {}
+            Ok(_) => failed_sources.push(format!("{} (still active)", id)),
         }
     }
 
     if !failed_sources.is_empty() {
-        let detail: Vec<String> = failed_sources
-            .iter()
-            .map(|(id, e)| format!("{} ({})", id, e))
-            .collect();
         bail!(
-            "Compressed memory {} was created, but {} source memor{} could not be deleted: {}. \
-             Delete the listed memories manually (the compressed memory is valid and supersedes them).",
+            "Compressed memory {} was created, but {} source memor{} could not be invalidated: {}. \
+             Re-run compress or `resolve --action invalidate` the listed memories manually \
+             (the compressed memory is valid and supersedes them).",
             result.id,
             failed_sources.len(),
             if failed_sources.len() == 1 { "y" } else { "ies" },
-            detail.join(", ")
+            failed_sources.join(", ")
         );
     }
 
@@ -220,6 +227,12 @@ mod tests {
                 visibility: Visibility::Shared,
                 provenance: Provenance::human(),
                 supersedes: vec![],
+                epistemic: None,
+                premise: None,
+                invalidated_by: vec![],
+                origin_task: None,
+                generality: None,
+                valid_from: None,
                 decay_strategy: None,
                 decay_half_life: None,
                 decay_ttl: None,
@@ -341,21 +354,23 @@ mod tests {
         assert!(new_memory.supersedes.contains(&id1));
         assert!(new_memory.supersedes.contains(&id2));
 
-        // Both sources were really deleted.
-        assert!(store.get(&id1).await.is_err());
-        assert!(store.get(&id2).await.is_err());
+        // Both sources survive on disk with CLOSED validity windows (§2.4
+        // writer 3) — invalidated, superseded by the summary, not deleted.
+        for id in [&id1, &id2] {
+            let source = store.get(id).await.unwrap();
+            assert!(source.invalidated_at.is_some(), "window must be closed");
+            assert_eq!(
+                source.superseded_by.as_deref(),
+                Some(result.new_id.as_str())
+            );
+        }
     }
 
-    /// A source that vanishes between validation and the deletion sweep
-    /// (concurrent delete) must be skipped and reported — the apply still
-    /// completes and the summary memory is valid.
-    ///
-    /// Simulated with a "ghost" source: a memory file on disk (so the
-    /// pre-create `batch_exists` validation passes) with no index row (so
-    /// `store.delete` resolves to NotFound, exactly like a source whose
-    /// index row and file were removed by a concurrent delete).
+    /// A source whose index row is missing (half-deleted by a crash) is
+    /// still invalidated through its on-disk file — the window-closing pass
+    /// operates on files, so nothing is skipped and the summary stays valid.
     #[tokio::test]
-    async fn test_compress_apply_source_gone_at_delete_time_is_skipped() {
+    async fn test_compress_apply_source_without_index_row_still_invalidated() {
         let (temp, store) = setup_store().await;
 
         let real_id = add_memory(&store, MemoryType::Debug, "real source", 0.1, vec![]).await;
@@ -383,33 +398,32 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.superseded_count, 2);
-        assert_eq!(
-            result.skipped_sources,
-            vec![ghost_id.clone()],
-            "missing source must be reported as skipped, not abort the apply"
+        assert!(
+            result.skipped_sources.is_empty(),
+            "a file-backed source is invalidatable even without an index row"
         );
 
-        // The summary is valid and supersedes both (dangling supersedes IDs
-        // are fine — supersedes is informational, never dereferenced).
         let new_memory = store.get(&result.new_id).await.unwrap();
         assert!(new_memory.supersedes.contains(&real_id));
         assert!(new_memory.supersedes.contains(&ghost_id));
 
-        // The real source was still deleted after the skip.
-        assert!(store.get(&real_id).await.is_err());
+        // Both sources were invalidated in place, not deleted.
+        for id in [&real_id, &ghost_id] {
+            let source = store.get(id).await.unwrap();
+            assert!(source.invalidated_at.is_some());
+        }
     }
 
-    /// A REAL deletion error (I/O) must not abort the sweep mid-way: the
-    /// remaining sources are still attempted, and the returned error lists
-    /// the un-deleted IDs plus the (valid) new memory's ID.
+    /// A REAL invalidation error (I/O) must not abort the sweep mid-way:
+    /// the remaining sources are still processed, and the returned error
+    /// lists the still-active IDs plus the (valid) new memory's ID.
     ///
     /// Failure injection: the first source's `.md` file is replaced by a
-    /// directory of the same name — `remove_file(2)` on a directory fails
-    /// (EISDIR), which is a genuine I/O error rather than NotFound, and it
-    /// works regardless of the user the tests run as (unlike chmod tricks,
-    /// which root ignores).
+    /// directory of the same name — reading/rewriting it fails with a
+    /// genuine I/O error rather than NotFound, and it works regardless of
+    /// the user the tests run as (unlike chmod tricks, which root ignores).
     #[tokio::test]
-    async fn test_compress_apply_continues_past_real_delete_failure() {
+    async fn test_compress_apply_continues_past_real_invalidate_failure() {
         let (temp, store) = setup_store().await;
 
         let broken_id = add_memory(&store, MemoryType::Debug, "undeletable", 0.1, vec![]).await;
@@ -444,23 +458,23 @@ mod tests {
 
         let msg = err.to_string();
         assert!(
-            msg.contains("could not be deleted"),
+            msg.contains("could not be invalidated"),
             "partial failure must be reported: {}",
             msg
         );
         assert!(
             msg.contains(&broken_id),
-            "error must list the un-deleted id: {}",
+            "error must list the still-active id: {}",
             msg
         );
         assert!(
             !msg.contains(&ok_id),
-            "successfully deleted source must not be listed as failed: {}",
+            "successfully invalidated source must not be listed as failed: {}",
             msg
         );
 
-        // The later source was still attempted and deleted.
-        assert!(store.get(&ok_id).await.is_err());
+        // The later source was still processed and invalidated.
+        assert!(store.get(&ok_id).await.unwrap().invalidated_at.is_some());
 
         // The summary memory was created and remains valid.
         let entries = store.list_filterable().await.unwrap();

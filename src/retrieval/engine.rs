@@ -479,6 +479,13 @@ impl RetrievalEngine {
         &self.store
     }
 
+    /// Get a reference to the engine's configuration (the ops layer reads
+    /// `[epistemic]` defaults from here, e.g. the off-diagonal Observation
+    /// decay in `ops::create`).
+    pub fn config(&self) -> &EngramConfig {
+        &self.config
+    }
+
     /// Get a mutable reference to the memory store.
     pub fn store_mut(&mut self) -> &mut MemoryStore {
         &mut self.store

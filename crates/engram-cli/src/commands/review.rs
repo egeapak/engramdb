@@ -88,6 +88,7 @@ pub async fn run_review(
                         action: ops::ResolveAction::Keep,
                         updated_content: None,
                         updated_summary: None,
+                        superseded_by: None,
                     },
                 )
                 .await?;
@@ -115,6 +116,7 @@ pub async fn run_review(
                         } else {
                             Some(new_summary)
                         },
+                        superseded_by: None,
                     },
                 )
                 .await?;
@@ -131,6 +133,7 @@ pub async fn run_review(
                         action: ops::ResolveAction::Delete,
                         updated_content: None,
                         updated_summary: None,
+                        superseded_by: None,
                     },
                 )
                 .await?;

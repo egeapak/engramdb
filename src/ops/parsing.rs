@@ -4,7 +4,9 @@
 //! user-provided strings into typed enums.
 
 use crate::retrieval::engine::DetailLevel;
-use crate::types::{DecayStrategy, MemoryType, Status, Visibility};
+use crate::types::{
+    DecayStrategy, Epistemic, Generality, MemoryType, Situation, Status, Visibility,
+};
 use anyhow::{bail, Result};
 
 /// Parse a string into a MemoryType enum.
@@ -44,6 +46,36 @@ pub fn parse_status(s: &str) -> Result<Status> {
             "Invalid status: {}. Valid values: active, needsreview, challenged",
             s
         ),
+    }
+}
+
+/// Parse a string into an Epistemic class (mirrors `parse_memory_type` so
+/// both boundaries reject identically; delegates to the types-crate
+/// `FromStr`, which owns the canonical error text).
+pub fn parse_epistemic(s: &str) -> Result<Epistemic> {
+    s.parse::<Epistemic>().map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Parse a string into a Generality.
+pub fn parse_generality(s: &str) -> Result<Generality> {
+    s.parse::<Generality>().map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Parse a string into a Situation.
+pub fn parse_situation(s: &str) -> Result<Situation> {
+    s.parse::<Situation>().map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Parse an optional list of epistemic-class strings into a class filter.
+/// `None`/empty ⇒ no filter (mirrors `parse_type_filter`).
+pub fn parse_epistemic_filter(classes: Option<&[String]>) -> Result<Option<Vec<Epistemic>>> {
+    match classes {
+        None | Some([]) => Ok(None),
+        Some(list) => Ok(Some(
+            list.iter()
+                .map(|c| parse_epistemic(c))
+                .collect::<Result<Vec<_>>>()?,
+        )),
     }
 }
 

@@ -10,6 +10,10 @@ pub enum ResolveAction {
     Keep,
     Update,
     Delete,
+    /// Close the memory's validity window (§2.4): it *was* true but no
+    /// longer is. Preferred over `Delete` — history is kept on disk and
+    /// queryable via `include_invalidated`.
+    Invalidate,
 }
 
 /// Parameters for resolving a memory.
@@ -18,6 +22,9 @@ pub struct ResolveParams {
     pub action: ResolveAction,
     pub updated_content: Option<String>,
     pub updated_summary: Option<String>,
+    /// For `Invalidate`: optional id of the memory that superseded this one
+    /// (the ADR-style reverse link). `None` = closed without a successor.
+    pub superseded_by: Option<String>,
 }
 
 /// Result of a resolve operation.
@@ -68,6 +75,15 @@ pub async fn resolve_memory(store: &MemoryStore, params: ResolveParams) -> Resul
                 action: "delete".to_string(),
             })
         }
+        ResolveAction::Invalidate => {
+            store
+                .invalidate_with(&params.id, params.superseded_by, Utc::now())
+                .await?;
+            Ok(ResolveResult {
+                resolved: true,
+                action: "invalidate".to_string(),
+            })
+        }
     }
 }
 
@@ -105,6 +121,7 @@ mod tests {
                 action: ResolveAction::Keep,
                 updated_content: None,
                 updated_summary: None,
+                superseded_by: None,
             },
         )
         .await
@@ -147,6 +164,7 @@ mod tests {
                 action: ResolveAction::Update,
                 updated_content: Some("Updated content".to_string()),
                 updated_summary: Some("Updated summary".to_string()),
+                superseded_by: None,
             },
         )
         .await
@@ -189,6 +207,7 @@ mod tests {
                 action: ResolveAction::Delete,
                 updated_content: None,
                 updated_summary: None,
+                superseded_by: None,
             },
         )
         .await
@@ -226,6 +245,7 @@ mod tests {
                 action: ResolveAction::Keep,
                 updated_content: None,
                 updated_summary: None,
+                superseded_by: None,
             },
         )
         .await
@@ -263,6 +283,7 @@ mod tests {
                 action: ResolveAction::Update,
                 updated_content: Some("New content only".to_string()),
                 updated_summary: None,
+                superseded_by: None,
             },
         )
         .await
@@ -298,6 +319,7 @@ mod tests {
                 action: ResolveAction::Update,
                 updated_content: None,
                 updated_summary: Some("New summary only".to_string()),
+                superseded_by: None,
             },
         )
         .await
@@ -335,6 +357,7 @@ mod tests {
                 action: ResolveAction::Keep,
                 updated_content: None,
                 updated_summary: None,
+                superseded_by: None,
             },
         )
         .await
@@ -374,6 +397,7 @@ mod tests {
                 action: ResolveAction::Keep,
                 updated_content: None,
                 updated_summary: None,
+                superseded_by: None,
             },
         )
         .await
@@ -403,6 +427,7 @@ mod tests {
                 action: ResolveAction::Keep,
                 updated_content: None,
                 updated_summary: None,
+                superseded_by: None,
             },
         )
         .await;
@@ -423,6 +448,7 @@ mod tests {
                 action: ResolveAction::Update,
                 updated_content: Some("New content".to_string()),
                 updated_summary: Some("New summary".to_string()),
+                superseded_by: None,
             },
         )
         .await;

@@ -3,9 +3,12 @@
 use crate::ops::parse_decay_strategy;
 use crate::retrieval::engine::RetrievalEngine;
 use crate::storage::MemoryStore;
-use crate::types::{Decay, DecayStrategy, MemoryType, MemoryUpdate, Status, Visibility};
+use crate::types::{
+    Decay, DecayStrategy, Epistemic, Generality, MemoryType, MemoryUpdate, Status, Validity,
+    Visibility,
+};
 use anyhow::Result;
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 
 /// Parameters for updating a memory.
 ///
@@ -26,6 +29,21 @@ pub struct UpdateParams {
     pub visibility: Option<Visibility>,
     pub status: Option<Status>,
     pub supersedes: Option<Vec<String>>,
+    /// Reclassify the memory's epistemic class.
+    pub epistemic: Option<Epistemic>,
+    /// Validity-condition edits, merged into the existing `valid_while`
+    /// (fields not provided keep their current values).
+    pub premise: Option<String>,
+    pub invalidated_by: Option<Vec<String>>,
+    pub origin_task: Option<String>,
+    pub generality: Option<Generality>,
+    /// Valid-time start (backdating).
+    pub valid_from: Option<DateTime<Utc>>,
+    /// Clear the whole `valid_while` condition.
+    pub clear_validity: bool,
+    /// Reopen a closed validity window (§2.4): clears `invalidated_at` and
+    /// `superseded_by`.
+    pub clear_invalidated: bool,
     pub decay_strategy: Option<String>,
     pub decay_half_life: Option<u64>,
     pub decay_ttl: Option<u64>,
@@ -75,6 +93,9 @@ pub async fn update_memory(
         || params.decay_ttl.is_some()
         || params.decay_floor.is_some();
     let embed_async = params.embed_async;
+    // Keep a copy for the post-update supersession pass (§2.4 writer 1) —
+    // the list itself is moved into the update closure below.
+    let supersedes_for_close = params.supersedes.clone();
 
     // Merge the params into the memory atomically: `update_with` re-reads the
     // memory inside the per-project write lock, so two concurrent updates
@@ -96,6 +117,36 @@ pub async fn update_memory(
             update.visibility = params.visibility;
             update.status = params.status;
             update.supersedes = params.supersedes;
+            update.epistemic = params.epistemic;
+            update.valid_from = params.valid_from;
+            update.clear_invalidated = params.clear_invalidated;
+
+            // Validity edits: merge the provided fields into the existing
+            // condition (or a fresh default), then let `apply_to`'s
+            // empty-Validity normalization decide whether anything persists.
+            // `clear_validity` wins over piecemeal edits in the same call.
+            if params.clear_validity {
+                update.valid_while = Some(Validity::default()); // all-empty ⇒ cleared
+            } else if params.premise.is_some()
+                || params.invalidated_by.is_some()
+                || params.origin_task.is_some()
+                || params.generality.is_some()
+            {
+                let mut validity = memory.valid_while.clone().unwrap_or_default();
+                if let Some(premise) = params.premise {
+                    validity.premise = Some(premise);
+                }
+                if let Some(invalidated_by) = params.invalidated_by {
+                    validity.invalidated_by = invalidated_by;
+                }
+                if let Some(origin_task) = params.origin_task {
+                    validity.origin_task = Some(origin_task);
+                }
+                if let Some(generality) = params.generality {
+                    validity.generality = generality;
+                }
+                update.valid_while = Some(validity);
+            }
 
             // Handle tags: full replacement first if provided
             if let Some(tags) = params.tags {
@@ -157,6 +208,13 @@ pub async fn update_memory(
             Ok(())
         })
         .await?;
+
+    // Supersession via update closes windows exactly like create (§2.4
+    // writer 1). Ids already invalidated (e.g. listed on a previous update)
+    // are skipped inside the helper, so re-sending the same list is a no-op.
+    if let Some(ref supersedes) = supersedes_for_close {
+        super::close_superseded_windows(store, supersedes, &saved.id).await;
+    }
 
     // Re-embed the updated memory if an engine with embeddings is available.
     //
@@ -225,6 +283,14 @@ mod tests {
             visibility: None,
             status: None,
             supersedes: None,
+            epistemic: None,
+            premise: None,
+            invalidated_by: None,
+            origin_task: None,
+            generality: None,
+            valid_from: None,
+            clear_validity: false,
+            clear_invalidated: false,
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,
@@ -580,5 +646,118 @@ mod tests {
         assert!(memory.decay.is_some());
         let decay = memory.decay.unwrap();
         assert_eq!(decay.strategy, DecayStrategy::None);
+    }
+}
+
+#[cfg(test)]
+mod epistemic_update_tests {
+    use super::*;
+    use crate::storage::{InMemoryRegistry, MemoryStore};
+    use crate::types::{Epistemic, Generality, Memory, MemoryType, Provenance};
+    use tempfile::TempDir;
+
+    async fn setup() -> (TempDir, MemoryStore, String) {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let m = Memory::new(MemoryType::Decision, "S", "C", Provenance::human());
+        let id = store.create(&m).await.unwrap();
+        (tmp, store, id)
+    }
+
+    fn base() -> UpdateParams {
+        UpdateParams {
+            type_: None,
+            content: None,
+            summary: None,
+            title: None,
+            physical: None,
+            logical: None,
+            tags: None,
+            tags_add: None,
+            tags_remove: None,
+            criticality: None,
+            confidence: None,
+            details: None,
+            visibility: None,
+            status: None,
+            supersedes: None,
+            epistemic: None,
+            premise: None,
+            invalidated_by: None,
+            origin_task: None,
+            generality: None,
+            valid_from: None,
+            clear_validity: false,
+            clear_invalidated: false,
+            decay_strategy: None,
+            decay_half_life: None,
+            decay_ttl: None,
+            decay_floor: None,
+            embed_async: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn update_merges_validity_fields() {
+        let (_t, store, id) = setup().await;
+
+        let mut p = base();
+        p.premise = Some("premise A".into());
+        update_memory(&store, &id, p, None).await.unwrap();
+
+        // Second edit adds a field without erasing the first.
+        let mut p = base();
+        p.origin_task = Some("task-x".into());
+        p.generality = Some(Generality::Task);
+        update_memory(&store, &id, p, None).await.unwrap();
+
+        let m = store.get(&id).await.unwrap();
+        let v = m.valid_while.unwrap();
+        assert_eq!(v.premise.as_deref(), Some("premise A"));
+        assert_eq!(v.origin_task.as_deref(), Some("task-x"));
+        assert_eq!(v.generality, Generality::Task);
+
+        // clear_validity wipes the whole condition.
+        let mut p = base();
+        p.clear_validity = true;
+        update_memory(&store, &id, p, None).await.unwrap();
+        assert_eq!(store.get(&id).await.unwrap().valid_while, None);
+    }
+
+    #[tokio::test]
+    async fn update_reclassifies_epistemic() {
+        let (_t, store, id) = setup().await;
+        let mut p = base();
+        p.epistemic = Some(Epistemic::Observation);
+        update_memory(&store, &id, p, None).await.unwrap();
+        assert_eq!(
+            store.get(&id).await.unwrap().epistemic,
+            Epistemic::Observation
+        );
+    }
+
+    #[tokio::test]
+    async fn update_supersedes_closes_windows_and_reopen_clears() {
+        let (_t, store, id) = setup().await;
+        let old = Memory::new(MemoryType::Decision, "Old", "C", Provenance::human());
+        let old_id = store.create(&old).await.unwrap();
+
+        let mut p = base();
+        p.supersedes = Some(vec![old_id.clone()]);
+        update_memory(&store, &id, p, None).await.unwrap();
+
+        let old_mem = store.get(&old_id).await.unwrap();
+        assert!(old_mem.invalidated_at.is_some());
+        assert_eq!(old_mem.superseded_by.as_deref(), Some(id.as_str()));
+
+        // Reopening (§2.4): clear_invalidated restores the closed window.
+        let mut p = base();
+        p.clear_invalidated = true;
+        update_memory(&store, &old_id, p, None).await.unwrap();
+        let old_mem = store.get(&old_id).await.unwrap();
+        assert_eq!(old_mem.invalidated_at, None);
+        assert_eq!(old_mem.superseded_by, None);
     }
 }

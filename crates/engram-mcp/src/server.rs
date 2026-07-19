@@ -1418,6 +1418,14 @@ impl EngramDbServer {
                 visibility,
                 provenance: Provenance::agent("mcp"),
                 supersedes: input.supersedes.unwrap_or_default(),
+                // The epistemic/validity input fields land on CreateInput in
+                // I5a; until then MCP creates use the type-derived defaults.
+                epistemic: None,
+                premise: None,
+                invalidated_by: vec![],
+                origin_task: None,
+                generality: None,
+                valid_from: None,
                 decay_strategy: input.decay_strategy,
                 decay_half_life: input.decay_half_life,
                 decay_ttl: input.decay_ttl,
@@ -1629,6 +1637,15 @@ impl EngramDbServer {
                 title: input.title,
                 status,
                 supersedes: input.supersedes,
+                // Epistemic/validity update fields land on UpdateInput in I5a.
+                epistemic: None,
+                premise: None,
+                invalidated_by: None,
+                origin_task: None,
+                generality: None,
+                valid_from: None,
+                clear_validity: false,
+                clear_invalidated: false,
                 decay_strategy: input.decay_strategy,
                 decay_half_life: input.decay_half_life,
                 decay_ttl: input.decay_ttl,
@@ -1785,6 +1802,7 @@ impl EngramDbServer {
                 action,
                 updated_content: input.updated_content,
                 updated_summary: input.updated_summary,
+                superseded_by: None,
             },
         )
         .await
