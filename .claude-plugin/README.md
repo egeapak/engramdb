@@ -40,9 +40,9 @@ engramdb --version
 
 ### MCP Server
 
-A full MCP server (`engramdb serve`) starts automatically, providing 19 tools for memory and project management:
+A full MCP server (`engramdb serve`) starts automatically, providing 22 tools for memory and project management:
 
-`query`, `create`, `get`, `list`, `update`, `delete`, `challenge`, `review`, `resolve`, `stats`, `doctor`, `gc`, `reindex`, `compress_candidates`, `compress_apply`, `projects_list`, `projects_info`, `projects_link`, `projects_unlink`
+`query`, `create`, `get`, `list`, `update`, `delete`, `challenge`, `review`, `resolve`, `verify`, `task_current`, `task_complete`, `stats`, `doctor`, `gc`, `reindex`, `compress_candidates`, `compress_apply`, `projects_list`, `projects_info`, `projects_link`, `projects_unlink`
 
 ### Shared embedding daemon
 
@@ -61,8 +61,12 @@ and it can be disabled with `enabled = false` under `[daemon]` in
 
 ### Hooks
 
-- **SessionStart** — injects high-criticality memories (hazards, active decisions) into the conversation when a session begins
+- **SessionStart** — injects high-criticality memories (hazards, active decisions) into the conversation when a session begins, grouped by epistemic class
 - **PreToolUse (Read/Write/Edit)** — surfaces relevant memories as context when the agent touches files
+- **UserPromptSubmit** — surfaces prompt-relevant memories, inferring your situation (debugging vs. design) to reweight what appears
+- **PostToolUse (Write/Edit/MultiEdit)** — warns when an edit touches a path some memory declared as its invalidation trigger
+- **SessionEnd** — housekeeping: clears the session's task mapping (and optionally demotes task-scoped memories)
+- **PreCompact** — reminds the agent to store durable discoveries before context compaction
 
 ### Permissions
 

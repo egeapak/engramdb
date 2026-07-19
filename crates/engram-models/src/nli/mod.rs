@@ -8,7 +8,10 @@ pub mod challenge;
 #[cfg(feature = "onnxruntime")]
 pub mod onnx;
 
-pub use challenge::{challenge_for_contradictions, challenge_memory, ChallengeResult};
+pub use challenge::{
+    challenge_for_contradictions, challenge_memory, route_contradiction, ChallengeResult,
+    ConflictAction, NewMemoryMeta,
+};
 #[cfg(feature = "onnxruntime")]
 pub use onnx::{
     NliModelSpec, OnnxNliProvider, DEFAULT_NLI_MODEL, NLI_DEBERTA_XSMALL, NLI_DEBERTA_XSMALL_Q,

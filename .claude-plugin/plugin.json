@@ -1,11 +1,15 @@
 {
   "name": "engram",
-  "version": "0.8.0",
-  "description": "Project-scoped persistent memory store for coding agents. Stores decisions, hazards, conventions, and context about the codebase. Query memories (query) before answering project questions or researching workflows — not only before modifying files. Store after significant discoveries. All tools accept an optional `project` parameter (absolute path or 16-char project ID) for cross-project memory access.",
+  "version": "0.9.0",
+  "description": "Project-scoped persistent memory store for coding agents. Stores decisions, hazards, conventions, and context about the codebase. Memories carry an epistemic class — fact, observation, or decision — that shapes when they surface. Query memories (query) before answering project questions or researching workflows \u2014 not only before modifying files. Store after significant discoveries. All tools accept an optional `project` parameter (absolute path or 16-char project ID) for cross-project memory access.",
   "mcpServers": {
     "memory": {
       "command": "engramdb",
-      "args": ["serve", "--dir", "."],
+      "args": [
+        "serve",
+        "--dir",
+        "."
+      ],
       "env": {}
     }
   },
@@ -27,6 +31,47 @@
           {
             "type": "command",
             "command": "engramdb hook session-start --dir ."
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "engramdb hook user-prompt-submit --dir ."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "engramdb hook post-tool-use --dir ."
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "engramdb hook session-end --dir ."
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "engramdb hook pre-compact --dir ."
           }
         ]
       }

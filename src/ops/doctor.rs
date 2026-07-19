@@ -3403,3 +3403,582 @@ mod tests {
         assert!(checks.iter().any(|c| c.name == "Title model"));
     }
 }
+
+// ===========================================================================
+// Epistemic checks (§10.1–§10.3)
+// ===========================================================================
+
+/// Which epistemic check produced a finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EpistemicFindingKind {
+    /// §10.1 — files matching `valid_while.invalidated_by` changed since the
+    /// memory was last verified. `--fix` flips to `NeedsReview`.
+    InvalidatedPath,
+    /// §10.2 — an observation unverified for longer than
+    /// `[epistemic] observation_review_days`. Never flips status (age alone
+    /// is not evidence of wrongness; decay already handles ranking).
+    StaleObservation,
+    /// §10.3 — a memory this one was derived from is missing, challenged, or
+    /// under review (one level only, TMS-lite). `--fix` flips to
+    /// `NeedsReview`.
+    DerivedFromInvalid,
+}
+
+/// One finding from the epistemic doctor pass.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EpistemicFinding {
+    pub id: String,
+    pub summary: String,
+    pub kind: EpistemicFindingKind,
+    /// Human-readable explanation (what changed / how stale / which source).
+    pub detail: String,
+    /// Whether `--fix` flipped this memory to `NeedsReview` in this run.
+    pub fixed: bool,
+}
+
+/// Enrichment gaps: live memories that carry a (type-derived or explicit)
+/// epistemic class but none of the metadata that makes the class actionable.
+/// Pre-epistemic stores start with EVERY memory in this state — the class
+/// itself is materialized from the frozen type mapping, but premises, watch
+/// globs, and verification stamps only accrue as memories are touched.
+/// Report-only: gaps are an enrichment opportunity, never a defect.
+#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
+pub struct EnrichmentGaps {
+    /// Decision-class memories with no recorded premise ("because C").
+    pub decisions_without_premise: usize,
+    /// Observation-class memories with no `invalidated_by` watch globs
+    /// (the §10.1 doctor check can never fire for these).
+    pub observations_without_watch: usize,
+    /// Live memories examined.
+    pub total_live: usize,
+}
+
+impl EnrichmentGaps {
+    /// Count gaps over a set of live memories (shared by the doctor pass and
+    /// the session-end prompt).
+    pub fn count<'a, I: IntoIterator<Item = &'a crate::types::Memory>>(live: I) -> Self {
+        use crate::types::Epistemic;
+        let mut gaps = Self::default();
+        for m in live {
+            gaps.total_live += 1;
+            match m.epistemic {
+                Epistemic::Decision => {
+                    if m.valid_while
+                        .as_ref()
+                        .and_then(|v| v.premise.as_ref())
+                        .is_none()
+                    {
+                        gaps.decisions_without_premise += 1;
+                    }
+                }
+                Epistemic::Observation => {
+                    if m.valid_while
+                        .as_ref()
+                        .is_none_or(|v| v.invalidated_by.is_empty())
+                    {
+                        gaps.observations_without_watch += 1;
+                    }
+                }
+                Epistemic::Fact => {}
+            }
+        }
+        gaps
+    }
+
+    pub fn any(&self) -> bool {
+        self.decisions_without_premise > 0 || self.observations_without_watch > 0
+    }
+}
+
+/// Result of the epistemic doctor pass.
+#[must_use]
+#[derive(Debug, serde::Serialize)]
+pub struct EpistemicDoctorResult {
+    pub findings: Vec<EpistemicFinding>,
+    /// Memories examined (live memories with the relevant fields).
+    pub checked: usize,
+    /// Enrichment gaps across the live set (report-only, see
+    /// [`EnrichmentGaps`]).
+    pub gaps: EnrichmentGaps,
+}
+
+/// Run the three epistemic checks (§10.1–§10.3) over every live memory.
+///
+/// Report-only by default (E4); with `fix = true` the §10.1/§10.3 findings
+/// flip the memory to `NeedsReview` and record a challenge carrying the
+/// machine-readable origin tag that `ops::verify` clears
+/// ([`super::verify::DOCTOR_ORIGIN_INVALIDATED_PATH`] /
+/// [`super::verify::DOCTOR_ORIGIN_DERIVED_FROM`]). Already-flagged memories
+/// (same tag pending) are reported but not re-flipped, so repeated runs are
+/// idempotent. Invalidated memories are skipped entirely — their windows are
+/// closed; there is nothing left to review.
+pub async fn doctor_epistemic(
+    store: &MemoryStore,
+    config: &crate::types::EngramConfig,
+    fix: bool,
+) -> Result<EpistemicDoctorResult> {
+    use super::verify::{DOCTOR_ORIGIN_DERIVED_FROM, DOCTOR_ORIGIN_INVALIDATED_PATH};
+    use crate::types::{Epistemic, Status};
+    use chrono::{DateTime, Utc};
+
+    let now = Utc::now();
+    let ids = store.list_ids().await?;
+    let loaded = store.get_batch(&ids).await?;
+    let live: Vec<&crate::types::Memory> = loaded
+        .iter()
+        .map(|(_, m)| m)
+        .filter(|m| !m.is_invalidated_at(now))
+        .collect();
+
+    // Status of every memory by id, for the derived-from check (§10.3) —
+    // includes invalidated ones (an invalidated source also invalidates the
+    // derivation, and a missing id is a finding too).
+    let status_by_id: std::collections::HashMap<&str, (Status, bool)> = loaded
+        .iter()
+        .map(|(id, m)| (id.as_str(), (m.status, m.is_invalidated_at(now))))
+        .collect();
+
+    // §10.1 needs file mtimes. Walk the project tree ONCE, collecting
+    // repo-relative paths + mtimes; each memory's globs are then matched in
+    // memory. Skips dotted dirs (.git, .engramdb) and build output.
+    let needs_walk = live.iter().any(|m| {
+        m.valid_while
+            .as_ref()
+            .is_some_and(|v| !v.invalidated_by.is_empty())
+    });
+    let file_mtimes: Vec<(String, DateTime<Utc>)> = if needs_walk {
+        collect_file_mtimes(&store.project_dir)
+    } else {
+        Vec::new()
+    };
+
+    let review_days = config.epistemic.observation_review_days;
+    let mut findings = Vec::new();
+
+    for memory in &live {
+        let anchor = memory.verified_at.unwrap_or(memory.created_at);
+
+        // §10.1 invalidated-path.
+        if let Some(validity) = &memory.valid_while {
+            if !validity.invalidated_by.is_empty() {
+                let newest_match = file_mtimes
+                    .iter()
+                    .filter(|(path, _)| {
+                        crate::scope::physical::matches(&validity.invalidated_by, path)
+                    })
+                    .map(|(_, mtime)| *mtime)
+                    .max();
+                if let Some(newest) = newest_match {
+                    if newest > anchor {
+                        let fixed = fix
+                            && flip_to_needs_review(
+                                store,
+                                &memory.id,
+                                DOCTOR_ORIGIN_INVALIDATED_PATH,
+                                "invalidation paths changed since last verification",
+                            )
+                            .await;
+                        findings.push(EpistemicFinding {
+                            id: memory.id.clone(),
+                            summary: memory.summary.clone(),
+                            kind: EpistemicFindingKind::InvalidatedPath,
+                            detail: format!(
+                                "watched paths modified {} (last verified {})",
+                                newest.format("%Y-%m-%d"),
+                                anchor.format("%Y-%m-%d")
+                            ),
+                            fixed,
+                        });
+                    }
+                }
+            }
+        }
+
+        // §10.2 stale-observation (report-only, never flips).
+        if memory.epistemic == Epistemic::Observation
+            && review_days > 0
+            && now - anchor > chrono::Duration::days(review_days as i64)
+        {
+            findings.push(EpistemicFinding {
+                id: memory.id.clone(),
+                summary: memory.summary.clone(),
+                kind: EpistemicFindingKind::StaleObservation,
+                detail: format!(
+                    "observation unverified for {} days (review window {} days) — re-verify or delete",
+                    (now - anchor).num_days(),
+                    review_days
+                ),
+                fixed: false,
+            });
+        }
+
+        // §10.3 derived-from cascade (one level, no transitive propagation).
+        if let Some(validity) = &memory.valid_while {
+            for source_id in &validity.derived_from {
+                let problem = match status_by_id.get(source_id.as_str()) {
+                    None => Some("missing".to_string()),
+                    Some((_, true)) => Some("invalidated".to_string()),
+                    Some((Status::Challenged, _)) => Some("challenged".to_string()),
+                    Some((Status::NeedsReview, _)) => Some("under review".to_string()),
+                    Some((Status::Active, _)) => None,
+                };
+                if let Some(problem) = problem {
+                    let fixed = fix
+                        && flip_to_needs_review(
+                            store,
+                            &memory.id,
+                            DOCTOR_ORIGIN_DERIVED_FROM,
+                            "a source this memory was derived from is invalid",
+                        )
+                        .await;
+                    findings.push(EpistemicFinding {
+                        id: memory.id.clone(),
+                        summary: memory.summary.clone(),
+                        kind: EpistemicFindingKind::DerivedFromInvalid,
+                        detail: format!("derived from {source_id} which is {problem}"),
+                        fixed,
+                    });
+                    break; // one finding per memory for this check
+                }
+            }
+        }
+    }
+
+    Ok(EpistemicDoctorResult {
+        checked: live.len(),
+        gaps: EnrichmentGaps::count(live.iter().copied()),
+        findings,
+    })
+}
+
+/// Standalone enrichment-gap count (one batched load) for surfaces that
+/// don't run the full doctor pass — the session-end prompt uses this.
+pub async fn enrichment_gaps(store: &MemoryStore) -> Result<EnrichmentGaps> {
+    let now = chrono::Utc::now();
+    let ids = store.list_ids().await?;
+    let loaded = store.get_batch(&ids).await?;
+    Ok(EnrichmentGaps::count(
+        loaded
+            .iter()
+            .map(|(_, m)| m)
+            .filter(|m| !m.is_invalidated_at(now)),
+    ))
+}
+
+/// Flip a memory to `NeedsReview` with a tagged doctor challenge (E4).
+/// Idempotent: if a challenge with the same origin tag is already pending,
+/// nothing is written. Returns whether a flip was actually performed.
+async fn flip_to_needs_review(
+    store: &MemoryStore,
+    id: &str,
+    origin_tag: &str,
+    reason: &str,
+) -> bool {
+    // Pre-check outside the write path: an already-flagged memory must not be
+    // rewritten (update_with always bumps updated_at) nor re-reported as
+    // freshly fixed on repeated `doctor --fix` runs.
+    match store.get(id).await {
+        Ok(existing)
+            if existing
+                .challenges
+                .iter()
+                .any(|c| c.evidence.starts_with(origin_tag)) =>
+        {
+            return false;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(memory_id = %id, "doctor --fix pre-check failed: {e}");
+            return false;
+        }
+    }
+    let tag = origin_tag.to_string();
+    let evidence = format!("{origin_tag} {reason}");
+    let result = store
+        .update_with(id, move |memory| {
+            if memory
+                .challenges
+                .iter()
+                .any(|c| c.evidence.starts_with(&tag))
+            {
+                return Ok(()); // already flagged; keep idempotent
+            }
+            memory
+                .challenges
+                .push(crate::types::Challenge::new(evidence.clone()));
+            memory.status = crate::types::Status::NeedsReview;
+            Ok(())
+        })
+        .await;
+    match result {
+        Ok(saved) => saved.status == crate::types::Status::NeedsReview,
+        Err(e) => {
+            tracing::warn!(memory_id = %id, "doctor --fix flip failed: {e}");
+            false
+        }
+    }
+}
+
+/// Walk the project tree collecting `(repo-relative path, mtime)` pairs.
+/// Skips dotted directories (`.git`, `.engramdb`, …) and `target`.
+fn collect_file_mtimes(project_dir: &Path) -> Vec<(String, chrono::DateTime<chrono::Utc>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![project_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if path.is_dir() {
+                if name.starts_with('.') || name == "target" || name == "node_modules" {
+                    continue;
+                }
+                stack.push(path);
+            } else if let Ok(meta) = entry.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if let Ok(rel) = path.strip_prefix(project_dir) {
+                        out.push((
+                            rel.to_string_lossy().replace('\\', "/"),
+                            chrono::DateTime::<chrono::Utc>::from(modified),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod epistemic_doctor_tests {
+    use super::*;
+    use crate::storage::InMemoryRegistry;
+    use crate::types::{EngramConfig, Epistemic, Memory, MemoryType, Provenance, Status, Validity};
+    use chrono::{Duration, Utc};
+    use tempfile::TempDir;
+
+    async fn setup() -> (TempDir, MemoryStore) {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        (tmp, store)
+    }
+
+    fn memory(id: &str, type_: MemoryType) -> Memory {
+        let mut m = Memory::new(type_, id, "content", Provenance::human());
+        m.id = id.to_string();
+        m
+    }
+
+    /// Enrichment gaps count legacy-shaped memories (class present, metadata
+    /// absent) and skip enriched + invalidated ones. Every pre-epistemic
+    /// store starts with all-diagonal, all-unenriched memories — this is the
+    /// signal doctor and the session-end prompt surface.
+    #[tokio::test]
+    async fn enrichment_gaps_count_legacy_shaped_memories() {
+        let (_t, store) = setup().await;
+
+        // Legacy-shaped decision: class decision (diagonal), no premise.
+        store
+            .create(&memory("gap-dec", MemoryType::Decision))
+            .await
+            .unwrap();
+        // Enriched decision: premise recorded -> no gap.
+        let mut enriched = memory("ok-dec", MemoryType::Decision);
+        enriched.valid_while = Some(Validity {
+            premise: Some("because C".into()),
+            ..Default::default()
+        });
+        store.create(&enriched).await.unwrap();
+        // Legacy-shaped observation: class observation (debug diagonal), no watch globs.
+        store
+            .create(&memory("gap-obs", MemoryType::Debug))
+            .await
+            .unwrap();
+        // Watched observation -> no gap.
+        let mut watched = memory("ok-obs", MemoryType::Debug);
+        watched.valid_while = Some(Validity {
+            invalidated_by: vec!["src/**".into()],
+            ..Default::default()
+        });
+        store.create(&watched).await.unwrap();
+        // Fact class never gaps; invalidated memories are excluded entirely.
+        store
+            .create(&memory("fact", MemoryType::Convention))
+            .await
+            .unwrap();
+        let mut dead = memory("dead-dec", MemoryType::Decision);
+        dead.invalidated_at = Some(Utc::now() - Duration::days(1));
+        store.create(&dead).await.unwrap();
+
+        let gaps = enrichment_gaps(&store).await.unwrap();
+        assert_eq!(gaps.decisions_without_premise, 1, "{gaps:?}");
+        assert_eq!(gaps.observations_without_watch, 1, "{gaps:?}");
+        assert_eq!(gaps.total_live, 5, "{gaps:?}");
+        assert!(gaps.any());
+
+        // The full doctor pass carries the same counts.
+        let result = doctor_epistemic(&store, &EngramConfig::default(), false)
+            .await
+            .unwrap();
+        assert_eq!(result.gaps.decisions_without_premise, 1);
+        assert_eq!(result.gaps.observations_without_watch, 1);
+    }
+
+    #[tokio::test]
+    async fn invalidated_path_check_flags_changed_files() {
+        let (tmp, store) = setup().await;
+        // A watched file, modified NOW (i.e. after verified_at below).
+        std::fs::write(tmp.path().join("watched.txt"), "v2").unwrap();
+
+        let mut m = memory("doc-path", MemoryType::Hazard);
+        m.valid_while = Some(Validity {
+            invalidated_by: vec!["watched.txt".into()],
+            ..Default::default()
+        });
+        m.verified_at = Some(Utc::now() - Duration::days(30));
+        m.created_at = Utc::now() - Duration::days(60);
+        store.create(&m).await.unwrap();
+
+        // Report-only run: finding, no status change.
+        let config = EngramConfig::default();
+        let result = doctor_epistemic(&store, &config, false).await.unwrap();
+        assert_eq!(result.findings.len(), 1);
+        assert_eq!(
+            result.findings[0].kind,
+            EpistemicFindingKind::InvalidatedPath
+        );
+        assert!(!result.findings[0].fixed);
+        assert_eq!(store.get("doc-path").await.unwrap().status, Status::Active);
+
+        // --fix flips to NeedsReview with the tagged challenge; a second
+        // fix run is idempotent.
+        let result = doctor_epistemic(&store, &config, true).await.unwrap();
+        assert!(result.findings[0].fixed);
+        let m = store.get("doc-path").await.unwrap();
+        assert_eq!(m.status, Status::NeedsReview);
+        assert_eq!(m.challenges.len(), 1);
+        assert!(super::super::verify::is_doctor_review_finding(
+            &m.challenges[0].evidence
+        ));
+        let _ = doctor_epistemic(&store, &config, true).await.unwrap();
+        assert_eq!(store.get("doc-path").await.unwrap().challenges.len(), 1);
+
+        // ops::verify clears the doctor review.
+        let vr = super::super::verify::verify_memory(&store, "doc-path")
+            .await
+            .unwrap();
+        assert!(vr.review_cleared);
+        assert_eq!(store.get("doc-path").await.unwrap().status, Status::Active);
+        // Verified now ⇒ the finding disappears on the next run.
+        let result = doctor_epistemic(&store, &config, false).await.unwrap();
+        assert!(result.findings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_observation_reported_never_flipped() {
+        let (_tmp, store) = setup().await;
+        let mut m = memory("doc-obs", MemoryType::Debug); // Observation class
+        m.epistemic = Epistemic::Observation;
+        m.created_at = Utc::now() - Duration::days(120); // > 90d default
+        store.create(&m).await.unwrap();
+
+        let config = EngramConfig::default();
+        let result = doctor_epistemic(&store, &config, true).await.unwrap();
+        assert_eq!(result.findings.len(), 1);
+        assert_eq!(
+            result.findings[0].kind,
+            EpistemicFindingKind::StaleObservation
+        );
+        assert!(!result.findings[0].fixed, "stale-observation never flips");
+        assert_eq!(store.get("doc-obs").await.unwrap().status, Status::Active);
+
+        // A recent verification silences it.
+        store
+            .update_with("doc-obs", |m| {
+                m.verified_at = Some(Utc::now());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let result = doctor_epistemic(&store, &config, false).await.unwrap();
+        assert!(result.findings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn derived_from_cascade_flags_bad_sources() {
+        let (_tmp, store) = setup().await;
+
+        let mut source = memory("doc-src", MemoryType::Debug);
+        source.status = Status::Challenged;
+        store.create(&source).await.unwrap();
+
+        let mut derived = memory("doc-derived", MemoryType::Context);
+        derived.valid_while = Some(Validity {
+            derived_from: vec!["doc-src".into()],
+            ..Default::default()
+        });
+        store.create(&derived).await.unwrap();
+
+        // A memory derived from a MISSING id is also flagged.
+        let mut orphan = memory("doc-orphan", MemoryType::Context);
+        orphan.valid_while = Some(Validity {
+            derived_from: vec!["never-existed".into()],
+            ..Default::default()
+        });
+        store.create(&orphan).await.unwrap();
+
+        // A memory derived from a healthy source is NOT flagged.
+        let healthy_src = memory("doc-good-src", MemoryType::Debug);
+        store.create(&healthy_src).await.unwrap();
+        let mut fine = memory("doc-fine", MemoryType::Context);
+        fine.valid_while = Some(Validity {
+            derived_from: vec!["doc-good-src".into()],
+            ..Default::default()
+        });
+        store.create(&fine).await.unwrap();
+
+        let config = EngramConfig::default();
+        let result = doctor_epistemic(&store, &config, true).await.unwrap();
+        let flagged: Vec<&str> = result
+            .findings
+            .iter()
+            .filter(|f| f.kind == EpistemicFindingKind::DerivedFromInvalid)
+            .map(|f| f.id.as_str())
+            .collect();
+        assert!(flagged.contains(&"doc-derived"));
+        assert!(flagged.contains(&"doc-orphan"));
+        assert!(!flagged.contains(&"doc-fine"));
+
+        assert_eq!(
+            store.get("doc-derived").await.unwrap().status,
+            Status::NeedsReview
+        );
+        // One level only: nothing derives from doc-derived, and doc-fine
+        // stays Active even though the STORE contains challenged memories.
+        assert_eq!(store.get("doc-fine").await.unwrap().status, Status::Active);
+    }
+
+    #[tokio::test]
+    async fn invalidated_memories_are_skipped() {
+        let (_tmp, store) = setup().await;
+        let mut m = memory("doc-dead", MemoryType::Debug);
+        m.epistemic = Epistemic::Observation;
+        m.created_at = Utc::now() - Duration::days(365);
+        m.invalidated_at = Some(Utc::now() - Duration::days(1));
+        store.create(&m).await.unwrap();
+
+        let config = EngramConfig::default();
+        let result = doctor_epistemic(&store, &config, false).await.unwrap();
+        assert!(
+            result.findings.is_empty(),
+            "closed windows have nothing to review"
+        );
+    }
+}

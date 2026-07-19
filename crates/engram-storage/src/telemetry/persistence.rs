@@ -152,12 +152,80 @@ fn events_schema() -> Arc<Schema> {
         Field::new("hit", DataType::Boolean, true),
         Field::new("retrieval_quality", DataType::Utf8, true),
         Field::new("session_id", DataType::Utf8, true),
+        // Added for §11.3 promotion: JSON-encoded Vec<String> of memory ids
+        // on `retrieval` rows; null elsewhere. Nullable so pre-existing rows
+        // rebuilt into the new table stay valid.
+        Field::new("memory_ids", DataType::Utf8, true),
     ]))
 }
 
 async fn ensure_table(conn: &Connection) -> Result<Table> {
     match conn.open_table(TABLE_NAME).execute().await {
-        Ok(t) => Ok(t),
+        Ok(t) => {
+            // One-shot rebuild for tables created before the `memory_ids`
+            // column existed (`stats_events` is deliberately outside the
+            // manifest schema-version bump, which governs the memories
+            // table only). Recent rows are preserved through the tolerant
+            // reader; append then proceeds against the new schema.
+            let has_memory_ids = t
+                .schema()
+                .await
+                .map(|s| s.column_with_name("memory_ids").is_some())
+                .unwrap_or(true);
+            if has_memory_ids {
+                return Ok(t);
+            }
+            tracing::info!("stats: rebuilding stats_events with the memory_ids column");
+            let mut preserved = Vec::new();
+            // ORDER BY ts DESC before the cap: an unordered Lance scan returns
+            // insertion order (oldest first), which would preserve the oldest
+            // rows and silently discard the recent history the rebuild exists
+            // to keep.
+            let mut stream = t
+                .query()
+                .order_by(Some(vec![ColumnOrdering::desc_nulls_last(
+                    "ts".to_string(),
+                )]))
+                .limit(STARTUP_REPLAY_CAP)
+                .execute()
+                .await
+                .context("reading stats_events for rebuild")?;
+            while let Some(batch_result) = stream.next().await {
+                let batch = batch_result.context("reading stats_events batch")?;
+                preserved.extend(batch_to_events(&batch)?);
+            }
+            drop(stream);
+            // Restore ascending order for the re-append so the rebuilt table
+            // keeps chronological insertion order.
+            preserved.reverse();
+            conn.drop_table(TABLE_NAME, &[])
+                .await
+                .context("dropping pre-memory_ids stats_events table")?;
+            let table = conn
+                .create_empty_table(TABLE_NAME, events_schema())
+                .execute()
+                .await
+                .context("recreating stats_events table")?;
+            if let Err(e) = table
+                .create_index(&["ts"], lancedb::index::Index::BTree(Default::default()))
+                .execute()
+                .await
+            {
+                tracing::warn!("stats: failed to create BTree index on ts: {e}");
+            }
+            if !preserved.is_empty() {
+                let batch = events_to_batch(&preserved)?;
+                let schema = batch.schema();
+                let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+                let reader: Box<dyn RecordBatchReader + Send> = Box::new(batches);
+                table
+                    .add(reader)
+                    .execute()
+                    .await
+                    .context("re-appending preserved stats_events rows")?;
+            }
+            Ok(table)
+        }
         Err(_) => {
             let table = conn
                 .create_empty_table(TABLE_NAME, events_schema())
@@ -239,6 +307,7 @@ fn events_to_batch(events: &[EventRow]) -> Result<RecordBatch> {
     let mut hit: Vec<Option<bool>> = Vec::with_capacity(events.len());
     let mut retrieval_quality: Vec<Option<String>> = Vec::with_capacity(events.len());
     let mut session_id: Vec<Option<String>> = Vec::with_capacity(events.len());
+    let mut memory_ids: Vec<Option<String>> = Vec::with_capacity(events.len());
 
     for ev in events {
         ts.push(ev.ts.timestamp_micros());
@@ -250,6 +319,7 @@ fn events_to_batch(events: &[EventRow]) -> Result<RecordBatch> {
         hit.push(ev.hit);
         retrieval_quality.push(ev.retrieval_quality.clone());
         session_id.push(ev.session_id.clone());
+        memory_ids.push(ev.memory_ids.clone());
     }
 
     let ts_array = TimestampMicrosecondArray::from(ts).with_timezone(Arc::<str>::from("UTC"));
@@ -263,6 +333,7 @@ fn events_to_batch(events: &[EventRow]) -> Result<RecordBatch> {
         Arc::new(BooleanArray::from(hit)),
         Arc::new(StringArray::from(retrieval_quality)),
         Arc::new(StringArray::from(session_id)),
+        Arc::new(StringArray::from(memory_ids)),
     ];
 
     RecordBatch::try_new(schema, arrays).context("building stats_events RecordBatch")
@@ -375,6 +446,12 @@ fn batch_to_events(batch: &RecordBatch) -> Result<Vec<EventRow>> {
         .downcast_ref::<StringArray>()
         .context("session_id column is not Utf8")?;
 
+    // Tolerant read: rows written before the column existed have no
+    // `memory_ids` — treat as null rather than failing the whole batch.
+    let memory_ids = batch
+        .column_by_name("memory_ids")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+
     let mut rows = Vec::with_capacity(batch.num_rows());
     for i in 0..batch.num_rows() {
         let micros = ts.value(i);
@@ -391,6 +468,7 @@ fn batch_to_events(batch: &RecordBatch) -> Result<Vec<EventRow>> {
             hit: nullable_bool(hit, i),
             retrieval_quality: nullable_str(retrieval_quality, i),
             session_id: nullable_str(session_id, i),
+            memory_ids: memory_ids.and_then(|arr| nullable_str(arr, i)),
         });
     }
     Ok(rows)
@@ -659,6 +737,7 @@ mod tests {
             hit: None,
             retrieval_quality: None,
             session_id: Some(sid.to_string()),
+            memory_ids: None,
         }
     }
 

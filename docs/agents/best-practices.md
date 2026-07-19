@@ -74,6 +74,23 @@ Build a consistent vocabulary inside a project. If you've used `database.migrati
 
 Logical scoring is hierarchical: a memory tagged `database` matches a query in `database.connection` (parent bonus). A memory tagged `database.migrations` does not match `database.connection` (siblings — smaller bonus).
 
+## Epistemic hygiene
+
+Field semantics are in [memory-model.md](./memory-model.md#epistemic-classes); this is the judgment.
+
+**State the falsifier when you know it.** For decisions and observations, ask: "what change would make this wrong?" If you can name it, record it:
+
+- `premise` — the condition the memory depends on. ✅ `"while we pin ort rc.12"`, `"while SQLite is the only backend"`. It's surfaced verbatim in results, so a future agent can check it in seconds.
+- `invalidated_by` — paths/globs whose change invalidates the memory. This is **not** `physical` (where the memory applies): a benchmark observation may apply to `src/retrieval/` but be invalidated by `Cargo.lock` changing. Declaring it gets you real-time warnings when the watched path is edited, and `doctor` findings when it drifts.
+
+Facts usually need neither — they're verifiable against the repo directly.
+
+**Scope task-bound memories to the task.** When a memory only matters for the feature you're building (an in-flight plan, a temporary constraint), set `origin_task` plus `generality: "task"`. It stays out of other sessions' hook injections, and `task_complete` demotes it to fast decay instead of letting it linger. Declare `task_current` at the start of a work session and call `task_complete` when the task ships — see [workflows.md](./workflows.md#task-lifecycle--task_current-and-task_complete).
+
+**Prefer `resolve` with `action: "invalidate"` over `delete`** when a memory *was* true but no longer is. Invalidation closes the validity window: the memory drops out of default retrieval but stays queryable via `include_invalidated`, so the history (and the reason it changed) survives. Delete only what was never true or is noise.
+
+**Use `verify` after re-confirming.** When you check a memory against the code and it still holds, call `verify` — it stamps `verified_at` (facts rank fresher from that anchor) and clears a doctor-flagged review. Don't rewrite a correct memory just to "refresh" it.
+
 ## Sizing content
 
 - **`summary`** ≤ 100 chars. Hard limit.

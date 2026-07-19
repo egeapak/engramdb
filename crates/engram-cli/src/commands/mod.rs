@@ -25,7 +25,9 @@ pub mod rollback;
 pub mod serve;
 pub mod setup;
 pub mod stats;
+pub mod task;
 pub mod update;
+pub mod verify;
 
 pub use add::{run_add, AddParams};
 pub use challenge::{run_challenge, ChallengeParams};
@@ -36,7 +38,10 @@ pub use delete::run_delete;
 pub use doctor::run_doctor;
 pub use gc::run_gc;
 pub use get::run_get;
-pub use hook::{run_hook_pre_tool_use, run_hook_session_start};
+pub use hook::{
+    run_hook_post_tool_use, run_hook_pre_compact, run_hook_pre_tool_use, run_hook_session_end,
+    run_hook_session_start, run_hook_user_prompt_submit,
+};
 pub use init::run_init;
 pub use list::run_list;
 pub use migrate::run_migrate;
@@ -48,4 +53,6 @@ pub use rollback::run_rollback;
 pub use serve::run_serve;
 pub use setup::run_setup;
 pub use stats::run_stats;
+pub use task::{run_task_complete, run_task_current};
 pub use update::{run_update, UpdateParams};
+pub use verify::run_verify;

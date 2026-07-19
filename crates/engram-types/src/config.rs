@@ -132,12 +132,15 @@ pub struct ScoringConfig {
     #[serde(default = "ScoringConfig::default_trust_multiplier_floor")]
     pub trust_multiplier_floor: f64,
 
-    /// Flat penalty subtracted from score when memory is challenged (default 0.10).
+    /// Penalty subtracted from score when memory is challenged. Either a
+    /// legacy flat value (`challenge_penalty = 0.10`) applied to every class,
+    /// or per-epistemic-class values (the default:
+    /// `{ fact = 0.15, observation = 0.20, decision = 0.05 }`).
     ///
     /// Applied as `score -= penalty` instead of multiplicative, so the impact
     /// is uniform regardless of trust/scope combination.
     #[serde(default = "ScoringConfig::default_challenge_penalty")]
-    pub challenge_penalty: f64,
+    pub challenge_penalty: ChallengePenalty,
 
     /// Base for exponential depth decay of physical scope scores (default 0.82).
     ///
@@ -150,6 +153,265 @@ pub struct ScoringConfig {
     /// Floor for depth decay — minimum scope score regardless of depth (default 0.3).
     #[serde(default = "ScoringConfig::default_depth_decay_floor")]
     pub depth_decay_floor: f64,
+
+    /// Situation-conditioned epistemic-class weighting (post-multiplier).
+    #[serde(default)]
+    pub situation: SituationConfig,
+}
+
+/// Challenge penalty: legacy flat value or per-epistemic-class values.
+///
+/// Untagged so existing `config.toml` files with `challenge_penalty = 0.10`
+/// keep parsing (as `Flat`, applied to every class). The per-class ordering
+/// rationale: a contradicted observation is cheap to re-measure (suppress
+/// hardest, 0.20); a contradicted fact is probably stale (moderate, 0.15); a
+/// contested decision must remain visible together with its dispute
+/// (mildest, 0.05).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ChallengePenalty {
+    /// One penalty for every epistemic class (legacy shape).
+    Flat(f64),
+    /// Per-class penalties.
+    PerClass {
+        fact: f64,
+        observation: f64,
+        decision: f64,
+    },
+}
+
+impl ChallengePenalty {
+    /// The penalty for a class, clamped to [0,1] on read (config and file
+    /// data are unvalidated at fuzz boundaries; non-finite values read as 0).
+    pub fn penalty_for(&self, epistemic: crate::Epistemic) -> f64 {
+        let raw = match self {
+            ChallengePenalty::Flat(v) => *v,
+            ChallengePenalty::PerClass {
+                fact,
+                observation,
+                decision,
+            } => match epistemic {
+                crate::Epistemic::Fact => *fact,
+                crate::Epistemic::Observation => *observation,
+                crate::Epistemic::Decision => *decision,
+            },
+        };
+        if raw.is_finite() {
+            raw.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Validate every carried value is in [0,1].
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let values = match self {
+            ChallengePenalty::Flat(v) => [*v, 0.0, 0.0],
+            ChallengePenalty::PerClass {
+                fact,
+                observation,
+                decision,
+            } => [*fact, *observation, *decision],
+        };
+        for v in values {
+            if !(0.0..=1.0).contains(&v) {
+                anyhow::bail!("scoring.challenge_penalty values must be in [0.0, 1.0]");
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for ChallengePenalty {
+    fn default() -> Self {
+        ChallengePenalty::PerClass {
+            fact: 0.15,
+            observation: 0.20,
+            decision: 0.05,
+        }
+    }
+}
+
+/// Per-class profile values for one situation. Each value ∈ [0,1] feeds the
+/// floor transform: `multiplier = floor + (1 - floor) * value`.
+///
+/// Deliberately exactly three `f64` class fields and nothing else —
+/// situation profiles are class-conditioned CONSTANTS, never age-conditioned
+/// (decay is the only age-sensitive scoring channel; see the no-double-decay
+/// invariant).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct SituationProfile {
+    #[serde(default = "default_profile_weight")]
+    pub fact: f64,
+    #[serde(default = "default_profile_weight")]
+    pub observation: f64,
+    #[serde(default = "default_profile_weight")]
+    pub decision: f64,
+}
+
+fn default_profile_weight() -> f64 {
+    1.0
+}
+
+impl Default for SituationProfile {
+    fn default() -> Self {
+        Self {
+            fact: 1.0,
+            observation: 1.0,
+            decision: 1.0,
+        }
+    }
+}
+
+impl SituationProfile {
+    /// Profile value for a class, clamped to [0,1]; non-finite ⇒ neutral 1.0
+    /// (config values are unvalidated file data — the fuzzer ignores
+    /// `validate`, and scoring must stay finite).
+    pub fn value_for(&self, epistemic: super::Epistemic) -> f64 {
+        let raw = match epistemic {
+            super::Epistemic::Fact => self.fact,
+            super::Epistemic::Observation => self.observation,
+            super::Epistemic::Decision => self.decision,
+        };
+        if raw.is_finite() {
+            raw.clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
+    }
+
+    fn validate(&self, name: &str) -> Result<(), anyhow::Error> {
+        for (field, v) in [
+            ("fact", self.fact),
+            ("observation", self.observation),
+            ("decision", self.decision),
+        ] {
+            if !(0.0..=1.0).contains(&v) {
+                anyhow::bail!("scoring.situation.{name}.{field} must be in [0,1] (got {v})");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Situation-conditioned scoring: a fourth post-multiplier (after scope and
+/// trust) that reweights epistemic classes by the querying agent's
+/// situation. Neutral (1.0) when a query carries no situation.
+///
+/// `multiplier = floor + (1 - floor) * profile[situation][class]`
+///
+/// The floor is load-bearing: with the default 0.6, a class can be
+/// down-weighted at most 40%, keeping a criticality-0.8 exact-scope memory
+/// above the default relevance threshold at the lowest profile value (same
+/// reasoning as `scope_multiplier_floor` — see the regression history
+/// there).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SituationConfig {
+    /// Multiplier floor (default 0.6). 1.0 disables situation weighting.
+    #[serde(default = "SituationConfig::default_floor")]
+    pub floor: f64,
+
+    /// SessionStart: static facts and project-wide decisions matter most.
+    #[serde(default = "SituationConfig::default_session_start")]
+    pub session_start: SituationProfile,
+
+    /// FileEdit: decisions (and hazard-facts) binding on the file dominate.
+    #[serde(default = "SituationConfig::default_file_edit")]
+    pub file_edit: SituationProfile,
+
+    /// Debugging: observations rank highest.
+    #[serde(default = "SituationConfig::default_debugging")]
+    pub debugging: SituationProfile,
+
+    /// DesignChoice: prior decisions and their rationale dominate.
+    #[serde(default = "SituationConfig::default_design_choice")]
+    pub design_choice: SituationProfile,
+}
+
+impl SituationConfig {
+    fn default_floor() -> f64 {
+        0.6
+    }
+
+    fn default_session_start() -> SituationProfile {
+        SituationProfile {
+            fact: 1.0,
+            observation: 0.5,
+            decision: 0.8,
+        }
+    }
+
+    fn default_file_edit() -> SituationProfile {
+        SituationProfile {
+            fact: 0.7,
+            observation: 0.7,
+            decision: 1.0,
+        }
+    }
+
+    fn default_debugging() -> SituationProfile {
+        SituationProfile {
+            fact: 0.6,
+            observation: 1.0,
+            decision: 0.7,
+        }
+    }
+
+    fn default_design_choice() -> SituationProfile {
+        SituationProfile {
+            fact: 0.8,
+            observation: 0.7,
+            decision: 1.0,
+        }
+    }
+
+    /// Profile for a situation.
+    pub fn profile(&self, situation: super::Situation) -> &SituationProfile {
+        match situation {
+            super::Situation::SessionStart => &self.session_start,
+            super::Situation::FileEdit => &self.file_edit,
+            super::Situation::Debugging => &self.debugging,
+            super::Situation::DesignChoice => &self.design_choice,
+        }
+    }
+
+    /// The effective multiplier for (situation, class), floor-transformed.
+    /// Non-finite floor ⇒ neutral 1.0.
+    pub fn multiplier(&self, situation: super::Situation, epistemic: super::Epistemic) -> f64 {
+        let floor = if self.floor.is_finite() {
+            self.floor.clamp(0.0, 1.0)
+        } else {
+            return 1.0;
+        };
+        floor + (1.0 - floor) * self.profile(situation).value_for(epistemic)
+    }
+
+    /// Validate floor and every profile value ∈ [0,1].
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if !(0.0..=1.0).contains(&self.floor) {
+            anyhow::bail!(
+                "scoring.situation.floor must be in [0,1] (got {})",
+                self.floor
+            );
+        }
+        self.session_start.validate("session_start")?;
+        self.file_edit.validate("file_edit")?;
+        self.debugging.validate("debugging")?;
+        self.design_choice.validate("design_choice")?;
+        Ok(())
+    }
+}
+
+impl Default for SituationConfig {
+    fn default() -> Self {
+        Self {
+            floor: Self::default_floor(),
+            session_start: Self::default_session_start(),
+            file_edit: Self::default_file_edit(),
+            debugging: Self::default_debugging(),
+            design_choice: Self::default_design_choice(),
+        }
+    }
 }
 
 impl ScoringConfig {
@@ -169,8 +431,8 @@ impl ScoringConfig {
         0.5
     }
 
-    fn default_challenge_penalty() -> f64 {
-        0.10
+    fn default_challenge_penalty() -> ChallengePenalty {
+        ChallengePenalty::default()
     }
 
     fn default_depth_decay_base() -> f64 {
@@ -199,9 +461,10 @@ impl Default for ScoringConfig {
             },
             scope_multiplier_floor: 0.5,
             trust_multiplier_floor: 0.5,
-            challenge_penalty: 0.10,
+            challenge_penalty: ChallengePenalty::default(),
             depth_decay_base: 0.82,
             depth_decay_floor: 0.3,
+            situation: SituationConfig::default(),
         }
     }
 }
@@ -568,6 +831,11 @@ impl Default for EmbeddingsConfig {
 }
 
 /// NLI contradiction detection configuration
+///
+/// One NLI model serves every epistemic class (§9 conflict routing keys off
+/// the class pair, not per-class models). If class-specific NLI models are
+/// ever added, `provider_cache_key` in `src/ops/mod.rs` must be extended
+/// with the new field(s) or the cache will serve stale bundles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NliConfig {
     /// Whether NLI contradiction detection is enabled
@@ -800,6 +1068,138 @@ pub struct EngramConfig {
     /// Security / access-control settings
     #[serde(default)]
     pub security: SecurityConfig,
+
+    /// Epistemic-class lifecycle settings (verification, demotion,
+    /// promotion, consolidation, invalidation retention)
+    #[serde(default)]
+    pub epistemic: EpistemicConfig,
+
+    /// Claude Code hook rendering settings
+    #[serde(default)]
+    pub hooks: HooksConfig,
+}
+
+/// Epistemic-class lifecycle settings (`[epistemic]` section).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EpistemicConfig {
+    /// Observations unverified for longer than this many days get a
+    /// "re-verify or delete" doctor suggestion.
+    #[serde(default = "EpistemicConfig::default_observation_review_days")]
+    pub observation_review_days: u64,
+
+    /// Half-life (days) for the off-diagonal Observation decay default.
+    /// Consumed by the create path; the pure `default_decay` fn carries the
+    /// same built-in constant.
+    #[serde(default = "EpistemicConfig::default_observation_half_life_days")]
+    pub observation_half_life_days: u64,
+
+    /// Floor for the off-diagonal Observation decay default.
+    #[serde(default = "EpistemicConfig::default_observation_decay_floor")]
+    pub observation_decay_floor: f64,
+
+    /// When true, the SessionEnd hook runs task demotion for the session's
+    /// mapped task.
+    #[serde(default)]
+    pub demote_on_session_end: bool,
+
+    /// Distinct later sessions retrieving a task-bound decision above
+    /// threshold before promotion is suggested.
+    #[serde(default = "EpistemicConfig::default_promotion_min_sessions")]
+    pub promotion_min_sessions: u64,
+
+    /// When true, the maintenance pass auto-promotes instead of suggesting.
+    #[serde(default)]
+    pub auto_promote: bool,
+
+    /// Minimum mutually-consistent observations to consolidate into a fact.
+    #[serde(default = "EpistemicConfig::default_consolidation_min_sources")]
+    pub consolidation_min_sources: usize,
+
+    /// Pairwise embedding similarity threshold for consolidation clusters.
+    #[serde(default = "EpistemicConfig::default_consolidation_similarity")]
+    pub consolidation_similarity: f64,
+
+    /// When true, the maintenance pass auto-consolidates instead of
+    /// suggesting.
+    #[serde(default)]
+    pub auto_consolidate: bool,
+
+    /// Days an invalidated memory is retained before gc may purge it.
+    /// 0 = keep forever.
+    #[serde(default = "EpistemicConfig::default_invalidated_retention_days")]
+    pub invalidated_retention_days: u64,
+}
+
+impl EpistemicConfig {
+    fn default_observation_review_days() -> u64 {
+        90
+    }
+    fn default_observation_half_life_days() -> u64 {
+        90
+    }
+    fn default_observation_decay_floor() -> f64 {
+        0.2
+    }
+    fn default_promotion_min_sessions() -> u64 {
+        3
+    }
+    fn default_consolidation_min_sources() -> usize {
+        3
+    }
+    fn default_consolidation_similarity() -> f64 {
+        0.85
+    }
+    fn default_invalidated_retention_days() -> u64 {
+        180
+    }
+}
+
+impl Default for EpistemicConfig {
+    fn default() -> Self {
+        Self {
+            observation_review_days: Self::default_observation_review_days(),
+            observation_half_life_days: Self::default_observation_half_life_days(),
+            observation_decay_floor: Self::default_observation_decay_floor(),
+            demote_on_session_end: false,
+            promotion_min_sessions: Self::default_promotion_min_sessions(),
+            auto_promote: false,
+            consolidation_min_sources: Self::default_consolidation_min_sources(),
+            consolidation_similarity: Self::default_consolidation_similarity(),
+            auto_consolidate: false,
+            invalidated_retention_days: Self::default_invalidated_retention_days(),
+        }
+    }
+}
+
+/// Claude Code hook rendering settings (`[hooks]` section).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HooksConfig {
+    /// Optional epistemic-class ordering override for context injection.
+    /// A single list applied uniformly to ALL situations; when unset the
+    /// per-situation defaults apply (SessionStart: fact → decision →
+    /// observation; FileEdit: decision → fact → observation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_order: Option<Vec<String>>,
+
+    /// Character budget for the UserPromptSubmit and PreToolUse hooks'
+    /// context injection (SessionStart uses its own fixed 2000-char cap).
+    #[serde(default = "HooksConfig::default_prompt_context_budget")]
+    pub prompt_context_budget: usize,
+}
+
+impl HooksConfig {
+    fn default_prompt_context_budget() -> usize {
+        1000
+    }
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            class_order: None,
+            prompt_context_budget: Self::default_prompt_context_budget(),
+        }
+    }
 }
 
 /// Shared embedding-daemon settings.
@@ -1095,9 +1495,8 @@ impl EngramConfig {
         if !(0.0..=1.0).contains(&self.retrieval.scoring.trust_multiplier_floor) {
             anyhow::bail!("scoring.trust_multiplier_floor must be in [0.0, 1.0]");
         }
-        if !(0.0..=1.0).contains(&self.retrieval.scoring.challenge_penalty) {
-            anyhow::bail!("scoring.challenge_penalty must be in [0.0, 1.0]");
-        }
+        self.retrieval.scoring.challenge_penalty.validate()?;
+        self.retrieval.scoring.situation.validate()?;
         if !(0.0..=1.0).contains(&self.retrieval.scoring.depth_decay_base) {
             anyhow::bail!("scoring.depth_decay_base must be in [0.0, 1.0]");
         }
@@ -1193,6 +1592,192 @@ impl EngramConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_challenge_penalty_defaults_and_accessor() {
+        use crate::Epistemic;
+
+        // Default is per-class: fact 0.15, observation 0.20, decision 0.05.
+        let p = ChallengePenalty::default();
+        assert_eq!(p.penalty_for(Epistemic::Fact), 0.15);
+        assert_eq!(p.penalty_for(Epistemic::Observation), 0.20);
+        assert_eq!(p.penalty_for(Epistemic::Decision), 0.05);
+        assert_eq!(
+            ScoringConfig::default().challenge_penalty,
+            ChallengePenalty::default()
+        );
+
+        // Flat applies one value to every class.
+        let flat = ChallengePenalty::Flat(0.10);
+        for e in [Epistemic::Fact, Epistemic::Observation, Epistemic::Decision] {
+            assert_eq!(flat.penalty_for(e), 0.10);
+        }
+
+        // penalty_for clamps out-of-range / non-finite on read (fuzz boundary).
+        assert_eq!(
+            ChallengePenalty::Flat(5.0).penalty_for(Epistemic::Fact),
+            1.0
+        );
+        assert_eq!(
+            ChallengePenalty::Flat(-1.0).penalty_for(Epistemic::Fact),
+            0.0
+        );
+        assert_eq!(
+            ChallengePenalty::Flat(f64::NAN).penalty_for(Epistemic::Fact),
+            0.0
+        );
+
+        // validate rejects out-of-range values in either shape.
+        assert!(ChallengePenalty::Flat(1.5).validate().is_err());
+        let bad = ChallengePenalty::PerClass {
+            fact: 0.1,
+            observation: -0.2,
+            decision: 0.0,
+        };
+        assert!(bad.validate().is_err());
+        assert!(ChallengePenalty::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_challenge_penalty_serde_shapes() {
+        const REQUIRED: &str = r#"
+            with_query = { semantic = 0.55, relevance = 0.45 }
+            scope_only = { relevance = 1.0 }
+            degraded = { relevance = 1.0 }
+        "#;
+
+        // Legacy flat TOML keeps parsing.
+        let parsed: ScoringConfig =
+            toml::from_str(&format!("{REQUIRED}challenge_penalty = 0.10")).unwrap();
+        assert_eq!(parsed.challenge_penalty, ChallengePenalty::Flat(0.10));
+
+        // Per-class table parses.
+        let parsed: ScoringConfig = toml::from_str(&format!(
+            "{REQUIRED}challenge_penalty = {{ fact = 0.3, observation = 0.4, decision = 0.1 }}"
+        ))
+        .unwrap();
+        assert_eq!(
+            parsed.challenge_penalty,
+            ChallengePenalty::PerClass {
+                fact: 0.3,
+                observation: 0.4,
+                decision: 0.1
+            }
+        );
+
+        // Absent key ⇒ per-class defaults.
+        let parsed: ScoringConfig = toml::from_str(REQUIRED).unwrap();
+        assert_eq!(parsed.challenge_penalty, ChallengePenalty::default());
+    }
+
+    #[test]
+    fn test_situation_config_defaults_and_validate() {
+        let cfg = SituationConfig::default();
+        assert_eq!(cfg.floor, 0.6);
+        // Tuned default profiles (spec §7.1 table)
+        assert_eq!(cfg.session_start.fact, 1.0);
+        assert_eq!(cfg.session_start.observation, 0.5);
+        assert_eq!(cfg.session_start.decision, 0.8);
+        assert_eq!(cfg.file_edit.fact, 0.7);
+        assert_eq!(cfg.file_edit.observation, 0.7);
+        assert_eq!(cfg.file_edit.decision, 1.0);
+        assert_eq!(cfg.debugging.fact, 0.6);
+        assert_eq!(cfg.debugging.observation, 1.0);
+        assert_eq!(cfg.debugging.decision, 0.7);
+        assert_eq!(cfg.design_choice.fact, 0.8);
+        assert_eq!(cfg.design_choice.observation, 0.7);
+        assert_eq!(cfg.design_choice.decision, 1.0);
+        cfg.validate().unwrap();
+
+        // Out-of-range floor / profile values rejected by validate
+        let bad_floor = SituationConfig {
+            floor: 1.5,
+            ..Default::default()
+        };
+        assert!(bad_floor.validate().is_err());
+        let mut bad_profile = SituationConfig::default();
+        bad_profile.debugging.observation = -0.1;
+        assert!(bad_profile.validate().is_err());
+
+        // Absent section ⇒ defaults (serde default path)
+        let parsed: ScoringConfig = toml::from_str(
+            r#"
+            with_query = { semantic = 0.55, relevance = 0.45 }
+            scope_only = { relevance = 1.0 }
+            degraded = { relevance = 1.0 }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(parsed.situation, SituationConfig::default());
+    }
+
+    #[test]
+    fn test_situation_multiplier_floor_transform() {
+        use crate::{Epistemic, Situation};
+        let cfg = SituationConfig::default();
+        // multiplier = 0.6 + 0.4 * value
+        let m = cfg.multiplier(Situation::SessionStart, Epistemic::Observation);
+        assert!((m - (0.6 + 0.4 * 0.5)).abs() < 1e-9);
+        let m = cfg.multiplier(Situation::FileEdit, Epistemic::Decision);
+        assert!((m - 1.0).abs() < 1e-9);
+        // Non-finite floor ⇒ neutral
+        let nan_floor = SituationConfig {
+            floor: f64::NAN,
+            ..Default::default()
+        };
+        assert_eq!(
+            nan_floor.multiplier(Situation::Debugging, Epistemic::Fact),
+            1.0
+        );
+        // Non-finite profile value ⇒ neutral value (multiplier = floor + (1-floor)*1.0 = 1.0)
+        let mut nan_profile = SituationConfig::default();
+        nan_profile.debugging.fact = f64::INFINITY;
+        assert_eq!(
+            nan_profile.multiplier(Situation::Debugging, Epistemic::Fact),
+            1.0
+        );
+    }
+
+    #[test]
+    fn test_situation_profile_structure_no_age_terms() {
+        // Structural half of the no-double-decay invariant: a profile is
+        // exactly three per-class constants. If a field is ever added, this
+        // deserialization of a three-key table must keep round-tripping to
+        // an identical struct (deny-unknown is deliberately NOT set — but a
+        // new field would change this serialized shape and trip the
+        // assertion below).
+        let p: SituationProfile =
+            toml::from_str("fact = 0.1\nobservation = 0.2\ndecision = 0.3").unwrap();
+        let back = toml::to_string(&p).unwrap();
+        let keys: Vec<&str> = back
+            .lines()
+            .filter_map(|l| l.split('=').next())
+            .map(|k| k.trim())
+            .collect();
+        assert_eq!(keys, vec!["fact", "observation", "decision"]);
+    }
+
+    #[test]
+    fn test_epistemic_config_defaults() {
+        let cfg = EpistemicConfig::default();
+        assert_eq!(cfg.observation_review_days, 90);
+        assert_eq!(cfg.observation_half_life_days, 90);
+        assert_eq!(cfg.observation_decay_floor, 0.2);
+        assert!(!cfg.demote_on_session_end);
+        assert_eq!(cfg.promotion_min_sessions, 3);
+        assert!(!cfg.auto_promote);
+        assert_eq!(cfg.consolidation_min_sources, 3);
+        assert_eq!(cfg.consolidation_similarity, 0.85);
+        assert!(!cfg.auto_consolidate);
+        assert_eq!(cfg.invalidated_retention_days, 180);
+
+        // Absent sections ⇒ defaults through EngramConfig
+        let parsed: EngramConfig = toml::from_str("").unwrap();
+        assert_eq!(parsed.epistemic, EpistemicConfig::default());
+        assert_eq!(parsed.hooks, HooksConfig::default());
+        assert_eq!(parsed.hooks.prompt_context_budget, 1000);
+        assert!(parsed.hooks.class_order.is_none());
+    }
 
     /// Every `EmbeddingBackend` variant round-trips through `Display`/`FromStr`
     /// (case-insensitively), and an unknown string errors. Locks the `tract`
@@ -1318,8 +1903,11 @@ mod tests {
         // Trust multiplier floor
         assert_eq!(config.retrieval.scoring.trust_multiplier_floor, 0.5);
 
-        // Challenge penalty
-        assert_eq!(config.retrieval.scoring.challenge_penalty, 0.10);
+        // Challenge penalty (per-class defaults)
+        assert_eq!(
+            config.retrieval.scoring.challenge_penalty,
+            ChallengePenalty::default()
+        );
 
         // Depth decay
         assert_eq!(config.retrieval.scoring.depth_decay_base, 0.82);
@@ -1817,16 +2405,37 @@ weight = 0.7
 
         // challenge_penalty > 1.0
         let mut config = EngramConfig::default();
-        config.retrieval.scoring.challenge_penalty = 1.1;
+        config.retrieval.scoring.challenge_penalty = ChallengePenalty::Flat(1.1);
         assert!(config.validate().is_err());
 
-        // challenge_penalty < 0.0
+        // challenge_penalty < 0.0 (per-class shape)
         let mut config = EngramConfig::default();
-        config.retrieval.scoring.challenge_penalty = -0.01;
+        config.retrieval.scoring.challenge_penalty = ChallengePenalty::PerClass {
+            fact: -0.01,
+            observation: 0.2,
+            decision: 0.05,
+        };
         assert!(config.validate().is_err());
 
         // valid defaults pass
         assert!(EngramConfig::default().validate().is_ok());
+    }
+
+    /// §7.1: `SituationConfig::validate` must be wired into
+    /// `EngramConfig::validate` — an out-of-range floor or profile value
+    /// must fail config validation, not silently clamp at read time.
+    #[test]
+    fn test_top_level_validate_covers_situation_config() {
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.situation.floor = 1.5;
+        assert!(config.validate().is_err(), "floor 1.5 must be rejected");
+
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.situation.debugging.observation = -3.0;
+        assert!(
+            config.validate().is_err(),
+            "negative profile value must be rejected"
+        );
     }
 
     #[test]

@@ -48,6 +48,11 @@ pub struct MaintenanceReport {
     pub doctor: Option<DoctorResult>,
     /// Result of LanceDB compaction/version pruning, if it ran and succeeded.
     pub optimize: Option<crate::storage::IndexOptimizeStats>,
+    /// §11.3 promotion pass result, if it ran and succeeded.
+    pub promotion: Option<crate::ops::task::PromotionReport>,
+    /// §11.4 consolidation pass result, if an engine was supplied and the
+    /// pass ran (it skips gracefully with no providers).
+    pub consolidation: Option<crate::ops::compress::ConsolidationReport>,
 }
 
 /// Effective auto-maintenance status, for diagnostics (`engramdb doctor`).
@@ -149,6 +154,16 @@ async fn record_maintenance() {
     let _ = tokio::fs::write(&path, chrono::Utc::now().to_rfc3339()).await;
 }
 
+/// Whether a call to [`auto_maintain`] right now would actually run (enabled
+/// and past the throttle window). Callers that must do expensive setup to
+/// *supply* the pass — the MCP server builds a `RetrievalEngine` so §11.4
+/// consolidation can run — use this to skip that setup on throttled calls.
+/// Advisory only: `auto_maintain` re-checks, so a lost race is just one
+/// wasted setup, never a duplicate pass.
+pub async fn maintenance_would_run(config: &MaintenanceConfig, cli_skip: bool) -> bool {
+    resolve_enabled(config, cli_skip) && maintenance_due(resolve_interval(config)).await
+}
+
 /// Run automatic maintenance for `dir` (the resolved main project root).
 ///
 /// `config` is the project's `[maintenance]` section and `cli_skip` is the
@@ -163,6 +178,20 @@ pub async fn auto_maintain(
     registry: &dyn RegistryBackend,
     config: &MaintenanceConfig,
     cli_skip: bool,
+) -> MaintenanceReport {
+    auto_maintain_with_engine(dir, registry, config, cli_skip, None).await
+}
+
+/// [`auto_maintain`] with an optional engine for the provider-dependent
+/// lifecycle jobs (§11.4 consolidation). Without one, consolidation is
+/// skipped (graceful-skip contract); promotion runs regardless (it needs
+/// only the telemetry log and the store).
+pub async fn auto_maintain_with_engine(
+    dir: &Path,
+    registry: &dyn RegistryBackend,
+    config: &MaintenanceConfig,
+    cli_skip: bool,
+    engine: Option<&crate::retrieval::engine::RetrievalEngine>,
 ) -> MaintenanceReport {
     if !resolve_enabled(config, cli_skip) {
         return MaintenanceReport::default();
@@ -245,6 +274,55 @@ pub async fn auto_maintain(
                 "engramdb auto-maintenance: could not open store at {}: {e}",
                 dir.display()
             ),
+        }
+
+        // 4) Lifecycle jobs (§11.5: all lifecycle work rides the throttled
+        // maintenance pass). Promotion needs only telemetry + store;
+        // consolidation additionally needs providers and runs only when the
+        // caller supplied an engine.
+        if let Ok(store) = MemoryStore::open(dir).await {
+            let full_config = crate::storage::config::load_config_or_default(
+                &dir.join(".engramdb").join("config.toml"),
+            )
+            .await;
+            match crate::ops::task::promote_reconfirmed_memories(&store, &full_config).await {
+                Ok(promo) => {
+                    for (id, summary, sessions) in &promo.suggestions {
+                        tracing::info!(
+                            "engramdb auto-maintenance: memory {id} ('{summary}') was retrieved                              in {sessions} later sessions — promote to project-wide?                              (set [epistemic] auto_promote = true to automate)"
+                        );
+                    }
+                    if !promo.promoted.is_empty() {
+                        tracing::info!(
+                            "engramdb auto-maintenance: auto-promoted {} memor(ies) to                              project-wide",
+                            promo.promoted.len()
+                        );
+                    }
+                    report.promotion = Some(promo);
+                }
+                Err(e) => tracing::warn!("engramdb auto-maintenance: promotion pass failed: {e}"),
+            }
+
+            if let Some(engine) = engine {
+                let apply = full_config.epistemic.auto_consolidate;
+                match crate::ops::compress::consolidation_pass(&store, engine, &full_config, apply)
+                    .await
+                {
+                    Ok(cons) => {
+                        for cluster in &cons.clusters {
+                            tracing::info!(
+                                "engramdb auto-maintenance: {} similar observations could                                  consolidate into a fact: {:?}",
+                                cluster.source_ids.len(),
+                                cluster.summaries
+                            );
+                        }
+                        report.consolidation = Some(cons);
+                    }
+                    Err(e) => {
+                        tracing::warn!("engramdb auto-maintenance: consolidation failed: {e}")
+                    }
+                }
+            }
         }
     }
 

@@ -32,12 +32,19 @@ pub fn parse_sort_field(s: &str) -> Result<SortField> {
 /// Parameters for listing memories.
 pub struct ListParams {
     pub types: Option<Vec<String>>,
+    /// Hard filter by epistemic class (§6.1) — parsed strings so both
+    /// surfaces share the error text of `parse_epistemic`.
+    pub epistemic: Option<Vec<String>>,
     pub tags: Option<Vec<String>>,
     pub status: Option<String>,
     pub scope: Option<String>,
     pub sort_field: SortField,
     pub reverse: bool,
     pub limit: Option<usize>,
+    /// Include memories whose validity window is closed (§2.4). Default
+    /// false — mirrors retrieval's default exclusion; a future-dated
+    /// `invalidated_at` (scheduled) still lists.
+    pub include_invalidated: bool,
 }
 
 /// List memories with optional filtering, sorting, and limiting.
@@ -49,6 +56,13 @@ pub async fn list_memories(
 ) -> Result<Vec<IndexFilterable>> {
     let mut entries = store.list_filterable().await?;
 
+    // Default exclusion of invalidated memories (§2.4), mirroring retrieval:
+    // a closed validity window hides the memory unless explicitly included.
+    if !params.include_invalidated {
+        let now = chrono::Utc::now();
+        entries.retain(|e| e.invalidated_at.is_none_or(|t| t > now));
+    }
+
     // Apply type filter
     if let Some(ref type_strs) = params.types {
         if !type_strs.is_empty() {
@@ -57,6 +71,17 @@ pub async fn list_memories(
                 .map(|s| parse_memory_type(s))
                 .collect::<Result<Vec<_>>>()?;
             entries.retain(|e| types.contains(&e.type_));
+        }
+    }
+
+    // Apply epistemic-class filter (§6.1, OR across the listed classes)
+    if let Some(ref class_strs) = params.epistemic {
+        if !class_strs.is_empty() {
+            let classes: Vec<crate::types::Epistemic> = class_strs
+                .iter()
+                .map(|s| crate::ops::parsing::parse_epistemic(s))
+                .collect::<Result<Vec<_>>>()?;
+            entries.retain(|e| classes.contains(&e.epistemic));
         }
     }
 

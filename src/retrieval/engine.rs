@@ -13,7 +13,7 @@ use crate::scoring::{
     composite_score_target_ignore_decay, ScoreBreakdown, ScoreTarget, ScoringContext,
 };
 use crate::storage::{MemoryStore, Result};
-use crate::types::{EngramConfig, Memory, MemoryType};
+use crate::types::{EngramConfig, Epistemic, Memory, MemoryType, Situation};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -87,6 +87,20 @@ pub struct RetrievalQuery {
 
     /// Filter by memory types
     pub types: Option<Vec<MemoryType>>,
+
+    /// Filter by epistemic class (hard filter, index-level, both modes —
+    /// exactly like `types`).
+    pub epistemic: Option<Vec<Epistemic>>,
+
+    /// Include invalidated memories (closed validity windows, §2.4). Default
+    /// false: excluded index-level via
+    /// `invalidated_at IS NULL OR invalidated_at > now`, mirroring expiry —
+    /// a future-dated (scheduled) invalidation is still returned.
+    pub include_invalidated: Option<bool>,
+
+    /// The querying agent's situation (§6.2), threaded into every scoring
+    /// context. `None` ⇒ neutral multiplier (all pre-epistemic behavior).
+    pub situation: Option<Situation>,
 
     /// Filter by tags
     pub tags: Option<Vec<String>>,
@@ -228,6 +242,19 @@ impl RetrievalEngine {
     fn record_query_outcome(&self, hit: bool, quality: &str) {
         if let (Some(stats), Some(pid)) = (self.stats.as_ref(), self.project_id.as_ref()) {
             stats.record_query_outcome(pid, hit, quality, self.session_id.as_deref());
+        }
+    }
+
+    /// Internal: record the ids of the memories a query returned
+    /// (above-threshold survivors) — the §11.3 promotion data source.
+    fn record_retrieved_memories(&self, result: &RetrievalResult) {
+        if let (Some(stats), Some(pid)) = (self.stats.as_ref(), self.project_id.as_ref()) {
+            let ids: Vec<String> = result
+                .memories
+                .iter()
+                .map(|sm| sm.memory.id.clone())
+                .collect();
+            stats.record_retrieved_memories(pid, &ids, self.session_id.as_deref());
         }
     }
 
@@ -443,7 +470,7 @@ impl RetrievalEngine {
                     );
                     crate::nli::challenge_for_contradictions(
                         &store,
-                        &memory.summary,
+                        &crate::nli::NewMemoryMeta::from(&memory),
                         &contradictions,
                     )
                     .await;
@@ -463,6 +490,43 @@ impl RetrievalEngine {
     /// Get a reference to the memory store.
     pub fn store(&self) -> &MemoryStore {
         &self.store
+    }
+
+    /// Get a reference to the engine's configuration (the ops layer reads
+    /// `[epistemic]` defaults from here, e.g. the off-diagonal Observation
+    /// decay in `ops::create`).
+    pub fn config(&self) -> &EngramConfig {
+        &self.config
+    }
+
+    /// Embed arbitrary text with the engine's embedding provider. `None`
+    /// when no provider is configured or the embed fails (logged). Used by
+    /// the §11.4 consolidation pass; NOT a retrieval path.
+    pub async fn embed_text(&self, text: &str) -> Option<Vec<f32>> {
+        let provider = self.embedding_provider.as_ref()?;
+        match provider.embed(text).await {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::debug!("embed_text failed (non-fatal): {e}");
+                None
+            }
+        }
+    }
+
+    /// Contradiction probabilities for text pairs via the NLI provider.
+    /// `None` when NLI is unavailable/disabled or classification fails.
+    pub async fn nli_contradictions(&self, pairs: &[(&str, &str)]) -> Option<Vec<f32>> {
+        if !self.config.nli.enabled {
+            return None;
+        }
+        let nli = self.nli_provider.as_ref()?;
+        match nli.classify_batch(pairs).await {
+            Ok(results) => Some(results.into_iter().map(|r| r.contradiction).collect()),
+            Err(e) => {
+                tracing::debug!("nli_contradictions failed (non-fatal): {e}");
+                None
+            }
+        }
     }
 
     /// Get a mutable reference to the memory store.
@@ -637,6 +701,11 @@ impl RetrievalEngine {
         let include_expired = query
             .include_expired
             .unwrap_or(self.config.retrieval.include_expired);
+        // Invalidated memories (closed validity windows) are excluded by
+        // default, mirroring expiry: pushdown predicate + authoritative Rust
+        // gate (Step 2.5c). No config default — only an explicit per-query
+        // opt-in includes them.
+        let include_invalidated = query.include_invalidated.unwrap_or(false);
 
         // Step 1: Load lightweight index entries (6 columns).
         //
@@ -649,8 +718,10 @@ impl RetrievalEngine {
         // scores are identical whether or not it fires.
         let pushdown_predicate = build_filter_predicate(
             query.types.as_deref(),
+            query.epistemic.as_deref(),
             query.min_criticality,
             (!include_expired).then(Utc::now),
+            (!include_invalidated).then(Utc::now),
         );
         // Remember whether the predicate fired: when it did, the scan itself
         // already narrowed the row set, so `total_entry_count` below counts
@@ -691,6 +762,22 @@ impl RetrievalEngine {
         };
         let filtered_entries = apply_index_filters(all_entries, &filters);
 
+        // Epistemic-class hard filter, beside the types filter (§6.1). Applied
+        // here (not via `SearchFilters`) because only the `IndexForFiltering`
+        // projection carries the class column.
+        let filtered_entries = if let Some(classes) = query.epistemic.as_ref() {
+            if classes.is_empty() {
+                filtered_entries
+            } else {
+                filtered_entries
+                    .into_iter()
+                    .filter(|e| classes.contains(&e.epistemic))
+                    .collect()
+            }
+        } else {
+            filtered_entries
+        };
+
         // Step 2.5a: In filter mode, user-supplied logical scopes act as a
         // hard filter (matching the legacy `search()` contract). Physical is
         // already filtered via `SearchFilters.physical`; logical is not a
@@ -730,6 +817,21 @@ impl RetrievalEngine {
             filtered_entries
                 .into_iter()
                 .filter(|e| e.expires_at.is_none_or(|exp| exp > now))
+                .collect()
+        };
+
+        // Step 2.5c: Pre-filter invalidated entries — the authoritative gate
+        // for the default exclusion (§2.4); the Step 1 predicate only
+        // pre-narrowed the scan. A future-dated `invalidated_at` (scheduled
+        // invalidation) is still valid now and passes, exactly like a future
+        // `expires_at`.
+        let filtered_entries: Vec<_> = if include_invalidated {
+            filtered_entries
+        } else {
+            let now = Utc::now();
+            filtered_entries
+                .into_iter()
+                .filter(|e| e.invalidated_at.is_none_or(|t| t > now))
                 .collect()
         };
 
@@ -950,7 +1052,8 @@ impl RetrievalEngine {
                 }
             } else {
                 ScoringContext::scope_only(ctx_path, ctx_logical)
-            };
+            }
+            .with_situation(query.situation);
 
             // Expired memories (only present when `include_expired` is set —
             // otherwise Step 2.5b already dropped them) are scored ignoring
@@ -1019,7 +1122,11 @@ impl RetrievalEngine {
         });
 
         // Step 8: Apply reranking if query text is present. Rerank runs on the
-        // full sorted candidate set BEFORE truncation (identical to before);
+        // post-situation survivors (§7.1): the situation multiplier applies
+        // pre-threshold in Step 5, so the cross-encoder sees (and blends over)
+        // class-appropriate candidates and rerank-blend semantics stay
+        // untouched. Rerank runs on the full sorted candidate set BEFORE
+        // truncation (identical to before);
         // it reads memory text from `memory_map` by id, so it needs no cloned
         // memories.
         // Only timed when the reranker is actually configured + enabled to
@@ -1085,6 +1192,7 @@ impl RetrievalEngine {
             query_started.elapsed().as_secs_f64() * 1000.0,
         );
         self.record_query_outcome(!result.memories.is_empty(), &result.retrieval_quality);
+        self.record_retrieved_memories(&result);
 
         Ok(result)
     }
@@ -1120,8 +1228,11 @@ impl RetrievalEngine {
                     logical: &e.logical,
                     provenance_source: e.provenance_source,
                     status: e.status,
+                    epistemic: e.epistemic,
+                    verified_at: e.verified_at,
                 };
-                let context = ScoringContext::scope_only(ctx_path, &query.logical);
+                let context = ScoringContext::scope_only(ctx_path, &query.logical)
+                    .with_situation(query.situation);
                 // Mirror the main loop: expired entries (present only under
                 // include_expired) score ignoring decay.
                 let breakdown = if e.expires_at.is_some_and(|exp| now > exp) {
@@ -1196,6 +1307,7 @@ impl RetrievalEngine {
             query_started.elapsed().as_secs_f64() * 1000.0,
         );
         self.record_query_outcome(!result.memories.is_empty(), &result.retrieval_quality);
+        self.record_retrieved_memories(&result);
         Ok(result)
     }
 }
@@ -1354,12 +1466,23 @@ async fn detect_contradictions_with(
     // Single batched load (one dir scan) instead of a per-candidate
     // `store.get` (a full dir scan each) — this runs on every create/update
     // with NLI enabled. Ids missing on disk are silently skipped, matching
-    // the old per-get error swallowing.
+    // the old per-get error swallowing. Invalidated memories (closed
+    // validity windows, §2.4) are excluded from the contradiction candidate
+    // set (§14.14): a new memory that contradicts an already-invalidated one
+    // is the EXPECTED outcome of supersession, not a dispute worth
+    // challenging.
+    let ingest_now = Utc::now();
     let candidate_ids: Vec<&str> = candidates.iter().map(|c| c.id.as_str()).collect();
     let candidate_memories: Vec<Memory> = store
         .get_batch(&candidate_ids)
         .await
-        .map(|loaded| loaded.into_iter().map(|(_, m)| m).collect())
+        .map(|loaded| {
+            loaded
+                .into_iter()
+                .map(|(_, m)| m)
+                .filter(|m| !m.is_invalidated_at(ingest_now))
+                .collect()
+        })
         .unwrap_or_default();
 
     if candidate_memories.is_empty() {
@@ -1404,6 +1527,126 @@ mod tests {
         assert_eq!(filter_threshold(-0.5), 0.0);
         // NEGATIVE (red before fix): NaN must become 0.0, not propagate.
         assert_eq!(filter_threshold(f64::NAN), 0.0);
+    }
+
+    /// Stub embedding: every text maps to the same unit vector, so any two
+    /// memories are cosine-1.0 neighbours. No model load.
+    struct ConstantEmbedding;
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for ConstantEmbedding {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            let mut v = vec![0.0f32; 384];
+            v[0] = 1.0;
+            Ok(v)
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            let mut out = Vec::with_capacity(texts.len());
+            for t in texts {
+                out.push(self.embed(t).await?);
+            }
+            Ok(out)
+        }
+        fn dimensions(&self) -> usize {
+            384
+        }
+        fn max_tokens(&self) -> usize {
+            256
+        }
+        fn model_id(&self) -> String {
+            "onnx/constant-stub".to_string()
+        }
+    }
+
+    /// Stub NLI: everything is a maximal contradiction. No model load.
+    struct AlwaysContradicts;
+
+    #[async_trait::async_trait]
+    impl NliProvider for AlwaysContradicts {
+        async fn classify(
+            &self,
+            _premise: &str,
+            _hypothesis: &str,
+        ) -> anyhow::Result<crate::nli::NliResult> {
+            Ok(crate::nli::NliResult {
+                label: crate::nli::NliLabel::Contradiction,
+                entailment: 0.0,
+                neutral: 0.0,
+                contradiction: 1.0,
+            })
+        }
+        async fn classify_batch(
+            &self,
+            pairs: &[(&str, &str)],
+        ) -> anyhow::Result<Vec<crate::nli::NliResult>> {
+            let mut out = Vec::with_capacity(pairs.len());
+            for _ in pairs {
+                out.push(self.classify("", "").await?);
+            }
+            Ok(out)
+        }
+    }
+
+    /// §14.14: invalidated memories are excluded from the NLI contradiction
+    /// candidate set. Deterministic stub providers: the existing memory is a
+    /// perfect vector neighbour and the NLI stub contradicts everything, so
+    /// the ONLY thing standing between the probe and a challenge is the
+    /// invalidated-window gate — without it, every create would re-challenge
+    /// its just-superseded predecessor.
+    #[tokio::test]
+    async fn nli_candidates_exclude_invalidated_memories() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let existing = Memory::new(
+            MemoryType::Decision,
+            "The cache is enabled",
+            "body",
+            Provenance::human(),
+        );
+        store.create(&existing).await.unwrap();
+
+        let embed: Arc<dyn EmbeddingProvider> = Arc::new(ConstantEmbedding);
+        embed_memory_with(embed.as_ref(), &store, &existing, embed.max_tokens(), None)
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.nli.enabled = true;
+        config.nli.similarity_threshold = 0.0;
+        config.nli.contradiction_threshold = 0.5;
+
+        let engine = RetrievalEngine::new(store.clone(), config)
+            .with_embedding_provider(Arc::clone(&embed))
+            .with_nli_provider(Arc::new(AlwaysContradicts));
+
+        let probe = Memory::new(
+            MemoryType::Decision,
+            "The cache is disabled",
+            "body",
+            Provenance::human(),
+        );
+
+        // Control: while the existing memory is live, it IS flagged.
+        let live = engine.detect_contradictions(&probe).await.unwrap();
+        assert_eq!(live.len(), 1, "live neighbour must be flagged");
+        assert_eq!(live[0].0, existing.id);
+
+        // Close the window: the same neighbour must vanish from candidates.
+        store
+            .invalidate_with(&existing.id, None, chrono::Utc::now())
+            .await
+            .unwrap();
+        let after = engine.detect_contradictions(&probe).await.unwrap();
+        assert!(
+            after.is_empty(),
+            "invalidated memory leaked into NLI candidates: {after:?}"
+        );
     }
 
     // Finding #19: `config.embeddings.max_tokens` is now authoritative for
@@ -1978,8 +2221,10 @@ mod tests {
         // Pushdown: predicate pre-narrows the scan, then the identical Rust gate.
         let predicate = build_filter_predicate(
             Some(&types),
+            None,
             min_criticality,
             (!include_expired).then(Utc::now),
+            None,
         );
         assert!(predicate.is_some(), "expected a non-empty predicate");
         let pushdown_entries = store.list_for_filtering_where(predicate).await.unwrap();
@@ -4203,5 +4448,179 @@ mod tests {
                 "in-window memories carry real semantic scores"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod epistemic_retrieval_tests {
+    use super::*;
+    use crate::storage::InMemoryRegistry;
+    use crate::types::{Provenance, Visibility};
+    use tempfile::TempDir;
+
+    async fn seeded_engine() -> (TempDir, RetrievalEngine) {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        // One memory per class (types chosen so the class is the DIAGONAL
+        // default — files stay pre-epistemic-shaped), plus one invalidated.
+        for (id, type_) in [
+            ("mem-fact", MemoryType::Hazard),
+            ("mem-obs", MemoryType::Debug),
+            ("mem-dec", MemoryType::Decision),
+        ] {
+            let mut m = Memory::new(type_, id, "content", Provenance::human());
+            m.id = id.to_string();
+            m.visibility = Visibility::Shared;
+            m.criticality = 0.8;
+            m.decay = Some(crate::types::Decay::none());
+            store.create(&m).await.unwrap();
+        }
+        let mut gone = Memory::new(
+            MemoryType::Hazard,
+            "mem-invalidated",
+            "content",
+            Provenance::human(),
+        );
+        gone.id = "mem-invalidated".to_string();
+        gone.visibility = Visibility::Shared;
+        gone.criticality = 0.8;
+        gone.decay = Some(crate::types::Decay::none());
+        gone.invalidated_at = Some(Utc::now() - chrono::Duration::days(1));
+        store.create(&gone).await.unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+        (temp_dir, RetrievalEngine::new(store, config))
+    }
+
+    fn ids(result: &RetrievalResult) -> Vec<&str> {
+        let mut v: Vec<&str> = result
+            .memories
+            .iter()
+            .map(|m| m.memory.id.as_str())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[tokio::test]
+    async fn epistemic_hard_filter_narrows_both_modes() {
+        let (_tmp, engine) = seeded_engine().await;
+
+        // Rank mode.
+        let result = engine
+            .query(&RetrievalQuery {
+                epistemic: Some(vec![Epistemic::Observation]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(ids(&result), vec!["mem-obs"]);
+
+        // Two classes.
+        let result = engine
+            .query(&RetrievalQuery {
+                epistemic: Some(vec![Epistemic::Observation, Epistemic::Decision]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(ids(&result), vec!["mem-dec", "mem-obs"]);
+
+        // Filter mode (tags signal to satisfy Step 0) — class filter still
+        // applies. Use a query that keyword-matches everything instead.
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Filter,
+                query: Some("content".to_string()),
+                epistemic: Some(vec![Epistemic::Decision]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(ids(&result), vec!["mem-dec"]);
+    }
+
+    #[tokio::test]
+    async fn invalidated_excluded_by_default_included_on_optin() {
+        let (_tmp, engine) = seeded_engine().await;
+
+        // Default: the invalidated memory never surfaces.
+        let result = engine.query(&RetrievalQuery::default()).await.unwrap();
+        assert_eq!(ids(&result), vec!["mem-dec", "mem-fact", "mem-obs"]);
+
+        // Opt-in: it is scored and returned like any other memory.
+        let result = engine
+            .query(&RetrievalQuery {
+                include_invalidated: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(&result),
+            vec!["mem-dec", "mem-fact", "mem-invalidated", "mem-obs"]
+        );
+
+        // A future-dated (scheduled) invalidation is still valid now → included
+        // by default, exactly like a future expires_at.
+        let store = engine.store();
+        store
+            .update_with("mem-fact", |m| {
+                m.invalidated_at = Some(Utc::now() + chrono::Duration::days(30));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let result = engine.query(&RetrievalQuery::default()).await.unwrap();
+        assert_eq!(ids(&result), vec!["mem-dec", "mem-fact", "mem-obs"]);
+    }
+
+    #[tokio::test]
+    async fn situation_reweights_rank_order() {
+        let (_tmp, engine) = seeded_engine().await;
+
+        // Neutral: all three active memories tie (same criticality/trust) and
+        // every breakdown records a neutral multiplier.
+        let neutral = engine.query(&RetrievalQuery::default()).await.unwrap();
+        for m in &neutral.memories {
+            assert_eq!(m.score_breakdown.situation_multiplier, 1.0);
+        }
+
+        // session_start: fact (1.0) > decision (0.92) > observation (0.8).
+        let result = engine
+            .query(&RetrievalQuery {
+                situation: Some(Situation::SessionStart),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let ordered: Vec<&str> = result
+            .memories
+            .iter()
+            .map(|m| m.memory.id.as_str())
+            .collect();
+        assert_eq!(ordered, vec!["mem-fact", "mem-dec", "mem-obs"]);
+        let mults: Vec<f64> = result
+            .memories
+            .iter()
+            .map(|m| m.score_breakdown.situation_multiplier)
+            .collect();
+        assert!((mults[0] - 1.0).abs() < 1e-9);
+        assert!((mults[1] - 0.92).abs() < 1e-9);
+        assert!((mults[2] - 0.8).abs() < 1e-9);
+
+        // debugging: observation on top.
+        let result = engine
+            .query(&RetrievalQuery {
+                situation: Some(Situation::Debugging),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.memories[0].memory.id, "mem-obs");
     }
 }

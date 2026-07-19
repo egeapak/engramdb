@@ -77,7 +77,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use app::{Cli, Command, HookCommand};
+use app::{Cli, Command, HookCommand, TaskCommand};
 use commands::{AddParams, ChallengeParams, QueryParams, UpdateParams};
 use output::OutputFormatter;
 
@@ -192,6 +192,11 @@ pub async fn run(cli: Cli) -> Result<()> {
     // is paid before every Read/Write/Edit. Any ordinary CLI command still
     // triggers maintenance on schedule.
     if !is_exempt && !is_hook && on_main_worktree {
+        // Deliberately engine-less: a short-lived CLI process must not load
+        // embedding models just for housekeeping, so §11.4 consolidation
+        // gracefully skips here. The long-running MCP server passes its
+        // engine (see `maintain_main_project`), which is where consolidation
+        // actually runs.
         engramdb::ops::auto_maintain(&dir, &registry, &config.maintenance, cli.no_maintenance)
             .await;
     }
@@ -234,6 +239,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             details,
             visibility,
             supersedes,
+            epistemic,
+            premise,
+            invalidated_by,
+            origin_task,
+            generality,
+            valid_from,
             decay_strategy,
             decay_half_life,
             decay_ttl,
@@ -262,6 +273,12 @@ pub async fn run(cli: Cli) -> Result<()> {
                     details,
                     visibility_str: visibility,
                     supersedes,
+                    epistemic,
+                    premise,
+                    invalidated_by,
+                    origin_task,
+                    generality,
+                    valid_from,
                     decay_strategy,
                     decay_half_life,
                     decay_ttl,
@@ -297,6 +314,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             max_results,
             detail_level,
             include_expired,
+            epistemic,
+            situation,
+            include_invalidated,
             show_scores,
             include_global,
             global,
@@ -329,6 +349,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                     max_results,
                     detail_level,
                     include_expired,
+                    epistemic,
+                    situation,
+                    include_invalidated,
                     show_scores,
                     include_global,
                 },
@@ -341,24 +364,28 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::List {
             type_,
+            epistemic,
             tags,
             status,
             scope,
             sort,
             reverse,
             limit,
+            include_invalidated,
             global,
         } => {
             commands::run_list(
                 &dir,
                 global,
                 type_,
+                epistemic,
                 tags,
                 status,
                 scope,
                 &sort,
                 reverse,
                 limit,
+                include_invalidated,
                 cli.verbose,
                 &formatter,
             )
@@ -382,6 +409,16 @@ pub async fn run(cli: Cli) -> Result<()> {
             visibility,
             status,
             supersedes,
+            epistemic,
+            premise,
+            invalidated_by,
+            origin_task,
+            generality,
+            valid_from,
+            clear_validity,
+            clear_invalidated,
+            invalidate,
+            superseded_by,
             decay_strategy,
             decay_half_life,
             decay_ttl,
@@ -410,6 +447,16 @@ pub async fn run(cli: Cli) -> Result<()> {
                     visibility,
                     status,
                     supersedes,
+                    epistemic,
+                    premise,
+                    invalidated_by,
+                    origin_task,
+                    generality,
+                    valid_from,
+                    clear_validity,
+                    clear_invalidated,
+                    invalidate,
+                    superseded_by,
                     decay_strategy,
                     decay_half_life,
                     decay_ttl,
@@ -426,6 +473,23 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Delete { id, force, global } => {
             commands::run_delete(&dir, global, &id, force, &formatter).await
         }
+        Command::Verify { id, global } => commands::run_verify(&dir, global, &id, &formatter).await,
+        Command::Task { command } => match command {
+            TaskCommand::Current {
+                name,
+                session_id,
+                global,
+            } => commands::run_task_current(
+                &dir,
+                global,
+                name.as_deref(),
+                session_id.as_deref(),
+                &formatter,
+            ),
+            TaskCommand::Complete { name, global } => {
+                commands::run_task_complete(&dir, global, &name, &formatter).await
+            }
+        },
         Command::Stats {
             all_projects,
             global,
@@ -559,6 +623,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                 HookCommand::SessionStart { min_criticality } => {
                     commands::run_hook_session_start(&dir, min_criticality).await
                 }
+                HookCommand::UserPromptSubmit => commands::run_hook_user_prompt_submit(&dir).await,
+                HookCommand::PostToolUse => commands::run_hook_post_tool_use(&dir).await,
+                HookCommand::SessionEnd => commands::run_hook_session_end(&dir).await,
+                HookCommand::PreCompact => commands::run_hook_pre_compact(&dir).await,
             };
             // Fail-open backstop: a hook that exits non-zero surfaces as an
             // error on EVERY Read/Write/Edit in Claude Code. The handlers

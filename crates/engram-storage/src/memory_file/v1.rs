@@ -56,6 +56,22 @@ impl MemoryWriter for V1Writer {
 fn parse_v1(frontmatter: &str, body: &str) -> Result<Memory> {
     let mut memory: Memory = serde_yaml_ng::from_str(frontmatter)?;
     super::validate_id_shape(&memory.id)?;
+
+    // Serde's field default for `epistemic` is `Fact`, but the authoritative
+    // defaulting rule for files that predate the field is type-derived
+    // (`Debug` ⇒ Observation, `Decision`/`Intent`/`Preference` ⇒ Decision).
+    // Serde can't distinguish "key absent" from "key = fact", so re-check the
+    // raw frontmatter for the key.
+    let has_epistemic_key = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(frontmatter)
+        .ok()
+        .and_then(|v| {
+            v.as_mapping()
+                .map(|m| m.contains_key(serde_yaml_ng::Value::from("epistemic")))
+        })
+        .unwrap_or(false);
+    if !has_epistemic_key {
+        memory.epistemic = memory.type_.default_epistemic();
+    }
     let sections = parse_body_sections(body);
 
     // H1 title in body overrides frontmatter title

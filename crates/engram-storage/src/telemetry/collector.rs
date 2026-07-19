@@ -61,6 +61,9 @@ pub enum EventType {
     ToolCall,
     Stage,
     QueryOutcome,
+    /// Memory ids returned (above threshold) by one retrieval — the data
+    /// source for §11.3 promotion (distinct later-session retrieval counts).
+    Retrieval,
 }
 
 impl EventType {
@@ -69,6 +72,7 @@ impl EventType {
             Self::ToolCall => "tool_call",
             Self::Stage => "stage",
             Self::QueryOutcome => "query_outcome",
+            Self::Retrieval => "retrieval",
         }
     }
 
@@ -77,6 +81,7 @@ impl EventType {
             "tool_call" => Some(Self::ToolCall),
             "stage" => Some(Self::Stage),
             "query_outcome" => Some(Self::QueryOutcome),
+            "retrieval" => Some(Self::Retrieval),
             _ => None,
         }
     }
@@ -95,6 +100,8 @@ pub struct EventRow {
     pub hit: Option<bool>,
     pub retrieval_quality: Option<String>,
     pub session_id: Option<String>,
+    /// JSON-encoded `Vec<String>` of memory ids (Retrieval events only).
+    pub memory_ids: Option<String>,
 }
 
 /// Fixed-capacity ring buffer of millisecond samples.
@@ -453,6 +460,7 @@ impl StatsCollector {
                 hit: None,
                 retrieval_quality: None,
                 session_id: session_id.map(str::to_owned),
+                memory_ids: None,
             },
         );
     }
@@ -487,6 +495,7 @@ impl StatsCollector {
                 hit: None,
                 retrieval_quality: None,
                 session_id: session_id.map(str::to_owned),
+                memory_ids: None,
             },
         );
     }
@@ -545,6 +554,37 @@ impl StatsCollector {
                 hit: Some(hit),
                 retrieval_quality: Some(bucket.as_str().to_string()),
                 session_id: session_id.map(str::to_owned),
+                memory_ids: None,
+            },
+        );
+    }
+
+    /// Record the memory ids returned (above threshold) by one retrieval.
+    /// Pure persistence — feeds the §11.3 promotion counts; no in-memory
+    /// counters change. No-op when disabled or `ids` is empty.
+    pub fn record_retrieved_memories(
+        &self,
+        project_id: &str,
+        ids: &[String],
+        session_id: Option<&str>,
+    ) {
+        if !self.config.enabled || ids.is_empty() {
+            return;
+        }
+        let memory_ids = serde_json::to_string(ids).ok();
+        self.send_event(
+            project_id,
+            EventRow {
+                ts: Utc::now(),
+                event_type: EventType::Retrieval,
+                tool: None,
+                stage: None,
+                duration_ms: None,
+                success: None,
+                hit: None,
+                retrieval_quality: None,
+                session_id: session_id.map(str::to_owned),
+                memory_ids,
             },
         );
     }
@@ -614,6 +654,9 @@ impl StatsCollector {
                             }
                         }
                     }
+                    // Retrieval rows are pure persistence for the promotion
+                    // job (§11.3) — no in-memory counters to rebuild.
+                    EventType::Retrieval => {}
                 }
             }
         });
@@ -1115,6 +1158,7 @@ mod tests {
                 hit: None,
                 retrieval_quality: None,
                 session_id: Some("s".to_string()),
+                memory_ids: None,
             },
             EventRow {
                 ts: now + chrono::Duration::milliseconds(50),
@@ -1126,6 +1170,7 @@ mod tests {
                 hit: Some(true),
                 retrieval_quality: Some("full".to_string()),
                 session_id: Some("s".to_string()),
+                memory_ids: None,
             },
             EventRow {
                 ts: now + chrono::Duration::milliseconds(100),
@@ -1137,6 +1182,7 @@ mod tests {
                 hit: None,
                 retrieval_quality: None,
                 session_id: Some("s".to_string()),
+                memory_ids: None,
             },
         ];
         c.replay_events("p", &events);
@@ -1168,6 +1214,7 @@ mod tests {
                 hit: None,
                 retrieval_quality: None,
                 session_id: Some("s".to_string()),
+                memory_ids: None,
             },
             EventRow {
                 ts: now + chrono::Duration::milliseconds(10),
@@ -1179,6 +1226,7 @@ mod tests {
                 hit: Some(true),
                 retrieval_quality: Some("full".to_string()),
                 session_id: Some("s".to_string()),
+                memory_ids: None,
             },
         ];
         c.replay_events("p", &events);
@@ -1264,6 +1312,7 @@ mod tests {
                 hit: Some(true),
                 retrieval_quality: Some("full".to_string()),
                 session_id: Some("S".to_string()),
+                memory_ids: None,
             },
             EventRow {
                 ts: now + chrono::Duration::seconds(10),
@@ -1275,6 +1324,7 @@ mod tests {
                 hit: Some(true),
                 retrieval_quality: Some("full".to_string()),
                 session_id: Some("S".to_string()),
+                memory_ids: None,
             },
             EventRow {
                 ts: now,
@@ -1286,6 +1336,7 @@ mod tests {
                 hit: Some(true),
                 retrieval_quality: Some("full".to_string()),
                 session_id: Some("S".to_string()),
+                memory_ids: None,
             },
         ];
         c.replay_events("p", &events);

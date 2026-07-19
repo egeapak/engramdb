@@ -119,6 +119,49 @@ async fn run_environment_check(
     let result = doctor_environment(&check_dir, store.as_ref(), daemon_check).await;
     formatter.print_environment_doctor(&result);
 
+    // §10 epistemic checks (invalidated-path / stale-observation /
+    // derived-from). Report-only unless --fix, which flips affected memories
+    // to NeedsReview with a doctor-tagged challenge that `verify` clears.
+    if let Some(store) = store.as_ref() {
+        let config = engramdb::storage::config::load_config_or_default(
+            &store.project_dir.join(".engramdb").join("config.toml"),
+        )
+        .await;
+        match engramdb::ops::doctor_epistemic(store, &config, fix).await {
+            Ok(epistemic) if !epistemic.findings.is_empty() => {
+                formatter.print_warning(&format!(
+                    "{} epistemic finding(s) across {} checked memories:",
+                    epistemic.findings.len(),
+                    epistemic.checked
+                ));
+                for f in &epistemic.findings {
+                    let action = if f.fixed {
+                        " -> flagged needs_review"
+                    } else if fix {
+                        " (already flagged)"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "  {} {} — {}{}",
+                        short_id(&f.id),
+                        f.summary,
+                        f.detail,
+                        action
+                    );
+                }
+                if !fix {
+                    formatter.print_message(
+                        "Run `engramdb doctor --fix` to flag these for review, or `engramdb verify <id>` after re-confirming one.",
+                    );
+                }
+                print_enrichment_gaps(&epistemic.gaps, formatter);
+            }
+            Ok(epistemic) => print_enrichment_gaps(&epistemic.gaps, formatter),
+            Err(e) => formatter.print_warning(&format!("epistemic checks skipped: {e}")),
+        }
+    }
+
     // `--fix` takes over from here: it offers to repair the fixable issues
     // instead of just exiting non-zero, so we don't `bail!` in that mode.
     if fix {
@@ -132,6 +175,21 @@ async fn run_environment_check(
         anyhow::bail!("environment check found failing checks");
     }
     Ok(())
+}
+
+/// Report-only enrichment nudge: memories whose (often type-derived, i.e.
+/// legacy pre-epistemic) class carries no actionable metadata yet. Not a
+/// defect — enrichment happens gradually as memories are touched.
+fn print_enrichment_gaps(gaps: &engramdb::ops::EnrichmentGaps, formatter: &OutputFormatter) {
+    if !gaps.any() {
+        return;
+    }
+    formatter.print_message(&format!(
+        "Epistemic metadata gaps ({} live memories): {} decision(s) without a premise, \
+         {} observation(s) without invalidation watch paths. Legacy memories start this way — \
+         enrich as you touch them (`update --premise` / `--invalidated-by`, `verify` what you re-confirm).",
+        gaps.total_live, gaps.decisions_without_premise, gaps.observations_without_watch
+    ));
 }
 
 /// Load each downloaded/enabled model and run a tiny inference to confirm it

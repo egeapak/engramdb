@@ -31,6 +31,16 @@ pub struct UpdateParams {
     pub visibility: Option<String>,
     pub status: Option<String>,
     pub supersedes: Option<String>,
+    pub epistemic: Option<String>,
+    pub premise: Option<String>,
+    pub invalidated_by: Vec<String>,
+    pub origin_task: Option<String>,
+    pub generality: Option<String>,
+    pub valid_from: Option<String>,
+    pub clear_validity: bool,
+    pub clear_invalidated: bool,
+    pub invalidate: bool,
+    pub superseded_by: Option<String>,
     pub decay_strategy: Option<String>,
     pub decay_half_life: Option<u64>,
     pub decay_ttl: Option<u64>,
@@ -213,6 +223,33 @@ pub async fn run_update(
             visibility,
             status,
             supersedes,
+            epistemic: params
+                .epistemic
+                .as_deref()
+                .map(engramdb::ops::parse_epistemic)
+                .transpose()?,
+            premise: params.premise,
+            invalidated_by: if params.invalidated_by.is_empty() {
+                None
+            } else {
+                Some(params.invalidated_by)
+            },
+            origin_task: params.origin_task,
+            generality: params
+                .generality
+                .as_deref()
+                .map(engramdb::ops::parse_generality)
+                .transpose()?,
+            valid_from: params
+                .valid_from
+                .as_deref()
+                .map(|s| {
+                    s.parse::<chrono::DateTime<chrono::Utc>>()
+                        .map_err(|e| anyhow::anyhow!("invalid --valid-from timestamp: {e}"))
+                })
+                .transpose()?,
+            clear_validity: params.clear_validity,
+            clear_invalidated: params.clear_invalidated,
             decay_strategy: params.decay_strategy,
             decay_half_life: params.decay_half_life,
             decay_ttl: params.decay_ttl,
@@ -224,6 +261,33 @@ pub async fn run_update(
         Some(&engine),
     )
     .await?;
+
+    // --invalidate closes the validity window AFTER any field updates above
+    // (§2.4 writer 2, via ops::resolve): the memory WAS true but no longer
+    // is. History stays on disk, queryable via --include-invalidated.
+    if params.invalidate {
+        engramdb::ops::resolve_memory(
+            &store,
+            engramdb::ops::ResolveParams {
+                id: params.id.clone(),
+                action: engramdb::ops::ResolveAction::Invalidate,
+                updated_content: None,
+                updated_summary: None,
+                superseded_by: params.superseded_by.clone(),
+            },
+        )
+        .await?;
+        formatter.print_success(&format!(
+            "Invalidated memory {} (window closed{})",
+            params.id,
+            params
+                .superseded_by
+                .as_deref()
+                .map(|s| format!(", superseded by {s}"))
+                .unwrap_or_default()
+        ));
+        return Ok(());
+    }
 
     formatter.print_success(&format!("Updated memory {}", params.id));
     Ok(())

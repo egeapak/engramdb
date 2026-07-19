@@ -27,6 +27,7 @@ Existing tools (`create_memory`, `query`) are the template — implement once in
 1. **`crates/engram-types/src/memory.rs`**:
    - Add the variant to `MemoryType` enum with the `#[serde(rename = "...")]` lowercase form.
    - Update `default_decay` to return the right `Decay` for the new variant.
+   - Update `default_epistemic` to map the new variant to its class (fact/observation/decision). The mapping for *existing* variants is frozen — pre-epistemic files must keep parsing to the same classes (see [architecture.md](./architecture.md)).
    - Update `Display`, `FromStr` impls.
 
 2. **`src/ops/parsing.rs`**: extend `parse_memory_type` to accept the new variant string.

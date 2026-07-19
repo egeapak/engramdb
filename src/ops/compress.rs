@@ -95,10 +95,11 @@ pub struct CompressApplyParams {
 /// The new memory is created as type Context with provenance agent("compress").
 /// The caller (typically an LLM agent) provides the summary and content.
 ///
-/// `engine` embeds the replacement memory: compression deletes sources that
-/// had vectors, so leaving the consolidated summary UN-embedded would make
-/// exactly the compressed knowledge invisible to semantic search until a
-/// manual reindex. Pass the same engine the front-end uses for `create`.
+/// `engine` embeds the replacement memory: compression invalidates sources
+/// that had vectors (default retrieval excludes them), so leaving the
+/// consolidated summary UN-embedded would make exactly the compressed
+/// knowledge invisible to semantic search until a manual reindex. Pass the
+/// same engine the front-end uses for `create`.
 pub async fn compress_apply(
     store: &MemoryStore,
     params: CompressApplyParams,
@@ -148,6 +149,12 @@ pub async fn compress_apply(
             visibility: Visibility::Shared,
             provenance: Provenance::agent("compress"),
             supersedes: source_ids.clone(),
+            epistemic: None,
+            premise: None,
+            invalidated_by: vec![],
+            origin_task: None,
+            generality: None,
+            valid_from: None,
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,
@@ -159,41 +166,42 @@ pub async fn compress_apply(
     )
     .await?;
 
-    // Delete source memories now that the compressed memory exists.
-    //
-    // From here on the summary memory is durable, so deletion failures must
-    // not abort the sweep mid-way (that would strand an arbitrary suffix of
-    // un-deleted sources). Instead:
-    // - a source that is already gone (deleted concurrently) is skipped and
-    //   reported in `skipped_sources`;
-    // - a real deletion error (I/O) is recorded, the REMAINING sources are
-    //   still attempted, and a partial-failure error listing the un-deleted
-    //   IDs (and the new memory's ID) is returned so the user can clean up
-    //   or re-run. The summary memory remains valid either way.
+    // Sources are INVALIDATED, not deleted (§2.4 writer 3): `create_memory`
+    // already closed each live source's validity window (`invalidated_at =
+    // now`, `superseded_by = <summary id>`) via its supersession pass. The
+    // files stay on disk — queryable under `include_invalidated`, purged
+    // eventually by gc's retention rule. Here we verify the outcome so
+    // partial failures surface exactly like the old delete loop did:
+    // - a source that vanished concurrently is skipped and reported in
+    //   `skipped_sources`;
+    // - a source still live (its window-close failed, e.g. I/O) is recorded,
+    //   the REMAINING sources are still checked, and a partial-failure error
+    //   listing the un-invalidated IDs (and the new memory's ID) is returned
+    //   so the user can re-run. The summary memory remains valid either way.
     let mut skipped_sources = Vec::new();
-    let mut failed_sources: Vec<(String, crate::storage::StorageError)> = Vec::new();
+    let mut failed_sources: Vec<String> = Vec::new();
     for id in &source_ids {
-        match store.delete(id).await {
-            Ok(()) => {}
+        match store.get(id).await {
             Err(crate::storage::StorageError::NotFound(_)) => {
                 skipped_sources.push(id.clone());
             }
-            Err(e) => failed_sources.push((id.clone(), e)),
+            Err(e) => failed_sources.push(format!("{} ({})", id, e)),
+            // Invalidated — by this compress or an earlier writer; either
+            // way the window is closed.
+            Ok(m) if m.is_invalidated() => {}
+            Ok(_) => failed_sources.push(format!("{} (still active)", id)),
         }
     }
 
     if !failed_sources.is_empty() {
-        let detail: Vec<String> = failed_sources
-            .iter()
-            .map(|(id, e)| format!("{} ({})", id, e))
-            .collect();
         bail!(
-            "Compressed memory {} was created, but {} source memor{} could not be deleted: {}. \
-             Delete the listed memories manually (the compressed memory is valid and supersedes them).",
+            "Compressed memory {} was created, but {} source memor{} could not be invalidated: {}. \
+             Re-run compress or `resolve --action invalidate` the listed memories manually \
+             (the compressed memory is valid and supersedes them).",
             result.id,
             failed_sources.len(),
             if failed_sources.len() == 1 { "y" } else { "ies" },
-            detail.join(", ")
+            failed_sources.join(", ")
         );
     }
 
@@ -241,6 +249,12 @@ mod tests {
                 visibility: Visibility::Shared,
                 provenance: Provenance::human(),
                 supersedes: vec![],
+                epistemic: None,
+                premise: None,
+                invalidated_by: vec![],
+                origin_task: None,
+                generality: None,
+                valid_from: None,
                 decay_strategy: None,
                 decay_half_life: None,
                 decay_ttl: None,
@@ -366,21 +380,23 @@ mod tests {
         assert!(new_memory.supersedes.contains(&id1));
         assert!(new_memory.supersedes.contains(&id2));
 
-        // Both sources were really deleted.
-        assert!(store.get(&id1).await.is_err());
-        assert!(store.get(&id2).await.is_err());
+        // Both sources survive on disk with CLOSED validity windows (§2.4
+        // writer 3) — invalidated, superseded by the summary, not deleted.
+        for id in [&id1, &id2] {
+            let source = store.get(id).await.unwrap();
+            assert!(source.invalidated_at.is_some(), "window must be closed");
+            assert_eq!(
+                source.superseded_by.as_deref(),
+                Some(result.new_id.as_str())
+            );
+        }
     }
 
-    /// A source that vanishes between validation and the deletion sweep
-    /// (concurrent delete) must be skipped and reported — the apply still
-    /// completes and the summary memory is valid.
-    ///
-    /// Simulated with a "ghost" source: a memory file on disk (so the
-    /// pre-create `batch_exists` validation passes) with no index row (so
-    /// `store.delete` resolves to NotFound, exactly like a source whose
-    /// index row and file were removed by a concurrent delete).
+    /// A source whose index row is missing (half-deleted by a crash) is
+    /// still invalidated through its on-disk file — the window-closing pass
+    /// operates on files, so nothing is skipped and the summary stays valid.
     #[tokio::test]
-    async fn test_compress_apply_source_gone_at_delete_time_is_skipped() {
+    async fn test_compress_apply_source_without_index_row_still_invalidated() {
         let (temp, store) = setup_store().await;
 
         let real_id = add_memory(&store, MemoryType::Debug, "real source", 0.1, vec![]).await;
@@ -412,33 +428,32 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.superseded_count, 2);
-        assert_eq!(
-            result.skipped_sources,
-            vec![ghost_id.clone()],
-            "missing source must be reported as skipped, not abort the apply"
+        assert!(
+            result.skipped_sources.is_empty(),
+            "a file-backed source is invalidatable even without an index row"
         );
 
-        // The summary is valid and supersedes both (dangling supersedes IDs
-        // are fine — supersedes is informational, never dereferenced).
         let new_memory = store.get(&result.new_id).await.unwrap();
         assert!(new_memory.supersedes.contains(&real_id));
         assert!(new_memory.supersedes.contains(&ghost_id));
 
-        // The real source was still deleted after the skip.
-        assert!(store.get(&real_id).await.is_err());
+        // Both sources were invalidated in place, not deleted.
+        for id in [&real_id, &ghost_id] {
+            let source = store.get(id).await.unwrap();
+            assert!(source.invalidated_at.is_some());
+        }
     }
 
-    /// A REAL deletion error (I/O) must not abort the sweep mid-way: the
-    /// remaining sources are still attempted, and the returned error lists
-    /// the un-deleted IDs plus the (valid) new memory's ID.
+    /// A REAL invalidation error (I/O) must not abort the sweep mid-way:
+    /// the remaining sources are still processed, and the returned error
+    /// lists the still-active IDs plus the (valid) new memory's ID.
     ///
     /// Failure injection: the first source's `.md` file is replaced by a
-    /// directory of the same name — `remove_file(2)` on a directory fails
-    /// (EISDIR), which is a genuine I/O error rather than NotFound, and it
-    /// works regardless of the user the tests run as (unlike chmod tricks,
-    /// which root ignores).
+    /// directory of the same name — reading/rewriting it fails with a
+    /// genuine I/O error rather than NotFound, and it works regardless of
+    /// the user the tests run as (unlike chmod tricks, which root ignores).
     #[tokio::test]
-    async fn test_compress_apply_continues_past_real_delete_failure() {
+    async fn test_compress_apply_continues_past_real_invalidate_failure() {
         let (temp, store) = setup_store().await;
 
         let broken_id = add_memory(&store, MemoryType::Debug, "undeletable", 0.1, vec![]).await;
@@ -477,23 +492,23 @@ mod tests {
 
         let msg = err.to_string();
         assert!(
-            msg.contains("could not be deleted"),
+            msg.contains("could not be invalidated"),
             "partial failure must be reported: {}",
             msg
         );
         assert!(
             msg.contains(&broken_id),
-            "error must list the un-deleted id: {}",
+            "error must list the still-active id: {}",
             msg
         );
         assert!(
             !msg.contains(&ok_id),
-            "successfully deleted source must not be listed as failed: {}",
+            "successfully invalidated source must not be listed as failed: {}",
             msg
         );
 
-        // The later source was still attempted and deleted.
-        assert!(store.get(&ok_id).await.is_err());
+        // The later source was still processed and invalidated.
+        assert!(store.get(&ok_id).await.unwrap().invalidated_at.is_some());
 
         // The summary memory was created and remains valid.
         let entries = store.list_filterable().await.unwrap();
@@ -706,5 +721,652 @@ mod tests {
         // Verify no new memory was created
         let count_after = store.count().await.unwrap();
         assert_eq!(count_before, count_after);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Consolidation (§11.4): observation clusters → derived fact
+// ---------------------------------------------------------------------------
+
+/// One consolidation candidate cluster.
+#[derive(Debug, Clone)]
+pub struct ConsolidationCluster {
+    pub source_ids: Vec<String>,
+    pub summaries: Vec<String>,
+}
+
+/// Report from one consolidation pass.
+#[derive(Debug, Default)]
+pub struct ConsolidationReport {
+    /// Candidate clusters (suggestion mode reports these; apply mode also
+    /// records what it created).
+    pub clusters: Vec<ConsolidationCluster>,
+    /// Ids of the Fact memories created (apply mode only).
+    pub created: Vec<String>,
+    /// True when embedding/NLI providers were unavailable and the pass
+    /// skipped (§14.11 graceful-skip contract).
+    pub skipped_no_providers: bool,
+    /// True when the store had more active observations than one throttled
+    /// pass will pairwise-compare (O(n²) bound); nothing was clustered.
+    pub skipped_too_many: bool,
+}
+
+/// Union-find clustering over similarity pairs. Returns clusters of size ≥
+/// `min_size`, each sorted ascending. Pure so the geometry is testable
+/// without providers.
+pub fn cluster_pairs(n: usize, pairs: &[(usize, usize)], min_size: usize) -> Vec<Vec<usize>> {
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut Vec<usize>, x: usize) -> usize {
+        if parent[x] != x {
+            let root = find(parent, parent[x]);
+            parent[x] = root;
+        }
+        parent[x]
+    }
+    for &(a, b) in pairs {
+        if a >= n || b >= n {
+            continue;
+        }
+        let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+        if ra != rb {
+            parent[ra] = rb;
+        }
+    }
+    let mut groups: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    for i in 0..n {
+        let root = find(&mut parent, i);
+        groups.entry(root).or_default().push(i);
+    }
+    let mut clusters: Vec<Vec<usize>> = groups
+        .into_values()
+        .filter(|g| g.len() >= min_size.max(2))
+        .collect();
+    for c in &mut clusters {
+        c.sort_unstable();
+    }
+    clusters.sort_by_key(|c| c[0]);
+    clusters
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += (*x as f64) * (*y as f64);
+        na += (*x as f64) * (*x as f64);
+        nb += (*y as f64) * (*y as f64);
+    }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na.sqrt() * nb.sqrt())
+    }
+}
+
+/// §11.4 consolidation pass: find clusters of ≥
+/// `[epistemic] consolidation_min_sources` Active observation-class memories
+/// with pairwise embedding similarity ≥ `consolidation_similarity` and no
+/// pairwise NLI contradiction. Suggestion-first: clusters are returned;
+/// `apply` (the `[epistemic] auto_consolidate` path) additionally creates
+/// the derived Fact and demotes the sources.
+///
+/// Model-dependent steps run only where providers already run — with no
+/// embedding or NLI provider the pass skips gracefully with a logged notice.
+pub async fn consolidation_pass(
+    store: &MemoryStore,
+    engine: &crate::retrieval::engine::RetrievalEngine,
+    config: &crate::types::EngramConfig,
+    apply: bool,
+) -> Result<ConsolidationReport> {
+    use crate::types::{Epistemic, Status};
+
+    let mut report = ConsolidationReport::default();
+    if !engine.embeddings_available() || !engine.nli_available() {
+        tracing::info!(
+            "consolidation: skipped — embedding/NLI providers unavailable (graceful skip)"
+        );
+        report.skipped_no_providers = true;
+        return Ok(report);
+    }
+
+    let min_sources = config.epistemic.consolidation_min_sources;
+    let similarity = config.epistemic.consolidation_similarity;
+    let ids = store.list_ids().await?;
+    let loaded = store.get_batch(&ids).await?;
+    let now = chrono::Utc::now();
+
+    // Idempotence: observations already consumed by a live derived fact must
+    // not re-cluster — without this, every throttled maintenance pass would
+    // mint a duplicate fact from the same (demoted-but-Active) sources. If
+    // the derived fact is later invalidated, its sources become eligible
+    // again, which is the desired "re-derive after retraction" behavior.
+    let already_derived: std::collections::HashSet<&str> = loaded
+        .iter()
+        .filter(|(_, m)| !m.is_invalidated_at(now))
+        .filter_map(|(_, m)| m.valid_while.as_ref())
+        .flat_map(|v| v.derived_from.iter().map(String::as_str))
+        .collect();
+
+    let observations: Vec<&(String, crate::types::Memory)> = loaded
+        .iter()
+        .filter(|(id, m)| {
+            m.epistemic == Epistemic::Observation
+                && m.status == Status::Active
+                && !m.is_invalidated_at(now)
+                && !already_derived.contains(id.as_str())
+        })
+        .collect();
+    if observations.len() < min_sources.max(2) {
+        return Ok(report);
+    }
+    // Pairwise-similarity bound: n observations cost n(n-1)/2 cosines. Past
+    // this size the throttled maintenance pass is the wrong tool — defer with
+    // a notice instead of stalling (same gated-O(n²) discipline as #58).
+    const MAX_OBSERVATIONS_PER_PASS: usize = 500;
+    if observations.len() > MAX_OBSERVATIONS_PER_PASS {
+        tracing::info!(
+            count = observations.len(),
+            "consolidation: more than {MAX_OBSERVATIONS_PER_PASS} active observations; \
+             skipping this pass (use compress for bulk cleanup)"
+        );
+        report.skipped_too_many = true;
+        return Ok(report);
+    }
+
+    // Embed each observation (summary + content). Failures drop the entry.
+    let mut vectors: Vec<Option<Vec<f32>>> = Vec::with_capacity(observations.len());
+    for (_, m) in &observations {
+        let text = format!("{} {}", m.summary, m.content);
+        vectors.push(engine.embed_text(&text).await);
+    }
+
+    // Pairwise similarity → union-find clusters.
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for i in 0..observations.len() {
+        for j in (i + 1)..observations.len() {
+            if let (Some(a), Some(b)) = (&vectors[i], &vectors[j]) {
+                if cosine(a, b) >= similarity {
+                    pairs.push((i, j));
+                }
+            }
+        }
+    }
+    let clusters = cluster_pairs(observations.len(), &pairs, min_sources);
+
+    // Pairwise-NLI bound per cluster: k sources cost k(k-1)/2 cross-encoder
+    // inferences, so an unbounded near-duplicate cluster would stall the
+    // (synchronous) maintenance pass for minutes. Oversized clusters are
+    // deferred with a notice rather than half-checked — mirroring the
+    // gated-O(n²) discipline from the workspace robustness pass (#58).
+    const MAX_CLUSTER_SOURCES: usize = 12;
+
+    for cluster in clusters {
+        if cluster.len() > MAX_CLUSTER_SOURCES {
+            tracing::info!(
+                size = cluster.len(),
+                "consolidation: cluster exceeds {MAX_CLUSTER_SOURCES} sources; skipping this pass \
+                 (compress it manually or raise consolidation_similarity)"
+            );
+            continue;
+        }
+        // NLI gate: any pairwise contradiction disqualifies the cluster
+        // (contradictory observations are a dispute, not a consolidation).
+        let mut nli_pairs: Vec<(&str, &str)> = Vec::new();
+        for (pos, &i) in cluster.iter().enumerate() {
+            for &j in &cluster[pos + 1..] {
+                nli_pairs.push((
+                    observations[i].1.summary.as_str(),
+                    observations[j].1.summary.as_str(),
+                ));
+            }
+        }
+        let contradicted = match engine.nli_contradictions(&nli_pairs).await {
+            Some(scores) => scores
+                .iter()
+                .any(|s| *s as f64 >= config.nli.contradiction_threshold),
+            // NLI failed mid-pass: be conservative, skip the cluster.
+            None => true,
+        };
+        if contradicted {
+            continue;
+        }
+
+        let source_ids: Vec<String> = cluster.iter().map(|&i| observations[i].0.clone()).collect();
+        let summaries: Vec<String> = cluster
+            .iter()
+            .map(|&i| observations[i].1.summary.clone())
+            .collect();
+
+        if apply {
+            match consolidate_cluster_apply(store, &source_ids, Some(engine)).await {
+                Ok(new_id) => report.created.push(new_id),
+                Err(e) => {
+                    tracing::warn!("consolidation apply failed for {source_ids:?}: {e}");
+                    continue;
+                }
+            }
+        }
+        report.clusters.push(ConsolidationCluster {
+            source_ids,
+            summaries,
+        });
+    }
+    Ok(report)
+}
+
+/// Apply one consolidation cluster (§11.4): create a Fact-class memory (type
+/// `context` unless all sources share a type) with
+/// `valid_while.derived_from = sources`, `provenance: inferred`,
+/// criticality = max(sources), decay = none — then DEMOTE the sources
+/// (decay → exponential 30d, floor 0.1). Sources are never deleted: they are
+/// the evidence the §10.3 derived-from check depends on.
+pub async fn consolidate_cluster_apply(
+    store: &MemoryStore,
+    source_ids: &[String],
+    engine: Option<&crate::retrieval::engine::RetrievalEngine>,
+) -> Result<String> {
+    use crate::types::{Epistemic, Memory, MemoryType, Provenance, Validity};
+
+    if source_ids.len() < 2 {
+        bail!("a consolidation cluster needs at least 2 sources");
+    }
+    let mut sources = Vec::with_capacity(source_ids.len());
+    for id in source_ids {
+        sources.push(store.get(id).await?);
+    }
+
+    let all_same_type = sources.windows(2).all(|w| w[0].type_ == w[1].type_);
+    let common_type = if all_same_type {
+        sources[0].type_
+    } else {
+        MemoryType::Context
+    };
+    let criticality = sources.iter().map(|m| m.criticality).fold(0.0f64, |a, b| {
+        if b.is_finite() {
+            a.max(b)
+        } else {
+            a
+        }
+    });
+
+    let mut summary = format!("Consolidated: {}", sources[0].summary);
+    if summary.chars().count() > 100 {
+        summary = summary.chars().take(97).collect::<String>() + "...";
+    }
+    let content = sources
+        .iter()
+        .map(|m| format!("- {}", m.summary))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut fact = Memory::new(common_type, &summary, &content, Provenance::inferred());
+    fact.epistemic = Epistemic::Fact;
+    fact.criticality = criticality;
+    fact.decay = Some(crate::types::Decay::none());
+    fact.valid_while = Some(Validity {
+        derived_from: source_ids.to_vec(),
+        ..Default::default()
+    });
+    // Union the sources' scopes so the fact applies where its evidence did.
+    let mut physical: Vec<String> = sources.iter().flat_map(|m| m.physical.clone()).collect();
+    physical.sort();
+    physical.dedup();
+    fact.physical = physical;
+    let mut logical: Vec<String> = sources.iter().flat_map(|m| m.logical.clone()).collect();
+    logical.sort();
+    logical.dedup();
+    fact.logical = logical;
+
+    let new_id = store.create(&fact).await?;
+
+    // Embed the derived fact so it participates in vector search immediately
+    // (plain `store.create` writes no vector). Best-effort: a failed embed
+    // leaves the fact index-searchable until the next reindex.
+    if let Some(engine) = engine {
+        if engine.embeddings_available() {
+            if let Ok(saved) = store.get(&new_id).await {
+                if let Err(e) = engine.embed_memory(&saved).await {
+                    tracing::warn!(memory_id = %new_id, "consolidated fact embed failed: {e}");
+                }
+            }
+        }
+    }
+
+    // Demote sources: 30d exponential, floor 0.1 — evidence fades, never
+    // vanishes.
+    for id in source_ids {
+        let demoted = store
+            .update_with(id, |m| {
+                m.decay = Some(
+                    crate::types::Decay::exponential(chrono::Duration::days(30)).with_floor(0.1),
+                );
+                Ok(())
+            })
+            .await;
+        if let Err(e) = demoted {
+            tracing::warn!(memory_id = %id, "consolidation source demotion failed: {e}");
+        }
+    }
+    Ok(new_id)
+}
+
+#[cfg(test)]
+mod consolidation_tests {
+    use super::*;
+    use crate::storage::InMemoryRegistry;
+    use crate::types::{DecayStrategy, Epistemic, Memory, MemoryType, Provenance};
+    use tempfile::TempDir;
+
+    #[test]
+    fn cluster_pairs_union_find() {
+        // 0-1-2 chained, 3-4 pair, 5 isolated.
+        let pairs = [(0, 1), (1, 2), (3, 4)];
+        let clusters = cluster_pairs(6, &pairs, 3);
+        assert_eq!(clusters, vec![vec![0, 1, 2]]);
+        let clusters = cluster_pairs(6, &pairs, 2);
+        assert_eq!(clusters, vec![vec![0, 1, 2], vec![3, 4]]);
+        // Out-of-range pairs are ignored; empty input yields nothing.
+        assert!(cluster_pairs(2, &[(0, 5)], 2).is_empty());
+        assert!(cluster_pairs(0, &[], 2).is_empty());
+    }
+
+    #[tokio::test]
+    async fn consolidation_skips_without_providers() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let engine = crate::retrieval::engine::RetrievalEngine::new(
+            store.clone(),
+            crate::types::EngramConfig::default(),
+        );
+        let config = crate::types::EngramConfig::default();
+        let report = consolidation_pass(&store, &engine, &config, false)
+            .await
+            .unwrap();
+        assert!(report.skipped_no_providers);
+        assert!(report.clusters.is_empty());
+    }
+
+    #[tokio::test]
+    async fn consolidate_cluster_apply_creates_fact_and_demotes_sources() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        for (id, crit) in [("con-a", 0.4), ("con-b", 0.7), ("con-c", 0.5)] {
+            let mut m = Memory::new(
+                MemoryType::Debug,
+                format!("Observation {id}"),
+                "body",
+                Provenance::human(),
+            );
+            m.id = id.to_string();
+            m.criticality = crit;
+            m.physical = vec![format!("src/{id}.rs")];
+            store.create(&m).await.unwrap();
+        }
+
+        let ids: Vec<String> = ["con-a", "con-b", "con-c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let new_id = consolidate_cluster_apply(&store, &ids, None).await.unwrap();
+
+        let fact = store.get(&new_id).await.unwrap();
+        assert_eq!(fact.epistemic, Epistemic::Fact);
+        assert_eq!(fact.type_, MemoryType::Debug, "all sources share a type");
+        assert_eq!(fact.criticality, 0.7, "max of sources");
+        assert_eq!(
+            fact.valid_while.as_ref().unwrap().derived_from,
+            ids,
+            "derivation links recorded for the §10.3 cascade"
+        );
+        assert_eq!(
+            fact.provenance.source,
+            crate::types::ProvenanceSource::Inferred
+        );
+        assert_eq!(fact.decay.as_ref().unwrap().strategy, DecayStrategy::None);
+        assert_eq!(fact.physical.len(), 3, "scope union");
+
+        // Sources demoted, never deleted.
+        for id in &ids {
+            let m = store.get(id).await.unwrap();
+            let decay = m.decay.unwrap();
+            assert_eq!(decay.strategy, DecayStrategy::Exponential);
+            assert_eq!(decay.half_life, Some(chrono::Duration::days(30)));
+            assert_eq!(decay.floor, 0.1);
+        }
+
+        // Mixed types fall back to Context.
+        let mut other = Memory::new(MemoryType::Convention, "Other", "b", Provenance::human());
+        other.id = "con-d".to_string();
+        store.create(&other).await.unwrap();
+        let mixed: Vec<String> = vec!["con-a".into(), "con-d".into()];
+        let mixed_id = consolidate_cluster_apply(&store, &mixed, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get(&mixed_id).await.unwrap().type_,
+            MemoryType::Context
+        );
+    }
+
+    // --- Gate tests: stub providers so similarity + NLI gating is
+    // --- deterministic without loading any real model.
+
+    /// Deterministic embeddings: texts containing the same `group<X>` marker
+    /// share an identical (cosine 1.0) vector; different markers are
+    /// orthogonal (cosine 0.0).
+    struct MarkerEmbedding;
+
+    #[async_trait::async_trait]
+    impl crate::embeddings::EmbeddingProvider for MarkerEmbedding {
+        async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            let mut v = vec![0.0f32; 384];
+            if text.contains("groupA") {
+                v[0] = 1.0;
+            } else if text.contains("groupB") {
+                v[1] = 1.0;
+            } else {
+                v[2] = 1.0;
+            }
+            Ok(v)
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            let mut out = Vec::with_capacity(texts.len());
+            for t in texts {
+                out.push(self.embed(t).await?);
+            }
+            Ok(out)
+        }
+        fn dimensions(&self) -> usize {
+            384
+        }
+        fn max_tokens(&self) -> usize {
+            256
+        }
+        fn model_id(&self) -> String {
+            "onnx/marker-stub".to_string()
+        }
+    }
+
+    /// Stub NLI: any pair where either side contains "flaky" is a full
+    /// contradiction; everything else is neutral.
+    struct MarkerNli;
+
+    #[async_trait::async_trait]
+    impl crate::nli::NliProvider for MarkerNli {
+        async fn classify(
+            &self,
+            premise: &str,
+            hypothesis: &str,
+        ) -> anyhow::Result<crate::nli::NliResult> {
+            let contradicted = premise.contains("flaky") || hypothesis.contains("flaky");
+            Ok(crate::nli::NliResult {
+                label: if contradicted {
+                    crate::nli::NliLabel::Contradiction
+                } else {
+                    crate::nli::NliLabel::Neutral
+                },
+                entailment: 0.0,
+                neutral: if contradicted { 0.0 } else { 1.0 },
+                contradiction: if contradicted { 1.0 } else { 0.0 },
+            })
+        }
+        async fn classify_batch(
+            &self,
+            pairs: &[(&str, &str)],
+        ) -> anyhow::Result<Vec<crate::nli::NliResult>> {
+            let mut out = Vec::with_capacity(pairs.len());
+            for (p, h) in pairs {
+                out.push(self.classify(p, h).await?);
+            }
+            Ok(out)
+        }
+    }
+
+    async fn gate_fixture() -> (
+        TempDir,
+        MemoryStore,
+        crate::retrieval::engine::RetrievalEngine,
+        crate::types::EngramConfig,
+    ) {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut config = crate::types::EngramConfig::default();
+        config.nli.enabled = true;
+        let engine = crate::retrieval::engine::RetrievalEngine::new(store.clone(), config.clone())
+            .with_embedding_provider(std::sync::Arc::new(MarkerEmbedding))
+            .with_nli_provider(std::sync::Arc::new(MarkerNli));
+        (tmp, store, engine, config)
+    }
+
+    async fn observation(store: &MemoryStore, id: &str, summary: &str) {
+        // Debug is diagonally Observation-class.
+        let mut m = Memory::new(MemoryType::Debug, summary, summary, Provenance::human());
+        m.id = id.to_string();
+        store.create(&m).await.unwrap();
+    }
+
+    /// The §11.4 similarity gate: only observations whose embeddings clear
+    /// `consolidation_similarity` cluster; sub-threshold (orthogonal)
+    /// observations never do, and clusters below `consolidation_min_sources`
+    /// are dropped.
+    #[tokio::test]
+    async fn consolidation_gate_clusters_by_similarity_only() {
+        let (_t, store, engine, config) = gate_fixture().await;
+
+        for id in ["ga-1", "ga-2", "ga-3"] {
+            observation(&store, id, &format!("groupA behavior seen in {id}")).await;
+        }
+        // Only two of these — below min_sources (3) — plus orthogonal class.
+        for id in ["gb-1", "gb-2"] {
+            observation(&store, id, &format!("groupB behavior seen in {id}")).await;
+        }
+
+        let report = consolidation_pass(&store, &engine, &config, false)
+            .await
+            .unwrap();
+        assert!(!report.skipped_no_providers);
+        assert_eq!(report.clusters.len(), 1, "only the 3-strong groupA cluster");
+        let mut ids = report.clusters[0].source_ids.clone();
+        ids.sort();
+        assert_eq!(ids, vec!["ga-1", "ga-2", "ga-3"]);
+        assert!(report.created.is_empty(), "suggestion mode creates nothing");
+    }
+
+    /// The §11.4 NLI gate: a similarity cluster containing a pairwise
+    /// contradiction is a dispute, not a consolidation — it must be dropped.
+    #[tokio::test]
+    async fn consolidation_gate_rejects_contradicting_cluster() {
+        let (_t, store, engine, config) = gate_fixture().await;
+
+        observation(&store, "gc-1", "groupA the cache is fast").await;
+        observation(&store, "gc-2", "groupA the cache is quick").await;
+        // Same embedding group, but the stub NLI contradicts this one.
+        observation(&store, "gc-3", "groupA the cache is flaky").await;
+
+        let report = consolidation_pass(&store, &engine, &config, false)
+            .await
+            .unwrap();
+        assert!(
+            report.clusters.is_empty(),
+            "contradicting cluster must not consolidate: {:?}",
+            report.clusters
+        );
+    }
+
+    /// Idempotence: after an applied consolidation, the (still-Active,
+    /// demoted) sources must not re-cluster on the next pass — one derived
+    /// fact, not one per maintenance interval.
+    #[tokio::test]
+    async fn consolidation_apply_is_idempotent_across_passes() {
+        let (_t, store, engine, config) = gate_fixture().await;
+
+        for id in ["gi-1", "gi-2", "gi-3"] {
+            observation(&store, id, &format!("groupA metric drift in {id}")).await;
+        }
+
+        let first = consolidation_pass(&store, &engine, &config, true)
+            .await
+            .unwrap();
+        assert_eq!(first.created.len(), 1, "first pass consolidates");
+        let fact = store.get(&first.created[0]).await.unwrap();
+        assert_eq!(fact.epistemic, Epistemic::Fact);
+
+        let second = consolidation_pass(&store, &engine, &config, true)
+            .await
+            .unwrap();
+        assert!(
+            second.created.is_empty() && second.clusters.is_empty(),
+            "consumed sources must not re-cluster: {:?}",
+            second.clusters
+        );
+
+        // Invalidating the derived fact frees its sources to re-derive.
+        store
+            .invalidate_with(&first.created[0], None, chrono::Utc::now())
+            .await
+            .unwrap();
+        let third = consolidation_pass(&store, &engine, &config, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            third.clusters.len(),
+            1,
+            "retracted derivation reopens the cluster"
+        );
+    }
+
+    /// O(n²) bound (#58 discipline): a cluster larger than the per-pass NLI
+    /// budget is deferred with a notice, not half-checked or consolidated.
+    #[tokio::test]
+    async fn consolidation_defers_oversized_clusters() {
+        let (_t, store, engine, config) = gate_fixture().await;
+
+        // 13 same-group observations: one cluster of 13 > MAX_CLUSTER_SOURCES.
+        for i in 0..13 {
+            observation(
+                &store,
+                &format!("gx-{i}"),
+                &format!("groupA repeated pattern {i}"),
+            )
+            .await;
+        }
+
+        let report = consolidation_pass(&store, &engine, &config, true)
+            .await
+            .unwrap();
+        assert!(
+            report.clusters.is_empty() && report.created.is_empty(),
+            "oversized cluster must be deferred: {:?}",
+            report.clusters
+        );
     }
 }

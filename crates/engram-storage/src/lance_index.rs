@@ -21,7 +21,9 @@ use lancedb::table::OptimizeAction;
 use lancedb::{connect, Connection, Table};
 
 use chrono::{DateTime, Utc};
-use engram_types::{Decay, Memory, MemoryType, ProvenanceSource, Status, Visibility};
+use engram_types::{
+    Decay, Epistemic, Generality, Memory, MemoryType, ProvenanceSource, Status, Visibility,
+};
 use serde::{Deserialize, Serialize};
 
 /// Minimum chunk-table row count before [`LanceIndex::optimize`] will
@@ -65,7 +67,7 @@ const VECTOR_SEARCH_NPROBES: usize = 48;
 /// (their stored vectors are already exact).
 const VECTOR_SEARCH_REFINE_FACTOR: u32 = 4;
 
-/// Full metadata entry stored in LanceDB (all 14 columns).
+/// Full metadata entry stored in LanceDB (all 23 columns).
 ///
 /// Used only for writing to LanceDB. For reads, prefer the narrower
 /// [`IndexSummary`] or [`IndexFilterable`] projections.
@@ -99,6 +101,23 @@ pub struct IndexEntry {
     /// so a semantic query can read it from the memories projection.
     #[serde(default)]
     pub has_embedding: bool,
+    // Added in schema v0.3.0 (epistemic memory classes). `watch_paths` is the
+    // index name for `valid_while.invalidated_by` — renamed to avoid confusion
+    // with the `invalidated_at` timestamp.
+    #[serde(default)]
+    pub epistemic: Epistemic,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub generality: Generality,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_task: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_from: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invalidated_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub watch_paths: Vec<String>,
 }
 
 /// Lightweight metadata for aggregation/stats queries (7 columns).
@@ -116,11 +135,11 @@ pub struct IndexSummary {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-/// Minimal projection for index-level filtering (7 columns).
+/// Projection for index-level filtering (18 columns).
 ///
-/// Contains only the fields that [`apply_index_filters`] reads plus `id`
-/// for tracking and `expires_at` for pre-filtering expired entries before
-/// any disk I/O.
+/// Contains the fields that [`apply_index_filters`] reads plus `id` for
+/// tracking, `expires_at`/`invalidated_at` for pre-filtering dead entries
+/// before any disk I/O, and the scoring/hook fields noted below.
 #[derive(Debug, Clone)]
 pub struct IndexForFiltering {
     pub id: String,
@@ -138,9 +157,19 @@ pub struct IndexForFiltering {
     pub provenance_source: ProvenanceSource,
     pub status: Status,
     pub has_embedding: bool,
+    // Schema v0.3.0 epistemic fields. `epistemic`/`verified_at` feed
+    // `ScoreTarget`; `invalidated_at` feeds the default-exclusion predicate;
+    // `generality`/`origin_task` gate hook injection; `watch_paths` is
+    // glob-matched by the PostToolUse hook — all without loading `.md` files.
+    pub epistemic: Epistemic,
+    pub verified_at: Option<DateTime<Utc>>,
+    pub generality: Generality,
+    pub origin_task: Option<String>,
+    pub invalidated_at: Option<DateTime<Utc>>,
+    pub watch_paths: Vec<String>,
 }
 
-/// Filterable/displayable entry (12 columns).
+/// Filterable/displayable entry (15 columns).
 ///
 /// Contains every field needed for filtering, sorting, and display.
 /// Omits only `provenance_source` and `confidence` which no caller reads
@@ -150,6 +179,11 @@ pub struct IndexFilterable {
     pub id: String,
     #[serde(rename = "type")]
     pub type_: MemoryType,
+    /// Epistemic class (schema v0.3.0). Always serialized — §5.4 requires
+    /// json/MCP list output to include it — and rendered as an off-diagonal
+    /// `[fact]`-style tag in pretty output.
+    #[serde(default)]
+    pub epistemic: Epistemic,
     pub summary: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub physical: Vec<String>,
@@ -164,6 +198,15 @@ pub struct IndexFilterable {
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
+    /// Valid-time start (schema v0.3.0); `None` ⇒ `created_at`. Carried in
+    /// the displayable projection for output tagging and time-travel filters.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub valid_from: Option<DateTime<Utc>>,
+    /// Valid-time end (schema v0.3.0). Carried so `list` can exclude closed
+    /// windows by default and tag them `[invalidated <date>]` when included
+    /// (§5.4) without loading files.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub invalidated_at: Option<DateTime<Utc>>,
 }
 
 impl From<&Memory> for IndexEntry {
@@ -190,6 +233,24 @@ impl From<&Memory> for IndexEntry {
             // check, `upsert_chunks`/`delete_chunks` via a targeted update, and
             // reindex from the chunk-id set. Defaults to false (no chunks yet).
             has_embedding: false,
+            epistemic: memory.epistemic,
+            verified_at: memory.verified_at,
+            generality: memory
+                .valid_while
+                .as_ref()
+                .map(|v| v.generality)
+                .unwrap_or_default(),
+            origin_task: memory
+                .valid_while
+                .as_ref()
+                .and_then(|v| v.origin_task.clone()),
+            valid_from: memory.valid_from,
+            invalidated_at: memory.invalidated_at,
+            watch_paths: memory
+                .valid_while
+                .as_ref()
+                .map(|v| v.invalidated_by.clone())
+                .unwrap_or_default(),
         }
     }
 }
@@ -279,6 +340,17 @@ impl LanceIndex {
             // presence so a semantic query needn't scan the chunks table.
             Field::new("decay", DataType::Utf8, true),
             Field::new("has_embedding", DataType::Boolean, false),
+            // Added in schema v0.3.0 (epistemic memory classes). Enum-valued
+            // columns store the lowercase serde names; `watch_paths` follows
+            // the existing multi-value convention (`physical`/`tags`):
+            // serde_json-encoded Utf8, glob-matched in Rust — never in SQL.
+            Field::new("epistemic", DataType::Utf8, false),
+            Field::new("verified_at", DataType::Utf8, true),
+            Field::new("generality", DataType::Utf8, false),
+            Field::new("origin_task", DataType::Utf8, true),
+            Field::new("valid_from", DataType::Utf8, true),
+            Field::new("invalidated_at", DataType::Utf8, true),
+            Field::new("watch_paths", DataType::Utf8, false),
         ]))
     }
 
@@ -553,7 +625,7 @@ impl LanceIndex {
         Ok(entries)
     }
 
-    /// List entries with all filterable/displayable columns (12 columns).
+    /// List entries with all filterable/displayable columns (15 columns).
     ///
     /// Omits only `provenance_source` and `confidence` which no caller reads.
     pub async fn list_filterable(&self) -> Result<Vec<IndexFilterable>> {
@@ -565,6 +637,7 @@ impl LanceIndex {
                 "id".into(),
                 "summary".into(),
                 "type".into(),
+                "epistemic".into(),
                 "status".into(),
                 "visibility".into(),
                 "criticality".into(),
@@ -574,6 +647,8 @@ impl LanceIndex {
                 "created_at".into(),
                 "updated_at".into(),
                 "expires_at".into(),
+                "valid_from".into(),
+                "invalidated_at".into(),
             ]))
             .execute()
             .await
@@ -587,7 +662,7 @@ impl LanceIndex {
         Ok(entries)
     }
 
-    /// List entries with minimal columns for filtering (6 columns).
+    /// List entries with the columns needed for filtering and projection scoring.
     ///
     /// Returns [`IndexForFiltering`] entries containing only the fields needed
     /// by `apply_index_filters`: id, type, physical, logical, tags, criticality.
@@ -630,6 +705,12 @@ impl LanceIndex {
             "provenance_source".into(),
             "status".into(),
             "has_embedding".into(),
+            "epistemic".into(),
+            "verified_at".into(),
+            "generality".into(),
+            "origin_task".into(),
+            "invalidated_at".into(),
+            "watch_paths".into(),
         ]));
         if let Some(pred) = predicate {
             query = query.only_if(pred);
@@ -1291,6 +1372,13 @@ impl LanceIndex {
         let mut expires_ats: Vec<Option<String>> = Vec::with_capacity(n);
         let mut decays: Vec<Option<String>> = Vec::with_capacity(n);
         let mut has_embeddings = Vec::with_capacity(n);
+        let mut epistemics = Vec::with_capacity(n);
+        let mut verified_ats: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut generalities = Vec::with_capacity(n);
+        let mut origin_tasks: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut valid_froms: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut invalidated_ats: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut watch_paths_col = Vec::with_capacity(n);
 
         for entry in entries {
             ids.push(entry.id.clone());
@@ -1316,6 +1404,16 @@ impl LanceIndex {
                 None => None,
             });
             has_embeddings.push(entry.has_embedding);
+            epistemics.push(entry.epistemic.as_str().to_string());
+            verified_ats.push(entry.verified_at.map(|dt| dt.to_rfc3339()));
+            generalities.push(entry.generality.as_str().to_string());
+            origin_tasks.push(entry.origin_task.clone());
+            valid_froms.push(entry.valid_from.map(|dt| dt.to_rfc3339()));
+            invalidated_ats.push(entry.invalidated_at.map(|dt| dt.to_rfc3339()));
+            watch_paths_col.push(
+                serde_json::to_string(&entry.watch_paths)
+                    .context("Failed to serialize watch_paths")?,
+            );
         }
 
         let batch = RecordBatch::try_new(
@@ -1337,6 +1435,13 @@ impl LanceIndex {
                 Arc::new(StringArray::from(expires_ats)) as ArrayRef,
                 Arc::new(StringArray::from(decays)) as ArrayRef,
                 Arc::new(BooleanArray::from(has_embeddings)) as ArrayRef,
+                Arc::new(StringArray::from(epistemics)) as ArrayRef,
+                Arc::new(StringArray::from(verified_ats)) as ArrayRef,
+                Arc::new(StringArray::from(generalities)) as ArrayRef,
+                Arc::new(StringArray::from(origin_tasks)) as ArrayRef,
+                Arc::new(StringArray::from(valid_froms)) as ArrayRef,
+                Arc::new(StringArray::from(invalidated_ats)) as ArrayRef,
+                Arc::new(StringArray::from(watch_paths_col)) as ArrayRef,
             ],
         )
         .context("Failed to create RecordBatch")?;
@@ -1420,7 +1525,7 @@ fn batch_to_summaries(batch: &RecordBatch) -> Result<Vec<IndexSummary>> {
     Ok(entries)
 }
 
-/// Convert a RecordBatch to a Vec of IndexFilterable (12 columns).
+/// Convert a RecordBatch to a Vec of IndexFilterable (15 columns).
 fn batch_to_filterable(batch: &RecordBatch) -> Result<Vec<IndexFilterable>> {
     let ids = batch
         .column_by_name("id")
@@ -1428,6 +1533,12 @@ fn batch_to_filterable(batch: &RecordBatch) -> Result<Vec<IndexFilterable>> {
         .as_any()
         .downcast_ref::<StringArray>()
         .context("Failed to cast 'id'")?;
+    let epistemics = batch
+        .column_by_name("epistemic")
+        .context("Missing 'epistemic' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'epistemic'")?;
     let summaries = batch
         .column_by_name("summary")
         .context("Missing 'summary' column")?
@@ -1494,6 +1605,18 @@ fn batch_to_filterable(batch: &RecordBatch) -> Result<Vec<IndexFilterable>> {
         .as_any()
         .downcast_ref::<StringArray>()
         .context("Failed to cast 'expires_at'")?;
+    let valid_froms = batch
+        .column_by_name("valid_from")
+        .context("Missing 'valid_from' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'valid_from'")?;
+    let invalidated_ats_col = batch
+        .column_by_name("invalidated_at")
+        .context("Missing 'invalidated_at' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'invalidated_at'")?;
 
     let mut entries = Vec::with_capacity(batch.num_rows());
     for i in 0..batch.num_rows() {
@@ -1518,10 +1641,29 @@ fn batch_to_filterable(batch: &RecordBatch) -> Result<Vec<IndexFilterable>> {
                     .with_timezone(&Utc),
             )
         };
+        let valid_from: Option<DateTime<Utc>> = if valid_froms.is_null(i) {
+            None
+        } else {
+            Some(
+                chrono::DateTime::parse_from_rfc3339(valid_froms.value(i))
+                    .context("Failed to parse valid_from")?
+                    .with_timezone(&Utc),
+            )
+        };
+        let invalidated_at: Option<DateTime<Utc>> = if invalidated_ats_col.is_null(i) {
+            None
+        } else {
+            Some(
+                chrono::DateTime::parse_from_rfc3339(invalidated_ats_col.value(i))
+                    .context("Failed to parse invalidated_at")?
+                    .with_timezone(&Utc),
+            )
+        };
 
         entries.push(IndexFilterable {
             id: ids.value(i).to_string(),
             type_: parse_memory_type(types.value(i))?,
+            epistemic: parse_epistemic(epistemics.value(i))?,
             summary: summaries.value(i).to_string(),
             physical,
             logical,
@@ -1532,12 +1674,14 @@ fn batch_to_filterable(batch: &RecordBatch) -> Result<Vec<IndexFilterable>> {
             created_at,
             updated_at,
             expires_at,
+            valid_from,
+            invalidated_at,
         });
     }
     Ok(entries)
 }
 
-/// Convert a RecordBatch to a Vec of IndexForFiltering (7 columns).
+/// Convert a RecordBatch to a Vec of IndexForFiltering (18 columns).
 fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>> {
     let ids = batch
         .column_by_name("id")
@@ -1611,6 +1755,42 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
         .as_any()
         .downcast_ref::<BooleanArray>()
         .context("Failed to cast 'has_embedding'")?;
+    let epistemics = batch
+        .column_by_name("epistemic")
+        .context("Missing 'epistemic' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'epistemic'")?;
+    let verified_ats = batch
+        .column_by_name("verified_at")
+        .context("Missing 'verified_at' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'verified_at'")?;
+    let generalities = batch
+        .column_by_name("generality")
+        .context("Missing 'generality' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'generality'")?;
+    let origin_tasks = batch
+        .column_by_name("origin_task")
+        .context("Missing 'origin_task' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'origin_task'")?;
+    let invalidated_ats = batch
+        .column_by_name("invalidated_at")
+        .context("Missing 'invalidated_at' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'invalidated_at'")?;
+    let watch_paths_col = batch
+        .column_by_name("watch_paths")
+        .context("Missing 'watch_paths' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'watch_paths'")?;
 
     let mut entries = Vec::with_capacity(batch.num_rows());
     for i in 0..batch.num_rows() {
@@ -1656,6 +1836,26 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
         let created_at: DateTime<Utc> = chrono::DateTime::parse_from_rfc3339(created_ats.value(i))
             .context("Failed to parse created_at")?
             .with_timezone(&Utc);
+        let verified_at: Option<DateTime<Utc>> = if verified_ats.is_null(i) {
+            None
+        } else {
+            Some(
+                chrono::DateTime::parse_from_rfc3339(verified_ats.value(i))
+                    .context("Failed to parse verified_at")?
+                    .with_timezone(&Utc),
+            )
+        };
+        let invalidated_at: Option<DateTime<Utc>> = if invalidated_ats.is_null(i) {
+            None
+        } else {
+            Some(
+                chrono::DateTime::parse_from_rfc3339(invalidated_ats.value(i))
+                    .context("Failed to parse invalidated_at")?
+                    .with_timezone(&Utc),
+            )
+        };
+        let watch_paths: Vec<String> = serde_json::from_str(watch_paths_col.value(i))
+            .context("Failed to parse watch_paths JSON")?;
 
         entries.push(IndexForFiltering {
             id: ids.value(i).to_string(),
@@ -1670,6 +1870,16 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
             provenance_source: parse_provenance_source(provenances.value(i))?,
             status: parse_status(statuses.value(i))?,
             has_embedding: has_embeddings.value(i),
+            epistemic: parse_epistemic(epistemics.value(i))?,
+            verified_at,
+            generality: parse_generality(generalities.value(i))?,
+            origin_task: if origin_tasks.is_null(i) {
+                None
+            } else {
+                Some(origin_tasks.value(i).to_string())
+            },
+            invalidated_at,
+            watch_paths,
         });
     }
     Ok(entries)
@@ -1697,6 +1907,23 @@ fn parse_status(s: &str) -> Result<Status> {
         "challenged" => Ok(Status::Challenged),
         "needsreview" | "needs_review" => Ok(Status::NeedsReview),
         _ => anyhow::bail!("Unknown status: {}", s),
+    }
+}
+
+fn parse_epistemic(s: &str) -> Result<Epistemic> {
+    match s {
+        "fact" => Ok(Epistemic::Fact),
+        "observation" => Ok(Epistemic::Observation),
+        "decision" => Ok(Epistemic::Decision),
+        _ => anyhow::bail!("Unknown epistemic class: {}", s),
+    }
+}
+
+fn parse_generality(s: &str) -> Result<Generality> {
+    match s {
+        "project" => Ok(Generality::Project),
+        "task" => Ok(Generality::Task),
+        _ => anyhow::bail!("Unknown generality: {}", s),
     }
 }
 
@@ -1728,6 +1955,11 @@ mod tests {
         let memory = Memory {
             id: id.to_string(),
             type_: MemoryType::Decision,
+            epistemic: MemoryType::Decision.default_epistemic(),
+            valid_while: None,
+            valid_from: None,
+            invalidated_at: None,
+            superseded_by: None,
             summary: "Test summary".to_string(),
             title: None,
             content: "Test content".to_string(),
@@ -1772,6 +2004,23 @@ mod tests {
         assert_eq!(entries[0].id, "test-1");
         assert_eq!(entries[0].summary, "Test summary");
         assert_eq!(entries[0].visibility, Visibility::Shared);
+        assert_eq!(entries[0].epistemic, engram_types::Epistemic::Decision);
+    }
+
+    /// §5.4: the filterable projection must carry the epistemic class so list
+    /// output can include it (json: always; pretty: off-diagonal tag).
+    #[tokio::test]
+    async fn test_list_filterable_carries_off_diagonal_epistemic() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        let mut entry = create_test_entry("test-offdiag");
+        entry.epistemic = engram_types::Epistemic::Observation;
+        lance.upsert(&entry).await.unwrap();
+
+        let entries = lance.list_filterable().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].epistemic, engram_types::Epistemic::Observation);
     }
 
     #[tokio::test]

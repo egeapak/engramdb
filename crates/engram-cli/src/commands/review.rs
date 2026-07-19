@@ -80,7 +80,14 @@ pub async fn run_review(
         }
         println!();
 
-        let options = vec!["Keep (reset to Active)", "Update", "Delete", "Skip", "Quit"];
+        let options = vec![
+            "Keep (reset to Active)",
+            "Update",
+            "Invalidate (close validity window, keep history)",
+            "Delete",
+            "Skip",
+            "Quit",
+        ];
         let answer = prompter.select("Action:", &options);
 
         match answer.as_deref() {
@@ -92,6 +99,7 @@ pub async fn run_review(
                         action: ops::ResolveAction::Keep,
                         updated_content: None,
                         updated_summary: None,
+                        superseded_by: None,
                     },
                 )
                 .await?;
@@ -119,11 +127,35 @@ pub async fn run_review(
                         } else {
                             Some(new_summary)
                         },
+                        superseded_by: None,
                     },
                 )
                 .await?;
                 formatter.print_success(&format!(
                     "Updated memory {}.",
+                    memory.id.chars().take(8).collect::<String>()
+                ));
+            }
+            Ok("Invalidate (close validity window, keep history)") => {
+                let successor =
+                    prompter.text("Superseded by (memory id, enter for none):", None)?;
+                ops::resolve_memory(
+                    &store,
+                    ops::ResolveParams {
+                        id: memory.id.clone(),
+                        action: ops::ResolveAction::Invalidate,
+                        updated_content: None,
+                        updated_summary: None,
+                        superseded_by: if successor.is_empty() {
+                            None
+                        } else {
+                            Some(successor)
+                        },
+                    },
+                )
+                .await?;
+                formatter.print_success(&format!(
+                    "Invalidated memory {} (retained on disk; reopen with `update --clear-invalidated`).",
                     memory.id.chars().take(8).collect::<String>()
                 ));
             }
@@ -135,6 +167,7 @@ pub async fn run_review(
                         action: ops::ResolveAction::Delete,
                         updated_content: None,
                         updated_summary: None,
+                        superseded_by: None,
                     },
                 )
                 .await?;

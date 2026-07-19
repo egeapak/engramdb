@@ -25,12 +25,14 @@ pub async fn run_list(
     dir: &Path,
     global: bool,
     type_filter: Vec<String>,
+    epistemic_filter: Vec<String>,
     tags_filter: Vec<String>,
     status_filter: Option<String>,
     scope_filter: Option<String>,
     sort_field: &str,
     reverse: bool,
     limit: Option<usize>,
+    include_invalidated: bool,
     verbose: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
@@ -51,6 +53,11 @@ pub async fn run_list(
         } else {
             Some(type_filter)
         },
+        epistemic: if epistemic_filter.is_empty() {
+            None
+        } else {
+            Some(epistemic_filter)
+        },
         tags: if tags_filter.is_empty() {
             None
         } else {
@@ -58,6 +65,7 @@ pub async fn run_list(
         },
         status: status_filter,
         scope: scope_filter,
+        include_invalidated,
         sort_field: parsed_sort,
         reverse,
         limit,
@@ -87,6 +95,11 @@ mod tests {
         Memory {
             id: id.to_string(),
             type_,
+            epistemic: type_.default_epistemic(),
+            valid_while: None,
+            valid_from: None,
+            invalidated_at: None,
+            superseded_by: None,
             summary: format!("Test summary for {}", id),
             title: None,
             content: format!("Test content for {}", id),
@@ -159,11 +172,13 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
             None,
             Some("src/main.rs".to_string()),
             "criticality",
             false,
             None,
+            false,
             false,
             &formatter,
         )
@@ -182,11 +197,13 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
             None,
             Some("app.core".to_string()),
             "criticality",
             false,
             None,
+            false,
             false,
             &formatter,
         )
@@ -205,11 +222,13 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
             None,
             Some("nonexistent".to_string()),
             "criticality",
             false,
             None,
+            false,
             false,
             &formatter,
         )
@@ -241,11 +260,13 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
             None,
             None,
             "created",
             false,
             None,
+            false,
             false,
             &formatter,
         )
@@ -264,11 +285,13 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
             None,
             None,
             "updated",
             false,
             None,
+            false,
             false,
             &formatter,
         )
@@ -287,11 +310,13 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
             None,
             None,
             "type",
             false,
             None,
+            false,
             false,
             &formatter,
         )
@@ -310,11 +335,13 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
             None,
             None,
             "invalid",
             false,
             None,
+            false,
             false,
             &formatter,
         )
@@ -337,11 +364,13 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
             None,
             None,
             "criticality",
             true,
             None,
+            false,
             false,
             &formatter,
         )
@@ -360,11 +389,13 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
             None,
             None,
             "criticality",
             false,
             Some(2),
+            false,
             false,
             &formatter,
         )
@@ -383,11 +414,13 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
             None,
             Some("app.core".to_string()),
             "criticality",
             false,
             Some(1),
+            false,
             false,
             &formatter,
         )
@@ -402,12 +435,14 @@ mod tests {
 
         let params = ListParams {
             types: None,
+            epistemic: None,
             tags: None,
             status: None,
             scope: Some("app.core".to_string()),
             sort_field: SortField::Criticality,
             reverse: false,
             limit: None,
+            include_invalidated: false,
         };
 
         let entries = list_memories(&store, &params).await.unwrap();
@@ -420,12 +455,14 @@ mod tests {
 
         let params = ListParams {
             types: None,
+            epistemic: None,
             tags: None,
             status: None,
             scope: None,
             sort_field: SortField::Criticality,
             reverse: false,
             limit: Some(1),
+            include_invalidated: false,
         };
 
         let entries = list_memories(&store, &params).await.unwrap();

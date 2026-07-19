@@ -17,6 +17,7 @@ pub mod paths;
 pub mod project_id;
 pub mod registry;
 pub mod store;
+pub mod task_state;
 pub mod telemetry;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

@@ -101,11 +101,14 @@ Example: user asks "how does auth work" while pointed at `src/api/auth/oauth.rs`
 | Parameter | Effect |
 |-----------|--------|
 | `types: ["decision", "hazard"]` | Hard filter; only those types are considered. |
+| `epistemic: ["fact", "decision"]` | Hard filter by epistemic class; OR within the list, like `types`. |
 | `tags: ["security", "auth"]` | Hard filter; OR within the list. |
 | `min_criticality: 0.5` | Drops memories below this. |
 | `max_results: 10` | Result cap (default 10). |
 | `detail_level: "summary"\|"content"\|"full"` | How much of each memory to return (default `content`). |
 | `include_expired: false` | Set true to include decayed memories. |
+| `include_invalidated: false` | Set true to include memories whose validity window was closed (superseded / invalidated). |
+| `situation: "..."` | Reweights epistemic classes for your current activity. See below. |
 | `include_global: false` | Set true to merge global-store hits. |
 | `project: "..."` | Target a different project. |
 
@@ -118,6 +121,26 @@ Example: user asks "how does auth work" while pointed at `src/api/auth/oauth.rs`
 | `logical` | Filters or scopes | Scoring signal (hierarchy) |
 
 (In `rank` mode, `path` and `logical` act as **scoring** signals. In `filter` mode they are hard filters: `logical` is matched **hierarchically** — a memory passes when any of its logical scopes is equal to, a descendant of, or an ancestor of a queried scope on the same dot-notation chain.)
+
+## Situation-aware queries
+
+The `situation` parameter tells retrieval what you're doing so it can reweight memories by **epistemic class** (`fact` / `observation` / `decision` — see [memory-model.md](./memory-model.md#epistemic-classes)). It works in both modes and is a soft reweight, not a filter: the multiplier is `floor + (1 − floor) × profile[situation][class]` with a floor of 0.6 by default, so a class is down-weighted at most 40%, never hidden.
+
+Default profiles (higher = ranks higher):
+
+| Situation | fact | observation | decision | Set by |
+|-----------|------|-------------|----------|--------|
+| `session_start` | 1.0 | 0.5 | 0.8 | SessionStart hook — static facts and project-wide decisions matter most. |
+| `file_edit` | 0.7 | 0.7 | 1.0 | PreToolUse hook — decisions (and hazards) binding on the file dominate. |
+| `debugging` | 0.6 | 1.0 | 0.7 | You, when investigating a failure — observations rank highest. |
+| `design_choice` | 0.8 | 0.7 | 1.0 | You, when weighing alternatives — prior decisions and their rationale dominate. |
+
+The hooks set `session_start` and `file_edit` automatically; declare `debugging` and `design_choice` yourself — hooks can't detect them. Omitting `situation` is neutral (multiplier 1.0). Each result's `score_breakdown.situation_multiplier` shows the applied value.
+
+Two related parameters are **hard** controls, not reweights:
+
+- `epistemic: ["observation"]` — only those classes are considered (OR within the list, like `types`).
+- `include_invalidated: true` — also return memories whose validity window was closed (superseded / invalidated). Default false: closed-window memories are excluded from results entirely.
 
 ## Examples
 
@@ -149,6 +172,18 @@ Example: user asks "how does auth work" while pointed at `src/api/auth/oauth.rs`
 
 ```jsonc
 { "mode": "rank", "min_criticality": 0.7, "max_results": 5 }
+```
+
+**Investigating a test failure (observations rank highest):**
+
+```jsonc
+{ "mode": "filter", "query": "flaky test model load race", "situation": "debugging" }
+```
+
+**Reviewing the history of a decision, including superseded versions:**
+
+```jsonc
+{ "mode": "filter", "query": "embedding backend choice", "epistemic": ["decision"], "include_invalidated": true }
 ```
 
 ## Common mistakes

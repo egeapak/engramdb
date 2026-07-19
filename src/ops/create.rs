@@ -4,9 +4,12 @@ use crate::ops::parse_decay_strategy;
 use crate::retrieval::engine::RetrievalEngine;
 use crate::storage::MemoryStore;
 use crate::title::TitleStrategy;
-use crate::types::{Decay, DecayStrategy, Memory, MemoryType, Provenance, Visibility};
+use crate::types::{
+    Decay, DecayStrategy, Epistemic, Generality, Memory, MemoryType, Provenance, Validity,
+    Visibility,
+};
 use anyhow::Result;
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 
 /// Parameters for creating a new memory.
 pub struct CreateParams {
@@ -23,6 +26,19 @@ pub struct CreateParams {
     pub visibility: Visibility,
     pub provenance: Provenance,
     pub supersedes: Vec<String>,
+    /// Epistemic class; `None` ⇒ `type_.default_epistemic()`.
+    pub epistemic: Option<Epistemic>,
+    /// Free-text premise the memory depends on (`valid_while.premise`).
+    pub premise: Option<String>,
+    /// Paths/globs whose change invalidates the memory
+    /// (`valid_while.invalidated_by` — distinct from `physical`).
+    pub invalidated_by: Vec<String>,
+    /// Task/feature the memory was created for (`valid_while.origin_task`).
+    pub origin_task: Option<String>,
+    /// How far beyond its origin the memory holds; `None` ⇒ `Project`.
+    pub generality: Option<Generality>,
+    /// Valid-time start (§2.4 backdating; rare). `None` ⇒ `created_at`.
+    pub valid_from: Option<DateTime<Utc>>,
     pub decay_strategy: Option<String>,
     pub decay_half_life: Option<u64>,
     pub decay_ttl: Option<u64>,
@@ -124,6 +140,44 @@ pub async fn create_memory(
 
     // Build memory
     let mut memory = Memory::new(params.type_, &summary, &params.content, params.provenance);
+
+    // Resolve the epistemic class (type-derived default) and the
+    // two-dimensional decay default (§2.6): the declared class wins over the
+    // type default when off-diagonal. `Memory::new` already set the diagonal
+    // `type_.default_decay()`; only replace it when the class differs. The
+    // effective off-diagonal Observation curve comes from `[epistemic]`
+    // config when an engine is available (§2.6 config note), falling back to
+    // the built-in constants (90d half-life, floor 0.2) — explicit
+    // user-provided decay below still wins over both.
+    let epistemic = params
+        .epistemic
+        .unwrap_or_else(|| params.type_.default_epistemic());
+    memory.epistemic = epistemic;
+    if epistemic != params.type_.default_epistemic() {
+        memory.decay = match epistemic {
+            Epistemic::Observation => {
+                let (half_life_days, floor) = engine
+                    .map(|e| {
+                        let cfg = &e.config().epistemic;
+                        (cfg.observation_half_life_days, cfg.observation_decay_floor)
+                    })
+                    .unwrap_or((90, 0.2));
+                Some(Decay::exponential(Duration::days(half_life_days as i64)).with_floor(floor))
+            }
+            _ => crate::types::default_decay(params.type_, epistemic),
+        };
+    }
+
+    // Assemble the validity condition; an all-empty Validity stays None.
+    let valid_while = Validity {
+        premise: params.premise,
+        invalidated_by: params.invalidated_by,
+        origin_task: params.origin_task,
+        generality: params.generality.unwrap_or_default(),
+        derived_from: vec![],
+    };
+    memory.valid_while = (!valid_while.is_empty()).then_some(valid_while);
+    memory.valid_from = params.valid_from;
     // Auto-generate title if not provided and strategy is not None
     let title = if params.title.is_some() {
         params.title
@@ -191,6 +245,12 @@ pub async fn create_memory(
 
     let id = store.create(&memory).await?;
 
+    // Supersession closes validity windows (§2.4 writer 1): each referenced
+    // live memory gets `invalidated_at = now`, `superseded_by = <new id>`.
+    // Runs after the new memory persists so a failed create never closes
+    // anything.
+    super::close_superseded_windows(store, &memory.supersedes, &id).await;
+
     // Run embedding + contradiction detection. The metadata index is already
     // updated synchronously inside `store.create` (filter queries see the new
     // memory immediately); only vector embedding and NLI classification are
@@ -246,10 +306,11 @@ pub async fn create_memory(
                                 "NLI detected contradictions with existing memories"
                             );
                             let store_clone = store.clone();
+                            let new_meta = crate::ops::NewMemoryMeta::from(&saved);
                             tokio::spawn(async move {
                                 crate::ops::challenge_for_contradictions(
                                     &store_clone,
-                                    &saved.summary,
+                                    &new_meta,
                                     &contradictions,
                                 )
                                 .await;
@@ -293,6 +354,12 @@ mod tests {
             visibility: Visibility::Shared,
             provenance: Provenance::human(),
             supersedes: vec![],
+            epistemic: None,
+            premise: None,
+            invalidated_by: vec![],
+            origin_task: None,
+            generality: None,
+            valid_from: None,
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,
@@ -616,5 +683,147 @@ mod tests {
             }
         }
         assert!(found, "Expected file with slug prefix 'database-choice_'");
+    }
+}
+
+#[cfg(test)]
+mod epistemic_create_tests {
+    use super::*;
+    use crate::storage::InMemoryRegistry;
+    use crate::types::{Epistemic, Generality, MemoryType, Provenance, Visibility};
+    use tempfile::TempDir;
+
+    async fn setup() -> (TempDir, MemoryStore) {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        (tmp, store)
+    }
+
+    fn params(type_: MemoryType) -> CreateParams {
+        CreateParams {
+            type_,
+            content: "content".into(),
+            summary: "summary".into(),
+            title: None,
+            physical: vec![],
+            logical: vec![],
+            tags: vec![],
+            criticality: 0.5,
+            confidence: 0.8,
+            details: None,
+            visibility: Visibility::Shared,
+            provenance: Provenance::human(),
+            supersedes: vec![],
+            epistemic: None,
+            premise: None,
+            invalidated_by: vec![],
+            origin_task: None,
+            generality: None,
+            valid_from: None,
+            decay_strategy: None,
+            decay_half_life: None,
+            decay_ttl: None,
+            decay_floor: None,
+            title_strategy: TitleStrategy::None,
+            embed_async: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn epistemic_defaults_from_type_and_diagonal_decay_unchanged() {
+        let (_t, store) = setup().await;
+        let result = create_memory(&store, params(MemoryType::Debug), None)
+            .await
+            .unwrap();
+        let m = store.get(&result.id).await.unwrap();
+        assert_eq!(m.epistemic, Epistemic::Observation);
+        // Diagonal ⇒ the type default decay (Debug: exponential 30d).
+        let decay = m.decay.unwrap();
+        assert_eq!(decay.strategy, DecayStrategy::Exponential);
+        assert_eq!(decay.half_life, Some(Duration::days(30)));
+        assert_eq!(m.valid_while, None);
+    }
+
+    #[tokio::test]
+    async fn off_diagonal_observation_gets_observation_decay() {
+        let (_t, store) = setup().await;
+        // Hazard defaults to Fact; declare an Observation → 90d/0.2 curve
+        // (built-in constants; no engine ⇒ no config override).
+        let mut p = params(MemoryType::Hazard);
+        p.epistemic = Some(Epistemic::Observation);
+        let result = create_memory(&store, p, None).await.unwrap();
+        let m = store.get(&result.id).await.unwrap();
+        assert_eq!(m.epistemic, Epistemic::Observation);
+        let decay = m.decay.unwrap();
+        assert_eq!(decay.half_life, Some(Duration::days(90)));
+        assert_eq!(decay.floor, 0.2);
+    }
+
+    #[tokio::test]
+    async fn off_diagonal_fact_never_fades_and_explicit_decay_wins() {
+        let (_t, store) = setup().await;
+        // Debug (Observation default) declared a Fact → Decay::none().
+        let mut p = params(MemoryType::Debug);
+        p.epistemic = Some(Epistemic::Fact);
+        let result = create_memory(&store, p, None).await.unwrap();
+        let m = store.get(&result.id).await.unwrap();
+        let decay = m.decay.unwrap();
+        assert_eq!(decay.strategy, DecayStrategy::None);
+        assert_eq!(decay.floor, 0.0);
+
+        // Explicit user decay wins over the off-diagonal default.
+        let mut p = params(MemoryType::Debug);
+        p.epistemic = Some(Epistemic::Fact);
+        p.decay_strategy = Some("linear".into());
+        p.decay_ttl = Some(86400);
+        let result = create_memory(&store, p, None).await.unwrap();
+        let m = store.get(&result.id).await.unwrap();
+        assert_eq!(m.decay.unwrap().strategy, DecayStrategy::Linear);
+    }
+
+    #[tokio::test]
+    async fn validity_assembled_and_empty_stays_none() {
+        let (_t, store) = setup().await;
+        let mut p = params(MemoryType::Decision);
+        p.premise = Some("while ort is pinned".into());
+        p.invalidated_by = vec!["Cargo.lock".into()];
+        p.origin_task = Some("epistemic".into());
+        p.generality = Some(Generality::Task);
+        p.valid_from = Some("2026-01-01T00:00:00Z".parse().unwrap());
+        let result = create_memory(&store, p, None).await.unwrap();
+        let m = store.get(&result.id).await.unwrap();
+        let v = m.valid_while.unwrap();
+        assert_eq!(v.premise.as_deref(), Some("while ort is pinned"));
+        assert_eq!(v.invalidated_by, vec!["Cargo.lock".to_string()]);
+        assert_eq!(v.origin_task.as_deref(), Some("epistemic"));
+        assert_eq!(v.generality, Generality::Task);
+        assert_eq!(m.valid_from, Some("2026-01-01T00:00:00Z".parse().unwrap()));
+
+        // All-empty validity params ⇒ valid_while stays None.
+        let result = create_memory(&store, params(MemoryType::Decision), None)
+            .await
+            .unwrap();
+        assert_eq!(store.get(&result.id).await.unwrap().valid_while, None);
+    }
+
+    #[tokio::test]
+    async fn create_with_supersedes_closes_old_window() {
+        let (_t, store) = setup().await;
+        let old = create_memory(&store, params(MemoryType::Decision), None)
+            .await
+            .unwrap();
+
+        let mut p = params(MemoryType::Decision);
+        p.supersedes = vec![old.id.clone(), "missing-id".into()];
+        let new = create_memory(&store, p, None).await.unwrap();
+
+        let old_mem = store.get(&old.id).await.unwrap();
+        assert!(old_mem.invalidated_at.is_some(), "window closed");
+        assert_eq!(old_mem.superseded_by.as_deref(), Some(new.id.as_str()));
+        // The missing id was skipped without failing the create.
+        let new_mem = store.get(&new.id).await.unwrap();
+        assert!(new_mem.supersedes.contains(&"missing-id".to_string()));
     }
 }

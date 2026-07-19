@@ -60,12 +60,14 @@ fn is_review_candidate(
 /// Cheap and index-only (no `.md` loads), so it is safe to call on hot paths
 /// like the MCP session-end hint. Returns 0 when the trigger is disabled.
 pub async fn count_recency_stale(store: &MemoryStore, recency_days: Option<u64>) -> Result<usize> {
-    let Some(cutoff) = recency_cutoff(Utc::now(), recency_days) else {
+    let now = Utc::now();
+    let Some(cutoff) = recency_cutoff(now, recency_days) else {
         return Ok(0);
     };
     let entries = store.list_filterable().await?;
     Ok(entries
         .iter()
+        .filter(|e| e.invalidated_at.is_none_or(|t| t > now))
         .filter(|e| {
             is_review_candidate(e.status, e.updated_at, Some(cutoff)) && e.status == Status::Active
         })
@@ -79,12 +81,21 @@ pub async fn count_recency_stale(store: &MemoryStore, recency_days: Option<u64>)
 /// are stale under the recency trigger. Returns memories sorted by criticality
 /// descending.
 pub async fn review_memories(store: &MemoryStore, params: &ReviewParams) -> Result<Vec<Memory>> {
-    let cutoff = recency_cutoff(Utc::now(), params.stale_after_days);
+    let now = Utc::now();
+    let cutoff = recency_cutoff(now, params.stale_after_days);
     let entries = store.list_filterable().await?;
 
-    // Filter candidates at the index level, then batch-load
+    // Filter candidates at the index level, then batch-load.
+    //
+    // Invalidated memories (closed validity windows, §2.4) are excluded from
+    // BOTH arms: they are resolved history, not live knowledge. Without this,
+    // a Challenged memory resolved via `invalidate` (or superseded by a new
+    // write) would reappear in review forever, and the recency trigger would
+    // nominate closed-window history for re-verification. A future-dated
+    // `invalidated_at` is still valid and stays reviewable.
     let candidate_ids: Vec<String> = entries
         .iter()
+        .filter(|e| e.invalidated_at.is_none_or(|t| t > now))
         .filter(|e| is_review_candidate(e.status, e.updated_at, cutoff))
         .filter(|e| {
             params
@@ -417,5 +428,56 @@ mod tests {
         );
         // Absurdly large window overflows the duration ⇒ treated as disabled.
         assert!(recency_cutoff(now, Some(u64::MAX)).is_none());
+    }
+
+    /// §2.4 interplay: invalidated memories (closed validity windows) are
+    /// resolved history, not review candidates — for BOTH arms. Without the
+    /// exclusion, a Challenged memory resolved via `invalidate` reappears in
+    /// review forever, and the recency trigger nominates closed history.
+    #[tokio::test]
+    async fn invalidated_memories_are_excluded_from_both_arms() {
+        let tmp = TempDir::new().unwrap();
+        let store = init_store(tmp.path()).await;
+
+        // Flagged arm: a challenged memory whose window closed.
+        let mut dead_challenged = make("invalidated challenged", Status::Challenged, 0.9);
+        dead_challenged.invalidated_at = Some(Utc::now() - Duration::days(1));
+        store.create(&dead_challenged).await.unwrap();
+
+        // Recency arm: an ancient active memory whose window closed.
+        let mut dead_stale = make_aged("invalidated stale", 0.8, 400);
+        dead_stale.invalidated_at = Some(Utc::now() - Duration::days(1));
+        store.create(&dead_stale).await.unwrap();
+
+        // Controls that must still surface.
+        store
+            .create(&make("live challenged", Status::Challenged, 0.7))
+            .await
+            .unwrap();
+        store
+            .create(&make_aged("live stale", 0.6, 400))
+            .await
+            .unwrap();
+
+        // Future-dated window end: still valid, still reviewable.
+        let mut scheduled = make("scheduled challenged", Status::Challenged, 0.5);
+        scheduled.invalidated_at = Some(Utc::now() + Duration::days(30));
+        store.create(&scheduled).await.unwrap();
+
+        let mut params = default_params();
+        params.stale_after_days = Some(90);
+        let listed = review_memories(&store, &params).await.unwrap();
+        let summaries: Vec<&str> = listed.iter().map(|m| m.summary.as_str()).collect();
+        assert!(summaries.contains(&"live challenged"), "{summaries:?}");
+        assert!(summaries.contains(&"live stale"), "{summaries:?}");
+        assert!(summaries.contains(&"scheduled challenged"), "{summaries:?}");
+        assert!(
+            !summaries.contains(&"invalidated challenged"),
+            "{summaries:?}"
+        );
+        assert!(!summaries.contains(&"invalidated stale"), "{summaries:?}");
+
+        // Count helper matches the recency arm: only the live stale one.
+        assert_eq!(count_recency_stale(&store, Some(90)).await.unwrap(), 1);
     }
 }

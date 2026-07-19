@@ -1,6 +1,12 @@
 [test-groups.ml-models]
 max-threads = 1
 
+# In-process ONNX loaders share heavyweight global model state; parallel
+# loads can transiently fail (`try_new()` → None), which downstream reads
+# as "embeddings unavailable" and flips test outcomes. Every test that
+# loads a real model in-process — including via the MCP server's engine
+# builders (reindex re-embed) and the daemon-less semantic-query path —
+# belongs in this serialized group.
 [[profile.default.overrides]]
-filter = "test(nli::onnx::tests::) | test(embeddings::onnx::tests::) | test(retrieval::engine::tests::test_rerank) | test(retrieval::engine::tests::test_search_with_real)"
+filter = "test(nli::onnx::tests::) | test(embeddings::onnx::tests::) | test(retrieval::engine::tests::test_rerank) | test(retrieval::engine::tests::test_search_with_real) | test(=server::tests::reindex_re_embeds_in_error_mode_despite_mismatch) | test(=server::tests::global_retrieve_with_semantic_query)"
 test-group = "ml-models"

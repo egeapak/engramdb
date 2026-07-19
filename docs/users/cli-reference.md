@@ -56,7 +56,13 @@ Positional argument: content. Alternatively `-c, --content <text>`, or `-i, --in
 | `--details <text>` | Extended details (lazy-loaded by default). |
 | `--details-file <path>` | Read details from a file. |
 | `--visibility <shared\|personal>` | Default `shared`. |
-| `--supersedes <id,id>` | IDs this memory supersedes. |
+| `--supersedes <id,id>` | IDs this memory supersedes (closes their validity windows). |
+| `--epistemic <fact\|observation\|decision>` | Epistemic class. Defaults from the type (context/convention/relationship/hazard → fact, debug → observation, decision/intent/preference → decision). |
+| `--premise <text>` | Premise this memory depends on (e.g. "while we pin ort rc.12"). |
+| `--invalidated-by <glob>` | Path/glob whose change invalidates this memory. Repeatable. |
+| `--origin-task <name>` | Task/feature this memory was created for. |
+| `--generality <project\|task>` | Default `project`. `task`-scoped memories are hidden from hook injection unless the session declared the matching task (see `task`). |
+| `--valid-from <RFC3339>` | Backdate when the claim became true. |
 | `--decay-strategy <none\|linear\|exponential\|step>` | Decay strategy. |
 | `--decay-half-life <secs>` | Half-life for exponential decay. |
 | `--decay-ttl <secs>` | TTL for any strategy. |
@@ -95,6 +101,9 @@ engramdb query --mode <rank|filter> [query] [flags...]
 | `-n, --max-results <N>` | Default 10. |
 | `--detail-level <summary\|content\|full>` | Output verbosity. |
 | `--include-expired` | Include decayed/expired memories. |
+| `--epistemic <fact\|observation\|decision>` | Filter by epistemic class. Repeatable. |
+| `--situation <session_start\|file_edit\|debugging\|design_choice>` | Your situation — reweights classes via `[retrieval.scoring.situation]` (see [configuration.md](./configuration.md)). |
+| `--include-invalidated` | Include invalidated memories (closed validity windows). |
 | `--show-scores` | Print composite score per result. |
 | `--include-global` | Merge global-store memories into results. |
 | `--global` | Search the global store instead of the current project. |
@@ -110,12 +119,14 @@ engramdb list [flags...]
 | Flag | Description |
 |------|-------------|
 | `-t, --type <T>` | Filter by type. Repeatable. |
+| `--epistemic <fact\|observation\|decision>` | Filter by epistemic class. Repeatable. |
 | `--tags <a,b,c>` | Filter by tags. |
 | `-s, --status <active\|needsreview\|challenged>` | Filter by status. |
 | `--scope <text>` | Filter by physical or logical scope match. |
 | `--sort <criticality\|created\|updated\|type>` | Sort field. Default `criticality`. |
 | `-r, --reverse` | Reverse sort. |
 | `-n, --limit <N>` | Cap output. |
+| `--include-invalidated` | Include invalidated memories (closed validity windows). |
 | `--global` | List the global store. |
 
 ## `update` — modify a memory
@@ -131,6 +142,10 @@ Same flags as `add`, plus:
 | `--tags-add <a,b>` | Add to existing tags. |
 | `--tags-remove <a,b>` | Remove from existing tags. |
 | `--status <active\|needsreview\|challenged>` | Set status manually. |
+| `--clear-validity` | Clear the whole validity condition (premise / invalidated-by / origin-task / generality). |
+| `--invalidate` | Close the validity window now: the memory *was* true but no longer is. Preferred over `delete` — history stays queryable via `--include-invalidated`. |
+| `--superseded-by <id>` | Record which memory supersedes this one (only with `--invalidate`). |
+| `--clear-invalidated` | Reopen a closed validity window (clears `invalidated_at` + `superseded_by`). |
 | `-e, --editor` | Open the memory file in `$EDITOR`. |
 
 For type/content/summary/scope/tags, the value **replaces** existing. Use `--tags-add` / `--tags-remove` for incremental tag changes.
@@ -141,7 +156,26 @@ For type/content/summary/scope/tags, the value **replaces** existing. Use `--tag
 engramdb delete <id> [-f] [--global]
 ```
 
-`-f, --force` skips the confirmation prompt.
+`-f, --force` skips the confirmation prompt. For a memory that *was* true but no longer is, prefer `engramdb update <id> --invalidate` — it keeps the history queryable.
+
+## `verify` — confirm a memory is still accurate
+
+```bash
+engramdb verify <id> [--global]
+```
+
+Stamps `verified_at = now` and clears a doctor-flagged needs-review status. Fact-class memories decay from their last verification, so verifying a fact refreshes its score; `doctor` suggests verification for observations unverified longer than `[epistemic].observation_review_days`.
+
+## `task` — session task lifecycle
+
+```bash
+engramdb task current [NAME] [--session-id <id>] [--global]
+engramdb task complete <NAME> [--global]
+```
+
+`task current NAME` declares the task this session is working on; with no `NAME` it reads the current declaration back. The session id comes from `--session-id` or the `CLAUDE_SESSION_ID` / `MCP_SESSION_ID` env vars. Declaring a task lets task-scoped memories (created with `--generality task` and a matching `--origin-task`) surface in hook injections; without a declaration they stay hidden from hooks (but remain reachable by explicit query).
+
+`task complete NAME` marks the task finished and demotes its task-scoped memories to fast decay (memories with custom decay are left alone and reported separately).
 
 ## `challenge` — flag a memory
 
@@ -268,9 +302,13 @@ See [claude-code.md](./claude-code.md).
 ```bash
 engramdb hook pre-tool-use                            # PreToolUse for Read/Write/Edit
 engramdb hook session-start [--min-criticality <0..1>] # SessionStart, default 0.6
+engramdb hook user-prompt-submit                      # UserPromptSubmit: prompt-relevant memories
+engramdb hook post-tool-use                           # PostToolUse for Write/Edit/MultiEdit: watch-path warnings
+engramdb hook session-end                             # SessionEnd: housekeeping, no output
+engramdb hook pre-compact                             # PreCompact: store-your-memories reminder
 ```
 
-Invoked by Claude Code, not manually.
+Invoked by Claude Code, not manually. See [claude-code.md](./claude-code.md#how-the-hooks-behave) for what each hook does.
 
 ## `projects` — registry management
 

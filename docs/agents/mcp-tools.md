@@ -31,10 +31,15 @@ Every tool exposed by `engramdb serve`. For when to use which tool, see [workflo
 | `max_results?` | `usize` | Default 10. |
 | `detail_level?` | `"summary"` \| `"content"` \| `"full"` | Default `"content"`. Controls how much of each memory is returned. |
 | `include_expired?` | `bool` | Default false. |
+| `epistemic?` | `array[string]` | Hard filter by epistemic class: `fact`, `observation`, `decision` (OR logic, like `types`). |
+| `situation?` | `string` | `session_start` \| `file_edit` \| `debugging` \| `design_choice`. Reweights epistemic classes for what you're doing (see [query-modes.md](./query-modes.md#situation-aware-queries)). Declare `debugging` when investigating a failure, `design_choice` when weighing alternatives. |
+| `include_invalidated?` | `bool` | Default false. Include memories whose validity window was closed (superseded / invalidated). |
 | `include_global?` | `bool` | Also merge global-store hits. Default false. |
 | `project?` | `string` | See conventions. |
 
 In `mode: "filter"`, **at least one** of `query`, `path`, `logical`, or `tags` must be present.
+
+Every returned memory carries `epistemic` (always) plus `valid_while`, `valid_from`, `invalidated_at`, `superseded_by`, and `verified_at` when present. Each result's `score_breakdown` includes `situation_multiplier` (1.0 when no `situation` was passed).
 
 ### `get` (read-only)
 
@@ -54,13 +59,17 @@ Returns the full memory object including `details` (which is lazy-loaded in `que
 | Param | Type | Description |
 |-------|------|-------------|
 | `types?` | `array[string]` | Filter by types. |
+| `epistemic?` | `array[string]` | Filter by epistemic class: `fact`, `observation`, `decision` (OR). |
 | `tags?` | `array[string]` | Filter by tags (OR). |
 | `status?` | `"active"` \| `"needsreview"` \| `"challenged"` | Filter by status. |
 | `scope?` | `string` | Match against physical or logical scope. |
 | `sort_field?` | `"criticality"` \| `"created"` \| `"updated"` \| `"type"` | Default `"criticality"`. |
+| `include_invalidated?` | `bool` | Default false. Include memories whose validity window was closed. |
 | `reverse?` | `bool` | Reverse sort. |
 | `limit?` | `usize` | Cap output. |
 | `project?` | `string` | See conventions. |
+
+Each entry includes `epistemic` (always) and `invalidated_at` / `valid_from` when present.
 
 ### `create` (mutates)
 
@@ -78,7 +87,13 @@ Returns the full memory object including `details` (which is lazy-loaded in `que
 | `criticality?` | `f64` | 0..1, default 0.5. |
 | `confidence?` | `f64` | 0..1, default 0.8. |
 | `visibility?` | `"shared"` \| `"personal"` | Default `"shared"`. |
-| `supersedes?` | `array[string]` | IDs this memory replaces. |
+| `supersedes?` | `array[string]` | IDs this memory replaces (closes their validity windows). |
+| `epistemic?` | `"fact"` \| `"observation"` \| `"decision"` | Epistemic class. Defaults from `type`; set only when it differs. |
+| `premise?` | `string` | Premise this memory depends on, e.g. `"while we pin ort rc.12"`. State it if the memory becomes wrong when something specific changes. |
+| `invalidated_by?` | `array[string]` | Paths/globs whose change invalidates this memory (distinct from `physical`, which is where it applies). |
+| `origin_task?` | `string` | Task/feature this was decided for (short human-readable name, not a session ID). |
+| `generality?` | `"project"` \| `"task"` | Default `"project"`. `"task"` = binding only within `origin_task`. |
+| `valid_from?` | `string` | Valid-time start (RFC3339). Only to backdate; defaults to creation time. |
 | `decay_strategy?` | `"none"` \| `"linear"` \| `"exponential"` \| `"step"` | Override default for type. |
 | `decay_half_life?` | `u64` | Seconds, for exponential. |
 | `decay_ttl?` | `u64` | Seconds, for linear/step. |
@@ -110,7 +125,15 @@ If NLI contradiction detection is enabled, the response may include auto-challen
 | `visibility?` | `"shared"` \| `"personal"` | |
 | `status?` | `"active"` \| `"needsreview"` \| `"challenged"` | |
 | `title?` | `string` | |
-| `supersedes?` | `array[string]` | |
+| `supersedes?` | `array[string]` | Closes the listed memories' validity windows. |
+| `epistemic?` | `"fact"` \| `"observation"` \| `"decision"` | |
+| `premise?` | `string` | Merged into the existing validity condition. |
+| `invalidated_by?` | `array[string]` | Merged into the existing validity condition. |
+| `origin_task?` | `string` | Merged into the existing validity condition. |
+| `generality?` | `"project"` \| `"task"` | Merged into the existing validity condition. |
+| `valid_from?` | `string` | Valid-time start (RFC3339). |
+| `clear_validity?` | `bool` | Clear the whole validity condition (premise/invalidated_by/origin_task/generality). Wins over piecemeal validity edits in the same call. |
+| `clear_invalidated?` | `bool` | Reopen a closed validity window: clears `invalidated_at` and `superseded_by`. Invalidation is reversible, unlike deletion. |
 | `decay_strategy?` | `string` | |
 | `decay_half_life?` | `u64` | |
 | `decay_ttl?` | `u64` | |
@@ -159,15 +182,53 @@ The `memory-session-end` prompt also reports how many active memories are past t
 
 ### `resolve` (mutates)
 
-**Resolve a challenged or needs-review memory.** Three actions:
+**Resolve a challenged or needs-review memory.** Four actions:
 
 | Param | Type | Description |
 |-------|------|-------------|
 | `id` | `string` | Required. |
-| `action` | `"keep"` \| `"update"` \| `"delete"` | Required. |
+| `action` | `"keep"` \| `"update"` \| `"delete"` \| `"invalidate"` | Required. |
 | `updated_content?` | `string` | Required when `action: "update"`. |
 | `updated_summary?` | `string` | Optional with `action: "update"`. |
+| `superseded_by?` | `string` | With `action: "invalidate"`: ID of the memory that superseded this one (optional). |
 | `project?` | `string` | See conventions. |
+
+`action: "invalidate"` closes the memory's validity window (`invalidated_at = now`) instead of deleting it. Prefer `invalidate` over `delete` when a memory **was** true but no longer is — history is kept and queryable via `include_invalidated`.
+
+### `verify` (mutates)
+
+**Confirm a memory is still accurate** after checking it against the code. Stamps `verified_at` (fact-class memories decay from this anchor, so they rank fresher) and clears a doctor-flagged `needsreview` status.
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `id` | `string` | Required. |
+| `project?` | `string` | See conventions. |
+
+Returns `{ id, verified, review_cleared }`.
+
+---
+
+## Task tools
+
+### `task_current` (read/write session state)
+
+**Declare the task/feature this session is working on.** Task-scoped memories (`generality: "task"`) from other tasks stay suppressed from hook injection; yours surface. Call without `task` to read the current declaration.
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `task?` | `string` | Task/feature name to declare (short human-readable name). Omit to read the current declaration. |
+| `project?` | `string` | See conventions. |
+
+### `task_complete` (mutates)
+
+**Mark a task/feature finished.** Task-scoped memories (`valid_while.origin_task` matching, `generality: "task"`) are demoted to fast decay (the 14-day intent curve) unless they carry an explicit custom decay; project-wide memories from the task are listed for review ("verify or demote").
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `task` | `string` | Required. Task/feature name to mark finished. |
+| `project?` | `string` | See conventions. |
+
+Returns `{ task, demoted, kept_custom_decay, project_wide_review }`.
 
 ---
 
@@ -185,7 +246,7 @@ The `memory-session-end` prompt also reports how many active memories are past t
 
 ### `compress_apply` (mutates)
 
-**Merge multiple memories into one summary.** Source memories are deleted; the new compressed memory `supersedes` them.
+**Merge multiple memories into one summary.** The new compressed memory `supersedes` the sources, which closes their validity windows (they stay on disk, queryable via `include_invalidated`, and are purged by `gc` only after the retention window).
 
 | Param | Type | Description |
 |-------|------|-------------|
@@ -229,13 +290,16 @@ The `memory-session-end` prompt also reports how many active memories are past t
 | `all_projects?` | `bool` | Include per-project runtime telemetry breakdown. |
 | `project?` | `string` | See conventions. |
 
-### `doctor` (read-only)
+### `doctor` (read-only unless `fix: true`)
 
-**Fast store health check** (index vs disk consistency).
+**Fast store health check** (index vs disk consistency) plus epistemic checks: watched paths (`invalidated_by`) changed since last verification, observations unverified past `[epistemic].observation_review_days` (default 90), and memories whose `derived_from` sources are missing or invalid.
 
 | Param | Type | Description |
 |-------|------|-------------|
+| `fix?` | `bool` | Default false (report only). When true, flips memories with epistemic findings (changed invalidation paths, invalid derived-from sources) to `needsreview`. Stale observations are reported but never flipped. |
 | `project?` | `string` | See conventions. |
+
+Epistemic findings appear as `epistemic_findings` in the response. Use `verify` to clear a doctor-flagged memory after re-confirming it.
 
 ---
 

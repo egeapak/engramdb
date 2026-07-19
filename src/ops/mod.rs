@@ -20,33 +20,51 @@ pub mod reindex;
 pub mod resolve;
 pub mod review;
 pub mod stats;
+pub mod task;
 pub mod update;
+pub mod verify;
 
-pub use challenge::{challenge_for_contradictions, challenge_memory, ChallengeResult};
+pub use challenge::{
+    challenge_for_contradictions, challenge_memory, route_contradiction, ChallengeResult,
+    ConflictAction, NewMemoryMeta,
+};
 pub use compress::{
-    compress_apply, compress_candidates, CompressApplyParams, CompressApplyResult,
-    CompressCandidate, CompressCandidatesResult,
+    compress_apply, compress_candidates, consolidate_cluster_apply, consolidation_pass,
+    CompressApplyParams, CompressApplyResult, CompressCandidate, CompressCandidatesResult,
+    ConsolidationCluster, ConsolidationReport,
 };
 pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
 pub use delete::delete_memory;
 pub use doctor::{
-    doctor, doctor_environment, validate_models, CheckStatus, DoctorResult, DoctorSection,
-    EnvironmentCheck, EnvironmentDoctorResult,
+    doctor, doctor_environment, doctor_epistemic, enrichment_gaps, validate_models, CheckStatus,
+    DoctorResult, DoctorSection, EnrichmentGaps, EnvironmentCheck, EnvironmentDoctorResult,
+    EpistemicDoctorResult, EpistemicFinding, EpistemicFindingKind,
 };
-pub use gc::{execute_gc_plan, gc_memories, plan_gc, GcCandidate, GcMaintenance, GcPlan, GcResult};
+pub use gc::{
+    execute_gc_plan, gc_memories, plan_gc, GcCandidate, GcMaintenance, GcPlan, GcReason, GcResult,
+};
 pub use get::get_memory;
 pub use list::{list_memories, parse_sort_field, ListParams, SortField};
-pub use maintenance::{auto_maintain, maintenance_status, MaintenanceReport, MaintenanceStatus};
+pub use maintenance::{
+    auto_maintain, auto_maintain_with_engine, maintenance_status, maintenance_would_run,
+    MaintenanceReport, MaintenanceStatus,
+};
 pub use parsing::{
-    parse_decay_strategy, parse_detail_level, parse_detail_level_or_default, parse_memory_type,
-    parse_status, parse_type_filter, parse_visibility, validate_score,
+    parse_decay_strategy, parse_detail_level, parse_detail_level_or_default, parse_epistemic,
+    parse_epistemic_filter, parse_generality, parse_memory_type, parse_situation, parse_status,
+    parse_type_filter, parse_visibility, validate_score,
 };
 pub use query::{merge_scored_memories, query_memories, query_memories_with_global};
 pub use reindex::{reindex, ReindexResult};
 pub use resolve::{resolve_memory, ResolveAction, ResolveParams, ResolveResult};
 pub use review::{count_recency_stale, review_memories, ReviewParams};
 pub use stats::{compute_stats, StoreStats};
+pub use task::{
+    count_retrieval_sessions, promote_reconfirmed_memories, task_complete, task_current,
+    PromotionReport, TaskCompleteResult, TaskCurrentResult,
+};
 pub use update::{update_memory, UpdateParams};
+pub use verify::{verify_memory, VerifyResult};
 
 use crate::embeddings::EmbeddingProvider;
 #[cfg(feature = "ollama")]
@@ -70,6 +88,54 @@ use crate::retrieval::reranker::Reranker;
 use crate::storage::{embedding_status, EmbeddingFingerprint, EmbeddingModelStatus, MemoryStore};
 use crate::types::{EmbeddingBackend, EngramConfig};
 use std::sync::Arc;
+
+/// Close the validity windows of memories superseded by `new_id` (§2.4
+/// writer 1): each referenced LIVE memory gets `invalidated_at = now`,
+/// `superseded_by = new_id`. Missing and already-invalidated ids are skipped
+/// with a log line, matching the existing tolerance in `compress_apply` —
+/// supersession is best-effort metadata maintenance, never a reason to fail
+/// the create/update that carried it.
+pub(crate) async fn close_superseded_windows(
+    store: &MemoryStore,
+    supersedes: &[String],
+    new_id: &str,
+) {
+    let now = chrono::Utc::now();
+    for old_id in supersedes {
+        if old_id.as_str() == new_id {
+            tracing::debug!(id = %new_id, "memory lists itself in supersedes; skipping");
+            continue;
+        }
+        match store.get(old_id).await {
+            Ok(old) if old.is_invalidated_at(now) => {
+                tracing::debug!(
+                    superseded = %old_id,
+                    by = %new_id,
+                    "supersedes target already invalidated; skipping window close"
+                );
+            }
+            Ok(_) => {
+                if let Err(e) = store
+                    .invalidate_with(old_id, Some(new_id.to_string()), now)
+                    .await
+                {
+                    tracing::warn!(
+                        superseded = %old_id,
+                        by = %new_id,
+                        "failed to close superseded memory's validity window: {e}"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    superseded = %old_id,
+                    by = %new_id,
+                    "supersedes target not found; skipping window close: {e}"
+                );
+            }
+        }
+    }
+}
 
 /// Resolve the effective embedding backend from the layered override chain.
 ///

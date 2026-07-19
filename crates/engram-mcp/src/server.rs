@@ -1,6 +1,6 @@
 //! EngramDB MCP server implementation.
 //!
-//! Defines the server struct, all MCP tools (19), resources (2), and prompts (2).
+//! Defines the server struct, all MCP tools (22), resources (2), and prompts (2).
 //! Tools delegate to the `ops` layer; the server opens a fresh `MemoryStore`
 //! per request so it always sees the latest on-disk state.
 
@@ -39,7 +39,9 @@ struct CreateInput {
     )]
     type_: String,
 
-    #[schemars(description = "Core knowledge to store (max ~500 tokens)")]
+    #[schemars(
+        description = "Core knowledge to store (max ~500 tokens). For decisions, state what was chosen, over what alternatives, and why."
+    )]
     content: String,
 
     #[schemars(description = "One-line summary, max 100 chars (required)")]
@@ -68,6 +70,34 @@ struct CreateInput {
 
     #[schemars(description = "IDs of memories this supersedes")]
     supersedes: Option<Vec<String>>,
+
+    #[schemars(
+        description = "Epistemic class: fact (structural, verifiable against the repo), observation (measured empirically, may go stale), decision (chosen over alternatives, valid while its premise holds). Defaults from type; set only when it differs."
+    )]
+    epistemic: Option<String>,
+
+    #[schemars(
+        description = "Premise this memory depends on, e.g. 'while we pin ort rc.12'. State it if the memory becomes wrong when something specific changes."
+    )]
+    premise: Option<String>,
+
+    #[schemars(
+        description = "Paths/globs whose change invalidates this memory (distinct from physical, which is where it applies)."
+    )]
+    invalidated_by: Option<Vec<String>>,
+
+    #[schemars(
+        description = "Task or feature this was decided for (short human-readable name, not a session id)."
+    )]
+    origin_task: Option<String>,
+
+    #[schemars(description = "'project' (default) or 'task' (binding only within origin_task).")]
+    generality: Option<String>,
+
+    #[schemars(
+        description = "Valid-time start (RFC3339): when the claim became true in the world. Only to backdate; defaults to creation time."
+    )]
+    valid_from: Option<String>,
 
     #[schemars(description = "Decay: none|linear|exponential|step")]
     decay_strategy: Option<String>,
@@ -134,6 +164,21 @@ struct QueryInput {
 
     #[schemars(description = "Include expired/decayed memories")]
     include_expired: Option<bool>,
+
+    #[schemars(
+        description = "Filter by epistemic class: fact, observation, decision (OR logic, like types)."
+    )]
+    epistemic: Option<Vec<String>>,
+
+    #[schemars(
+        description = "Your current situation, to reweight classes: session_start, file_edit, debugging, design_choice. Declare debugging when investigating a failure (observations rank highest) and design_choice when weighing alternatives (prior decisions rank highest)."
+    )]
+    situation: Option<String>,
+
+    #[schemars(
+        description = "Include memories whose validity window was closed (invalidated). Default false."
+    )]
+    include_invalidated: Option<bool>,
 
     #[schemars(description = "Also include global memories in results (default false)")]
     include_global: Option<bool>,
@@ -205,6 +250,44 @@ struct UpdateInput {
 
     #[schemars(description = "IDs of memories this supersedes")]
     supersedes: Option<Vec<String>>,
+
+    #[schemars(
+        description = "Epistemic class: fact (structural, verifiable against the repo), observation (measured empirically, may go stale), decision (chosen over alternatives, valid while its premise holds). Defaults from type; set only when it differs."
+    )]
+    epistemic: Option<String>,
+
+    #[schemars(
+        description = "Premise this memory depends on, e.g. 'while we pin ort rc.12'. State it if the memory becomes wrong when something specific changes."
+    )]
+    premise: Option<String>,
+
+    #[schemars(
+        description = "Paths/globs whose change invalidates this memory (distinct from physical, which is where it applies)."
+    )]
+    invalidated_by: Option<Vec<String>>,
+
+    #[schemars(
+        description = "Task or feature this was decided for (short human-readable name, not a session id)."
+    )]
+    origin_task: Option<String>,
+
+    #[schemars(description = "'project' (default) or 'task' (binding only within origin_task).")]
+    generality: Option<String>,
+
+    #[schemars(
+        description = "Valid-time start (RFC3339): when the claim became true in the world. Only to backdate; defaults to creation time."
+    )]
+    valid_from: Option<String>,
+
+    #[schemars(
+        description = "Clear the whole validity condition (premise/invalidated_by/origin_task/generality)."
+    )]
+    clear_validity: Option<bool>,
+
+    #[schemars(
+        description = "Reopen a closed validity window: clears invalidated_at and superseded_by. Invalidation is reversible, unlike deletion."
+    )]
+    clear_invalidated: Option<bool>,
 
     #[schemars(description = "Decay: none|linear|exponential|step")]
     decay_strategy: Option<String>,
@@ -286,7 +369,9 @@ struct ResolveInput {
     #[schemars(description = "Memory ID")]
     id: String,
 
-    #[schemars(description = "Action: keep, update, or delete")]
+    #[schemars(
+        description = "Action: keep, update, delete, or invalidate. Prefer invalidate over delete when a memory WAS true but no longer is — history is kept and queryable via include_invalidated."
+    )]
     action: String,
 
     #[schemars(description = "New content (required for update)")]
@@ -294,6 +379,46 @@ struct ResolveInput {
 
     #[schemars(description = "New summary (optional for update)")]
     updated_summary: Option<String>,
+
+    #[schemars(
+        description = "For invalidate: id of the memory that superseded this one (optional)."
+    )]
+    superseded_by: Option<String>,
+
+    #[schemars(
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+    )]
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct VerifyInput {
+    #[schemars(description = "Memory ID")]
+    id: String,
+
+    #[schemars(
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+    )]
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TaskCurrentInput {
+    #[schemars(
+        description = "Task/feature name to declare for this session (short human-readable name). Omit to read the current declaration."
+    )]
+    task: Option<String>,
+
+    #[schemars(
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+    )]
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TaskCompleteInput {
+    #[schemars(description = "Task/feature name to mark finished.")]
+    task: String,
 
     #[schemars(
         description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
@@ -371,6 +496,9 @@ struct ListInput {
     #[schemars(description = "Filter by memory types")]
     types: Option<Vec<String>>,
 
+    #[schemars(description = "Filter by epistemic class: fact, observation, decision (OR logic)")]
+    epistemic: Option<Vec<String>>,
+
     #[schemars(description = "Filter by tags (OR logic)")]
     tags: Option<Vec<String>>,
 
@@ -382,6 +510,11 @@ struct ListInput {
 
     #[schemars(description = "Sort: criticality|created|updated|type (default criticality)")]
     sort_field: Option<String>,
+
+    #[schemars(
+        description = "Include memories whose validity window was closed (invalidated). Default false."
+    )]
+    include_invalidated: Option<bool>,
 
     #[schemars(description = "Reverse sort order")]
     reverse: Option<bool>,
@@ -414,6 +547,10 @@ struct DoctorInput {
         description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
+    #[schemars(
+        description = "Flip memories with epistemic findings (changed invalidation paths, invalid derived-from sources) to needs_review. Default false: report only."
+    )]
+    fix: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -471,6 +608,20 @@ struct MemoryOutput {
     visibility: String,
     /// Who recorded the memory: human|agent|inferred|imported.
     provenance: String,
+    /// Epistemic class: fact|observation|decision (always present, §5.4).
+    epistemic: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    valid_while: Option<engramdb::types::Validity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    valid_from: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    invalidated_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    superseded_by: Option<String>,
+    /// When the memory was last re-confirmed via `verify` (facts decay from
+    /// this anchor, so agents can see how stale a verification is).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verified_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 fn memory_to_output(m: &engramdb::types::Memory, include_details: bool) -> MemoryOutput {
@@ -492,6 +643,12 @@ fn memory_to_output(m: &engramdb::types::Memory, include_details: bool) -> Memor
         status: format!("{:?}", m.status).to_lowercase(),
         visibility: format!("{:?}", m.visibility).to_lowercase(),
         provenance: format!("{:?}", m.provenance.source).to_lowercase(),
+        epistemic: m.epistemic.as_str().to_string(),
+        valid_while: m.valid_while.clone(),
+        valid_from: m.valid_from,
+        invalidated_at: m.invalidated_at,
+        superseded_by: m.superseded_by.clone(),
+        verified_at: m.verified_at,
     }
 }
 
@@ -522,6 +679,7 @@ struct ScoreBreakdownOutput {
     scope_multiplier: f64,
     trust: f64,
     trust_multiplier: f64,
+    situation_multiplier: f64,
     decay: f64,
     criticality: f64,
 }
@@ -758,11 +916,21 @@ impl EngramDbServer {
         // is always false; the env var and config still apply.
         let config_path = self.effective_dir.join(".engramdb").join("config.toml");
         let config = engramdb::storage::config::load_config_or_default(&config_path).await;
-        engramdb::ops::auto_maintain(
+        // §11.4 consolidation needs providers, so pass an engine — but only
+        // build one when the throttle says the pass will actually run, so a
+        // routine (throttled) startup never loads models for nothing. Engine
+        // build failure degrades to the engine-less pass (graceful-skip).
+        let engine = if engramdb::ops::maintenance_would_run(&config.maintenance, false).await {
+            self.build_engine().await.ok()
+        } else {
+            None
+        };
+        engramdb::ops::auto_maintain_with_engine(
             &self.effective_dir,
             self.registry.as_ref(),
             &config.maintenance,
             false,
+            engine.as_ref(),
         )
         .await;
     }
@@ -1382,7 +1550,7 @@ fn resolve_session_id() -> String {
 impl EngramDbServer {
     #[tool(
         name = "create",
-        description = "Store a new memory about the project (or globally with project=\"global\"). Use after discovering patterns, decisions, or hazards."
+        description = "Store a new memory about the project (or globally with project=\"global\"). Use after discovering patterns, decisions, or hazards. Set `epistemic` (fact/observation/decision) when it differs from the type default; state `premise` and `invalidated_by` for decisions and observations."
     )]
     async fn memory_create(
         &self,
@@ -1424,6 +1592,28 @@ impl EngramDbServer {
                 .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
         }
 
+        let epistemic = input
+            .epistemic
+            .as_deref()
+            .map(ops::parse_epistemic)
+            .transpose()
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        let generality = input
+            .generality
+            .as_deref()
+            .map(ops::parse_generality)
+            .transpose()
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        let valid_from = input
+            .valid_from
+            .as_deref()
+            .map(|s| {
+                s.parse::<chrono::DateTime<chrono::Utc>>()
+                    .map_err(|e| format!("invalid valid_from timestamp: {e}"))
+            })
+            .transpose()
+            .map_err(|e| error_response(ErrorCode::ValidationError, e.as_str()))?;
+
         let result = ops::create_memory(
             store,
             ops::CreateParams {
@@ -1439,6 +1629,12 @@ impl EngramDbServer {
                 visibility,
                 provenance: Provenance::agent("mcp"),
                 supersedes: input.supersedes.unwrap_or_default(),
+                epistemic,
+                premise: input.premise,
+                invalidated_by: input.invalidated_by.unwrap_or_default(),
+                origin_task: input.origin_task,
+                generality,
+                valid_from,
                 decay_strategy: input.decay_strategy,
                 decay_half_life: input.decay_half_life,
                 decay_ttl: input.decay_ttl,
@@ -1471,7 +1667,7 @@ impl EngramDbServer {
 
     #[tool(
         name = "query",
-        description = "Query all memories. Use `mode: \"rank\"` to browse memories ranked by relevance to a context (current file path, topic, logical scope) — good before modifying files or when orienting. Use `mode: \"filter\"` to find memories containing specific terms, scopes, or tag matches — good when you have a concrete lookup. Filter mode requires at least one of `query`, `logical`, `path`, or `tags`."
+        description = "Query all memories. Use `mode: \"rank\"` to browse memories ranked by relevance to a context (current file path, topic, logical scope) — good before modifying files or when orienting. Use `mode: \"filter\"` to find memories containing specific terms, scopes, or tag matches — good when you have a concrete lookup. Filter mode requires at least one of `query`, `logical`, `path`, or `tags`. Pass `situation` (session_start/file_edit/debugging/design_choice) to reweight results for what you're doing; `include_invalidated: true` to see superseded history."
     )]
     async fn memory_query(
         &self,
@@ -1507,6 +1703,15 @@ impl EngramDbServer {
                 .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
         }
 
+        let epistemic_filter = ops::parse_epistemic_filter(input.epistemic.as_deref())
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        let situation = input
+            .situation
+            .as_deref()
+            .map(ops::parse_situation)
+            .transpose()
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+
         let query = RetrievalQuery {
             mode,
             path: input.path,
@@ -1518,6 +1723,9 @@ impl EngramDbServer {
             max_results: Some(input.max_results.unwrap_or(10)),
             include_expired: Some(input.include_expired.unwrap_or(false)),
             detail_level,
+            epistemic: epistemic_filter,
+            include_invalidated: input.include_invalidated,
+            situation,
         };
 
         // Merge global memories if requested and not already targeting the
@@ -1546,6 +1754,7 @@ impl EngramDbServer {
                     scope_multiplier: sm.score_breakdown.scope_multiplier,
                     trust: sm.score_breakdown.trust,
                     trust_multiplier: sm.score_breakdown.trust_multiplier,
+                    situation_multiplier: sm.score_breakdown.situation_multiplier,
                     decay: sm.score_breakdown.decay,
                     criticality: sm.score_breakdown.criticality,
                 },
@@ -1637,6 +1846,28 @@ impl EngramDbServer {
                 .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
         }
 
+        let epistemic = input
+            .epistemic
+            .as_deref()
+            .map(ops::parse_epistemic)
+            .transpose()
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        let generality = input
+            .generality
+            .as_deref()
+            .map(ops::parse_generality)
+            .transpose()
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        let valid_from = input
+            .valid_from
+            .as_deref()
+            .map(|s| {
+                s.parse::<chrono::DateTime<chrono::Utc>>()
+                    .map_err(|e| format!("invalid valid_from timestamp: {e}"))
+            })
+            .transpose()
+            .map_err(|e| error_response(ErrorCode::ValidationError, e.as_str()))?;
+
         ops::update_memory(
             store,
             &input.id,
@@ -1656,6 +1887,14 @@ impl EngramDbServer {
                 title: input.title,
                 status,
                 supersedes: input.supersedes,
+                epistemic,
+                premise: input.premise,
+                invalidated_by: input.invalidated_by,
+                origin_task: input.origin_task,
+                generality,
+                valid_from,
+                clear_validity: input.clear_validity.unwrap_or(false),
+                clear_invalidated: input.clear_invalidated.unwrap_or(false),
                 decay_strategy: input.decay_strategy,
                 decay_half_life: input.decay_half_life,
                 decay_ttl: input.decay_ttl,
@@ -1808,7 +2047,7 @@ impl EngramDbServer {
 
     #[tool(
         name = "resolve",
-        description = "Resolve a challenged or needs_review memory: keep, update, or delete."
+        description = "Resolve a challenged or needs_review memory: keep, update, delete, or invalidate. Prefer invalidate over delete when a memory WAS true but no longer is — history is kept and queryable via include_invalidated."
     )]
     async fn memory_resolve(
         &self,
@@ -1823,11 +2062,12 @@ impl EngramDbServer {
             "keep" => ops::ResolveAction::Keep,
             "update" => ops::ResolveAction::Update,
             "delete" => ops::ResolveAction::Delete,
+            "invalidate" => ops::ResolveAction::Invalidate,
             other => {
                 return Err(error_response(
                     ErrorCode::ValidationError,
                     &format!(
-                        "Invalid action '{}'. Must be keep, update, or delete.",
+                        "Invalid action '{}'. Must be keep, update, delete, or invalidate.",
                         other
                     ),
                 ));
@@ -1841,6 +2081,7 @@ impl EngramDbServer {
                 action,
                 updated_content: input.updated_content,
                 updated_summary: input.updated_summary,
+                superseded_by: input.superseded_by,
             },
         )
         .await
@@ -1850,6 +2091,96 @@ impl EngramDbServer {
             "id": input.id,
             "action": result.action,
             "resolved": result.resolved
+        }))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
+    }
+
+    #[tool(
+        name = "verify",
+        description = "Confirm a memory is still accurate after checking it against the code. Stamps verified_at (facts rank fresher) and clears doctor-flagged needs_review."
+    )]
+    async fn memory_verify(
+        &self,
+        Parameters(input): Parameters<VerifyInput>,
+    ) -> Result<String, String> {
+        let _scope = self.scope("verify", input.project.as_deref());
+        self.check_cross_project_write(input.project.as_deref())
+            .await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
+
+        let result = ops::verify_memory(&store, &input.id)
+            .await
+            .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
+
+        let r = serde_json::to_string(&serde_json::json!({
+            "id": result.id,
+            "verified": true,
+            "review_cleared": result.review_cleared,
+        }))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
+    }
+
+    #[tool(
+        name = "task_current",
+        description = "Declare the task/feature this session is working on. Task-scoped memories from other tasks stay suppressed; yours surface. Call without a task to read the current declaration."
+    )]
+    async fn memory_task_current(
+        &self,
+        Parameters(input): Parameters<TaskCurrentInput>,
+    ) -> Result<String, String> {
+        let _scope = self.scope("task_current", input.project.as_deref());
+        let dir = self.resolve_dir(input.project.as_deref()).await?;
+
+        let result = ops::task_current(&dir, &self.session_id, input.task.as_deref())
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+
+        let r = serde_json::to_string(&serde_json::json!({
+            "session_id": result.session_id,
+            "task": result.task,
+        }))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
+    }
+
+    #[tool(
+        name = "task_complete",
+        description = "Mark a task/feature finished. Its task-scoped decisions start decaying unless promoted; project-wide memories from the task are listed for review."
+    )]
+    async fn memory_task_complete(
+        &self,
+        Parameters(input): Parameters<TaskCompleteInput>,
+    ) -> Result<String, String> {
+        let _scope = self.scope("task_complete", input.project.as_deref());
+        self.check_cross_project_write(input.project.as_deref())
+            .await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
+
+        let config = self.load_config_for(input.project.as_deref()).await?;
+        let result = ops::task_complete(&store, &input.task, &config.epistemic)
+            .await
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+
+        let notices: Vec<serde_json::Value> = result
+            .project_wide_notices
+            .iter()
+            .map(|(id, summary)| {
+                serde_json::json!({
+                    "id": id,
+                    "summary": summary,
+                    "notice": "project-wide memory from a completed task — verify or demote",
+                })
+            })
+            .collect();
+        let r = serde_json::to_string(&serde_json::json!({
+            "task": input.task,
+            "demoted": result.demoted,
+            "kept_custom_decay": result.kept_custom_decay,
+            "project_wide_review": notices,
         }))
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
@@ -2121,12 +2452,14 @@ impl EngramDbServer {
 
         let params = ops::ListParams {
             types: input.types,
+            epistemic: input.epistemic,
             tags: input.tags,
             status: input.status,
             scope: input.scope,
             sort_field,
             reverse: input.reverse.unwrap_or(false),
             limit: input.limit,
+            include_invalidated: input.include_invalidated.unwrap_or(false),
         };
 
         let entries = ops::list_memories(&store, &params)
@@ -2136,9 +2469,11 @@ impl EngramDbServer {
         let output: Vec<serde_json::Value> = entries
             .iter()
             .map(|e| {
-                serde_json::json!({
+                let mut obj = serde_json::json!({
                     "id": e.id,
                     "type": format!("{:?}", e.type_).to_lowercase(),
+                    // §5.4: epistemic is always present in MCP list output.
+                    "epistemic": e.epistemic.as_str(),
                     "summary": e.summary,
                     "tags": e.tags,
                     "logical": e.logical,
@@ -2147,7 +2482,17 @@ impl EngramDbServer {
                     "criticality": e.criticality,
                     "created_at": e.created_at.to_rfc3339(),
                     "updated_at": e.updated_at.to_rfc3339(),
-                })
+                });
+                // §5.4: emitted when present. `invalidated_at` is normally
+                // only reachable via include_invalidated (or future-dated);
+                // `valid_from` appears on any backdated live memory.
+                if let Some(t) = e.invalidated_at {
+                    obj["invalidated_at"] = serde_json::json!(t.to_rfc3339());
+                }
+                if let Some(t) = e.valid_from {
+                    obj["valid_from"] = serde_json::json!(t.to_rfc3339());
+                }
+                obj
             })
             .collect();
 
@@ -2162,15 +2507,26 @@ impl EngramDbServer {
 
     #[tool(
         name = "doctor",
-        description = "Check store health (index vs disk consistency). Fast, project-scoped check. For full environment diagnostics, use the CLI: `engramdb doctor`."
+        description = "Check store health (index vs disk consistency) plus epistemic checks: changed invalidation paths, stale observations, invalid derived-from sources. Pass fix: true to flip affected memories to needs_review. For full environment diagnostics, use the CLI: `engramdb doctor`."
     )]
     async fn memory_doctor(
         &self,
         Parameters(input): Parameters<DoctorInput>,
     ) -> Result<String, String> {
+        let fix = input.fix.unwrap_or(false);
+        if fix {
+            self.check_cross_project_write(input.project.as_deref())
+                .await?;
+        }
         let _scope = self.scope("doctor", input.project.as_deref());
         let store = self.open_store_for(input.project.as_deref()).await?;
         let result = ops::doctor(&store)
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+
+        // §10 epistemic checks run alongside the index-consistency check.
+        let config = self.load_config_for(input.project.as_deref()).await?;
+        let epistemic = ops::doctor_epistemic(&store, &config, fix)
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
@@ -2187,6 +2543,14 @@ impl EngramDbServer {
         }
         if !result.healthy {
             response["fix"] = serde_json::json!("Run reindex to repair.");
+        }
+        if !epistemic.findings.is_empty() {
+            response["epistemic_findings"] = serde_json::json!(epistemic.findings);
+        }
+        // Report-only enrichment nudge: classes without actionable metadata
+        // (legacy pre-epistemic memories all start this way).
+        if epistemic.gaps.any() {
+            response["enrichment_gaps"] = serde_json::json!(epistemic.gaps);
         }
         let r = serde_json::to_string(&response)
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
@@ -2338,7 +2702,12 @@ impl ServerHandler for EngramDbServer {
                  investigating workflows, or researching how things work — not only before \
                  modifying files. Use mode=\"filter\" with a query/logical/path/tags signal \
                  for specific lookups, mode=\"rank\" for context-aware browsing. \
-                 Store new knowledge after significant discoveries. \
+                 Store new knowledge after significant discoveries — for decisions, \
+                 state the premise (premise) and what would invalidate them \
+                 (invalidated_by); set epistemic (fact/observation/decision) when it \
+                 differs from the type default, and origin_task + generality=\"task\" \
+                 for task-specific choices. Declare situation on query when debugging \
+                 or weighing a design choice. \
                  All tools accept an optional `project` parameter (absolute path, 16-char \
                  project ID, or \"global\") to operate on a different project's memories. \
                  Use project=\"global\" for cross-project memories like personal preferences, \
@@ -2574,7 +2943,9 @@ impl ServerHandler for EngramDbServer {
                          Memories marked ⚠️ may be inaccurate.\n\
                          Memories marked 🕐 are flagged for review.\n\n\
                          When you discover important patterns, decisions, or hazards during \
-                         this session, store them using the create tool.\n\
+                         this session, store them using the create tool. If a decision holds \
+                         only for THIS task, set origin_task and generality: task, and state \
+                         its premise ('because C').\n\
                          If you encounter evidence that contradicts an existing memory, \
                          use challenge and ask the user how to resolve it.",
                     memory_text
@@ -2629,14 +3000,31 @@ impl ServerHandler for EngramDbServer {
                             }
                         }
                     }
+
+                    // Enrichment nudge: classes without actionable metadata.
+                    // Legacy (pre-epistemic) memories all start this way —
+                    // their class is type-derived, but premises and watch
+                    // globs only accrue as memories are touched. Report-only.
+                    if let Ok(gaps) = ops::enrichment_gaps(&store).await {
+                        if gaps.any() {
+                            recency_hint.push_str(&format!(
+                                "\n{} decision(s) lack a recorded premise and {} observation(s) \
+                                 lack invalidation watch paths (typical for pre-epistemic \
+                                 memories) — when you touch one, enrich it via update \
+                                 (premise / invalidated_by).",
+                                gaps.decisions_without_premise, gaps.observations_without_watch,
+                            ));
+                        }
+                    }
                 }
 
                 let prompt = format!(
                     "Before ending this session, consider:\n\
                          1. Did you make any architectural decisions? -> create type: decision\n\
                          2. Did you discover any hazards or footguns? -> create type: hazard\n\
-                         3. Did you encounter non-obvious behavior? -> create type: debug\n\
-                         4. Did anything contradict existing memories? -> challenge\n\n\
+                         3. Did you decide something for THIS task only? -> set origin_task and generality: task. State the premise ('because C') for decisions.\n\
+                         4. Did you encounter non-obvious behavior? -> create type: debug\n\
+                         5. Did anything contradict existing memories? -> challenge\n\n\
                          {}\n\
                          Run review if you'd like to address flagged memories with the user.{}",
                     stats_text, recency_hint

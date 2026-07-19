@@ -13,6 +13,14 @@ all-features = true
 # default. Yanked crates only warn: a yank often lands before a fixed release
 # exists, and the committed Cargo.lock pins what we actually build.
 yanked = "warn"
+ignore = [
+  # `paste` is archived upstream with no safe upgrade (RUSTSEC's own
+  # "Solution: No safe upgrade is available!"). It is a proc-macro used at
+  # build time only, reaching us transitively through the datafusion, lance,
+  # tract, and tokenizers stacks — nothing we can bump or replace locally.
+  # Re-evaluate when those ecosystems migrate (e.g. to `pastey`).
+  { id = "RUSTSEC-2024-0436", reason = "unmaintained build-time proc-macro; unavoidable transitive dep of datafusion/lance/tract" },
+]
 
 [licenses]
 # Permissive allow-list for the licenses expected in this dependency tree

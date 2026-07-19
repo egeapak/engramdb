@@ -17,6 +17,8 @@ The `type` field is one of these eight. They differ in **default decay** and in 
 | `debug` | A debugging insight or investigation result. Expected to fade. | exponential, half-life 30 days |
 | `preference` | User or agent preference. | none |
 
+Orthogonal to `type` is the **epistemic class** — what *kind of claim* the memory makes. See [Epistemic classes](#epistemic-classes) below.
+
 ## Fields
 
 ```toml
@@ -40,6 +42,20 @@ expires_at  = null                      # optional absolute expiration
 created_at  = "2026-05-20T09:00:00Z"
 updated_at  = "2026-05-20T09:00:00Z"
 accessed_at = "2026-05-20T09:00:00Z"
+
+# Epistemic fields — written to the file only when set / different from the
+# type-derived default (see "Epistemic classes" below):
+epistemic      = "decision"             # fact | observation | decision
+valid_from     = "2026-05-20T09:00:00Z" # valid-time start; defaults to created_at
+invalidated_at = null                   # valid-time end; set = window closed
+superseded_by  = null                   # id of the memory that replaced this one
+
+[valid_while]                           # invalidation condition; omitted when empty
+premise        = "while we pin ort rc.12"  # free-text premise this depends on
+invalidated_by = ["Cargo.lock"]         # paths/globs whose change invalidates this
+origin_task    = "epistemic-memory"     # task/feature this was created for
+generality     = "project"              # project | task
+derived_from   = []                     # memory IDs this was consolidated from
 
 # nested:
 [decay]
@@ -68,7 +84,7 @@ source_file = "..."
 - **`created_at`** — set on create. Immutable.
 - **`updated_at`** — set on every `update`.
 - **`accessed_at`** — set on every query that returns this memory. Used by the daemon for stats.
-- **`verified_at`** — set when someone (human or agent) confirmed this memory is still correct (e.g. by `resolve action: keep`). Old `verified_at` is a signal that the memory might be stale.
+- **`verified_at`** — set when someone (human or agent) confirmed this memory is still correct (the `verify` tool stamps it; `resolve action: keep` also re-affirms). Old `verified_at` is a signal that the memory might be stale. For fact-class memories, decay is anchored here (see below), so verifying refreshes their score.
 - **`expires_at`** — optional absolute deadline. After this time the memory is considered expired and filtered out by default (unless `include_expired: true`).
 
 ### Content fields
@@ -99,7 +115,7 @@ Set `physical` and `logical` accurately — they're how PreToolUse hooks find re
 
 ### `decay`
 
-Decay reduces a memory's effective relevance over time. The `composite_score` formula uses `effective_relevance = criticality × decay_factor(now − updated_at)`.
+Decay reduces a memory's effective relevance over time. The `composite_score` formula uses `effective_relevance = criticality × decay_factor(now − anchor)`, where the anchor is `created_at` — except for fact-class memories, which decay from `verified_at` when set (see [Epistemic classes](#epistemic-classes)).
 
 | Strategy | Behavior |
 |----------|----------|
@@ -144,8 +160,8 @@ Use `personal` for memories that are useful to you but shouldn't be team-visible
 
 A list of IDs of memories that this one **replaces**. When set:
 
-- The superseded memories get marked superseded (they stay around for audit).
-- They're filtered out of `query` results by default.
+- Each superseded memory's validity window is **closed**: it gets `invalidated_at = now` and `superseded_by = <new id>` (the ADR-style reverse link). It stays on disk for audit.
+- Closed-window memories are excluded from `query` and `list` by default; pass `include_invalidated: true` to see them.
 - They appear in the lineage shown by `get`.
 
 Always prefer `supersedes` over `delete` when correcting a memory that was true at some point.
@@ -153,6 +169,66 @@ Always prefer `supersedes` over `delete` when correcting a memory that was true 
 ### `challenges`
 
 Auto-appended when `challenge` is called. Each entry records evidence, source file, and timestamp. Don't write to this directly — call `challenge`.
+
+## Epistemic classes
+
+Every memory carries an `epistemic` class, orthogonal to `type`: `type` says what the memory is **about**, `epistemic` says what **kind of claim** it makes. The class drives decay defaults, situation-conditioned retrieval weighting, challenge penalties, conflict routing, and doctor verification.
+
+| Class | What it means |
+|-------|---------------|
+| `fact` | Structural fact about the code/tooling as it is. Verifiable against the repo; flips (rather than fades) when the referenced code changes. |
+| `observation` | Empirical observation measured at a point in time. Environment-dependent; goes stale; generalizes with caution. |
+| `decision` | Normative choice with a rationale. Valid while its premise holds; binding within its origin scope. |
+
+### Legacy (pre-epistemic) memories
+
+Memories created before epistemic classes existed are categorized by the same
+frozen type mapping the moment they are read — they are never "class-less"
+and score identically to a new diagonal memory. What they lack is the
+*enrichment metadata*: no `premise`, no `invalidated_by` watch globs, no
+`verified_at`. Enrichment is gradual, not a migration: the `doctor` tool
+reports the gap counts (`enrichment_gaps`), the session-end prompt nudges
+when decisions lack premises, and the recency review trigger surfaces
+long-untouched memories — record the premise / watch paths with `update`
+whenever you touch one, and `verify` what you re-confirm.
+
+### Default class by type
+
+You rarely set `epistemic` on `create` — it defaults from `type`. Set it only when the claim's kind differs from the default (e.g. a `hazard` you merely observed once is an `observation`, not a `fact`).
+
+| Type | Default class |
+|------|---------------|
+| `context`, `convention`, `relationship`, `hazard` | `fact` |
+| `debug` | `observation` |
+| `decision`, `intent`, `preference` | `decision` |
+
+When the class matches the type default, decay defaults are exactly the per-type table above. Off-diagonal, the class wins: an off-default `observation` gets exponential decay (half-life 90 days, floor 0.2 — configurable via `[epistemic]`), an off-default `fact` gets no decay, and an off-default `decision` keeps its type's default (decisions are premise-bound, not time-bound).
+
+### The validity condition (`valid_while`)
+
+`valid_while` makes a memory's *invalidation condition* first-class data: what change would falsify it. All fields are optional; an all-empty condition isn't stored.
+
+- **`premise`** — free-text premise the memory depends on ("while we pin ort rc.12"). Surfaced verbatim in results so a reading agent can judge whether it still holds.
+- **`invalidated_by`** — paths/globs whose *modification* invalidates the memory. Distinct from `physical` (where the memory *applies*): a perf observation may apply to `src/retrieval/` but be invalidated by `Cargo.lock` changing. `doctor` flags memories whose watched paths changed since last verification, and the PostToolUse hook warns in real time when an edit touches one.
+- **`origin_task`** — task/feature the memory was created for (short human-readable name, not a session ID). Presence means "review when this task completes".
+- **`generality`** — `project` (default; holds project-wide) or `task` (binding only within `origin_task`; suppressed from hook injection in other sessions, still reachable by explicit query).
+- **`derived_from`** — memory IDs this one was derived/consolidated from. If a listed source is later invalidated or challenged, `doctor` flags this memory for review (one level only).
+
+### Bi-temporal validity
+
+Separately from `valid_while` (the *condition*), each memory has a **validity window** (the *record*):
+
+- **`valid_from`** — when the claim became true in the world. Defaults to `created_at`; set explicitly only to backdate.
+- **`invalidated_at`** — when the claim stopped holding. Set = the window is **closed**: the memory stays on disk but is excluded from `query` and `list` by default. Pass `include_invalidated: true` to see history. A **future-dated** `invalidated_at` is a scheduled invalidation — the memory stays valid until that instant.
+- **`superseded_by`** — ID of the replacing memory, when the window was closed by supersession. `None` when closed without a successor (`resolve` with `action: "invalidate"`).
+
+Windows close three ways — always an explicit act, never automatic: `create`/`update` with `supersedes`, `resolve` with `action: "invalidate"`, or `compress_apply` (the compressed summary supersedes its sources). `update` with `clear_invalidated: true` **reopens** a closed window (invalidation is reversible, unlike deletion). `gc` only purges invalidated memories after `[epistemic].invalidated_retention_days` (default 180).
+
+### How classes affect scoring
+
+- **Situation multiplier.** When a query declares a `situation` (`session_start`, `file_edit`, `debugging`, `design_choice`), a per-class multiplier `floor + (1 − floor) × profile[situation][class]` is applied after the trust multiplier (floor default 0.6, so a class is down-weighted at most 40%). No situation ⇒ neutral 1.0. See [query-modes.md](./query-modes.md) for the profiles.
+- **Per-class challenge penalties.** A challenged memory's penalty depends on its class: `observation` 0.20 (cheap to re-measure — suppress hardest), `fact` 0.15 (probably stale), `decision` 0.05 (a contested decision must remain visible together with its dispute). A legacy flat `challenge_penalty` config value still applies uniformly.
+- **Fact freshness anchor.** For `fact`-class memories, decay is computed from `verified_at` (falling back to `created_at`) instead of `created_at` — so `verify` refreshes a fact's score. Observations and decisions keep the `created_at` anchor.
 
 ## Validation
 
@@ -165,6 +241,9 @@ These rules are enforced at write time:
 - `type` must be one of the eight enum values.
 - `visibility` must be `shared` or `personal`.
 - `status` must be one of the three enum values.
+- `epistemic` must be `fact`, `observation`, or `decision`.
+- `generality` must be `project` or `task`.
+- `valid_from` must be an RFC3339 timestamp.
 
 `content` has no hard length limit but soft-targets ~500 tokens. Use `details` for anything longer.
 
@@ -175,5 +254,6 @@ When you call `update`, every field is **optional** and **replaces** the existin
 - Scalar fields (`summary`, `content`, `criticality`): replaced if present.
 - Vector fields (`physical`, `logical`, `tags`): **replaced** if present.
 - For tags only: `tags_add` / `tags_remove` let you make incremental changes without enumerating the full list.
+- Validity-condition fields (`premise`, `invalidated_by`, `origin_task`, `generality`): **merged** into the existing `valid_while` — setting one doesn't clear the others. `clear_validity: true` drops the whole condition (and wins over piecemeal edits in the same call). `clear_invalidated: true` reopens a closed validity window (clears `invalidated_at` and `superseded_by`).
 
 `id`, `created_at`, and `provenance.source` are immutable.
