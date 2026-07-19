@@ -66,7 +66,7 @@ fn parse_v1(frontmatter: &str, body: &str) -> Result<Memory> {
         .ok()
         .and_then(|v| {
             v.as_mapping()
-                .map(|m| m.contains_key(&serde_yaml_ng::Value::from("epistemic")))
+                .map(|m| m.contains_key(serde_yaml_ng::Value::from("epistemic")))
         })
         .unwrap_or(false);
     if !has_epistemic_key {

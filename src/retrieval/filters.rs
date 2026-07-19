@@ -233,6 +233,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             expires_at: None,
+            valid_from: None,
         }
     }
 
