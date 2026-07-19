@@ -10,10 +10,21 @@ const ENGRAM_MD_CONTENT: &str = r#"# EngramDB
 
 This project uses EngramDB for persistent agent memory.
 
-- **Expand surfaced memories** — when memories are surfaced at session start, `get` the full content of any relevant to the current task before proceeding.
-- **Query before answering or modifying** — call `query` with `mode: "rank"` to surface memories relevant to your current file, topic, or logical scope; call with `mode: "filter"` (plus a `query` text, `logical` scopes, `path`, or `tags`) when you need specific-term lookup.
-- **Store after discovering** — call `create` after discovering important patterns, decisions, hazards, or conventions worth preserving.
-- **Challenge contradictions** — call `challenge` when you find information that contradicts an existing memory.
+- **Expand surfaced memories** — when memories are surfaced at session start
+  or on your prompt, `get` the full content of any relevant to the task.
+- **Query before answering or modifying** — `query` with `mode: "rank"` for
+  context relevance; `mode: "filter"` for specific-term lookup. Declare your
+  situation (`situation: "debugging"` or `"design_choice"`) when it fits —
+  it reweights what surfaces.
+- **Store after discovering** — `create` after discovering patterns,
+  decisions, hazards, or conventions. For decisions, state the premise
+  ("because C") and what would invalidate it (`premise`, `invalidated_by`).
+  For task-specific choices, set `origin_task` and `generality: "task"`.
+- **Keep memories honest** — `challenge` contradictions; `verify` a memory
+  you've confirmed against the code; prefer `resolve` with `invalidate`
+  over `delete` when something *was* true but no longer is (history stays).
+- **Bound your work** — declare `task_current` when starting focused work;
+  call `task_complete` when it ships so task-scoped memories retire.
 "#;
 
 const ENGRAM_MD_REF: &str = "@ENGRAM.md";
@@ -916,6 +927,48 @@ mod tests {
         let mcp = &settings["mcpServers"]["engramdb"];
         assert_eq!(mcp["command"].as_str().unwrap(), "engramdb");
         assert_eq!(mcp["args"][0].as_str().unwrap(), "serve");
+    }
+
+    /// §16.3 lockstep guard: the plugin manifest (`.claude-plugin/plugin.json`)
+    /// and the settings-json fallback must register the same hook events with
+    /// the same matchers and commands. A hook added to one but not the other
+    /// silently degrades whichever install path was forgotten.
+    #[test]
+    fn test_plugin_manifest_hooks_match_settings_fallback() {
+        let tmp = TempDir::new().unwrap();
+        let f = test_formatter();
+        install_settings_fallback(tmp.path(), false, &f).unwrap();
+        let content = std::fs::read_to_string(tmp.path().join("settings.json")).unwrap();
+        let settings: Value = serde_json::from_str(&content).unwrap();
+        let fallback_hooks = settings["hooks"].as_object().unwrap();
+
+        let plugin_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.claude-plugin/plugin.json");
+        let plugin: Value =
+            serde_json::from_str(&std::fs::read_to_string(&plugin_path).unwrap()).unwrap();
+        let plugin_hooks = plugin["hooks"].as_object().unwrap();
+
+        let mut fallback_events: Vec<&String> = fallback_hooks.keys().collect();
+        let mut plugin_events: Vec<&String> = plugin_hooks.keys().collect();
+        fallback_events.sort();
+        plugin_events.sort();
+        assert_eq!(
+            fallback_events, plugin_events,
+            "hook event sets differ between settings fallback and .claude-plugin/plugin.json"
+        );
+
+        for (event, plugin_entries) in plugin_hooks {
+            let plugin_entry = &plugin_entries.as_array().unwrap()[0];
+            let fallback_entry = &fallback_hooks[event].as_array().unwrap()[0];
+            assert_eq!(
+                plugin_entry["matcher"], fallback_entry["matcher"],
+                "matcher differs for {event}"
+            );
+            assert_eq!(
+                plugin_entry["hooks"][0]["command"], fallback_entry["hooks"][0]["command"],
+                "hook command differs for {event}"
+            );
+        }
     }
 
     #[test]

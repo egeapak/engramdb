@@ -4173,6 +4173,10 @@ async fn get_prompt_session_end_reports_zero_memory_store() {
         text.contains("create"),
         "session-end template body missing: {text}"
     );
+    assert!(
+        text.contains("origin_task") && text.contains("generality: task"),
+        "task-scoped guidance line (spec \u{a7}16.2) missing: {text}"
+    );
 
     client.cancel().await.ok();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;

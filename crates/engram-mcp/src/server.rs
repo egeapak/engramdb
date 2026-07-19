@@ -1508,7 +1508,7 @@ fn resolve_session_id() -> String {
 impl EngramDbServer {
     #[tool(
         name = "create",
-        description = "Store a new memory about the project (or globally with project=\"global\"). Use after discovering patterns, decisions, or hazards."
+        description = "Store a new memory about the project (or globally with project=\"global\"). Use after discovering patterns, decisions, or hazards. Set `epistemic` (fact/observation/decision) when it differs from the type default; state `premise` and `invalidated_by` for decisions and observations."
     )]
     async fn memory_create(
         &self,
@@ -1622,7 +1622,7 @@ impl EngramDbServer {
 
     #[tool(
         name = "query",
-        description = "Query all memories. Use `mode: \"rank\"` to browse memories ranked by relevance to a context (current file path, topic, logical scope) — good before modifying files or when orienting. Use `mode: \"filter\"` to find memories containing specific terms, scopes, or tag matches — good when you have a concrete lookup. Filter mode requires at least one of `query`, `logical`, `path`, or `tags`."
+        description = "Query all memories. Use `mode: \"rank\"` to browse memories ranked by relevance to a context (current file path, topic, logical scope) — good before modifying files or when orienting. Use `mode: \"filter\"` to find memories containing specific terms, scopes, or tag matches — good when you have a concrete lookup. Filter mode requires at least one of `query`, `logical`, `path`, or `tags`. Pass `situation` (session_start/file_edit/debugging/design_choice) to reweight results for what you're doing; `include_invalidated: true` to see superseded history."
     )]
     async fn memory_query(
         &self,
@@ -2580,7 +2580,12 @@ impl ServerHandler for EngramDbServer {
                  investigating workflows, or researching how things work — not only before \
                  modifying files. Use mode=\"filter\" with a query/logical/path/tags signal \
                  for specific lookups, mode=\"rank\" for context-aware browsing. \
-                 Store new knowledge after significant discoveries. \
+                 Store new knowledge after significant discoveries — for decisions, \
+                 state the premise (premise) and what would invalidate them \
+                 (invalidated_by); set epistemic (fact/observation/decision) when it \
+                 differs from the type default, and origin_task + generality=\"task\" \
+                 for task-specific choices. Declare situation on query when debugging \
+                 or weighing a design choice. \
                  All tools accept an optional `project` parameter (absolute path, 16-char \
                  project ID, or \"global\") to operate on a different project's memories. \
                  Use project=\"global\" for cross-project memories like personal preferences, \
@@ -2850,8 +2855,9 @@ impl ServerHandler for EngramDbServer {
                     "Before ending this session, consider:\n\
                          1. Did you make any architectural decisions? -> create type: decision\n\
                          2. Did you discover any hazards or footguns? -> create type: hazard\n\
-                         3. Did you encounter non-obvious behavior? -> create type: debug\n\
-                         4. Did anything contradict existing memories? -> challenge\n\n\
+                         3. Did you decide something for THIS task only? -> set origin_task and generality: task. State the premise ('because C') for decisions.\n\
+                         4. Did you encounter non-obvious behavior? -> create type: debug\n\
+                         5. Did anything contradict existing memories? -> challenge\n\n\
                          {}\n\
                          Run review if you'd like to address flagged memories with the user.",
                     stats_text
