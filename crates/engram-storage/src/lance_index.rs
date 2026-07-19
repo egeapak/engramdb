@@ -169,7 +169,7 @@ pub struct IndexForFiltering {
     pub watch_paths: Vec<String>,
 }
 
-/// Filterable/displayable entry (13 columns).
+/// Filterable/displayable entry (14 columns).
 ///
 /// Contains every field needed for filtering, sorting, and display.
 /// Omits only `provenance_source` and `confidence` which no caller reads
@@ -197,6 +197,11 @@ pub struct IndexFilterable {
     /// the displayable projection for output tagging and time-travel filters.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub valid_from: Option<DateTime<Utc>>,
+    /// Valid-time end (schema v0.3.0). Carried so `list` can exclude closed
+    /// windows by default and tag them `[invalidated <date>]` when included
+    /// (§5.4) without loading files.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub invalidated_at: Option<DateTime<Utc>>,
 }
 
 impl From<&Memory> for IndexEntry {
@@ -623,7 +628,7 @@ impl LanceIndex {
         Ok(entries)
     }
 
-    /// List entries with all filterable/displayable columns (13 columns).
+    /// List entries with all filterable/displayable columns (14 columns).
     ///
     /// Omits only `provenance_source` and `confidence` which no caller reads.
     pub async fn list_filterable(&self) -> Result<Vec<IndexFilterable>> {
@@ -645,6 +650,7 @@ impl LanceIndex {
                 "updated_at".into(),
                 "expires_at".into(),
                 "valid_from".into(),
+                "invalidated_at".into(),
             ]))
             .execute()
             .await
@@ -1452,7 +1458,7 @@ fn batch_to_summaries(batch: &RecordBatch) -> Result<Vec<IndexSummary>> {
     Ok(entries)
 }
 
-/// Convert a RecordBatch to a Vec of IndexFilterable (13 columns).
+/// Convert a RecordBatch to a Vec of IndexFilterable (14 columns).
 fn batch_to_filterable(batch: &RecordBatch) -> Result<Vec<IndexFilterable>> {
     let ids = batch
         .column_by_name("id")
@@ -1532,6 +1538,12 @@ fn batch_to_filterable(batch: &RecordBatch) -> Result<Vec<IndexFilterable>> {
         .as_any()
         .downcast_ref::<StringArray>()
         .context("Failed to cast 'valid_from'")?;
+    let invalidated_ats_col = batch
+        .column_by_name("invalidated_at")
+        .context("Missing 'invalidated_at' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'invalidated_at'")?;
 
     let mut entries = Vec::with_capacity(batch.num_rows());
     for i in 0..batch.num_rows() {
@@ -1565,6 +1577,15 @@ fn batch_to_filterable(batch: &RecordBatch) -> Result<Vec<IndexFilterable>> {
                     .with_timezone(&Utc),
             )
         };
+        let invalidated_at: Option<DateTime<Utc>> = if invalidated_ats_col.is_null(i) {
+            None
+        } else {
+            Some(
+                chrono::DateTime::parse_from_rfc3339(invalidated_ats_col.value(i))
+                    .context("Failed to parse invalidated_at")?
+                    .with_timezone(&Utc),
+            )
+        };
 
         entries.push(IndexFilterable {
             id: ids.value(i).to_string(),
@@ -1580,6 +1601,7 @@ fn batch_to_filterable(batch: &RecordBatch) -> Result<Vec<IndexFilterable>> {
             updated_at,
             expires_at,
             valid_from,
+            invalidated_at,
         });
     }
     Ok(entries)

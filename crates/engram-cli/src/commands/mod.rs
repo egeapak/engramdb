@@ -26,6 +26,7 @@ pub mod serve;
 pub mod setup;
 pub mod stats;
 pub mod update;
+pub mod verify;
 
 pub use add::{run_add, AddParams};
 pub use challenge::{run_challenge, ChallengeParams};
@@ -49,3 +50,4 @@ pub use serve::run_serve;
 pub use setup::run_setup;
 pub use stats::run_stats;
 pub use update::{run_update, UpdateParams};
+pub use verify::run_verify;

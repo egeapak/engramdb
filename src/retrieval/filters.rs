@@ -261,6 +261,7 @@ mod tests {
             updated_at: Utc::now(),
             expires_at: None,
             valid_from: None,
+            invalidated_at: None,
         }
     }
 

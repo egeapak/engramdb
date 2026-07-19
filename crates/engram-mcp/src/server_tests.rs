@@ -37,6 +37,9 @@ fn parse_err(result: &Result<String, String>) -> serde_json::Value {
 /// the fields that matter.
 fn query_input(mode: &str) -> QueryInput {
     QueryInput {
+        epistemic: None,
+        situation: None,
+        include_invalidated: None,
         mode: mode.to_string(),
         query: None,
         path: None,
@@ -54,6 +57,12 @@ fn query_input(mode: &str) -> QueryInput {
 
 fn create_input(type_: &str, summary: &str, content: &str) -> CreateInput {
     CreateInput {
+        epistemic: None,
+        premise: None,
+        invalidated_by: None,
+        origin_task: None,
+        generality: None,
+        valid_from: None,
         type_: type_.to_string(),
         content: content.to_string(),
         summary: summary.to_string(),
@@ -113,6 +122,12 @@ async fn create_basic() {
 async fn create_with_all_fields() {
     let (_dir, server) = setup().await;
     let input = CreateInput {
+        epistemic: None,
+        premise: None,
+        invalidated_by: None,
+        origin_task: None,
+        generality: None,
+        valid_from: None,
         type_: "hazard".to_string(),
         content: "Race condition in cache".to_string(),
         summary: "Cache race".to_string(),
@@ -241,6 +256,14 @@ async fn update_summary() {
     let id = create_and_get_id(&server, "decision", "Old summary", "Content").await;
     let result = server
         .memory_update(Parameters(UpdateInput {
+            epistemic: None,
+            premise: None,
+            invalidated_by: None,
+            origin_task: None,
+            generality: None,
+            valid_from: None,
+            clear_validity: None,
+            clear_invalidated: None,
             id: id.clone(),
             summary: Some("New summary".to_string()),
             type_: None,
@@ -280,6 +303,14 @@ async fn update_type() {
     let id = create_and_get_id(&server, "decision", "Summary", "Content").await;
     let result = server
         .memory_update(Parameters(UpdateInput {
+            epistemic: None,
+            premise: None,
+            invalidated_by: None,
+            origin_task: None,
+            generality: None,
+            valid_from: None,
+            clear_validity: None,
+            clear_invalidated: None,
             id: id.clone(),
             type_: Some("hazard".to_string()),
             summary: None,
@@ -319,6 +350,14 @@ async fn update_status() {
     let id = create_and_get_id(&server, "decision", "Summary", "Content").await;
     let result = server
         .memory_update(Parameters(UpdateInput {
+            epistemic: None,
+            premise: None,
+            invalidated_by: None,
+            origin_task: None,
+            generality: None,
+            valid_from: None,
+            clear_validity: None,
+            clear_invalidated: None,
             id: id.clone(),
             status: Some("challenged".to_string()),
             type_: None,
@@ -356,6 +395,12 @@ async fn update_status() {
 async fn update_tags_add_remove() {
     let (_dir, server) = setup().await;
     let input = CreateInput {
+        epistemic: None,
+        premise: None,
+        invalidated_by: None,
+        origin_task: None,
+        generality: None,
+        valid_from: None,
         tags: Some(vec!["alpha".to_string(), "beta".to_string()]),
         ..create_input("decision", "Tagged", "Content")
     };
@@ -364,6 +409,14 @@ async fn update_tags_add_remove() {
 
     let result = server
         .memory_update(Parameters(UpdateInput {
+            epistemic: None,
+            premise: None,
+            invalidated_by: None,
+            origin_task: None,
+            generality: None,
+            valid_from: None,
+            clear_validity: None,
+            clear_invalidated: None,
             id: id.clone(),
             tags_add: Some(vec!["gamma".to_string()]),
             tags_remove: Some(vec!["alpha".to_string()]),
@@ -410,6 +463,14 @@ async fn update_criticality_validation() {
     let id = create_and_get_id(&server, "decision", "Summary", "Content").await;
     let result = server
         .memory_update(Parameters(UpdateInput {
+            epistemic: None,
+            premise: None,
+            invalidated_by: None,
+            origin_task: None,
+            generality: None,
+            valid_from: None,
+            clear_validity: None,
+            clear_invalidated: None,
             id,
             criticality: Some(2.0),
             type_: None,
@@ -443,6 +504,14 @@ async fn update_decay_params() {
     let id = create_and_get_id(&server, "decision", "Summary", "Content").await;
     let result = server
         .memory_update(Parameters(UpdateInput {
+            epistemic: None,
+            premise: None,
+            invalidated_by: None,
+            origin_task: None,
+            generality: None,
+            valid_from: None,
+            clear_validity: None,
+            clear_invalidated: None,
             id,
             decay_strategy: Some("exponential".to_string()),
             decay_half_life: Some(3600),
@@ -532,6 +601,9 @@ async fn search_basic() {
 
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             query: Some("Rust fast".to_string()),
             ..query_input("filter")
         }))
@@ -548,6 +620,9 @@ async fn search_with_type_filter() {
 
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             query: Some("content".to_string()),
             types: Some(vec!["hazard".to_string()]),
             ..query_input("filter")
@@ -575,6 +650,9 @@ async fn search_max_results() {
 
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             query: Some("topic".to_string()),
             max_results: Some(1),
             ..query_input("filter")
@@ -597,12 +675,18 @@ async fn search_low_similarity_query_does_not_boost_unrelated_memory() {
 
     let nonsense = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             query: Some("xyzzy_nonexistent_term_9999".to_string()),
             ..query_input("filter")
         }))
         .await;
     let keyword = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             query: Some("Rust".to_string()),
             ..query_input("filter")
         }))
@@ -636,6 +720,12 @@ async fn search_low_similarity_query_does_not_boost_unrelated_memory() {
 async fn retrieve_by_path() {
     let (_dir, server) = setup().await;
     let input = CreateInput {
+        epistemic: None,
+        premise: None,
+        invalidated_by: None,
+        origin_task: None,
+        generality: None,
+        valid_from: None,
         physical: Some(vec!["src/main.rs".to_string()]),
         criticality: Some(0.9),
         ..create_input("decision", "Main entry", "The main function starts here")
@@ -644,6 +734,9 @@ async fn retrieve_by_path() {
 
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             path: Some("src/main.rs".to_string()),
             ..query_input("rank")
         }))
@@ -661,6 +754,12 @@ async fn retrieve_by_path() {
 async fn query_filter_absolute_path_relativized_to_project() {
     let (dir, server) = setup().await;
     let input = CreateInput {
+        epistemic: None,
+        premise: None,
+        invalidated_by: None,
+        origin_task: None,
+        generality: None,
+        valid_from: None,
         physical: Some(vec!["src/auth.rs".to_string()]),
         criticality: Some(0.9),
         ..create_input("hazard", "Auth hazard", "Never log raw tokens")
@@ -684,6 +783,9 @@ async fn query_filter_absolute_path_relativized_to_project() {
     // Baseline: repo-relative path (filter mode → path is a hard filter).
     let rel = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             path: Some("src/auth.rs".to_string()),
             ..query_input("filter")
         }))
@@ -695,6 +797,9 @@ async fn query_filter_absolute_path_relativized_to_project() {
     let abs_path = dir.path().join("src/auth.rs");
     let abs = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             path: Some(abs_path.to_string_lossy().to_string()),
             ..query_input("filter")
         }))
@@ -713,6 +818,12 @@ async fn query_filter_absolute_path_relativized_to_project() {
 async fn query_filter_absolute_path_outside_project_matches_nothing() {
     let (_dir, server) = setup().await;
     let input = CreateInput {
+        epistemic: None,
+        premise: None,
+        invalidated_by: None,
+        origin_task: None,
+        generality: None,
+        valid_from: None,
         physical: Some(vec!["src/auth.rs".to_string()]),
         criticality: Some(0.9),
         ..create_input("hazard", "Auth hazard", "Never log raw tokens")
@@ -721,6 +832,9 @@ async fn query_filter_absolute_path_outside_project_matches_nothing() {
 
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             path: Some("/definitely/elsewhere/src/auth.rs".to_string()),
             ..query_input("filter")
         }))
@@ -736,6 +850,12 @@ async fn query_filter_absolute_path_outside_project_matches_nothing() {
 async fn retrieve_by_logical() {
     let (_dir, server) = setup().await;
     let input = CreateInput {
+        epistemic: None,
+        premise: None,
+        invalidated_by: None,
+        origin_task: None,
+        generality: None,
+        valid_from: None,
         logical: Some(vec!["auth.login".to_string()]),
         physical: Some(vec!["src/auth/login.rs".to_string()]),
         criticality: Some(0.9),
@@ -745,6 +865,9 @@ async fn retrieve_by_logical() {
 
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             path: Some("src/auth/login.rs".to_string()),
             logical: Some(vec!["auth.login".to_string()]),
             ..query_input("rank")
@@ -764,6 +887,12 @@ async fn retrieve_by_logical() {
 async fn query_filter_logical_is_hierarchical() {
     let (_dir, server) = setup().await;
     let input = CreateInput {
+        epistemic: None,
+        premise: None,
+        invalidated_by: None,
+        origin_task: None,
+        generality: None,
+        valid_from: None,
         logical: Some(vec!["auth.oauth".to_string()]),
         criticality: Some(0.9),
         ..create_input("decision", "OAuth decision", "We use PKCE")
@@ -773,6 +902,9 @@ async fn query_filter_logical_is_hierarchical() {
     // Querying the parent domain matches the subdomain-scoped memory.
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             logical: Some(vec!["auth".to_string()]),
             ..query_input("filter")
         }))
@@ -787,6 +919,9 @@ async fn query_filter_logical_is_hierarchical() {
     // Querying a deeper scope matches the ancestor-scoped memory.
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             logical: Some(vec!["auth.oauth.google".to_string()]),
             ..query_input("filter")
         }))
@@ -801,6 +936,9 @@ async fn query_filter_logical_is_hierarchical() {
     // Unrelated scope matches nothing.
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             logical: Some(vec!["billing".to_string()]),
             ..query_input("filter")
         }))
@@ -825,6 +963,9 @@ async fn retrieve_detail_level_summary() {
 
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             path: Some("/".to_string()),
             detail_level: Some("summary".to_string()),
             ..query_input("rank")
@@ -850,6 +991,9 @@ async fn retrieve_detail_level_full_is_case_insensitive() {
 
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             // Filter mode + a query signal reliably returns the match.
             query: Some("Body content".to_string()),
             detail_level: Some("Full".to_string()), // capitalized on purpose
@@ -877,6 +1021,9 @@ async fn retrieve_detail_level_invalid() {
 
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             detail_level: Some("bogus".to_string()),
             ..query_input("rank")
         }))
@@ -890,6 +1037,9 @@ async fn query_rejects_invalid_mode() {
     let (_dir, server) = setup().await;
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             query: Some("anything".to_string()),
             ..query_input("invalid_mode_name")
         }))
@@ -906,6 +1056,9 @@ async fn query_filter_requires_a_signal() {
     // No query/logical/path/tags — filter mode must reject.
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             min_criticality: Some(0.5),
             ..query_input("filter")
         }))
@@ -934,6 +1087,7 @@ async fn list_empty() {
 
     let result = server
         .memory_list(Parameters(ListInput {
+            include_invalidated: None,
             types: None,
             tags: None,
             status: None,
@@ -958,6 +1112,7 @@ async fn list_all() {
 
     let result = server
         .memory_list(Parameters(ListInput {
+            include_invalidated: None,
             types: None,
             tags: None,
             status: None,
@@ -981,6 +1136,7 @@ async fn list_filter_by_type() {
 
     let result = server
         .memory_list(Parameters(ListInput {
+            include_invalidated: None,
             types: Some(vec!["decision".to_string()]),
             tags: None,
             status: None,
@@ -1009,6 +1165,7 @@ async fn list_sort_and_limit() {
 
     let result = server
         .memory_list(Parameters(ListInput {
+            include_invalidated: None,
             types: None,
             tags: None,
             status: None,
@@ -1030,6 +1187,7 @@ async fn list_invalid_sort() {
 
     let result = server
         .memory_list(Parameters(ListInput {
+            include_invalidated: None,
             types: None,
             tags: None,
             status: None,
@@ -1150,6 +1308,7 @@ async fn resolve_keep() {
 
     let result = server
         .memory_resolve(Parameters(ResolveInput {
+            superseded_by: None,
             id: id.clone(),
             action: "keep".to_string(),
             updated_content: None,
@@ -1184,6 +1343,7 @@ async fn resolve_delete() {
 
     let result = server
         .memory_resolve(Parameters(ResolveInput {
+            superseded_by: None,
             id: id.clone(),
             action: "delete".to_string(),
             updated_content: None,
@@ -1266,6 +1426,7 @@ async fn gc_dry_run() {
     // Memory should still be there
     let list_result = server
         .memory_list(Parameters(ListInput {
+            include_invalidated: None,
             types: None,
             tags: None,
             status: None,
@@ -1582,6 +1743,9 @@ async fn cross_project_search() {
     // Search from server A targeting project B
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             query: Some("snake_case".to_string()),
             project: Some(project_b),
             ..query_input("filter")
@@ -1640,6 +1804,14 @@ async fn write_security_config(dir: &std::path::Path, allow_cross_project_writes
 /// Build an `UpdateInput` with only `id`/`project` set (all else `None`).
 fn update_input(id: &str, project: Option<String>) -> UpdateInput {
     UpdateInput {
+        epistemic: None,
+        premise: None,
+        invalidated_by: None,
+        origin_task: None,
+        generality: None,
+        valid_from: None,
+        clear_validity: None,
+        clear_invalidated: None,
         id: id.to_string(),
         type_: None,
         content: Some("changed".to_string()),
@@ -1883,6 +2055,14 @@ async fn cross_project_update() {
     // Update in B from server A
     let update_result = server
         .memory_update(Parameters(UpdateInput {
+            epistemic: None,
+            premise: None,
+            invalidated_by: None,
+            origin_task: None,
+            generality: None,
+            valid_from: None,
+            clear_validity: None,
+            clear_invalidated: None,
             id: id.clone(),
             summary: Some("Updated summary".to_string()),
             content: Some("Updated content".to_string()),
@@ -2037,6 +2217,7 @@ async fn cross_project_list() {
     // List from A targeting B
     let result = server
         .memory_list(Parameters(ListInput {
+            include_invalidated: None,
             types: None,
             tags: None,
             status: None,
@@ -2053,6 +2234,7 @@ async fn cross_project_list() {
     // List A — should have nothing
     let result_a = server
         .memory_list(Parameters(ListInput {
+            include_invalidated: None,
             types: None,
             tags: None,
             status: None,
@@ -2184,6 +2366,12 @@ fn global_project() -> Option<String> {
 
 fn create_global_input(type_: &str, summary: &str, content: &str) -> CreateInput {
     CreateInput {
+        epistemic: None,
+        premise: None,
+        invalidated_by: None,
+        origin_task: None,
+        generality: None,
+        valid_from: None,
         project: global_project(),
         ..create_input(type_, summary, content)
     }
@@ -2224,6 +2412,12 @@ async fn global_create_basic() {
 async fn global_create_with_all_fields() {
     let (_dir, server) = setup_global().await;
     let input = CreateInput {
+        epistemic: None,
+        premise: None,
+        invalidated_by: None,
+        origin_task: None,
+        generality: None,
+        valid_from: None,
         type_: "convention".to_string(),
         content: "Always use semantic versioning".to_string(),
         summary: "Use semver".to_string(),
@@ -2285,6 +2479,14 @@ async fn global_update() {
 
     let result = server
         .memory_update(Parameters(UpdateInput {
+            epistemic: None,
+            premise: None,
+            invalidated_by: None,
+            origin_task: None,
+            generality: None,
+            valid_from: None,
+            clear_validity: None,
+            clear_invalidated: None,
             id: id.clone(),
             type_: None,
             content: Some("Use conventional commits with scope".to_string()),
@@ -2422,6 +2624,9 @@ async fn global_retrieve() {
 
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             path: Some("/".to_string()),
             project: global_project(),
             ..query_input("rank")
@@ -2444,6 +2649,9 @@ async fn global_retrieve_with_semantic_query() {
 
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             query: Some("error handling".to_string()),
             project: global_project(),
             ..query_input("rank")
@@ -2466,6 +2674,9 @@ async fn global_search() {
 
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             query: Some("JetBrains Mono".to_string()),
             project: global_project(),
             ..query_input("filter")
@@ -2489,6 +2700,9 @@ async fn global_search_with_type_filter() {
 
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             query: Some("content".to_string()),
             types: Some(vec!["hazard".to_string()]),
             project: global_project(),
@@ -2529,6 +2743,9 @@ async fn include_global_in_retrieve() {
     // Retrieve with include_global=true should include both
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             path: Some("/".to_string()),
             max_results: Some(20),
             include_global: Some(true),
@@ -2575,6 +2792,9 @@ async fn include_global_in_search() {
 
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             query: Some("search test memory".to_string()),
             max_results: Some(20),
             include_global: Some(true),
@@ -2621,6 +2841,9 @@ async fn include_global_false_excludes_global() {
 
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             path: Some("/".to_string()),
             max_results: Some(20),
             include_global: Some(false),
@@ -2663,6 +2886,9 @@ async fn include_global_default_excludes_global() {
     // include_global defaults to None (false)
     let result = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             path: Some("/".to_string()),
             max_results: Some(20),
             ..query_input("rank")
@@ -2750,6 +2976,7 @@ async fn global_resolve_keep() {
     // Resolve by keeping
     let result = server
         .memory_resolve(Parameters(ResolveInput {
+            superseded_by: None,
             id: id.clone(),
             action: "keep".to_string(),
             updated_content: None,
@@ -2795,6 +3022,7 @@ async fn global_resolve_update() {
 
     let result = server
         .memory_resolve(Parameters(ResolveInput {
+            superseded_by: None,
             id: id.clone(),
             action: "update".to_string(),
             updated_content: Some("Updated content after resolve".to_string()),
@@ -2840,6 +3068,7 @@ async fn global_resolve_delete() {
 
     let result = server
         .memory_resolve(Parameters(ResolveInput {
+            superseded_by: None,
             id: id.clone(),
             action: "delete".to_string(),
             updated_content: None,
@@ -2882,6 +3111,7 @@ async fn global_list() {
 
     let result = server
         .memory_list(Parameters(ListInput {
+            include_invalidated: None,
             types: None,
             tags: None,
             status: None,
@@ -2904,6 +3134,7 @@ async fn global_list_with_type_filter() {
 
     let result = server
         .memory_list(Parameters(ListInput {
+            include_invalidated: None,
             types: Some(vec!["hazard".to_string()]),
             tags: None,
             status: None,
@@ -2973,6 +3204,7 @@ async fn global_reindex() {
     // Memory should still be accessible after reindex
     let list_result = server
         .memory_list(Parameters(ListInput {
+            include_invalidated: None,
             types: None,
             tags: None,
             status: None,
@@ -3011,12 +3243,24 @@ async fn global_compress_candidates() {
 
     // Create low-criticality global memories
     let input1 = CreateInput {
+        epistemic: None,
+        premise: None,
+        invalidated_by: None,
+        origin_task: None,
+        generality: None,
+        valid_from: None,
         criticality: Some(0.1),
         ..create_global_input("context", "Low crit 1", "Low criticality global context 1")
     };
     server.memory_create(Parameters(input1)).await.unwrap();
 
     let input2 = CreateInput {
+        epistemic: None,
+        premise: None,
+        invalidated_by: None,
+        origin_task: None,
+        generality: None,
+        valid_from: None,
         criticality: Some(0.1),
         ..create_global_input("context", "Low crit 2", "Low criticality global context 2")
     };
@@ -3123,6 +3367,12 @@ async fn global_all_memory_types() {
 async fn global_personal_visibility() {
     let (_dir, server) = setup_global().await;
     let input = CreateInput {
+        epistemic: None,
+        premise: None,
+        invalidated_by: None,
+        origin_task: None,
+        generality: None,
+        valid_from: None,
         visibility: Some("personal".to_string()),
         ..create_global_input(
             "preference",
@@ -3150,6 +3400,12 @@ async fn global_personal_visibility() {
 async fn global_retrieve_detail_levels() {
     let (_dir, server) = setup_global().await;
     let input = CreateInput {
+        epistemic: None,
+        premise: None,
+        invalidated_by: None,
+        origin_task: None,
+        generality: None,
+        valid_from: None,
         details: Some("Extended details for this global memory".to_string()),
         ..create_global_input(
             "decision",
@@ -3162,6 +3418,9 @@ async fn global_retrieve_detail_levels() {
     for level in &["summary", "content", "full"] {
         let result = server
             .memory_query(Parameters(QueryInput {
+                epistemic: None,
+                situation: None,
+                include_invalidated: None,
                 path: Some("/".to_string()),
                 detail_level: Some(level.to_string()),
                 project: global_project(),
@@ -3574,6 +3833,9 @@ async fn stats_includes_runtime_fields_after_calls() {
 
     let _ = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             mode: "filter".to_string(),
             query: Some("snake_case".to_string()),
             ..query_input("filter")
@@ -3655,6 +3917,9 @@ async fn stats_records_zero_results_and_quality() {
     // `no_query_signals` quality bucket and count as zero-result.
     let _ = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             mode: "rank".to_string(),
             query: Some("nonexistent gobbledygook".to_string()),
             ..query_input("rank")
@@ -3682,6 +3947,9 @@ async fn stats_reports_session_id_and_unique_sessions() {
     let _ = create_and_get_id(&server, "decision", "Test", "Session test").await;
     let _ = server
         .memory_query(Parameters(QueryInput {
+            epistemic: None,
+            situation: None,
+            include_invalidated: None,
             mode: "rank".to_string(),
             query: Some("anything".to_string()),
             ..query_input("rank")
@@ -3711,6 +3979,9 @@ async fn stats_reports_followups_for_same_session_queries() {
     for _ in 0..3 {
         let _ = server
             .memory_query(Parameters(QueryInput {
+                epistemic: None,
+                situation: None,
+                include_invalidated: None,
                 mode: "rank".to_string(),
                 query: Some("hello".to_string()),
                 ..query_input("rank")
@@ -4025,4 +4296,281 @@ async fn list_prompts_returns_both_session_prompts() {
 
     client.cancel().await.ok();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+}
+
+// -----------------------------------------------------------------------
+// Epistemic surfaces (I5a): create/update fields, query filters, verify,
+// resolve invalidate, output tagging
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn create_with_epistemic_fields_roundtrips_in_get() {
+    let (_dir, server) = setup().await;
+    let mut input = create_input("hazard", "Off-diagonal hazard", "content");
+    input.epistemic = Some("observation".to_string());
+    input.premise = Some("while ort is pinned".to_string());
+    input.invalidated_by = Some(vec!["Cargo.lock".to_string()]);
+    input.origin_task = Some("epistemic-memory".to_string());
+    input.generality = Some("task".to_string());
+    let id = parse_ok(&server.memory_create(Parameters(input)).await)["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let got = parse_ok(
+        &server
+            .memory_get(Parameters(GetInput {
+                id: id.clone(),
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(got["epistemic"], "observation");
+    assert_eq!(got["valid_while"]["premise"], "while ort is pinned");
+    assert_eq!(got["valid_while"]["invalidated_by"][0], "Cargo.lock");
+    assert_eq!(got["valid_while"]["origin_task"], "epistemic-memory");
+    assert_eq!(got["valid_while"]["generality"], "task");
+    assert!(
+        got.get("invalidated_at").is_none(),
+        "live memory has no window end"
+    );
+
+    // Diagonal create: epistemic still always present in output (§5.4).
+    let id2 = create_and_get_id(&server, "decision", "Diagonal decision", "c").await;
+    let got2 = parse_ok(
+        &server
+            .memory_get(Parameters(GetInput {
+                id: id2,
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(got2["epistemic"], "decision");
+    assert!(got2.get("valid_while").is_none());
+}
+
+#[tokio::test]
+async fn create_rejects_invalid_epistemic_inputs() {
+    let (_dir, server) = setup().await;
+    let mut input = create_input("decision", "Bad class", "c");
+    input.epistemic = Some("vibes".to_string());
+    let err = parse_err(&server.memory_create(Parameters(input)).await);
+    assert!(err["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("invalid epistemic class"));
+
+    let mut input = create_input("decision", "Bad ts", "c");
+    input.valid_from = Some("not-a-date".to_string());
+    let err = parse_err(&server.memory_create(Parameters(input)).await);
+    assert!(err["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("invalid valid_from"));
+}
+
+#[tokio::test]
+async fn query_epistemic_filter_and_breakdown_expose_situation() {
+    let (_dir, server) = setup().await;
+    create_and_get_id(&server, "debug", "An observation memory", "c").await;
+    create_and_get_id(&server, "hazard", "A fact memory", "c").await;
+
+    let mut q = query_input("rank");
+    q.epistemic = Some(vec!["observation".to_string()]);
+    let result = parse_ok(&server.memory_query(Parameters(q)).await);
+    let memories = result["memories"].as_array().unwrap();
+    assert_eq!(memories.len(), 1);
+    assert_eq!(memories[0]["epistemic"], "observation");
+
+    // Situation is threaded and observable in the breakdown (§7.1).
+    let mut q = query_input("rank");
+    q.situation = Some("debugging".to_string());
+    let result = parse_ok(&server.memory_query(Parameters(q)).await);
+    for m in result["memories"].as_array().unwrap() {
+        let mult = m["score_breakdown"]["situation_multiplier"]
+            .as_f64()
+            .unwrap();
+        assert!(mult > 0.0 && mult <= 1.0);
+        // debugging × observation = 1.0; debugging × fact = 0.6+0.4*0.6=0.84
+        if m["epistemic"] == "observation" {
+            assert!((mult - 1.0).abs() < 1e-9);
+        }
+    }
+
+    // Invalid situation rejected.
+    let mut q = query_input("rank");
+    q.situation = Some("panicking".to_string());
+    let err = parse_err(&server.memory_query(Parameters(q)).await);
+    assert!(err["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("invalid situation"));
+}
+
+#[tokio::test]
+async fn resolve_invalidate_closes_window_and_query_excludes_by_default() {
+    let (_dir, server) = setup().await;
+    let old_id = create_and_get_id(&server, "decision", "Old decision", "c").await;
+    let new_id = create_and_get_id(&server, "decision", "New decision", "c").await;
+
+    let result = parse_ok(
+        &server
+            .memory_resolve(Parameters(ResolveInput {
+                superseded_by: Some(new_id.clone()),
+                id: old_id.clone(),
+                action: "invalidate".to_string(),
+                updated_content: None,
+                updated_summary: None,
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(result["action"], "invalidate");
+
+    // get shows the closed window + reverse link.
+    let got = parse_ok(
+        &server
+            .memory_get(Parameters(GetInput {
+                id: old_id.clone(),
+                project: None,
+            }))
+            .await,
+    );
+    assert!(got.get("invalidated_at").is_some());
+    assert_eq!(got["superseded_by"], new_id);
+
+    // Default query excludes it; include_invalidated brings it back.
+    let result = parse_ok(&server.memory_query(Parameters(query_input("rank"))).await);
+    let ids: Vec<&str> = result["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert!(!ids.contains(&old_id.as_str()));
+    assert!(ids.contains(&new_id.as_str()));
+
+    let mut q = query_input("rank");
+    q.include_invalidated = Some(true);
+    let result = parse_ok(&server.memory_query(Parameters(q)).await);
+    let ids: Vec<&str> = result["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&old_id.as_str()));
+
+    // List mirrors the default exclusion + opt-in, tagging invalidated_at.
+    let result = parse_ok(
+        &server
+            .memory_list(Parameters(ListInput {
+                include_invalidated: None,
+                types: None,
+                tags: None,
+                status: None,
+                scope: None,
+                sort_field: None,
+                reverse: None,
+                limit: None,
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(result["memories"].as_array().unwrap().len(), 1);
+    let result = parse_ok(
+        &server
+            .memory_list(Parameters(ListInput {
+                include_invalidated: Some(true),
+                types: None,
+                tags: None,
+                status: None,
+                scope: None,
+                sort_field: None,
+                reverse: None,
+                limit: None,
+                project: None,
+            }))
+            .await,
+    );
+    let listed = result["memories"].as_array().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(listed
+        .iter()
+        .any(|m| m["id"] == old_id.as_str() && m.get("invalidated_at").is_some()));
+}
+
+#[tokio::test]
+async fn verify_tool_stamps_and_update_reopens() {
+    let (_dir, server) = setup().await;
+    let id = create_and_get_id(&server, "hazard", "Verifiable fact", "c").await;
+
+    let result = parse_ok(
+        &server
+            .memory_verify(Parameters(VerifyInput {
+                id: id.clone(),
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(result["verified"], true);
+    assert_eq!(result["review_cleared"], false);
+
+    // Invalidate then reopen via update's clear_invalidated.
+    parse_ok(
+        &server
+            .memory_resolve(Parameters(ResolveInput {
+                superseded_by: None,
+                id: id.clone(),
+                action: "invalidate".to_string(),
+                updated_content: None,
+                updated_summary: None,
+                project: None,
+            }))
+            .await,
+    );
+    let mut update = UpdateInput {
+        epistemic: None,
+        premise: None,
+        invalidated_by: None,
+        origin_task: None,
+        generality: None,
+        valid_from: None,
+        clear_validity: None,
+        clear_invalidated: Some(true),
+        id: id.clone(),
+        type_: None,
+        content: None,
+        summary: None,
+        details: None,
+        physical: None,
+        logical: None,
+        tags: None,
+        tags_add: None,
+        tags_remove: None,
+        criticality: None,
+        confidence: None,
+        visibility: None,
+        title: None,
+        status: None,
+        supersedes: None,
+        decay_strategy: None,
+        decay_half_life: None,
+        decay_ttl: None,
+        decay_floor: None,
+        project: None,
+    };
+    update.clear_invalidated = Some(true);
+    parse_ok(&server.memory_update(Parameters(update)).await);
+
+    let got = parse_ok(
+        &server
+            .memory_get(Parameters(GetInput {
+                id: id.clone(),
+                project: None,
+            }))
+            .await,
+    );
+    assert!(got.get("invalidated_at").is_none(), "window reopened");
+    assert!(got.get("superseded_by").is_none());
 }

@@ -31,6 +31,7 @@ pub async fn run_list(
     sort_field: &str,
     reverse: bool,
     limit: Option<usize>,
+    include_invalidated: bool,
     verbose: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
@@ -58,6 +59,7 @@ pub async fn run_list(
         },
         status: status_filter,
         scope: scope_filter,
+        include_invalidated,
         sort_field: parsed_sort,
         reverse,
         limit,
@@ -170,6 +172,7 @@ mod tests {
             false,
             None,
             false,
+            false,
             &formatter,
         )
         .await;
@@ -193,6 +196,7 @@ mod tests {
             false,
             None,
             false,
+            false,
             &formatter,
         )
         .await;
@@ -215,6 +219,7 @@ mod tests {
             "criticality",
             false,
             None,
+            false,
             false,
             &formatter,
         )
@@ -252,6 +257,7 @@ mod tests {
             false,
             None,
             false,
+            false,
             &formatter,
         )
         .await;
@@ -274,6 +280,7 @@ mod tests {
             "updated",
             false,
             None,
+            false,
             false,
             &formatter,
         )
@@ -298,6 +305,7 @@ mod tests {
             false,
             None,
             false,
+            false,
             &formatter,
         )
         .await;
@@ -320,6 +328,7 @@ mod tests {
             "invalid",
             false,
             None,
+            false,
             false,
             &formatter,
         )
@@ -348,6 +357,7 @@ mod tests {
             true,
             None,
             false,
+            false,
             &formatter,
         )
         .await;
@@ -370,6 +380,7 @@ mod tests {
             "criticality",
             false,
             Some(2),
+            false,
             false,
             &formatter,
         )
@@ -394,6 +405,7 @@ mod tests {
             false,
             Some(1),
             false,
+            false,
             &formatter,
         )
         .await;
@@ -413,6 +425,7 @@ mod tests {
             sort_field: SortField::Criticality,
             reverse: false,
             limit: None,
+            include_invalidated: false,
         };
 
         let entries = list_memories(&store, &params).await.unwrap();
@@ -431,6 +444,7 @@ mod tests {
             sort_field: SortField::Criticality,
             reverse: false,
             limit: Some(1),
+            include_invalidated: false,
         };
 
         let entries = list_memories(&store, &params).await.unwrap();

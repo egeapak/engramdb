@@ -45,8 +45,9 @@ pub use get::get_memory;
 pub use list::{list_memories, parse_sort_field, ListParams, SortField};
 pub use maintenance::{auto_maintain, maintenance_status, MaintenanceReport, MaintenanceStatus};
 pub use parsing::{
-    parse_decay_strategy, parse_detail_level, parse_detail_level_or_default, parse_memory_type,
-    parse_status, parse_type_filter, parse_visibility, validate_score,
+    parse_decay_strategy, parse_detail_level, parse_detail_level_or_default, parse_epistemic,
+    parse_epistemic_filter, parse_generality, parse_memory_type, parse_situation, parse_status,
+    parse_type_filter, parse_visibility, validate_score,
 };
 pub use query::{merge_scored_memories, query_memories, query_memories_with_global};
 pub use reindex::{reindex, ReindexResult};

@@ -1,3 +1,4 @@
 export ORT_STRATEGY=system
 export ORT_LIB_LOCATION=/tmp/ort-lib
 export CARGO_PROFILE_DEV_DEBUG=0
+export CARGO_INCREMENTAL=0

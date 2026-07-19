@@ -31,6 +31,12 @@ pub struct AddParams {
     pub details: Option<String>,
     pub visibility_str: Option<String>,
     pub supersedes: Option<String>,
+    pub epistemic: Option<String>,
+    pub premise: Option<String>,
+    pub invalidated_by: Vec<String>,
+    pub origin_task: Option<String>,
+    pub generality: Option<String>,
+    pub valid_from: Option<String>,
     pub decay_strategy: Option<String>,
     pub decay_half_life: Option<u64>,
     pub decay_ttl: Option<u64>,
@@ -38,6 +44,30 @@ pub struct AddParams {
     pub interactive: bool,
     pub editor: bool,
     pub details_file: Option<PathBuf>,
+}
+
+/// Parse the epistemic/validity flags shared by all three add modes.
+/// Returns (epistemic, generality, valid_from) or a validation error.
+fn parse_epistemic_flags(
+    epistemic: Option<&str>,
+    generality: Option<&str>,
+    valid_from: Option<&str>,
+) -> Result<(
+    Option<engramdb::types::Epistemic>,
+    Option<engramdb::types::Generality>,
+    Option<chrono::DateTime<chrono::Utc>>,
+)> {
+    let epistemic = epistemic.map(engramdb::ops::parse_epistemic).transpose()?;
+    let generality = generality
+        .map(engramdb::ops::parse_generality)
+        .transpose()?;
+    let valid_from = valid_from
+        .map(|s| {
+            s.parse::<chrono::DateTime<chrono::Utc>>()
+                .map_err(|e| anyhow!("invalid --valid-from timestamp: {e}"))
+        })
+        .transpose()?;
+    Ok((epistemic, generality, valid_from))
 }
 
 /// Add a new memory to the store.
@@ -152,6 +182,12 @@ async fn run_direct_mode(
         validate_score(floor, "decay-floor")?;
     }
 
+    let (parsed_epistemic, parsed_generality, parsed_valid_from) = parse_epistemic_flags(
+        params.epistemic.as_deref(),
+        params.generality.as_deref(),
+        params.valid_from.as_deref(),
+    )?;
+
     let result = create_memory(
         store,
         CreateParams {
@@ -170,13 +206,12 @@ async fn run_direct_mode(
             visibility,
             provenance: Provenance::human(),
             supersedes,
-            // Epistemic/validity CLI flags land in I5a; defaults until then.
-            epistemic: None,
-            premise: None,
-            invalidated_by: vec![],
-            origin_task: None,
-            generality: None,
-            valid_from: None,
+            epistemic: parsed_epistemic,
+            premise: params.premise,
+            invalidated_by: params.invalidated_by,
+            origin_task: params.origin_task,
+            generality: parsed_generality,
+            valid_from: parsed_valid_from,
             decay_strategy: params.decay_strategy,
             decay_half_life: params.decay_half_life,
             decay_ttl: params.decay_ttl,
@@ -298,6 +333,12 @@ async fn run_interactive_mode(
         parse_visibility(&selected)?
     };
 
+    let (parsed_epistemic, parsed_generality, parsed_valid_from) = parse_epistemic_flags(
+        params.epistemic.as_deref(),
+        params.generality.as_deref(),
+        params.valid_from.as_deref(),
+    )?;
+
     let result = create_memory(
         store,
         CreateParams {
@@ -314,13 +355,12 @@ async fn run_interactive_mode(
             visibility,
             provenance: Provenance::human(),
             supersedes: vec![],
-            // Epistemic/validity CLI flags land in I5a; defaults until then.
-            epistemic: None,
-            premise: None,
-            invalidated_by: vec![],
-            origin_task: None,
-            generality: None,
-            valid_from: None,
+            epistemic: parsed_epistemic,
+            premise: params.premise,
+            invalidated_by: params.invalidated_by,
+            origin_task: params.origin_task,
+            generality: parsed_generality,
+            valid_from: parsed_valid_from,
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,
@@ -403,6 +443,12 @@ async fn run_editor_mode(
     // Parse the file
     let parsed = parse_editor_template(&file_contents)?;
 
+    let (parsed_epistemic, parsed_generality, parsed_valid_from) = parse_epistemic_flags(
+        params.epistemic.as_deref(),
+        params.generality.as_deref(),
+        params.valid_from.as_deref(),
+    )?;
+
     let result = create_memory(
         store,
         CreateParams {
@@ -419,13 +465,12 @@ async fn run_editor_mode(
             visibility: parsed.visibility,
             provenance: Provenance::human(),
             supersedes: vec![],
-            // Epistemic/validity CLI flags land in I5a; defaults until then.
-            epistemic: None,
-            premise: None,
-            invalidated_by: vec![],
-            origin_task: None,
-            generality: None,
-            valid_from: None,
+            epistemic: parsed_epistemic,
+            premise: params.premise,
+            invalidated_by: params.invalidated_by,
+            origin_task: params.origin_task,
+            generality: parsed_generality,
+            valid_from: parsed_valid_from,
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,
@@ -632,6 +677,12 @@ mod tests {
             details: None,
             visibility_str: None,
             supersedes: None,
+            epistemic: None,
+            premise: None,
+            invalidated_by: vec![],
+            origin_task: None,
+            generality: None,
+            valid_from: None,
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,
@@ -684,6 +735,12 @@ mod tests {
             details: None,
             visibility_str: None,
             supersedes: None,
+            epistemic: None,
+            premise: None,
+            invalidated_by: vec![],
+            origin_task: None,
+            generality: None,
+            valid_from: None,
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,
@@ -737,6 +794,12 @@ mod tests {
             details: None,
             visibility_str: None,
             supersedes: None,
+            epistemic: None,
+            premise: None,
+            invalidated_by: vec![],
+            origin_task: None,
+            generality: None,
+            valid_from: None,
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,
@@ -790,6 +853,12 @@ mod tests {
             details: None,
             visibility_str: None,
             supersedes: None,
+            epistemic: None,
+            premise: None,
+            invalidated_by: vec![],
+            origin_task: None,
+            generality: None,
+            valid_from: None,
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,

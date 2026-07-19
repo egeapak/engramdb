@@ -257,6 +257,30 @@ pub enum Command {
         #[arg(long)]
         supersedes: Option<String>,
 
+        /// Epistemic class: fact, observation, or decision (defaults from type)
+        #[arg(long)]
+        epistemic: Option<String>,
+
+        /// Premise this memory depends on (e.g. "while we pin ort rc.12")
+        #[arg(long)]
+        premise: Option<String>,
+
+        /// Paths/globs whose change invalidates this memory (repeatable)
+        #[arg(long = "invalidated-by")]
+        invalidated_by: Vec<String>,
+
+        /// Task/feature this memory was created for
+        #[arg(long = "origin-task")]
+        origin_task: Option<String>,
+
+        /// Generality: project (default) or task
+        #[arg(long)]
+        generality: Option<String>,
+
+        /// Valid-time start (RFC3339) — backdate when the claim became true
+        #[arg(long = "valid-from")]
+        valid_from: Option<String>,
+
         /// Decay strategy: none, linear, exponential, or step
         #[arg(long)]
         decay_strategy: Option<String>,
@@ -363,6 +387,18 @@ pub enum Command {
         #[arg(long)]
         include_expired: bool,
 
+        /// Filter by epistemic class: fact, observation, decision (repeatable).
+        #[arg(long)]
+        epistemic: Vec<String>,
+
+        /// Your situation, to reweight classes: session_start, file_edit, debugging, design_choice.
+        #[arg(long)]
+        situation: Option<String>,
+
+        /// Include invalidated memories (closed validity windows).
+        #[arg(long = "include-invalidated")]
+        include_invalidated: bool,
+
         /// Show relevance scores alongside results.
         #[arg(long)]
         show_scores: bool,
@@ -409,6 +445,10 @@ pub enum Command {
         /// Maximum number of results to display
         #[arg(long, short = 'n')]
         limit: Option<usize>,
+
+        /// Include invalidated memories (closed validity windows)
+        #[arg(long = "include-invalidated")]
+        include_invalidated: bool,
 
         /// List the global (cross-project) memory store instead of the current project
         #[arg(long)]
@@ -486,6 +526,38 @@ pub enum Command {
         #[arg(long)]
         supersedes: Option<String>,
 
+        /// Epistemic class: fact, observation, or decision (defaults from type)
+        #[arg(long)]
+        epistemic: Option<String>,
+
+        /// Premise this memory depends on (e.g. "while we pin ort rc.12")
+        #[arg(long)]
+        premise: Option<String>,
+
+        /// Paths/globs whose change invalidates this memory (repeatable)
+        #[arg(long = "invalidated-by")]
+        invalidated_by: Vec<String>,
+
+        /// Task/feature this memory was created for
+        #[arg(long = "origin-task")]
+        origin_task: Option<String>,
+
+        /// Generality: project (default) or task
+        #[arg(long)]
+        generality: Option<String>,
+
+        /// Valid-time start (RFC3339) — backdate when the claim became true
+        #[arg(long = "valid-from")]
+        valid_from: Option<String>,
+
+        /// Clear the whole validity condition (premise/invalidated-by/origin-task/generality)
+        #[arg(long = "clear-validity")]
+        clear_validity: bool,
+
+        /// Reopen a closed validity window (clears invalidated_at + superseded_by)
+        #[arg(long = "clear-invalidated")]
+        clear_invalidated: bool,
+
         /// Decay strategy: none, linear, exponential, or step
         #[arg(long)]
         decay_strategy: Option<String>,
@@ -519,6 +591,17 @@ pub enum Command {
         /// Skip confirmation prompt
         #[arg(long, short = 'f')]
         force: bool,
+
+        /// Operate on the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
+    },
+
+    /// Confirm a memory is still accurate (stamps verified_at; clears
+    /// doctor-flagged needs_review)
+    Verify {
+        /// Memory ID (supports prefix matching)
+        id: String,
 
         /// Operate on the global (cross-project) memory store instead of the current project
         #[arg(long)]

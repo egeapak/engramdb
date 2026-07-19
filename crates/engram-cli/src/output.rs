@@ -29,6 +29,24 @@ pub fn short_id(id: &str) -> &str {
     }
 }
 
+/// §5.4 tags: `[fact]`-style class tag only when the class differs from the
+/// type default (off-diagonal), and `[invalidated <date>]` when the validity
+/// window is closed (visible only when the caller included such memories).
+fn epistemic_tags(
+    type_: MemoryType,
+    epistemic: engramdb::types::Epistemic,
+    invalidated_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> String {
+    let mut tags = String::new();
+    if epistemic != type_.default_epistemic() {
+        tags.push_str(&format!(" [{}]", epistemic.as_str()));
+    }
+    if let Some(t) = invalidated_at {
+        tags.push_str(&format!(" [invalidated {}]", t.format("%Y-%m-%d")));
+    }
+    tags
+}
+
 /// Output formatter for CLI results.
 ///
 /// Handles formatting and display of command results in different output modes.
@@ -404,7 +422,11 @@ impl OutputFormatter {
         };
 
         println!("ID: {}", id_display);
-        println!("Type: {}", type_display);
+        println!(
+            "Type: {}{}",
+            type_display,
+            epistemic_tags(memory.type_, memory.epistemic, memory.invalidated_at)
+        );
         println!("Summary: {}", memory.summary);
         println!("Content: {}", memory.content);
 
@@ -434,7 +456,11 @@ impl OutputFormatter {
 
     fn print_memory_plain(&self, memory: &Memory) {
         println!("ID: {}", memory.id);
-        println!("Type: {:?}", memory.type_);
+        println!(
+            "Type: {:?}{}",
+            memory.type_,
+            epistemic_tags(memory.type_, memory.epistemic, memory.invalidated_at)
+        );
         println!("Summary: {}", memory.summary);
         println!("Content: {}", memory.content);
 
@@ -669,7 +695,14 @@ impl OutputFormatter {
                 format!("{:?}", entry.type_)
             };
 
-            println!("{} {} {}", id_display, type_display, entry.summary);
+            let invalidated_tag = entry
+                .invalidated_at
+                .map(|t| format!(" [invalidated {}]", t.format("%Y-%m-%d")))
+                .unwrap_or_default();
+            println!(
+                "{} {}{} {}",
+                id_display, type_display, invalidated_tag, entry.summary
+            );
 
             if verbose {
                 println!(
@@ -1120,6 +1153,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             expires_at: None,
             valid_from: None,
+            invalidated_at: None,
         }
     }
 

@@ -31,6 +31,14 @@ pub struct UpdateParams {
     pub visibility: Option<String>,
     pub status: Option<String>,
     pub supersedes: Option<String>,
+    pub epistemic: Option<String>,
+    pub premise: Option<String>,
+    pub invalidated_by: Vec<String>,
+    pub origin_task: Option<String>,
+    pub generality: Option<String>,
+    pub valid_from: Option<String>,
+    pub clear_validity: bool,
+    pub clear_invalidated: bool,
     pub decay_strategy: Option<String>,
     pub decay_half_life: Option<u64>,
     pub decay_ttl: Option<u64>,
@@ -217,15 +225,33 @@ pub async fn run_update(
             visibility,
             status,
             supersedes,
-            // Epistemic/validity CLI flags land in I5a; defaults until then.
-            epistemic: None,
-            premise: None,
-            invalidated_by: None,
-            origin_task: None,
-            generality: None,
-            valid_from: None,
-            clear_validity: false,
-            clear_invalidated: false,
+            epistemic: params
+                .epistemic
+                .as_deref()
+                .map(engramdb::ops::parse_epistemic)
+                .transpose()?,
+            premise: params.premise,
+            invalidated_by: if params.invalidated_by.is_empty() {
+                None
+            } else {
+                Some(params.invalidated_by)
+            },
+            origin_task: params.origin_task,
+            generality: params
+                .generality
+                .as_deref()
+                .map(engramdb::ops::parse_generality)
+                .transpose()?,
+            valid_from: params
+                .valid_from
+                .as_deref()
+                .map(|s| {
+                    s.parse::<chrono::DateTime<chrono::Utc>>()
+                        .map_err(|e| anyhow::anyhow!("invalid --valid-from timestamp: {e}"))
+                })
+                .transpose()?,
+            clear_validity: params.clear_validity,
+            clear_invalidated: params.clear_invalidated,
             decay_strategy: params.decay_strategy,
             decay_half_life: params.decay_half_life,
             decay_ttl: params.decay_ttl,

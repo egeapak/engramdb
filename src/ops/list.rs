@@ -38,6 +38,10 @@ pub struct ListParams {
     pub sort_field: SortField,
     pub reverse: bool,
     pub limit: Option<usize>,
+    /// Include memories whose validity window is closed (§2.4). Default
+    /// false — mirrors retrieval's default exclusion; a future-dated
+    /// `invalidated_at` (scheduled) still lists.
+    pub include_invalidated: bool,
 }
 
 /// List memories with optional filtering, sorting, and limiting.
@@ -48,6 +52,13 @@ pub async fn list_memories(
     params: &ListParams,
 ) -> Result<Vec<IndexFilterable>> {
     let mut entries = store.list_filterable().await?;
+
+    // Default exclusion of invalidated memories (§2.4), mirroring retrieval:
+    // a closed validity window hides the memory unless explicitly included.
+    if !params.include_invalidated {
+        let now = chrono::Utc::now();
+        entries.retain(|e| e.invalidated_at.is_none_or(|t| t > now));
+    }
 
     // Apply type filter
     if let Some(ref type_strs) = params.types {

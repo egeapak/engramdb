@@ -69,6 +69,34 @@ struct CreateInput {
     #[schemars(description = "IDs of memories this supersedes")]
     supersedes: Option<Vec<String>>,
 
+    #[schemars(
+        description = "Epistemic class: fact (structural, verifiable against the repo), observation (measured empirically, may go stale), decision (chosen over alternatives, valid while its premise holds). Defaults from type; set only when it differs."
+    )]
+    epistemic: Option<String>,
+
+    #[schemars(
+        description = "Premise this memory depends on, e.g. 'while we pin ort rc.12'. State it if the memory becomes wrong when something specific changes."
+    )]
+    premise: Option<String>,
+
+    #[schemars(
+        description = "Paths/globs whose change invalidates this memory (distinct from physical, which is where it applies)."
+    )]
+    invalidated_by: Option<Vec<String>>,
+
+    #[schemars(
+        description = "Task or feature this was decided for (short human-readable name, not a session id)."
+    )]
+    origin_task: Option<String>,
+
+    #[schemars(description = "'project' (default) or 'task' (binding only within origin_task).")]
+    generality: Option<String>,
+
+    #[schemars(
+        description = "Valid-time start (RFC3339): when the claim became true in the world. Only to backdate; defaults to creation time."
+    )]
+    valid_from: Option<String>,
+
     #[schemars(description = "Decay: none|linear|exponential|step")]
     decay_strategy: Option<String>,
 
@@ -134,6 +162,21 @@ struct QueryInput {
 
     #[schemars(description = "Include expired/decayed memories")]
     include_expired: Option<bool>,
+
+    #[schemars(
+        description = "Filter by epistemic class: fact, observation, decision (OR logic, like types)."
+    )]
+    epistemic: Option<Vec<String>>,
+
+    #[schemars(
+        description = "Your current situation, to reweight classes: session_start, file_edit, debugging, design_choice. Declare debugging when investigating a failure (observations rank highest) and design_choice when weighing alternatives (prior decisions rank highest)."
+    )]
+    situation: Option<String>,
+
+    #[schemars(
+        description = "Include memories whose validity window was closed (invalidated). Default false."
+    )]
+    include_invalidated: Option<bool>,
 
     #[schemars(description = "Also include global memories in results (default false)")]
     include_global: Option<bool>,
@@ -205,6 +248,44 @@ struct UpdateInput {
 
     #[schemars(description = "IDs of memories this supersedes")]
     supersedes: Option<Vec<String>>,
+
+    #[schemars(
+        description = "Epistemic class: fact (structural, verifiable against the repo), observation (measured empirically, may go stale), decision (chosen over alternatives, valid while its premise holds). Defaults from type; set only when it differs."
+    )]
+    epistemic: Option<String>,
+
+    #[schemars(
+        description = "Premise this memory depends on, e.g. 'while we pin ort rc.12'. State it if the memory becomes wrong when something specific changes."
+    )]
+    premise: Option<String>,
+
+    #[schemars(
+        description = "Paths/globs whose change invalidates this memory (distinct from physical, which is where it applies)."
+    )]
+    invalidated_by: Option<Vec<String>>,
+
+    #[schemars(
+        description = "Task or feature this was decided for (short human-readable name, not a session id)."
+    )]
+    origin_task: Option<String>,
+
+    #[schemars(description = "'project' (default) or 'task' (binding only within origin_task).")]
+    generality: Option<String>,
+
+    #[schemars(
+        description = "Valid-time start (RFC3339): when the claim became true in the world. Only to backdate; defaults to creation time."
+    )]
+    valid_from: Option<String>,
+
+    #[schemars(
+        description = "Clear the whole validity condition (premise/invalidated_by/origin_task/generality)."
+    )]
+    clear_validity: Option<bool>,
+
+    #[schemars(
+        description = "Reopen a closed validity window: clears invalidated_at and superseded_by. Invalidation is reversible, unlike deletion."
+    )]
+    clear_invalidated: Option<bool>,
 
     #[schemars(description = "Decay: none|linear|exponential|step")]
     decay_strategy: Option<String>,
@@ -281,7 +362,9 @@ struct ResolveInput {
     #[schemars(description = "Memory ID")]
     id: String,
 
-    #[schemars(description = "Action: keep, update, or delete")]
+    #[schemars(
+        description = "Action: keep, update, delete, or invalidate. Prefer invalidate over delete when a memory WAS true but no longer is — history is kept and queryable via include_invalidated."
+    )]
     action: String,
 
     #[schemars(description = "New content (required for update)")]
@@ -289,6 +372,22 @@ struct ResolveInput {
 
     #[schemars(description = "New summary (optional for update)")]
     updated_summary: Option<String>,
+
+    #[schemars(
+        description = "For invalidate: id of the memory that superseded this one (optional)."
+    )]
+    superseded_by: Option<String>,
+
+    #[schemars(
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+    )]
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct VerifyInput {
+    #[schemars(description = "Memory ID")]
+    id: String,
 
     #[schemars(
         description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
@@ -378,6 +477,11 @@ struct ListInput {
     #[schemars(description = "Sort: criticality|created|updated|type (default criticality)")]
     sort_field: Option<String>,
 
+    #[schemars(
+        description = "Include memories whose validity window was closed (invalidated). Default false."
+    )]
+    include_invalidated: Option<bool>,
+
     #[schemars(description = "Reverse sort order")]
     reverse: Option<bool>,
 
@@ -466,6 +570,16 @@ struct MemoryOutput {
     visibility: String,
     /// Who recorded the memory: human|agent|inferred|imported.
     provenance: String,
+    /// Epistemic class: fact|observation|decision (always present, §5.4).
+    epistemic: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    valid_while: Option<engramdb::types::Validity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    valid_from: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    invalidated_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    superseded_by: Option<String>,
 }
 
 fn memory_to_output(m: &engramdb::types::Memory, include_details: bool) -> MemoryOutput {
@@ -487,6 +601,11 @@ fn memory_to_output(m: &engramdb::types::Memory, include_details: bool) -> Memor
         status: format!("{:?}", m.status).to_lowercase(),
         visibility: format!("{:?}", m.visibility).to_lowercase(),
         provenance: format!("{:?}", m.provenance.source).to_lowercase(),
+        epistemic: m.epistemic.as_str().to_string(),
+        valid_while: m.valid_while.clone(),
+        valid_from: m.valid_from,
+        invalidated_at: m.invalidated_at,
+        superseded_by: m.superseded_by.clone(),
     }
 }
 
@@ -504,6 +623,7 @@ struct ScoreBreakdownOutput {
     scope_multiplier: f64,
     trust: f64,
     trust_multiplier: f64,
+    situation_multiplier: f64,
     decay: f64,
     criticality: f64,
 }
@@ -1403,6 +1523,28 @@ impl EngramDbServer {
                 .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
         }
 
+        let epistemic = input
+            .epistemic
+            .as_deref()
+            .map(ops::parse_epistemic)
+            .transpose()
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        let generality = input
+            .generality
+            .as_deref()
+            .map(ops::parse_generality)
+            .transpose()
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        let valid_from = input
+            .valid_from
+            .as_deref()
+            .map(|s| {
+                s.parse::<chrono::DateTime<chrono::Utc>>()
+                    .map_err(|e| format!("invalid valid_from timestamp: {e}"))
+            })
+            .transpose()
+            .map_err(|e| error_response(ErrorCode::ValidationError, e.as_str()))?;
+
         let result = ops::create_memory(
             &store,
             ops::CreateParams {
@@ -1418,14 +1560,12 @@ impl EngramDbServer {
                 visibility,
                 provenance: Provenance::agent("mcp"),
                 supersedes: input.supersedes.unwrap_or_default(),
-                // The epistemic/validity input fields land on CreateInput in
-                // I5a; until then MCP creates use the type-derived defaults.
-                epistemic: None,
-                premise: None,
-                invalidated_by: vec![],
-                origin_task: None,
-                generality: None,
-                valid_from: None,
+                epistemic,
+                premise: input.premise,
+                invalidated_by: input.invalidated_by.unwrap_or_default(),
+                origin_task: input.origin_task,
+                generality,
+                valid_from,
                 decay_strategy: input.decay_strategy,
                 decay_half_life: input.decay_half_life,
                 decay_ttl: input.decay_ttl,
@@ -1494,6 +1634,15 @@ impl EngramDbServer {
                 .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
         }
 
+        let epistemic_filter = ops::parse_epistemic_filter(input.epistemic.as_deref())
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        let situation = input
+            .situation
+            .as_deref()
+            .map(ops::parse_situation)
+            .transpose()
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+
         let query = RetrievalQuery {
             mode,
             path: input.path,
@@ -1505,9 +1654,9 @@ impl EngramDbServer {
             max_results: Some(input.max_results.unwrap_or(10)),
             include_expired: Some(input.include_expired.unwrap_or(false)),
             detail_level,
-            // Epistemic filter / invalidated opt-in / situation reach the MCP
-            // QueryInput surface in I5a; until then queries are neutral.
-            ..Default::default()
+            epistemic: epistemic_filter,
+            include_invalidated: input.include_invalidated,
+            situation,
         };
 
         // Merge global memories if requested and not already targeting the
@@ -1536,6 +1685,7 @@ impl EngramDbServer {
                     scope_multiplier: sm.score_breakdown.scope_multiplier,
                     trust: sm.score_breakdown.trust,
                     trust_multiplier: sm.score_breakdown.trust_multiplier,
+                    situation_multiplier: sm.score_breakdown.situation_multiplier,
                     decay: sm.score_breakdown.decay,
                     criticality: sm.score_breakdown.criticality,
                 },
@@ -1618,6 +1768,28 @@ impl EngramDbServer {
                 .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
         }
 
+        let epistemic = input
+            .epistemic
+            .as_deref()
+            .map(ops::parse_epistemic)
+            .transpose()
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        let generality = input
+            .generality
+            .as_deref()
+            .map(ops::parse_generality)
+            .transpose()
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        let valid_from = input
+            .valid_from
+            .as_deref()
+            .map(|s| {
+                s.parse::<chrono::DateTime<chrono::Utc>>()
+                    .map_err(|e| format!("invalid valid_from timestamp: {e}"))
+            })
+            .transpose()
+            .map_err(|e| error_response(ErrorCode::ValidationError, e.as_str()))?;
+
         ops::update_memory(
             &store,
             &input.id,
@@ -1637,15 +1809,14 @@ impl EngramDbServer {
                 title: input.title,
                 status,
                 supersedes: input.supersedes,
-                // Epistemic/validity update fields land on UpdateInput in I5a.
-                epistemic: None,
-                premise: None,
-                invalidated_by: None,
-                origin_task: None,
-                generality: None,
-                valid_from: None,
-                clear_validity: false,
-                clear_invalidated: false,
+                epistemic,
+                premise: input.premise,
+                invalidated_by: input.invalidated_by,
+                origin_task: input.origin_task,
+                generality,
+                valid_from,
+                clear_validity: input.clear_validity.unwrap_or(false),
+                clear_invalidated: input.clear_invalidated.unwrap_or(false),
                 decay_strategy: input.decay_strategy,
                 decay_half_life: input.decay_half_life,
                 decay_ttl: input.decay_ttl,
@@ -1769,7 +1940,7 @@ impl EngramDbServer {
 
     #[tool(
         name = "resolve",
-        description = "Resolve a challenged or needs_review memory: keep, update, or delete."
+        description = "Resolve a challenged or needs_review memory: keep, update, delete, or invalidate. Prefer invalidate over delete when a memory WAS true but no longer is — history is kept and queryable via include_invalidated."
     )]
     async fn memory_resolve(
         &self,
@@ -1784,11 +1955,12 @@ impl EngramDbServer {
             "keep" => ops::ResolveAction::Keep,
             "update" => ops::ResolveAction::Update,
             "delete" => ops::ResolveAction::Delete,
+            "invalidate" => ops::ResolveAction::Invalidate,
             other => {
                 return Err(error_response(
                     ErrorCode::ValidationError,
                     &format!(
-                        "Invalid action '{}'. Must be keep, update, or delete.",
+                        "Invalid action '{}'. Must be keep, update, delete, or invalidate.",
                         other
                     ),
                 ));
@@ -1802,7 +1974,7 @@ impl EngramDbServer {
                 action,
                 updated_content: input.updated_content,
                 updated_summary: input.updated_summary,
-                superseded_by: None,
+                superseded_by: input.superseded_by,
             },
         )
         .await
@@ -1812,6 +1984,33 @@ impl EngramDbServer {
             "id": input.id,
             "action": result.action,
             "resolved": result.resolved
+        }))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
+    }
+
+    #[tool(
+        name = "verify",
+        description = "Confirm a memory is still accurate after checking it against the code. Stamps verified_at (facts rank fresher) and clears doctor-flagged needs_review."
+    )]
+    async fn memory_verify(
+        &self,
+        Parameters(input): Parameters<VerifyInput>,
+    ) -> Result<String, String> {
+        let _scope = self.scope("verify", input.project.as_deref());
+        self.check_cross_project_write(input.project.as_deref())
+            .await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
+
+        let result = ops::verify_memory(&store, &input.id)
+            .await
+            .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
+
+        let r = serde_json::to_string(&serde_json::json!({
+            "id": result.id,
+            "verified": true,
+            "review_cleared": result.review_cleared,
         }))
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
@@ -2075,6 +2274,7 @@ impl EngramDbServer {
             sort_field,
             reverse: input.reverse.unwrap_or(false),
             limit: input.limit,
+            include_invalidated: input.include_invalidated.unwrap_or(false),
         };
 
         let entries = ops::list_memories(&store, &params)
@@ -2084,7 +2284,7 @@ impl EngramDbServer {
         let output: Vec<serde_json::Value> = entries
             .iter()
             .map(|e| {
-                serde_json::json!({
+                let mut obj = serde_json::json!({
                     "id": e.id,
                     "type": format!("{:?}", e.type_).to_lowercase(),
                     "summary": e.summary,
@@ -2095,7 +2295,15 @@ impl EngramDbServer {
                     "criticality": e.criticality,
                     "created_at": e.created_at.to_rfc3339(),
                     "updated_at": e.updated_at.to_rfc3339(),
-                })
+                });
+                // §5.4: visible only when include_invalidated let them through.
+                if let Some(t) = e.invalidated_at {
+                    obj["invalidated_at"] = serde_json::json!(t.to_rfc3339());
+                }
+                if let Some(t) = e.valid_from {
+                    obj["valid_from"] = serde_json::json!(t.to_rfc3339());
+                }
+                obj
             })
             .collect();
 

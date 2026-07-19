@@ -22,6 +22,9 @@ pub struct QueryParams {
     pub max_results: usize,
     pub detail_level: Option<String>,
     pub include_expired: bool,
+    pub epistemic: Vec<String>,
+    pub situation: Option<String>,
+    pub include_invalidated: bool,
     pub show_scores: bool,
     /// Also merge global-store memories into the project results.
     pub include_global: bool,
@@ -101,8 +104,13 @@ async fn compute_query_result(
         max_results: Some(params.max_results),
         include_expired: Some(params.include_expired),
         detail_level,
-        // --epistemic / --include-invalidated / --situation flags land in I5a.
-        ..Default::default()
+        epistemic: engramdb::ops::parse_epistemic_filter(Some(&params.epistemic))?,
+        situation: params
+            .situation
+            .as_deref()
+            .map(engramdb::ops::parse_situation)
+            .transpose()?,
+        include_invalidated: Some(params.include_invalidated),
     };
 
     // Optionally fold in global-store memories via the shared band
@@ -177,6 +185,9 @@ mod tests {
 
     fn base_params() -> QueryParams {
         QueryParams {
+            epistemic: vec![],
+            situation: None,
+            include_invalidated: false,
             mode: RetrievalMode::Rank,
             query: None,
             path: None,

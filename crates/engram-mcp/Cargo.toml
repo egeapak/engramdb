@@ -20,6 +20,7 @@ tract = ["engramdb/tract"]
 ollama = ["engramdb/ollama"]
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 engramdb = { path = "../..", default-features = false }
 
 rmcp = { version = "1", features = ["macros", "server", "transport-io", "transport-streamable-http-server"] }
