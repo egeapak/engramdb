@@ -1099,6 +1099,7 @@ mod tests {
             scope_multiplier: 0.8,
             trust: 1.0,
             trust_multiplier: 1.0,
+            situation_multiplier: 1.0,
             decay: 1.0,
             criticality: 0.8,
         }
