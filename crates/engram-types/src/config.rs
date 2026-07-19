@@ -1436,8 +1436,10 @@ mod tests {
         cfg.validate().unwrap();
 
         // Out-of-range floor / profile values rejected by validate
-        let mut bad_floor = SituationConfig::default();
-        bad_floor.floor = 1.5;
+        let bad_floor = SituationConfig {
+            floor: 1.5,
+            ..Default::default()
+        };
         assert!(bad_floor.validate().is_err());
         let mut bad_profile = SituationConfig::default();
         bad_profile.debugging.observation = -0.1;
@@ -1465,8 +1467,10 @@ mod tests {
         let m = cfg.multiplier(Situation::FileEdit, Epistemic::Decision);
         assert!((m - 1.0).abs() < 1e-9);
         // Non-finite floor ⇒ neutral
-        let mut nan_floor = SituationConfig::default();
-        nan_floor.floor = f64::NAN;
+        let nan_floor = SituationConfig {
+            floor: f64::NAN,
+            ..Default::default()
+        };
         assert_eq!(
             nan_floor.multiplier(Situation::Debugging, Epistemic::Fact),
             1.0
