@@ -22,4 +22,17 @@ fuzz_target!(|data: &[u8]| {
         write_memory_file(&reparsed).expect("writing a re-parsed memory must succeed");
 
     assert_eq!(written, rewritten, "memory file write is not idempotent");
+
+    // Epistemic emission is off-diagonal-only: a memory whose class equals its
+    // type-derived default must write NO `epistemic` key in the frontmatter
+    // (the region between the first two `---` fences — body text is free to
+    // contain the string). This is the no-rewrite-churn invariant for every
+    // pre-epistemic file.
+    if reparsed.epistemic == reparsed.type_.default_epistemic() {
+        let frontmatter = written.split("---").nth(1).unwrap_or("");
+        assert!(
+            !frontmatter.contains("epistemic:"),
+            "diagonal memory must not write an epistemic key"
+        );
+    }
 });

@@ -24,6 +24,7 @@ use super::lance_index::{
 use super::registry::RegistryBackend;
 use super::{manifest, memory_file, paths, project_id, write_lock};
 use crate::config::{load_config, load_config_or_default};
+use chrono::{DateTime, Utc};
 use engram_types::{Memory, MemoryUpdate, Visibility};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -526,6 +527,32 @@ impl MemoryStore {
             .await?;
 
         Ok(memory)
+    }
+
+    /// Close a memory's validity window (§2.4): set `invalidated_at = now`
+    /// and, when the closure was caused by supersession, the ADR-style
+    /// reverse link `superseded_by`. The memory is retained on disk and
+    /// queryable via `include_invalidated`, but excluded from default
+    /// retrieval. A no-op error-free path is deliberately NOT provided for
+    /// already-invalidated memories — the caller decides whether to skip
+    /// (ops-level supersession logs and skips; see `is_invalidated_at`).
+    ///
+    /// Built on [`MemoryStore::update_with`], so the read-modify-write is one
+    /// critical section under the per-project write lock and `updated_at` is
+    /// bumped. Reopening remains possible via a plain `update_with` clearing
+    /// the two fields — invalidation is reversible, unlike deletion.
+    pub async fn invalidate_with(
+        &self,
+        id: &str,
+        superseded_by: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<Memory> {
+        self.update_with(id, |memory| {
+            memory.invalidated_at = Some(now);
+            memory.superseded_by = superseded_by;
+            Ok(())
+        })
+        .await
     }
 
     /// Shared write path for `update` / `update_with`. Callers MUST hold the
@@ -1652,6 +1679,167 @@ mod tests {
                 .schema_version,
             manifest::CURRENT_SCHEMA_VERSION
         );
+    }
+
+    /// The 0.3.0 schema migration (epistemic columns): a store stamped 0.2.0
+    /// whose `.md` files predate the epistemic fields is transparently
+    /// re-indexed on open. The seven new columns materialize the type-derived
+    /// defaults (§2.5) — NOT the serde defaults — and vectors are preserved.
+    #[tokio::test]
+    async fn schema_migration_to_0_3_0_backfills_epistemic_columns() {
+        use engram_types::{Epistemic, Generality};
+
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+
+        // Diagonal memories write files byte-identical to the pre-epistemic
+        // writer, so creating them and downgrading the stamp reproduces a
+        // genuine pre-epistemic store. Debug's type default (Observation)
+        // differs from the serde default (Fact), which is what makes the
+        // materialization assertion meaningful.
+        let mut debug_mem = create_test_memory("mig3-debug", Visibility::Shared);
+        debug_mem.type_ = MemoryType::Debug;
+        debug_mem.epistemic = MemoryType::Debug.default_epistemic();
+        store.create(&debug_mem).await.unwrap();
+        store
+            .upsert_chunks("mig3-debug", vec![vec![0.1f32; 384]])
+            .await
+            .unwrap();
+        let mut hazard_mem = create_test_memory("mig3-hazard", Visibility::Shared);
+        hazard_mem.type_ = MemoryType::Hazard;
+        hazard_mem.epistemic = MemoryType::Hazard.default_epistemic();
+        store.create(&hazard_mem).await.unwrap();
+
+        // Downgrade the recorded version to the pre-epistemic schema.
+        let manifest_path = paths::project_dir(tmp.path()).join("manifest.toml");
+        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
+        m.schema_version = "0.2.0".to_string();
+        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+
+        // Re-open → migration reindexes and stamps 0.3.0.
+        let store2 = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        assert_eq!(
+            manifest::load_manifest(&manifest_path)
+                .await
+                .unwrap()
+                .schema_version,
+            manifest::CURRENT_SCHEMA_VERSION,
+        );
+
+        let entries = store2.lance_index.list_for_filtering().await.unwrap();
+        let debug_row = entries.iter().find(|e| e.id == "mig3-debug").unwrap();
+        assert_eq!(
+            debug_row.epistemic,
+            Epistemic::Observation,
+            "pre-epistemic Debug memory must materialize its TYPE default"
+        );
+        assert_eq!(debug_row.generality, Generality::Project);
+        assert_eq!(debug_row.origin_task, None);
+        assert_eq!(debug_row.invalidated_at, None);
+        assert_eq!(debug_row.verified_at, None);
+        assert!(debug_row.watch_paths.is_empty());
+        assert!(
+            debug_row.has_embedding,
+            "vectors preserved across the 0.3.0 migration"
+        );
+        let hazard_row = entries.iter().find(|e| e.id == "mig3-hazard").unwrap();
+        assert_eq!(hazard_row.epistemic, Epistemic::Fact);
+    }
+
+    /// The 0.3.0 columns carry real values through the normal write path:
+    /// an off-diagonal memory with a full Validity lands in the filtering
+    /// projection without any file loads.
+    #[tokio::test]
+    async fn epistemic_columns_roundtrip_through_index() {
+        use engram_types::{Epistemic, Generality, Validity};
+
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let mut memory = create_test_memory("epi-idx", Visibility::Shared);
+        memory.type_ = MemoryType::Hazard;
+        memory.epistemic = Epistemic::Observation; // off-diagonal
+        memory.verified_at = Some("2026-03-01T00:00:00Z".parse().unwrap());
+        memory.valid_from = Some("2026-01-10T00:00:00Z".parse().unwrap());
+        memory.valid_while = Some(Validity {
+            premise: Some("while ort is pinned".into()),
+            invalidated_by: vec!["Cargo.lock".into(), "crates/engram-onnx/**".into()],
+            origin_task: Some("epistemic-memory".into()),
+            generality: Generality::Task,
+            derived_from: vec![],
+        });
+        store.create(&memory).await.unwrap();
+
+        let entries = store.lance_index.list_for_filtering().await.unwrap();
+        let row = entries.iter().find(|e| e.id == "epi-idx").unwrap();
+        assert_eq!(row.epistemic, Epistemic::Observation);
+        assert_eq!(row.verified_at, memory.verified_at);
+        assert_eq!(row.generality, Generality::Task);
+        assert_eq!(row.origin_task.as_deref(), Some("epistemic-memory"));
+        assert_eq!(row.invalidated_at, None);
+        assert_eq!(
+            row.watch_paths,
+            vec![
+                "Cargo.lock".to_string(),
+                "crates/engram-onnx/**".to_string()
+            ]
+        );
+
+        // The displayable projection carries valid_from.
+        let filterable = store.lance_index.list_filterable().await.unwrap();
+        let frow = filterable.iter().find(|e| e.id == "epi-idx").unwrap();
+        assert_eq!(frow.valid_from, memory.valid_from);
+    }
+
+    /// `invalidate_with` closes the validity window atomically and reversibly.
+    #[tokio::test]
+    async fn invalidate_with_closes_and_reopens_window() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("inv-1", Visibility::Shared))
+            .await
+            .unwrap();
+
+        let now: chrono::DateTime<chrono::Utc> = "2026-07-19T12:00:00Z".parse().unwrap();
+        let closed = store
+            .invalidate_with("inv-1", Some("succ-9".into()), now)
+            .await
+            .unwrap();
+        assert_eq!(closed.invalidated_at, Some(now));
+        assert_eq!(closed.superseded_by.as_deref(), Some("succ-9"));
+        assert!(closed.is_invalidated_at(now));
+
+        // Persisted (file + index), not just returned.
+        let reread = store.get("inv-1").await.unwrap();
+        assert_eq!(reread.invalidated_at, Some(now));
+        let row = store
+            .lance_index
+            .list_for_filtering()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == "inv-1")
+            .unwrap();
+        assert_eq!(row.invalidated_at, Some(now));
+
+        // Reopening is a plain update clearing the two fields.
+        store
+            .update_with("inv-1", |m| {
+                m.invalidated_at = None;
+                m.superseded_by = None;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let reopened = store.get("inv-1").await.unwrap();
+        assert_eq!(reopened.invalidated_at, None);
+        assert_eq!(reopened.superseded_by, None);
     }
 
     /// The `has_embedding` projection flag tracks the chunk lifecycle: false at

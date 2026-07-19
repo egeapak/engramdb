@@ -1544,3 +1544,215 @@ accessed_at: "2026-01-15T10:00:00Z"
     let memory = parse_memory_file(file).unwrap();
     assert_eq!(memory.visibility, Visibility::Shared);
 }
+
+// ===========================================================================
+// Epistemic fields (schema 0.3.0 era) — file-format behavior
+// ===========================================================================
+
+/// Byte-for-byte output of the pre-epistemic V2 writer for `sample_memory()`.
+/// Captured on the last commit before the epistemic fields landed. The writer
+/// only emits `epistemic` when off-diagonal and validity/window fields when
+/// set, so a diagonal memory must keep producing EXACTLY these bytes — this is
+/// the no-rewrite-churn guarantee for every existing store.
+const GOLDEN_PRE_EPISTEMIC_SAMPLE: &str = r#"---
+version: 2
+id: test-123
+type: hazard
+status: Active
+---
+
+# Test memory
+
+## Content
+
+This is the content.
+
+## Details
+
+These are the details.
+
+## Scope
+
+- **Files:** `/`
+- **Criticality:** 0.5
+- **Confidence:** 0.8
+
+## Provenance
+
+- **Source:** human
+- **Created:** 2026-01-15T10:00:00+00:00
+- **Updated:** 2026-01-15T10:00:00+00:00
+
+<!-- engramdb
+visibility: Shared
+accessed_at: 2026-01-15T10:00:00Z
+decay:
+  strategy: none
+  floor: 0.5
+-->
+"#;
+
+/// Same capture for `full_memory()` (title, personal visibility, decay with
+/// half-life, supersedes — the busy path through the writer).
+const GOLDEN_PRE_EPISTEMIC_FULL: &str = r#"---
+version: 2
+id: test-full
+type: decision
+status: Active
+title: Full Field Test Title
+---
+
+# Full Field Test Title
+
+**Summary:** Full field test
+
+## Content
+
+Content here.
+
+## Details
+
+Details here.
+
+## Scope
+
+- **Files:** `src/db/**`, `src/lib.rs`
+- **Logical:** `infrastructure.database`
+- **Tags:** database, transactions
+- **Criticality:** 0.95
+- **Confidence:** 1
+- **Visibility:** personal
+
+## Provenance
+
+- **Source:** agent
+- **Agent:** claude
+- **Model:** claude-opus-4-6
+- **Session:** sess-123
+- **Reason:** Post-incident review
+- **Created:** 2026-01-15T10:00:00+00:00
+- **Updated:** 2026-01-15T10:00:00+00:00
+
+<!-- engramdb
+visibility: Personal
+accessed_at: 2026-01-15T10:00:00Z
+decay:
+  strategy: exponential
+  half_life:
+  - 1209600
+  - 0
+  floor: 0.0
+supersedes:
+- old-id-1
+-->
+"#;
+
+#[test]
+fn test_v2_diagonal_memory_writes_pre_epistemic_bytes() {
+    assert_eq!(
+        write_memory_file(&sample_memory()).unwrap(),
+        GOLDEN_PRE_EPISTEMIC_SAMPLE,
+        "diagonal memory must round-trip byte-identically to the pre-epistemic writer"
+    );
+    assert_eq!(
+        write_memory_file(&full_memory()).unwrap(),
+        GOLDEN_PRE_EPISTEMIC_FULL,
+        "full diagonal memory must round-trip byte-identically to the pre-epistemic writer"
+    );
+}
+
+#[test]
+fn test_v2_off_diagonal_epistemic_roundtrip() {
+    use engram_types::Epistemic;
+
+    // Hazard defaults to Fact; declare it an Observation (off-diagonal).
+    let mut memory = sample_memory();
+    memory.epistemic = Epistemic::Observation;
+
+    let written = write_memory_file(&memory).unwrap();
+    assert!(
+        written.contains("epistemic: observation"),
+        "off-diagonal class must be emitted in frontmatter:\n{written}"
+    );
+
+    let parsed = parse_memory_file(&written).unwrap();
+    assert_eq!(parsed.epistemic, Epistemic::Observation);
+}
+
+#[test]
+fn test_v2_parser_defaults_epistemic_from_type() {
+    // A file with no `epistemic` key (i.e. every pre-epistemic file)
+    // materializes the type-derived default, not the serde default (Fact).
+    let file = "---\nversion: 2\nid: epi-default\ntype: debug\nstatus: Active\n---\n\n\
+                # S\n\n## Content\n\nc\n";
+    let parsed = parse_memory_file(file).unwrap();
+    assert_eq!(parsed.epistemic, engram_types::Epistemic::Observation);
+}
+
+#[test]
+fn test_v2_validity_and_window_fields_roundtrip() {
+    use engram_types::{Generality, Validity};
+
+    let mut memory = sample_memory();
+    memory.valid_while = Some(Validity {
+        premise: Some("while we pin ort rc.12".into()),
+        invalidated_by: vec!["Cargo.lock".into()],
+        origin_task: Some("epistemic-memory".into()),
+        generality: Generality::Task,
+        derived_from: vec!["src-1".into()],
+    });
+    memory.valid_from = Some("2026-01-10T00:00:00Z".parse().unwrap());
+    memory.invalidated_at = Some("2026-02-01T00:00:00Z".parse().unwrap());
+    memory.superseded_by = Some("succ-1".into());
+
+    let written = write_memory_file(&memory).unwrap();
+    let parsed = parse_memory_file(&written).unwrap();
+    assert_eq!(parsed.valid_while, memory.valid_while);
+    assert_eq!(parsed.valid_from, memory.valid_from);
+    assert_eq!(parsed.invalidated_at, memory.invalidated_at);
+    assert_eq!(parsed.superseded_by, memory.superseded_by);
+}
+
+#[test]
+fn test_v2_empty_validity_normalized_to_none() {
+    use engram_types::{Generality, Validity};
+
+    // An all-empty Validity must not be persisted (write side)…
+    let mut memory = sample_memory();
+    memory.valid_while = Some(Validity::default());
+    let written = write_memory_file(&memory).unwrap();
+    assert!(
+        !written.contains("valid_while"),
+        "empty Validity must not be written:\n{written}"
+    );
+    assert_eq!(parse_memory_file(&written).unwrap().valid_while, None);
+
+    // …and a hand-edited file carrying one (generality-only counts as empty)
+    // is normalized away on read.
+    let mut memory = sample_memory();
+    memory.valid_while = Some(Validity {
+        generality: Generality::Task,
+        ..Default::default()
+    });
+    let written = write_memory_file(&memory).unwrap();
+    assert_eq!(parse_memory_file(&written).unwrap().valid_while, None);
+}
+
+#[test]
+fn test_v1_epistemic_defaults_from_type_not_serde() {
+    // V1 frontmatter without an `epistemic` key: serde's field default is
+    // Fact, but the authoritative default is type-derived — Debug must
+    // materialize as Observation.
+    let v1 = "---\nid: v1-epi\ntype: debug\nsummary: S\ncontent: \"\"\n\
+              physical: []\nlogical: []\ncriticality: 0.5\nconfidence: 0.8\n\
+              provenance:\n  source: human\nstatus: Active\nvisibility: Shared\n\
+              created_at: 2026-01-15T10:00:00Z\nupdated_at: 2026-01-15T10:00:00Z\n\
+              accessed_at: 2026-01-15T10:00:00Z\n---\n\n## Content\n\nc\n";
+    let parsed = parse_memory_file(v1).unwrap();
+    assert_eq!(parsed.epistemic, engram_types::Epistemic::Observation);
+
+    // An explicit key is honored, even when it names the serde default.
+    let v1_explicit = v1.replace("type: debug", "type: debug\nepistemic: fact");
+    let parsed = parse_memory_file(&v1_explicit).unwrap();
+    assert_eq!(parsed.epistemic, engram_types::Epistemic::Fact);
+}

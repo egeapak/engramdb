@@ -54,7 +54,7 @@ use super::helpers::{
 };
 use super::{MemoryParser, MemoryWriter, CURRENT_FORMAT_VERSION};
 use crate::error::Result;
-use engram_types::{Challenge, Decay, Memory, MemoryType, Status, Visibility};
+use engram_types::{Challenge, Decay, Epistemic, Memory, MemoryType, Status, Validity, Visibility};
 
 // ---------------------------------------------------------------------------
 // Frontmatter structs
@@ -67,6 +67,13 @@ struct MinimalFrontmatter {
     #[serde(rename = "type")]
     type_: MemoryType,
     status: Status,
+    /// Epistemic class. Frontmatter (not hidden meta) because it is
+    /// human-meaningful and human-editable, like `type`/`status`. Written
+    /// only when off-diagonal (`!= type_.default_epistemic()`), so files
+    /// carrying the type-derived default round-trip byte-identically to
+    /// files written before the field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epistemic: Option<Epistemic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
 }
@@ -80,6 +87,14 @@ struct HiddenMeta {
     verified_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     expires_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    valid_while: Option<Validity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    valid_from: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    invalidated_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    superseded_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     decay: Option<Decay>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -164,11 +179,13 @@ fn parse_v2(frontmatter: &str, body: &str) -> Result<Memory> {
     Ok(Memory {
         id: fm.id,
         type_: fm.type_,
-        epistemic: fm.type_.default_epistemic(),
-        valid_while: None,
-        valid_from: None,
-        invalidated_at: None,
-        superseded_by: None,
+        epistemic: fm.epistemic.unwrap_or_else(|| fm.type_.default_epistemic()),
+        // An all-empty Validity is meaningless; normalize it away on read so
+        // hand-edited files can't smuggle one into the domain model.
+        valid_while: hidden.valid_while.filter(|v| !v.is_empty()),
+        valid_from: hidden.valid_from,
+        invalidated_at: hidden.invalidated_at,
+        superseded_by: hidden.superseded_by,
         title: fm.title,
         summary,
         content,
@@ -202,6 +219,8 @@ fn write_v2(memory: &Memory) -> Result<String> {
         id: memory.id.clone(),
         type_: memory.type_,
         status: memory.status,
+        epistemic: (memory.epistemic != memory.type_.default_epistemic())
+            .then_some(memory.epistemic),
         title: memory.title.clone(),
     };
     let yaml = serde_yaml_ng::to_string(&fm)?;
@@ -281,6 +300,10 @@ fn write_v2(memory: &Memory) -> Result<String> {
         accessed_at: Some(memory.accessed_at),
         verified_at: memory.verified_at,
         expires_at: memory.expires_at,
+        valid_while: memory.valid_while.clone().filter(|v| !v.is_empty()),
+        valid_from: memory.valid_from,
+        invalidated_at: memory.invalidated_at,
+        superseded_by: memory.superseded_by.clone(),
         decay: memory.decay.clone(),
         supersedes: memory.supersedes.clone(),
         challenges: memory.challenges.clone(),
