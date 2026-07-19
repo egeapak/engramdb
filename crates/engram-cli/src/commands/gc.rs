@@ -31,25 +31,45 @@ pub async fn run_gc(
     let config = engramdb::storage::config::load_config(&config_path).await?;
 
     let dry_run = !confirm;
-    let result = gc_memories(&store, &config, dry_run, threshold).await?;
 
     // JSON mode: emit a single parseable object (the human flow below mixes
     // print_* JSON with raw per-id println! lines, which corrupts the stream for
     // scripted consumers — finding #7). The dry-run plan is exactly what a
     // script wants to parse.
     if formatter.is_json() {
-        let mut removed = Vec::with_capacity(result.removed.len());
-        for id in &result.removed {
-            match store.get(id).await {
-                Ok(m) => removed.push(serde_json::json!({
-                    "id": id,
+        // Snapshot candidate summaries before any deletion: on a real run the
+        // memories are gone by render time, so a post-hoc per-id store.get
+        // always failed and degraded every entry to a bare {"id"} (finding
+        // #5). One batched load replaces N lookups. gc_memories re-plans and
+        // re-validates under the write lock, so the snapshot is display-only;
+        // an id that races past it falls back to the bare form.
+        let plan = engramdb::ops::plan_gc(&store, &config, threshold).await?;
+        let candidate_ids: Vec<String> = plan.candidates.iter().map(|c| c.id.clone()).collect();
+        let mut summaries: std::collections::HashMap<String, serde_json::Value> = store
+            .get_batch(&candidate_ids)
+            .await?
+            .into_iter()
+            .map(|(id, m)| {
+                let entry = serde_json::json!({
+                    "id": id.as_str(),
                     "type": format!("{:?}", m.type_),
                     "summary": m.summary,
                     "criticality": m.criticality,
-                })),
-                Err(_) => removed.push(serde_json::json!({ "id": id })),
-            }
-        }
+                });
+                (id, entry)
+            })
+            .collect();
+
+        let result = gc_memories(&store, &config, dry_run, threshold).await?;
+        let removed: Vec<serde_json::Value> = result
+            .removed
+            .iter()
+            .map(|id| {
+                summaries
+                    .remove(id)
+                    .unwrap_or_else(|| serde_json::json!({ "id": id }))
+            })
+            .collect();
         let maintenance = result.maintenance.as_ref().map(|m| {
             serde_json::json!({
                 "bytes_removed": m.bytes_removed,
@@ -69,6 +89,8 @@ pub async fn run_gc(
         );
         return Ok(());
     }
+
+    let result = gc_memories(&store, &config, dry_run, threshold).await?;
 
     if !result.stale_entries.is_empty() {
         formatter.print_warning(&format!(
@@ -200,5 +222,30 @@ mod tests {
 
         let result = run_gc(temp_dir.path(), false, false, None, &formatter).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_gc_dry_run_json_mode() {
+        let (temp_dir, _store) = setup_test_store().await;
+        let formatter = OutputFormatter::new(None, true, true);
+
+        let result = run_gc(temp_dir.path(), false, false, None, &formatter).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_gc_confirm_json_mode() {
+        // Exercises the pre-deletion summary snapshot (finding #5): summaries
+        // are batched before gc_memories deletes, so the JSON path must not
+        // depend on post-deletion lookups.
+        let (temp_dir, store) = setup_test_store().await;
+        let formatter = OutputFormatter::new(None, true, true);
+
+        let result = run_gc(temp_dir.path(), false, true, Some(1.0), &formatter).await;
+        assert!(result.is_ok());
+
+        // Threshold 1.0 collects everything scoring below the clamp ceiling.
+        let remaining = store.list_ids().await.unwrap();
+        assert!(remaining.len() < 3, "gc --confirm should delete memories");
     }
 }

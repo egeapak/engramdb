@@ -96,6 +96,32 @@ pub async fn reindex(
             // vectors survive.
             if !embeddings_only && foreign_checkout.is_none() {
                 store.clear_chunks().await?;
+            } else if embeddings_only && foreign_checkout.is_none() {
+                // `--embeddings-only` is the advertised remediation for an
+                // embedding-model mismatch — including DIMENSION changes. The
+                // chunks table is opened as-is with its stored width, so
+                // after a dimension change every upsert below would fail
+                // against the old schema and the loop would error on every
+                // memory. Since this branch re-embeds everything anyway,
+                // recreating the table is as safe as the full path; it is
+                // suppressed under a checkout conflict exactly like above
+                // (the other clone's vectors must survive).
+                let live_dims = engine
+                    .embedding_fingerprint()
+                    .map(|f| f.dimensions)
+                    .unwrap_or(0);
+                if live_dims > 0 {
+                    if let Some(stored) = store.chunks_table_dimensions().await? {
+                        if stored != live_dims {
+                            warnings.push(format!(
+                                "chunks table stored {stored}-dimension vectors but the \
+                                 provider produces {live_dims}; recreating the table before \
+                                 re-embedding"
+                            ));
+                            store.clear_chunks().await?;
+                        }
+                    }
+                }
             }
 
             // Under a checkout conflict the shared index also lists the other
@@ -112,13 +138,22 @@ pub async fn reindex(
             } else {
                 ids
             };
+            // Single batched load (one dir scan) instead of a per-ID
+            // `store.get` (one full dir scan each — O(N²) dirent work over
+            // the whole store, and reindex by definition runs over the whole
+            // store). Mirrors the same conversion in `plan_gc`.
+            let loaded = store
+                .get_batch(&ids)
+                .await
+                .map_err(|e| anyhow::anyhow!("batch load failed: {}", e))?;
+            let mut by_id: std::collections::HashMap<String, _> = loaded.into_iter().collect();
             for id in &ids {
-                match store.get(id).await {
-                    Ok(memory) => match engine.embed_memory(&memory).await {
+                match by_id.remove(id) {
+                    Some(memory) => match engine.embed_memory(&memory).await {
                         Ok(()) => embedded += 1,
                         Err(e) => errors.push(format!("{}: {}", id, e)),
                     },
-                    Err(e) => errors.push(format!("{}: {}", id, e)),
+                    None => errors.push(format!("{}: memory file not found", id)),
                 }
             }
 

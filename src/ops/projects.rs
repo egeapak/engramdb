@@ -138,6 +138,13 @@ pub async fn delete_project(
     project_id: &str,
     cascade: bool,
 ) -> Result<DeleteResult> {
+    // Registry removal is a manual load → mutate → save cycle, so it must
+    // run under the backend's cross-process mutation lock — otherwise a
+    // concurrent registration (locked `update_inner`) that lands between our
+    // load and save is silently erased, and its data dir is then collected
+    // as an orphan by the next prune. Held only across the registry rewrite;
+    // dropped before the (slow) data-directory deletion below.
+    let lock = registry.lock_exclusive().await?;
     let mut reg = registry.load().await?;
 
     let idx = reg.projects.iter().position(|e| e.project_id == project_id);
@@ -163,6 +170,7 @@ pub async fn delete_project(
             .retain(|e| !descendants.iter().any(|d| d == &e.project_id));
     }
     registry.save(&reg).await?;
+    drop(lock);
 
     // Delete global data directory for this project.
     let projects_dir = paths::global_data_dir()?.join("projects");
@@ -350,6 +358,10 @@ pub fn scan_hierarchy_issues(registry: &Registry) -> HierarchyIssues {
 ///
 /// Returns the issues that were repaired (empty when nothing was wrong).
 pub async fn repair_hierarchy(registry: &dyn RegistryBackend) -> Result<HierarchyIssues> {
+    // Scan and rewrite under the cross-process mutation lock so a concurrent
+    // registration between our load and save isn't erased (see
+    // `RegistryBackend::lock_exclusive`).
+    let _lock = registry.lock_exclusive().await?;
     let mut reg = registry.load().await?;
     let issues = scan_hierarchy_issues(&reg);
     if issues.total() == 0 {
@@ -414,10 +426,22 @@ pub async fn prune_stale_projects(
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let mut reg = registry.load().await?;
-
     // --- Stale registry entries ---
+    //
+    // The whole load → partition → save cycle runs under the backend's
+    // cross-process mutation lock: without it, a project registered
+    // concurrently (via the locked `update_inner`) between our load and save
+    // is silently erased — and its data dir is then swept as an orphan on
+    // the next prune pass. Directory deletion happens *after* the save,
+    // outside the lock: once the entries are gone the dirs are plain
+    // orphans, so a crash mid-delete just leaves work for the next pass.
+    let lock = registry.lock_exclusive().await?;
+    let mut reg = registry.load().await?;
     let (keep, stale): (Vec<_>, Vec<_>) = reg.projects.into_iter().partition(registry_entry_alive);
+    let stale_removed = stale.len();
+    reg.projects = keep;
+    registry.save(&reg).await?;
+    drop(lock);
 
     let projects_dir = paths::global_data_dir()?.join("projects");
 
@@ -433,13 +457,19 @@ pub async fn prune_stale_projects(
         on_progress(PrunePhase::Stale);
     });
 
-    let stale_removed = stale.len();
-    reg.projects = keep;
-    registry.save(&reg).await?;
-
     // --- Orphan data directories ---
-    let registered_ids: std::collections::HashSet<String> =
-        reg.projects.iter().map(|e| e.project_id.clone()).collect();
+    //
+    // Re-load rather than reusing the pre-save snapshot: a project that
+    // registered while the stale-dir deletion above ran would be missing
+    // from the old snapshot and its fresh data dir would be swept as an
+    // orphan. A fresh snapshot narrows that window to the sweep itself.
+    let registered_ids: std::collections::HashSet<String> = registry
+        .load()
+        .await?
+        .projects
+        .iter()
+        .map(|e| e.project_id.clone())
+        .collect();
 
     let mut orphan_paths = Vec::new();
     let mut orphan_ids = Vec::new();
@@ -472,22 +502,28 @@ pub async fn prune_stale_projects(
     //
     // Runs after stale removal so that any children orphaned by a stale
     // parent removal are caught in the same pass (they appear as "dangling"
-    // after the parent is gone).
-    let issues = scan_hierarchy_issues(&registry.load().await?);
-    let hierarchy_cleared = issues.into_all_ids();
-    if !hierarchy_cleared.is_empty() {
+    // after the parent is gone). Scan and rewrite share one critical
+    // section: scanning one snapshot and mutating a re-loaded one would let
+    // a registration between the two loads be erased by the save.
+    let hierarchy_cleared = {
+        let _lock = registry.lock_exclusive().await?;
         let mut reg = registry.load().await?;
-        let cleared_set: std::collections::HashSet<&str> =
-            hierarchy_cleared.iter().map(|s| s.as_str()).collect();
-        for entry in reg.projects.iter_mut() {
-            if cleared_set.contains(entry.project_id.as_str()) {
-                entry.parent_project_id = None;
+        let issues = scan_hierarchy_issues(&reg);
+        let hierarchy_cleared = issues.into_all_ids();
+        if !hierarchy_cleared.is_empty() {
+            let cleared_set: std::collections::HashSet<&str> =
+                hierarchy_cleared.iter().map(|s| s.as_str()).collect();
+            for entry in reg.projects.iter_mut() {
+                if cleared_set.contains(entry.project_id.as_str()) {
+                    entry.parent_project_id = None;
+                }
             }
+            registry.save(&reg).await?;
         }
-        registry.save(&reg).await?;
-        for _ in &hierarchy_cleared {
-            on_progress(PrunePhase::Hierarchy);
-        }
+        hierarchy_cleared
+    };
+    for _ in &hierarchy_cleared {
+        on_progress(PrunePhase::Hierarchy);
     }
 
     Ok(PruneResult {

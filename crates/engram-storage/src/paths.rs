@@ -32,7 +32,11 @@ pub fn project_dir(dir: &Path) -> PathBuf {
 /// hooks) must relativize absolute paths before prefix/glob matching.
 ///
 /// Behavior:
-/// - Already-relative paths are returned unchanged.
+/// - Already-relative paths are lexically normalized (leading `./` stripped,
+///   `.` segments dropped, duplicate `/` collapsed) — scope matching is
+///   purely textual, so the natural spelling `./src/api/auth.rs` would
+///   otherwise silently match nothing (`strip_prefix("src")` fails and
+///   globset's literal `.` segment never matches `src/**`).
 /// - Absolute paths under `project_dir` are returned repo-relative.
 /// - Absolute paths NOT under `project_dir` are returned unchanged (they
 ///   legitimately match no repo-relative scope).
@@ -42,7 +46,7 @@ pub fn project_dir(dir: &Path) -> PathBuf {
 /// `/tmp` on macOS, or `--dir .` — still strip correctly.
 pub fn relativize_path(file_path: &str, project_dir: &Path) -> String {
     if Path::new(file_path).is_relative() {
-        return file_path.to_string();
+        return normalize_relative(file_path);
     }
     let canonical_dir = project_dir
         .canonicalize()
@@ -54,6 +58,21 @@ pub fn relativize_path(file_path: &str, project_dir: &Path) -> String {
         .strip_prefix(&canonical_dir)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| file_path.to_string())
+}
+
+/// Lexical cleanup for a relative query path: drop `.` segments and empty
+/// segments (duplicate `/`). `..` segments are kept as-is — resolving them
+/// lexically would be wrong in the presence of symlinks, and a parent-
+/// escaping path legitimately matches no repo-relative scope.
+fn normalize_relative(file_path: &str) -> String {
+    if !file_path.contains("./") && !file_path.contains("//") {
+        return file_path.to_string();
+    }
+    let cleaned: Vec<&str> = file_path
+        .split('/')
+        .filter(|seg| !seg.is_empty() && *seg != ".")
+        .collect();
+    cleaned.join("/")
 }
 
 /// Returns the shared memories directory in the project
@@ -272,6 +291,35 @@ mod tests {
         let path = Path::new("/tmp/my_project");
         let result = project_dir(path);
         assert_eq!(result, PathBuf::from("/tmp/my_project/.engramdb"));
+    }
+
+    // Scope matching is purely textual, so the natural relative spellings
+    // (`./src/...`, doubled slashes) must be normalized or they silently
+    // match no repo-relative scope at all.
+    #[test]
+    fn test_relativize_path_normalizes_relative_spellings() {
+        let project = Path::new("/nonexistent/project");
+        assert_eq!(
+            relativize_path("./src/api/auth.rs", project),
+            "src/api/auth.rs"
+        );
+        assert_eq!(
+            relativize_path("src//api/auth.rs", project),
+            "src/api/auth.rs"
+        );
+        assert_eq!(
+            relativize_path("src/./api/auth.rs", project),
+            "src/api/auth.rs"
+        );
+        // Plain relative paths pass through untouched.
+        assert_eq!(
+            relativize_path("src/api/auth.rs", project),
+            "src/api/auth.rs"
+        );
+        // A dot inside a segment name is not a `.` segment.
+        assert_eq!(relativize_path("x./y", project), "x./y");
+        // `..` is preserved (matches no repo-relative scope, by design).
+        assert_eq!(relativize_path("../other/f.rs", project), "../other/f.rs");
     }
 
     #[test]

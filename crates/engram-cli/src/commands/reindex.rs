@@ -35,14 +35,11 @@ pub async fn run_reindex(
         MemoryStore::open(dir).await?
     };
 
-    // Set up engine with embeddings if not index_only
+    // Set up engine with embeddings if not index_only. `MemoryStore` is
+    // `Clone` — a second `open` here paid a redundant config load + LanceDB
+    // connection.
     let engine = if !index_only {
-        let engine_store = if global {
-            MemoryStore::open_global().await?
-        } else {
-            MemoryStore::open(dir).await?
-        };
-        Some(engine_for(engine_store, embedding_backend, cell, policy).await)
+        Some(engine_for(store.clone(), embedding_backend, cell, policy).await)
     } else {
         None
     };

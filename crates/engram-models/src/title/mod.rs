@@ -59,13 +59,39 @@ pub fn create_generator(strategy: TitleStrategy) -> Result<Option<Box<dyn TitleG
 ///
 /// Convenience function that creates a generator and invokes it.
 /// Returns `None` if the strategy is disabled or generation fails gracefully.
+///
+/// The T5 generator is cached process-wide: it is two ONNX sessions
+/// (encoder + decoder) whose construction costs hundreds of ms — this is the
+/// FALLBACK path used when the caller has no pooled engine generator (the
+/// in-process CLI, or a failed bundle load), and rebuilding it per created
+/// memory dwarfed the create itself. Keyword generation is allocation-cheap
+/// and stays per-call. A failed T5 build is NOT cached, so a transient cause
+/// (model download in progress) can recover on a later call.
 pub async fn generate_title(strategy: TitleStrategy, text: &str) -> Option<String> {
-    let generator = match create_generator(strategy) {
-        Ok(Some(gen)) => gen,
-        Ok(None) => return None,
-        Err(e) => {
-            tracing::warn!("Failed to create title generator: {}", e);
-            return None;
+    use std::sync::OnceLock;
+    static T5_CACHE: OnceLock<tokio::sync::Mutex<Option<std::sync::Arc<dyn TitleGenerator>>>> =
+        OnceLock::new();
+
+    let generator: std::sync::Arc<dyn TitleGenerator> = match strategy {
+        TitleStrategy::None => return None,
+        TitleStrategy::Keyword => std::sync::Arc::new(keyword::KeywordTitleGenerator::new()),
+        TitleStrategy::T5 => {
+            let cell = T5_CACHE.get_or_init(|| tokio::sync::Mutex::new(None));
+            let mut guard = cell.lock().await;
+            match guard.as_ref() {
+                Some(cached) => std::sync::Arc::clone(cached),
+                None => match t5::T5TitleGenerator::new() {
+                    Ok(gen) => {
+                        let gen: std::sync::Arc<dyn TitleGenerator> = std::sync::Arc::new(gen);
+                        *guard = Some(std::sync::Arc::clone(&gen));
+                        gen
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create title generator: {}", e);
+                        return None;
+                    }
+                },
+            }
         }
     };
 

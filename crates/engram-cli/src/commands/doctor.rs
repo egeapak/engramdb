@@ -49,25 +49,41 @@ async fn run_store_check(dir: &Path, global: bool, formatter: &OutputFormatter) 
             result.indexed, result.on_disk
         ));
     } else {
-        if !result.stale_entries.is_empty() {
-            formatter.print_warning(&format!(
-                "{} stale index entries (in index but missing from disk):",
-                result.stale_entries.len()
-            ));
-            for id in &result.stale_entries {
-                println!("  {}", short_id(id));
+        if formatter.is_json() {
+            // One machine-readable object on stdout: the raw per-id lines in
+            // the pretty branch would interleave with print_* JSON and
+            // corrupt the stream for scripted consumers (finding #7 pattern).
+            println!(
+                "{}",
+                serde_json::json!({
+                    "healthy": false,
+                    "indexed": result.indexed,
+                    "on_disk": result.on_disk,
+                    "stale_entries": result.stale_entries,
+                    "orphaned_files": result.orphaned_files,
+                })
+            );
+        } else {
+            if !result.stale_entries.is_empty() {
+                formatter.print_warning(&format!(
+                    "{} stale index entries (in index but missing from disk):",
+                    result.stale_entries.len()
+                ));
+                for id in &result.stale_entries {
+                    println!("  {}", short_id(id));
+                }
             }
-        }
-        if !result.orphaned_files.is_empty() {
-            formatter.print_warning(&format!(
-                "{} orphaned files (on disk but not in index):",
-                result.orphaned_files.len()
-            ));
-            for id in &result.orphaned_files {
-                println!("  {}", short_id(id));
+            if !result.orphaned_files.is_empty() {
+                formatter.print_warning(&format!(
+                    "{} orphaned files (on disk but not in index):",
+                    result.orphaned_files.len()
+                ));
+                for id in &result.orphaned_files {
+                    println!("  {}", short_id(id));
+                }
             }
+            formatter.print_message("\nRun `engramdb reindex` to repair.");
         }
-        formatter.print_message("\nRun `engramdb reindex` to repair.");
         // Unhealthy must exit non-zero so scripts/CI can gate on `doctor`.
         // The findings were already printed above; the error just sets the
         // exit code (main maps Err → exit 1).
@@ -542,6 +558,38 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_doctor_store_unhealthy_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        // Orphaned file → unhealthy store.
+        let orphan_path = temp_dir
+            .path()
+            .join(".engramdb")
+            .join("memories")
+            .join("orphan-json.md");
+        tokio::fs::write(&orphan_path, "---\nid: orphan-json\n---\n")
+            .await
+            .unwrap();
+
+        // JSON formatter — the unhealthy branch must emit a single JSON
+        // object (finding #1) and still exit non-zero.
+        let formatter = OutputFormatter::new(None, true, true);
+        let result = run_doctor(
+            temp_dir.path(),
+            false,
+            Some(DoctorCommand::Store),
+            false,
+            false,
+            &noop_prompter(),
+            &formatter,
+        )
+        .await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

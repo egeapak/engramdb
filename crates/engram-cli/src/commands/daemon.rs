@@ -53,6 +53,17 @@ pub async fn run_daemon_cmd(
         DaemonCommand::Status { socket } => {
             let socket = daemon::resolve_socket(socket.as_deref(), &cfg);
             match daemon::query_status(&socket).await? {
+                None if formatter.is_json() => {
+                    // One JSON object (mirrors stats --daemon), not two
+                    // {"message": ...} lines a script can't dispatch on.
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "running": false,
+                            "socket": socket.display().to_string(),
+                        })
+                    );
+                }
                 None => {
                     formatter.print_message(&format!(
                         "Daemon: not running (socket {})",
@@ -193,6 +204,20 @@ mod tests {
         };
         // Result must be Ok and must not panic.
         run_daemon_cmd(tmp.path(), cmd, &fmt()).await.unwrap();
+    }
+
+    /// The pretty "not running" branch (the `fmt()` helper above is JSON, so
+    /// the graceful test covers the single-JSON-object arm instead).
+    #[tokio::test]
+    async fn run_daemon_cmd_status_missing_socket_pretty_mode() {
+        let tmp = TempDir::new().unwrap();
+        let socket = tmp.path().join("no-such-pretty.sock");
+
+        let formatter = OutputFormatter::new(Some(crate::app::OutputFormat::Plain), false, true);
+        let cmd = DaemonCommand::Status {
+            socket: Some(socket),
+        };
+        run_daemon_cmd(tmp.path(), cmd, &formatter).await.unwrap();
     }
 
     /// `daemon stop` against a socket no daemon owns: must print
