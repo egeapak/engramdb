@@ -57,11 +57,16 @@ pub struct LimitsView {
     /// Hard cap on `summary` length (bytes; == chars for ASCII). `create`
     /// rejects longer summaries.
     pub summary_max_chars: usize,
-    /// Soft target for `content` length in tokens (not enforced).
+    /// Soft target for `content` length in tokens (not enforced). Longer
+    /// content is not lost — it is chunked and every chunk is embedded — but
+    /// keeping the main point in `content` and moving bulk detail to `details`
+    /// (which is not embedded) keeps retrieval focused.
     pub content_soft_token_target: usize,
-    /// Tokens beyond this are not embedded — content past it does not improve
-    /// semantic retrieval.
-    pub embedding_max_tokens: usize,
+    /// Per-chunk embedding window, in tokens. `summary + content` is split
+    /// into chunks of this size and each chunk is embedded and searched
+    /// independently — so content past one window is still embedded, just in
+    /// additional chunks (it is not truncated).
+    pub embedding_chunk_tokens: usize,
 }
 
 /// Retrieval / search knobs that govern what `query` and `search` return.
@@ -118,7 +123,7 @@ impl AgentConfigView {
             limits: LimitsView {
                 summary_max_chars: MAX_SUMMARY_CHARS,
                 content_soft_token_target: CONTENT_SOFT_TOKEN_TARGET,
-                embedding_max_tokens: config.embeddings.max_tokens,
+                embedding_chunk_tokens: config.embeddings.max_tokens,
             },
             retrieval: RetrievalView {
                 default_max_results: config.retrieval.max_results,
@@ -220,7 +225,7 @@ mod tests {
         let view = AgentConfigView::from_config(&EngramConfig::default());
         assert_eq!(view.limits.summary_max_chars, 100);
         assert_eq!(view.limits.content_soft_token_target, 500);
-        assert_eq!(view.limits.embedding_max_tokens, 256);
+        assert_eq!(view.limits.embedding_chunk_tokens, 256);
         assert_eq!(view.retrieval.default_max_results, 10);
         assert!((view.retrieval.relevance_threshold - 0.45).abs() < f64::EPSILON);
         assert!((view.retrieval.search_threshold - 0.2).abs() < f64::EPSILON);
