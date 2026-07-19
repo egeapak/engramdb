@@ -1352,7 +1352,12 @@ mod consolidation_tests {
 
         // 13 same-group observations: one cluster of 13 > MAX_CLUSTER_SOURCES.
         for i in 0..13 {
-            observation(&store, &format!("gx-{i}"), &format!("groupA repeated pattern {i}")).await;
+            observation(
+                &store,
+                &format!("gx-{i}"),
+                &format!("groupA repeated pattern {i}"),
+            )
+            .await;
         }
 
         let report = consolidation_pass(&store, &engine, &config, true)

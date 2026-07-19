@@ -471,7 +471,10 @@ mod tests {
         assert!(summaries.contains(&"live challenged"), "{summaries:?}");
         assert!(summaries.contains(&"live stale"), "{summaries:?}");
         assert!(summaries.contains(&"scheduled challenged"), "{summaries:?}");
-        assert!(!summaries.contains(&"invalidated challenged"), "{summaries:?}");
+        assert!(
+            !summaries.contains(&"invalidated challenged"),
+            "{summaries:?}"
+        );
         assert!(!summaries.contains(&"invalidated stale"), "{summaries:?}");
 
         // Count helper matches the recency arm: only the live stale one.
