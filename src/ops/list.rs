@@ -32,6 +32,9 @@ pub fn parse_sort_field(s: &str) -> Result<SortField> {
 /// Parameters for listing memories.
 pub struct ListParams {
     pub types: Option<Vec<String>>,
+    /// Hard filter by epistemic class (§6.1) — parsed strings so both
+    /// surfaces share the error text of `parse_epistemic`.
+    pub epistemic: Option<Vec<String>>,
     pub tags: Option<Vec<String>>,
     pub status: Option<String>,
     pub scope: Option<String>,
@@ -68,6 +71,17 @@ pub async fn list_memories(
                 .map(|s| parse_memory_type(s))
                 .collect::<Result<Vec<_>>>()?;
             entries.retain(|e| types.contains(&e.type_));
+        }
+    }
+
+    // Apply epistemic-class filter (§6.1, OR across the listed classes)
+    if let Some(ref class_strs) = params.epistemic {
+        if !class_strs.is_empty() {
+            let classes: Vec<crate::types::Epistemic> = class_strs
+                .iter()
+                .map(|s| crate::ops::parsing::parse_epistemic(s))
+                .collect::<Result<Vec<_>>>()?;
+            entries.retain(|e| classes.contains(&e.epistemic));
         }
     }
 

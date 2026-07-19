@@ -3603,6 +3603,24 @@ async fn flip_to_needs_review(
     origin_tag: &str,
     reason: &str,
 ) -> bool {
+    // Pre-check outside the write path: an already-flagged memory must not be
+    // rewritten (update_with always bumps updated_at) nor re-reported as
+    // freshly fixed on repeated `doctor --fix` runs.
+    match store.get(id).await {
+        Ok(existing)
+            if existing
+                .challenges
+                .iter()
+                .any(|c| c.evidence.starts_with(origin_tag)) =>
+        {
+            return false;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(memory_id = %id, "doctor --fix pre-check failed: {e}");
+            return false;
+        }
+    }
     let tag = origin_tag.to_string();
     let evidence = format!("{origin_tag} {reason}");
     let result = store

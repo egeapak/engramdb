@@ -117,6 +117,10 @@ pub async fn update_memory(
             update.visibility = params.visibility;
             update.status = params.status;
             update.supersedes = params.supersedes;
+            // Reclassifying `epistemic` deliberately does NOT touch decay:
+            // update never changes decay unless the caller passes decay
+            // fields explicitly (unlike create, which derives a class-default
+            // curve). Pass --decay-* alongside --epistemic to re-curve.
             update.epistemic = params.epistemic;
             update.valid_from = params.valid_from;
             update.clear_invalidated = params.clear_invalidated;

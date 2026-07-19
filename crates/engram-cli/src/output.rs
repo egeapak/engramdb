@@ -32,19 +32,70 @@ pub fn short_id(id: &str) -> &str {
 /// §5.4 tags: `[fact]`-style class tag only when the class differs from the
 /// type default (off-diagonal), and `[invalidated <date>]` when the validity
 /// window is closed (visible only when the caller included such memories).
+/// A future-dated window end is still valid (mirrors `expires_at`), so it
+/// renders as `[invalidates <date>]` — a schedule, not a tombstone.
 fn epistemic_tags(
     type_: MemoryType,
     epistemic: engramdb::types::Epistemic,
     invalidated_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> String {
     let mut tags = String::new();
     if epistemic != type_.default_epistemic() {
         tags.push_str(&format!(" [{}]", epistemic.as_str()));
     }
     if let Some(t) = invalidated_at {
-        tags.push_str(&format!(" [invalidated {}]", t.format("%Y-%m-%d")));
+        let label = if t <= now {
+            "invalidated"
+        } else {
+            "invalidates"
+        };
+        tags.push_str(&format!(" [{label} {}]", t.format("%Y-%m-%d")));
     }
     tags
+}
+
+/// §5.4: the validity metadata the feature teaches users to record must be
+/// visible outside `--format json` — premise ("holds because"), watch globs,
+/// task binding, window bounds, supersessor, and verification stamp.
+fn print_validity_lines(memory: &Memory) {
+    if let Some(v) = &memory.valid_while {
+        if let Some(premise) = &v.premise {
+            println!("Premise: {}", premise);
+        }
+        if !v.invalidated_by.is_empty() {
+            println!("Invalidated by: {}", v.invalidated_by.join(", "));
+        }
+        if let Some(task) = &v.origin_task {
+            println!(
+                "Origin task: {} (generality: {})",
+                task,
+                v.generality.as_str()
+            );
+        }
+        if !v.derived_from.is_empty() {
+            println!(
+                "Derived from: {}",
+                v.derived_from
+                    .iter()
+                    .map(|id| short_id(id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+    if let Some(t) = memory.valid_from {
+        println!("Valid from: {}", t.format("%Y-%m-%d %H:%M:%S"));
+    }
+    if let Some(t) = memory.invalidated_at {
+        println!("Invalidated at: {}", t.format("%Y-%m-%d %H:%M:%S"));
+    }
+    if let Some(sup) = &memory.superseded_by {
+        println!("Superseded by: {}", sup);
+    }
+    if let Some(t) = memory.verified_at {
+        println!("Verified: {}", t.format("%Y-%m-%d %H:%M:%S"));
+    }
 }
 
 /// Output formatter for CLI results.
@@ -425,7 +476,12 @@ impl OutputFormatter {
         println!(
             "Type: {}{}",
             type_display,
-            epistemic_tags(memory.type_, memory.epistemic, memory.invalidated_at)
+            epistemic_tags(
+                memory.type_,
+                memory.epistemic,
+                memory.invalidated_at,
+                chrono::Utc::now()
+            )
         );
         println!("Summary: {}", memory.summary);
         println!("Content: {}", memory.content);
@@ -450,6 +506,7 @@ impl OutputFormatter {
         println!("Confidence: {:.2}", memory.confidence);
         println!("Status: {:?}", memory.status);
         println!("Visibility: {:?}", memory.visibility);
+        print_validity_lines(memory);
         println!("Created: {}", memory.created_at.format("%Y-%m-%d %H:%M:%S"));
         println!("Updated: {}", memory.updated_at.format("%Y-%m-%d %H:%M:%S"));
     }
@@ -459,7 +516,12 @@ impl OutputFormatter {
         println!(
             "Type: {:?}{}",
             memory.type_,
-            epistemic_tags(memory.type_, memory.epistemic, memory.invalidated_at)
+            epistemic_tags(
+                memory.type_,
+                memory.epistemic,
+                memory.invalidated_at,
+                chrono::Utc::now()
+            )
         );
         println!("Summary: {}", memory.summary);
         println!("Content: {}", memory.content);
@@ -484,6 +546,7 @@ impl OutputFormatter {
         println!("Confidence: {:.2}", memory.confidence);
         println!("Status: {:?}", memory.status);
         println!("Visibility: {:?}", memory.visibility);
+        print_validity_lines(memory);
     }
 
     /// Print search results in the configured format.
@@ -565,10 +628,18 @@ impl OutputFormatter {
             OutputFormat::Json => {
                 let json_output = serde_json::json!({
                     "memories": result.memories.iter().map(|sm| {
-                        serde_json::json!({
+                        let mut obj = serde_json::json!({
                             "memory": sm.memory,
                             "score": sm.score,
-                        })
+                        });
+                        // Parity with MCP query output: expose the component
+                        // breakdown (incl. situation_multiplier) when scores
+                        // were requested, so profile tuning is observable
+                        // from the CLI too.
+                        if show_scores {
+                            obj["breakdown"] = serde_json::json!(sm.score_breakdown);
+                        }
+                        obj
                     }).collect::<Vec<_>>(),
                     "total": result.total,
                 });
@@ -595,35 +666,44 @@ impl OutputFormatter {
             result.total
         );
 
+        let now = chrono::Utc::now();
         for sm in &result.memories {
             let id_short = short_id(&sm.memory.id);
             let type_str = format!("{:?}", sm.memory.type_);
+            let tags = epistemic_tags(
+                sm.memory.type_,
+                sm.memory.epistemic,
+                sm.memory.invalidated_at,
+                now,
+            );
 
             if show_scores {
                 let score_str = format!("[{:.2}]", sm.score);
                 if self.use_color {
                     println!(
-                        "  {} {} {}  {}",
+                        "  {} {} {}{}  {}",
                         score_str.if_supports_color(Stream::Stdout, |text| text.green()),
                         id_short.if_supports_color(Stream::Stdout, |text| text.cyan()),
                         type_str.if_supports_color(Stream::Stdout, |text| text.yellow()),
+                        tags,
                         sm.memory.summary
                     );
                 } else {
                     println!(
-                        "  {} {} {}  {}",
-                        score_str, id_short, type_str, sm.memory.summary
+                        "  {} {} {}{}  {}",
+                        score_str, id_short, type_str, tags, sm.memory.summary
                     );
                 }
             } else if self.use_color {
                 println!(
-                    "  {} {}  {}",
+                    "  {} {}{}  {}",
                     id_short.if_supports_color(Stream::Stdout, |text| text.cyan()),
                     type_str.if_supports_color(Stream::Stdout, |text| text.yellow()),
+                    tags,
                     sm.memory.summary
                 );
             } else {
-                println!("  {} {}  {}", id_short, type_str, sm.memory.summary);
+                println!("  {} {}{}  {}", id_short, type_str, tags, sm.memory.summary);
             }
         }
     }
@@ -640,18 +720,25 @@ impl OutputFormatter {
             result.total
         );
 
+        let now = chrono::Utc::now();
         for sm in &result.memories {
             let id_short = short_id(&sm.memory.id);
             let type_str = format!("{:?}", sm.memory.type_);
+            let tags = epistemic_tags(
+                sm.memory.type_,
+                sm.memory.epistemic,
+                sm.memory.invalidated_at,
+                now,
+            );
 
             if show_scores {
                 let score_str = format!("[{:.2}]", sm.score);
                 println!(
-                    "  {} {} {}  {}",
-                    score_str, id_short, type_str, sm.memory.summary
+                    "  {} {} {}{}  {}",
+                    score_str, id_short, type_str, tags, sm.memory.summary
                 );
             } else {
-                println!("  {} {}  {}", id_short, type_str, sm.memory.summary);
+                println!("  {} {}{}  {}", id_short, type_str, tags, sm.memory.summary);
             }
         }
     }
@@ -699,7 +786,12 @@ impl OutputFormatter {
                 "{} {}{} {}",
                 id_display,
                 type_display,
-                epistemic_tags(entry.type_, entry.epistemic, entry.invalidated_at),
+                epistemic_tags(
+                    entry.type_,
+                    entry.epistemic,
+                    entry.invalidated_at,
+                    chrono::Utc::now()
+                ),
                 entry.summary
             );
 
@@ -727,7 +819,12 @@ impl OutputFormatter {
                 "{} {:?}{} {}",
                 id_short,
                 entry.type_,
-                epistemic_tags(entry.type_, entry.epistemic, entry.invalidated_at),
+                epistemic_tags(
+                    entry.type_,
+                    entry.epistemic,
+                    entry.invalidated_at,
+                    chrono::Utc::now()
+                ),
                 entry.summary
             );
 
@@ -1173,6 +1270,7 @@ mod tests {
             MemoryType::Decision,
             MemoryType::Decision.default_epistemic(),
             None,
+            chrono::Utc::now(),
         );
         assert_eq!(tags, "");
     }
@@ -1181,12 +1279,30 @@ mod tests {
     fn test_epistemic_tags_off_diagonal_and_invalidated() {
         use chrono::TimeZone;
         let when = chrono::Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
+        let now = chrono::Utc.with_ymd_and_hms(2026, 7, 19, 0, 0, 0).unwrap();
         let tags = epistemic_tags(
             MemoryType::Context,
             engramdb::types::Epistemic::Observation,
             Some(when),
+            now,
         );
         assert_eq!(tags, " [observation] [invalidated 2026-07-01]");
+    }
+
+    /// A future-dated window end is still valid (mirrors `expires_at`), so
+    /// it must not read as a tombstone.
+    #[test]
+    fn test_epistemic_tags_future_invalidation_is_schedule_not_tombstone() {
+        use chrono::TimeZone;
+        let when = chrono::Utc.with_ymd_and_hms(2026, 8, 18, 0, 0, 0).unwrap();
+        let now = chrono::Utc.with_ymd_and_hms(2026, 7, 19, 0, 0, 0).unwrap();
+        let tags = epistemic_tags(
+            MemoryType::Decision,
+            MemoryType::Decision.default_epistemic(),
+            Some(when),
+            now,
+        );
+        assert_eq!(tags, " [invalidates 2026-08-18]");
     }
 
     // ========================================

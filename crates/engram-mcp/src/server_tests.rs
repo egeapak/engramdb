@@ -1087,6 +1087,7 @@ async fn list_empty() {
 
     let result = server
         .memory_list(Parameters(ListInput {
+            epistemic: None,
             include_invalidated: None,
             types: None,
             tags: None,
@@ -1112,6 +1113,7 @@ async fn list_all() {
 
     let result = server
         .memory_list(Parameters(ListInput {
+            epistemic: None,
             include_invalidated: None,
             types: None,
             tags: None,
@@ -1145,6 +1147,7 @@ async fn list_filter_by_type() {
 
     let result = server
         .memory_list(Parameters(ListInput {
+            epistemic: None,
             include_invalidated: None,
             types: Some(vec!["decision".to_string()]),
             tags: None,
@@ -1174,6 +1177,7 @@ async fn list_sort_and_limit() {
 
     let result = server
         .memory_list(Parameters(ListInput {
+            epistemic: None,
             include_invalidated: None,
             types: None,
             tags: None,
@@ -1196,6 +1200,7 @@ async fn list_invalid_sort() {
 
     let result = server
         .memory_list(Parameters(ListInput {
+            epistemic: None,
             include_invalidated: None,
             types: None,
             tags: None,
@@ -1435,6 +1440,7 @@ async fn gc_dry_run() {
     // Memory should still be there
     let list_result = server
         .memory_list(Parameters(ListInput {
+            epistemic: None,
             include_invalidated: None,
             types: None,
             tags: None,
@@ -2201,6 +2207,7 @@ async fn cross_project_doctor() {
     // Run doctor on B from server A
     let result = server
         .memory_doctor(Parameters(DoctorInput {
+            fix: None,
             project: Some(project_b),
         }))
         .await;
@@ -2226,6 +2233,7 @@ async fn cross_project_list() {
     // List from A targeting B
     let result = server
         .memory_list(Parameters(ListInput {
+            epistemic: None,
             include_invalidated: None,
             types: None,
             tags: None,
@@ -2243,6 +2251,7 @@ async fn cross_project_list() {
     // List A — should have nothing
     let result_a = server
         .memory_list(Parameters(ListInput {
+            epistemic: None,
             include_invalidated: None,
             types: None,
             tags: None,
@@ -3120,6 +3129,7 @@ async fn global_list() {
 
     let result = server
         .memory_list(Parameters(ListInput {
+            epistemic: None,
             include_invalidated: None,
             types: None,
             tags: None,
@@ -3143,6 +3153,7 @@ async fn global_list_with_type_filter() {
 
     let result = server
         .memory_list(Parameters(ListInput {
+            epistemic: None,
             include_invalidated: None,
             types: Some(vec!["hazard".to_string()]),
             tags: None,
@@ -3186,6 +3197,7 @@ async fn global_doctor() {
 
     let result = server
         .memory_doctor(Parameters(DoctorInput {
+            fix: None,
             project: global_project(),
         }))
         .await;
@@ -3213,6 +3225,7 @@ async fn global_reindex() {
     // Memory should still be accessible after reindex
     let list_result = server
         .memory_list(Parameters(ListInput {
+            epistemic: None,
             include_invalidated: None,
             types: None,
             tags: None,
@@ -4478,6 +4491,7 @@ async fn resolve_invalidate_closes_window_and_query_excludes_by_default() {
     let result = parse_ok(
         &server
             .memory_list(Parameters(ListInput {
+                epistemic: None,
                 include_invalidated: None,
                 types: None,
                 tags: None,
@@ -4494,6 +4508,7 @@ async fn resolve_invalidate_closes_window_and_query_excludes_by_default() {
     let result = parse_ok(
         &server
             .memory_list(Parameters(ListInput {
+                epistemic: None,
                 include_invalidated: Some(true),
                 types: None,
                 tags: None,

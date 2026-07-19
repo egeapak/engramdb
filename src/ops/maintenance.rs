@@ -154,6 +154,16 @@ async fn record_maintenance() {
     let _ = tokio::fs::write(&path, chrono::Utc::now().to_rfc3339()).await;
 }
 
+/// Whether a call to [`auto_maintain`] right now would actually run (enabled
+/// and past the throttle window). Callers that must do expensive setup to
+/// *supply* the pass — the MCP server builds a `RetrievalEngine` so §11.4
+/// consolidation can run — use this to skip that setup on throttled calls.
+/// Advisory only: `auto_maintain` re-checks, so a lost race is just one
+/// wasted setup, never a duplicate pass.
+pub async fn maintenance_would_run(config: &MaintenanceConfig, cli_skip: bool) -> bool {
+    resolve_enabled(config, cli_skip) && maintenance_due(resolve_interval(config)).await
+}
+
 /// Run automatic maintenance for `dir` (the resolved main project root).
 ///
 /// `config` is the project's `[maintenance]` section and `cli_skip` is the

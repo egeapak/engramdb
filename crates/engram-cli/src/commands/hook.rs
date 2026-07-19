@@ -51,7 +51,9 @@ fn source_marker(m: &engramdb::types::Memory) -> String {
     )
 }
 
-/// Format scored memories into a compact additionalContext string (for PreToolUse).
+/// Format scored memories into a compact additionalContext string (legacy
+/// flat renderer; production hooks all use the §8 class-grouped formatter).
+#[cfg(test)]
 fn format_additional_context(header: &str, memories: &[ScoredMemory]) -> String {
     let mut lines: Vec<String> = vec![header.into()];
     for scored in memories {
@@ -108,9 +110,22 @@ fn build_session_start_context(memories: &[ScoredMemory]) -> String {
 }
 
 /// [`build_session_start_context`] with a `[hooks].class_order` override.
+#[cfg(test)] // production path reserves hint space via ..._reserving
 fn build_session_start_context_with(
     memories: &[ScoredMemory],
     class_order: Option<&[String]>,
+) -> String {
+    build_session_start_context_reserving(memories, class_order, 0)
+}
+
+/// [`build_session_start_context_with`], reserving `reserved` chars of the
+/// §14.9 budget for a trailing line the caller will append (the §16.4 hint
+/// counts against the 2000-char budget, so the memory body must shrink to
+/// make room for it).
+fn build_session_start_context_reserving(
+    memories: &[ScoredMemory],
+    class_order: Option<&[String]>,
+    reserved: usize,
 ) -> String {
     if memories.is_empty() {
         REFLECTION_NUDGE.to_string()
@@ -120,7 +135,7 @@ fn build_session_start_context_with(
             format_class_context_with_budget(
                 "[EngramDB] Key project memories:",
                 memories,
-                SESSION_CONTEXT_BUDGET,
+                SESSION_CONTEXT_BUDGET.saturating_sub(reserved),
                 Some(Situation::SessionStart),
                 class_order,
             ),
@@ -267,6 +282,14 @@ fn format_class_entry(scored: &ScoredMemory, compact: bool) -> Vec<String> {
 /// (§11.1 mapping) matches their `origin_task`. Absent a mapping,
 /// task-scoped memories are suppressed from hooks but remain reachable by
 /// explicit query.
+///
+/// Recorded deviation from §8.3: suppression runs on the MATERIALIZED
+/// result (after the engine's `max_results` truncation), not at the index
+/// level. Consequence: a top-k dominated by foreign task-scoped memories
+/// yields fewer injected entries rather than backfilling project-wide ones.
+/// Accepted because hooks request small k (5/10) against the same index the
+/// engine already filtered, and the §16.4 hint tells the agent exactly how
+/// to recover the hidden ones.
 fn suppress_task_scoped(
     memories: Vec<ScoredMemory>,
     current_task: Option<&str>,
@@ -283,11 +306,16 @@ fn suppress_task_scoped(
 }
 
 /// The session's declared task, resolved from the hook event's session id
-/// and the §11.1 mapping. `None` when the event carries no session id or no
-/// mapping exists.
+/// and the §11.1 mapping. Falls back to the freshest mapping from ANY
+/// session when this session id has no entry: the MCP `task_current` tool
+/// records the mapping under the server process's own session id, which
+/// never matches the id in a hook event, so without the fallback the
+/// hook-taught "declare task_current to surface yours" flow would be a
+/// no-op under the default plugin install. `None` when the event carries no
+/// session id or nothing fresh is mapped.
 fn session_task_for(input: &str, dir: &Path) -> Option<String> {
     let session_id = extract_session_id(input)?;
-    engramdb::storage::task_state::current_task(dir, &session_id)
+    engramdb::storage::task_state::current_task_or_recent(dir, &session_id)
 }
 
 /// Budget-aware implementation (extracted for testability).
@@ -321,21 +349,40 @@ fn format_class_context_with_budget(
     let mut included = 0usize;
     let total = memories.len();
 
+    // Reserve room for the worst-case omission notice up front so appending
+    // it can never push the output over the §14.9 cap. Only at realistic
+    // budgets — at tiny (test/degenerate) budgets the reserve would crowd
+    // out the content itself, and the cap those budgets model isn't real.
+    const OMITTED_RESERVE: usize = "\n(999 more memories omitted — use query to find them)".len();
+    let body_budget = if budget >= 4 * OMITTED_RESERVE {
+        budget - OMITTED_RESERVE
+    } else {
+        budget
+    };
+
     for (class, group) in &groups {
         let group_header = format!("\n## {} ({}):", class_header(*class), group.len());
         let group_header_len = group_header.len() + 1; // +1 for join newline
 
-        if used + group_header_len > budget {
+        if used + group_header_len > body_budget {
             break;
         }
-        lines.push(group_header);
-        used += group_header_len;
+
+        // Emit the header only once an entry from this group actually fits —
+        // a header with zero surviving entries is noise, not context.
+        let mut header_emitted = false;
 
         for scored in group {
             let entry = format_class_entry(scored, false);
             let entry_len: usize = entry.iter().map(|l| l.len() + 1).sum();
+            let pending_header = if header_emitted { 0 } else { group_header_len };
 
-            if used + entry_len <= budget {
+            if used + pending_header + entry_len <= body_budget {
+                if !header_emitted {
+                    lines.push(group_header.clone());
+                    used += group_header_len;
+                    header_emitted = true;
+                }
                 lines.extend(entry);
                 used += entry_len;
                 included += 1;
@@ -347,7 +394,12 @@ fn format_class_context_with_budget(
             if *class == Epistemic::Fact {
                 let compact_entry = format_class_entry(scored, true);
                 let compact_len: usize = compact_entry.iter().map(|l| l.len() + 1).sum();
-                if used + compact_len <= budget {
+                if used + pending_header + compact_len <= body_budget {
+                    if !header_emitted {
+                        lines.push(group_header.clone());
+                        used += group_header_len;
+                        header_emitted = true;
+                    }
                     lines.extend(compact_entry);
                     used += compact_len;
                     included += 1;
@@ -449,8 +501,19 @@ async fn process_hook_input(input: &str, dir: &Path, store: MemoryStore) -> Resu
         return Ok(None);
     }
 
-    let context =
-        format_additional_context("[EngramDB] Relevant memories for this file:", &memories);
+    // §8.1/§8.2 class-grouped rendering (same formatter as SessionStart /
+    // UserPromptSubmit): decisions carry their "— because {premise}" clause
+    // atomically, facts show "revisit if" globs, groups get class headers.
+    // The pre-sort above still matters — group_by_class is stable, so the
+    // hazard-first ordering inside the facts group survives.
+    let budget = engine.config().hooks.prompt_context_budget;
+    let context = format_class_context_with_budget(
+        "[EngramDB] Relevant memories for this file:",
+        &memories,
+        budget,
+        Some(Situation::FileEdit),
+        class_order.as_deref(),
+    );
     let json = build_hook_response("PreToolUse", &context)?;
     Ok(Some(json))
 }
@@ -533,14 +596,20 @@ async fn process_session_start(
     let memories = suppress_task_scoped(result.memories, current_task.as_deref());
     let suppressed = before - memories.len();
     let class_order = engine.config().hooks.class_order.clone();
-    let mut context = build_session_start_context_with(&memories, class_order.as_deref());
     // §16.4 hint line: teach the task mechanism exactly when it becomes
     // relevant. Safe to advertise `task_current` — the tool ships in this
-    // build (it is pinned into MCP_TOOL_SUFFIXES alongside this hint).
-    if suppressed > 0 {
-        context.push_str(&format!(
+    // build (it is pinned into MCP_TOOL_SUFFIXES alongside this hint). Built
+    // first so its length is reserved out of the 2000-char budget (§14.9).
+    let hint = (suppressed > 0).then(|| {
+        format!(
             "\n({suppressed} task-scoped memories hidden — declare task_current to surface yours.)"
-        ));
+        )
+    });
+    let reserved = hint.as_ref().map(|h| h.len()).unwrap_or(0);
+    let mut context =
+        build_session_start_context_reserving(&memories, class_order.as_deref(), reserved);
+    if let Some(hint) = hint {
+        context.push_str(&hint);
     }
     let json = build_hook_response("SessionStart", &context)?;
     Ok(Some(json))
@@ -797,7 +866,9 @@ pub async fn run_hook_session_end(dir: &Path) -> Result<()> {
         if config.epistemic.demote_on_session_end {
             match MemoryStore::open(dir).await {
                 Ok(store) => {
-                    if let Err(e) = engramdb::ops::task_complete(&store, &task).await {
+                    if let Err(e) =
+                        engramdb::ops::task_complete(&store, &task, &config.epistemic).await
+                    {
                         tracing::debug!("SessionEnd demotion failed (non-fatal): {e}");
                     }
                 }

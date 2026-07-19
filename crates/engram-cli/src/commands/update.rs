@@ -39,6 +39,8 @@ pub struct UpdateParams {
     pub valid_from: Option<String>,
     pub clear_validity: bool,
     pub clear_invalidated: bool,
+    pub invalidate: bool,
+    pub superseded_by: Option<String>,
     pub decay_strategy: Option<String>,
     pub decay_half_life: Option<u64>,
     pub decay_ttl: Option<u64>,
@@ -263,6 +265,33 @@ pub async fn run_update(
         Some(&engine),
     )
     .await?;
+
+    // --invalidate closes the validity window AFTER any field updates above
+    // (§2.4 writer 2, via ops::resolve): the memory WAS true but no longer
+    // is. History stays on disk, queryable via --include-invalidated.
+    if params.invalidate {
+        engramdb::ops::resolve_memory(
+            &store,
+            engramdb::ops::ResolveParams {
+                id: params.id.clone(),
+                action: engramdb::ops::ResolveAction::Invalidate,
+                updated_content: None,
+                updated_summary: None,
+                superseded_by: params.superseded_by.clone(),
+            },
+        )
+        .await?;
+        formatter.print_success(&format!(
+            "Invalidated memory {} (window closed{})",
+            params.id,
+            params
+                .superseded_by
+                .as_deref()
+                .map(|s| format!(", superseded by {s}"))
+                .unwrap_or_default()
+        ));
+        return Ok(());
+    }
 
     formatter.print_success(&format!("Updated memory {}", params.id));
     Ok(())

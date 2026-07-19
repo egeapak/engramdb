@@ -30,12 +30,18 @@ fn resolve_session_id(flag: Option<&str>) -> Result<String> {
 /// Declare (or read) the session's current task (§11.1).
 pub fn run_task_current(
     dir: &Path,
+    global: bool,
     name: Option<&str>,
     session_id: Option<&str>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
+    let target_dir = if global {
+        engramdb::storage::paths::global_store_dir()?
+    } else {
+        dir.to_path_buf()
+    };
     let session_id = resolve_session_id(session_id)?;
-    let result = ops::task_current(dir, &session_id, name)?;
+    let result = ops::task_current(&target_dir, &session_id, name)?;
 
     if formatter.is_json() {
         println!(
@@ -67,7 +73,11 @@ pub async fn run_task_complete(
         MemoryStore::open(dir).await?
     };
 
-    let result = ops::task_complete(&store, name).await?;
+    let config = engramdb::storage::config::load_config_or_default(
+        &store.project_dir.join(".engramdb").join("config.toml"),
+    )
+    .await;
+    let result = ops::task_complete(&store, name, &config.epistemic).await?;
 
     if formatter.is_json() {
         println!(

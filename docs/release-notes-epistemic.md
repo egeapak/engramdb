@@ -18,7 +18,8 @@ On top of the class sit:
   supersession, `resolve --action invalidate`, or compression) without being
   deleted. Retrieval and `list` exclude them by default;
   `include_invalidated: true` shows history. GC purges them only after
-  `[gc].invalidated_retention_days`.
+  `[epistemic] invalidated_retention_days` (0 = keep forever); until then
+  they are exempt from low-score GC too.
 - **Situation-aware ranking**: hooks and queries can pass a `situation`
   (`session_start`, `file_edit`, `debugging`, `design_choice`) that reweights
   classes — observations surface while debugging, decisions while designing.
@@ -33,7 +34,7 @@ On top of the class sit:
 - **Smarter maintenance**: telemetry-driven promotion of re-confirmed
   task-scoped memories, and observation consolidation (near-duplicate
   clusters merge into a derived fact; opt-in apply via
-  `[maintenance].auto_consolidate`).
+  `[epistemic] auto_consolidate`).
 
 ## Intended behavior changes on upgrade
 

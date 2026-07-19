@@ -127,6 +127,15 @@ pub async fn plan_gc(
             }
         }
 
+        // Invalidated-but-within-retention memories are exempt from LowScore
+        // deletion: retention is a floor on history preservation (the whole
+        // point of invalidate-not-delete), and an invalidated memory's score
+        // is meaningless for "is this still worth keeping as history". With
+        // retention 0 (= keep forever) they are never GC'd at all.
+        if memory.is_invalidated_at(now) {
+            continue;
+        }
+
         let context = ScoringContext::scope_only(None, &[]);
         let breakdown = composite_score(memory, &context, config, now);
 
@@ -176,7 +185,11 @@ pub async fn execute_gc_plan(
                 }
                 match candidate.reason {
                     GcReason::LowScore => {
-                        composite_score(memory, &context, config, now).final_score < plan.threshold
+                        // Mirror planning: a memory invalidated since planning
+                        // is protected by retention, not score.
+                        !memory.is_invalidated_at(now)
+                            && composite_score(memory, &context, config, now).final_score
+                                < plan.threshold
                     }
                     // Still invalidated and still past retention (a §2.4
                     // reopening would have bumped updated_at, but re-check
@@ -690,6 +703,45 @@ mod invalidated_retention_tests {
         assert!(store.get("gc-fresh-invalid").await.is_ok());
         assert!(store.get("gc-live").await.is_ok());
         assert!(store.get("gc-old-invalid").await.is_err());
+    }
+
+    /// Retention is a floor on history preservation: a *low-scoring*
+    /// invalidated memory inside its retention window must not be reaped via
+    /// the LowScore rule (which ignores `invalidated_at` entirely).
+    #[tokio::test]
+    async fn gc_low_score_exempts_invalidated_within_retention() {
+        let (_t, store) = setup().await;
+        let config = EngramConfig::default(); // retention 180d
+
+        // Debug type (fast 30d decay, no floor) + low criticality + old:
+        // scores under the gc threshold. Hazard would never qualify — its
+        // decay floor keeps it above.
+        let low_score = |id: &str| {
+            let mut m = Memory::new(MemoryType::Debug, id, "content", Provenance::human());
+            m.id = id.to_string();
+            m.criticality = 0.05;
+            m.created_at = Utc::now() - Duration::days(400);
+            m.updated_at = m.created_at;
+            m
+        };
+        let mut doomed = low_score("gc-low-invalid");
+        // Invalidated yesterday: inside the 180d retention window.
+        doomed.invalidated_at = Some(Utc::now() - Duration::days(1));
+        store.create(&doomed).await.unwrap();
+
+        // Same profile but live: the LowScore rule still applies to it.
+        store.create(&low_score("gc-low-live")).await.unwrap();
+
+        let result = gc_memories(&store, &config, false, None).await.unwrap();
+        assert!(
+            store.get("gc-low-invalid").await.is_ok(),
+            "invalidated-within-retention memory must survive LowScore gc"
+        );
+        assert!(
+            result.removed.contains(&"gc-low-live".to_string()),
+            "the live low-score control should still be reaped: {:?}",
+            result.removed
+        );
     }
 
     #[tokio::test]

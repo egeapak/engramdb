@@ -53,7 +53,7 @@ impl<'a> From<&'a Memory> for ScoreTarget<'a> {
 /// fields retain their pre-rerank values. The presence of `rerank: Some(...)`
 /// signals that `final_score` is blended and not directly reproducible from
 /// the breakdown components.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ScoreBreakdown {
     /// The final composite score
     pub final_score: f64,
@@ -1281,6 +1281,48 @@ mod tests {
             "trust multiplier {} should be >= trust floor 0.5",
             breakdown.trust_multiplier,
         );
+    }
+
+    /// §14.5 threshold composition, worst case: an exact-scope,
+    /// criticality-0.8, human, unchallenged memory must stay at or above
+    /// `thresholds.relevance` under EVERY default situation profile value ×
+    /// every epistemic class — a profile/floor retune that silently drops
+    /// high-criticality memories out of hook injection must fail here.
+    #[test]
+    fn test_situation_worst_case_above_threshold() {
+        use crate::types::{Epistemic, Situation};
+        let config = EngramConfig::default();
+        let now = Utc::now();
+        let threshold = config.retrieval.relevance_threshold;
+
+        let situations = [
+            Situation::SessionStart,
+            Situation::FileEdit,
+            Situation::Debugging,
+            Situation::DesignChoice,
+        ];
+        let classes = [Epistemic::Fact, Epistemic::Observation, Epistemic::Decision];
+
+        for situation in situations {
+            for class in classes {
+                let mut memory = create_test_memory();
+                memory.criticality = 0.8;
+                memory.provenance = Provenance::human();
+                memory.status = Status::Active;
+                memory.epistemic = class;
+
+                // Exact scope: query path equals the memory's physical scope.
+                let context = ScoringContext::scope_only(Some("src/api/auth.rs"), &[])
+                    .with_situation(Some(situation));
+                let breakdown = composite_score(&memory, &context, &config, now);
+                assert!(
+                    breakdown.final_score >= threshold,
+                    "worst-case memory fell below relevance threshold {threshold}: \
+                     {situation:?}/{class:?} scored {}",
+                    breakdown.final_score,
+                );
+            }
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! EngramDB MCP server implementation.
 //!
-//! Defines the server struct, all MCP tools (19), resources (2), and prompts (2).
+//! Defines the server struct, all MCP tools (22), resources (2), and prompts (2).
 //! Tools delegate to the `ops` layer; the server opens a fresh `MemoryStore`
 //! per request so it always sees the latest on-disk state.
 
@@ -39,7 +39,9 @@ struct CreateInput {
     )]
     type_: String,
 
-    #[schemars(description = "Core knowledge to store (max ~500 tokens)")]
+    #[schemars(
+        description = "Core knowledge to store (max ~500 tokens). For decisions, state what was chosen, over what alternatives, and why."
+    )]
     content: String,
 
     #[schemars(description = "One-line summary, max 100 chars (required)")]
@@ -489,6 +491,9 @@ struct ListInput {
     #[schemars(description = "Filter by memory types")]
     types: Option<Vec<String>>,
 
+    #[schemars(description = "Filter by epistemic class: fact, observation, decision (OR logic)")]
+    epistemic: Option<Vec<String>>,
+
     #[schemars(description = "Filter by tags (OR logic)")]
     tags: Option<Vec<String>>,
 
@@ -537,6 +542,10 @@ struct DoctorInput {
         description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
+    #[schemars(
+        description = "Flip memories with epistemic findings (changed invalidation paths, invalid derived-from sources) to needs_review. Default false: report only."
+    )]
+    fix: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -604,6 +613,10 @@ struct MemoryOutput {
     invalidated_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     superseded_by: Option<String>,
+    /// When the memory was last re-confirmed via `verify` (facts decay from
+    /// this anchor, so agents can see how stale a verification is).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verified_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 fn memory_to_output(m: &engramdb::types::Memory, include_details: bool) -> MemoryOutput {
@@ -630,6 +643,7 @@ fn memory_to_output(m: &engramdb::types::Memory, include_details: bool) -> Memor
         valid_from: m.valid_from,
         invalidated_at: m.invalidated_at,
         superseded_by: m.superseded_by.clone(),
+        verified_at: m.verified_at,
     }
 }
 
@@ -884,11 +898,21 @@ impl EngramDbServer {
         // is always false; the env var and config still apply.
         let config_path = self.effective_dir.join(".engramdb").join("config.toml");
         let config = engramdb::storage::config::load_config_or_default(&config_path).await;
-        engramdb::ops::auto_maintain(
+        // §11.4 consolidation needs providers, so pass an engine — but only
+        // build one when the throttle says the pass will actually run, so a
+        // routine (throttled) startup never loads models for nothing. Engine
+        // build failure degrades to the engine-less pass (graceful-skip).
+        let engine = if engramdb::ops::maintenance_would_run(&config.maintenance, false).await {
+            self.build_engine().await.ok()
+        } else {
+            None
+        };
+        engramdb::ops::auto_maintain_with_engine(
             &self.effective_dir,
             self.registry.as_ref(),
             &config.maintenance,
             false,
+            engine.as_ref(),
         )
         .await;
     }
@@ -2077,7 +2101,8 @@ impl EngramDbServer {
             .await?;
         let store = self.open_store_for(input.project.as_deref()).await?;
 
-        let result = ops::task_complete(&store, &input.task)
+        let config = self.load_config_for(input.project.as_deref()).await?;
+        let result = ops::task_complete(&store, &input.task, &config.epistemic)
             .await
             .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
@@ -2354,6 +2379,7 @@ impl EngramDbServer {
 
         let params = ops::ListParams {
             types: input.types,
+            epistemic: input.epistemic,
             tags: input.tags,
             status: input.status,
             scope: input.scope,
@@ -2384,7 +2410,9 @@ impl EngramDbServer {
                     "created_at": e.created_at.to_rfc3339(),
                     "updated_at": e.updated_at.to_rfc3339(),
                 });
-                // §5.4: visible only when include_invalidated let them through.
+                // §5.4: emitted when present. `invalidated_at` is normally
+                // only reachable via include_invalidated (or future-dated);
+                // `valid_from` appears on any backdated live memory.
                 if let Some(t) = e.invalidated_at {
                     obj["invalidated_at"] = serde_json::json!(t.to_rfc3339());
                 }
@@ -2406,15 +2434,26 @@ impl EngramDbServer {
 
     #[tool(
         name = "doctor",
-        description = "Check store health (index vs disk consistency). Fast, project-scoped check. For full environment diagnostics, use the CLI: `engramdb doctor`."
+        description = "Check store health (index vs disk consistency) plus epistemic checks: changed invalidation paths, stale observations, invalid derived-from sources. Pass fix: true to flip affected memories to needs_review. For full environment diagnostics, use the CLI: `engramdb doctor`."
     )]
     async fn memory_doctor(
         &self,
         Parameters(input): Parameters<DoctorInput>,
     ) -> Result<String, String> {
+        let fix = input.fix.unwrap_or(false);
+        if fix {
+            self.check_cross_project_write(input.project.as_deref())
+                .await?;
+        }
         let _scope = self.scope("doctor", input.project.as_deref());
         let store = self.open_store_for(input.project.as_deref()).await?;
         let result = ops::doctor(&store)
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+
+        // §10 epistemic checks run alongside the index-consistency check.
+        let config = self.load_config_for(input.project.as_deref()).await?;
+        let epistemic = ops::doctor_epistemic(&store, &config, fix)
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
@@ -2431,6 +2470,9 @@ impl EngramDbServer {
         }
         if !result.healthy {
             response["fix"] = serde_json::json!("Run reindex to repair.");
+        }
+        if !epistemic.findings.is_empty() {
+            response["epistemic_findings"] = serde_json::json!(epistemic.findings);
         }
         let r = serde_json::to_string(&response)
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
@@ -2823,7 +2865,9 @@ impl ServerHandler for EngramDbServer {
                          Memories marked ⚠️ may be inaccurate.\n\
                          Memories marked 🕐 are flagged for review.\n\n\
                          When you discover important patterns, decisions, or hazards during \
-                         this session, store them using the create tool.\n\
+                         this session, store them using the create tool. If a decision holds \
+                         only for THIS task, set origin_task and generality: task, and state \
+                         its premise ('because C').\n\
                          If you encounter evidence that contradicts an existing memory, \
                          use challenge and ask the user how to resolve it.",
                     memory_text

@@ -780,12 +780,25 @@ pub async fn consolidation_pass(
     let loaded = store.get_batch(&ids).await?;
     let now = chrono::Utc::now();
 
+    // Idempotence: observations already consumed by a live derived fact must
+    // not re-cluster — without this, every throttled maintenance pass would
+    // mint a duplicate fact from the same (demoted-but-Active) sources. If
+    // the derived fact is later invalidated, its sources become eligible
+    // again, which is the desired "re-derive after retraction" behavior.
+    let already_derived: std::collections::HashSet<&str> = loaded
+        .iter()
+        .filter(|(_, m)| !m.is_invalidated_at(now))
+        .filter_map(|(_, m)| m.valid_while.as_ref())
+        .flat_map(|v| v.derived_from.iter().map(String::as_str))
+        .collect();
+
     let observations: Vec<&(String, crate::types::Memory)> = loaded
         .iter()
-        .filter(|(_, m)| {
+        .filter(|(id, m)| {
             m.epistemic == Epistemic::Observation
                 && m.status == Status::Active
                 && !m.is_invalidated_at(now)
+                && !already_derived.contains(id.as_str())
         })
         .collect();
     if observations.len() < min_sources.max(2) {
@@ -842,7 +855,7 @@ pub async fn consolidation_pass(
             .collect();
 
         if apply {
-            match consolidate_cluster_apply(store, &source_ids).await {
+            match consolidate_cluster_apply(store, &source_ids, Some(engine)).await {
                 Ok(new_id) => report.created.push(new_id),
                 Err(e) => {
                     tracing::warn!("consolidation apply failed for {source_ids:?}: {e}");
@@ -867,6 +880,7 @@ pub async fn consolidation_pass(
 pub async fn consolidate_cluster_apply(
     store: &MemoryStore,
     source_ids: &[String],
+    engine: Option<&crate::retrieval::engine::RetrievalEngine>,
 ) -> Result<String> {
     use crate::types::{Epistemic, Memory, MemoryType, Provenance, Validity};
 
@@ -893,7 +907,7 @@ pub async fn consolidate_cluster_apply(
     });
 
     let mut summary = format!("Consolidated: {}", sources[0].summary);
-    if summary.len() > 100 {
+    if summary.chars().count() > 100 {
         summary = summary.chars().take(97).collect::<String>() + "...";
     }
     let content = sources
@@ -921,6 +935,19 @@ pub async fn consolidate_cluster_apply(
     fact.logical = logical;
 
     let new_id = store.create(&fact).await?;
+
+    // Embed the derived fact so it participates in vector search immediately
+    // (plain `store.create` writes no vector). Best-effort: a failed embed
+    // leaves the fact index-searchable until the next reindex.
+    if let Some(engine) = engine {
+        if engine.embeddings_available() {
+            if let Ok(saved) = store.get(&new_id).await {
+                if let Err(e) = engine.embed_memory(&saved).await {
+                    tracing::warn!(memory_id = %new_id, "consolidated fact embed failed: {e}");
+                }
+            }
+        }
+    }
 
     // Demote sources: 30d exponential, floor 0.1 — evidence fades, never
     // vanishes.
@@ -1002,7 +1029,7 @@ mod consolidation_tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let new_id = consolidate_cluster_apply(&store, &ids).await.unwrap();
+        let new_id = consolidate_cluster_apply(&store, &ids, None).await.unwrap();
 
         let fact = store.get(&new_id).await.unwrap();
         assert_eq!(fact.epistemic, Epistemic::Fact);
@@ -1034,10 +1061,201 @@ mod consolidation_tests {
         other.id = "con-d".to_string();
         store.create(&other).await.unwrap();
         let mixed: Vec<String> = vec!["con-a".into(), "con-d".into()];
-        let mixed_id = consolidate_cluster_apply(&store, &mixed).await.unwrap();
+        let mixed_id = consolidate_cluster_apply(&store, &mixed, None)
+            .await
+            .unwrap();
         assert_eq!(
             store.get(&mixed_id).await.unwrap().type_,
             MemoryType::Context
+        );
+    }
+
+    // --- Gate tests: stub providers so similarity + NLI gating is
+    // --- deterministic without loading any real model.
+
+    /// Deterministic embeddings: texts containing the same `group<X>` marker
+    /// share an identical (cosine 1.0) vector; different markers are
+    /// orthogonal (cosine 0.0).
+    struct MarkerEmbedding;
+
+    #[async_trait::async_trait]
+    impl crate::embeddings::EmbeddingProvider for MarkerEmbedding {
+        async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            let mut v = vec![0.0f32; 384];
+            if text.contains("groupA") {
+                v[0] = 1.0;
+            } else if text.contains("groupB") {
+                v[1] = 1.0;
+            } else {
+                v[2] = 1.0;
+            }
+            Ok(v)
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            let mut out = Vec::with_capacity(texts.len());
+            for t in texts {
+                out.push(self.embed(t).await?);
+            }
+            Ok(out)
+        }
+        fn dimensions(&self) -> usize {
+            384
+        }
+        fn max_tokens(&self) -> usize {
+            256
+        }
+        fn model_id(&self) -> String {
+            "onnx/marker-stub".to_string()
+        }
+    }
+
+    /// Stub NLI: any pair where either side contains "flaky" is a full
+    /// contradiction; everything else is neutral.
+    struct MarkerNli;
+
+    #[async_trait::async_trait]
+    impl crate::nli::NliProvider for MarkerNli {
+        async fn classify(
+            &self,
+            premise: &str,
+            hypothesis: &str,
+        ) -> anyhow::Result<crate::nli::NliResult> {
+            let contradicted = premise.contains("flaky") || hypothesis.contains("flaky");
+            Ok(crate::nli::NliResult {
+                label: if contradicted {
+                    crate::nli::NliLabel::Contradiction
+                } else {
+                    crate::nli::NliLabel::Neutral
+                },
+                entailment: 0.0,
+                neutral: if contradicted { 0.0 } else { 1.0 },
+                contradiction: if contradicted { 1.0 } else { 0.0 },
+            })
+        }
+        async fn classify_batch(
+            &self,
+            pairs: &[(&str, &str)],
+        ) -> anyhow::Result<Vec<crate::nli::NliResult>> {
+            let mut out = Vec::with_capacity(pairs.len());
+            for (p, h) in pairs {
+                out.push(self.classify(p, h).await?);
+            }
+            Ok(out)
+        }
+    }
+
+    async fn gate_fixture() -> (
+        TempDir,
+        MemoryStore,
+        crate::retrieval::engine::RetrievalEngine,
+        crate::types::EngramConfig,
+    ) {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut config = crate::types::EngramConfig::default();
+        config.nli.enabled = true;
+        let engine = crate::retrieval::engine::RetrievalEngine::new(store.clone(), config.clone())
+            .with_embedding_provider(std::sync::Arc::new(MarkerEmbedding))
+            .with_nli_provider(std::sync::Arc::new(MarkerNli));
+        (tmp, store, engine, config)
+    }
+
+    async fn observation(store: &MemoryStore, id: &str, summary: &str) {
+        // Debug is diagonally Observation-class.
+        let mut m = Memory::new(MemoryType::Debug, summary, summary, Provenance::human());
+        m.id = id.to_string();
+        store.create(&m).await.unwrap();
+    }
+
+    /// The §11.4 similarity gate: only observations whose embeddings clear
+    /// `consolidation_similarity` cluster; sub-threshold (orthogonal)
+    /// observations never do, and clusters below `consolidation_min_sources`
+    /// are dropped.
+    #[tokio::test]
+    async fn consolidation_gate_clusters_by_similarity_only() {
+        let (_t, store, engine, config) = gate_fixture().await;
+
+        for id in ["ga-1", "ga-2", "ga-3"] {
+            observation(&store, id, &format!("groupA behavior seen in {id}")).await;
+        }
+        // Only two of these — below min_sources (3) — plus orthogonal class.
+        for id in ["gb-1", "gb-2"] {
+            observation(&store, id, &format!("groupB behavior seen in {id}")).await;
+        }
+
+        let report = consolidation_pass(&store, &engine, &config, false)
+            .await
+            .unwrap();
+        assert!(!report.skipped_no_providers);
+        assert_eq!(report.clusters.len(), 1, "only the 3-strong groupA cluster");
+        let mut ids = report.clusters[0].source_ids.clone();
+        ids.sort();
+        assert_eq!(ids, vec!["ga-1", "ga-2", "ga-3"]);
+        assert!(report.created.is_empty(), "suggestion mode creates nothing");
+    }
+
+    /// The §11.4 NLI gate: a similarity cluster containing a pairwise
+    /// contradiction is a dispute, not a consolidation — it must be dropped.
+    #[tokio::test]
+    async fn consolidation_gate_rejects_contradicting_cluster() {
+        let (_t, store, engine, config) = gate_fixture().await;
+
+        observation(&store, "gc-1", "groupA the cache is fast").await;
+        observation(&store, "gc-2", "groupA the cache is quick").await;
+        // Same embedding group, but the stub NLI contradicts this one.
+        observation(&store, "gc-3", "groupA the cache is flaky").await;
+
+        let report = consolidation_pass(&store, &engine, &config, false)
+            .await
+            .unwrap();
+        assert!(
+            report.clusters.is_empty(),
+            "contradicting cluster must not consolidate: {:?}",
+            report.clusters
+        );
+    }
+
+    /// Idempotence: after an applied consolidation, the (still-Active,
+    /// demoted) sources must not re-cluster on the next pass — one derived
+    /// fact, not one per maintenance interval.
+    #[tokio::test]
+    async fn consolidation_apply_is_idempotent_across_passes() {
+        let (_t, store, engine, config) = gate_fixture().await;
+
+        for id in ["gi-1", "gi-2", "gi-3"] {
+            observation(&store, id, &format!("groupA metric drift in {id}")).await;
+        }
+
+        let first = consolidation_pass(&store, &engine, &config, true)
+            .await
+            .unwrap();
+        assert_eq!(first.created.len(), 1, "first pass consolidates");
+        let fact = store.get(&first.created[0]).await.unwrap();
+        assert_eq!(fact.epistemic, Epistemic::Fact);
+
+        let second = consolidation_pass(&store, &engine, &config, true)
+            .await
+            .unwrap();
+        assert!(
+            second.created.is_empty() && second.clusters.is_empty(),
+            "consumed sources must not re-cluster: {:?}",
+            second.clusters
+        );
+
+        // Invalidating the derived fact frees its sources to re-derive.
+        store
+            .invalidate_with(&first.created[0], None, chrono::Utc::now())
+            .await
+            .unwrap();
+        let third = consolidation_pass(&store, &engine, &config, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            third.clusters.len(),
+            1,
+            "retracted derivation reopens the cluster"
         );
     }
 }

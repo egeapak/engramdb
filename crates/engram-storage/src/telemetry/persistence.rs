@@ -177,8 +177,15 @@ async fn ensure_table(conn: &Connection) -> Result<Table> {
             }
             tracing::info!("stats: rebuilding stats_events with the memory_ids column");
             let mut preserved = Vec::new();
+            // ORDER BY ts DESC before the cap: an unordered Lance scan returns
+            // insertion order (oldest first), which would preserve the oldest
+            // rows and silently discard the recent history the rebuild exists
+            // to keep.
             let mut stream = t
                 .query()
+                .order_by(Some(vec![ColumnOrdering::desc_nulls_last(
+                    "ts".to_string(),
+                )]))
                 .limit(STARTUP_REPLAY_CAP)
                 .execute()
                 .await
@@ -188,6 +195,9 @@ async fn ensure_table(conn: &Connection) -> Result<Table> {
                 preserved.extend(batch_to_events(&batch)?);
             }
             drop(stream);
+            // Restore ascending order for the re-append so the rebuilt table
+            // keeps chronological insertion order.
+            preserved.reverse();
             conn.drop_table(TABLE_NAME, &[])
                 .await
                 .context("dropping pre-memory_ids stats_events table")?;

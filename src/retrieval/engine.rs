@@ -1461,6 +1461,126 @@ mod tests {
         assert_eq!(filter_threshold(f64::NAN), 0.0);
     }
 
+    /// Stub embedding: every text maps to the same unit vector, so any two
+    /// memories are cosine-1.0 neighbours. No model load.
+    struct ConstantEmbedding;
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for ConstantEmbedding {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            let mut v = vec![0.0f32; 384];
+            v[0] = 1.0;
+            Ok(v)
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            let mut out = Vec::with_capacity(texts.len());
+            for t in texts {
+                out.push(self.embed(t).await?);
+            }
+            Ok(out)
+        }
+        fn dimensions(&self) -> usize {
+            384
+        }
+        fn max_tokens(&self) -> usize {
+            256
+        }
+        fn model_id(&self) -> String {
+            "onnx/constant-stub".to_string()
+        }
+    }
+
+    /// Stub NLI: everything is a maximal contradiction. No model load.
+    struct AlwaysContradicts;
+
+    #[async_trait::async_trait]
+    impl NliProvider for AlwaysContradicts {
+        async fn classify(
+            &self,
+            _premise: &str,
+            _hypothesis: &str,
+        ) -> anyhow::Result<crate::nli::NliResult> {
+            Ok(crate::nli::NliResult {
+                label: crate::nli::NliLabel::Contradiction,
+                entailment: 0.0,
+                neutral: 0.0,
+                contradiction: 1.0,
+            })
+        }
+        async fn classify_batch(
+            &self,
+            pairs: &[(&str, &str)],
+        ) -> anyhow::Result<Vec<crate::nli::NliResult>> {
+            let mut out = Vec::with_capacity(pairs.len());
+            for _ in pairs {
+                out.push(self.classify("", "").await?);
+            }
+            Ok(out)
+        }
+    }
+
+    /// §14.14: invalidated memories are excluded from the NLI contradiction
+    /// candidate set. Deterministic stub providers: the existing memory is a
+    /// perfect vector neighbour and the NLI stub contradicts everything, so
+    /// the ONLY thing standing between the probe and a challenge is the
+    /// invalidated-window gate — without it, every create would re-challenge
+    /// its just-superseded predecessor.
+    #[tokio::test]
+    async fn nli_candidates_exclude_invalidated_memories() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let existing = Memory::new(
+            MemoryType::Decision,
+            "The cache is enabled",
+            "body",
+            Provenance::human(),
+        );
+        store.create(&existing).await.unwrap();
+
+        let embed: Arc<dyn EmbeddingProvider> = Arc::new(ConstantEmbedding);
+        embed_memory_with(embed.as_ref(), &store, &existing, embed.max_tokens(), None)
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.nli.enabled = true;
+        config.nli.similarity_threshold = 0.0;
+        config.nli.contradiction_threshold = 0.5;
+
+        let engine = RetrievalEngine::new(store.clone(), config)
+            .with_embedding_provider(Arc::clone(&embed))
+            .with_nli_provider(Arc::new(AlwaysContradicts));
+
+        let probe = Memory::new(
+            MemoryType::Decision,
+            "The cache is disabled",
+            "body",
+            Provenance::human(),
+        );
+
+        // Control: while the existing memory is live, it IS flagged.
+        let live = engine.detect_contradictions(&probe).await.unwrap();
+        assert_eq!(live.len(), 1, "live neighbour must be flagged");
+        assert_eq!(live[0].0, existing.id);
+
+        // Close the window: the same neighbour must vanish from candidates.
+        store
+            .invalidate_with(&existing.id, None, chrono::Utc::now())
+            .await
+            .unwrap();
+        let after = engine.detect_contradictions(&probe).await.unwrap();
+        assert!(
+            after.is_empty(),
+            "invalidated memory leaked into NLI candidates: {after:?}"
+        );
+    }
+
     // Finding #19: `config.embeddings.max_tokens` is now authoritative for
     // chunking (previously dead config — chunking only used the provider spec).
     #[test]

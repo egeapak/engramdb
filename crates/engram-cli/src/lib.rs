@@ -170,6 +170,11 @@ pub async fn run(cli: Cli) -> Result<()> {
     // `[maintenance]` config and the `--no-maintenance` flag. Failures are
     // logged and swallowed so they never block the actual command.
     if !is_exempt && on_main_worktree {
+        // Deliberately engine-less: a short-lived CLI process must not load
+        // embedding models just for housekeeping, so §11.4 consolidation
+        // gracefully skips here. The long-running MCP server passes its
+        // engine (see `maintain_main_project`), which is where consolidation
+        // actually runs.
         engramdb::ops::auto_maintain(&dir, &registry, &config.maintenance, cli.no_maintenance)
             .await;
     }
@@ -337,6 +342,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::List {
             type_,
+            epistemic,
             tags,
             status,
             scope,
@@ -350,6 +356,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 &dir,
                 global,
                 type_,
+                epistemic,
                 tags,
                 status,
                 scope,
@@ -388,6 +395,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             valid_from,
             clear_validity,
             clear_invalidated,
+            invalidate,
+            superseded_by,
             decay_strategy,
             decay_half_life,
             decay_ttl,
@@ -424,6 +433,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                     valid_from,
                     clear_validity,
                     clear_invalidated,
+                    invalidate,
+                    superseded_by,
                     decay_strategy,
                     decay_half_life,
                     decay_ttl,
@@ -442,9 +453,17 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Verify { id, global } => commands::run_verify(&dir, global, &id, &formatter).await,
         Command::Task { command } => match command {
-            TaskCommand::Current { name, session_id } => {
-                commands::run_task_current(&dir, name.as_deref(), session_id.as_deref(), &formatter)
-            }
+            TaskCommand::Current {
+                name,
+                session_id,
+                global,
+            } => commands::run_task_current(
+                &dir,
+                global,
+                name.as_deref(),
+                session_id.as_deref(),
+                &formatter,
+            ),
             TaskCommand::Complete { name, global } => {
                 commands::run_task_complete(&dir, global, &name, &formatter).await
             }

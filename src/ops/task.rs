@@ -58,10 +58,31 @@ fn demotion_decay() -> Decay {
     Decay::exponential(Duration::days(14))
 }
 
-/// True when the memory's decay is one of its DEFAULTS (type-diagonal or
-/// off-diagonal class default) rather than an explicit user choice. Decay
-/// has no `PartialEq`; compare the serialized form.
-fn decay_is_default(memory: &crate::types::Memory) -> bool {
+/// The class-appropriate default decay, honoring the `[epistemic]` config
+/// overrides for the off-diagonal Observation curve (mirrors the create
+/// path, which builds that curve from `observation_half_life_days` /
+/// `observation_decay_floor`).
+fn config_default_decay(
+    type_: crate::types::MemoryType,
+    epistemic: crate::types::Epistemic,
+    cfg: &crate::types::EpistemicConfig,
+) -> Option<Decay> {
+    use crate::types::Epistemic;
+    if epistemic == Epistemic::Observation && type_.default_epistemic() != Epistemic::Observation {
+        Some(
+            Decay::exponential(Duration::days(cfg.observation_half_life_days as i64))
+                .with_floor(cfg.observation_decay_floor),
+        )
+    } else {
+        crate::types::default_decay(type_, epistemic)
+    }
+}
+
+/// True when the memory's decay is one of its DEFAULTS (type-diagonal,
+/// off-diagonal class default, or the config-overridden observation curve)
+/// rather than an explicit user choice. Decay has no `PartialEq`; compare
+/// the serialized form.
+fn decay_is_default(memory: &crate::types::Memory, cfg: &crate::types::EpistemicConfig) -> bool {
     let current = match &memory.decay {
         Some(d) => match serde_json::to_string(d) {
             Ok(s) => s,
@@ -70,6 +91,7 @@ fn decay_is_default(memory: &crate::types::Memory) -> bool {
         None => return true,
     };
     let candidates = [
+        config_default_decay(memory.type_, memory.epistemic, cfg),
         crate::types::default_decay(memory.type_, memory.epistemic),
         memory.type_.default_decay(),
     ];
@@ -87,7 +109,11 @@ fn decay_is_default(memory: &crate::types::Memory) -> bool {
 ///   memory carries an explicit user-set decay);
 /// - `generality: project` → left untouched, reported as a notice
 ///   ("project-wide memory from a completed task — verify or demote").
-pub async fn task_complete(store: &MemoryStore, name: &str) -> Result<TaskCompleteResult> {
+pub async fn task_complete(
+    store: &MemoryStore,
+    name: &str,
+    epistemic_cfg: &crate::types::EpistemicConfig,
+) -> Result<TaskCompleteResult> {
     let name = name.trim();
     if name.is_empty() {
         anyhow::bail!("task name must not be empty");
@@ -116,7 +142,7 @@ pub async fn task_complete(store: &MemoryStore, name: &str) -> Result<TaskComple
                     .push((id.clone(), memory.summary.clone()));
             }
             Generality::Task => {
-                if !decay_is_default(memory) {
+                if !decay_is_default(memory, epistemic_cfg) {
                     result.kept_custom_decay.push(id.clone());
                     continue;
                 }
@@ -203,7 +229,9 @@ mod tests {
         custom.decay = Some(Decay::linear(Duration::days(3)).with_floor(0.4));
         store.create(&custom).await.unwrap();
 
-        let result = task_complete(&store, "feat-x").await.unwrap();
+        let result = task_complete(&store, "feat-x", &Default::default())
+            .await
+            .unwrap();
         assert_eq!(result.demoted, vec!["tc-task".to_string()]);
         assert_eq!(result.kept_custom_decay, vec!["tc-custom".to_string()]);
         assert_eq!(result.project_wide_notices.len(), 1);
@@ -241,9 +269,48 @@ mod tests {
         obs.decay = crate::types::default_decay(MemoryType::Hazard, Epistemic::Observation);
         store.create(&obs).await.unwrap();
 
-        let result = task_complete(&store, "feat-z").await.unwrap();
+        let result = task_complete(&store, "feat-z", &Default::default())
+            .await
+            .unwrap();
         assert_eq!(result.demoted, vec!["tc-obs".to_string()]);
         assert!(store.get("tc-dead").await.unwrap().decay.is_some());
+    }
+
+    /// A config-overridden observation curve (create builds it from
+    /// `[epistemic] observation_half_life_days`/`observation_decay_floor`)
+    /// still counts as "default" and demotes — the override must not be
+    /// mistaken for an explicit user decay.
+    #[tokio::test]
+    async fn task_complete_demotes_config_overridden_observation_curve() {
+        let (_t, store) = setup().await;
+        let cfg = crate::types::EpistemicConfig {
+            observation_half_life_days: 60,
+            observation_decay_floor: 0.25,
+            ..Default::default()
+        };
+
+        let mut obs = task_memory("tc-cfg-obs", "feat-w", Generality::Task);
+        obs.type_ = MemoryType::Hazard;
+        obs.epistemic = Epistemic::Observation;
+        // Exactly what create_memory builds under this config.
+        obs.decay = Some(Decay::exponential(Duration::days(60)).with_floor(0.25));
+        store.create(&obs).await.unwrap();
+
+        let result = task_complete(&store, "feat-w", &cfg).await.unwrap();
+        assert_eq!(result.demoted, vec!["tc-cfg-obs".to_string()]);
+        let demoted = store.get("tc-cfg-obs").await.unwrap().decay.unwrap();
+        assert_eq!(demoted.half_life, Some(Duration::days(14)));
+
+        // Under the DEFAULT config the same curve is a custom choice: kept.
+        let mut obs2 = task_memory("tc-cfg-obs2", "feat-w2", Generality::Task);
+        obs2.type_ = MemoryType::Hazard;
+        obs2.epistemic = Epistemic::Observation;
+        obs2.decay = Some(Decay::exponential(Duration::days(60)).with_floor(0.25));
+        store.create(&obs2).await.unwrap();
+        let result = task_complete(&store, "feat-w2", &Default::default())
+            .await
+            .unwrap();
+        assert_eq!(result.kept_custom_decay, vec!["tc-cfg-obs2".to_string()]);
     }
 }
 
@@ -340,13 +407,17 @@ pub async fn promote_reconfirmed_memories(
         }
 
         if config.epistemic.auto_promote {
+            // Class-appropriate reset honoring the [epistemic] observation
+            // overrides — computed outside the closure from the loaded copy.
+            let reset_decay =
+                config_default_decay(memory.type_, memory.epistemic, &config.epistemic);
             let promoted = store
-                .update_with(id, |m| {
+                .update_with(id, move |m| {
                     if let Some(v) = &mut m.valid_while {
                         v.origin_task = None;
                         v.generality = crate::types::Generality::Project;
                     }
-                    m.decay = crate::types::default_decay(m.type_, m.epistemic);
+                    m.decay = reset_decay.clone();
                     m.verified_at = Some(chrono::Utc::now());
                     Ok(())
                 })

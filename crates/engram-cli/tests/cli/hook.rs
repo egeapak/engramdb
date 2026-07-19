@@ -142,3 +142,157 @@ fn hook_pre_tool_use_uninitialized_store_is_silent() {
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+/// §14.15 process-level robustness: every hook subcommand must exit 0 on
+/// empty or garbage stdin — a hook exiting non-zero on malformed input
+/// breaks the host Claude Code session, the exact contract these handlers
+/// exist to protect. (session-start emits its reflection nudge even on
+/// malformed stdin — by design — so only exit codes are asserted here;
+/// silence is asserted separately for the handlers that require input.)
+#[test]
+fn hook_all_subcommands_malformed_stdin_exit_zero() {
+    let project = seed_project();
+    let empty_cache = TempDir::new().unwrap();
+
+    let subcommands = [
+        "pre-tool-use",
+        "session-start",
+        "user-prompt-submit",
+        "post-tool-use",
+        "session-end",
+        "pre-compact",
+    ];
+    for sub in subcommands {
+        for stdin in ["", "not json at all {{{", "42", "null"] {
+            let output = hook_cmd(project.path(), &[sub], &empty_cache)
+                .write_stdin(stdin)
+                .output()
+                .unwrap_or_else(|e| panic!("failed to run hook {sub}: {e}"));
+            assert!(
+                output.status.success(),
+                "hook {sub} must exit 0 on stdin {stdin:?}; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}
+
+/// The event-driven handlers (everything except session-start and
+/// pre-compact, which emit static context regardless) must stay SILENT on
+/// malformed stdin — garbage in, no additionalContext out.
+#[test]
+fn hook_event_handlers_malformed_stdin_are_silent() {
+    let project = seed_project();
+    let empty_cache = TempDir::new().unwrap();
+
+    for sub in [
+        "pre-tool-use",
+        "user-prompt-submit",
+        "post-tool-use",
+        "session-end",
+    ] {
+        for stdin in ["", "not json at all {{{"] {
+            let output = hook_cmd(project.path(), &[sub], &empty_cache)
+                .write_stdin(stdin)
+                .output()
+                .unwrap_or_else(|e| panic!("failed to run hook {sub}: {e}"));
+            assert!(
+                output.stdout.is_empty(),
+                "hook {sub} must emit nothing on stdin {stdin:?}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+    }
+}
+
+/// SessionEnd housekeeping end-to-end: the session→task mapping is cleared,
+/// and with `[epistemic] demote_on_session_end = true` the ended task's
+/// task-scoped memories are demoted to the 14-day curve (§11.2 via §8.5.3).
+#[test]
+fn hook_session_end_clears_mapping_and_demotes_when_configured() {
+    let project = seed_project();
+    let empty_cache = TempDir::new().unwrap();
+
+    let task_mem = add_memory_with_args(
+        project.path(),
+        &[
+            "-t",
+            "decision",
+            "-s",
+            "Pin rc12 for this task",
+            "-c",
+            "task-scoped decision body",
+            "--origin-task",
+            "feat-x",
+            "--generality",
+            "task",
+        ],
+    );
+
+    // Opt in to demotion-on-session-end.
+    std::fs::write(
+        project.path().join(".engramdb").join("config.toml"),
+        "[epistemic]\ndemote_on_session_end = true\n",
+    )
+    .unwrap();
+
+    // Declare the mapping the way a session would.
+    let out = cmd()
+        .args([
+            "--dir",
+            project.path().to_str().unwrap(),
+            "task",
+            "current",
+            "feat-x",
+            "--session-id",
+            "sess-end-e2e",
+        ])
+        .output()
+        .expect("task current failed");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let output = hook_cmd(project.path(), &["session-end"], &empty_cache)
+        .write_stdin(r#"{"session_id":"sess-end-e2e"}"#)
+        .output()
+        .expect("failed to run hook session-end");
+    assert!(output.status.success());
+
+    // Mapping cleared.
+    let mapping = std::fs::read_to_string(
+        project
+            .path()
+            .join(".engramdb")
+            .join("state")
+            .join("session_tasks.json"),
+    )
+    .unwrap_or_default();
+    assert!(
+        !mapping.contains("sess-end-e2e"),
+        "session mapping must be cleared: {mapping}"
+    );
+
+    // Task-scoped memory demoted to the 14d exponential curve.
+    let get = cmd()
+        .args([
+            "--dir",
+            project.path().to_str().unwrap(),
+            "get",
+            &task_mem,
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("get failed");
+    assert!(get.status.success());
+    let mem: serde_json::Value = serde_json::from_slice(&get.stdout).unwrap();
+    let decay = &mem["decay"];
+    assert_eq!(
+        decay["strategy"].as_str(),
+        Some("exponential"),
+        "expected demotion curve, got: {decay}"
+    );
+}

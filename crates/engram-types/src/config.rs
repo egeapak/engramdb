@@ -751,6 +751,11 @@ impl Default for EmbeddingsConfig {
 }
 
 /// NLI contradiction detection configuration
+///
+/// One NLI model serves every epistemic class (§9 conflict routing keys off
+/// the class pair, not per-class models). If class-specific NLI models are
+/// ever added, `provider_cache_key` in `src/ops/mod.rs` must be extended
+/// with the new field(s) or the cache will serve stale bundles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NliConfig {
     /// Whether NLI contradiction detection is enabled
@@ -1405,6 +1410,7 @@ impl EngramConfig {
             anyhow::bail!("scoring.trust_multiplier_floor must be in [0.0, 1.0]");
         }
         self.retrieval.scoring.challenge_penalty.validate()?;
+        self.retrieval.scoring.situation.validate()?;
         if !(0.0..=1.0).contains(&self.retrieval.scoring.depth_decay_base) {
             anyhow::bail!("scoring.depth_decay_base must be in [0.0, 1.0]");
         }
@@ -2313,6 +2319,23 @@ weight = 0.7
 
         // valid defaults pass
         assert!(EngramConfig::default().validate().is_ok());
+    }
+
+    /// §7.1: `SituationConfig::validate` must be wired into
+    /// `EngramConfig::validate` — an out-of-range floor or profile value
+    /// must fail config validation, not silently clamp at read time.
+    #[test]
+    fn test_top_level_validate_covers_situation_config() {
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.situation.floor = 1.5;
+        assert!(config.validate().is_err(), "floor 1.5 must be rejected");
+
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.situation.debugging.observation = -3.0;
+        assert!(
+            config.validate().is_err(),
+            "negative profile value must be rejected"
+        );
     }
 
     #[test]

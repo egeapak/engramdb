@@ -38,6 +38,10 @@ pub enum TaskCommand {
         /// Session id (defaults to $CLAUDE_SESSION_ID / $MCP_SESSION_ID)
         #[arg(long = "session-id")]
         session_id: Option<String>,
+
+        /// Operate on the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
     },
     /// Mark a task finished: demote its task-scoped memories
     Complete {
@@ -453,6 +457,10 @@ pub enum Command {
         #[arg(long, short = 't')]
         type_: Vec<String>,
 
+        /// Filter by epistemic class: fact, observation, decision (repeatable)
+        #[arg(long)]
+        epistemic: Vec<String>,
+
         /// Filter by tags (comma-separated or repeated)
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
@@ -588,6 +596,15 @@ pub enum Command {
         /// Reopen a closed validity window (clears invalidated_at + superseded_by)
         #[arg(long = "clear-invalidated")]
         clear_invalidated: bool,
+
+        /// Close the validity window now: the memory WAS true but no longer is.
+        /// Preferred over delete — history stays queryable via --include-invalidated
+        #[arg(long, conflicts_with = "clear_invalidated")]
+        invalidate: bool,
+
+        /// Id of the memory that supersedes this one (only with --invalidate)
+        #[arg(long = "superseded-by", requires = "invalidate")]
+        superseded_by: Option<String>,
 
         /// Decay strategy: none, linear, exponential, or step
         #[arg(long)]
@@ -850,6 +867,158 @@ pub enum Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Epistemic-feature flag wiring: every new long flag must parse and land
+    /// in the right field — a clap long-name typo ships silently otherwise.
+    #[test]
+    fn test_epistemic_flags_parse() {
+        // add: all six epistemic fields.
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "add",
+            "content",
+            "-s",
+            "sum",
+            "-t",
+            "decision",
+            "--epistemic",
+            "decision",
+            "--premise",
+            "while rc12 is pinned",
+            "--invalidated-by",
+            "Cargo.lock",
+            "--origin-task",
+            "feat-x",
+            "--generality",
+            "task",
+            "--valid-from",
+            "2026-07-01T00:00:00Z",
+        ])
+        .expect("add epistemic flags must parse");
+        match cli.command {
+            Command::Add {
+                epistemic,
+                premise,
+                invalidated_by,
+                origin_task,
+                generality,
+                valid_from,
+                ..
+            } => {
+                assert_eq!(epistemic.as_deref(), Some("decision"));
+                assert_eq!(premise.as_deref(), Some("while rc12 is pinned"));
+                assert_eq!(invalidated_by, vec!["Cargo.lock"]);
+                assert_eq!(origin_task.as_deref(), Some("feat-x"));
+                assert_eq!(generality.as_deref(), Some("task"));
+                assert_eq!(valid_from.as_deref(), Some("2026-07-01T00:00:00Z"));
+            }
+            _ => panic!("expected Add"),
+        }
+
+        // update: clear flags + invalidate + superseded-by.
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "update",
+            "some-id",
+            "--clear-validity",
+            "--invalidate",
+            "--superseded-by",
+            "other-id",
+        ])
+        .expect("update invalidate flags must parse");
+        match cli.command {
+            Command::Update {
+                clear_validity,
+                clear_invalidated,
+                invalidate,
+                superseded_by,
+                ..
+            } => {
+                assert!(clear_validity);
+                assert!(!clear_invalidated);
+                assert!(invalidate);
+                assert_eq!(superseded_by.as_deref(), Some("other-id"));
+            }
+            _ => panic!("expected Update"),
+        }
+        // --superseded-by requires --invalidate; --invalidate conflicts with
+        // --clear-invalidated.
+        assert!(Cli::try_parse_from(["engramdb", "update", "id", "--superseded-by", "x"]).is_err());
+        assert!(Cli::try_parse_from([
+            "engramdb",
+            "update",
+            "id",
+            "--invalidate",
+            "--clear-invalidated"
+        ])
+        .is_err());
+
+        // query: situation + epistemic filter + include-invalidated.
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "query",
+            "--mode",
+            "filter",
+            "--query",
+            "x",
+            "--situation",
+            "debugging",
+            "--epistemic",
+            "observation",
+            "--include-invalidated",
+        ])
+        .expect("query epistemic flags must parse");
+        match cli.command {
+            Command::Query {
+                situation,
+                epistemic,
+                include_invalidated,
+                ..
+            } => {
+                assert_eq!(situation.as_deref(), Some("debugging"));
+                assert_eq!(epistemic, vec!["observation"]);
+                assert!(include_invalidated);
+            }
+            _ => panic!("expected Query"),
+        }
+
+        // list: epistemic filter + include-invalidated.
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "list",
+            "--epistemic",
+            "fact",
+            "--epistemic",
+            "decision",
+            "--include-invalidated",
+        ])
+        .expect("list epistemic flags must parse");
+        match cli.command {
+            Command::List {
+                epistemic,
+                include_invalidated,
+                ..
+            } => {
+                assert_eq!(epistemic, vec!["fact", "decision"]);
+                assert!(include_invalidated);
+            }
+            _ => panic!("expected List"),
+        }
+
+        // verify + task subcommands.
+        assert!(Cli::try_parse_from(["engramdb", "verify", "some-id"]).is_ok());
+        assert!(Cli::try_parse_from([
+            "engramdb",
+            "task",
+            "current",
+            "feat-x",
+            "--session-id",
+            "s1"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from(["engramdb", "task", "current", "--global"]).is_ok());
+        assert!(Cli::try_parse_from(["engramdb", "task", "complete", "feat-x"]).is_ok());
+    }
 
     #[test]
     fn test_retrieve_with_query_long_flag() {

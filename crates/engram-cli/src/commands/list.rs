@@ -25,6 +25,7 @@ pub async fn run_list(
     dir: &Path,
     global: bool,
     type_filter: Vec<String>,
+    epistemic_filter: Vec<String>,
     tags_filter: Vec<String>,
     status_filter: Option<String>,
     scope_filter: Option<String>,
@@ -51,6 +52,11 @@ pub async fn run_list(
             None
         } else {
             Some(type_filter)
+        },
+        epistemic: if epistemic_filter.is_empty() {
+            None
+        } else {
+            Some(epistemic_filter)
         },
         tags: if tags_filter.is_empty() {
             None
@@ -166,6 +172,7 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
             None,
             Some("src/main.rs".to_string()),
             "criticality",
@@ -190,6 +197,7 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
             None,
             Some("app.core".to_string()),
             "criticality",
@@ -212,6 +220,7 @@ mod tests {
         let result = run_list(
             temp_dir.path(),
             false,
+            vec![],
             vec![],
             vec![],
             None,
@@ -251,6 +260,7 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
             None,
             None,
             "created",
@@ -273,6 +283,7 @@ mod tests {
         let result = run_list(
             temp_dir.path(),
             false,
+            vec![],
             vec![],
             vec![],
             None,
@@ -299,6 +310,7 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
             None,
             None,
             "type",
@@ -321,6 +333,7 @@ mod tests {
         let result = run_list(
             temp_dir.path(),
             false,
+            vec![],
             vec![],
             vec![],
             None,
@@ -351,6 +364,7 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
             None,
             None,
             "criticality",
@@ -373,6 +387,7 @@ mod tests {
         let result = run_list(
             temp_dir.path(),
             false,
+            vec![],
             vec![],
             vec![],
             None,
@@ -399,6 +414,7 @@ mod tests {
             false,
             vec![],
             vec![],
+            vec![],
             None,
             Some("app.core".to_string()),
             "criticality",
@@ -419,6 +435,7 @@ mod tests {
 
         let params = ListParams {
             types: None,
+            epistemic: None,
             tags: None,
             status: None,
             scope: Some("app.core".to_string()),
@@ -438,6 +455,7 @@ mod tests {
 
         let params = ListParams {
             types: None,
+            epistemic: None,
             tags: None,
             status: None,
             scope: None,
