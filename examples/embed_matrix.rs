@@ -1,18 +1,24 @@
 //! Embedding-strategy benchmark matrix: chunking x field-composition x model.
 //!
-//! Answers, with a labeled offline corpus (`examples/data/embed_eval.json`):
-//! 1. How much does chunk size (and chunking at all, vs truncated full text)
-//!    affect retrieval quality?
-//! 2. How much does the embedding model matter (int8/fp32 MiniLM, BGE-small,
-//!    nomic-embed-text), and do retrieval-tuned models need their query
-//!    instruction prefix to win?
-//! 3. Does composing the embed text from more fields (title, tags, structured
-//!    labels) — or embedding fields as separate vectors — improve recall?
+//! Executes the experiment plan from the embedding-quality research review:
+//! - E1 field composition: does embedding title/tags/labels (today only
+//!   `"{summary} {content}"` is embedded) fix the title-echo/tag-only blind
+//!   spot — and is a separate metadata vector better than concatenation?
+//! - E2 model swap + prefixes: retrieval-tuned bge-small-en-v1.5 / nomic
+//!   vs the MiniLM default, with and without their instruction prefixes
+//!   (fastembed adds none; EngramDB adds none today).
+//! - E3 token-budget overflow: true-token counts of the word-count chunker's
+//!   output (code-dense text overflows the 256-token model limit silently).
+//! - E4 chunk-budget sweep: 64..256-token budgets vs no chunking at all.
+//! - E5 boundary defects: word overlap, sentence-aware packing, runt-merge,
+//!   scored on planted facts at start/straddle/end of long memories.
+//! - E6 aggregation: max (production) vs mean vs top-2 mean over chunks.
 //!
 //! The harness mirrors the store's real behavior: documents become one or
-//! more chunk vectors (`engramdb::embeddings::chunk_text`), queries are
-//! embedded whole, and per-memory scores aggregate over chunk vectors
-//! (max, like `LanceIndex::vector_search`; mean reported as an ablation).
+//! more chunk vectors (`engramdb::embeddings::chunk_text` or an experimental
+//! variant), queries are embedded whole, and per-memory scores aggregate
+//! over chunk vectors (max, like `LanceIndex::vector_search`; vectors are
+//! L2-normalized so cosine ordering matches the store's `1/(1+L2)`).
 //!
 //! Run: `cargo run --release --example embed_matrix`
 //! Env: `EMBED_EVAL_DATA` (dataset path), `EMBED_EVAL_OUT` (results JSON),
@@ -23,8 +29,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use engramdb::embeddings::{
-    chunk_text, EmbeddingProvider, OnnxModelSpec, OnnxProvider, ONNX_ALL_MINILM,
-    ONNX_ALL_MINILM_Q, ONNX_BGE_SMALL_EN_Q, ONNX_NOMIC_EMBED_TEXT_Q,
+    chunk_text, EmbeddingProvider, OnnxModelSpec, OnnxProvider, ONNX_ALL_MINILM, ONNX_ALL_MINILM_Q,
+    ONNX_BGE_SMALL_EN_Q, ONNX_NOMIC_EMBED_TEXT_Q,
 };
 use engramdb::onnx_ep::Backend;
 use serde::{Deserialize, Serialize};
@@ -51,6 +57,13 @@ struct Mem {
     tags: Vec<String>,
     #[serde(default)]
     logical: Vec<String>,
+    /// For long memories with a planted fact: where it sits relative to the
+    /// 192-word chunk boundary ("start" | "straddle" | "end").
+    #[serde(default)]
+    fact_pos: Option<String>,
+    /// Heavy in code identifiers/paths/env vars (token-overflow stratum).
+    #[serde(default)]
+    code_dense: bool,
 }
 
 #[derive(Deserialize)]
@@ -63,7 +76,133 @@ struct Query {
 }
 
 // ---------------------------------------------------------------------------
-// Variants
+// Chunker variants (E4/E5)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq)]
+enum Chunker {
+    /// Production `chunk_text`: fixed word blocks, no overlap.
+    Fixed,
+    /// Fixed blocks with N words of overlap between consecutive chunks.
+    Overlap(usize),
+    /// Greedy sentence packing up to the word budget.
+    Sentence,
+    /// Fixed blocks, then merge a trailing runt (<32 words) into its
+    /// predecessor.
+    RuntMerge,
+    /// No chunking: one embed call, the model truncates at max_tokens.
+    None,
+}
+
+fn budget_words(budget_tokens: usize) -> usize {
+    (budget_tokens * 3 / 4).max(1)
+}
+
+fn chunk_overlap(text: &str, budget_tokens: usize, overlap: usize) -> Vec<String> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let max_words = budget_words(budget_tokens);
+    if words.len() <= max_words {
+        return vec![words.join(" ")];
+    }
+    let stride = max_words.saturating_sub(overlap).max(1);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let end = (i + max_words).min(words.len());
+        out.push(words[i..end].join(" "));
+        if end == words.len() {
+            break;
+        }
+        i += stride;
+    }
+    out
+}
+
+fn chunk_sentences(text: &str, budget_tokens: usize) -> Vec<String> {
+    let max_words = budget_words(budget_tokens);
+    // Sentence terminators; keeps it dependency-free. A "sentence" longer
+    // than the budget falls back to word splitting.
+    let mut sentences: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for part in text.split_inclusive(['.', '!', '?', '\n']) {
+        cur.push_str(part);
+        if part.ends_with(['.', '!', '?', '\n']) {
+            let s = cur.trim();
+            if !s.is_empty() {
+                sentences.push(s.to_string());
+            }
+            cur = String::new();
+        }
+    }
+    let tail = cur.trim();
+    if !tail.is_empty() {
+        sentences.push(tail.to_string());
+    }
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut buf: Vec<String> = Vec::new();
+    let mut buf_words = 0usize;
+    let flush = |buf: &mut Vec<String>, buf_words: &mut usize, chunks: &mut Vec<String>| {
+        if !buf.is_empty() {
+            chunks.push(buf.join(" "));
+            buf.clear();
+            *buf_words = 0;
+        }
+    };
+    for s in sentences {
+        let w = s.split_whitespace().count();
+        if w > max_words {
+            flush(&mut buf, &mut buf_words, &mut chunks);
+            chunks.extend(chunk_text(&s, budget_tokens));
+            continue;
+        }
+        if buf_words + w > max_words {
+            flush(&mut buf, &mut buf_words, &mut chunks);
+        }
+        buf_words += w;
+        buf.push(s);
+    }
+    flush(&mut buf, &mut buf_words, &mut chunks);
+    chunks
+}
+
+fn runt_merge(mut chunks: Vec<String>) -> Vec<String> {
+    if chunks.len() >= 2 {
+        let last_words = chunks.last().map(|c| c.split_whitespace().count());
+        if let Some(w) = last_words {
+            if w < 32 {
+                let runt = chunks.pop().unwrap_or_default();
+                if let Some(prev) = chunks.last_mut() {
+                    prev.push(' ');
+                    prev.push_str(&runt);
+                }
+            }
+        }
+    }
+    chunks
+}
+
+fn run_chunker(text: &str, chunker: Chunker, budget_tokens: usize) -> Vec<String> {
+    match chunker {
+        Chunker::Fixed => chunk_text(text, budget_tokens),
+        Chunker::Overlap(n) => chunk_overlap(text, budget_tokens, n),
+        Chunker::Sentence => chunk_sentences(text, budget_tokens),
+        Chunker::RuntMerge => runt_merge(chunk_text(text, budget_tokens)),
+        Chunker::None => {
+            if text.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![text.to_string()]
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Composition variants (E1)
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq)]
@@ -72,16 +211,13 @@ enum Comp {
     Baseline,
     /// Title prepended.
     PlusTitle,
-    /// Title + tags prepended (tags as a keyword clause up front so they
-    /// survive chunking).
+    /// Title + tags prepended (up front so they survive chunking).
     PlusTitleTags,
-    /// Structured metadata label line, then title/summary/content.
+    /// Structured metadata label line (negative control per the plan).
     LabeledPrefix,
-    /// Metadata ("{title}. {summary}. tags: ...") as its OWN vector alongside
-    /// plain content chunks — multi-vector, no dilution of content text.
+    /// Metadata as its OWN vector alongside plain content chunks.
     FieldVectors,
-    /// Contextual chunking: every content chunk carries the title+summary
-    /// header, so later chunks keep the memory's global context.
+    /// Every content chunk carries the title+summary header.
     ContextChunks,
 }
 
@@ -89,25 +225,110 @@ enum Comp {
 struct DocVariant {
     name: &'static str,
     comp: Comp,
-    /// None = no chunking: one embed call, model truncates at max_tokens.
-    chunk_tokens: Option<usize>,
+    chunker: Chunker,
+    chunk_tokens: usize,
 }
 
 const DOC_VARIANTS: &[DocVariant] = &[
-    // Chunk-size sweep on today's composition. c256 is the production config.
-    DocVariant { name: "base_c256", comp: Comp::Baseline, chunk_tokens: Some(256) },
-    DocVariant { name: "base_c192", comp: Comp::Baseline, chunk_tokens: Some(192) },
-    DocVariant { name: "base_c128", comp: Comp::Baseline, chunk_tokens: Some(128) },
-    DocVariant { name: "base_c64", comp: Comp::Baseline, chunk_tokens: Some(64) },
-    // Full text at once (single truncated vector) — "no chunking" arm.
-    DocVariant { name: "base_trunc", comp: Comp::Baseline, chunk_tokens: None },
-    // Field-composition arms at the production chunk size.
-    DocVariant { name: "title_c256", comp: Comp::PlusTitle, chunk_tokens: Some(256) },
-    DocVariant { name: "title_tags_c256", comp: Comp::PlusTitleTags, chunk_tokens: Some(256) },
-    DocVariant { name: "labeled_c256", comp: Comp::LabeledPrefix, chunk_tokens: Some(256) },
-    DocVariant { name: "fieldvec_c256", comp: Comp::FieldVectors, chunk_tokens: Some(256) },
-    DocVariant { name: "ctx_c256", comp: Comp::ContextChunks, chunk_tokens: Some(256) },
-    DocVariant { name: "ctx_c128", comp: Comp::ContextChunks, chunk_tokens: Some(128) },
+    // E4: chunk-budget sweep on today's composition. c256 = production.
+    DocVariant {
+        name: "base_c256",
+        comp: Comp::Baseline,
+        chunker: Chunker::Fixed,
+        chunk_tokens: 256,
+    },
+    DocVariant {
+        name: "base_c192",
+        comp: Comp::Baseline,
+        chunker: Chunker::Fixed,
+        chunk_tokens: 192,
+    },
+    DocVariant {
+        name: "base_c128",
+        comp: Comp::Baseline,
+        chunker: Chunker::Fixed,
+        chunk_tokens: 128,
+    },
+    DocVariant {
+        name: "base_c96",
+        comp: Comp::Baseline,
+        chunker: Chunker::Fixed,
+        chunk_tokens: 96,
+    },
+    DocVariant {
+        name: "base_c64",
+        comp: Comp::Baseline,
+        chunker: Chunker::Fixed,
+        chunk_tokens: 64,
+    },
+    DocVariant {
+        name: "base_trunc",
+        comp: Comp::Baseline,
+        chunker: Chunker::None,
+        chunk_tokens: 256,
+    },
+    // E5: chunker-structure variants at the production budget.
+    DocVariant {
+        name: "base_ov24_c256",
+        comp: Comp::Baseline,
+        chunker: Chunker::Overlap(24),
+        chunk_tokens: 256,
+    },
+    DocVariant {
+        name: "base_ov48_c256",
+        comp: Comp::Baseline,
+        chunker: Chunker::Overlap(48),
+        chunk_tokens: 256,
+    },
+    DocVariant {
+        name: "base_sent_c256",
+        comp: Comp::Baseline,
+        chunker: Chunker::Sentence,
+        chunk_tokens: 256,
+    },
+    DocVariant {
+        name: "base_runt_c256",
+        comp: Comp::Baseline,
+        chunker: Chunker::RuntMerge,
+        chunk_tokens: 256,
+    },
+    // E1: field-composition arms at the production chunk size.
+    DocVariant {
+        name: "title_c256",
+        comp: Comp::PlusTitle,
+        chunker: Chunker::Fixed,
+        chunk_tokens: 256,
+    },
+    DocVariant {
+        name: "title_tags_c256",
+        comp: Comp::PlusTitleTags,
+        chunker: Chunker::Fixed,
+        chunk_tokens: 256,
+    },
+    DocVariant {
+        name: "labeled_c256",
+        comp: Comp::LabeledPrefix,
+        chunker: Chunker::Fixed,
+        chunk_tokens: 256,
+    },
+    DocVariant {
+        name: "fieldvec_c256",
+        comp: Comp::FieldVectors,
+        chunker: Chunker::Fixed,
+        chunk_tokens: 256,
+    },
+    DocVariant {
+        name: "ctx_c256",
+        comp: Comp::ContextChunks,
+        chunker: Chunker::Fixed,
+        chunk_tokens: 256,
+    },
+    DocVariant {
+        name: "ctx_c128",
+        comp: Comp::ContextChunks,
+        chunker: Chunker::Fixed,
+        chunk_tokens: 128,
+    },
 ];
 
 fn meta_header(m: &Mem) -> String {
@@ -121,12 +342,7 @@ fn meta_header(m: &Mem) -> String {
 /// Produce the chunk texts the store would hold for this memory under a
 /// variant. `budget` already folds in the provider's real token limit.
 fn doc_texts(m: &Mem, v: DocVariant, budget: usize) -> Vec<String> {
-    let chunked = |text: &str| -> Vec<String> {
-        match v.chunk_tokens {
-            Some(_) => chunk_text(text, budget),
-            None => vec![text.to_string()],
-        }
-    };
+    let chunked = |text: &str| run_chunker(text, v.chunker, budget);
     match v.comp {
         Comp::Baseline => chunked(&format!("{} {}", m.summary, m.content)),
         Comp::PlusTitle => chunked(&format!("{}. {} {}", m.title, m.summary, m.content)),
@@ -165,14 +381,17 @@ fn doc_texts(m: &Mem, v: DocVariant, budget: usize) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Models
+// Models (E2)
 // ---------------------------------------------------------------------------
+
+const BGE_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
 
 struct ModelUnderTest {
     key: &'static str,
     spec: OnnxModelSpec,
-    /// Retrieval instruction prefix for the query side, if the model was
-    /// trained with one (fastembed adds none itself).
+    /// Retrieval instruction prefix for the query side, if tested for this
+    /// model (fastembed adds none itself). For minilm-q this is the BGE
+    /// instruction as a NEGATIVE CONTROL — MiniLM was not trained with it.
     query_prefix: Option<&'static str>,
     /// Document-side prefix, if the model expects one (nomic).
     doc_prefix: Option<&'static str>,
@@ -182,7 +401,7 @@ const MODELS: &[ModelUnderTest] = &[
     ModelUnderTest {
         key: "minilm-q",
         spec: ONNX_ALL_MINILM_Q,
-        query_prefix: None,
+        query_prefix: Some(BGE_QUERY_PREFIX), // negative control
         doc_prefix: None,
     },
     ModelUnderTest {
@@ -194,7 +413,7 @@ const MODELS: &[ModelUnderTest] = &[
     ModelUnderTest {
         key: "bge-small-q",
         spec: ONNX_BGE_SMALL_EN_Q,
-        query_prefix: Some("Represent this sentence for searching relevant passages: "),
+        query_prefix: Some(BGE_QUERY_PREFIX),
         doc_prefix: None,
     },
     ModelUnderTest {
@@ -220,7 +439,7 @@ struct Metrics {
 
 /// Per-query numbers, averaged later per archetype and overall.
 struct QueryScore {
-    archetype: String,
+    groups: Vec<String>,
     p1: f64,
     r5: f64,
     mrr: f64,
@@ -254,7 +473,7 @@ fn ndcg_at_k(ranked: &[&str], rels: &BTreeMap<String, u8>, k: usize) -> f64 {
     }
 }
 
-fn score_query(ranked: &[&str], q: &Query) -> QueryScore {
+fn score_query(ranked: &[&str], q: &Query, groups: Vec<String>) -> QueryScore {
     let rels = &q.relevant;
     let p1 = ranked
         .first()
@@ -267,7 +486,7 @@ fn score_query(ranked: &[&str], q: &Query) -> QueryScore {
         .filter(|id| *rels.get(**id).unwrap_or(&0) >= 1)
         .count();
     let r5 = if total_rel > 0 {
-        hits5 as f64 / total_rel as f64
+        hits5 as f64 / total_rel.min(5) as f64
     } else {
         0.0
     };
@@ -283,7 +502,7 @@ fn score_query(ranked: &[&str], q: &Query) -> QueryScore {
         .map(|i| i + 1)
         .unwrap_or(usize::MAX);
     QueryScore {
-        archetype: q.archetype.clone(),
+        groups,
         p1,
         r5,
         mrr,
@@ -305,6 +524,80 @@ fn aggregate(scores: &[&QueryScore]) -> Metrics {
         mrr_at_10: scores.iter().map(|s| s.mrr).sum::<f64>() / nf,
         ndcg_at_10: scores.iter().map(|s| s.ndcg).sum::<f64>() / nf,
     }
+}
+
+// ---------------------------------------------------------------------------
+// E3 stage 1: true-token overflow measurement
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Default)]
+struct OverflowBucket {
+    chunks: usize,
+    over_limit: usize,
+    mean_tokens: f64,
+    max_tokens: usize,
+}
+
+#[derive(Serialize)]
+struct OverflowReport {
+    token_limit: usize,
+    all: OverflowBucket,
+    code_dense: OverflowBucket,
+    prose: OverflowBucket,
+}
+
+fn measure_overflow(ds: &Dataset, token_limit: usize) -> Option<OverflowReport> {
+    let cache = engramdb::storage::paths::model_cache_dir().ok()?;
+    let tok_path = cache
+        .join("models--Xenova--all-MiniLM-L6-v2")
+        .join("snapshots")
+        .join("main")
+        .join("tokenizer.json");
+    let tokenizer = tokenizers::Tokenizer::from_file(&tok_path).ok()?;
+
+    let mut all = OverflowBucket::default();
+    let mut code = OverflowBucket::default();
+    let mut prose = OverflowBucket::default();
+    let mut all_sum = 0usize;
+    let mut code_sum = 0usize;
+    let mut prose_sum = 0usize;
+
+    for m in &ds.memories {
+        let text = format!("{} {}", m.summary, m.content);
+        for chunk in chunk_text(&text, token_limit) {
+            // +2 for the [CLS]/[SEP] specials fastembed adds.
+            let n = tokenizer
+                .encode(chunk.as_str(), false)
+                .map(|e| e.len() + 2)
+                .unwrap_or(0);
+            for (bucket, sum) in [(&mut all, &mut all_sum)]
+                .into_iter()
+                .chain(std::iter::once(if m.code_dense {
+                    (&mut code, &mut code_sum)
+                } else {
+                    (&mut prose, &mut prose_sum)
+                }))
+            {
+                bucket.chunks += 1;
+                bucket.over_limit += usize::from(n > token_limit);
+                bucket.max_tokens = bucket.max_tokens.max(n);
+                *sum += n;
+            }
+        }
+    }
+    for (bucket, sum) in [
+        (&mut all, all_sum),
+        (&mut code, code_sum),
+        (&mut prose, prose_sum),
+    ] {
+        bucket.mean_tokens = sum as f64 / bucket.chunks.max(1) as f64;
+    }
+    Some(OverflowReport {
+        token_limit,
+        all,
+        code_dense: code,
+        prose,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -370,11 +663,13 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 #[derive(Serialize)]
 struct VariantResult {
     overall: Metrics,
-    by_archetype: BTreeMap<String, Metrics>,
+    by_group: BTreeMap<String, Metrics>,
     /// Queries whose primary-target rank improved / worsened vs base_c256
     /// (same model, agg=max, no query prefix).
     wins_vs_baseline: usize,
     losses_vs_baseline: usize,
+    /// Index-cost proxy: total chunk vectors across the corpus.
+    total_chunks: usize,
 }
 
 #[derive(Serialize)]
@@ -388,10 +683,35 @@ struct ModelReport {
     results: BTreeMap<String, BTreeMap<String, BTreeMap<String, VariantResult>>>,
 }
 
+#[derive(Serialize)]
+struct FullReport {
+    overflow: Option<OverflowReport>,
+    models: BTreeMap<String, ModelReport>,
+}
+
+const AGGS: &[&str] = &["max", "mean", "top2"];
+
+fn agg_score(sims: &[f64], agg: &str) -> f64 {
+    if sims.is_empty() {
+        return f64::MIN;
+    }
+    match agg {
+        "max" => sims.iter().cloned().fold(f64::MIN, f64::max),
+        "mean" => sims.iter().sum::<f64>() / sims.len() as f64,
+        _ => {
+            // top2: mean of the two best (single chunk falls back to itself).
+            let mut s = sims.to_vec();
+            s.sort_by(|a, b| b.partial_cmp(a).unwrap());
+            let k = s.len().min(2);
+            s[..k].iter().sum::<f64>() / k as f64
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let data_path = std::env::var("EMBED_EVAL_DATA")
-        .unwrap_or_else(|_| "examples/data/embed_eval.json".into());
+    let data_path =
+        std::env::var("EMBED_EVAL_DATA").unwrap_or_else(|_| "examples/data/embed_eval.json".into());
     let out_path = std::env::var("EMBED_EVAL_OUT")
         .unwrap_or_else(|_| "target/embed_matrix_results.json".into());
     let model_filter: Option<Vec<String>> = std::env::var("EMBED_EVAL_MODELS")
@@ -401,11 +721,54 @@ async fn main() -> Result<()> {
     let raw = std::fs::read_to_string(&data_path)
         .with_context(|| format!("reading dataset {data_path}"))?;
     let ds: Dataset = serde_json::from_str(&raw).context("parsing dataset")?;
+    let mem_by_id: HashMap<&str, &Mem> = ds.memories.iter().map(|m| (m.id.as_str(), m)).collect();
     println!(
         "dataset: {} memories, {} queries",
         ds.memories.len(),
         ds.queries.len()
     );
+
+    // Grouping keys per query: archetype, plus fact-position and code-dense
+    // sub-buckets so E3/E5 can read their strata directly.
+    let query_groups: Vec<Vec<String>> = ds
+        .queries
+        .iter()
+        .map(|q| {
+            let mut groups = vec![q.archetype.clone()];
+            if let Some(target) = q
+                .relevant
+                .iter()
+                .find(|(_, g)| **g == 2)
+                .and_then(|(id, _)| mem_by_id.get(id.as_str()))
+            {
+                if let Some(pos) = &target.fact_pos {
+                    groups.push(format!("factpos:{pos}"));
+                }
+                if target.code_dense {
+                    groups.push("code_dense".to_string());
+                }
+            }
+            groups
+        })
+        .collect();
+
+    let overflow = measure_overflow(&ds, 256);
+    if let Some(o) = &overflow {
+        println!(
+            "E3 overflow (MiniLM tokenizer, limit {}): all {}/{} chunks over (mean {:.0} tok, max {}), code-dense {}/{}, prose {}/{}",
+            o.token_limit,
+            o.all.over_limit,
+            o.all.chunks,
+            o.all.mean_tokens,
+            o.all.max_tokens,
+            o.code_dense.over_limit,
+            o.code_dense.chunks,
+            o.prose.over_limit,
+            o.prose.chunks
+        );
+    } else {
+        println!("E3 overflow: MiniLM tokenizer not cached; skipping");
+    }
 
     let mut reports: BTreeMap<String, ModelReport> = BTreeMap::new();
 
@@ -416,7 +779,7 @@ async fn main() -> Result<()> {
             }
         }
         println!("\n=== model {} ===", mut_.key);
-        let provider = match OnnxProvider::with_model_on(mut_.spec, Backend::Cpu) {
+        let provider = match OnnxProvider::with_model_on(mut_.spec.clone(), Backend::Cpu) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("skipping {}: {e:#}", mut_.key);
@@ -431,13 +794,9 @@ async fn main() -> Result<()> {
         if mut_.doc_prefix.is_some() {
             doc_modes.push("prefixed");
         }
-        // texts[variant][doc_mode][mem_idx] = chunk texts
         let mut texts: HashMap<(&str, &str), Vec<Vec<String>>> = HashMap::new();
         for v in DOC_VARIANTS {
-            let budget = v
-                .chunk_tokens
-                .unwrap_or(mut_.spec.max_tokens)
-                .min(mut_.spec.max_tokens);
+            let budget = v.chunk_tokens.min(mut_.spec.max_tokens);
             for dm in &doc_modes {
                 let per_mem: Vec<Vec<String>> = ds
                     .memories
@@ -499,8 +858,6 @@ async fn main() -> Result<()> {
             1000.0 * cache.total_secs / cache.total_texts.max(1) as f64
         );
 
-        // Score. Doc mode pairs with query mode for nomic ("prefixed" doc
-        // side only ever scores against "prefixed" queries).
         let mut results: BTreeMap<String, BTreeMap<String, BTreeMap<String, VariantResult>>> =
             BTreeMap::new();
         // Baseline primary ranks for win/loss: base_c256 / max / raw.
@@ -514,7 +871,10 @@ async fn main() -> Result<()> {
                     "raw"
                 };
                 let per_mem = &texts[&(v.name, dm)];
-                for agg in ["max", "mean"] {
+                let total_chunks: usize = per_mem.iter().map(|c| c.len()).sum();
+                // Chunk similarities are shared across aggregations; compute
+                // once per (variant, query).
+                for agg in AGGS {
                     let mut qscores: Vec<QueryScore> = Vec::new();
                     for (qi, q) in ds.queries.iter().enumerate() {
                         let qv = cache.get(&query_texts[qm][qi]);
@@ -525,37 +885,32 @@ async fn main() -> Result<()> {
                             .map(|(m, chunks)| {
                                 let sims: Vec<f64> =
                                     chunks.iter().map(|c| cosine(qv, cache.get(c))).collect();
-                                let s = if sims.is_empty() {
-                                    f64::MIN
-                                } else if agg == "max" {
-                                    sims.iter().cloned().fold(f64::MIN, f64::max)
-                                } else {
-                                    sims.iter().sum::<f64>() / sims.len() as f64
-                                };
-                                (m.id.as_str(), s)
+                                (m.id.as_str(), agg_score(&sims, agg))
                             })
                             .collect();
                         scored.sort_by(|a, b| {
                             b.1.partial_cmp(&a.1).unwrap().then_with(|| a.0.cmp(b.0))
                         });
                         let ranked: Vec<&str> = scored.iter().map(|(id, _)| *id).collect();
-                        qscores.push(score_query(&ranked, q));
+                        qscores.push(score_query(&ranked, q, query_groups[qi].clone()));
                     }
 
-                    if v.name == "base_c256" && *qm == "raw" && agg == "max" {
+                    if v.name == "base_c256" && *qm == "raw" && *agg == "max" {
                         for (q, s) in ds.queries.iter().zip(&qscores) {
                             baseline_ranks.insert(q.id.as_str(), s.primary_rank);
                         }
                     }
 
-                    let mut by_arch: BTreeMap<String, Metrics> = BTreeMap::new();
-                    let mut arch_groups: BTreeMap<&str, Vec<&QueryScore>> = BTreeMap::new();
+                    let mut group_map: BTreeMap<&str, Vec<&QueryScore>> = BTreeMap::new();
                     for s in &qscores {
-                        arch_groups.entry(s.archetype.as_str()).or_default().push(s);
+                        for g in &s.groups {
+                            group_map.entry(g.as_str()).or_default().push(s);
+                        }
                     }
-                    for (arch, group) in &arch_groups {
-                        by_arch.insert((*arch).to_string(), aggregate(group));
-                    }
+                    let by_group = group_map
+                        .iter()
+                        .map(|(g, list)| ((*g).to_string(), aggregate(list)))
+                        .collect();
                     let all_refs: Vec<&QueryScore> = qscores.iter().collect();
                     let (mut wins, mut losses) = (0usize, 0usize);
                     for (q, s) in ds.queries.iter().zip(&qscores) {
@@ -570,25 +925,26 @@ async fn main() -> Result<()> {
                     results
                         .entry(v.name.to_string())
                         .or_default()
-                        .entry(agg.to_string())
+                        .entry((*agg).to_string())
                         .or_default()
                         .insert(
                             (*qm).to_string(),
                             VariantResult {
                                 overall: aggregate(&all_refs),
-                                by_archetype: by_arch,
+                                by_group,
                                 wins_vs_baseline: wins,
                                 losses_vs_baseline: losses,
+                                total_chunks,
                             },
                         );
                 }
             }
         }
 
-        // Compact stdout table: variant x (max/raw) overall metrics.
+        // Compact stdout table: variant (max agg, raw queries).
         println!(
-            "{:<18} {:>6} {:>6} {:>6} {:>6}  {:>9}",
-            "variant(max,raw)", "P@1", "R@5", "MRR", "nDCG", "win/loss"
+            "{:<18} {:>6} {:>6} {:>6} {:>6}  {:>9} {:>7}",
+            "variant(max,raw)", "P@1", "R@5", "MRR", "nDCG", "win/loss", "chunks"
         );
         for v in DOC_VARIANTS {
             if let Some(r) = results
@@ -597,19 +953,20 @@ async fn main() -> Result<()> {
                 .and_then(|m| m.get("raw"))
             {
                 println!(
-                    "{:<18} {:>6.3} {:>6.3} {:>6.3} {:>6.3}  {:>4}/{:<4}",
+                    "{:<18} {:>6.3} {:>6.3} {:>6.3} {:>6.3}  {:>4}/{:<4} {:>7}",
                     v.name,
                     r.overall.p_at_1,
                     r.overall.recall_at_5,
                     r.overall.mrr_at_10,
                     r.overall.ndcg_at_10,
                     r.wins_vs_baseline,
-                    r.losses_vs_baseline
+                    r.losses_vs_baseline,
+                    r.total_chunks
                 );
             }
         }
         if query_modes.contains(&"prefixed") {
-            println!("-- with query prefix --");
+            println!("-- with query prefix ({}) --", mut_.key);
             for v in ["base_c256", "title_tags_c256", "fieldvec_c256", "ctx_c256"] {
                 if let Some(r) = results
                     .get(v)
@@ -643,7 +1000,11 @@ async fn main() -> Result<()> {
         );
     }
 
-    let json = serde_json::to_string_pretty(&reports)?;
+    let report = FullReport {
+        overflow,
+        models: reports,
+    };
+    let json = serde_json::to_string_pretty(&report)?;
     std::fs::write(&out_path, &json).with_context(|| format!("writing {out_path}"))?;
     println!("\nresults written to {out_path}");
     Ok(())
