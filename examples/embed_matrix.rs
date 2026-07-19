@@ -626,11 +626,16 @@ impl EmbedCache {
     async fn ensure(&mut self, provider: &OnnxProvider, texts: &[String]) -> Result<()> {
         let missing: Vec<String> = {
             let mut seen = std::collections::HashSet::new();
-            texts
+            let mut list: Vec<String> = texts
                 .iter()
                 .filter(|t| !self.map.contains_key(*t) && seen.insert(t.as_str()))
                 .cloned()
-                .collect()
+                .collect();
+            // Deterministic batch composition: callers collect texts from
+            // HashMaps, and batch membership perturbs dynamically-quantized
+            // int8 outputs slightly — sorted order makes runs reproducible.
+            list.sort();
+            list
         };
         for batch in missing.chunks(32) {
             let refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
