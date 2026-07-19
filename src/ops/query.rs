@@ -42,8 +42,13 @@ where
         if let Some(global_engine) = global_engine().await {
             if let Ok(global_result) = query_memories(&global_engine, query).await {
                 let max = query.max_results.unwrap_or(10);
-                merge_scored_memories(&mut result.memories, global_result.memories, max);
-                result.total += global_result.total;
+                let global_total = global_result.total;
+                let duplicates =
+                    merge_scored_memories(&mut result.memories, global_result.memories, max);
+                // A memory present in both stores must not count twice —
+                // subtract the duplicates the merge skipped (best-effort: we
+                // can only see dupes among the returned pages).
+                result.total += global_total.saturating_sub(duplicates);
             }
         }
     }
@@ -56,14 +61,20 @@ where
 /// Used to fold cross-project ("global") memories into a project query
 /// result. Shared by the MCP `include_global` option and the CLI
 /// `query --include-global` flag so both stay behaviorally identical.
+///
+/// Returns the number of `global` entries skipped as duplicates, so callers
+/// tracking a combined `total` can avoid double-counting shared memories.
 pub fn merge_scored_memories(
     project: &mut Vec<ScoredMemory>,
     global: Vec<ScoredMemory>,
     max: usize,
-) {
+) -> usize {
     let existing_ids: HashSet<String> = project.iter().map(|sm| sm.memory.id.clone()).collect();
+    let mut duplicates = 0;
     for sm in global {
-        if !existing_ids.contains(&sm.memory.id) {
+        if existing_ids.contains(&sm.memory.id) {
+            duplicates += 1;
+        } else {
             project.push(sm);
         }
     }
@@ -73,6 +84,7 @@ pub fn merge_scored_memories(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     project.truncate(max);
+    duplicates
 }
 
 #[cfg(test)]

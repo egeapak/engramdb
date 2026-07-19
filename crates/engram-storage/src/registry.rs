@@ -95,6 +95,21 @@ pub trait RegistryBackend: Send + Sync {
     async fn set_parent(&self, project_id: &str, parent_project_id: Option<&str>) -> Result<()> {
         set_parent_impl(self, project_id, parent_project_id).await
     }
+
+    /// Acquire the backend's cross-process mutation lock for a manual
+    /// load → mutate → save cycle that the built-in mutators (`update*`,
+    /// `set_parent`) don't cover — e.g. removing entries.
+    ///
+    /// Hold the returned guard across the whole cycle; drop it before any
+    /// slow follow-up work (directory deletion) so other processes aren't
+    /// blocked. While holding it, call only `load`/`save` — the built-in
+    /// mutators re-acquire the same lock and would deadlock (`flock` on a
+    /// fresh fd in the same process blocks like another process).
+    ///
+    /// Backends without cross-process state (in-memory tests) return `None`.
+    async fn lock_exclusive(&self) -> Result<Option<write_lock::WriteLockGuard>> {
+        Ok(None)
+    }
 }
 
 /// Load → mutate → save body shared by the trait's default `update_inner`
@@ -372,6 +387,10 @@ impl RegistryBackend for FileRegistry {
     async fn set_parent(&self, project_id: &str, parent_project_id: Option<&str>) -> Result<()> {
         let _lock = write_lock::acquire_lock_file(self.lock_path()).await?;
         set_parent_impl(self, project_id, parent_project_id).await
+    }
+
+    async fn lock_exclusive(&self) -> Result<Option<write_lock::WriteLockGuard>> {
+        Ok(Some(write_lock::acquire_lock_file(self.lock_path()).await?))
     }
 }
 

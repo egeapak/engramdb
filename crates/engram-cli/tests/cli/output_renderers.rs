@@ -299,16 +299,16 @@ fn daemon_status_with_no_running_daemon_reports_not_running() {
         .unwrap();
 
     assert!(output.status.success());
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        combined.contains("not running")
-            || combined.contains("Not running")
-            || combined.contains("\"message\""),
-        "expected not-running message: {combined}"
+    // Piped stdout defaults to JSON mode: the not-running branch emits a
+    // single machine-readable object (mirroring `stats --daemon`), not
+    // {"message": ...} chatter.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout must be one JSON object");
+    assert_eq!(
+        parsed["running"],
+        serde_json::json!(false),
+        "expected running=false: {stdout}"
     );
 }
 
@@ -567,9 +567,23 @@ fn projects_prune_when_nothing_stale_prints_nothing_to_prune() {
     init_isolated(&env, dir.path());
 
     // The project exists, registry has it, no orphan dirs → Prune's
-    // early-return branch (src/cli/commands/projects.rs:139-142).
-    isolated_cmd(&env)
+    // early-return branch. Piped stdout defaults to JSON mode, where the
+    // nothing-to-prune case emits the same result-object shape as a real
+    // prune (all zeroes) so scripts parse one form.
+    let output = isolated_cmd(&env)
         .args(["projects", "prune", "--force"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout must be one JSON object");
+    assert_eq!(parsed["stale_removed"], serde_json::json!(0), "{stdout}");
+    assert_eq!(parsed["orphans_removed"], serde_json::json!(0), "{stdout}");
+
+    // Pretty mode keeps the human message.
+    isolated_cmd(&env)
+        .args(["projects", "prune", "--force", "--format", "pretty"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Nothing to prune"));

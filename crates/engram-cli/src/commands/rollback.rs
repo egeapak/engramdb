@@ -74,6 +74,27 @@ pub async fn run_rollback(
         }
     };
 
+    // Serialize against live MemoryStore mutations (same rationale as
+    // `migrate`): an unlocked read → rewrite races a concurrent locked
+    // `update` and writes stale content back over it. Dry runs skip the lock.
+    let lock_project_id = if global {
+        Some(paths::GLOBAL_PROJECT_ID.to_string())
+    } else {
+        let manifest_path = engramdb_dir.join("manifest.toml");
+        if manifest_path.exists() {
+            engramdb::storage::manifest::load_manifest(&manifest_path)
+                .await
+                .ok()
+                .map(|m| m.project)
+        } else {
+            None
+        }
+    };
+    let _write_lock = match (&lock_project_id, dry_run) {
+        (Some(id), false) => Some(engramdb::storage::write_lock::acquire_write_lock(id).await?),
+        _ => None,
+    };
+
     let mut rolled_back = 0u32;
     let mut already_target = 0u32;
     let mut errors = Vec::new();
@@ -85,7 +106,8 @@ pub async fn run_rollback(
         &mut rolled_back,
         &mut already_target,
         &mut errors,
-    );
+    )
+    .await;
 
     if let Some(ref pdir) = personal_dir {
         rollback_dir(
@@ -95,7 +117,8 @@ pub async fn run_rollback(
             &mut rolled_back,
             &mut already_target,
             &mut errors,
-        );
+        )
+        .await;
     }
 
     if dry_run {
@@ -128,7 +151,7 @@ pub async fn run_rollback(
     Ok(())
 }
 
-fn rollback_dir(
+async fn rollback_dir(
     dir: &Path,
     target_version: Option<u32>,
     dry_run: bool,
@@ -190,7 +213,12 @@ fn rollback_dir(
         match parser.parse(&raw) {
             Ok(memory) => match writer.write(&memory) {
                 Ok(new_content) => {
-                    if let Err(e) = std::fs::write(&path, &new_content) {
+                    // Atomic temp-then-rename, same contract as the store's
+                    // own writers — a crash mid-write must never leave a
+                    // truncated memory file.
+                    if let Err(e) =
+                        engramdb::storage::store::atomic_write(&path, &new_content).await
+                    {
                         errors.push(format!("{}: write error: {e}", path.display()));
                     } else {
                         *rolled_back += 1;

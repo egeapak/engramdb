@@ -270,18 +270,36 @@ mod windows {
 
     impl Listener {
         /// Accept the next client connection.
+        ///
+        /// Every early return must leave `current` repopulated: the daemon's
+        /// accept loop treats an `Err` here as transient (`continue`), so a
+        /// single failed `connect()`/`create()` that left `current` empty
+        /// would make the NEXT call fail unrecoverably — the daemon would
+        /// stop accepting until manually killed while still owning the pipe
+        /// name.
         pub async fn accept(&self) -> std::io::Result<NamedPipeServer> {
-            // Take the pending instance (held briefly, never across the await).
-            let server = self
-                .current
-                .lock()
-                .unwrap()
-                .take()
-                .expect("named-pipe listener always holds a pending instance");
-            server.connect().await?;
-            // Prepare the next instance so the pipe name keeps an owner.
-            let next = ServerOptions::new().create(&self.name)?;
-            *self.current.lock().unwrap() = Some(next);
+            // Take the pending instance, creating a fresh one if a previous
+            // error consumed it (held briefly, never across the await).
+            let server = match self.current.lock().unwrap().take() {
+                Some(s) => s,
+                None => ServerOptions::new().create(&self.name)?,
+            };
+            if let Err(e) = server.connect().await {
+                // Put the (still unconnected) instance back so the pipe name
+                // keeps an owner and the next accept can retry.
+                *self.current.lock().unwrap() = Some(server);
+                return Err(e);
+            }
+            // Prepare the next instance so the pipe name keeps an owner. On
+            // failure, return the connected client anyway — `current` stays
+            // empty and the next accept re-creates it above.
+            match ServerOptions::new().create(&self.name) {
+                Ok(next) => *self.current.lock().unwrap() = Some(next),
+                Err(e) => tracing::warn!(
+                    "named-pipe listener could not pre-create the next instance \
+                     (will retry on next accept): {e}"
+                ),
+            }
             Ok(server)
         }
     }

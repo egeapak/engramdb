@@ -1263,6 +1263,7 @@ async fn review_shows_challenged() {
             type_: None,
             challenged_only: Some(true),
             stale_only: None,
+            stale_after_days: None,
             project: None,
         }))
         .await;
@@ -1297,6 +1298,7 @@ async fn review_with_type_filter() {
             type_: Some("decision".to_string()),
             challenged_only: Some(true),
             stale_only: None,
+            stale_after_days: None,
             project: None,
         }))
         .await;
@@ -1304,6 +1306,60 @@ async fn review_with_type_filter() {
     for m in val["memories"].as_array().unwrap() {
         assert_eq!(m["type"], "decision");
     }
+}
+
+/// The `review` tool defaults its recency window to `[review].recency_days`
+/// (90) when the caller omits `stale_after_days`, echoes the effective window
+/// back, and does NOT surface freshly-created active memories (they are well
+/// within the window) — so the recency arm nudges about *stale* memories rather
+/// than flooding review with every active one.
+#[tokio::test]
+async fn review_recency_defaults_and_excludes_fresh() {
+    let (_dir, server) = setup().await;
+    // A brand-new active memory: within the 90-day window, must not surface.
+    let _id = create_and_get_id(&server, "decision", "Fresh decision", "Content").await;
+
+    let result = server
+        .memory_review(Parameters(ReviewInput {
+            scope: None,
+            max_results: None,
+            type_: None,
+            challenged_only: None,
+            stale_only: None,
+            stale_after_days: None,
+            project: None,
+        }))
+        .await;
+    let val = parse_ok(&result);
+    // The effective window is echoed from config (default 90).
+    assert_eq!(val["recency_days"], 90);
+    // The fresh active memory is not stale, and nothing is flagged, so review
+    // is empty.
+    assert_eq!(val["total"], 0);
+}
+
+/// Passing `stale_after_days: 0` disables the recency arm (a 0-day window would
+/// otherwise flag every active memory). The window is echoed as 0 and no active
+/// memory surfaces.
+#[tokio::test]
+async fn review_recency_zero_disables() {
+    let (_dir, server) = setup().await;
+    let _id = create_and_get_id(&server, "decision", "Some decision", "Content").await;
+
+    let result = server
+        .memory_review(Parameters(ReviewInput {
+            scope: None,
+            max_results: None,
+            type_: None,
+            challenged_only: None,
+            stale_only: None,
+            stale_after_days: Some(0),
+            project: None,
+        }))
+        .await;
+    let val = parse_ok(&result);
+    assert_eq!(val["recency_days"], 0);
+    assert_eq!(val["total"], 0);
 }
 
 #[tokio::test]
@@ -2298,6 +2354,7 @@ async fn cross_project_challenge_and_review() {
             type_: None,
             challenged_only: Some(true),
             stale_only: None,
+            stale_after_days: None,
             project: Some(project_b),
         }))
         .await;
@@ -2958,6 +3015,7 @@ async fn global_challenge_and_review() {
             type_: None,
             challenged_only: Some(true),
             stale_only: None,
+            stale_after_days: None,
             project: global_project(),
         }))
         .await;

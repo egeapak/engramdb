@@ -130,13 +130,9 @@ pub async fn run_update(
         MemoryStore::open(dir).await?
     };
 
-    // Build engine for auto-embedding on update
-    let engine_store = if global {
-        MemoryStore::open_global().await?
-    } else {
-        MemoryStore::open(dir).await?
-    };
-    let engine = engine_for(engine_store, embedding_backend, cell, policy).await;
+    // Build engine for auto-embedding on update. `MemoryStore` is `Clone` —
+    // a second `open` here paid a redundant config load + LanceDB connection.
+    let engine = engine_for(store.clone(), embedding_backend, cell, policy).await;
 
     let type_ = params.type_.map(|s| parse_memory_type(&s)).transpose()?;
     let visibility = params

@@ -20,6 +20,11 @@ use crate::types::EngramConfig;
 /// --daemon` stays reasonably fresh even without a clean shutdown.
 const PERSIST_INTERVAL: Duration = Duration::from_secs(300);
 
+/// How long a single connection may sit idle (no request frame) before the
+/// server closes it. Comfortably above the client's one-round-trip usage
+/// and its 60s request timeout; see the guard in `handle_conn`.
+const CONN_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Parsed-config cache keyed by path, invalidated by file mtime + length.
 ///
 /// Every Embed/Classify/Rerank/Title/Meta request resolves the caller's
@@ -251,10 +256,21 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
             *t = Instant::now();
         }
         tokio::spawn(async move {
+            // Decrement via a drop guard, not straight-line code: a panic in
+            // `handle_conn` (tokio task panics don't kill the process) would
+            // otherwise leak the increment and pin `active` above zero — the
+            // idle watchdog then never fires and the daemon becomes immortal
+            // with all models resident.
+            struct ActiveGuard(Arc<AtomicUsize>);
+            impl Drop for ActiveGuard {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            let _guard = ActiveGuard(active);
             if let Err(e) = handle_conn(stream, &ctx).await {
                 tracing::debug!("daemon connection ended: {e}");
             }
-            active.fetch_sub(1, Ordering::SeqCst);
         });
     }
 
@@ -262,6 +278,11 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
     // bounded window to finish before the front-end exits the process.
     drop(listener);
     drain_connections(&active, Duration::from_secs(30)).await;
+    // Persist once more AFTER the drain: the Shutdown handler persisted
+    // before requesting shutdown, so counter increments from connections
+    // that finished during the drain would otherwise be silently dropped
+    // across the restart (the next daemon seeds from the last snapshot).
+    ctx.persist().await;
     Ok(())
 }
 
@@ -310,7 +331,31 @@ where
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
 
-    while let Some(req) = read_msg::<_, DaemonRequest>(&mut reader).await? {
+    loop {
+        // Bound the wait for the next request frame. An open connection
+        // holds `active >= 1`, which vetoes the idle watchdog — so a peer
+        // that connects and then goes silent (wedged process, or a future
+        // connection-reuse client) would otherwise make the daemon immortal
+        // and burn the full shutdown-drain window. The production client
+        // opens one connection per request and drops it, so a healthy peer
+        // never comes near this bound.
+        let req = match tokio::time::timeout(
+            CONN_IDLE_TIMEOUT,
+            read_msg::<_, DaemonRequest>(&mut reader),
+        )
+        .await
+        {
+            Ok(read) => read?,
+            Err(_elapsed) => {
+                tracing::debug!(
+                    "daemon connection idle for {CONN_IDLE_TIMEOUT:?} with no request; closing"
+                );
+                return Ok(());
+            }
+        };
+        let Some(req) = req else {
+            return Ok(());
+        };
         // Shutdown is terminal: ack, flush, persist, then signal the accept
         // loop so `run_daemon` returns (the daemon binary's main then exits).
         if let DaemonOp::Shutdown = req.op {
@@ -330,7 +375,6 @@ where
             *t = Instant::now();
         }
     }
-    Ok(())
 }
 
 async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {

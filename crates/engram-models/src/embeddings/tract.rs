@@ -133,8 +133,22 @@ impl TractEmbeddingProvider {
             .get(spec.tokenizer_file)
             .with_context(|| format!("Failed to fetch tokenizer {}", spec.tokenizer_file))?;
 
-        let tokenizer = Tokenizer::from_file(&tokenizer_path)
+        let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {e}"))?;
+        // The repo's tokenizer.json bakes in its own truncation/padding — the
+        // Qdrant MiniLM export ships `max_length: 128`, HALF this spec's
+        // window, so every longer chunk was silently cut at 128 tokens while
+        // `max_tokens()` advertised 256 (the chunker packs ~192). Override
+        // both: truncate at the spec's window, and no tokenizer-side padding
+        // (`embed_blocking` pads to the fixed [1, max_tokens] shape itself,
+        // with mask=0). Mirrors the ONNX path's explicit `.with_max_length`.
+        tokenizer
+            .with_truncation(Some(tokenizers::TruncationParams {
+                max_length: spec.max_tokens,
+                ..Default::default()
+            }))
+            .map_err(|e| anyhow::anyhow!("Failed to set tokenizer truncation: {e}"))?;
+        tokenizer.with_padding(None);
 
         let mut infer = tract_onnx::onnx()
             .model_for_path(&model_path)
@@ -373,6 +387,32 @@ mod tests {
         if let Some(p) = provider() {
             let out = p.embed_batch(&[]).await.unwrap();
             assert!(out.is_empty());
+        }
+    }
+
+    /// The effective token window must be the spec's 256, not whatever the
+    /// repo's tokenizer.json bakes in (the Qdrant export ships max_length
+    /// 128). Two texts sharing a >128-token prefix but differing after it
+    /// must embed differently — under a 128 cap both truncate to the
+    /// identical prefix and come out bit-equal.
+    #[tokio::test]
+    async fn token_window_extends_past_128() {
+        if let Some(p) = provider() {
+            let prefix = "the ".repeat(140); // ~141 tokens with [CLS]
+            let a = p
+                .embed(&format!("{prefix} quantum cryptography research"))
+                .await
+                .unwrap();
+            let b = p
+                .embed(&format!("{prefix} banana smoothie recipe"))
+                .await
+                .unwrap();
+            let cos: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
+            assert!(
+                cos < 0.9999,
+                "distinct tails past token 128 embedded identically (cos = {cos}); \
+                 the tokenizer's baked-in 128-token truncation is back"
+            );
         }
     }
 

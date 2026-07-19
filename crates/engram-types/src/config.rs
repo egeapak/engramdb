@@ -49,8 +49,30 @@ pub struct ScoringWeights {
 }
 
 impl ScoringWeights {
-    /// Validate that active weights sum to 1.0 ± 0.001.
+    /// Validate that each weight is a finite value in `[0, 1]` and that the
+    /// active weights sum to 1.0 ± 0.001.
+    ///
+    /// The per-weight range check must come first: with a NaN weight the sum
+    /// is NaN and `NaN > 0.001` is false, so the sum check alone would
+    /// ACCEPT `semantic = nan` (TOML parses the `nan` literal) — and every
+    /// composite score downstream would be NaN, silently emptying results.
     pub fn validate(&self, mode_name: &str) -> Result<(), anyhow::Error> {
+        for (name, weight) in [
+            ("keyword", self.keyword),
+            ("semantic", self.semantic),
+            ("relevance", Some(self.relevance)),
+        ] {
+            if let Some(w) = weight {
+                if !(0.0..=1.0).contains(&w) {
+                    anyhow::bail!(
+                        "scoring.{}.{} must be between 0.0 and 1.0 (got {})",
+                        mode_name,
+                        name,
+                        w
+                    );
+                }
+            }
+        }
         let sum = self.keyword.unwrap_or(0.0) + self.semantic.unwrap_or(0.0) + self.relevance;
         if (sum - 1.0).abs() > 0.001 {
             anyhow::bail!(
@@ -584,6 +606,56 @@ impl Default for ThresholdsConfig {
     }
 }
 
+/// Recency-based review-suggestion settings.
+///
+/// EngramDB nudges agents and users to revisit memories that have gone stale —
+/// active memories that have not been touched (updated or verified) in a while.
+/// This is a *review* trigger, not a TTL: nothing is deleted or hidden. The
+/// suggestion is surfaced by the MCP session-end prompt and the `review` tool,
+/// and stale memories are ranked by criticality so the ones most worth
+/// re-verifying float to the top (recency by itself is indifferent to utility).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewConfig {
+    /// Active memories whose last update is older than this many days are
+    /// surfaced as review suggestions. `None` disables the recency trigger.
+    #[serde(default = "default_review_recency_days")]
+    pub recency_days: Option<u64>,
+}
+
+/// Default recency window before an untouched active memory is suggested for
+/// review. 90 days matches the default telemetry retention window and is long
+/// enough that routinely-referenced memories (which bump `updated_at` on every
+/// edit/resolve) never trip it.
+fn default_review_recency_days() -> Option<u64> {
+    Some(90)
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            recency_days: default_review_recency_days(),
+        }
+    }
+}
+
+impl ReviewConfig {
+    /// Validate the recency window bounds (mirrors `stats.retention_days`).
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if let Some(days) = self.recency_days {
+            if days == 0 {
+                anyhow::bail!(
+                    "review.recency_days must be >= 1 (0 is ambiguous). Set a positive \
+                     number of days, or omit the field to use the default (90)."
+                );
+            }
+            if days > 3650 {
+                anyhow::bail!("review.recency_days ({}) must be <= 3650", days);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Retrieval configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievalConfig {
@@ -715,8 +787,14 @@ pub struct EmbeddingsConfig {
 
 impl EmbeddingsConfig {
     /// Resolve the configured embedding pool size for a machine with
-    /// `cores` logical CPUs: the configured value (only floored at 1 so it
-    /// can never disable embeddings), else auto `cores/2` (also ≥ 1).
+    /// `cores` logical CPUs: the configured value clamped to `[1, cores]`,
+    /// else auto `cores/2` (also ≥ 1).
+    ///
+    /// The upper clamp matches the title pool's policy: each pooled
+    /// `TextEmbedding` is a full ONNX session with its own threadpool, so a
+    /// typo like `pool_size = 512` would otherwise load 512 sessions —
+    /// memory blow-up and thread oversubscription with no error. The floor
+    /// of 1 means a configured value can never disable embeddings.
     ///
     /// `cores` is passed in (not read from the machine here) so the policy
     /// is deterministically unit-testable. Callers in one-shot contexts
@@ -724,7 +802,9 @@ impl EmbeddingsConfig {
     /// long-lived multi-tenant daemon / MCP server, where extra sessions
     /// pay back across many concurrent callers.
     pub fn resolved_pool_size(&self, cores: usize) -> usize {
-        self.pool_size.unwrap_or((cores / 2).max(1)).max(1)
+        self.pool_size
+            .unwrap_or((cores / 2).max(1))
+            .clamp(1, cores.max(1))
     }
 }
 
@@ -956,6 +1036,10 @@ pub struct EngramConfig {
     /// Various thresholds
     #[serde(default)]
     pub thresholds: ThresholdsConfig,
+
+    /// Recency-based review-suggestion settings
+    #[serde(default)]
+    pub review: ReviewConfig,
 
     /// NLI contradiction detection settings
     #[serde(default)]
@@ -1402,6 +1486,7 @@ impl EngramConfig {
         self.stats.validate()?;
         self.daemon.validate()?;
         self.security.validate()?;
+        self.review.validate()?;
 
         if !(0.0..=1.0).contains(&self.retrieval.scoring.scope_multiplier_floor) {
             anyhow::bail!("scoring.scope_multiplier_floor must be in [0.0, 1.0]");
@@ -1453,6 +1538,17 @@ impl EngramConfig {
             anyhow::bail!(
                 "search.threshold ({}) must be >= 0.0",
                 self.search.threshold
+            );
+        }
+
+        // Same contract for the Rank-mode gate: the engine applies
+        // `retrieval.relevance_threshold` unclamped, so a NaN would silently
+        // empty every Rank query (every `score >= NaN` is false) and a
+        // negative value would silently disable the gate.
+        if self.retrieval.relevance_threshold.is_nan() || self.retrieval.relevance_threshold < 0.0 {
+            anyhow::bail!(
+                "retrieval.relevance_threshold ({}) must be >= 0.0",
+                self.retrieval.relevance_threshold
             );
         }
 
@@ -1784,6 +1880,9 @@ mod tests {
         assert_eq!(config.thresholds.needs_review, 0.3);
         assert_eq!(config.thresholds.gc, 0.05);
         assert_eq!(config.thresholds.compress, 0.4);
+
+        // Review recency trigger
+        assert_eq!(config.review.recency_days, Some(90));
 
         // Scoring weights - with_query
         assert_eq!(config.retrieval.scoring.with_query.semantic, Some(0.55));
@@ -2422,6 +2521,45 @@ weight = 0.7
     }
 
     #[test]
+    fn test_review_config_validate() {
+        let mut r = ReviewConfig::default();
+        assert_eq!(r.recency_days, Some(90));
+        assert!(r.validate().is_ok());
+
+        // Disabled trigger is valid.
+        r.recency_days = None;
+        assert!(r.validate().is_ok());
+
+        // Zero is ambiguous → rejected.
+        r.recency_days = Some(0);
+        assert!(r.validate().is_err());
+
+        // Upper bound mirrors stats.retention_days (10 years).
+        r.recency_days = Some(3650);
+        assert!(r.validate().is_ok());
+        r.recency_days = Some(3651);
+        assert!(r.validate().is_err());
+
+        // Surfaced through the top-level config validate too.
+        let mut cfg = EngramConfig::default();
+        cfg.review.recency_days = Some(0);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_review_config_serde_default() {
+        // Absent `[review]` ⇒ default 90-day recency trigger.
+        let cfg: EngramConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.review.recency_days, Some(90));
+        // A `[review]` table present but without `recency_days` ⇒ default too.
+        let cfg: EngramConfig = toml::from_str("[review]\n").unwrap();
+        assert_eq!(cfg.review.recency_days, Some(90));
+        // Explicit override parses.
+        let cfg: EngramConfig = toml::from_str("[review]\nrecency_days = 30\n").unwrap();
+        assert_eq!(cfg.review.recency_days, Some(30));
+    }
+
+    #[test]
     fn title_config_serde_default_and_roundtrip() {
         use super::TitleStrategy;
 
@@ -2487,14 +2625,16 @@ weight = 0.7
         assert_eq!(cfg.embeddings.resolved_pool_size(1), 1); // cores/2 floored at 1
         assert_eq!(cfg.embeddings.resolved_pool_size(0), 1); // (cores/2).max(1) guard
 
-        // Explicit value is honored verbatim regardless of cores (only a
-        // floor of 1 so it can't disable embeddings).
+        // Explicit value is clamped to [1, cores] (matching the title
+        // pool): honored when it fits, capped at the core count so a typo
+        // can't oversubscribe, floored at 1 so it can't disable embeddings.
         let cfg: EngramConfig =
             toml::from_str("[embeddings]\nprovider = \"onnx\"\ndimensions = 384\nmax_tokens = 256\npool_size = 3\n")
                 .unwrap();
         assert_eq!(cfg.embeddings.pool_size, Some(3));
-        assert_eq!(cfg.embeddings.resolved_pool_size(2), 3);
-        assert_eq!(cfg.embeddings.resolved_pool_size(64), 3);
+        assert_eq!(cfg.embeddings.resolved_pool_size(2), 2); // capped at cores
+        assert_eq!(cfg.embeddings.resolved_pool_size(64), 3); // honored when it fits
+        assert_eq!(cfg.embeddings.resolved_pool_size(0), 1); // degenerate cores guard
 
         // Legacy `[embeddings]` without the field still parses (back-compat).
         let legacy: EmbeddingsConfig =

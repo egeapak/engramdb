@@ -54,6 +54,11 @@ pub async fn resolve_memory(store: &MemoryStore, params: ResolveParams) -> Resul
             })
         }
         ResolveAction::Update => {
+            // Same summary contract as create/update — resolve must not be a
+            // back door for empty/oversized/multi-line summaries.
+            if let Some(summary) = params.updated_summary.as_deref() {
+                super::validate_summary(summary)?;
+            }
             // Atomic update: set content/summary, status, clear challenges, set verified_at
             let mut update = MemoryUpdate::new();
             update.content = params.updated_content;

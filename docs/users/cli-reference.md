@@ -154,10 +154,12 @@ Sets the memory's status to `Challenged` and records the evidence. Surface it la
 ## `review` — interactive review
 
 ```bash
-engramdb review [--challenged-only|--stale-only] [-t <type>] [--scope <text>] [--global]
+engramdb review [--challenged-only|--stale-only] [--stale-after-days [N]] [-t <type>] [--scope <text>] [--global]
 ```
 
 Walks through memories one at a time and lets you keep, update, or delete each.
+
+By default it lists flagged memories (challenged / needs-review). `--stale-after-days` adds the **recency trigger**: active memories not updated in more than `N` days are folded in too (a bare `--stale-after-days` uses the 90-day default). Every keep/update resets a memory's clock, so this surfaces knowledge nobody has revisited in a while for you to confirm or retire.
 
 ## `stats` — store statistics
 

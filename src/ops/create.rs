@@ -88,11 +88,18 @@ async fn title_for(
     crate::title::generate_title(strategy, text).await
 }
 
-/// Validate that a summary is non-empty and within the character limit.
+/// Validate that a summary is non-empty, single-line, and within the
+/// character limit. Single-line matters beyond cosmetics: the memory-file
+/// writer renders the summary on one structural line (H1 or `**Summary:**`),
+/// so embedded newlines would be collapsed on write anyway — reject them up
+/// front instead of silently rewriting the caller's text.
 pub fn validate_summary(summary: &str) -> Result<()> {
     let trimmed = summary.trim();
     if trimmed.is_empty() {
         anyhow::bail!("Summary cannot be empty");
+    }
+    if trimmed.contains(['\n', '\r']) {
+        anyhow::bail!("Summary must be a single line");
     }
     if trimmed.len() > 100 {
         anyhow::bail!("Summary must be <= 100 characters (got {})", trimmed.len());
@@ -116,6 +123,12 @@ pub async fn create_memory(
     // math that assumes the [0,1] domain (finding #3).
     super::validate_score(params.criticality, "criticality")?;
     super::validate_score(params.confidence, "confidence")?;
+    // update_memory validates this too — create must not be the one path
+    // that lets a NaN/out-of-range floor into the decay math (the [0,1]
+    // clamp on the final score does not survive a NaN floor).
+    if let Some(floor) = params.decay_floor {
+        super::validate_score(floor, "decay_floor")?;
+    }
     let summary = params.summary;
 
     // Use default physical scope if empty
@@ -262,8 +275,23 @@ pub async fn create_memory(
                 // to the returned CreateResult below.
                 let _ = engine.spawn_ingest(memory);
             } else {
-                let saved = store.get(&id).await?;
-                engine.embed_memory(&saved).await?;
+                // `memory.id == id` (set by Memory::new), so embed the
+                // in-hand value directly — the old `store.get(&id)` re-read
+                // was a redundant dir-scan+parse of a file we just wrote.
+                //
+                // Embed failure is non-fatal, matching the async branch: the
+                // memory is already durably created (file + index row), so
+                // returning Err here would tell the caller the create failed
+                // and the natural retry would write a DUPLICATE memory. The
+                // memory degrades to keyword-only retrieval until a reindex.
+                let saved = memory;
+                if let Err(e) = engine.embed_memory(&saved).await {
+                    tracing::warn!(
+                        memory_id = %saved.id,
+                        "memory created but embedding failed (semantic search \
+                         will miss it until `engramdb reindex --embeddings-only`): {e}"
+                    );
+                }
 
                 // Detect contradictions with existing memories (best-effort).
                 // Challenge writes are spawned so create_memory returns without

@@ -129,6 +129,21 @@ async fn run_setup_inner(
     formatter: &OutputFormatter,
 ) -> Result<()> {
     let claude_dir = resolve_claude_dir(project_dir, global, claude_dir_override);
+    // Where Claude Code reads MCP servers from: `<project>/.mcp.json` for
+    // project scope, `~/.claude.json` for user scope. (NOT settings.json —
+    // an entry there is silently ignored, and the repo's own doctor checks
+    // `.mcp.json`.) With a --claude-dir override, keep the file inside the
+    // override so tests stay hermetic.
+    let mcp_json_name = if global { ".claude.json" } else { ".mcp.json" };
+    let mcp_json_path = if let Some(dir) = claude_dir_override {
+        dir.join(mcp_json_name)
+    } else if global {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(mcp_json_name)
+    } else {
+        project_dir.join(mcp_json_name)
+    };
     let mut any_changes = false;
 
     // Step 1: Plugin install (or hooks + MCP fallback)
@@ -141,6 +156,7 @@ async fn run_setup_inner(
         let plugin_installed = try_install_plugin(dry_run, formatter);
         if !plugin_installed {
             any_changes |= install_settings_fallback(&claude_dir, dry_run, formatter)?;
+            any_changes |= install_mcp_json(&mcp_json_path, dry_run, formatter)?;
             false
         } else {
             any_changes = true;
@@ -148,6 +164,7 @@ async fn run_setup_inner(
         }
     } else {
         any_changes |= install_settings_fallback(&claude_dir, dry_run, formatter)?;
+        any_changes |= install_mcp_json(&mcp_json_path, dry_run, formatter)?;
         false
     };
 
@@ -388,7 +405,14 @@ fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     result
 }
 
-/// Write hooks and MCP server config into settings.json (merge strategy).
+/// Write hook config into settings.json (merge strategy).
+///
+/// The MCP server entry is NOT written here: Claude Code does not read
+/// `mcpServers` from settings.json — project-scope servers live in
+/// `<project>/.mcp.json` and user-scope ones in `~/.claude.json` (see
+/// [`install_mcp_json`]). A `mcpServers.engramdb` entry that an older
+/// engramdb setup wrote into settings.json is removed (exact match only) so
+/// the dead entry doesn't linger.
 fn install_settings_fallback(
     claude_dir: &Path,
     dry_run: bool,
@@ -484,43 +508,89 @@ fn install_settings_fallback(
         &settings_path,
     )?;
 
-    // --- MCP server ---
-    changed |= ensure_mcp_server(&mut settings, &settings_path)?;
+    // --- Migrate away a stale MCP entry this tool used to write here ---
+    changed |= remove_stale_mcp_server(&mut settings);
 
     if !changed {
-        formatter.print_message("Hooks and MCP already configured in settings.json.");
+        formatter.print_message("Hooks already configured in settings.json.");
         return Ok(false);
     }
 
     if dry_run {
-        formatter.print_message("Would add hooks and MCP server to settings.json.");
+        formatter.print_message("Would add hooks to settings.json.");
         return Ok(true);
     }
 
     std::fs::create_dir_all(claude_dir)?;
     let formatted = serde_json::to_string_pretty(&settings)?;
     write_atomic(&settings_path, &formatted)?;
-    formatter.print_success("Added hooks and MCP server to settings.json.");
+    formatter.print_success("Added hooks to settings.json.");
     Ok(true)
 }
 
-/// Ensure the engramdb MCP server entry exists in settings.json.
-/// Returns true if it was added.
-fn ensure_mcp_server(settings: &mut Value, settings_path: &Path) -> Result<bool> {
-    let root = settings_object_mut(settings, settings_path)?;
-    let mcp_servers = ensure_object_entry(root, "mcpServers", "mcpServers", settings_path)?;
+/// The MCP server entry `engramdb setup` registers.
+fn engramdb_mcp_entry() -> Value {
+    json!({
+        "command": "engramdb",
+        "args": ["serve", "--dir", "."]
+    })
+}
 
+/// Remove a `mcpServers.engramdb` entry that an older engramdb setup wrote
+/// into settings.json (where Claude Code never reads it). Only the exact
+/// entry this tool writes is removed — anything user-modified is left alone.
+/// Returns true if the entry was removed.
+fn remove_stale_mcp_server(settings: &mut Value) -> bool {
+    let Some(mcp_servers) = settings
+        .get_mut("mcpServers")
+        .and_then(|v| v.as_object_mut())
+    else {
+        return false;
+    };
+    if mcp_servers.get("engramdb") == Some(&engramdb_mcp_entry()) {
+        mcp_servers.remove("engramdb");
+        return true;
+    }
+    false
+}
+
+/// Register the engramdb MCP server in the file Claude Code actually reads:
+/// `<project>/.mcp.json` (project scope) or `~/.claude.json` (user scope).
+/// Merge strategy — everything else in the file is preserved; an existing
+/// `engramdb` entry (even user-modified) is left untouched.
+fn install_mcp_json(
+    mcp_json_path: &Path,
+    dry_run: bool,
+    formatter: &OutputFormatter,
+) -> Result<bool> {
+    let mut root = read_settings(mcp_json_path)?;
+
+    let root_map = settings_object_mut(&mut root, mcp_json_path)?;
+    let mcp_servers = ensure_object_entry(root_map, "mcpServers", "mcpServers", mcp_json_path)?;
     if mcp_servers.get("engramdb").is_some() {
         return Ok(false);
     }
+    mcp_servers.insert("engramdb".to_string(), engramdb_mcp_entry());
 
-    mcp_servers.insert(
-        "engramdb".to_string(),
-        json!({
-            "command": "engramdb",
-            "args": ["serve", "--dir", "."]
-        }),
-    );
+    if dry_run {
+        formatter.print_message(&format!(
+            "Would register the engramdb MCP server in {}.",
+            mcp_json_path.display()
+        ));
+        return Ok(true);
+    }
+
+    if let Some(parent) = mcp_json_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let formatted = serde_json::to_string_pretty(&root)?;
+    write_atomic(mcp_json_path, &formatted)?;
+    formatter.print_success(&format!(
+        "Registered the engramdb MCP server in {}.",
+        mcp_json_path.display()
+    ));
     Ok(true)
 }
 
@@ -923,10 +993,9 @@ mod tests {
             .unwrap();
         assert!(session_cmd.contains("engramdb hook session-start"));
 
-        // MCP server
-        let mcp = &settings["mcpServers"]["engramdb"];
-        assert_eq!(mcp["command"].as_str().unwrap(), "engramdb");
-        assert_eq!(mcp["args"][0].as_str().unwrap(), "serve");
+        // No MCP server here — Claude Code doesn't read mcpServers from
+        // settings.json; that entry goes into .mcp.json (install_mcp_json).
+        assert!(settings.get("mcpServers").is_none());
     }
 
     /// §16.3 lockstep guard: the plugin manifest (`.claude-plugin/plugin.json`)
@@ -1017,8 +1086,8 @@ mod tests {
         // SessionStart added
         assert!(settings["hooks"]["SessionStart"].is_array());
 
-        // MCP server added
-        assert!(settings["mcpServers"]["engramdb"].is_object());
+        // MCP server NOT added to settings.json (lives in .mcp.json)
+        assert!(settings.get("mcpServers").is_none());
     }
 
     #[test]
@@ -1034,27 +1103,114 @@ mod tests {
     // --- MCP server tests ---
 
     #[test]
-    fn test_ensure_mcp_server_adds_new() {
-        let mut settings = json!({});
-        let added = ensure_mcp_server(&mut settings, Path::new("settings.json")).unwrap();
+    fn test_install_mcp_json_creates_file() {
+        let tmp = TempDir::new().unwrap();
+        let f = test_formatter();
+        let path = tmp.path().join(".mcp.json");
+
+        let added = install_mcp_json(&path, false, &f).unwrap();
         assert!(added);
-        assert_eq!(
-            settings["mcpServers"]["engramdb"]["command"]
-                .as_str()
-                .unwrap(),
-            "engramdb"
-        );
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let root: Value = serde_json::from_str(&content).unwrap();
+        let mcp = &root["mcpServers"]["engramdb"];
+        assert_eq!(mcp["command"].as_str().unwrap(), "engramdb");
+        assert_eq!(mcp["args"][0].as_str().unwrap(), "serve");
     }
 
     #[test]
-    fn test_ensure_mcp_server_skips_existing() {
-        let mut settings = json!({
-            "mcpServers": {
-                "engramdb": { "command": "engramdb", "args": ["serve"] }
-            }
-        });
-        let added = ensure_mcp_server(&mut settings, Path::new("settings.json")).unwrap();
-        assert!(!added);
+    fn test_install_mcp_json_skips_existing_and_preserves_others() {
+        let tmp = TempDir::new().unwrap();
+        let f = test_formatter();
+        let path = tmp.path().join(".mcp.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "mcpServers": {
+                    "engramdb": { "command": "custom-engramdb", "args": ["serve"] },
+                    "other": { "command": "other-server" }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let added = install_mcp_json(&path, false, &f).unwrap();
+        assert!(!added, "user-modified entry must be left untouched");
+
+        let root: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            root["mcpServers"]["engramdb"]["command"].as_str().unwrap(),
+            "custom-engramdb"
+        );
+        assert!(root["mcpServers"]["other"].is_object());
+    }
+
+    #[test]
+    fn test_install_mcp_json_dry_run_no_write() {
+        let tmp = TempDir::new().unwrap();
+        let f = test_formatter();
+        let path = tmp.path().join(".mcp.json");
+
+        let added = install_mcp_json(&path, true, &f).unwrap();
+        assert!(added);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_install_mcp_json_malformed_shapes() {
+        let f = test_formatter();
+
+        // Wrong-typed non-empty mcpServers: hard error, file untouched.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".mcp.json");
+        let content = r#"{"mcpServers": ["x"]}"#;
+        std::fs::write(&path, content).unwrap();
+        let err = install_mcp_json(&path, false, &f).expect_err("should error");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("\"mcpServers\""), "got: {msg}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+
+        // Semantically empty mcpServers: repaired in place.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".mcp.json");
+        std::fs::write(&path, r#"{"mcpServers": []}"#).unwrap();
+        let changed = install_mcp_json(&path, false, &f).unwrap();
+        assert!(changed);
+        let root: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(root["mcpServers"]["engramdb"].is_object());
+    }
+
+    #[test]
+    fn test_settings_fallback_removes_stale_mcp_entry() {
+        let tmp = TempDir::new().unwrap();
+        let f = test_formatter();
+        // An older setup wrote our exact MCP entry into settings.json, where
+        // Claude Code never reads it — a re-run migrates it away.
+        std::fs::write(
+            tmp.path().join("settings.json"),
+            serde_json::to_string_pretty(&json!({
+                "mcpServers": {
+                    "engramdb": { "command": "engramdb", "args": ["serve", "--dir", "."] },
+                    "foreign": { "command": "keep-me" }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let changed = install_settings_fallback(tmp.path(), false, &f).unwrap();
+        assert!(changed);
+
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(settings["mcpServers"].get("engramdb").is_none());
+        assert!(
+            settings["mcpServers"]["foreign"].is_object(),
+            "foreign MCP entries must be preserved"
+        );
     }
 
     // --- ensure_hook_entry tests ---
@@ -1265,14 +1421,22 @@ mod tests {
         .await
         .unwrap();
 
-        let content = std::fs::read_to_string(claude_dir.join("settings.json")).unwrap();
-        let settings: Value = serde_json::from_str(&content).unwrap();
+        // The MCP server is registered in .mcp.json (inside the --claude-dir
+        // override for hermeticity), NOT in settings.json.
+        let content = std::fs::read_to_string(claude_dir.join(".mcp.json")).unwrap();
+        let root: Value = serde_json::from_str(&content).unwrap();
 
-        let mcp = &settings["mcpServers"]["engramdb"];
+        let mcp = &root["mcpServers"]["engramdb"];
         assert_eq!(mcp["command"].as_str().unwrap(), "engramdb");
         assert_eq!(mcp["args"][0].as_str().unwrap(), "serve");
         assert_eq!(mcp["args"][1].as_str().unwrap(), "--dir");
         assert_eq!(mcp["args"][2].as_str().unwrap(), ".");
+
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(claude_dir.join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(settings.get("mcpServers").is_none());
     }
 
     #[tokio::test]
@@ -1315,7 +1479,14 @@ mod tests {
         let content = std::fs::read_to_string(claude_dir.join("settings.json")).unwrap();
         let settings: Value = serde_json::from_str(&content).unwrap();
         assert!(settings["hooks"]["PreToolUse"].is_array());
-        assert!(settings["mcpServers"]["engramdb"].is_object());
+        assert!(settings.get("mcpServers").is_none());
+        // Global scope registers the MCP server in the user-scope config
+        // (.claude.json — inside the override dir for hermeticity).
+        let root: Value = serde_json::from_str(
+            &std::fs::read_to_string(claude_dir.join(".claude.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(root["mcpServers"]["engramdb"].is_object());
     }
 
     #[tokio::test]
@@ -1585,12 +1756,6 @@ mod tests {
                 "\"hooks.PreToolUse\"",
             ),
             (
-                "mcpServers non-empty array",
-                r#"{"mcpServers": ["x"]}"#,
-                Via::Fallback,
-                "\"mcpServers\"",
-            ),
-            (
                 "permissions string",
                 r#"{"permissions": "x"}"#,
                 Via::Permissions,
@@ -1640,11 +1805,6 @@ mod tests {
                 Via::Fallback,
             ),
             (
-                "mcpServers empty array",
-                r#"{"mcpServers": []}"#,
-                Via::Fallback,
-            ),
-            (
                 "permissions empty array",
                 r#"{"permissions": []}"#,
                 Via::Permissions,
@@ -1672,10 +1832,6 @@ mod tests {
                     assert!(
                         settings["hooks"]["PreToolUse"].is_array(),
                         "case {label:?}: hooks.PreToolUse should be an array"
-                    );
-                    assert!(
-                        settings["mcpServers"]["engramdb"].is_object(),
-                        "case {label:?}: mcpServers.engramdb should be an object"
                     );
                 }
                 Via::Permissions => {

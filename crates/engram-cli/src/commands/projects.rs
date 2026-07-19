@@ -7,7 +7,6 @@ use anyhow::Result;
 use engramdb::ops::projects;
 use engramdb::storage::RegistryBackend;
 use indicatif::{ProgressBar, ProgressStyle};
-use owo_colors::OwoColorize;
 use std::path::Path;
 
 /// Run the `projects` command with the given subcommand (defaults to `Info`).
@@ -134,51 +133,76 @@ pub async fn run_projects(
             let hierarchy_issues = projects::scan_hierarchy_issues(&reg_snapshot);
             drop(reg_snapshot);
 
+            let json_mode = formatter.is_json();
+
             if stale.is_empty() && orphan_count == 0 && hierarchy_issues.total() == 0 {
-                formatter.print_success("Nothing to prune.");
+                if json_mode {
+                    // Same object shape as a real prune so scripts parse one form.
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "stale_removed": 0,
+                            "orphans_removed": 0,
+                            "hierarchy_cleared": [],
+                        })
+                    );
+                } else {
+                    formatter.print_success("Nothing to prune.");
+                }
                 return Ok(());
             }
 
-            if stale.is_empty() {
-                println!("  {} stale registry entries found.", "No".green());
-            } else {
-                println!(
-                    "  Found {} stale registry entry(ies).",
-                    stale.len().yellow()
-                );
-            }
-            if orphan_count == 0 {
-                println!("  {} orphan data directories found.", "No".green());
-            } else {
-                println!(
-                    "  Found {} orphan data directory(ies) not in registry.",
-                    orphan_count.yellow()
-                );
-            }
-            if hierarchy_issues.total() == 0 {
-                println!("  {} broken parent links found.", "No".green());
-            } else {
-                let mut parts = Vec::new();
-                if !hierarchy_issues.dangling.is_empty() {
-                    parts.push(format!("{} dangling", hierarchy_issues.dangling.len()));
-                }
-                if !hierarchy_issues.stale_parent.is_empty() {
-                    parts.push(format!(
-                        "{} stale-parent",
-                        hierarchy_issues.stale_parent.len()
+            // Preview goes through the formatter so --no-color and plain mode
+            // are honored (raw owo-colors println! ignored both), and is
+            // suppressed entirely in JSON mode where stdout must carry
+            // exactly one JSON object.
+            if !json_mode {
+                if stale.is_empty() {
+                    formatter.print_message("  No stale registry entries found.");
+                } else {
+                    formatter.print_message(&format!(
+                        "  Found {} stale registry entry(ies).",
+                        stale.len()
                     ));
                 }
-                if !hierarchy_issues.cycle_members.is_empty() {
-                    parts.push(format!("{} in cycle", hierarchy_issues.cycle_members.len()));
+                if orphan_count == 0 {
+                    formatter.print_message("  No orphan data directories found.");
+                } else {
+                    formatter.print_message(&format!(
+                        "  Found {} orphan data directory(ies) not in registry.",
+                        orphan_count
+                    ));
                 }
-                println!(
-                    "  Found {} sub-project(s) with broken parent link ({}).",
-                    hierarchy_issues.total().yellow(),
-                    parts.join(", ")
-                );
+                if hierarchy_issues.total() == 0 {
+                    formatter.print_message("  No broken parent links found.");
+                } else {
+                    let mut parts = Vec::new();
+                    if !hierarchy_issues.dangling.is_empty() {
+                        parts.push(format!("{} dangling", hierarchy_issues.dangling.len()));
+                    }
+                    if !hierarchy_issues.stale_parent.is_empty() {
+                        parts.push(format!(
+                            "{} stale-parent",
+                            hierarchy_issues.stale_parent.len()
+                        ));
+                    }
+                    if !hierarchy_issues.cycle_members.is_empty() {
+                        parts.push(format!("{} in cycle", hierarchy_issues.cycle_members.len()));
+                    }
+                    formatter.print_message(&format!(
+                        "  Found {} sub-project(s) with broken parent link ({}).",
+                        hierarchy_issues.total(),
+                        parts.join(", ")
+                    ));
+                }
             }
 
             if !force {
+                // JSON is machine-consumed: never prompt (mirrors the
+                // doctor --fix interactivity rule).
+                if json_mode {
+                    anyhow::bail!("prune requires confirmation; re-run with --force in JSON mode");
+                }
                 let confirm = prompter.confirm("Remove all?", false).unwrap_or(false);
                 if !confirm {
                     formatter.print_message("Aborted.");
@@ -186,31 +210,26 @@ pub async fn run_projects(
                 }
             }
 
+            // Progress bars are human-only chatter; hidden in JSON mode.
             let style = ProgressStyle::default_bar()
                 .template("{prefix} [{bar:40.green/dim}] {pos}/{len} ({eta})")
                 .unwrap()
                 .progress_chars("=>-");
-
-            let stale_pb = ProgressBar::new(stale.len() as u64);
-            stale_pb.set_style(style.clone());
-            stale_pb.set_prefix("stale");
-            if stale.is_empty() {
-                stale_pb.finish_and_clear();
-            }
-
-            let orphan_pb = ProgressBar::new(orphan_count as u64);
-            orphan_pb.set_style(style.clone());
-            orphan_pb.set_prefix("orphan");
-            if orphan_count == 0 {
-                orphan_pb.finish_and_clear();
-            }
-
-            let hierarchy_pb = ProgressBar::new(hierarchy_issues.total() as u64);
-            hierarchy_pb.set_style(style);
-            hierarchy_pb.set_prefix("links");
-            if hierarchy_issues.total() == 0 {
-                hierarchy_pb.finish_and_clear();
-            }
+            let make_bar = |len: u64, prefix: &'static str| {
+                if json_mode {
+                    return ProgressBar::hidden();
+                }
+                let pb = ProgressBar::new(len);
+                pb.set_style(style.clone());
+                pb.set_prefix(prefix);
+                if len == 0 {
+                    pb.finish_and_clear();
+                }
+                pb
+            };
+            let stale_pb = make_bar(stale.len() as u64, "stale");
+            let orphan_pb = make_bar(orphan_count as u64, "orphan");
+            let hierarchy_pb = make_bar(hierarchy_issues.total() as u64, "links");
 
             let result = projects::prune_stale_projects(registry, |phase| match phase {
                 projects::PrunePhase::Stale => stale_pb.inc(1),
@@ -222,26 +241,37 @@ pub async fn run_projects(
             orphan_pb.finish_and_clear();
             hierarchy_pb.finish_and_clear();
 
-            if result.stale_removed > 0 {
+            if json_mode {
                 println!(
-                    "  {} Removed {} stale project(s) from registry.",
-                    "✓".green(),
-                    result.stale_removed.green()
+                    "{}",
+                    serde_json::json!({
+                        "stale_removed": result.stale_removed,
+                        "stale_ids": result.stale_ids,
+                        "orphans_removed": result.orphans_removed,
+                        "orphan_ids": result.orphan_ids,
+                        "hierarchy_cleared": result.hierarchy_cleared,
+                    })
                 );
+                return Ok(());
+            }
+
+            if result.stale_removed > 0 {
+                formatter.print_success(&format!(
+                    "Removed {} stale project(s) from registry.",
+                    result.stale_removed
+                ));
             }
             if result.orphans_removed > 0 {
-                println!(
-                    "  {} Removed {} orphan data directory(ies).",
-                    "✓".green(),
-                    result.orphans_removed.green()
-                );
+                formatter.print_success(&format!(
+                    "Removed {} orphan data directory(ies).",
+                    result.orphans_removed
+                ));
             }
             if !result.hierarchy_cleared.is_empty() {
-                println!(
-                    "  {} Cleared broken parent link on {} sub-project(s).",
-                    "✓".green(),
-                    result.hierarchy_cleared.len().green()
-                );
+                formatter.print_success(&format!(
+                    "Cleared broken parent link on {} sub-project(s).",
+                    result.hierarchy_cleared.len()
+                ));
             }
         }
     }
@@ -354,6 +384,77 @@ mod tests {
 
         let loaded = registry.load().await.unwrap();
         assert_eq!(loaded.projects.len(), 2, "nothing should have been deleted");
+    }
+
+    #[tokio::test]
+    async fn test_projects_prune_json_nothing_to_prune_is_ok() {
+        let registry = InMemoryRegistry::new();
+        let formatter = OutputFormatter::new(None, true, true);
+        let prompter = MockPrompter::new(vec![]);
+
+        let result = run_projects(
+            Path::new("."),
+            &registry,
+            Some(ProjectsCommand::Prune { force: false }),
+            &formatter,
+            &prompter,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_projects_prune_json_without_force_errors() {
+        // A stale entry so there is something to prune.
+        let mut data = Registry::default();
+        data.projects.push(RegistryEntry {
+            project_id: "gone".to_string(),
+            project_path: "/nonexistent/prune-test-path".to_string(),
+            parent_project_id: None,
+        });
+        let registry = InMemoryRegistry::with(data);
+        let formatter = OutputFormatter::new(None, true, true);
+        // No scripted responses: JSON mode must error before ever prompting.
+        let prompter = MockPrompter::new(vec![]);
+
+        let result = run_projects(
+            Path::new("."),
+            &registry,
+            Some(ProjectsCommand::Prune { force: false }),
+            &formatter,
+            &prompter,
+        )
+        .await;
+        assert!(result.is_err(), "JSON mode without --force must error");
+        // Nothing was pruned.
+        let loaded = registry.load().await.unwrap();
+        assert_eq!(loaded.projects.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_projects_prune_json_force_removes_stale() {
+        let mut data = Registry::default();
+        data.projects.push(RegistryEntry {
+            project_id: "gone".to_string(),
+            project_path: "/nonexistent/prune-test-path".to_string(),
+            parent_project_id: None,
+        });
+        let registry = InMemoryRegistry::with(data);
+        let formatter = OutputFormatter::new(None, true, true);
+        let prompter = MockPrompter::new(vec![]);
+
+        run_projects(
+            Path::new("."),
+            &registry,
+            Some(ProjectsCommand::Prune { force: true }),
+            &formatter,
+            &prompter,
+        )
+        .await
+        .unwrap();
+
+        let loaded = registry.load().await.unwrap();
+        assert!(loaded.projects.is_empty(), "stale entry must be pruned");
     }
 
     #[tokio::test]

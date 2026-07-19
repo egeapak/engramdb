@@ -354,6 +354,11 @@ struct ReviewInput {
     stale_only: Option<bool>,
 
     #[schemars(
+        description = "Recency trigger: also surface active memories not updated in more than N days. Omit to use the project's [review].recency_days (default 90); set 0 or a very large value to effectively disable."
+    )]
+    stale_after_days: Option<u64>,
+
+    #[schemars(
         description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
     )]
     project: Option<String>,
@@ -645,6 +650,19 @@ fn memory_to_output(m: &engramdb::types::Memory, include_details: bool) -> Memor
         superseded_by: m.superseded_by.clone(),
         verified_at: m.verified_at,
     }
+}
+
+/// True when an ops error bottoms out in a missing-id storage error.
+///
+/// Only a genuine `StorageError::NotFound` may map to
+/// `ErrorCode::MemoryNotFound`; validation and I/O failures must not
+/// masquerade as "not found" (anyhow's downcast sees through `.context()`
+/// layers, so the typed check works across the ops chain).
+fn is_not_found(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<engramdb::storage::StorageError>(),
+        Some(engramdb::storage::StorageError::NotFound(_))
+    )
 }
 
 #[derive(Serialize)]
@@ -1541,8 +1559,11 @@ impl EngramDbServer {
         let _scope = self.scope("create", input.project.as_deref());
         self.check_cross_project_write(input.project.as_deref())
             .await?;
-        let store = self.open_store_for(input.project.as_deref()).await?;
+        // The engine already owns an open store — reuse it rather than
+        // paying a second `MemoryStore::open` (config load + LanceDB
+        // connection) per request on the agent hot path.
         let engine = self.build_engine_for(input.project.as_deref()).await?;
+        let store = engine.store();
         // The configured strategy is the deployment default; an explicit
         // per-call `title_strategy` still overrides it. This is what makes
         // `[title] strategy = "t5"` actually take effect for agent creates
@@ -1594,7 +1615,7 @@ impl EngramDbServer {
             .map_err(|e| error_response(ErrorCode::ValidationError, e.as_str()))?;
 
         let result = ops::create_memory(
-            &store,
+            store,
             ops::CreateParams {
                 type_,
                 content: input.content,
@@ -1757,9 +1778,16 @@ impl EngramDbServer {
     async fn memory_get(&self, Parameters(input): Parameters<GetInput>) -> Result<String, String> {
         let _scope = self.scope("get", input.project.as_deref());
         let store = self.open_store_for(input.project.as_deref()).await?;
-        let memory = ops::get_memory(&store, &input.id)
-            .await
-            .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
+        let memory = ops::get_memory(&store, &input.id).await.map_err(|e| {
+            let code = if is_not_found(&e) {
+                ErrorCode::MemoryNotFound
+            } else {
+                // Store I/O failures are not "not found" — the memory may
+                // well exist.
+                ErrorCode::InternalError
+            };
+            error_response(code, &e.to_string())
+        })?;
 
         let r = serde_json::to_string(&memory_to_output(&memory, true))
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
@@ -1778,8 +1806,10 @@ impl EngramDbServer {
         let _scope = self.scope("update", input.project.as_deref());
         self.check_cross_project_write(input.project.as_deref())
             .await?;
-        let store = self.open_store_for(input.project.as_deref()).await?;
+        // The engine already owns an open store — reuse it rather than
+        // paying a second `MemoryStore::open` per request.
         let engine = self.build_engine_for(input.project.as_deref()).await?;
+        let store = engine.store();
 
         let type_ = input
             .type_
@@ -1839,7 +1869,7 @@ impl EngramDbServer {
             .map_err(|e| error_response(ErrorCode::ValidationError, e.as_str()))?;
 
         ops::update_memory(
-            &store,
+            store,
             &input.id,
             ops::UpdateParams {
                 type_,
@@ -1876,7 +1906,22 @@ impl EngramDbServer {
             Some(&engine),
         )
         .await
-        .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
+        .map_err(|e| {
+            let code = if is_not_found(&e) {
+                ErrorCode::MemoryNotFound
+            } else if e
+                .downcast_ref::<engramdb::storage::StorageError>()
+                .is_some()
+            {
+                // A storage failure other than NotFound is an I/O problem.
+                ErrorCode::InternalError
+            } else {
+                // update_memory's non-storage failures are input validation
+                // (score/summary/decay-strategy checks before the write).
+                ErrorCode::ValidationError
+            };
+            error_response(code, &e.to_string())
+        })?;
 
         let r = serde_json::to_string(&serde_json::json!({
             "id": input.id,
@@ -1944,7 +1989,7 @@ impl EngramDbServer {
 
     #[tool(
         name = "review",
-        description = "List memories needing review (stale or challenged)."
+        description = "List memories needing review: flagged (challenged/needs-review) plus, by the recency trigger, active memories not updated in more than [review].recency_days (default 90). Highest-criticality first."
     )]
     async fn memory_review(
         &self,
@@ -1960,12 +2005,25 @@ impl EngramDbServer {
             .transpose()
             .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
+        // When the caller omits `stale_after_days`, fall back to the project's
+        // configured recency window so the recency trigger is on by default.
+        let stale_after_days = match input.stale_after_days {
+            Some(days) => Some(days),
+            None => {
+                self.load_config_for(input.project.as_deref())
+                    .await?
+                    .review
+                    .recency_days
+            }
+        };
+
         let params = ops::ReviewParams {
             scope: input.scope,
             max_results: input.max_results,
             type_filter,
             challenged_only: input.challenged_only.unwrap_or(false),
             stale_only: input.stale_only.unwrap_or(false),
+            stale_after_days,
         };
 
         let memories = ops::review_memories(&store, &params)
@@ -1979,7 +2037,8 @@ impl EngramDbServer {
 
         let r = serde_json::to_string(&serde_json::json!({
             "memories": outputs,
-            "total": memories.len()
+            "total": memories.len(),
+            "recency_days": stale_after_days,
         }))
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
@@ -2167,14 +2226,22 @@ impl EngramDbServer {
         let _scope = self.scope("compress_apply", input.project.as_deref());
         self.check_cross_project_write(input.project.as_deref())
             .await?;
-        let store = self.open_store_for(input.project.as_deref()).await?;
+        // Build the full engine (not just a store): the replacement summary
+        // must be embedded — its sources had vectors and are deleted below,
+        // so an un-embedded summary would be invisible to semantic search.
+        // `embed_async = true` matches the `create` tool's behavior.
+        let engine = self.build_engine_for(input.project.as_deref()).await?;
         let result = ops::compress_apply(
-            &store,
-            input.source_ids,
-            input.summary,
-            input.content,
-            input.scope,
-            input.tags,
+            engine.store(),
+            ops::CompressApplyParams {
+                source_ids: input.source_ids,
+                summary: input.summary,
+                content: input.content,
+                scope: input.scope,
+                tags: input.tags,
+                embed_async: true,
+            },
+            Some(&engine),
         )
         .await
         .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
@@ -2326,7 +2393,6 @@ impl EngramDbServer {
         let _scope = self.scope("reindex", input.project.as_deref());
         self.check_cross_project_write(input.project.as_deref())
             .await?;
-        let store = self.open_store_for(input.project.as_deref()).await?;
         let embeddings_only = input.embeddings_only.unwrap_or(false);
         let index_only = input.index_only.unwrap_or(false);
 
@@ -2336,18 +2402,25 @@ impl EngramDbServer {
         // in `build_engine_for` (that would refuse the very operation that
         // fixes the mismatch). A genuine build failure is surfaced rather
         // than silently downgrading to an index-only reindex reported as
-        // success.
-        let engine = if !index_only {
-            Some(
-                self.assemble_engine_for(input.project.as_deref())
-                    .await
-                    .map_err(|e| error_response(ErrorCode::InternalError, &e))?,
-            )
+        // success. When the engine is built, reuse its store instead of
+        // opening a second one.
+        let (engine, opened_store) = if !index_only {
+            let engine = self
+                .assemble_engine_for(input.project.as_deref())
+                .await
+                .map_err(|e| error_response(ErrorCode::InternalError, &e))?;
+            (Some(engine), None)
         } else {
-            None
+            let store = self.open_store_for(input.project.as_deref()).await?;
+            (None, Some(store))
         };
+        let store = engine
+            .as_ref()
+            .map(|e| e.store())
+            .or(opened_store.as_ref())
+            .expect("either the engine or the direct open supplies a store");
 
-        let result = ops::reindex(&store, engine.as_ref(), embeddings_only)
+        let result = ops::reindex(store, engine.as_ref(), embeddings_only)
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
@@ -2882,6 +2955,7 @@ impl ServerHandler for EngramDbServer {
             }
             "memory-session-end" => {
                 let mut stats_text = String::new();
+                let mut recency_hint = String::new();
                 if let Ok(store) = self.open_store().await {
                     if let Ok(stats) = ops::compute_stats(&store).await {
                         let review_count = stats
@@ -2895,6 +2969,32 @@ impl ServerHandler for EngramDbServer {
                             stats.total, review_count
                         );
                     }
+
+                    // Recency trigger: nudge the agent to revisit memories that
+                    // have gone stale (active, untouched past the configured
+                    // window) so long-lived stores don't quietly rot.
+                    let recency_days = self
+                        .load_config_for(None)
+                        .await
+                        .ok()
+                        .and_then(|c| c.review.recency_days);
+                    if let Some(days) = recency_days {
+                        if let Ok(stale) = ops::count_recency_stale(&store, Some(days)).await {
+                            if stale > 0 {
+                                recency_hint =
+                                    format!(
+                                    "\n{} active {} not been touched in over {} days and may be \
+                                     stale — run review (or review stale_after_days: {}) to \
+                                     confirm or retire {}.",
+                                    stale,
+                                    if stale == 1 { "memory has" } else { "memories have" },
+                                    days,
+                                    days,
+                                    if stale == 1 { "it" } else { "them" },
+                                );
+                            }
+                        }
+                    }
                 }
 
                 let prompt = format!(
@@ -2905,8 +3005,8 @@ impl ServerHandler for EngramDbServer {
                          4. Did you encounter non-obvious behavior? -> create type: debug\n\
                          5. Did anything contradict existing memories? -> challenge\n\n\
                          {}\n\
-                         Run review if you'd like to address flagged memories with the user.",
-                    stats_text
+                         Run review if you'd like to address flagged memories with the user.{}",
+                    stats_text, recency_hint
                 );
 
                 let mut result = GetPromptResult::new(vec![PromptMessage::new_text(

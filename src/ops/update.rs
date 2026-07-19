@@ -81,6 +81,12 @@ pub async fn update_memory(
     if let Some(floor) = params.decay_floor {
         super::validate_score(floor, "decay_floor")?;
     }
+    // Validate the summary exactly as create does — without this, update was
+    // a back door for empty/oversized/multi-line summaries that create
+    // rejects (and that downstream single-line rendering relies on).
+    if let Some(summary) = params.summary.as_deref() {
+        super::validate_summary(summary)?;
+    }
 
     // Parse the decay strategy up front (it doesn't depend on the stored
     // memory) so invalid input fails before taking the write lock.
@@ -195,6 +201,22 @@ pub async fn update_memory(
 
             // Apply the update to get the current state
             update.apply_to(memory);
+
+            // Keep `expires_at` consistent with the merged TTL, mirroring
+            // create (`expires_at = created_at + ttl`). Without this,
+            // extending a TTL left the old (shorter) `expires_at` in place —
+            // the memory kept vanishing from queries on the original
+            // schedule — and adding a TTL to a memory created without one
+            // never set `expires_at` at all. A merged decay without a TTL
+            // clears `expires_at`: the decay config is authoritative for
+            // expiry whenever a decay field is updated.
+            if wants_decay_update {
+                memory.expires_at = memory
+                    .decay
+                    .as_ref()
+                    .and_then(|d| d.ttl)
+                    .map(|ttl| memory.created_at + ttl);
+            }
 
             // Then handle tag additions (after replacement)
             if let Some(tags_to_add) = params.tags_add {
