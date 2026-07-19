@@ -412,6 +412,11 @@ mod tests {
         Memory {
             id: "test-id".to_string(),
             type_: MemoryType::Decision,
+            epistemic: MemoryType::Decision.default_epistemic(),
+            valid_while: None,
+            valid_from: None,
+            invalidated_at: None,
+            superseded_by: None,
             summary: "Test memory".to_string(),
             title: None,
             content: "Test content".to_string(),

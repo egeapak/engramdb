@@ -129,6 +129,11 @@ mod tests {
         Memory {
             id: id.to_string(),
             type_,
+            epistemic: type_.default_epistemic(),
+            valid_while: None,
+            valid_from: None,
+            invalidated_at: None,
+            superseded_by: None,
             summary: format!("Test summary for {}", id),
             title: None,
             content: format!("Test content for {}", id),

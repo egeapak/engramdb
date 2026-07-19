@@ -15,6 +15,7 @@ mod challenge;
 pub mod config;
 mod decay;
 pub mod env;
+mod epistemic;
 mod memory;
 mod provenance;
 mod title_strategy;
@@ -22,13 +23,14 @@ mod title_strategy;
 // Re-export all public types
 pub use challenge::Challenge;
 pub use config::{
-    DaemonConfig, EmbeddingBackend, EmbeddingsConfig, EngramConfig, LogicalBonusConfig,
-    MaintenanceConfig, NliConfig, ReindexOnModelChange, RerankConfig, RetrievalConfig,
-    ScopeProximityConfig, ScoringConfig, ScoringWeights, SearchConfig, ThresholdsConfig,
-    TrustWeights, DEFAULT_NLI_MODEL_REPO,
+    DaemonConfig, EmbeddingBackend, EmbeddingsConfig, EngramConfig, EpistemicConfig, HooksConfig,
+    LogicalBonusConfig, MaintenanceConfig, NliConfig, ReindexOnModelChange, RerankConfig,
+    RetrievalConfig, ScopeProximityConfig, ScoringConfig, ScoringWeights, SearchConfig,
+    SituationConfig, SituationProfile, ThresholdsConfig, TrustWeights, DEFAULT_NLI_MODEL_REPO,
 };
 pub use decay::{Decay, DecayStrategy};
 pub use env::in_process_override;
-pub use memory::{Memory, MemoryType, MemoryUpdate, Status, Visibility};
+pub use epistemic::{Epistemic, Generality, Situation, Validity};
+pub use memory::{default_decay, Memory, MemoryType, MemoryUpdate, Status, Visibility};
 pub use provenance::{Provenance, ProvenanceSource};
 pub use title_strategy::TitleStrategy;

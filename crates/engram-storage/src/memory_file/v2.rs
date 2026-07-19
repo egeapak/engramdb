@@ -164,6 +164,11 @@ fn parse_v2(frontmatter: &str, body: &str) -> Result<Memory> {
     Ok(Memory {
         id: fm.id,
         type_: fm.type_,
+        epistemic: fm.type_.default_epistemic(),
+        valid_while: None,
+        valid_from: None,
+        invalidated_at: None,
+        superseded_by: None,
         title: fm.title,
         summary,
         content,

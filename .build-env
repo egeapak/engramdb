@@ -1,0 +1,2 @@
+export ORT_STRATEGY=system
+export ORT_LIB_LOCATION=/tmp/ort-lib

@@ -16,7 +16,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{Challenge, Decay, Provenance};
+use super::{Challenge, Decay, Epistemic, Provenance, Validity};
 
 /// Type of memory - categorizes the kind of knowledge stored
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -54,6 +54,53 @@ impl MemoryType {
             MemoryType::Debug => Some(Decay::exponential(Duration::days(30))),
         }
     }
+
+    /// Default epistemic class when the author doesn't specify one.
+    ///
+    /// This mapping is the backward-compatibility anchor: memory files that
+    /// predate the `epistemic` field materialize to exactly these values, so
+    /// it is effectively frozen — changing it changes the behavior of
+    /// existing stores. (Hazard → Fact is deliberate: a footgun is
+    /// verifiable against the repo, and the Fact class preserves Hazard's
+    /// never-forget floor-0.5 decay via the diagonal rule in
+    /// [`default_decay`].)
+    pub fn default_epistemic(&self) -> Epistemic {
+        match self {
+            MemoryType::Context
+            | MemoryType::Convention
+            | MemoryType::Relationship
+            | MemoryType::Hazard => Epistemic::Fact,
+            MemoryType::Debug => Epistemic::Observation,
+            MemoryType::Decision | MemoryType::Intent | MemoryType::Preference => {
+                Epistemic::Decision
+            }
+        }
+    }
+}
+
+/// Default decay for a (type, epistemic class) pair.
+///
+/// INVARIANT (diagonal): `default_decay(t, t.default_epistemic())` is
+/// byte-identical to `t.default_decay()` — every memory whose class was
+/// defaulted from its type decays exactly as it did before the epistemic
+/// axis existed. A paired test asserts this for all types.
+///
+/// Off-diagonal, the declared class wins over the type default. The
+/// Observation constants (90d half-life, 0.2 floor) are the built-in
+/// defaults; the create path substitutes `[epistemic]` config values when
+/// set (`observation_half_life_days` / `observation_decay_floor`) — config
+/// resolution happens in `ops::create`, keeping this function pure.
+pub fn default_decay(type_: MemoryType, epistemic: Epistemic) -> Option<Decay> {
+    if epistemic == type_.default_epistemic() {
+        return type_.default_decay();
+    }
+    match epistemic {
+        Epistemic::Observation => Some(Decay::exponential(Duration::days(90)).with_floor(0.2)),
+        // Facts flip when the code changes; they don't fade with time.
+        Epistemic::Fact => Some(Decay::none()),
+        // Decisions are premise-bound, not time-bound.
+        Epistemic::Decision => type_.default_decay(),
+    }
 }
 
 /// Status of a memory
@@ -85,6 +132,38 @@ pub struct Memory {
     /// Type of memory
     #[serde(rename = "type")]
     pub type_: MemoryType,
+
+    /// Epistemic class — what KIND of claim this memory makes (orthogonal to
+    /// `type_`, which says what it is ABOUT). Non-optional in the domain
+    /// model; the memory-file parsers default it from
+    /// `type_.default_epistemic()` for files that predate the field. (The
+    /// serde default — `Fact` — only covers exotic JSON paths that bypass
+    /// the file parsers; it is not the authoritative defaulting rule.)
+    #[serde(default)]
+    pub epistemic: Epistemic,
+
+    /// Invalidation condition. `None` = no declared falsifier.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub valid_while: Option<Validity>,
+
+    /// Valid-time start: when the claim became true in the world. `None` ⇒
+    /// `created_at` (the overwhelmingly common case; set explicitly only to
+    /// backdate).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub valid_from: Option<DateTime<Utc>>,
+
+    /// Valid-time end: when the claim stopped holding. `None` ⇒ still valid.
+    /// Setting this CLOSES the validity window — the memory is retained on
+    /// disk and queryable via `include_invalidated`, but excluded from
+    /// default retrieval. Never set by deletion.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub invalidated_at: Option<DateTime<Utc>>,
+
+    /// Id of the memory that superseded this one, when the window was closed
+    /// by supersession (ADR-style reverse link of `supersedes`). `None` when
+    /// closed by `resolve invalidate` without a successor.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub superseded_by: Option<String>,
 
     /// Brief summary (≤100 chars)
     pub summary: String,
@@ -170,6 +249,11 @@ impl Memory {
         Self {
             id,
             type_,
+            epistemic: type_.default_epistemic(),
+            valid_while: None,
+            valid_from: None,
+            invalidated_at: None,
+            superseded_by: None,
             summary: summary.into(),
             title: None,
             content: content.into(),
@@ -224,9 +308,22 @@ impl Memory {
         self.expires_at.is_some_and(|expires_at| now > expires_at)
     }
 
-    /// Check if the memory is active (not expired, not challenged)
+    /// Check if the memory's validity window is closed as of `now`.
+    ///
+    /// A future-dated `invalidated_at` (scheduled invalidation) is NOT yet
+    /// invalidated — mirroring `is_expired_at` semantics.
+    pub fn is_invalidated_at(&self, now: chrono::DateTime<Utc>) -> bool {
+        self.invalidated_at.is_some_and(|t| now >= t)
+    }
+
+    /// Check if the memory's validity window is closed as of the current time.
+    pub fn is_invalidated(&self) -> bool {
+        self.is_invalidated_at(Utc::now())
+    }
+
+    /// Check if the memory is active (not expired, not invalidated, not challenged)
     pub fn is_active(&self) -> bool {
-        !self.is_expired() && self.status == Status::Active
+        !self.is_expired() && !self.is_invalidated() && self.status == Status::Active
     }
 }
 
@@ -236,6 +333,30 @@ pub struct MemoryUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "type")]
     pub type_: Option<MemoryType>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub epistemic: Option<Epistemic>,
+
+    /// `Some(validity)` replaces `valid_while`; an all-empty `Validity`
+    /// clears it to `None` on the memory (see `apply_to`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_while: Option<Validity>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_from: Option<DateTime<Utc>>,
+
+    /// `Some(ts)` closes the validity window at `ts`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invalidated_at: Option<DateTime<Utc>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+
+    /// When true, clears `invalidated_at` AND `superseded_by` — the §2.4
+    /// reopening surface. Applied after the setter fields above, so a single
+    /// update cannot both set and clear.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_invalidated: bool,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
@@ -299,6 +420,31 @@ impl MemoryUpdate {
     pub fn apply_to(&self, memory: &mut Memory) {
         if let Some(type_) = self.type_ {
             memory.type_ = type_;
+        }
+        if let Some(epistemic) = self.epistemic {
+            memory.epistemic = epistemic;
+        }
+        if let Some(ref valid_while) = self.valid_while {
+            // An all-empty Validity clears the field: `is_empty` is the
+            // write-path guard that keeps meaningless Validity off disk.
+            memory.valid_while = if valid_while.is_empty() {
+                None
+            } else {
+                Some(valid_while.clone())
+            };
+        }
+        if let Some(valid_from) = self.valid_from {
+            memory.valid_from = Some(valid_from);
+        }
+        if let Some(invalidated_at) = self.invalidated_at {
+            memory.invalidated_at = Some(invalidated_at);
+        }
+        if let Some(ref superseded_by) = self.superseded_by {
+            memory.superseded_by = Some(superseded_by.clone());
+        }
+        if self.clear_invalidated {
+            memory.invalidated_at = None;
+            memory.superseded_by = None;
         }
         if let Some(ref summary) = self.summary {
             memory.summary = summary.clone();
@@ -513,6 +659,12 @@ mod tests {
 
         let update = MemoryUpdate {
             type_: Some(MemoryType::Convention),
+            epistemic: None,
+            valid_while: None,
+            valid_from: None,
+            invalidated_at: None,
+            superseded_by: None,
+            clear_invalidated: false,
             summary: Some("New summary".to_string()),
             title: None,
             content: Some("New content".to_string()),
@@ -620,6 +772,178 @@ mod tests {
         // challenges should be untouched
         assert_eq!(memory.challenges.len(), 1);
         assert_eq!(memory.challenges[0].evidence, "Existing challenge");
+    }
+
+    #[test]
+    fn test_default_epistemic_mapping() {
+        use crate::Epistemic;
+        assert_eq!(MemoryType::Context.default_epistemic(), Epistemic::Fact);
+        assert_eq!(MemoryType::Convention.default_epistemic(), Epistemic::Fact);
+        assert_eq!(
+            MemoryType::Relationship.default_epistemic(),
+            Epistemic::Fact
+        );
+        // Hazard → Fact is deliberate (D3): preserves the never-forget
+        // floor-0.5 decay via the diagonal rule.
+        assert_eq!(MemoryType::Hazard.default_epistemic(), Epistemic::Fact);
+        assert_eq!(
+            MemoryType::Debug.default_epistemic(),
+            Epistemic::Observation
+        );
+        assert_eq!(
+            MemoryType::Decision.default_epistemic(),
+            Epistemic::Decision
+        );
+        assert_eq!(MemoryType::Intent.default_epistemic(), Epistemic::Decision);
+        assert_eq!(
+            MemoryType::Preference.default_epistemic(),
+            Epistemic::Decision
+        );
+    }
+
+    #[test]
+    fn test_default_decay_diagonal_invariant() {
+        // For every type, the two-arg default with the type's own default
+        // class must be byte-identical to the one-arg default — this is what
+        // makes the epistemic migration a behavioral no-op.
+        use crate::default_decay;
+        for t in [
+            MemoryType::Decision,
+            MemoryType::Convention,
+            MemoryType::Hazard,
+            MemoryType::Context,
+            MemoryType::Intent,
+            MemoryType::Relationship,
+            MemoryType::Debug,
+            MemoryType::Preference,
+        ] {
+            let diagonal = default_decay(t, t.default_epistemic());
+            let legacy = t.default_decay();
+            match (diagonal, legacy) {
+                (Some(a), Some(b)) => {
+                    assert_eq!(a.strategy, b.strategy, "strategy drift for {t:?}");
+                    assert_eq!(a.half_life, b.half_life, "half_life drift for {t:?}");
+                    assert_eq!(a.ttl, b.ttl, "ttl drift for {t:?}");
+                    assert_eq!(a.floor, b.floor, "floor drift for {t:?}");
+                }
+                (None, None) => {}
+                (a, b) => panic!("diagonal decay mismatch for {t:?}: {a:?} vs {b:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_default_decay_off_diagonal() {
+        use crate::{default_decay, Epistemic};
+
+        // Convention (diagonal Fact) declared as Observation: staleness decay.
+        let obs = default_decay(MemoryType::Convention, Epistemic::Observation).unwrap();
+        assert_eq!(obs.strategy, DecayStrategy::Exponential);
+        assert_eq!(obs.half_life, Some(Duration::days(90)));
+        assert_eq!(obs.floor, 0.2);
+
+        // Debug (diagonal Observation) declared as Fact: no decay.
+        let fact = default_decay(MemoryType::Debug, Epistemic::Fact).unwrap();
+        assert_eq!(fact.strategy, DecayStrategy::None);
+
+        // Convention declared as Decision: falls back to the type default.
+        let dec = default_decay(MemoryType::Convention, Epistemic::Decision).unwrap();
+        assert_eq!(dec.strategy, DecayStrategy::None);
+        // Debug declared as Decision keeps Debug's own exponential default.
+        let dbg_dec = default_decay(MemoryType::Debug, Epistemic::Decision).unwrap();
+        assert_eq!(dbg_dec.strategy, DecayStrategy::Exponential);
+        assert_eq!(dbg_dec.half_life, Some(Duration::days(30)));
+    }
+
+    #[test]
+    fn test_memory_new_epistemic_defaults() {
+        for t in [
+            MemoryType::Decision,
+            MemoryType::Hazard,
+            MemoryType::Debug,
+            MemoryType::Convention,
+        ] {
+            let memory = Memory::new(t, "s", "c", Provenance::human());
+            assert_eq!(memory.epistemic, t.default_epistemic());
+            assert!(memory.valid_while.is_none());
+            assert!(memory.valid_from.is_none());
+            assert!(memory.invalidated_at.is_none());
+            assert!(memory.superseded_by.is_none());
+        }
+    }
+
+    #[test]
+    fn test_memory_update_apply_epistemic_and_validity() {
+        use crate::{Epistemic, Generality, Validity};
+        let mut memory = Memory::new(MemoryType::Convention, "s", "c", Provenance::human());
+        assert_eq!(memory.epistemic, Epistemic::Fact);
+
+        // Set class + validity
+        let mut update = MemoryUpdate::new();
+        update.epistemic = Some(Epistemic::Decision);
+        update.valid_while = Some(Validity {
+            premise: Some("while rate limits exist".into()),
+            origin_task: Some("demo".into()),
+            generality: Generality::Task,
+            ..Default::default()
+        });
+        update.apply_to(&mut memory);
+        assert_eq!(memory.epistemic, Epistemic::Decision);
+        let vw = memory.valid_while.as_ref().unwrap();
+        assert_eq!(vw.origin_task.as_deref(), Some("demo"));
+        assert_eq!(vw.generality, Generality::Task);
+
+        // All-empty Validity clears the field
+        let mut clear = MemoryUpdate::new();
+        clear.valid_while = Some(Validity::default());
+        clear.apply_to(&mut memory);
+        assert!(memory.valid_while.is_none());
+
+        // None preserves
+        let noop = MemoryUpdate::new();
+        noop.apply_to(&mut memory);
+        assert_eq!(memory.epistemic, Epistemic::Decision);
+    }
+
+    #[test]
+    fn test_memory_update_invalidate_and_reopen() {
+        let mut memory = Memory::new(MemoryType::Decision, "s", "c", Provenance::human());
+        let ts = Utc::now() - Duration::hours(1);
+
+        let mut invalidate = MemoryUpdate::new();
+        invalidate.invalidated_at = Some(ts);
+        invalidate.superseded_by = Some("winner-id".to_string());
+        invalidate.apply_to(&mut memory);
+        assert!(memory.is_invalidated());
+        assert_eq!(memory.superseded_by.as_deref(), Some("winner-id"));
+
+        // Reopening clears both fields
+        let mut reopen = MemoryUpdate::new();
+        reopen.clear_invalidated = true;
+        reopen.apply_to(&mut memory);
+        assert!(!memory.is_invalidated());
+        assert!(memory.invalidated_at.is_none());
+        assert!(memory.superseded_by.is_none());
+    }
+
+    #[test]
+    fn test_is_active_invalidated() {
+        let mut memory = Memory::new(MemoryType::Decision, "s", "c", Provenance::human());
+        assert!(memory.is_active());
+
+        // Past invalidation ⇒ inactive
+        memory.invalidated_at = Some(Utc::now() - Duration::days(1));
+        assert!(memory.is_invalidated());
+        assert!(!memory.is_active());
+
+        // Future-dated invalidation (scheduled) ⇒ still active now
+        memory.invalidated_at = Some(Utc::now() + Duration::days(1));
+        assert!(!memory.is_invalidated());
+        assert!(memory.is_active());
+
+        // None ⇒ unchanged behavior
+        memory.invalidated_at = None;
+        assert!(memory.is_active());
     }
 
     #[test]
