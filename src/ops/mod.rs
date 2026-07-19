@@ -20,6 +20,7 @@ pub mod reindex;
 pub mod resolve;
 pub mod review;
 pub mod stats;
+pub mod task;
 pub mod update;
 pub mod verify;
 
@@ -54,6 +55,7 @@ pub use reindex::{reindex, ReindexResult};
 pub use resolve::{resolve_memory, ResolveAction, ResolveParams, ResolveResult};
 pub use review::{review_memories, ReviewParams};
 pub use stats::{compute_stats, StoreStats};
+pub use task::{task_complete, task_current, TaskCompleteResult, TaskCurrentResult};
 pub use update::{update_memory, UpdateParams};
 pub use verify::{verify_memory, VerifyResult};
 

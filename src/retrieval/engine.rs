@@ -245,6 +245,19 @@ impl RetrievalEngine {
         }
     }
 
+    /// Internal: record the ids of the memories a query returned
+    /// (above-threshold survivors) — the §11.3 promotion data source.
+    fn record_retrieved_memories(&self, result: &RetrievalResult) {
+        if let (Some(stats), Some(pid)) = (self.stats.as_ref(), self.project_id.as_ref()) {
+            let ids: Vec<String> = result
+                .memories
+                .iter()
+                .map(|sm| sm.memory.id.clone())
+                .collect();
+            stats.record_retrieved_memories(pid, &ids, self.session_id.as_deref());
+        }
+    }
+
     /// Build an [`IngestTelemetry`] from this engine when telemetry is
     /// wired up. Used by both `embed_memory` (synchronous) and
     /// `spawn_ingest` (spawned task) so create-side stage timings flow
@@ -1115,6 +1128,7 @@ impl RetrievalEngine {
             query_started.elapsed().as_secs_f64() * 1000.0,
         );
         self.record_query_outcome(!result.memories.is_empty(), &result.retrieval_quality);
+        self.record_retrieved_memories(&result);
 
         Ok(result)
     }
@@ -1228,6 +1242,7 @@ impl RetrievalEngine {
             query_started.elapsed().as_secs_f64() * 1000.0,
         );
         self.record_query_outcome(!result.memories.is_empty(), &result.retrieval_quality);
+        self.record_retrieved_memories(&result);
         Ok(result)
     }
 }

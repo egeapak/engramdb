@@ -264,19 +264,30 @@ fn format_class_entry(scored: &ScoredMemory, compact: bool) -> Vec<String> {
 
 /// Suppress task-scoped memories from hook injection (§8.3): entries with
 /// `generality == Task` are dropped unless the session's declared task
-/// matches `origin_task`. The session→task mapping reader lands with the
-/// lifecycle increment; until then task-scoped memories are always
-/// suppressed from hooks (they stay reachable by explicit query).
-fn suppress_task_scoped(memories: Vec<ScoredMemory>) -> Vec<ScoredMemory> {
+/// (§11.1 mapping) matches their `origin_task`. Absent a mapping,
+/// task-scoped memories are suppressed from hooks but remain reachable by
+/// explicit query.
+fn suppress_task_scoped(
+    memories: Vec<ScoredMemory>,
+    current_task: Option<&str>,
+) -> Vec<ScoredMemory> {
     memories
         .into_iter()
         .filter(|sm| {
-            sm.memory
-                .valid_while
-                .as_ref()
-                .is_none_or(|v| v.generality != Generality::Task)
+            sm.memory.valid_while.as_ref().is_none_or(|v| {
+                v.generality != Generality::Task
+                    || (current_task.is_some() && v.origin_task.as_deref() == current_task)
+            })
         })
         .collect()
+}
+
+/// The session's declared task, resolved from the hook event's session id
+/// and the §11.1 mapping. `None` when the event carries no session id or no
+/// mapping exists.
+fn session_task_for(input: &str, dir: &Path) -> Option<String> {
+    let session_id = extract_session_id(input)?;
+    engramdb::storage::task_state::current_task(dir, &session_id)
 }
 
 /// Budget-aware implementation (extracted for testability).
@@ -417,10 +428,12 @@ async fn process_hook_input(input: &str, dir: &Path, store: MemoryStore) -> Resu
         }
     };
 
-    // Task-scoped memories are suppressed from hook injection (§8.3), and
-    // the surviving list is ordered by FileEdit class rank (§8.1: decisions
-    // first, then facts — hazards leading — then observations).
-    let mut memories = suppress_task_scoped(result.memories);
+    // Task-scoped memories are suppressed from hook injection (§8.3) unless
+    // the session declared their task, and the surviving list is ordered by
+    // FileEdit class rank (§8.1: decisions first, then facts — hazards
+    // leading — then observations).
+    let current_task = session_task_for(input, dir);
+    let mut memories = suppress_task_scoped(result.memories, current_task.as_deref());
     let class_order = engine.config().hooks.class_order.clone();
     memories.sort_by_key(|sm| {
         (
@@ -472,7 +485,11 @@ pub async fn run_hook_pre_tool_use(dir: &Path) -> Result<()> {
 /// retrieval failed). Split from [`run_hook_session_start`] so the body is
 /// unit-testable without stdout capture — mirrors how `process_hook_input`
 /// backs `run_hook_pre_tool_use`.
-async fn process_session_start(dir: &Path, min_criticality: f64) -> Result<Option<String>> {
+async fn process_session_start(
+    dir: &Path,
+    min_criticality: f64,
+    input: &str,
+) -> Result<Option<String>> {
     let store = match MemoryStore::open(dir).await {
         Ok(s) => s,
         Err(e) => {
@@ -511,7 +528,8 @@ async fn process_session_start(dir: &Path, min_criticality: f64) -> Result<Optio
 
     // Always emit the reflection nudge, even when the store has no memories
     // yet — the agent should still be reminded to capture durable learnings.
-    let memories = suppress_task_scoped(result.memories);
+    let current_task = session_task_for(input, dir);
+    let memories = suppress_task_scoped(result.memories, current_task.as_deref());
     let class_order = engine.config().hooks.class_order.clone();
     let context = build_session_start_context_with(&memories, class_order.as_deref());
     let json = build_hook_response("SessionStart", &context)?;
@@ -524,7 +542,11 @@ async fn process_session_start(dir: &Path, min_criticality: f64) -> Result<Optio
 /// additionalContext JSON to stdout so they are surfaced at session start.
 pub async fn run_hook_session_start(dir: &Path, min_criticality: f64) -> Result<()> {
     let min_criticality = sanitize_min_criticality(min_criticality);
-    if let Some(json) = process_session_start(dir, min_criticality).await? {
+    // The event JSON carries the session id used for §8.3 task
+    // un-suppression; a missing/closed stdin degrades to no session id.
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    if let Some(json) = process_session_start(dir, min_criticality, &input).await? {
         println!("{}", json);
     }
     Ok(())
@@ -570,6 +592,16 @@ fn infer_situation(prompt: &str) -> Option<Situation> {
         return Some(Situation::DesignChoice);
     }
     None
+}
+
+/// Extract the `session_id` field every hook event carries.
+fn extract_session_id(input: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(input).ok()?;
+    value
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Extract the submitted prompt text from a UserPromptSubmit event.
@@ -621,7 +653,8 @@ async fn process_user_prompt_submit(input: &str, dir: &Path) -> Result<Option<St
         }
     };
 
-    let memories = suppress_task_scoped(result.memories);
+    let current_task = session_task_for(input, dir);
+    let memories = suppress_task_scoped(result.memories, current_task.as_deref());
     if memories.is_empty() {
         return Ok(None);
     }
@@ -728,13 +761,40 @@ pub async fn run_hook_post_tool_use(dir: &Path) -> Result<()> {
 }
 
 /// Run the SessionEnd hook handler (§8.5.3): housekeeping only, no context
-/// output, must never block session teardown. Telemetry lives in the
-/// long-running MCP/daemon processes (persisted there), so this increment
-/// has nothing to flush from a one-shot hook process; the session→task
-/// mapping clear and optional demotion wire in with the lifecycle work.
-pub async fn run_hook_session_end(_dir: &Path) -> Result<()> {
+/// output, must never block session teardown. Clears the session→task
+/// mapping (§11.1) and, when `[epistemic].demote_on_session_end` is set and
+/// a mapping existed, runs the §11.2 demotion for that task. Best-effort:
+/// every failure is logged and swallowed. (Telemetry flushes live in the
+/// long-running MCP/daemon processes; a one-shot hook has none.)
+pub async fn run_hook_session_end(dir: &Path) -> Result<()> {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
+
+    let Some(session_id) = extract_session_id(&input) else {
+        return Ok(());
+    };
+    let ended_task = match engramdb::storage::task_state::clear_session_task(dir, &session_id) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::debug!("SessionEnd mapping clear failed (non-fatal): {e}");
+            None
+        }
+    };
+
+    if let Some(task) = ended_task {
+        let config_path = dir.join(".engramdb").join("config.toml");
+        let config = engramdb::storage::config::load_config_or_default(&config_path).await;
+        if config.epistemic.demote_on_session_end {
+            match MemoryStore::open(dir).await {
+                Ok(store) => {
+                    if let Err(e) = engramdb::ops::task_complete(&store, &task).await {
+                        tracing::debug!("SessionEnd demotion failed (non-fatal): {e}");
+                    }
+                }
+                Err(e) => tracing::debug!("SessionEnd store open failed (non-fatal): {e}"),
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1379,7 +1439,7 @@ mod tests {
                 score_breakdown: Default::default(),
             })
             .collect();
-        let kept = suppress_task_scoped(memories);
+        let kept = suppress_task_scoped(memories, None);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].memory.summary, "Project-wide decision");
     }
@@ -1922,7 +1982,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         // No init — `MemoryStore::open` will fail and the hook must
         // swallow it (we don't want a missing store to break Claude Code).
-        let out = process_session_start(temp_dir.path(), 0.5).await.unwrap();
+        let out = process_session_start(temp_dir.path(), 0.5, "")
+            .await
+            .unwrap();
         assert!(out.is_none(), "missing store must return None silently");
     }
 
@@ -1934,7 +1996,7 @@ mod tests {
 
         // An empty store still emits the reflection nudge on its own, but no
         // "Key project memories" block.
-        let out = process_session_start(temp_dir.path(), 0.5)
+        let out = process_session_start(temp_dir.path(), 0.5, "")
             .await
             .unwrap()
             .expect("empty store still surfaces the reflection nudge");
@@ -1958,7 +2020,7 @@ mod tests {
         // when min_criticality is above all of them, but the nudge still fires.
         let dir = store_with_criticality(&[(0.2, "low"), (0.3, "lower")]).await;
 
-        let out = process_session_start(dir.path(), 0.9)
+        let out = process_session_start(dir.path(), 0.9, "")
             .await
             .unwrap()
             .expect("below-threshold store still surfaces the reflection nudge");
@@ -1986,7 +2048,7 @@ mod tests {
             store_with_criticality(&[(0.95, "Critical decision A"), (0.10, "Low-priority B")])
                 .await;
 
-        let out = process_session_start(dir.path(), 0.7)
+        let out = process_session_start(dir.path(), 0.7, "")
             .await
             .unwrap()
             .expect("high-criticality memory should surface");
@@ -2018,7 +2080,7 @@ mod tests {
         .await;
 
         // Lower threshold: both included.
-        let permissive = process_session_start(dir.path(), 0.5)
+        let permissive = process_session_start(dir.path(), 0.5, "")
             .await
             .unwrap()
             .expect("permissive threshold should surface at least one");
@@ -2030,7 +2092,7 @@ mod tests {
         assert!(permissive_ctx.contains("Mid criticality"));
 
         // Higher threshold: only the top one survives.
-        let strict = process_session_start(dir.path(), 0.9)
+        let strict = process_session_start(dir.path(), 0.9, "")
             .await
             .unwrap()
             .expect("strict threshold should still surface the top memory");
@@ -2044,5 +2106,93 @@ mod tests {
             "min_criticality must drop mid-level memories: {}",
             strict_ctx
         );
+    }
+}
+
+#[cfg(test)]
+mod task_lifecycle_hook_tests {
+    use super::*;
+    use engramdb::storage::{task_state, InMemoryRegistry, MemoryStore};
+    use engramdb::types::{Generality, Memory, MemoryType, Provenance, Validity};
+    use tempfile::TempDir;
+
+    fn task_scoped(summary: &str, task: &str) -> ScoredMemory {
+        let mut m = Memory::new(MemoryType::Decision, summary, "c", Provenance::human());
+        m.valid_while = Some(Validity {
+            origin_task: Some(task.to_string()),
+            generality: Generality::Task,
+            ..Default::default()
+        });
+        ScoredMemory {
+            memory: m,
+            score: 0.9,
+            score_breakdown: Default::default(),
+        }
+    }
+
+    #[test]
+    fn suppression_unsuppresses_matching_task() {
+        let memories = vec![
+            task_scoped("mine", "feat-x"),
+            task_scoped("other", "feat-y"),
+        ];
+        // Declared task feat-x: its memories surface; feat-y stays hidden.
+        let kept = suppress_task_scoped(memories, Some("feat-x"));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].memory.summary, "mine");
+    }
+
+    #[tokio::test]
+    async fn session_start_unsuppresses_declared_task_memories() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        let mut m = Memory::new(
+            MemoryType::Decision,
+            "Task-scoped decision",
+            "c",
+            Provenance::human(),
+        );
+        m.criticality = 0.9;
+        m.valid_while = Some(Validity {
+            origin_task: Some("feat-x".to_string()),
+            generality: Generality::Task,
+            ..Default::default()
+        });
+        store.create(&m).await.unwrap();
+
+        // Without a mapping, the task-scoped memory is suppressed.
+        let out = process_session_start(temp_dir.path(), 0.5, r#"{"session_id":"sess-1"}"#)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!out.contains("Task-scoped decision"), "{out}");
+
+        // Declare the task for this session → un-suppressed.
+        task_state::set_current_task(temp_dir.path(), "sess-1", "feat-x").unwrap();
+        let out = process_session_start(temp_dir.path(), 0.5, r#"{"session_id":"sess-1"}"#)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(out.contains("Task-scoped decision"), "{out}");
+
+        // A different session keeps it suppressed.
+        let out = process_session_start(temp_dir.path(), 0.5, r#"{"session_id":"sess-2"}"#)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!out.contains("Task-scoped decision"), "{out}");
+    }
+
+    #[test]
+    fn extract_session_id_variants() {
+        assert_eq!(
+            extract_session_id(r#"{"session_id":"abc"}"#),
+            Some("abc".to_string())
+        );
+        assert_eq!(extract_session_id(r#"{"session_id":""}"#), None);
+        assert_eq!(extract_session_id(r#"{}"#), None);
+        assert_eq!(extract_session_id("not json"), None);
     }
 }
