@@ -169,7 +169,7 @@ pub struct IndexForFiltering {
     pub watch_paths: Vec<String>,
 }
 
-/// Filterable/displayable entry (14 columns).
+/// Filterable/displayable entry (15 columns).
 ///
 /// Contains every field needed for filtering, sorting, and display.
 /// Omits only `provenance_source` and `confidence` which no caller reads
@@ -179,6 +179,11 @@ pub struct IndexFilterable {
     pub id: String,
     #[serde(rename = "type")]
     pub type_: MemoryType,
+    /// Epistemic class (schema v0.3.0). Always serialized — §5.4 requires
+    /// json/MCP list output to include it — and rendered as an off-diagonal
+    /// `[fact]`-style tag in pretty output.
+    #[serde(default)]
+    pub epistemic: Epistemic,
     pub summary: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub physical: Vec<String>,
@@ -1458,7 +1463,7 @@ fn batch_to_summaries(batch: &RecordBatch) -> Result<Vec<IndexSummary>> {
     Ok(entries)
 }
 
-/// Convert a RecordBatch to a Vec of IndexFilterable (14 columns).
+/// Convert a RecordBatch to a Vec of IndexFilterable (15 columns).
 fn batch_to_filterable(batch: &RecordBatch) -> Result<Vec<IndexFilterable>> {
     let ids = batch
         .column_by_name("id")
@@ -1466,6 +1471,12 @@ fn batch_to_filterable(batch: &RecordBatch) -> Result<Vec<IndexFilterable>> {
         .as_any()
         .downcast_ref::<StringArray>()
         .context("Failed to cast 'id'")?;
+    let epistemics = batch
+        .column_by_name("epistemic")
+        .context("Missing 'epistemic' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'epistemic'")?;
     let summaries = batch
         .column_by_name("summary")
         .context("Missing 'summary' column")?
@@ -1590,6 +1601,7 @@ fn batch_to_filterable(batch: &RecordBatch) -> Result<Vec<IndexFilterable>> {
         entries.push(IndexFilterable {
             id: ids.value(i).to_string(),
             type_: parse_memory_type(types.value(i))?,
+            epistemic: parse_epistemic(epistemics.value(i))?,
             summary: summaries.value(i).to_string(),
             physical,
             logical,
@@ -1911,6 +1923,23 @@ mod tests {
         assert_eq!(entries[0].id, "test-1");
         assert_eq!(entries[0].summary, "Test summary");
         assert_eq!(entries[0].visibility, Visibility::Shared);
+        assert_eq!(entries[0].epistemic, engram_types::Epistemic::Decision);
+    }
+
+    /// §5.4: the filterable projection must carry the epistemic class so list
+    /// output can include it (json: always; pretty: off-diagonal tag).
+    #[tokio::test]
+    async fn test_list_filterable_carries_off_diagonal_epistemic() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        let mut entry = create_test_entry("test-offdiag");
+        entry.epistemic = engram_types::Epistemic::Observation;
+        lance.upsert(&entry).await.unwrap();
+
+        let entries = lance.list_filterable().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].epistemic, engram_types::Epistemic::Observation);
     }
 
     #[tokio::test]

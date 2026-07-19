@@ -2373,6 +2373,8 @@ impl EngramDbServer {
                 let mut obj = serde_json::json!({
                     "id": e.id,
                     "type": format!("{:?}", e.type_).to_lowercase(),
+                    // §5.4: epistemic is always present in MCP list output.
+                    "epistemic": e.epistemic.as_str(),
                     "summary": e.summary,
                     "tags": e.tags,
                     "logical": e.logical,

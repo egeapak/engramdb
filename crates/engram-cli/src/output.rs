@@ -695,13 +695,12 @@ impl OutputFormatter {
                 format!("{:?}", entry.type_)
             };
 
-            let invalidated_tag = entry
-                .invalidated_at
-                .map(|t| format!(" [invalidated {}]", t.format("%Y-%m-%d")))
-                .unwrap_or_default();
             println!(
                 "{} {}{} {}",
-                id_display, type_display, invalidated_tag, entry.summary
+                id_display,
+                type_display,
+                epistemic_tags(entry.type_, entry.epistemic, entry.invalidated_at),
+                entry.summary
             );
 
             if verbose {
@@ -724,7 +723,13 @@ impl OutputFormatter {
 
         for entry in entries {
             let id_short = short_id(&entry.id);
-            println!("{} {:?} {}", id_short, entry.type_, entry.summary);
+            println!(
+                "{} {:?}{} {}",
+                id_short,
+                entry.type_,
+                epistemic_tags(entry.type_, entry.epistemic, entry.invalidated_at),
+                entry.summary
+            );
 
             if verbose {
                 println!(
@@ -1142,6 +1147,7 @@ mod tests {
         IndexFilterable {
             id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             type_: MemoryType::Decision,
+            epistemic: MemoryType::Decision.default_epistemic(),
             summary: "Test index entry".to_string(),
             physical: vec![],
             logical: vec![],
@@ -1155,6 +1161,32 @@ mod tests {
             valid_from: None,
             invalidated_at: None,
         }
+    }
+
+    // ========================================
+    // 0. epistemic_tags helper tests (§5.4)
+    // ========================================
+
+    #[test]
+    fn test_epistemic_tags_diagonal_is_empty() {
+        let tags = epistemic_tags(
+            MemoryType::Decision,
+            MemoryType::Decision.default_epistemic(),
+            None,
+        );
+        assert_eq!(tags, "");
+    }
+
+    #[test]
+    fn test_epistemic_tags_off_diagonal_and_invalidated() {
+        use chrono::TimeZone;
+        let when = chrono::Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
+        let tags = epistemic_tags(
+            MemoryType::Context,
+            engramdb::types::Epistemic::Observation,
+            Some(when),
+        );
+        assert_eq!(tags, " [observation] [invalidated 2026-07-01]");
     }
 
     // ========================================

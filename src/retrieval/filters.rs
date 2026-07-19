@@ -250,6 +250,7 @@ mod tests {
         IndexFilterable {
             id: id.to_string(),
             type_,
+            epistemic: type_.default_epistemic(),
             summary: "Test summary".to_string(),
             physical,
             logical,

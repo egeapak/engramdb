@@ -1125,6 +1125,15 @@ async fn list_all() {
         .await;
     let val = parse_ok(&result);
     assert_eq!(val["total"], 3);
+    // §5.4: epistemic is always present in list output (type-derived here).
+    for m in val["memories"].as_array().unwrap() {
+        let epistemic = m["epistemic"].as_str().unwrap();
+        match m["type"].as_str().unwrap() {
+            "decision" => assert_eq!(epistemic, "decision"),
+            "hazard" | "convention" => assert_eq!(epistemic, "fact"),
+            other => panic!("unexpected type {other}"),
+        }
+    }
 }
 
 #[tokio::test]
