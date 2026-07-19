@@ -180,6 +180,18 @@ Every memory carries an `epistemic` class, orthogonal to `type`: `type` says wha
 | `observation` | Empirical observation measured at a point in time. Environment-dependent; goes stale; generalizes with caution. |
 | `decision` | Normative choice with a rationale. Valid while its premise holds; binding within its origin scope. |
 
+### Legacy (pre-epistemic) memories
+
+Memories created before epistemic classes existed are categorized by the same
+frozen type mapping the moment they are read — they are never "class-less"
+and score identically to a new diagonal memory. What they lack is the
+*enrichment metadata*: no `premise`, no `invalidated_by` watch globs, no
+`verified_at`. Enrichment is gradual, not a migration: the `doctor` tool
+reports the gap counts (`enrichment_gaps`), the session-end prompt nudges
+when decisions lack premises, and the recency review trigger surfaces
+long-untouched memories — record the premise / watch paths with `update`
+whenever you touch one, and `verify` what you re-confirm.
+
 ### Default class by type
 
 You rarely set `epistemic` on `create` — it defaults from `type`. Set it only when the claim's kind differs from the default (e.g. a `hazard` you merely observed once is an `observation`, not a `fact`).

@@ -155,8 +155,9 @@ async fn run_environment_check(
                         "Run `engramdb doctor --fix` to flag these for review, or `engramdb verify <id>` after re-confirming one.",
                     );
                 }
+                print_enrichment_gaps(&epistemic.gaps, formatter);
             }
-            Ok(_) => {}
+            Ok(epistemic) => print_enrichment_gaps(&epistemic.gaps, formatter),
             Err(e) => formatter.print_warning(&format!("epistemic checks skipped: {e}")),
         }
     }
@@ -174,6 +175,21 @@ async fn run_environment_check(
         anyhow::bail!("environment check found failing checks");
     }
     Ok(())
+}
+
+/// Report-only enrichment nudge: memories whose (often type-derived, i.e.
+/// legacy pre-epistemic) class carries no actionable metadata yet. Not a
+/// defect — enrichment happens gradually as memories are touched.
+fn print_enrichment_gaps(gaps: &engramdb::ops::EnrichmentGaps, formatter: &OutputFormatter) {
+    if !gaps.any() {
+        return;
+    }
+    formatter.print_message(&format!(
+        "Epistemic metadata gaps ({} live memories): {} decision(s) without a premise, \
+         {} observation(s) without invalidation watch paths. Legacy memories start this way — \
+         enrich as you touch them (`update --premise` / `--invalidated-by`, `verify` what you re-confirm).",
+        gaps.total_live, gaps.decisions_without_premise, gaps.observations_without_watch
+    ));
 }
 
 /// Load each downloaded/enabled model and run a tiny inference to confirm it

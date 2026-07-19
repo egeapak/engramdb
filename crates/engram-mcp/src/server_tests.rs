@@ -4262,6 +4262,59 @@ async fn get_prompt_session_end_reports_zero_memory_store() {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
 }
 
+/// Legacy/pre-epistemic categorization: memories get a type-derived class
+/// but no enrichment metadata. The session-end prompt must surface the gap
+/// count so agents enrich as they touch memories (and stay silent when
+/// nothing gaps).
+#[tokio::test]
+async fn get_prompt_session_end_surfaces_enrichment_gaps() {
+    let (_dir, server) = setup().await;
+
+    // No memories: no gap line.
+    let (client, server_handle) = duplex_serve(server).await;
+    let result = client
+        .peer()
+        .get_prompt(GetPromptRequestParams::new("memory-session-end"))
+        .await
+        .expect("get_prompt must succeed");
+    let text = match &result.messages[0].content {
+        PromptMessageContent::Text { text } => text.clone(),
+        other => panic!("expected text content, got {other:?}"),
+    };
+    assert!(
+        !text.contains("lack a recorded premise"),
+        "empty store must not nag: {text}"
+    );
+    client.cancel().await.ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+
+    // A legacy-shaped decision (class defaulted, no premise) triggers it.
+    let (_dir2, server2) = setup().await;
+    let _ = create_and_get_id(
+        &server2,
+        "decision",
+        "Legacy decision",
+        "no premise recorded",
+    )
+    .await;
+    let (client2, server_handle2) = duplex_serve(server2).await;
+    let result = client2
+        .peer()
+        .get_prompt(GetPromptRequestParams::new("memory-session-end"))
+        .await
+        .expect("get_prompt must succeed");
+    let text = match &result.messages[0].content {
+        PromptMessageContent::Text { text } => text.clone(),
+        other => panic!("expected text content, got {other:?}"),
+    };
+    assert!(
+        text.contains("1 decision(s) lack a recorded premise"),
+        "gap line missing: {text}"
+    );
+    client2.cancel().await.ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle2).await;
+}
+
 /// Unknown prompt name → `invalid_params` error branch
 /// (server.rs:2397-2401).
 #[tokio::test]

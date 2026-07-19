@@ -36,9 +36,9 @@ pub use compress::{
 pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
 pub use delete::delete_memory;
 pub use doctor::{
-    doctor, doctor_environment, doctor_epistemic, validate_models, CheckStatus, DoctorResult,
-    DoctorSection, EnvironmentCheck, EnvironmentDoctorResult, EpistemicDoctorResult,
-    EpistemicFinding, EpistemicFindingKind,
+    doctor, doctor_environment, doctor_epistemic, enrichment_gaps, validate_models, CheckStatus,
+    DoctorResult, DoctorSection, EnrichmentGaps, EnvironmentCheck, EnvironmentDoctorResult,
+    EpistemicDoctorResult, EpistemicFinding, EpistemicFindingKind,
 };
 pub use gc::{
     execute_gc_plan, gc_memories, plan_gc, GcCandidate, GcMaintenance, GcPlan, GcReason, GcResult,

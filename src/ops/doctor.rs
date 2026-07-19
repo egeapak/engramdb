@@ -3437,6 +3437,60 @@ pub struct EpistemicFinding {
     pub fixed: bool,
 }
 
+/// Enrichment gaps: live memories that carry a (type-derived or explicit)
+/// epistemic class but none of the metadata that makes the class actionable.
+/// Pre-epistemic stores start with EVERY memory in this state — the class
+/// itself is materialized from the frozen type mapping, but premises, watch
+/// globs, and verification stamps only accrue as memories are touched.
+/// Report-only: gaps are an enrichment opportunity, never a defect.
+#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
+pub struct EnrichmentGaps {
+    /// Decision-class memories with no recorded premise ("because C").
+    pub decisions_without_premise: usize,
+    /// Observation-class memories with no `invalidated_by` watch globs
+    /// (the §10.1 doctor check can never fire for these).
+    pub observations_without_watch: usize,
+    /// Live memories examined.
+    pub total_live: usize,
+}
+
+impl EnrichmentGaps {
+    /// Count gaps over a set of live memories (shared by the doctor pass and
+    /// the session-end prompt).
+    pub fn count<'a, I: IntoIterator<Item = &'a crate::types::Memory>>(live: I) -> Self {
+        use crate::types::Epistemic;
+        let mut gaps = Self::default();
+        for m in live {
+            gaps.total_live += 1;
+            match m.epistemic {
+                Epistemic::Decision => {
+                    if m.valid_while
+                        .as_ref()
+                        .and_then(|v| v.premise.as_ref())
+                        .is_none()
+                    {
+                        gaps.decisions_without_premise += 1;
+                    }
+                }
+                Epistemic::Observation => {
+                    if m.valid_while
+                        .as_ref()
+                        .is_none_or(|v| v.invalidated_by.is_empty())
+                    {
+                        gaps.observations_without_watch += 1;
+                    }
+                }
+                Epistemic::Fact => {}
+            }
+        }
+        gaps
+    }
+
+    pub fn any(&self) -> bool {
+        self.decisions_without_premise > 0 || self.observations_without_watch > 0
+    }
+}
+
 /// Result of the epistemic doctor pass.
 #[must_use]
 #[derive(Debug, serde::Serialize)]
@@ -3444,6 +3498,9 @@ pub struct EpistemicDoctorResult {
     pub findings: Vec<EpistemicFinding>,
     /// Memories examined (live memories with the relevant fields).
     pub checked: usize,
+    /// Enrichment gaps across the live set (report-only, see
+    /// [`EnrichmentGaps`]).
+    pub gaps: EnrichmentGaps,
 }
 
 /// Run the three epistemic checks (§10.1–§10.3) over every live memory.
@@ -3590,8 +3647,23 @@ pub async fn doctor_epistemic(
 
     Ok(EpistemicDoctorResult {
         checked: live.len(),
+        gaps: EnrichmentGaps::count(live.iter().copied()),
         findings,
     })
+}
+
+/// Standalone enrichment-gap count (one batched load) for surfaces that
+/// don't run the full doctor pass — the session-end prompt uses this.
+pub async fn enrichment_gaps(store: &MemoryStore) -> Result<EnrichmentGaps> {
+    let now = chrono::Utc::now();
+    let ids = store.list_ids().await?;
+    let loaded = store.get_batch(&ids).await?;
+    Ok(EnrichmentGaps::count(
+        loaded
+            .iter()
+            .map(|(_, m)| m)
+            .filter(|m| !m.is_invalidated_at(now)),
+    ))
 }
 
 /// Flip a memory to `NeedsReview` with a tagged doctor challenge (E4).
@@ -3702,6 +3774,61 @@ mod epistemic_doctor_tests {
         let mut m = Memory::new(type_, id, "content", Provenance::human());
         m.id = id.to_string();
         m
+    }
+
+    /// Enrichment gaps count legacy-shaped memories (class present, metadata
+    /// absent) and skip enriched + invalidated ones. Every pre-epistemic
+    /// store starts with all-diagonal, all-unenriched memories — this is the
+    /// signal doctor and the session-end prompt surface.
+    #[tokio::test]
+    async fn enrichment_gaps_count_legacy_shaped_memories() {
+        let (_t, store) = setup().await;
+
+        // Legacy-shaped decision: class decision (diagonal), no premise.
+        store
+            .create(&memory("gap-dec", MemoryType::Decision))
+            .await
+            .unwrap();
+        // Enriched decision: premise recorded -> no gap.
+        let mut enriched = memory("ok-dec", MemoryType::Decision);
+        enriched.valid_while = Some(Validity {
+            premise: Some("because C".into()),
+            ..Default::default()
+        });
+        store.create(&enriched).await.unwrap();
+        // Legacy-shaped observation: class observation (debug diagonal), no watch globs.
+        store
+            .create(&memory("gap-obs", MemoryType::Debug))
+            .await
+            .unwrap();
+        // Watched observation -> no gap.
+        let mut watched = memory("ok-obs", MemoryType::Debug);
+        watched.valid_while = Some(Validity {
+            invalidated_by: vec!["src/**".into()],
+            ..Default::default()
+        });
+        store.create(&watched).await.unwrap();
+        // Fact class never gaps; invalidated memories are excluded entirely.
+        store
+            .create(&memory("fact", MemoryType::Convention))
+            .await
+            .unwrap();
+        let mut dead = memory("dead-dec", MemoryType::Decision);
+        dead.invalidated_at = Some(Utc::now() - Duration::days(1));
+        store.create(&dead).await.unwrap();
+
+        let gaps = enrichment_gaps(&store).await.unwrap();
+        assert_eq!(gaps.decisions_without_premise, 1, "{gaps:?}");
+        assert_eq!(gaps.observations_without_watch, 1, "{gaps:?}");
+        assert_eq!(gaps.total_live, 5, "{gaps:?}");
+        assert!(gaps.any());
+
+        // The full doctor pass carries the same counts.
+        let result = doctor_epistemic(&store, &EngramConfig::default(), false)
+            .await
+            .unwrap();
+        assert_eq!(result.gaps.decisions_without_premise, 1);
+        assert_eq!(result.gaps.observations_without_watch, 1);
     }
 
     #[tokio::test]

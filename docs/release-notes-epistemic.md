@@ -36,6 +36,15 @@ On top of the class sit:
   clusters merge into a derived fact; opt-in apply via
   `[epistemic] auto_consolidate`).
 
+## Existing memories
+
+Old memories are categorized automatically: the frozen type→class mapping
+applies at read time, so nothing needs migrating and nothing changes rank
+(outside the four intended changes below). They start without enrichment
+metadata (premise, watch paths, verification) — `doctor` reports these gaps,
+and the session-end prompt nudges agents to enrich memories as they touch
+them.
+
 ## Intended behavior changes on upgrade
 
 Everything else is inert for existing data; these four change behavior:

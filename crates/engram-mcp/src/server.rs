@@ -2547,6 +2547,11 @@ impl EngramDbServer {
         if !epistemic.findings.is_empty() {
             response["epistemic_findings"] = serde_json::json!(epistemic.findings);
         }
+        // Report-only enrichment nudge: classes without actionable metadata
+        // (legacy pre-epistemic memories all start this way).
+        if epistemic.gaps.any() {
+            response["enrichment_gaps"] = serde_json::json!(epistemic.gaps);
+        }
         let r = serde_json::to_string(&response)
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
@@ -2993,6 +2998,22 @@ impl ServerHandler for EngramDbServer {
                                     if stale == 1 { "it" } else { "them" },
                                 );
                             }
+                        }
+                    }
+
+                    // Enrichment nudge: classes without actionable metadata.
+                    // Legacy (pre-epistemic) memories all start this way —
+                    // their class is type-derived, but premises and watch
+                    // globs only accrue as memories are touched. Report-only.
+                    if let Ok(gaps) = ops::enrichment_gaps(&store).await {
+                        if gaps.any() {
+                            recency_hint.push_str(&format!(
+                                "\n{} decision(s) lack a recorded premise and {} observation(s) \
+                                 lack invalidation watch paths (typical for pre-epistemic \
+                                 memories) — when you touch one, enrich it via update \
+                                 (premise / invalidated_by).",
+                                gaps.decisions_without_premise, gaps.observations_without_watch,
+                            ));
                         }
                     }
                 }
