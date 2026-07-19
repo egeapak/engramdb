@@ -1594,6 +1594,12 @@ decay:
 
 /// Same capture for `full_memory()` (title, personal visibility, decay with
 /// half-life, supersedes — the busy path through the writer).
+///
+/// Baseline updated once after merging the #58 writer hardening (tags are
+/// now backtick-quoted like Files/Logical, so comma-bearing tags survive
+/// the roundtrip); the invariant is unchanged — a diagonal memory emits no
+/// epistemic bytes on top of whatever the current pre-epistemic writer
+/// produces.
 const GOLDEN_PRE_EPISTEMIC_FULL: &str = r#"---
 version: 2
 id: test-full
@@ -1618,7 +1624,7 @@ Details here.
 
 - **Files:** `src/db/**`, `src/lib.rs`
 - **Logical:** `infrastructure.database`
-- **Tags:** database, transactions
+- **Tags:** `database`, `transactions`
 - **Criticality:** 0.95
 - **Confidence:** 1
 - **Visibility:** personal
