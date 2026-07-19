@@ -94,6 +94,7 @@ that contradicts a memory. Suggested, not required.";
 /// respects a character budget. When the budget is exceeded, remaining
 /// memories are omitted with a notice telling the agent to use
 /// `search` for more.
+#[cfg(test)] // production paths use format_class_context_with_budget directly
 fn format_detailed_context(header: &str, memories: &[ScoredMemory]) -> String {
     format_detailed_context_with_budget(header, memories, SESSION_CONTEXT_BUDGET)
 }
@@ -101,6 +102,7 @@ fn format_detailed_context(header: &str, memories: &[ScoredMemory]) -> String {
 /// Build the full SessionStart additional context: project memories (if any)
 /// followed by the reflection nudge. When the store has no memories the nudge
 /// is still emitted on its own so the agent always receives it.
+#[cfg(test)] // production path passes the config class_order via ..._with
 fn build_session_start_context(memories: &[ScoredMemory]) -> String {
     build_session_start_context_with(memories, None)
 }
@@ -284,6 +286,7 @@ fn suppress_task_scoped(memories: Vec<ScoredMemory>) -> Vec<ScoredMemory> {
 /// truncated mid-rationale. Facts are compressible — the preview line is
 /// dropped first, then the summary line competes like any other. Observations
 /// are a single summary+date line.
+#[cfg(test)] // budget-parameterized entry point for the formatter tests
 fn format_detailed_context_with_budget(
     header: &str,
     memories: &[ScoredMemory],
@@ -683,7 +686,7 @@ async fn process_post_tool_use(input: &str, dir: &Path) -> Result<Option<String>
         .iter()
         .filter(|entry| {
             // §2.4 validity guard: closed windows never warn (§14.14).
-            !entry.invalidated_at.is_some_and(|t| t <= now)
+            entry.invalidated_at.is_none_or(|t| t > now)
                 && !entry.watch_paths.is_empty()
                 && engramdb::scope::physical::matches(&entry.watch_paths, &relative_path)
         })
