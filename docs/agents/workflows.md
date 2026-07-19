@@ -90,13 +90,44 @@ Example:
 
 Field semantics are in [memory-model.md](./memory-model.md); judgment on what makes a memory useful is in [best-practices.md](./best-practices.md).
 
-## Before/after editing — `update` and `supersedes`
+## Before/after editing — `update`, `supersedes`, and invalidation
 
 A memory's content can drift from reality. When it does:
 
-- **Right answer**: `update` if the original framing is still useful — change `content` and bump `verified_at`.
-- **Right answer for big changes**: `create` a new memory with `supersedes: [<old_id>]`. The old one stays around for history, marked superseded; the new one wins in retrieval.
+- **Right answer**: `update` if the original framing is still useful — change `content`, and call `verify` if you re-confirmed it against the code.
+- **Right answer for big changes**: `create` a new memory with `supersedes: [<old_id>]`. Supersession closes the old memory's validity window (`invalidated_at` is set, `superseded_by` back-links to the new one): it drops out of default retrieval but stays on disk for history.
+- **Right answer when there's no replacement**: `resolve` with `action: "invalidate"` — the claim simply stopped being true. Pass `superseded_by` if a successor exists.
 - **Wrong answer**: silently `delete` the old one. You lose the audit trail and may re-derive the same wrong answer later.
+
+A supersession walkthrough:
+
+```jsonc
+// 1. The old decision is now wrong — create the replacement, linking it:
+{ "tool": "create", "arguments": {
+    "type": "decision",
+    "summary": "Use SQLite for persistence (reversed PostgreSQL decision, PR #432)",
+    "content": "...",
+    "supersedes": ["<old_id>"]
+} }
+
+// 2. Later, to see the full history including the closed-out version:
+{ "tool": "query", "arguments": {
+    "mode": "filter", "query": "persistence database choice",
+    "epistemic": ["decision"], "include_invalidated": true
+} }
+```
+
+Invalidated memories carry `invalidated_at` (and `superseded_by` when applicable) in results, so the chain is reconstructible. If you invalidated the wrong memory, `update` with `clear_invalidated: true` reopens the window.
+
+## Task lifecycle — `task_current` and `task_complete`
+
+For memories that only matter while a feature is in flight (plans, temporary constraints, task-local decisions):
+
+1. **Declare the task** at the start of the session: `task_current` with `task: "billing-refactor"`. This maps your session to the task, so task-scoped memories from *other* tasks stay suppressed from hook injection while yours surface. Call it with no `task` to read the current declaration.
+2. **Create task-scoped memories** as you work: pass `origin_task: "billing-refactor"` and `generality: "task"` on `create`.
+3. **Complete the task** when it ships: `task_complete` with `task: "billing-refactor"`. Task-scoped memories are demoted to fast decay (the 14-day intent curve) so they fade instead of lingering; project-wide memories created for the task are listed back to you with a "verify or demote" notice.
+
+Demotion isn't a death sentence: the maintenance pass watches retrieval telemetry, and when a task-bound memory keeps being retrieved in later sessions (3 distinct sessions by default), it suggests promoting it to project-wide — or does so automatically with `[epistemic] auto_promote = true` (clears `origin_task`, sets `generality: "project"`, restores default decay).
 
 ## When you find a contradiction — `challenge`, then `resolve`
 
@@ -129,7 +160,7 @@ Later (next session, or right then), use `resolve` to decide:
 }
 ```
 
-`action` is one of `keep` (re-affirm; clear the challenge), `update` (rewrite), or `delete` (the challenge was right; remove).
+`action` is one of `keep` (re-affirm; clear the challenge), `update` (rewrite), `delete` (the challenge was right; remove), or `invalidate` (it *was* true but no longer is; close the validity window, keeping history — optionally pass `superseded_by`).
 
 If NLI contradiction detection is enabled in config (`[nli].enabled = true`), the server auto-challenges on `create` when a new memory contradicts an existing one. You'll see the auto-challenge in the response.
 
