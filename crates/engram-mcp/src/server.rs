@@ -396,6 +396,30 @@ struct VerifyInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct TaskCurrentInput {
+    #[schemars(
+        description = "Task/feature name to declare for this session (short human-readable name). Omit to read the current declaration."
+    )]
+    task: Option<String>,
+
+    #[schemars(
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+    )]
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TaskCompleteInput {
+    #[schemars(description = "Task/feature name to mark finished.")]
+    task: String,
+
+    #[schemars(
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+    )]
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct CompressCandidatesInput {
     #[schemars(description = "Scope to filter candidates")]
     scope: Option<String>,
@@ -2011,6 +2035,68 @@ impl EngramDbServer {
             "id": result.id,
             "verified": true,
             "review_cleared": result.review_cleared,
+        }))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
+    }
+
+    #[tool(
+        name = "task_current",
+        description = "Declare the task/feature this session is working on. Task-scoped memories from other tasks stay suppressed; yours surface. Call without a task to read the current declaration."
+    )]
+    async fn memory_task_current(
+        &self,
+        Parameters(input): Parameters<TaskCurrentInput>,
+    ) -> Result<String, String> {
+        let _scope = self.scope("task_current", input.project.as_deref());
+        let dir = self.resolve_dir(input.project.as_deref()).await?;
+
+        let result = ops::task_current(&dir, &self.session_id, input.task.as_deref())
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+
+        let r = serde_json::to_string(&serde_json::json!({
+            "session_id": result.session_id,
+            "task": result.task,
+        }))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
+    }
+
+    #[tool(
+        name = "task_complete",
+        description = "Mark a task/feature finished. Its task-scoped decisions start decaying unless promoted; project-wide memories from the task are listed for review."
+    )]
+    async fn memory_task_complete(
+        &self,
+        Parameters(input): Parameters<TaskCompleteInput>,
+    ) -> Result<String, String> {
+        let _scope = self.scope("task_complete", input.project.as_deref());
+        self.check_cross_project_write(input.project.as_deref())
+            .await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
+
+        let result = ops::task_complete(&store, &input.task)
+            .await
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+
+        let notices: Vec<serde_json::Value> = result
+            .project_wide_notices
+            .iter()
+            .map(|(id, summary)| {
+                serde_json::json!({
+                    "id": id,
+                    "summary": summary,
+                    "notice": "project-wide memory from a completed task — verify or demote",
+                })
+            })
+            .collect();
+        let r = serde_json::to_string(&serde_json::json!({
+            "task": input.task,
+            "demoted": result.demoted,
+            "kept_custom_decay": result.kept_custom_decay,
+            "project_wide_review": notices,
         }))
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();

@@ -4574,3 +4574,67 @@ async fn verify_tool_stamps_and_update_reopens() {
     assert!(got.get("invalidated_at").is_none(), "window reopened");
     assert!(got.get("superseded_by").is_none());
 }
+
+// -----------------------------------------------------------------------
+// Task tools (I5b)
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn task_current_and_complete_roundtrip() {
+    let (_dir, server) = setup().await;
+
+    // Read with no declaration.
+    let result = parse_ok(
+        &server
+            .memory_task_current(Parameters(TaskCurrentInput {
+                task: None,
+                project: None,
+            }))
+            .await,
+    );
+    assert!(result["task"].is_null());
+
+    // Declare, then read back.
+    let result = parse_ok(
+        &server
+            .memory_task_current(Parameters(TaskCurrentInput {
+                task: Some("feat-x".to_string()),
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(result["task"], "feat-x");
+
+    // Create a task-scoped memory for that task and complete it.
+    let mut input = create_input("decision", "Task-bound decision", "c");
+    input.origin_task = Some("feat-x".to_string());
+    input.generality = Some("task".to_string());
+    let id = parse_ok(&server.memory_create(Parameters(input)).await)["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let result = parse_ok(
+        &server
+            .memory_task_complete(Parameters(TaskCompleteInput {
+                task: "feat-x".to_string(),
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(result["demoted"][0], id);
+
+    // Empty task name is rejected.
+    let err = parse_err(
+        &server
+            .memory_task_complete(Parameters(TaskCompleteInput {
+                task: "  ".to_string(),
+                project: None,
+            }))
+            .await,
+    );
+    assert!(err["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("must not be empty"));
+}

@@ -25,6 +25,7 @@ pub mod rollback;
 pub mod serve;
 pub mod setup;
 pub mod stats;
+pub mod task;
 pub mod update;
 pub mod verify;
 
@@ -52,5 +53,6 @@ pub use rollback::run_rollback;
 pub use serve::run_serve;
 pub use setup::run_setup;
 pub use stats::run_stats;
+pub use task::{run_task_complete, run_task_current};
 pub use update::{run_update, UpdateParams};
 pub use verify::run_verify;

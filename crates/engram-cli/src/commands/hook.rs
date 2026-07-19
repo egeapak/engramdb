@@ -529,9 +529,19 @@ async fn process_session_start(
     // Always emit the reflection nudge, even when the store has no memories
     // yet — the agent should still be reminded to capture durable learnings.
     let current_task = session_task_for(input, dir);
+    let before = result.memories.len();
     let memories = suppress_task_scoped(result.memories, current_task.as_deref());
+    let suppressed = before - memories.len();
     let class_order = engine.config().hooks.class_order.clone();
-    let context = build_session_start_context_with(&memories, class_order.as_deref());
+    let mut context = build_session_start_context_with(&memories, class_order.as_deref());
+    // §16.4 hint line: teach the task mechanism exactly when it becomes
+    // relevant. Safe to advertise `task_current` — the tool ships in this
+    // build (it is pinned into MCP_TOOL_SUFFIXES alongside this hint).
+    if suppressed > 0 {
+        context.push_str(&format!(
+            "\n({suppressed} task-scoped memories hidden — declare task_current to surface yours.)"
+        ));
+    }
     let json = build_hook_response("SessionStart", &context)?;
     Ok(Some(json))
 }
@@ -2194,5 +2204,64 @@ mod task_lifecycle_hook_tests {
         assert_eq!(extract_session_id(r#"{"session_id":""}"#), None);
         assert_eq!(extract_session_id(r#"{}"#), None);
         assert_eq!(extract_session_id("not json"), None);
+    }
+}
+
+#[cfg(test)]
+mod hint_line_tests {
+    use super::*;
+    use engramdb::storage::{task_state, InMemoryRegistry, MemoryStore};
+    use engramdb::types::{Generality, Memory, MemoryType, Provenance, Validity};
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn session_start_hints_when_task_scoped_memories_hidden() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        for (id, task) in [("h1", "feat-a"), ("h2", "feat-b")] {
+            let mut m = Memory::new(MemoryType::Decision, id, "c", Provenance::human());
+            m.id = id.to_string();
+            m.criticality = 0.9;
+            m.valid_while = Some(Validity {
+                origin_task: Some(task.to_string()),
+                generality: Generality::Task,
+                ..Default::default()
+            });
+            store.create(&m).await.unwrap();
+        }
+
+        // No declared task: both hidden → hint names the count.
+        let out = process_session_start(temp_dir.path(), 0.5, r#"{"session_id":"s"}"#)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            out.contains("2 task-scoped memories hidden — declare task_current"),
+            "{out}"
+        );
+
+        // Declaring one task un-hides its memory; hint counts the remainder.
+        task_state::set_current_task(temp_dir.path(), "s", "feat-a").unwrap();
+        let out = process_session_start(temp_dir.path(), 0.5, r#"{"session_id":"s"}"#)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(out.contains("h1"), "{out}");
+        assert!(out.contains("1 task-scoped memories hidden"), "{out}");
+
+        // Nothing suppressed → no hint.
+        let store2 = MemoryStore::open(temp_dir.path()).await.unwrap();
+        drop(store2);
+        let tmp2 = TempDir::new().unwrap();
+        let _ = MemoryStore::init(tmp2.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let out = process_session_start(tmp2.path(), 0.5, "")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!out.contains("task-scoped memories hidden"), "{out}");
     }
 }

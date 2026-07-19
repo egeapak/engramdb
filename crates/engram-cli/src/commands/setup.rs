@@ -33,6 +33,8 @@ const MCP_TOOL_SUFFIXES: &[&str] = &[
     "challenge",
     "resolve",
     "verify",
+    "task_current",
+    "task_complete",
     "review",
     "stats",
     "doctor",

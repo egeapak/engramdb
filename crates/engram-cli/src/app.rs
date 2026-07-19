@@ -27,6 +27,29 @@ pub enum HookCommand {
     PreCompact,
 }
 
+/// Subcommands for `engramdb task`.
+#[derive(Subcommand)]
+pub enum TaskCommand {
+    /// Declare (or read, with no NAME) the task this session is working on
+    Current {
+        /// Task/feature name (short, human-readable)
+        name: Option<String>,
+
+        /// Session id (defaults to $CLAUDE_SESSION_ID / $MCP_SESSION_ID)
+        #[arg(long = "session-id")]
+        session_id: Option<String>,
+    },
+    /// Mark a task finished: demote its task-scoped memories
+    Complete {
+        /// Task/feature name
+        name: String,
+
+        /// Operate on the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
+    },
+}
+
 /// Subcommands for `engramdb doctor`.
 #[derive(Subcommand)]
 pub enum DoctorCommand {
@@ -603,6 +626,12 @@ pub enum Command {
         /// Operate on the global (cross-project) memory store instead of the current project
         #[arg(long)]
         global: bool,
+    },
+
+    /// Task lifecycle: declare or complete the task this session works on
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
     },
 
     /// Confirm a memory is still accurate (stamps verified_at; clears

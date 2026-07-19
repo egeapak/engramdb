@@ -77,7 +77,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use app::{Cli, Command, HookCommand};
+use app::{Cli, Command, HookCommand, TaskCommand};
 use commands::{AddParams, ChallengeParams, QueryParams, UpdateParams};
 use output::OutputFormatter;
 
@@ -441,6 +441,14 @@ pub async fn run(cli: Cli) -> Result<()> {
             commands::run_delete(&dir, global, &id, force, &formatter).await
         }
         Command::Verify { id, global } => commands::run_verify(&dir, global, &id, &formatter).await,
+        Command::Task { command } => match command {
+            TaskCommand::Current { name, session_id } => {
+                commands::run_task_current(&dir, name.as_deref(), session_id.as_deref(), &formatter)
+            }
+            TaskCommand::Complete { name, global } => {
+                commands::run_task_complete(&dir, global, &name, &formatter).await
+            }
+        },
         Command::Stats {
             all_projects,
             global,
