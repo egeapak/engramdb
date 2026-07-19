@@ -15,6 +15,9 @@ Decided by the project owner (2026-07-19):
 | D2 | Wire/field name | `epistemic` (values `fact` / `observation` / `decision`) |
 | D3 | Hazard default class | `Fact` |
 | D4 | Situation scoring rollout | Tuned defaults **enabled** out of the box |
+| D5 | Bi-temporal validity intervals | **In scope** (§2.4) — this development is completed fully, not deferred |
+| D6 | Hook/MCP surface expansion | In scope: UserPromptSubmit, PostToolUse, SessionEnd, PreCompact hooks (§8.5); `verify`, `task_current`, `task_complete` tools + `resolve` invalidate action (§5.5) |
+| D7 | Agent teaching surfaces | In scope: ENGRAM.md rewrite, tool-description updates, plugin manifest, session-start hints (§16) |
 
 Editorial calls made in this spec (flag in review if you disagree):
 
@@ -151,7 +154,68 @@ pub struct Memory {
   `valid_while: Option<Validity>` with matching `apply_to` arms. Setting an
   all-empty `Validity` via update clears `valid_while` to `None`.
 
-### 2.4 Type-derived defaults
+### 2.4 Bi-temporal validity interval (D5)
+
+Following the bi-temporal model (SQL:2011 / Zep-Graphiti): **transaction
+time** is when EngramDB learned something (`created_at` / `updated_at`,
+already present, unchanged); **valid time** is when the claim holds in the
+world. Three new fields on `Memory`:
+
+```rust
+/// Valid-time start: when the claim became true in the world. None ⇒
+/// created_at (the overwhelmingly common case; set explicitly only to
+/// backdate, e.g. "this convention has held since the v0.5 rewrite").
+#[serde(skip_serializing_if = "Option::is_none")]
+pub valid_from: Option<DateTime<Utc>>,
+
+/// Valid-time end: when the claim stopped holding. None ⇒ still valid.
+/// Setting this CLOSES the validity window — the memory is retained on
+/// disk and queryable via include_invalidated, but excluded from default
+/// retrieval. Never set by deletion (deletion removes; invalidation ends).
+#[serde(skip_serializing_if = "Option::is_none")]
+pub invalidated_at: Option<DateTime<Utc>>,
+
+/// Id of the memory that superseded this one, when the window was closed
+/// by supersession (ADR-style reverse link of `supersedes`). None when
+/// closed by resolve/doctor without a successor.
+#[serde(skip_serializing_if = "Option::is_none")]
+pub superseded_by: Option<String>,
+```
+
+Semantics:
+
+- `Memory::is_invalidated_at(now)` = `invalidated_at.is_some_and(|t| now >= t)`;
+  `is_active()` additionally requires not-invalidated. `valid_from` in the
+  future is permitted but not specially handled (documented as unusual).
+- **Window-closing writers** (all via atomic `update_with` under the
+  per-project write lock):
+  1. **Supersession**: when a create/update carries `supersedes: [ids]`,
+     each referenced live memory gets `invalidated_at = now`,
+     `superseded_by = <new id>`. This upgrades `supersedes` from
+     informational to semantic. Missing/already-invalidated ids are skipped
+     (logged), matching the existing tolerance in `compress_apply`.
+  2. **Resolution**: the `resolve` op gains an `invalidate` action (§5.5) —
+     preferred over `delete` for "this is no longer true".
+  3. **Compression**: `compress_apply` switches from deleting sources to
+     invalidating them (`superseded_by = summary id`). GC handles eventual
+     cleanup.
+  4. Doctor never closes windows, even with `--fix` (it only flips status to
+     `NeedsReview`; window closure is an agent/human act).
+- **Reopening** is allowed (`update` clearing `invalidated_at`/`superseded_by`)
+  — invalidation is reversible, unlike deletion.
+- **Retrieval**: invalidated memories are excluded index-level by default
+  (mirrors expiry). New `include_invalidated: Option<bool>` on
+  `RetrievalQuery`, MCP `QueryInput`, `list`, and CLI. When included they are
+  scored normally and tagged `[invalidated <date>]` in output.
+- **Retention**: `gc` gains a rule purging memories with
+  `invalidated_at` older than `[epistemic] invalidated_retention_days`
+  (default 180; `0` = keep forever). Same dry-run-first ethos as existing gc.
+- **Relation to existing mechanisms**: `expires_at` remains *planned* expiry
+  (known in advance); `invalidated_at` is *learned* invalidation (discovered
+  after the fact). `Status::Challenged` remains "disputed, possibly valid" —
+  a challenge may *lead to* invalidation via resolve but does not imply it.
+
+### 2.5 Type-derived defaults
 
 ```rust
 impl MemoryType {
@@ -170,7 +234,7 @@ impl MemoryType {
 This mapping is the backward-compatibility anchor. It is **frozen at ship**:
 changing it later changes the materialized behavior of old files.
 
-### 2.5 Decay defaults become two-dimensional
+### 2.6 Decay defaults become two-dimensional
 
 Replace create-path call sites of `MemoryType::default_decay()` with:
 
@@ -203,8 +267,11 @@ precedence preserved).
   `#[serde(skip_serializing_if = "Option::is_none")] epistemic: Option<Epistemic>`.
   Rationale for frontmatter (not hidden meta): the class is human-meaningful
   and human-editable, like `type`/`status`.
-- `HiddenMeta` (v2.rs:75) gains:
-  `#[serde(skip_serializing_if = "Option::is_none")] valid_while: Option<Validity>`.
+- `HiddenMeta` (v2.rs:75) gains four optional fields:
+  `valid_while: Option<Validity>`, `valid_from: Option<DateTime<Utc>>`,
+  `invalidated_at: Option<DateTime<Utc>>`, `superseded_by: Option<String>`
+  (all `skip_serializing_if = "Option::is_none"` — sitting next to the
+  existing `verified_at`/`expires_at` timestamps).
 - **Writer**: emits `epistemic` only when off-diagonal
   (`memory.epistemic != memory.type_.default_epistemic()`); emits
   `valid_while` only when `Some` and non-empty. Diagonal memories therefore
@@ -236,9 +303,16 @@ Memories-table additions, in a **single** schema bump
 | `verified_at` | nullable timestamp | `Memory::verified_at` | fact freshness anchor (§7.3), doctor (§10) |
 | `generality` | string | `valid_while.generality` (default `project`) | injection gating (§8.3) without file loads |
 | `origin_task` | nullable string | `valid_while.origin_task` | injection gating (§8.3), task ops (§11.2) |
+| `valid_from` | nullable timestamp | `Memory::valid_from` | output tagging; time-travel list filters |
+| `invalidated_at` | nullable timestamp | `Memory::invalidated_at` | default-exclusion filter (§2.4), gc retention |
+| `watch_paths` | list\<string\> | `valid_while.invalidated_by` | PostToolUse hook matching (§8.5.2) without file loads |
 
-`premise`/`invalidated_by`/`derived_from` do **not** get columns — they are
-consumed only by doctor and rendering, both of which read files.
+`premise` and `derived_from` do **not** get columns — they are consumed only
+by doctor and rendering, both of which read files. (`superseded_by` likewise
+stays file-only; it is display/audit data.) `valid_while.invalidated_by`
+*does* get a column — named `watch_paths` at the index layer to avoid
+confusion with the `invalidated_at` timestamp — because the PostToolUse hook
+must match edited paths against it at hook speed.
 
 Existing stores backfill via the standard reindex-on-open path (rebuild from
 `.md` files, seconds, vectors preserved — same as the R2/R3 `decay` /
@@ -307,9 +381,30 @@ same flags plus `--clear-validity`.
 
 ### 5.4 Output surfaces
 
-`--format json` / MCP responses include `epistemic` always and `valid_while`
-when present. `pretty` output shows `[fact]`-style class tag next to the
-existing type tag only when off-diagonal.
+`--format json` / MCP responses include `epistemic` always and `valid_while`,
+`valid_from`, `invalidated_at`, `superseded_by` when present. `pretty` output
+shows a `[fact]`-style class tag next to the existing type tag only when
+off-diagonal, and an `[invalidated 2026-07-01]` tag on invalidated memories
+(visible only under `include_invalidated`).
+
+### 5.5 New MCP tools (D6)
+
+Three new tools plus one extended action. Each also gets a CLI subcommand.
+`setup.rs::MCP_TOOL_SUFFIXES` gains `verify`, `task_current`,
+`task_complete` — the pinned `mcp_tool_suffixes_match_server_tools` test
+enforces this; forgetting it means a permission prompt per invocation.
+
+| Tool | Inputs | Behavior | Description text (agent-facing) |
+|------|--------|----------|--------------------------------|
+| `verify` | `id`, optional `project` | §10.4: stamps `verified_at = now`; resets `NeedsReview`→`Active` when the review was doctor-initiated | "Confirm a memory is still accurate after checking it against the code. Stamps verified_at (facts rank fresher) and clears needs_review." |
+| `task_current` | `task` (name) or empty to read, optional `project` | §11.1: records/reads the session→task mapping | "Declare the task/feature this session is working on. Task-scoped memories from other tasks stay suppressed; yours surface." |
+| `task_complete` | `task`, optional `project` | §11.2: demotes task-bound memories | "Mark a task/feature finished. Its task-scoped decisions start decaying unless promoted; project-wide memories from the task are listed for review." |
+| `resolve` (extended) | existing + new action `invalidate` | closes the validity window (§2.4) instead of deleting; optional `superseded_by` id | description gains: "Prefer `invalidate` over `delete` when a memory *was* true but no longer is — history is kept and queryable." |
+
+Explicitly considered and rejected: a standalone `invalidate` tool
+(redundant with `resolve`), a `promote` tool (promotion is
+maintenance/doctor-driven, §11.3), and a `situation` tool (it is a `query`
+parameter, not a verb).
 
 ## 6. Query surfaces & filtering
 
@@ -317,9 +412,12 @@ existing type tag only when off-diagonal.
 
 `RetrievalQuery` (src/retrieval/engine.rs:73) gains
 `epistemic: Option<Vec<Epistemic>>`, applied index-level exactly like the
-existing `types` filter (filters.rs + `build_filter_predicate`). Exposed as
-MCP `QueryInput.epistemic` (array of strings) and CLI `--epistemic`
-(repeatable). Applies in both Rank and Filter modes.
+existing `types` filter (filters.rs + `build_filter_predicate`), and
+`include_invalidated: Option<bool>` (default false — invalidated memories are
+excluded index-level via `invalidated_at IS NULL`, mirroring expiry
+handling). Both exposed on MCP `QueryInput`, `list`, and the CLI
+(`--epistemic` repeatable, `--include-invalidated`). Both apply in Rank and
+Filter modes.
 
 ### 6.2 Situation
 
@@ -465,6 +563,63 @@ but remain retrievable by explicit query). Implemented from the index columns
 
 Config: `[hooks] class_order` override (optional, default per §8.1).
 
+### 8.5 New hook events (D6)
+
+Today the plugin wires SessionStart and PreToolUse (`Read|Write|Edit`). Four
+additions, each a new `engramdb hook <event>` subcommand reading the event
+JSON from stdin and emitting `additionalContext` JSON (same contract as the
+existing two). All degrade gracefully: no daemon ⇒ `ConnectOnly` falls back
+per the existing hook policy; empty result ⇒ empty output, never an error
+exit. Wired in both `.claude-plugin/plugin.json` and the `setup.rs`
+settings.json fallback (kept in lockstep — see §16.3).
+
+#### 8.5.1 `user-prompt-submit` (UserPromptSubmit)
+
+Reads the submitted prompt text; runs a Filter-mode query with the prompt as
+`query` text plus **situation inference** — a cheap keyword heuristic mapping
+the prompt onto §6.2 situations (`error|failing|why does|debug|panic|crash` →
+Debugging; `should we|choose|vs|design|approach|architecture` → DesignChoice;
+no match → no situation). Injects top-k results under a compact budget
+(`[hooks] prompt_context_budget`, default 1000 chars) with the §8.2 per-class
+rendering. This is the highest-value addition: it surfaces
+*prompt*-relevant memories exactly when the agent forms its plan, and it is
+the only place situation inference can happen automatically for
+Debugging/DesignChoice. Keyword-only matching when embeddings are
+unavailable in-hook (never loads models in-process; daemon `ConnectOnly`).
+
+#### 8.5.2 `post-tool-use` (PostToolUse, matcher `Write|Edit|MultiEdit`)
+
+After a successful file mutation, matches the edited path against the
+`watch_paths` index column (§4.1). On match, injects a warning:
+`"⚠ this edit may invalidate memory <id> ('<summary>') — verify it or update/invalidate it"`.
+This converts §10.1's offline doctor check into a real-time signal at the
+moment of invalidation, closing the loop the user asked for: memories that
+declare their falsifier get *actively* policed. Index-only (no file loads);
+silent when no watcher matches (the common case — zero overhead beyond one
+index lookup).
+
+#### 8.5.3 `session-end` (SessionEnd)
+
+Housekeeping only, no context output: flushes session telemetry, clears the
+session→task mapping (§11.1), and — when `[epistemic] demote_on_session_end`
+is true and a mapping existed — runs the §11.2 demotion for that task.
+Must complete fast and never block session teardown (best-effort, logged).
+
+#### 8.5.4 `pre-compact` (PreCompact)
+
+Injects a short static reminder: "Context is about to be compacted. Store
+durable discoveries first: decisions (with their premise), hazards, and
+verified observations via the memory `create` tool." A memory system's worst
+enemy is context loss; this is the natural interception point.
+**Implementation note:** verify against the current Claude Code hook API at
+build time — if PreCompact does not support `additionalContext` injection,
+ship the subcommand as a no-op and document the limitation rather than
+misusing another channel.
+
+Considered and rejected: `Stop` (a store-your-memories nag on every turn end
+is noise and would train agents to ignore it), `Notification`/`SubagentStop`
+(no memory-relevant signal).
+
 ## 9. Conflict semantics (`crates/engram-models/src/nli/challenge.rs` + engine ingestion tail)
 
 ### 9.1 Routing table
@@ -482,8 +637,10 @@ memories). Resolution by (new, existing) class pair:
 - *Supersession candidate*: existing decision gets `Status::NeedsReview`
   (deliberately zero score penalty — "probably replaced, human confirms") and
   a challenge record naming the new memory id; doctor lists it as
-  "resolve: supersede (`update --supersedes`) or reject". Never auto-writes
-  `supersedes`.
+  "resolve: supersede (`update --supersedes`, which closes the old window
+  per §2.4) or reject". The NLI flow never auto-writes `supersedes` or
+  closes windows itself — window closure is always an explicit agent/human
+  act (create/update with `supersedes`, or `resolve invalidate`).
 - *Premise challenge*: mild — challenge text
   `"premise may have changed: contradicted by <new-id> (NLI {score:.2})"`;
   decision-class penalty (0.05) applies; §8.2 rendering shows the rationale
@@ -649,9 +806,11 @@ auto_promote = false
 consolidation_min_sources = 3    # §11.4
 consolidation_similarity = 0.85
 auto_consolidate = false
+invalidated_retention_days = 180 # §2.4 gc retention; 0 = keep forever
 
 [hooks]
 # class_order = ["fact", "decision", "observation"]   # optional override, §8.1
+prompt_context_budget = 1000     # §8.5.1 UserPromptSubmit injection budget
 ```
 
 All sections/fields `#[serde(default)]` — absent config ⇒ the defaults above.
@@ -665,6 +824,8 @@ added, the cache key must be extended.
 |---|---|---|
 | `.md` files | serde defaults + type-derived materialization | none; fields stamp on next natural rewrite |
 | LanceDB | one bump 0.2.0→0.3.0, reindex-on-open backfill | none (columns derived from files) |
+| `supersedes` | becomes semantic (closes windows) **for new writes only** — pre-existing `supersedes` references are never retroactively closed | old memories referenced by old supersede lists stay retrievable exactly as today |
+| `compress_apply` | invalidates sources instead of deleting them | superseded sources linger (hidden from default queries) until gc retention purges them |
 | Scoring | diagonal decay invariant; neutral-on-missing situation | none without `situation`; with hooks: tuned profiles active (D4) — the **only** intended behavior change on upgrade |
 | Config | untagged `ChallengePenalty`; defaulted sections | none for existing configs except new per-class penalty defaults when no scalar is set |
 | MCP/CLI | all new params optional | none |
@@ -680,7 +841,7 @@ out in release notes; `floor = 1.0` is the one-line opt-out.
    drift tests).
 2. **Roundtrip**: for every class × validity combination, write→parse is
    identity; diagonal memories emit no `epistemic` key; pre-epistemic fixture
-   files parse with the §2.4 defaults.
+   files parse with the §2.5 defaults.
 3. **Score parity**: `composite_score` ≡ `composite_score_target` on
    identical field values, including `epistemic`/`verified_at` (extend the
    existing parity coverage).
@@ -709,13 +870,88 @@ out in release notes; `floor = 1.0` is the one-line opt-out.
 12. **CI gates**: `cargo fmt --all`, `cargo clippy --workspace --all-targets
     --all-features -- -D warnings`, `cargo nextest run --workspace
     --all-features` all pass at every increment.
+13. **Invalidation never deletes**: no §2.4 code path removes a file; only
+    gc (retention rule, dry-run-able) ever deletes invalidated memories.
+14. **Default exclusion**: an invalidated memory appears in no query, list,
+    hook injection, or NLI candidate set unless `include_invalidated`;
+    window closure via `supersedes` is atomic under the write lock and
+    tolerant of missing ids.
+15. **Tool-suffix pinning**: `mcp_tool_suffixes_match_server_tools` passes
+    with the three new tools; every new hook subcommand exits 0 with empty
+    output on empty/malformed stdin (hooks must never break the host).
+16. **ENGRAM.md idempotence**: re-running `setup` after the content update
+    replaces the old ENGRAM.md exactly once (existing `write_engram_md`
+    equality check), and never duplicates the `@ENGRAM.md` ref in CLAUDE.md.
 
 ## 15. Deferred / explicitly out of scope
 
 - NLI premise-vs-repo verification (offline classifier for §10.4).
-- Bi-temporal validity intervals (`valid_from`/`invalidated_at` columns) —
-  status + challenges + supersedes cover current needs; revisit if history
-  queries become a requirement.
 - Epistemic auto-classification suggestions in doctor.
 - Transitive derived-from propagation.
 - Retyping on promotion.
+- Valid-time *querying* beyond include_invalidated (no "as of <date>"
+  time-travel query surface; the columns make it possible later).
+
+## 16. Agent teaching & documentation surfaces (D7)
+
+The feature only works if authoring agents *use* the new fields. Three
+surfaces teach them, in order of authority:
+
+### 16.1 ENGRAM.md (`setup.rs::ENGRAM_MD_CONTENT`)
+
+Rewritten content (replaces the current four bullets; `write_engram_md`'s
+content-equality check makes the rollout idempotent, §14.16):
+
+```markdown
+# EngramDB
+
+This project uses EngramDB for persistent agent memory.
+
+- **Expand surfaced memories** — when memories are surfaced at session start
+  or on your prompt, `get` the full content of any relevant to the task.
+- **Query before answering or modifying** — `query` with `mode: "rank"` for
+  context relevance; `mode: "filter"` for specific-term lookup. Declare your
+  situation (`situation: "debugging"` or `"design_choice"`) when it fits —
+  it reweights what surfaces.
+- **Store after discovering** — `create` after discovering patterns,
+  decisions, hazards, or conventions. For decisions, state the premise
+  ("because C") and what would invalidate it (`premise`, `invalidated_by`).
+  For task-specific choices, set `origin_task` and `generality: "task"`.
+- **Keep memories honest** — `challenge` contradictions; `verify` a memory
+  you've confirmed against the code; prefer `resolve` with `invalidate`
+  over `delete` when something *was* true but no longer is (history stays).
+- **Bound your work** — declare `task_current` when starting focused work;
+  call `task_complete` when it ships so task-scoped memories retire.
+```
+
+### 16.2 MCP tool descriptions (`crates/engram-mcp/src/server.rs`)
+
+- `create` (line ~1367) appends: "Set `epistemic` (fact/observation/decision)
+  when it differs from the type default; state `premise` and
+  `invalidated_by` for decisions and observations."
+- `query` (line ~1453) appends: "Pass `situation`
+  (session_start/file_edit/debugging/design_choice) to reweight results for
+  what you're doing; `include_invalidated: true` to see superseded history."
+- `resolve`, `verify`, `task_current`, `task_complete` per §5.5 table.
+- The server-level instructions blob (~line 2263) and the create-guidance
+  text (~2503/2536) gain the §5.2 lines.
+
+### 16.3 Plugin manifest + setup parity (`.claude-plugin/plugin.json`, `setup.rs`)
+
+- `plugin.json`: version bump; description gains one sentence ("Memories
+  carry an epistemic class — fact, observation, or decision — that shapes
+  when they surface."); `hooks` gains the §8.5 events (UserPromptSubmit,
+  PostToolUse with `Write|Edit|MultiEdit` matcher, SessionEnd, PreCompact).
+- `setup.rs` settings.json fallback adds the same four hook entries; the
+  existing "already installed" duplicate-suppression logic covers them.
+  A unit test asserts plugin.json's hook set and setup.rs's hook set stay in
+  lockstep (parse plugin.json in the test, compare event names — same spirit
+  as `mcp_tool_suffixes_match_server_tools`).
+
+### 16.4 Session-start hint line
+
+When §8.3 gating suppressed ≥1 task-scoped memory, the session-start
+injection appends one line:
+`"(N task-scoped memories hidden — declare task_current to surface yours.)"`
+— teaching the task mechanism exactly when it becomes relevant, at ~70 chars
+of budget.
