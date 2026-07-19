@@ -329,24 +329,26 @@ mod tests {
         assert_eq!(result, PathBuf::from("/tmp/my_project/.engramdb/memories"));
     }
 
+    // Suffix assertions use component-wise `Path::ends_with` (like
+    // `test_model_cache_dir_default_when_unset` below), NOT a stringified
+    // comparison against a forward-slash literal — Windows renders these
+    // paths with backslashes, so the string form fails there.
     #[test]
     fn test_personal_dir() {
         let result = personal_dir("abc123").unwrap();
-        let path_str = result.to_string_lossy();
-        assert!(path_str.ends_with("projects/abc123/personal"));
+        assert!(result.ends_with("projects/abc123/personal"), "{result:?}");
     }
 
     #[test]
     fn test_personal_memories_dir() {
         let result = personal_memories_dir("abc123").unwrap();
-        assert!(result.to_string_lossy().ends_with("personal/memories"));
+        assert!(result.ends_with("personal/memories"), "{result:?}");
     }
 
     #[test]
     fn test_lancedb_dir() {
         let result = lancedb_dir("abc123").unwrap();
-        let path_str = result.to_string_lossy();
-        assert!(path_str.ends_with("projects/abc123/lancedb"));
+        assert!(result.ends_with("projects/abc123/lancedb"), "{result:?}");
     }
 
     #[test]
