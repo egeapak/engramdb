@@ -721,6 +721,12 @@ pub enum Command {
         #[arg(long)]
         stale_only: bool,
 
+        /// Recency trigger: also surface active memories not updated in more than
+        /// N days. Bare `--stale-after-days` uses the 90-day default; omit the
+        /// flag entirely to review only flagged memories.
+        #[arg(long, num_args = 0..=1, default_missing_value = "90")]
+        stale_after_days: Option<u64>,
+
         /// Review the global (cross-project) memory store instead of the current project
         #[arg(long)]
         global: bool,
@@ -1673,6 +1679,36 @@ mod tests {
                 assert!(challenged_only);
                 assert!(stale_only);
             }
+            _ => panic!("Expected Review command"),
+        }
+    }
+
+    #[test]
+    fn test_review_stale_after_days_parsing() {
+        // Flag omitted ⇒ None (review only flagged memories).
+        let cli = Cli::try_parse_from(["engramdb", "review"]).unwrap();
+        match cli.command {
+            Command::Review {
+                stale_after_days, ..
+            } => assert_eq!(stale_after_days, None),
+            _ => panic!("Expected Review command"),
+        }
+
+        // Bare flag ⇒ Some(90) (the default window).
+        let cli = Cli::try_parse_from(["engramdb", "review", "--stale-after-days"]).unwrap();
+        match cli.command {
+            Command::Review {
+                stale_after_days, ..
+            } => assert_eq!(stale_after_days, Some(90)),
+            _ => panic!("Expected Review command"),
+        }
+
+        // Explicit value ⇒ Some(N).
+        let cli = Cli::try_parse_from(["engramdb", "review", "--stale-after-days", "30"]).unwrap();
+        match cli.command {
+            Command::Review {
+                stale_after_days, ..
+            } => assert_eq!(stale_after_days, Some(30)),
             _ => panic!("Expected Review command"),
         }
     }

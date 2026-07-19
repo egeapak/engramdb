@@ -17,6 +17,8 @@ use std::path::Path;
 /// * `type_str` - Optional memory type filter
 /// * `challenged_only` - Only show Status::Challenged memories
 /// * `stale_only` - Only show Status::NeedsReview memories
+/// * `stale_after_days` - Recency trigger: also surface active memories not
+///   updated in more than N days. `None` reviews only flagged memories.
 /// * `formatter` - Output formatter for success/error messages
 #[allow(clippy::too_many_arguments)]
 pub async fn run_review(
@@ -26,6 +28,7 @@ pub async fn run_review(
     type_str: Option<String>,
     challenged_only: bool,
     stale_only: bool,
+    stale_after_days: Option<u64>,
     formatter: &OutputFormatter,
     prompter: &dyn Prompter,
 ) -> Result<()> {
@@ -43,6 +46,7 @@ pub async fn run_review(
         type_filter,
         challenged_only,
         stale_only,
+        stale_after_days,
     };
 
     let memories = review_memories(&store, &params).await?;
@@ -196,6 +200,7 @@ mod tests {
             None,
             false,
             false,
+            None,
             &formatter,
             &prompter,
         )
@@ -224,6 +229,7 @@ mod tests {
             None,
             false,
             false,
+            None,
             &formatter,
             &prompter,
         )
@@ -252,6 +258,7 @@ mod tests {
             None,
             false,
             false,
+            None,
             &formatter,
             &prompter,
         )
@@ -302,6 +309,7 @@ mod tests {
             None,
             false,
             false,
+            None,
             &formatter,
             &prompter,
         )
@@ -332,6 +340,7 @@ mod tests {
             None,
             false,
             false,
+            None,
             &formatter,
             &prompter,
         )
