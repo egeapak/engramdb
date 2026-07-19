@@ -68,13 +68,16 @@ pub fn create_generator(strategy: TitleStrategy) -> Result<Option<Box<dyn TitleG
 /// and stays per-call. A failed T5 build is NOT cached, so a transient cause
 /// (model download in progress) can recover on a later call.
 pub async fn generate_title(strategy: TitleStrategy, text: &str) -> Option<String> {
+    #[cfg(feature = "onnxruntime")]
     use std::sync::OnceLock;
+    #[cfg(feature = "onnxruntime")]
     static T5_CACHE: OnceLock<tokio::sync::Mutex<Option<std::sync::Arc<dyn TitleGenerator>>>> =
         OnceLock::new();
 
     let generator: std::sync::Arc<dyn TitleGenerator> = match strategy {
         TitleStrategy::None => return None,
         TitleStrategy::Keyword => std::sync::Arc::new(keyword::KeywordTitleGenerator::new()),
+        #[cfg(feature = "onnxruntime")]
         TitleStrategy::T5 => {
             let cell = T5_CACHE.get_or_init(|| tokio::sync::Mutex::new(None));
             let mut guard = cell.lock().await;
@@ -93,6 +96,11 @@ pub async fn generate_title(strategy: TitleStrategy, text: &str) -> Option<Strin
                 },
             }
         }
+        // No ONNX Runtime on this build (pure-tract): T5 is unavailable, so
+        // fall back to keyword titling — the same degradation
+        // `create_generator` applies above.
+        #[cfg(not(feature = "onnxruntime"))]
+        TitleStrategy::T5 => std::sync::Arc::new(keyword::KeywordTitleGenerator::new()),
     };
 
     match generator.generate(text).await {
