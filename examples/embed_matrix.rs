@@ -553,7 +553,11 @@ fn measure_overflow(ds: &Dataset, token_limit: usize) -> Option<OverflowReport> 
         .join("snapshots")
         .join("main")
         .join("tokenizer.json");
-    let tokenizer = tokenizers::Tokenizer::from_file(&tok_path).ok()?;
+    let mut tokenizer = tokenizers::Tokenizer::from_file(&tok_path).ok()?;
+    // The Xenova export ships a baked-in truncation config; disable it so we
+    // count TRUE token lengths (fastembed's own truncation is what we're
+    // measuring the chunker against).
+    tokenizer.with_truncation(None).ok()?;
 
     let mut all = OverflowBucket::default();
     let mut code = OverflowBucket::default();
