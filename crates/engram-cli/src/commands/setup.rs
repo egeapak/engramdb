@@ -418,6 +418,59 @@ fn install_settings_fallback(
         &settings_path,
     )?;
 
+    changed |= ensure_hook_entry(
+        hooks,
+        "UserPromptSubmit",
+        json!({
+            "hooks": [{
+                "type": "command",
+                "command": "engramdb hook user-prompt-submit --dir ."
+            }]
+        }),
+        "engramdb hook user-prompt-submit",
+        &settings_path,
+    )?;
+
+    changed |= ensure_hook_entry(
+        hooks,
+        "PostToolUse",
+        json!({
+            "matcher": "Write|Edit|MultiEdit",
+            "hooks": [{
+                "type": "command",
+                "command": "engramdb hook post-tool-use --dir ."
+            }]
+        }),
+        "engramdb hook post-tool-use",
+        &settings_path,
+    )?;
+
+    changed |= ensure_hook_entry(
+        hooks,
+        "SessionEnd",
+        json!({
+            "hooks": [{
+                "type": "command",
+                "command": "engramdb hook session-end --dir ."
+            }]
+        }),
+        "engramdb hook session-end",
+        &settings_path,
+    )?;
+
+    changed |= ensure_hook_entry(
+        hooks,
+        "PreCompact",
+        json!({
+            "hooks": [{
+                "type": "command",
+                "command": "engramdb hook pre-compact --dir ."
+            }]
+        }),
+        "engramdb hook pre-compact",
+        &settings_path,
+    )?;
+
     // --- MCP server ---
     changed |= ensure_mcp_server(&mut settings, &settings_path)?;
 

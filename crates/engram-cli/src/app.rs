@@ -17,6 +17,14 @@ pub enum HookCommand {
         #[arg(long, default_value = "0.6")]
         min_criticality: f64,
     },
+    /// Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)
+    UserPromptSubmit,
+    /// Handle PostToolUse hook events (warn when an edit touches a memory's watch paths)
+    PostToolUse,
+    /// Handle SessionEnd hook events (housekeeping; no context output)
+    SessionEnd,
+    /// Handle PreCompact hook events (store-your-memories reminder before compaction)
+    PreCompact,
 }
 
 /// Subcommands for `engramdb doctor`.

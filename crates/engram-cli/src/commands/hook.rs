@@ -14,6 +14,7 @@
 
 use anyhow::Result;
 use engramdb::retrieval::engine::{DetailLevel, RetrievalMode, RetrievalQuery, ScoredMemory};
+use engramdb::types::{Epistemic, Generality, MemoryType, Situation};
 // Shared with the retrieval engine (which also relativizes `query.path`
 // itself); the hook still pre-relativizes so the injected context shows
 // repo-relative paths.
@@ -101,33 +102,213 @@ fn format_detailed_context(header: &str, memories: &[ScoredMemory]) -> String {
 /// followed by the reflection nudge. When the store has no memories the nudge
 /// is still emitted on its own so the agent always receives it.
 fn build_session_start_context(memories: &[ScoredMemory]) -> String {
+    build_session_start_context_with(memories, None)
+}
+
+/// [`build_session_start_context`] with a `[hooks].class_order` override.
+fn build_session_start_context_with(
+    memories: &[ScoredMemory],
+    class_order: Option<&[String]>,
+) -> String {
     if memories.is_empty() {
         REFLECTION_NUDGE.to_string()
     } else {
         format!(
             "{}\n\n{}",
-            format_detailed_context("[EngramDB] Key project memories:", memories),
+            format_class_context_with_budget(
+                "[EngramDB] Key project memories:",
+                memories,
+                SESSION_CONTEXT_BUDGET,
+                Some(Situation::SessionStart),
+                class_order,
+            ),
             REFLECTION_NUDGE
         )
     }
 }
 
+/// Class-order rank for a scored memory under a situation (§8.1).
+///
+/// `class_order` (from `[hooks].class_order`) overrides the per-situation
+/// defaults with one uniform ordering. Unknown class names in the override
+/// sink to the end.
+fn class_rank(
+    class: Epistemic,
+    situation: Option<Situation>,
+    class_order: Option<&[String]>,
+) -> usize {
+    if let Some(order) = class_order {
+        return order
+            .iter()
+            .position(|c| c.eq_ignore_ascii_case(class.as_str()))
+            .unwrap_or(order.len());
+    }
+    match situation {
+        // FileEdit: decisions bind on the edit; facts next; observations last.
+        Some(Situation::FileEdit) => match class {
+            Epistemic::Decision => 0,
+            Epistemic::Fact => 1,
+            Epistemic::Observation => 2,
+        },
+        // SessionStart (and default): facts → decisions → observations.
+        _ => match class {
+            Epistemic::Fact => 0,
+            Epistemic::Decision => 1,
+            Epistemic::Observation => 2,
+        },
+    }
+}
+
+/// Group scored memories by epistemic class in situation order (§8.1),
+/// preserving score order within each group — except FileEdit's fact group,
+/// where hazard-typed entries sort first (a deliberate new ordering: the
+/// footgun outranks the description when about to edit).
+fn group_by_class<'a>(
+    memories: &'a [ScoredMemory],
+    situation: Option<Situation>,
+    class_order: Option<&[String]>,
+) -> Vec<(Epistemic, Vec<&'a ScoredMemory>)> {
+    let mut groups: Vec<(Epistemic, Vec<&ScoredMemory>)> = Vec::new();
+    for class in [Epistemic::Fact, Epistemic::Observation, Epistemic::Decision] {
+        let mut group: Vec<&ScoredMemory> = memories
+            .iter()
+            .filter(|sm| sm.memory.epistemic == class)
+            .collect();
+        if group.is_empty() {
+            continue;
+        }
+        if situation == Some(Situation::FileEdit) && class == Epistemic::Fact {
+            // Stable sort: hazards first, otherwise keep score order.
+            group.sort_by_key(|sm| (sm.memory.type_ != MemoryType::Hazard) as u8);
+        }
+        groups.push((class, group));
+    }
+    groups.sort_by_key(|(class, _)| class_rank(*class, situation, class_order));
+    groups
+}
+
+/// Human-facing plural header for a class group.
+fn class_header(class: Epistemic) -> &'static str {
+    match class {
+        Epistemic::Fact => "Facts",
+        Epistemic::Observation => "Observations",
+        Epistemic::Decision => "Decisions",
+    }
+}
+
+/// Per-class rendering (§8.2). Returns the entry lines; `compact` drops the
+/// fact preview (the budget policy's first compression step).
+///
+/// - Decision: `- {summary} — because {premise}[; revisit if {globs}]`;
+///   summary only when no premise (never invent a rationale).
+/// - Observation: `- {summary} (observed date[, verified date])`.
+/// - Fact: compact one-liner, `(verified date)` only when set; optional
+///   content preview line when not compacting.
+///
+/// Every line carries the `source: visibility/provenance` marker — shared
+/// memories arrive with a git clone, and injected context must keep
+/// repo-shipped text distinguishable from the user's own notes.
+fn format_class_entry(scored: &ScoredMemory, compact: bool) -> Vec<String> {
+    let m = &scored.memory;
+    let src = source_marker(m);
+    let type_str = format!("{:?}", m.type_).to_lowercase();
+    match m.epistemic {
+        Epistemic::Decision => {
+            let mut line = format!("- [{}] {}", type_str, m.summary);
+            if let Some(validity) = &m.valid_while {
+                if let Some(premise) = &validity.premise {
+                    line.push_str(&format!(" — because {}", premise));
+                }
+                if !validity.invalidated_by.is_empty() {
+                    line.push_str(&format!(
+                        "; revisit if {} changes",
+                        validity.invalidated_by.join(", ")
+                    ));
+                }
+            }
+            line.push_str(&format!(" (source: {})", src));
+            vec![line]
+        }
+        Epistemic::Observation => {
+            let mut line = format!(
+                "- [{}] {} (observed {}",
+                type_str,
+                m.summary,
+                m.created_at.format("%Y-%m-%d")
+            );
+            if let Some(v) = m.verified_at {
+                line.push_str(&format!(", verified {}", v.format("%Y-%m-%d")));
+            }
+            line.push_str(&format!("; source: {})", src));
+            vec![line]
+        }
+        Epistemic::Fact => {
+            let mut line = format!("- [{}] {}", type_str, m.summary);
+            if let Some(v) = m.verified_at {
+                line.push_str(&format!(" (verified {})", v.format("%Y-%m-%d")));
+            }
+            line.push_str(&format!(" (source: {})", src));
+            let mut entry = vec![line];
+            if !compact {
+                let preview = truncate_content(&m.content, 200);
+                if preview != m.summary {
+                    entry.push(format!("  {}", preview));
+                }
+            }
+            entry
+        }
+    }
+}
+
+/// Suppress task-scoped memories from hook injection (§8.3): entries with
+/// `generality == Task` are dropped unless the session's declared task
+/// matches `origin_task`. The session→task mapping reader lands with the
+/// lifecycle increment; until then task-scoped memories are always
+/// suppressed from hooks (they stay reachable by explicit query).
+fn suppress_task_scoped(memories: Vec<ScoredMemory>) -> Vec<ScoredMemory> {
+    memories
+        .into_iter()
+        .filter(|sm| {
+            sm.memory
+                .valid_while
+                .as_ref()
+                .is_none_or(|v| v.generality != Generality::Task)
+        })
+        .collect()
+}
+
 /// Budget-aware implementation (extracted for testability).
+///
+/// Budget policy (§8.4): decisions are ATOMIC — if the whole line (with its
+/// because-clause) doesn't fit, the entry is skipped entirely, never
+/// truncated mid-rationale. Facts are compressible — the preview line is
+/// dropped first, then the summary line competes like any other. Observations
+/// are a single summary+date line.
 fn format_detailed_context_with_budget(
     header: &str,
     memories: &[ScoredMemory],
     budget: usize,
 ) -> String {
-    // Group memories by type, preserving score-based ordering within each group.
-    let groups = group_by_type(memories);
+    format_class_context_with_budget(header, memories, budget, None, None)
+}
+
+/// Class-grouped, situation-ordered, budget-aware context formatter (§8).
+fn format_class_context_with_budget(
+    header: &str,
+    memories: &[ScoredMemory],
+    budget: usize,
+    situation: Option<Situation>,
+    class_order: Option<&[String]>,
+) -> String {
+    let groups = group_by_class(memories, situation, class_order);
 
     let mut lines: Vec<String> = vec![header.into()];
     let mut used: usize = header.len();
     let mut included = 0usize;
     let total = memories.len();
 
-    for (type_str, group) in &groups {
-        let group_header = format!("\n## {} ({}):", type_str, group.len());
+    for (class, group) in &groups {
+        let group_header = format!("\n## {} ({}):", class_header(*class), group.len());
         let group_header_len = group_header.len() + 1; // +1 for join newline
 
         if used + group_header_len > budget {
@@ -137,15 +318,27 @@ fn format_detailed_context_with_budget(
         used += group_header_len;
 
         for scored in group {
-            let entry = format_memory_entry(scored);
+            let entry = format_class_entry(scored, false);
             let entry_len: usize = entry.iter().map(|l| l.len() + 1).sum();
 
-            if used + entry_len > budget {
-                break;
+            if used + entry_len <= budget {
+                lines.extend(entry);
+                used += entry_len;
+                included += 1;
+                continue;
             }
-            lines.extend(entry);
-            used += entry_len;
-            included += 1;
+
+            // Over budget: facts compress (drop the preview line first);
+            // decisions and observations are atomic and are skipped whole.
+            if *class == Epistemic::Fact {
+                let compact_entry = format_class_entry(scored, true);
+                let compact_len: usize = compact_entry.iter().map(|l| l.len() + 1).sum();
+                if used + compact_len <= budget {
+                    lines.extend(compact_entry);
+                    used += compact_len;
+                    included += 1;
+                }
+            }
         }
     }
 
@@ -158,47 +351,6 @@ fn format_detailed_context_with_budget(
     }
 
     lines.join("\n")
-}
-
-/// Group scored memories by type label, preserving input order within each group.
-///
-/// Returns groups in a deterministic order based on the first appearance of each type.
-fn group_by_type(memories: &[ScoredMemory]) -> Vec<(String, Vec<&ScoredMemory>)> {
-    let mut groups: Vec<(String, Vec<&ScoredMemory>)> = Vec::new();
-    let mut type_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-
-    for scored in memories {
-        let type_str = format!("{:?}", scored.memory.type_);
-        if let Some(&idx) = type_index.get(&type_str) {
-            groups[idx].1.push(scored);
-        } else {
-            let idx = groups.len();
-            type_index.insert(type_str.clone(), idx);
-            groups.push((type_str, vec![scored]));
-        }
-    }
-    groups
-}
-
-/// Format a single memory entry as one or two lines (summary + optional preview).
-fn format_memory_entry(scored: &ScoredMemory) -> Vec<String> {
-    let m = &scored.memory;
-    let mut meta_parts: Vec<String> = vec![
-        format!("criticality: {:.1}", m.criticality),
-        format!("source: {}", source_marker(m)),
-    ];
-    if !m.tags.is_empty() {
-        meta_parts.push(format!("tags: {}", m.tags.join(", ")));
-    }
-    if !m.logical.is_empty() {
-        meta_parts.push(format!("scope: {}", m.logical.join(", ")));
-    }
-    let mut entry = vec![format!("- {} ({})", m.summary, meta_parts.join(" | "))];
-    let preview = truncate_content(&m.content, 200);
-    if preview != m.summary {
-        entry.push(format!("  {}", preview));
-    }
-    entry
 }
 
 /// Truncate content to a maximum character length, appending "..." if truncated.
@@ -250,7 +402,7 @@ async fn process_hook_input(input: &str, dir: &Path, store: MemoryStore) -> Resu
         max_results: Some(5),
         include_expired: Some(false),
         detail_level: DetailLevel::Summary,
-        // situation: FileEdit lands with the I6 hook work.
+        situation: Some(Situation::FileEdit),
         ..Default::default()
     };
 
@@ -262,14 +414,27 @@ async fn process_hook_input(input: &str, dir: &Path, store: MemoryStore) -> Resu
         }
     };
 
-    if result.memories.is_empty() {
+    // Task-scoped memories are suppressed from hook injection (§8.3), and
+    // the surviving list is ordered by FileEdit class rank (§8.1: decisions
+    // first, then facts — hazards leading — then observations).
+    let mut memories = suppress_task_scoped(result.memories);
+    let class_order = engine.config().hooks.class_order.clone();
+    memories.sort_by_key(|sm| {
+        (
+            class_rank(
+                sm.memory.epistemic,
+                Some(Situation::FileEdit),
+                class_order.as_deref(),
+            ),
+            (sm.memory.epistemic == Epistemic::Fact && sm.memory.type_ != MemoryType::Hazard) as u8,
+        )
+    });
+    if memories.is_empty() {
         return Ok(None);
     }
 
-    let context = format_additional_context(
-        "[EngramDB] Relevant memories for this file:",
-        &result.memories,
-    );
+    let context =
+        format_additional_context("[EngramDB] Relevant memories for this file:", &memories);
     let json = build_hook_response("PreToolUse", &context)?;
     Ok(Some(json))
 }
@@ -329,7 +494,7 @@ async fn process_session_start(dir: &Path, min_criticality: f64) -> Result<Optio
         max_results: Some(10),
         include_expired: Some(false),
         detail_level: DetailLevel::Summary,
-        // situation: SessionStart lands with the I6 hook work.
+        situation: Some(Situation::SessionStart),
         ..Default::default()
     };
 
@@ -343,7 +508,9 @@ async fn process_session_start(dir: &Path, min_criticality: f64) -> Result<Optio
 
     // Always emit the reflection nudge, even when the store has no memories
     // yet — the agent should still be reminded to capture durable learnings.
-    let context = build_session_start_context(&result.memories);
+    let memories = suppress_task_scoped(result.memories);
+    let class_order = engine.config().hooks.class_order.clone();
+    let context = build_session_start_context_with(&memories, class_order.as_deref());
     let json = build_hook_response("SessionStart", &context)?;
     Ok(Some(json))
 }
@@ -370,6 +537,219 @@ fn sanitize_min_criticality(v: f64) -> f64 {
     } else {
         v.clamp(0.0, 1.0)
     }
+}
+
+// ---------------------------------------------------------------------------
+// New hook events (§8.5)
+// ---------------------------------------------------------------------------
+
+/// Situation-inference keyword tables for UserPromptSubmit (§8.5.1). Cheap
+/// substring heuristics — the only place Debugging/DesignChoice can be
+/// inferred automatically.
+const DEBUGGING_KEYWORDS: &[&str] = &["error", "failing", "why does", "debug", "panic", "crash"];
+const DESIGN_KEYWORDS: &[&str] = &[
+    "should we",
+    "choose",
+    " vs ",
+    "design",
+    "approach",
+    "architecture",
+];
+
+/// Infer a situation from the submitted prompt text (`None` when no keyword
+/// table matches — neutral scoring).
+fn infer_situation(prompt: &str) -> Option<Situation> {
+    let lower = prompt.to_lowercase();
+    if DEBUGGING_KEYWORDS.iter().any(|k| lower.contains(k)) {
+        return Some(Situation::Debugging);
+    }
+    if DESIGN_KEYWORDS.iter().any(|k| lower.contains(k)) {
+        return Some(Situation::DesignChoice);
+    }
+    None
+}
+
+/// Extract the submitted prompt text from a UserPromptSubmit event.
+fn extract_prompt(input: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(input).ok()?;
+    value
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// Core UserPromptSubmit logic (§8.5.1): Filter-mode query with the prompt as
+/// query text plus inferred situation; injects top-k under
+/// `[hooks].prompt_context_budget` with per-class rendering. Keyword-only
+/// retrieval — hooks never load model providers.
+async fn process_user_prompt_submit(input: &str, dir: &Path) -> Result<Option<String>> {
+    let prompt = match extract_prompt(input) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    let store = match MemoryStore::open(dir).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!("Hook store open failed (non-fatal): {}", e);
+            return Ok(None);
+        }
+    };
+    let config_path = dir.join(".engramdb").join("config.toml");
+    let engine = engramdb::ops::build_engine_without_providers(store, &config_path).await;
+
+    let situation = infer_situation(&prompt);
+    let query = RetrievalQuery {
+        mode: RetrievalMode::Filter,
+        query: Some(prompt),
+        max_results: Some(5),
+        include_expired: Some(false),
+        detail_level: DetailLevel::Summary,
+        situation,
+        ..Default::default()
+    };
+
+    let result = match engramdb::ops::query_memories(&engine, &query).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!("Hook retrieval failed (non-fatal): {}", e);
+            return Ok(None);
+        }
+    };
+
+    let memories = suppress_task_scoped(result.memories);
+    if memories.is_empty() {
+        return Ok(None);
+    }
+
+    let budget = engine.config().hooks.prompt_context_budget;
+    let class_order = engine.config().hooks.class_order.clone();
+    let context = format_class_context_with_budget(
+        "[EngramDB] Memories relevant to this prompt:",
+        &memories,
+        budget,
+        situation,
+        class_order.as_deref(),
+    );
+    let json = build_hook_response("UserPromptSubmit", &context)?;
+    Ok(Some(json))
+}
+
+/// Run the UserPromptSubmit hook handler. Malformed/empty stdin ⇒ exit 0
+/// with empty stdout, never an error.
+pub async fn run_hook_user_prompt_submit(dir: &Path) -> Result<()> {
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    if let Ok(Some(json)) = process_user_prompt_submit(&input, dir).await {
+        println!("{}", json);
+    }
+    Ok(())
+}
+
+/// Core PostToolUse logic (§8.5.2): after a file mutation, match the edited
+/// path against the `watch_paths` index column, restricted to currently-valid
+/// memories (this hook bypasses the query path, so it applies the §2.4
+/// default exclusion itself — an invalidated memory must not keep warning).
+/// Index-only: no memory files are loaded.
+async fn process_post_tool_use(input: &str, dir: &Path) -> Result<Option<String>> {
+    let file_path = match extract_file_path(input) {
+        Some(fp) => fp,
+        None => return Ok(None),
+    };
+    let relative_path = relativize_path(&file_path, dir);
+    if relative_path.is_empty() {
+        return Ok(None);
+    }
+
+    let store = match MemoryStore::open(dir).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!("Hook store open failed (non-fatal): {}", e);
+            return Ok(None);
+        }
+    };
+
+    let entries = match store.list_for_filtering().await {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::debug!("Hook index read failed (non-fatal): {}", e);
+            return Ok(None);
+        }
+    };
+
+    let now = chrono::Utc::now();
+    let matched_ids: Vec<&str> = entries
+        .iter()
+        .filter(|entry| {
+            // §2.4 validity guard: closed windows never warn (§14.14).
+            !entry.invalidated_at.is_some_and(|t| t <= now)
+                && !entry.watch_paths.is_empty()
+                && engramdb::scope::physical::matches(&entry.watch_paths, &relative_path)
+        })
+        .map(|entry| entry.id.as_str())
+        .collect();
+    if matched_ids.is_empty() {
+        // The common case: one index scan, zero file loads, no output.
+        return Ok(None);
+    }
+
+    // Load ONLY the matched memories (rare, bounded) for their summaries.
+    let matched = store.get_batch(&matched_ids).await.unwrap_or_default();
+    let warnings: Vec<String> = matched
+        .iter()
+        .map(|(id, m)| {
+            format!(
+                "⚠ this edit may invalidate memory {} ('{}') — verify it or update/invalidate it",
+                crate::output::short_id(id),
+                m.summary
+            )
+        })
+        .collect();
+    if warnings.is_empty() {
+        return Ok(None);
+    }
+    let context = format!("[EngramDB]\n{}", warnings.join("\n"));
+    let json = build_hook_response("PostToolUse", &context)?;
+    Ok(Some(json))
+}
+
+/// Run the PostToolUse hook handler (matcher `Write|Edit|MultiEdit`).
+pub async fn run_hook_post_tool_use(dir: &Path) -> Result<()> {
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    if let Ok(Some(json)) = process_post_tool_use(&input, dir).await {
+        println!("{}", json);
+    }
+    Ok(())
+}
+
+/// Run the SessionEnd hook handler (§8.5.3): housekeeping only, no context
+/// output, must never block session teardown. Telemetry lives in the
+/// long-running MCP/daemon processes (persisted there), so this increment
+/// has nothing to flush from a one-shot hook process; the session→task
+/// mapping clear and optional demotion wire in with the lifecycle work.
+pub async fn run_hook_session_end(_dir: &Path) -> Result<()> {
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    Ok(())
+}
+
+/// Static PreCompact reminder (§8.5.4): context loss is a memory system's
+/// worst enemy; intercept right before compaction.
+const PRE_COMPACT_REMINDER: &str = "[EngramDB] Context is about to be compacted. Store durable \
+discoveries first: decisions (with their premise), hazards, and verified observations via the \
+memory create tool.";
+
+/// Run the PreCompact hook handler (§8.5.4): inject a short static reminder.
+/// Same additionalContext contract as the other hooks; if the runtime
+/// ignores it for PreCompact events, the output is harmlessly dropped.
+pub async fn run_hook_pre_compact(_dir: &Path) -> Result<()> {
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    let json = build_hook_response("PreCompact", PRE_COMPACT_REMINDER)?;
+    println!("{}", json);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -607,15 +987,15 @@ mod tests {
     // --- Unit tests for format_detailed_context (grouped + budget) ---
 
     #[test]
-    fn test_format_detailed_context_with_tags_and_scope() {
+    fn test_format_detailed_context_fact_rendering() {
+        // Convention defaults to the Fact class: compact line, type tag,
+        // content preview when it adds information, source marker.
         let mut mem = Memory::new(
             MemoryType::Convention,
             "Azure DevOps PR conventions",
             "PR templates are stored in .azuredevops/pull_request_template/",
             Provenance::human(),
         );
-        mem.tags = vec!["pr".into(), "azure-devops".into()];
-        mem.logical = vec!["workflow.pr".into()];
         mem.criticality = 0.8;
         let scored = ScoredMemory {
             memory: mem,
@@ -623,12 +1003,14 @@ mod tests {
             score_breakdown: Default::default(),
         };
         let ctx = format_detailed_context("[EngramDB] Key project memories:", &[scored]);
-        assert!(ctx.contains("Convention"));
-        assert!(ctx.contains("Azure DevOps PR conventions"));
-        assert!(ctx.contains("tags: pr, azure-devops"));
-        assert!(ctx.contains("scope: workflow.pr"));
-        assert!(ctx.contains("criticality: 0.8"));
+        assert!(ctx.contains("## Facts (1):"), "{ctx}");
+        assert!(ctx.contains("[convention] Azure DevOps PR conventions"));
         assert!(ctx.contains("PR templates are stored in"));
+        assert!(ctx.contains("source: shared/human"));
+        assert!(
+            !ctx.contains("(verified"),
+            "no verified_at ⇒ no verified tag"
+        );
     }
 
     /// Injected memory content must carry a `visibility/provenance` marker:
@@ -672,50 +1054,40 @@ mod tests {
     }
 
     #[test]
-    fn test_format_detailed_context_groups_by_type() {
-        let mem1 = Memory::new(
+    fn test_format_detailed_context_groups_by_class_in_session_order() {
+        // SessionStart default order: Facts → Decisions → Observations.
+        let fact = Memory::new(
             MemoryType::Hazard,
             "Do not delete index",
             "Index deletion causes data loss",
             Provenance::human(),
         );
-        let mem2 = Memory::new(
-            MemoryType::Convention,
-            "Always run clippy",
-            "Run clippy with -D warnings",
+        let decision = Memory::new(
+            MemoryType::Decision,
+            "Use rustls",
+            "We chose rustls over openssl",
             Provenance::human(),
         );
-        let mem3 = Memory::new(
-            MemoryType::Hazard,
-            "Avoid force push",
-            "Force push destroys history",
+        let observation = Memory::new(
+            MemoryType::Debug,
+            "Tests flake under load",
+            "Two tests fail under full parallelism",
             Provenance::human(),
         );
-        let scored = vec![
-            ScoredMemory {
-                memory: mem1,
+        let scored: Vec<ScoredMemory> = [observation, decision, fact]
+            .into_iter()
+            .map(|memory| ScoredMemory {
+                memory,
                 score: 0.9,
                 score_breakdown: Default::default(),
-            },
-            ScoredMemory {
-                memory: mem2,
-                score: 0.8,
-                score_breakdown: Default::default(),
-            },
-            ScoredMemory {
-                memory: mem3,
-                score: 0.7,
-                score_breakdown: Default::default(),
-            },
-        ];
+            })
+            .collect();
         let ctx = format_detailed_context("[EngramDB] Key project memories:", &scored);
-        // Hazard group should appear first (first in input), Convention second
-        let hazard_pos = ctx.find("Hazard").unwrap();
-        let convention_pos = ctx.find("Convention").unwrap();
-        assert!(hazard_pos < convention_pos);
-        // Both hazard memories should be under the Hazard group
-        assert!(ctx.contains("Do not delete index"));
-        assert!(ctx.contains("Avoid force push"));
+        let facts_pos = ctx.find("## Facts").unwrap();
+        let decisions_pos = ctx.find("## Decisions").unwrap();
+        let observations_pos = ctx.find("## Observations").unwrap();
+        assert!(facts_pos < decisions_pos, "{ctx}");
+        assert!(decisions_pos < observations_pos, "{ctx}");
     }
 
     #[test]
@@ -768,9 +1140,11 @@ mod tests {
     }
 
     #[test]
-    fn test_format_detailed_context_skips_content_matching_summary() {
+    fn test_format_detailed_context_skips_fact_preview_matching_summary() {
+        // Context type defaults to the Fact class; a preview identical to
+        // the summary adds nothing and is dropped.
         let mem = Memory::new(
-            MemoryType::Decision,
+            MemoryType::Context,
             "Use async everywhere",
             "Use async everywhere",
             Provenance::human(),
@@ -781,13 +1155,12 @@ mod tests {
             score_breakdown: Default::default(),
         };
         let ctx = format_detailed_context("[EngramDB] Key project memories:", &[scored]);
-        // Content line should not appear since it matches summary
         let content_lines: Vec<&str> = ctx.lines().filter(|l| l.starts_with("  ")).collect();
         assert!(content_lines.is_empty());
     }
 
     #[test]
-    fn test_format_detailed_context_no_tags_no_scope() {
+    fn test_format_detailed_context_minimal_fact_line() {
         let mem = Memory::new(
             MemoryType::Hazard,
             "Avoid blocking in async",
@@ -800,66 +1173,241 @@ mod tests {
             score_breakdown: Default::default(),
         };
         let ctx = format_detailed_context("[EngramDB] Key project memories:", &[scored]);
-        assert!(!ctx.contains("tags:"));
-        assert!(!ctx.contains("scope:"));
-        assert!(ctx.contains("criticality: 0.5"));
+        assert!(ctx.contains("[hazard] Avoid blocking in async"));
+        assert!(ctx.contains("source: shared/human"));
     }
 
-    // --- Unit tests for group_by_type ---
+    // --- Unit tests for group_by_class (§8.1) ---
 
     #[test]
-    fn test_group_by_type_preserves_order() {
-        let mem1 = Memory::new(MemoryType::Convention, "Conv 1", "c1", Provenance::human());
-        let mem2 = Memory::new(MemoryType::Hazard, "Hazard 1", "h1", Provenance::human());
-        let mem3 = Memory::new(MemoryType::Convention, "Conv 2", "c2", Provenance::human());
-        let scored = vec![
-            ScoredMemory {
-                memory: mem1,
+    fn test_group_by_class_orders_per_situation() {
+        let fact = Memory::new(MemoryType::Convention, "Conv 1", "c1", Provenance::human());
+        let hazard_fact = Memory::new(MemoryType::Hazard, "Hazard 1", "h1", Provenance::human());
+        let decision = Memory::new(MemoryType::Decision, "Dec 1", "d1", Provenance::human());
+        let scored: Vec<ScoredMemory> = [fact, hazard_fact, decision]
+            .into_iter()
+            .map(|memory| ScoredMemory {
+                memory,
+                score: 0.9,
+                score_breakdown: Default::default(),
+            })
+            .collect();
+
+        // SessionStart: facts (both types) first, decisions after.
+        let groups = group_by_class(&scored, Some(Situation::SessionStart), None);
+        assert_eq!(groups[0].0, Epistemic::Fact);
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups[1].0, Epistemic::Decision);
+
+        // FileEdit: decisions first; hazard-typed facts lead the fact group.
+        let groups = group_by_class(&scored, Some(Situation::FileEdit), None);
+        assert_eq!(groups[0].0, Epistemic::Decision);
+        assert_eq!(groups[1].0, Epistemic::Fact);
+        assert_eq!(groups[1].1[0].memory.type_, MemoryType::Hazard);
+
+        // [hooks].class_order override wins over the situation defaults.
+        let override_order = vec![
+            "observation".to_string(),
+            "decision".to_string(),
+            "fact".to_string(),
+        ];
+        let groups = group_by_class(
+            &scored,
+            Some(Situation::SessionStart),
+            Some(&override_order),
+        );
+        assert_eq!(groups[0].0, Epistemic::Decision);
+        assert_eq!(groups[1].0, Epistemic::Fact);
+    }
+
+    // --- Unit tests for format_class_entry (§8.2) ---
+
+    #[test]
+    fn test_format_class_entry_per_class() {
+        use engramdb::types::Validity;
+
+        // Decision with premise + watch globs.
+        let mut decision = Memory::new(
+            MemoryType::Decision,
+            "Pin ort to rc.12",
+            "content",
+            Provenance::human(),
+        );
+        decision.valid_while = Some(Validity {
+            premise: Some("rc.13 breaks the static build".into()),
+            invalidated_by: vec!["Cargo.lock".into()],
+            ..Default::default()
+        });
+        let lines = format_class_entry(
+            &ScoredMemory {
+                memory: decision,
                 score: 0.9,
                 score_breakdown: Default::default(),
             },
-            ScoredMemory {
-                memory: mem2,
-                score: 0.8,
+            false,
+        );
+        assert_eq!(lines.len(), 1, "decisions are a single atomic line");
+        assert!(lines[0].contains("Pin ort to rc.12 — because rc.13 breaks the static build"));
+        assert!(lines[0].contains("revisit if Cargo.lock changes"));
+
+        // Decision WITHOUT premise: summary only, never invent a rationale.
+        let bare = Memory::new(MemoryType::Decision, "Use tokio", "c", Provenance::human());
+        let lines = format_class_entry(
+            &ScoredMemory {
+                memory: bare,
+                score: 0.9,
                 score_breakdown: Default::default(),
             },
-            ScoredMemory {
-                memory: mem3,
-                score: 0.7,
+            false,
+        );
+        assert!(!lines[0].contains("because"), "{}", lines[0]);
+
+        // Observation: observed date, verified when set.
+        let mut obs = Memory::new(MemoryType::Debug, "Flaky test", "c", Provenance::human());
+        obs.created_at = "2026-06-01T00:00:00Z".parse().unwrap();
+        obs.verified_at = Some("2026-07-01T00:00:00Z".parse().unwrap());
+        let lines = format_class_entry(
+            &ScoredMemory {
+                memory: obs,
+                score: 0.9,
                 score_breakdown: Default::default(),
             },
-        ];
-        let groups = group_by_type(&scored);
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].0, "Convention");
-        assert_eq!(groups[0].1.len(), 2);
-        assert_eq!(groups[1].0, "Hazard");
-        assert_eq!(groups[1].1.len(), 1);
-    }
+            false,
+        );
+        assert!(lines[0].contains("(observed 2026-06-01, verified 2026-07-01"));
 
-    // --- Unit tests for format_memory_entry ---
-
-    #[test]
-    fn test_format_memory_entry_with_all_metadata() {
-        let mut mem = Memory::new(
-            MemoryType::Convention,
-            "Run clippy",
-            "Always run clippy before committing",
+        // Fact: verified tag only when set; compact drops the preview.
+        let mut fact = Memory::new(
+            MemoryType::Hazard,
+            "Index deletion loses data",
+            "A longer body explaining the hazard in detail",
             Provenance::human(),
         );
-        mem.tags = vec!["ci".into()];
-        mem.logical = vec!["workflow.lint".into()];
-        mem.criticality = 0.9;
+        fact.verified_at = Some("2026-07-10T00:00:00Z".parse().unwrap());
         let scored = ScoredMemory {
-            memory: mem,
-            score: 0.8,
+            memory: fact,
+            score: 0.9,
             score_breakdown: Default::default(),
         };
-        let lines = format_memory_entry(&scored);
-        assert_eq!(lines.len(), 2); // summary + content preview
-        assert!(lines[0].contains("tags: ci"));
-        assert!(lines[0].contains("scope: workflow.lint"));
-        assert!(lines[1].starts_with("  "));
+        let full = format_class_entry(&scored, false);
+        assert_eq!(full.len(), 2, "fact carries a preview when not compacting");
+        assert!(full[0].contains("(verified 2026-07-10)"));
+        let compact = format_class_entry(&scored, true);
+        assert_eq!(compact.len(), 1, "compact fact drops the preview");
+    }
+
+    #[test]
+    fn test_budget_decision_atomicity_and_fact_compression() {
+        use engramdb::types::Validity;
+
+        // A decision whose because-clause makes it long.
+        let mut decision = Memory::new(
+            MemoryType::Decision,
+            "Long decision summary here",
+            "content",
+            Provenance::human(),
+        );
+        decision.valid_while = Some(Validity {
+            premise: Some("a very long premise explaining the constraint in detail".into()),
+            ..Default::default()
+        });
+        let scored = vec![ScoredMemory {
+            memory: decision,
+            score: 0.9,
+            score_breakdown: Default::default(),
+        }];
+        // Budget too small for the full atomic line (but larger than the
+        // header): the decision is skipped WHOLE — no truncated rationale.
+        let ctx = format_class_context_with_budget("[H]", &scored, 60, None, None);
+        assert!(
+            !ctx.contains("because"),
+            "decision must never be truncated mid-clause: {ctx}"
+        );
+        assert!(ctx.contains("omitted"));
+
+        // A fact with a long preview under a budget that fits only the
+        // summary line: preview dropped first, summary still included.
+        let fact = Memory::new(
+            MemoryType::Context,
+            "Short fact",
+            "An extremely long body preview that will not fit the budget at all xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            Provenance::human(),
+        );
+        let scored = vec![ScoredMemory {
+            memory: fact,
+            score: 0.9,
+            score_breakdown: Default::default(),
+        }];
+        let ctx = format_class_context_with_budget("[H]", &scored, 80, None, None);
+        assert!(ctx.contains("Short fact"), "{ctx}");
+        assert!(!ctx.contains("extremely long body"), "{ctx}");
+        assert!(
+            !ctx.contains("omitted"),
+            "compressed fact still counts as included: {ctx}"
+        );
+    }
+
+    #[test]
+    fn test_suppress_task_scoped_memories() {
+        use engramdb::types::{Generality, Validity};
+
+        let mut task_scoped = Memory::new(
+            MemoryType::Decision,
+            "Task-local decision",
+            "c",
+            Provenance::human(),
+        );
+        task_scoped.valid_while = Some(Validity {
+            origin_task: Some("some-task".into()),
+            generality: Generality::Task,
+            ..Default::default()
+        });
+        let project_wide = Memory::new(
+            MemoryType::Decision,
+            "Project-wide decision",
+            "c",
+            Provenance::human(),
+        );
+        let memories: Vec<ScoredMemory> = [task_scoped, project_wide]
+            .into_iter()
+            .map(|memory| ScoredMemory {
+                memory,
+                score: 0.9,
+                score_breakdown: Default::default(),
+            })
+            .collect();
+        let kept = suppress_task_scoped(memories);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].memory.summary, "Project-wide decision");
+    }
+
+    #[test]
+    fn test_infer_situation_keyword_tables() {
+        assert_eq!(
+            infer_situation("why does the test panic here?"),
+            Some(Situation::Debugging)
+        );
+        assert_eq!(
+            infer_situation("Should we choose sqlite vs postgres?"),
+            Some(Situation::DesignChoice)
+        );
+        // Debugging wins when both match (checked first).
+        assert_eq!(
+            infer_situation("error in the design"),
+            Some(Situation::Debugging)
+        );
+        assert_eq!(infer_situation("add a new field to the struct"), None);
+    }
+
+    #[test]
+    fn test_extract_prompt() {
+        assert_eq!(
+            extract_prompt(r#"{"prompt":"why does this fail?"}"#),
+            Some("why does this fail?".to_string())
+        );
+        assert_eq!(extract_prompt(r#"{"prompt":"  "}"#), None);
+        assert_eq!(extract_prompt("not json"), None);
+        assert_eq!(extract_prompt(r#"{}"#), None);
     }
 
     // --- Unit tests for build_session_start_context (reflection nudge) ---
@@ -959,6 +1507,162 @@ mod tests {
                 .unwrap(),
             ctx
         );
+    }
+
+    // --- Integration tests for the new hook events (§8.5) ---
+
+    #[tokio::test]
+    async fn post_tool_use_warns_on_watch_match_and_respects_validity() {
+        use engramdb::types::Validity;
+
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join("Cargo.lock"), "").unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        // A live memory watching Cargo.lock…
+        let mut watcher = Memory::new(
+            MemoryType::Decision,
+            "Pin ort while rc.12",
+            "content",
+            Provenance::human(),
+        );
+        watcher.id = "watch-live".to_string();
+        watcher.valid_while = Some(Validity {
+            invalidated_by: vec!["Cargo.lock".into()],
+            ..Default::default()
+        });
+        store.create(&watcher).await.unwrap();
+
+        // …and an INVALIDATED one watching the same path (must not warn —
+        // §2.4 validity guard / §14.14).
+        let mut dead = Memory::new(
+            MemoryType::Decision,
+            "Old pin decision",
+            "content",
+            Provenance::human(),
+        );
+        dead.id = "watch-dead".to_string();
+        dead.valid_while = Some(Validity {
+            invalidated_by: vec!["Cargo.lock".into()],
+            ..Default::default()
+        });
+        dead.invalidated_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
+        store.create(&dead).await.unwrap();
+
+        let abs = temp_dir.path().join("Cargo.lock");
+        let input = serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": { "file_path": abs.to_str().unwrap() }
+        })
+        .to_string();
+
+        let out = process_post_tool_use(&input, temp_dir.path())
+            .await
+            .unwrap()
+            .expect("watch match must warn");
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+        let ctx = parsed["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(ctx.contains("may invalidate memory"), "{ctx}");
+        assert!(ctx.contains("Pin ort while rc.12"), "{ctx}");
+        assert!(
+            !ctx.contains("Old pin decision"),
+            "invalidated watcher must stay silent: {ctx}"
+        );
+
+        // An edit that matches no watcher is silent.
+        std::fs::write(temp_dir.path().join("README.md"), "").unwrap();
+        let abs = temp_dir.path().join("README.md");
+        let input = serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": { "file_path": abs.to_str().unwrap() }
+        })
+        .to_string();
+        assert!(process_post_tool_use(&input, temp_dir.path())
+            .await
+            .unwrap()
+            .is_none());
+
+        // Malformed stdin is silent, never an error.
+        assert!(process_post_tool_use("not json", temp_dir.path())
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn user_prompt_submit_surfaces_keyword_matches() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+
+        let mut mem = Memory::new(
+            MemoryType::Convention,
+            "Nextest is required for the test suite",
+            "Use cargo nextest run, never cargo test",
+            Provenance::human(),
+        );
+        mem.criticality = 0.9;
+        store.create(&mem).await.unwrap();
+
+        let input = serde_json::json!({ "prompt": "how do I run the nextest suite?" }).to_string();
+        let out = process_user_prompt_submit(&input, temp_dir.path())
+            .await
+            .unwrap()
+            .expect("keyword match should surface");
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit"
+        );
+        let ctx = parsed["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(ctx.contains("Nextest is required"), "{ctx}");
+
+        // No keyword overlap ⇒ silent.
+        let input = serde_json::json!({ "prompt": "completely unrelated zebra topic" }).to_string();
+        let out = process_user_prompt_submit(&input, temp_dir.path())
+            .await
+            .unwrap();
+        assert!(out.is_none());
+
+        // Empty/malformed stdin ⇒ silent.
+        assert!(process_user_prompt_submit("", temp_dir.path())
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_new_hook_subcommands_parse() {
+        use crate::app::{Cli, Command, HookCommand};
+        use clap::Parser;
+
+        for (arg, expect) in [
+            ("user-prompt-submit", "UserPromptSubmit"),
+            ("post-tool-use", "PostToolUse"),
+            ("session-end", "SessionEnd"),
+            ("pre-compact", "PreCompact"),
+        ] {
+            let cli = Cli::try_parse_from(["engramdb", "hook", arg]).unwrap();
+            match cli.command {
+                Command::Hook { command } => {
+                    let name = match command {
+                        HookCommand::UserPromptSubmit => "UserPromptSubmit",
+                        HookCommand::PostToolUse => "PostToolUse",
+                        HookCommand::SessionEnd => "SessionEnd",
+                        HookCommand::PreCompact => "PreCompact",
+                        _ => "other",
+                    };
+                    assert_eq!(name, expect);
+                }
+                _ => panic!("Expected Hook command"),
+            }
+        }
     }
 
     // --- Integration tests for process_hook_input ---

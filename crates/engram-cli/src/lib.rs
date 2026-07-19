@@ -571,6 +571,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             HookCommand::SessionStart { min_criticality } => {
                 commands::run_hook_session_start(&dir, min_criticality).await
             }
+            HookCommand::UserPromptSubmit => commands::run_hook_user_prompt_submit(&dir).await,
+            HookCommand::PostToolUse => commands::run_hook_post_tool_use(&dir).await,
+            HookCommand::SessionEnd => commands::run_hook_session_end(&dir).await,
+            HookCommand::PreCompact => commands::run_hook_pre_compact(&dir).await,
         },
         Command::Projects { command } => {
             commands::run_projects(&dir, &registry, command, &formatter, &prompter).await
