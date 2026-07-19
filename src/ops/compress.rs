@@ -774,7 +774,7 @@ pub async fn consolidation_pass(
         return Ok(report);
     }
 
-    let min_sources = config.epistemic.consolidation_min_sources as usize;
+    let min_sources = config.epistemic.consolidation_min_sources;
     let similarity = config.epistemic.consolidation_similarity;
     let ids = store.list_ids().await?;
     let loaded = store.get_batch(&ids).await?;
@@ -878,11 +878,12 @@ pub async fn consolidate_cluster_apply(
         sources.push(store.get(id).await?);
     }
 
-    let common_type = sources
-        .windows(2)
-        .all(|w| w[0].type_ == w[1].type_)
-        .then(|| sources[0].type_)
-        .unwrap_or(MemoryType::Context);
+    let all_same_type = sources.windows(2).all(|w| w[0].type_ == w[1].type_);
+    let common_type = if all_same_type {
+        sources[0].type_
+    } else {
+        MemoryType::Context
+    };
     let criticality = sources.iter().map(|m| m.criticality).fold(0.0f64, |a, b| {
         if b.is_finite() {
             a.max(b)
