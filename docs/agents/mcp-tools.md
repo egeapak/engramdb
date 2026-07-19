@@ -290,6 +290,21 @@ Returns `{ task, demoted, kept_custom_decay, project_wide_review }`.
 | `all_projects?` | `bool` | Include per-project runtime telemetry breakdown. |
 | `project?` | `string` | See conventions. |
 
+### `config` (read-only)
+
+**Effective config values and store vocabulary** — call this once at the start of a session to learn the limits and thresholds that govern the other tools, and to get a feel for what is already in memory. Returns:
+
+- `limits` — `summary_max_chars` (hard cap `create` enforces), `content_soft_token_target`, and `embedding_max_tokens` (content past this is not embedded).
+- `retrieval` — `default_max_results`, `relevance_threshold` (min score a `query` result clears), `search_threshold`, `search_semantic_weight`, `include_expired`.
+- `features` — `rerank_enabled` / `rerank_top_n`, `contradiction_detection_enabled` (whether `challenge`'s NLI is on), and the `title_strategy` used when `create` gets no title.
+- `embedding` — `provider` and vector `dimensions`.
+- `top_tags` — the most-used unique tags with counts, most-used first.
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `top_tags?` | `int` | Number of top tags to include (most-used first). Default 20. |
+| `project?` | `string` | See conventions. |
+
 ### `doctor` (read-only unless `fix: true`)
 
 **Fast store health check** (index vs disk consistency) plus epistemic checks: watched paths (`invalidated_by`) changed since last verification, observations unverified past `[epistemic].observation_review_days` (default 90), and memories whose `derived_from` sources are missing or invalid.

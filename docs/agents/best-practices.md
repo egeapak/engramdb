@@ -95,6 +95,8 @@ Facts usually need neither — they're verifiable against the repo directly.
 
 - **`summary`** ≤ 100 chars. Hard limit.
 - **`content`** ~500 tokens soft target. The semantic embedding is computed over `summary + content`, and longer content doesn't help retrieval — the model embeds the first ~256 tokens anyway (`max_tokens`).
+
+> These limits, the retrieval thresholds, and the store's most-used tags are all readable at runtime via the [`config`](./mcp-tools.md#config-read-only) tool — call it once at the start of a session rather than hard-coding the numbers above.
 - **`details`** anything longer. Lazy-loaded — only fetched when `detail_level: "full"`. Use for code snippets, long rationale, links.
 
 If you find yourself writing > 1000 tokens of `content`, you almost always want to split:

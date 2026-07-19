@@ -1475,6 +1475,58 @@ async fn stats_populated() {
 }
 
 // -----------------------------------------------------------------------
+// memory_config
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn config_exposes_limits_and_defaults() {
+    let (_dir, server) = setup().await;
+    // Init the store via a create so config can open it.
+    let _ = create_and_get_id(&server, "decision", "Seed", "Content").await;
+
+    let result = server
+        .memory_config(Parameters(ConfigInput {
+            project: None,
+            top_tags: None,
+        }))
+        .await;
+    let val = parse_ok(&result);
+
+    assert_eq!(val["limits"]["summary_max_chars"], 100);
+    assert_eq!(val["limits"]["content_soft_token_target"], 500);
+    assert_eq!(val["retrieval"]["default_max_results"], 10);
+    assert!(val["retrieval"]["relevance_threshold"].is_number());
+    assert_eq!(val["features"]["rerank_enabled"], false);
+    assert_eq!(val["features"]["contradiction_detection_enabled"], false);
+    assert!(val["embedding"]["dimensions"].is_number());
+    assert!(val["top_tags"].is_array());
+}
+
+#[tokio::test]
+async fn config_reports_top_tags() {
+    let (_dir, server) = setup().await;
+
+    // "rust" appears on two memories, "async" on one.
+    let mut a = create_input("context", "A", "Content");
+    a.tags = Some(vec!["rust".into(), "async".into()]);
+    server.memory_create(Parameters(a)).await.unwrap();
+    let mut b = create_input("context", "B", "Content");
+    b.tags = Some(vec!["rust".into()]);
+    server.memory_create(Parameters(b)).await.unwrap();
+
+    let result = server
+        .memory_config(Parameters(ConfigInput {
+            project: None,
+            top_tags: Some(5),
+        }))
+        .await;
+    let val = parse_ok(&result);
+    let tags = val["top_tags"].as_array().unwrap();
+    assert_eq!(tags[0]["tag"], "rust");
+    assert_eq!(tags[0]["count"], 2);
+}
+
+// -----------------------------------------------------------------------
 // memory_gc
 // -----------------------------------------------------------------------
 
