@@ -4582,6 +4582,8 @@ async fn verify_tool_stamps_and_update_reopens() {
 #[tokio::test]
 async fn task_current_and_complete_roundtrip() {
     let (_dir, server) = setup().await;
+    // Initialize the store first (task state lives under .engramdb/).
+    create_and_get_id(&server, "context", "Bootstrap memory", "c").await;
 
     // Read with no declaration.
     let result = parse_ok(
