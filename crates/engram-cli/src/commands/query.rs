@@ -101,6 +101,8 @@ async fn compute_query_result(
         max_results: Some(params.max_results),
         include_expired: Some(params.include_expired),
         detail_level,
+        // --epistemic / --include-invalidated / --situation flags land in I5a.
+        ..Default::default()
     };
 
     // Optionally fold in global-store memories via the shared band

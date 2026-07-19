@@ -1497,6 +1497,9 @@ impl EngramDbServer {
             max_results: Some(input.max_results.unwrap_or(10)),
             include_expired: Some(input.include_expired.unwrap_or(false)),
             detail_level,
+            // Epistemic filter / invalidated opt-in / situation reach the MCP
+            // QueryInput surface in I5a; until then queries are neutral.
+            ..Default::default()
         };
 
         // Merge global memories if requested and not already targeting the

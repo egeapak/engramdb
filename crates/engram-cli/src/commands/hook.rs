@@ -250,6 +250,8 @@ async fn process_hook_input(input: &str, dir: &Path, store: MemoryStore) -> Resu
         max_results: Some(5),
         include_expired: Some(false),
         detail_level: DetailLevel::Summary,
+        // situation: FileEdit lands with the I6 hook work.
+        ..Default::default()
     };
 
     let result = match engramdb::ops::query_memories(&engine, &query).await {
@@ -327,6 +329,8 @@ async fn process_session_start(dir: &Path, min_criticality: f64) -> Result<Optio
         max_results: Some(10),
         include_expired: Some(false),
         detail_level: DetailLevel::Summary,
+        // situation: SessionStart lands with the I6 hook work.
+        ..Default::default()
     };
 
     let result = match engramdb::ops::query_memories(&engine, &query).await {
