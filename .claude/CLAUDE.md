@@ -92,7 +92,7 @@ The **model cache** is separate from the data dir and is *not* redirected by the
 
 Note: `cargo test --lib` has two pre-existing flaky failures under full parallelism (`ops::doctor::tests::test_doctor_many_memories_healthy`, `ops::projects::tests::test_get_project_info_with_memories`) — they pass in isolation and fail identically on a clean base, so they are not a regression signal.
 
-Note: `mcp::server::tests::global_retrieve_with_semantic_query` is similarly flaky under a full-parallel `cargo nextest run --all-features` in a resource-constrained sandbox. The daemon path is disabled under `#[cfg(test)]`, so every embedding test loads ONNX in-process; when many processes lose the model-load race at once, the embedding provider resolves to `None`, the memory is stored without a vector, and the semantic query returns empty. It passes in isolation and on adequately-resourced CI, so it is not a regression signal.
+Note: `mcp::server::tests::global_retrieve_with_semantic_query` and `reindex_re_embeds_in_error_mode_despite_mismatch` were similarly flaky under a full-parallel `cargo nextest run --all-features` (sandbox AND coverage-instrumented CI); both are now serialized in the `ml-models` nextest group. The daemon path is disabled under `#[cfg(test)]`, so every embedding test loads ONNX in-process; when many processes lose the model-load race at once, the embedding provider resolves to `None`, the memory is stored without a vector, and the semantic query returns empty. It passes in isolation and on adequately-resourced CI, so it is not a regression signal.
 
 ### Fuzzing
 
