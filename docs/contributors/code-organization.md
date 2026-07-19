@@ -51,6 +51,7 @@ re-exported from it).
 ├── lib.rs
 ├── config.rs            # EngramConfig + every sub-config; defaults
 ├── memory.rs            # Memory, MemoryType, Status, Visibility, MemoryUpdate
+├── epistemic.rs         # Epistemic, Generality, Validity, Situation
 ├── decay.rs             # Decay, DecayStrategy
 ├── provenance.rs        # Provenance, ProvenanceSource
 ├── challenge.rs         # Challenge
@@ -69,6 +70,7 @@ re-exported from it).
 ├── paths.rs             # platform paths (project/global/cache/lancedb/...)
 ├── project_id.rs        # SHA-256-derived 16-char IDs, detect_worktree_main
 ├── registry.rs          # FileRegistry/InMemoryRegistry, parent-child
+├── task_state.rs        # session→task association (.engramdb/state/, flock-serialized)
 ├── worktree.rs          # resolve_project_root, consolidate_worktree_into_main
 ├── write_lock.rs        # per-project advisory flock
 ├── config.rs            # load_config from config.toml
@@ -112,6 +114,8 @@ re-exported from it).
 │   ├── challenge.rs     # thin re-export of engram-models' nli::challenge (keeps ops::challenge_* stable)
 │   ├── resolve.rs       # ResolveParams, resolve_memory
 │   ├── review.rs        # ReviewParams, review_memories
+│   ├── verify.rs        # verify_memory (stamps verified_at, clears doctor findings)
+│   ├── task.rs          # task_current / task_complete lifecycle
 │   ├── gc.rs            # gc_memories
 │   ├── compress.rs      # compress_candidates, compress_apply
 │   ├── reindex.rs       # reindex
@@ -173,7 +177,7 @@ re-exported from it).
 │   ├── challenge.rs, review.rs, stats.rs, doctor.rs, gc.rs,
 │   ├── compress.rs, reindex.rs, migrate.rs, rollback.rs,
 │   ├── init.rs, serve.rs, daemon.rs, completions.rs,
-│   ├── setup.rs, hook.rs, projects.rs
+│   ├── setup.rs, hook.rs, projects.rs, task.rs, verify.rs
 │   └── mod.rs           # re-exports
 ├── output.rs            # OutputFormatter: pretty / json / plain rendering
 ├── prompter.rs          # InquirePrompter for interactive flows
@@ -190,7 +194,7 @@ Black-box CLI integration tests live in `crates/engram-cli/tests/cli/` (see
 | Add a new CLI subcommand | `crates/engram-cli/src/app.rs` (Clap), `crates/engram-cli/src/commands/<new>.rs`, `crates/engram-cli/src/lib.rs` (dispatch), and the `src/ops/<new>.rs` it calls |
 | Add a new MCP tool | `crates/engram-mcp/src/server.rs` (the `#[tool]` macro) calling into the same `src/ops/<new>.rs` |
 | Change a memory field | `crates/engram-types/src/memory.rs` + `crates/engram-storage/src/lance_index.rs` (schema) + `crates/engram-storage/src/memory_file/` (serializer) + `crates/engram-types/src/config.rs` if it has a default |
-| Add a new memory type variant | `crates/engram-types/src/memory.rs::MemoryType` + the default_decay match + `src/ops/parsing.rs::parse_memory_type` |
+| Add a new memory type variant | `crates/engram-types/src/memory.rs::MemoryType` + the default_decay and default_epistemic matches + `src/ops/parsing.rs::parse_memory_type` |
 | Add a new embedding provider | `crates/engram-models/src/embeddings/<provider>.rs` + extend `provider_specs` in `src/ops/mod.rs` (see [extending.md](./extending.md)) |
 | Add a new config field | `crates/engram-types/src/config.rs` (with `#[serde(default)]` + a `default_*` fn) + extend `provider_cache_key` if it affects model loading |
 | Change scoring | `src/scoring/composite.rs` (formula) or `src/scoring/decay.rs`, `src/scoring/trust.rs` (the multipliers) |

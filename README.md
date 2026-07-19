@@ -12,6 +12,9 @@ EngramDB gives your AI coding agent a memory layer that persists between convers
 - **Semantic search** — vector similarity search powered by LanceDB and all-MiniLM-L6-v2 embeddings
 - **Automatic context injection** — hooks surface relevant memories when your agent touches files
 - **Contradiction detection** — NLI-based challenge system flags conflicting information
+- **Epistemic classes** — every memory is a `fact`, `observation`, or `decision`, orthogonal to its type; retrieval reweights classes by situation (observations surface while debugging, decisions while designing)
+- **Bi-temporal validity** — outdated memories are invalidated instead of deleted; superseded and consolidated memories stay queryable as history
+- **Task-scoped memories** — declare the task a session works on; completing it demotes its task-scoped memories, re-confirmed ones get promoted, and `verify`/`doctor` re-check what's still accurate
 - **Memory lifecycle** — criticality scoring, garbage collection, compression of stale memories
 - **MCP server** — full Model Context Protocol integration (stdio and SSE transports)
 - **Shared embedding daemon** — auto-spawned and self-healing; loads models once machine-wide instead of once per agent session, stays resident while sessions are connected, and is usable from the CLI too, with graceful in-process fallback
@@ -76,6 +79,7 @@ engramdb query --mode rank --path src/db/connection.rs
 EngramDB stores memories as structured files (TOML + markdown) in `.engramdb/memories/` within your project. Each memory has:
 
 - **Type** — decision, convention, hazard, context, intent, relationship, debug, preference
+- **Epistemic class** — fact, observation, or decision (defaults from the type), with a bi-temporal validity window: memories are invalidated, not deleted
 - **Visibility** — project, team, or personal scope
 - **Criticality** — 0.0 to 1.0 score that decays over time
 - **Embeddings** — vector representations stored in a LanceDB index for semantic search
@@ -84,7 +88,10 @@ When integrated with Claude Code:
 
 1. **SessionStart hook** — injects high-criticality memories into the conversation at startup
 2. **PreToolUse hook** — when the agent reads/writes/edits a file, relevant memories are surfaced as context
-3. **MCP server** — the agent can search, create, update, and manage memories through tool calls
+3. **UserPromptSubmit hook** — surfaces memories relevant to the prompt, inferring the situation (e.g. debugging vs. design)
+4. **PostToolUse hook** — warns when an edit touches paths a memory's validity depends on
+5. **SessionEnd / PreCompact hooks** — housekeeping and a store-your-memories reminder before compaction
+6. **MCP server** — the agent can search, create, update, and manage memories through tool calls
 
 ## CLI Reference
 
@@ -99,6 +106,8 @@ When integrated with Claude Code:
 | `delete` | Delete a memory |
 | `challenge` | Challenge a memory's validity |
 | `review` | Interactive review of challenged/stale memories |
+| `verify` | Confirm a memory is still accurate (stamps `verified_at`, clears doctor-flagged reviews) |
+| `task` | Declare or complete the task this session works on (`current`/`complete`) |
 | `stats` | Show store statistics |
 | `doctor` | Check environment and store health (`--fix` to repair, `validate` to test models) |
 | `gc` | Garbage collect low-relevance memories |
@@ -144,7 +153,10 @@ When running as an MCP server (`engramdb serve`), the following tools are availa
 | `delete` | Remove a memory |
 | `challenge` | Flag a memory as potentially incorrect |
 | `review` | List memories needing review |
-| `resolve` | Accept, update, or delete a challenged memory |
+| `resolve` | Accept, update, invalidate, or delete a challenged memory |
+| `verify` | Re-confirm a memory is still accurate, refreshing fact decay |
+| `task_current` | Declare (or read) the task this session is working on |
+| `task_complete` | Mark a task finished, demoting its task-scoped memories |
 | `stats` | Store statistics and health info |
 | `doctor` | Environment and store diagnostics |
 | `gc` | Garbage collect low-relevance memories |
