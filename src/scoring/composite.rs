@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 
-use crate::types::{Decay, EngramConfig, Memory, ProvenanceSource, Status};
+use crate::types::{Decay, EngramConfig, Epistemic, Memory, ProvenanceSource, Situation, Status};
 
 use super::trust::trust_weight_from_config;
 
@@ -20,6 +20,13 @@ pub struct ScoreTarget<'a> {
     pub logical: &'a [String],
     pub provenance_source: ProvenanceSource,
     pub status: Status,
+    /// Epistemic class: drives the situation multiplier, the per-class
+    /// challenge penalty, and (for facts) the freshness anchor.
+    pub epistemic: Epistemic,
+    /// Fact freshness anchor (§7.3): for `Fact` targets decay is measured
+    /// from `verified_at` when present, so doctor verification refreshes a
+    /// decaying fact without new formula terms. Ignored for other classes.
+    pub verified_at: Option<DateTime<Utc>>,
 }
 
 impl<'a> From<&'a Memory> for ScoreTarget<'a> {
@@ -32,6 +39,8 @@ impl<'a> From<&'a Memory> for ScoreTarget<'a> {
             logical: &m.logical,
             provenance_source: m.provenance.source,
             status: m.status,
+            epistemic: m.epistemic,
+            verified_at: m.verified_at,
         }
     }
 }
@@ -69,6 +78,10 @@ pub struct ScoreBreakdown {
     /// Effective trust multiplier after floor transform:
     /// `floor + (1 - floor) * trust_weight`
     pub trust_multiplier: f64,
+    /// Situation-conditioned epistemic-class multiplier:
+    /// `floor + (1 - floor) * profile[situation][epistemic]`, or 1.0 when the
+    /// query carries no situation (every pre-epistemic query).
+    pub situation_multiplier: f64,
     /// Decay amount (0.0 = fresh, 1.0 = fully decayed)
     pub decay: f64,
     /// Raw criticality value
@@ -98,6 +111,11 @@ pub struct ScoringContext<'a> {
 
     /// Whether embeddings are available for this retrieval
     pub embeddings_available: bool,
+
+    /// The querying agent's situation (§6.2). `None` ⇒ neutral multiplier —
+    /// every constructor starts here; thread a value in via
+    /// [`ScoringContext::with_situation`].
+    pub situation: Option<Situation>,
 }
 
 impl<'a> ScoringContext<'a> {
@@ -110,6 +128,7 @@ impl<'a> ScoringContext<'a> {
             keyword_score: None,
             semantic_score: None,
             embeddings_available: false,
+            situation: None,
         }
     }
 
@@ -126,6 +145,7 @@ impl<'a> ScoringContext<'a> {
             keyword_score: None,
             semantic_score: None,
             embeddings_available: false,
+            situation: None,
         }
     }
 
@@ -143,6 +163,7 @@ impl<'a> ScoringContext<'a> {
             keyword_score: None,
             semantic_score: Some(semantic_score),
             embeddings_available: true,
+            situation: None,
         }
     }
 
@@ -161,7 +182,14 @@ impl<'a> ScoringContext<'a> {
             keyword_score: Some(keyword_score),
             semantic_score,
             embeddings_available: semantic_score.is_some(),
+            situation: None,
         }
+    }
+
+    /// Attach the querying agent's situation (builder-style; `None` clears).
+    pub fn with_situation(mut self, situation: Option<Situation>) -> Self {
+        self.situation = situation;
+        self
     }
 }
 
@@ -282,8 +310,16 @@ fn composite_score_inner(
     now: DateTime<Utc>,
     ignore_decay: bool,
 ) -> ScoreBreakdown {
-    // Calculate decay factor (always computed for the breakdown)
-    let decay_factor_value = super::decay::decay_factor(target.created_at, now, target.decay);
+    // Calculate decay factor (always computed for the breakdown). Fact
+    // freshness anchor (§7.3): facts decay from their last verification when
+    // one exists — doctor's `verified_at` writes become score-relevant.
+    // Observations/decisions keep `created_at` (re-verifying an observation
+    // is modeled by updating it; decisions are premise-bound, not time-bound).
+    let decay_anchor = match target.epistemic {
+        Epistemic::Fact => target.verified_at.unwrap_or(target.created_at),
+        _ => target.created_at,
+    };
+    let decay_factor_value = super::decay::decay_factor(decay_anchor, now, target.decay);
 
     // Calculate relevance: when ignoring decay, use criticality directly.
     // (Otherwise `criticality * decay_factor`, i.e. `effective_relevance`.)
@@ -371,9 +407,29 @@ fn composite_score_inner(
     let trust_multiplier = trust_floor + (1.0 - trust_floor) * trust;
     score *= trust_multiplier;
 
-    // Apply challenge penalty as flat subtraction
+    // Apply the situation multiplier (§7.1) after trust, before the challenge
+    // penalty. Mode-independent post-multiplier; `None` situation (every
+    // pre-epistemic query) is exactly neutral. The floor transform and
+    // non-finite-to-neutral clamping live in `SituationConfig::multiplier`.
+    let situation_multiplier = match context.situation {
+        Some(situation) => config
+            .retrieval
+            .scoring
+            .situation
+            .multiplier(situation, target.epistemic),
+        None => 1.0,
+    };
+    score *= situation_multiplier;
+
+    // Apply challenge penalty as flat subtraction, sized per epistemic class
+    // (§7.2): observation 0.20 / fact 0.15 / decision 0.05 by default; a
+    // legacy `Flat` config value applies to all classes.
     if target.status == Status::Challenged {
-        score -= config.retrieval.scoring.challenge_penalty;
+        score -= config
+            .retrieval
+            .scoring
+            .challenge_penalty
+            .penalty_for(target.epistemic);
     }
 
     // Safety clamp to [0, 1]. `f64::clamp` propagates NaN, and `criticality`
@@ -397,6 +453,7 @@ fn composite_score_inner(
         scope_multiplier,
         trust,
         trust_multiplier,
+        situation_multiplier,
         decay: 1.0 - decay_factor_value,
         criticality: target.criticality,
     }
@@ -563,9 +620,9 @@ mod tests {
         let breakdown_without_challenge =
             composite_score(&create_test_memory(), &context, &config, now);
 
-        // Should be non-challenged score minus flat 0.10 penalty
+        // Decision-class memory: per-class default penalty is 0.05.
         assert!(
-            (breakdown.final_score - (breakdown_without_challenge.final_score - 0.10)).abs() < 0.01
+            (breakdown.final_score - (breakdown_without_challenge.final_score - 0.05)).abs() < 0.01
         );
     }
 
@@ -791,16 +848,17 @@ mod tests {
         let human_score =
             composite_score(&create_test_memory(), &context, &config, now).final_score;
 
-        // Inferred + challenged: score = base * trust_mult(0.80) - 0.10
+        // Inferred + challenged: score = base * trust_mult(0.80) - 0.05
+        // (Decision-class per-class penalty).
         let mut challenged_inferred = create_test_memory();
         challenged_inferred.provenance = Provenance::inferred();
         challenged_inferred.status = Status::Challenged;
         let ci_score = composite_score(&challenged_inferred, &context, &config, now).final_score;
 
-        let expected = human_score * 0.80 - 0.10;
+        let expected = human_score * 0.80 - 0.05;
         assert!(
             (ci_score - expected).abs() < 0.001,
-            "challenged inferred {} should be {} (human * 0.80 - 0.10)",
+            "challenged inferred {} should be {} (human * 0.80 - 0.05)",
             ci_score,
             expected
         );
@@ -977,10 +1035,10 @@ mod tests {
         let ignore = composite_score_ignore_decay(&memory, &context, &config, now);
 
         // base = 1.0*0.8 = 0.80, scope_mult=1.0, trust_mult=1.0
-        // challenged penalty: 0.80 - 0.10 = 0.70
+        // challenged penalty (decision class): 0.80 - 0.05 = 0.75
         assert!(
-            (ignore.final_score - 0.70).abs() < 0.01,
-            "challenged ignore_decay: expected ~0.70, got {}",
+            (ignore.final_score - 0.75).abs() < 0.01,
+            "challenged ignore_decay: expected ~0.75, got {}",
             ignore.final_score,
         );
     }
@@ -1180,15 +1238,16 @@ mod tests {
         let low_challenged_bd = composite_score(&low_base, &ctx_low, &config, now);
         let low_diff = low_active_bd.final_score - low_challenged_bd.final_score;
 
-        // Both should lose exactly 0.10
+        // Both should lose exactly the decision-class penalty (0.05) — the
+        // subtraction is flat with respect to base score, only class-sized.
         assert!(
-            (high_diff - 0.10).abs() < 0.001,
-            "high base challenge diff {} should be 0.10",
+            (high_diff - 0.05).abs() < 0.001,
+            "high base challenge diff {} should be 0.05",
             high_diff,
         );
         assert!(
-            (low_diff - 0.10).abs() < 0.001,
-            "low base challenge diff {} should be 0.10",
+            (low_diff - 0.05).abs() < 0.001,
+            "low base challenge diff {} should be 0.05",
             low_diff,
         );
     }
@@ -1308,10 +1367,10 @@ mod tests {
         let challenged_score =
             composite_score(&challenged_memory, &context, &config, now).final_score;
 
-        // Penalty should be exactly 0.10
+        // Penalty should be exactly the decision-class 0.05
         assert!(
-            (active_score - challenged_score - 0.10).abs() < 0.001,
-            "keyword mode challenge diff {} should be 0.10",
+            (active_score - challenged_score - 0.05).abs() < 0.001,
+            "keyword mode challenge diff {} should be 0.05",
             active_score - challenged_score,
         );
     }
@@ -1473,7 +1532,7 @@ mod tests {
 
         let breakdown = composite_score(&memory, &context, &config, now);
 
-        // base=0.0, after challenge penalty: 0.0 - 0.10 = -0.10 → clamped to 0.0
+        // base=0.0, after challenge penalty: 0.0 - 0.05 = -0.05 → clamped to 0.0
         assert!(
             (breakdown.final_score - 0.0).abs() < f64::EPSILON,
             "zero crit + challenged should clamp to 0.0, got {}",
@@ -1513,5 +1572,239 @@ mod tests {
 
         // With floor=1.0, trust is effectively disabled — scores should be higher
         assert!(bd_one.final_score > bd_zero.final_score);
+    }
+}
+
+#[cfg(test)]
+mod epistemic_tests {
+    use super::*;
+    use crate::types::{Epistemic, MemoryType, Provenance, Situation, Visibility};
+    use chrono::Duration;
+
+    fn test_memory() -> Memory {
+        let mut m = Memory::new(
+            MemoryType::Decision,
+            "Test memory",
+            "Test content",
+            Provenance::human(),
+        );
+        m.id = "epi-score".into();
+        m.criticality = 0.8;
+        m.decay = Some(Decay::none());
+        m.visibility = Visibility::Shared;
+        m
+    }
+
+    #[test]
+    fn situation_multiplier_applies_after_trust() {
+        let config = EngramConfig::default();
+        let now = Utc::now();
+        let memory = test_memory(); // Decision class
+
+        let neutral_ctx = ScoringContext::scope_only(None, &[]);
+        let neutral = composite_score(&memory, &neutral_ctx, &config, now);
+        assert_eq!(neutral.situation_multiplier, 1.0);
+
+        // session_start × decision: profile 0.8 → mult = 0.6 + 0.4*0.8 = 0.92
+        let ctx =
+            ScoringContext::scope_only(None, &[]).with_situation(Some(Situation::SessionStart));
+        let bd = composite_score(&memory, &ctx, &config, now);
+        assert!((bd.situation_multiplier - 0.92).abs() < 1e-9);
+        assert!(
+            (bd.final_score - neutral.final_score * 0.92).abs() < 1e-9,
+            "situation acts as a pure post-multiplier: {} vs {}",
+            bd.final_score,
+            neutral.final_score * 0.92
+        );
+
+        // file_edit × decision: profile 1.0 → neutral multiplier even with a
+        // situation set.
+        let ctx = ScoringContext::scope_only(None, &[]).with_situation(Some(Situation::FileEdit));
+        let bd = composite_score(&memory, &ctx, &config, now);
+        assert!((bd.situation_multiplier - 1.0).abs() < 1e-9);
+
+        // session_start × observation is the strongest default down-weight:
+        // 0.6 + 0.4*0.5 = 0.8.
+        let mut obs = test_memory();
+        obs.epistemic = Epistemic::Observation;
+        let ctx =
+            ScoringContext::scope_only(None, &[]).with_situation(Some(Situation::SessionStart));
+        let bd = composite_score(&obs, &ctx, &config, now);
+        assert!((bd.situation_multiplier - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn situation_multiplier_identical_across_modes() {
+        // The multiplier is mode-independent: the ratio situated/neutral is the
+        // same in scope_only, degraded, with_query, and with_keyword modes.
+        let config = EngramConfig::default();
+        let now = Utc::now();
+        let memory = test_memory();
+        let logical: Vec<String> = vec![];
+
+        let contexts: Vec<(ScoringContext<'_>, ScoringContext<'_>)> = vec![
+            (
+                ScoringContext::scope_only(None, &logical),
+                ScoringContext::scope_only(None, &logical)
+                    .with_situation(Some(Situation::SessionStart)),
+            ),
+            (
+                ScoringContext::with_query_degraded(None, &logical, "q"),
+                ScoringContext::with_query_degraded(None, &logical, "q")
+                    .with_situation(Some(Situation::SessionStart)),
+            ),
+            (
+                ScoringContext::with_semantic(None, &logical, "q", 0.9),
+                ScoringContext::with_semantic(None, &logical, "q", 0.9)
+                    .with_situation(Some(Situation::SessionStart)),
+            ),
+            (
+                ScoringContext::with_keyword(None, &logical, "q", 0.7, Some(0.9)),
+                ScoringContext::with_keyword(None, &logical, "q", 0.7, Some(0.9))
+                    .with_situation(Some(Situation::SessionStart)),
+            ),
+        ];
+        for (neutral_ctx, situated_ctx) in contexts {
+            let neutral = composite_score(&memory, &neutral_ctx, &config, now);
+            let situated = composite_score(&memory, &situated_ctx, &config, now);
+            assert!(
+                (situated.final_score - neutral.final_score * 0.92).abs() < 1e-9,
+                "mode-independent post-multiplier violated: {} vs {}",
+                situated.final_score,
+                neutral.final_score * 0.92
+            );
+        }
+    }
+
+    #[test]
+    fn per_class_challenge_penalty() {
+        let config = EngramConfig::default();
+        let now = Utc::now();
+        let ctx = ScoringContext::scope_only(None, &[]);
+
+        for (class, expected_penalty) in [
+            (Epistemic::Fact, 0.15),
+            (Epistemic::Observation, 0.20),
+            (Epistemic::Decision, 0.05),
+        ] {
+            let mut active = test_memory();
+            active.epistemic = class;
+            let mut challenged = active.clone();
+            challenged.status = Status::Challenged;
+
+            let a = composite_score(&active, &ctx, &config, now).final_score;
+            let c = composite_score(&challenged, &ctx, &config, now).final_score;
+            assert!(
+                (a - c - expected_penalty).abs() < 1e-9,
+                "{class}: challenge diff {} should be {expected_penalty}",
+                a - c
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_flat_challenge_penalty_applies_to_all_classes() {
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.challenge_penalty = crate::types::ChallengePenalty::Flat(0.10);
+        let now = Utc::now();
+        let ctx = ScoringContext::scope_only(None, &[]);
+
+        for class in [Epistemic::Fact, Epistemic::Observation, Epistemic::Decision] {
+            let mut active = test_memory();
+            active.epistemic = class;
+            let mut challenged = active.clone();
+            challenged.status = Status::Challenged;
+            let a = composite_score(&active, &ctx, &config, now).final_score;
+            let c = composite_score(&challenged, &ctx, &config, now).final_score;
+            assert!((a - c - 0.10).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn fact_freshness_anchor_uses_verified_at() {
+        // A decaying fact re-verified recently must score as fresh; the same
+        // fact unverified decays from created_at. Non-facts ignore verified_at.
+        let config = EngramConfig::default();
+        let now = Utc::now();
+        let ctx = ScoringContext::scope_only(None, &[]);
+
+        let mut fact = test_memory();
+        fact.epistemic = Epistemic::Fact;
+        fact.created_at = now - Duration::days(14);
+        fact.decay = Some(Decay::exponential(Duration::days(7)));
+
+        let unverified = composite_score(&fact, &ctx, &config, now);
+
+        let mut verified = fact.clone();
+        verified.verified_at = Some(now);
+        let verified_bd = composite_score(&verified, &ctx, &config, now);
+
+        assert!(
+            verified_bd.final_score > unverified.final_score,
+            "verification must refresh a decaying fact: {} vs {}",
+            verified_bd.final_score,
+            unverified.final_score
+        );
+        assert!(
+            (verified_bd.decay - 0.0).abs() < 1e-6,
+            "anchored at now ⇒ fresh"
+        );
+
+        // Observation with the same verified_at keeps the created_at anchor.
+        let mut obs = fact.clone();
+        obs.epistemic = Epistemic::Observation;
+        obs.verified_at = Some(now);
+        let obs_bd = composite_score(&obs, &ctx, &config, now);
+        assert!(
+            (obs_bd.decay - unverified.decay).abs() < 1e-6,
+            "non-fact classes must ignore verified_at"
+        );
+    }
+
+    #[test]
+    fn score_target_parity_with_memory() {
+        // §4.2 parity invariant: composite_score(&memory) and
+        // composite_score_target(target built from the same field values)
+        // produce identical breakdowns — including the new epistemic fields.
+        let config = EngramConfig::default();
+        let now = Utc::now();
+
+        let mut memory = test_memory();
+        memory.epistemic = Epistemic::Fact;
+        memory.created_at = now - Duration::days(30);
+        memory.verified_at = Some(now - Duration::days(2));
+        memory.decay = Some(Decay::exponential(Duration::days(7)));
+        memory.status = Status::Challenged;
+        memory.physical = vec!["src/api/**".into()];
+        memory.logical = vec!["auth".into()];
+
+        let target = ScoreTarget {
+            created_at: memory.created_at,
+            decay: &memory.decay,
+            criticality: memory.criticality,
+            physical: &memory.physical,
+            logical: &memory.logical,
+            provenance_source: memory.provenance.source,
+            status: memory.status,
+            epistemic: memory.epistemic,
+            verified_at: memory.verified_at,
+        };
+
+        let logical = vec!["auth".to_string()];
+        let ctx = ScoringContext::scope_only(Some("src/api/auth.rs"), &logical)
+            .with_situation(Some(Situation::Debugging));
+
+        let from_memory = composite_score(&memory, &ctx, &config, now);
+        let from_target = composite_score_target(target, &ctx, &config, now);
+
+        assert_eq!(from_memory.final_score, from_target.final_score);
+        assert_eq!(from_memory.relevance, from_target.relevance);
+        assert_eq!(from_memory.decay, from_target.decay);
+        assert_eq!(
+            from_memory.situation_multiplier,
+            from_target.situation_multiplier
+        );
+        assert_eq!(from_memory.trust_multiplier, from_target.trust_multiplier);
+        assert_eq!(from_memory.scope_multiplier, from_target.scope_multiplier);
     }
 }

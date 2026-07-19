@@ -110,12 +110,15 @@ pub struct ScoringConfig {
     #[serde(default = "ScoringConfig::default_trust_multiplier_floor")]
     pub trust_multiplier_floor: f64,
 
-    /// Flat penalty subtracted from score when memory is challenged (default 0.10).
+    /// Penalty subtracted from score when memory is challenged. Either a
+    /// legacy flat value (`challenge_penalty = 0.10`) applied to every class,
+    /// or per-epistemic-class values (the default:
+    /// `{ fact = 0.15, observation = 0.20, decision = 0.05 }`).
     ///
     /// Applied as `score -= penalty` instead of multiplicative, so the impact
     /// is uniform regardless of trust/scope combination.
     #[serde(default = "ScoringConfig::default_challenge_penalty")]
-    pub challenge_penalty: f64,
+    pub challenge_penalty: ChallengePenalty,
 
     /// Base for exponential depth decay of physical scope scores (default 0.82).
     ///
@@ -132,6 +135,79 @@ pub struct ScoringConfig {
     /// Situation-conditioned epistemic-class weighting (post-multiplier).
     #[serde(default)]
     pub situation: SituationConfig,
+}
+
+/// Challenge penalty: legacy flat value or per-epistemic-class values.
+///
+/// Untagged so existing `config.toml` files with `challenge_penalty = 0.10`
+/// keep parsing (as `Flat`, applied to every class). The per-class ordering
+/// rationale: a contradicted observation is cheap to re-measure (suppress
+/// hardest, 0.20); a contradicted fact is probably stale (moderate, 0.15); a
+/// contested decision must remain visible together with its dispute
+/// (mildest, 0.05).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ChallengePenalty {
+    /// One penalty for every epistemic class (legacy shape).
+    Flat(f64),
+    /// Per-class penalties.
+    PerClass {
+        fact: f64,
+        observation: f64,
+        decision: f64,
+    },
+}
+
+impl ChallengePenalty {
+    /// The penalty for a class, clamped to [0,1] on read (config and file
+    /// data are unvalidated at fuzz boundaries; non-finite values read as 0).
+    pub fn penalty_for(&self, epistemic: crate::Epistemic) -> f64 {
+        let raw = match self {
+            ChallengePenalty::Flat(v) => *v,
+            ChallengePenalty::PerClass {
+                fact,
+                observation,
+                decision,
+            } => match epistemic {
+                crate::Epistemic::Fact => *fact,
+                crate::Epistemic::Observation => *observation,
+                crate::Epistemic::Decision => *decision,
+            },
+        };
+        if raw.is_finite() {
+            raw.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Validate every carried value is in [0,1].
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let values = match self {
+            ChallengePenalty::Flat(v) => [*v, 0.0, 0.0],
+            ChallengePenalty::PerClass {
+                fact,
+                observation,
+                decision,
+            } => [*fact, *observation, *decision],
+        };
+        for v in values {
+            if !(0.0..=1.0).contains(&v) {
+                anyhow::bail!("scoring.challenge_penalty values must be in [0.0, 1.0]");
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for ChallengePenalty {
+    fn default() -> Self {
+        ChallengePenalty::PerClass {
+            fact: 0.15,
+            observation: 0.20,
+            decision: 0.05,
+        }
+    }
 }
 
 /// Per-class profile values for one situation. Each value ∈ [0,1] feeds the
@@ -333,8 +409,8 @@ impl ScoringConfig {
         0.5
     }
 
-    fn default_challenge_penalty() -> f64 {
-        0.10
+    fn default_challenge_penalty() -> ChallengePenalty {
+        ChallengePenalty::default()
     }
 
     fn default_depth_decay_base() -> f64 {
@@ -363,7 +439,7 @@ impl Default for ScoringConfig {
             },
             scope_multiplier_floor: 0.5,
             trust_multiplier_floor: 0.5,
-            challenge_penalty: 0.10,
+            challenge_penalty: ChallengePenalty::default(),
             depth_decay_base: 0.82,
             depth_decay_floor: 0.3,
             situation: SituationConfig::default(),
@@ -1328,9 +1404,7 @@ impl EngramConfig {
         if !(0.0..=1.0).contains(&self.retrieval.scoring.trust_multiplier_floor) {
             anyhow::bail!("scoring.trust_multiplier_floor must be in [0.0, 1.0]");
         }
-        if !(0.0..=1.0).contains(&self.retrieval.scoring.challenge_penalty) {
-            anyhow::bail!("scoring.challenge_penalty must be in [0.0, 1.0]");
-        }
+        self.retrieval.scoring.challenge_penalty.validate()?;
         if !(0.0..=1.0).contains(&self.retrieval.scoring.depth_decay_base) {
             anyhow::bail!("scoring.depth_decay_base must be in [0.0, 1.0]");
         }
@@ -1415,6 +1489,83 @@ impl EngramConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_challenge_penalty_defaults_and_accessor() {
+        use crate::Epistemic;
+
+        // Default is per-class: fact 0.15, observation 0.20, decision 0.05.
+        let p = ChallengePenalty::default();
+        assert_eq!(p.penalty_for(Epistemic::Fact), 0.15);
+        assert_eq!(p.penalty_for(Epistemic::Observation), 0.20);
+        assert_eq!(p.penalty_for(Epistemic::Decision), 0.05);
+        assert_eq!(
+            ScoringConfig::default().challenge_penalty,
+            ChallengePenalty::default()
+        );
+
+        // Flat applies one value to every class.
+        let flat = ChallengePenalty::Flat(0.10);
+        for e in [Epistemic::Fact, Epistemic::Observation, Epistemic::Decision] {
+            assert_eq!(flat.penalty_for(e), 0.10);
+        }
+
+        // penalty_for clamps out-of-range / non-finite on read (fuzz boundary).
+        assert_eq!(
+            ChallengePenalty::Flat(5.0).penalty_for(Epistemic::Fact),
+            1.0
+        );
+        assert_eq!(
+            ChallengePenalty::Flat(-1.0).penalty_for(Epistemic::Fact),
+            0.0
+        );
+        assert_eq!(
+            ChallengePenalty::Flat(f64::NAN).penalty_for(Epistemic::Fact),
+            0.0
+        );
+
+        // validate rejects out-of-range values in either shape.
+        assert!(ChallengePenalty::Flat(1.5).validate().is_err());
+        let bad = ChallengePenalty::PerClass {
+            fact: 0.1,
+            observation: -0.2,
+            decision: 0.0,
+        };
+        assert!(bad.validate().is_err());
+        assert!(ChallengePenalty::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_challenge_penalty_serde_shapes() {
+        const REQUIRED: &str = r#"
+            with_query = { semantic = 0.55, relevance = 0.45 }
+            scope_only = { relevance = 1.0 }
+            degraded = { relevance = 1.0 }
+        "#;
+
+        // Legacy flat TOML keeps parsing.
+        let parsed: ScoringConfig =
+            toml::from_str(&format!("{REQUIRED}challenge_penalty = 0.10")).unwrap();
+        assert_eq!(parsed.challenge_penalty, ChallengePenalty::Flat(0.10));
+
+        // Per-class table parses.
+        let parsed: ScoringConfig = toml::from_str(&format!(
+            "{REQUIRED}challenge_penalty = {{ fact = 0.3, observation = 0.4, decision = 0.1 }}"
+        ))
+        .unwrap();
+        assert_eq!(
+            parsed.challenge_penalty,
+            ChallengePenalty::PerClass {
+                fact: 0.3,
+                observation: 0.4,
+                decision: 0.1
+            }
+        );
+
+        // Absent key ⇒ per-class defaults.
+        let parsed: ScoringConfig = toml::from_str(REQUIRED).unwrap();
+        assert_eq!(parsed.challenge_penalty, ChallengePenalty::default());
+    }
 
     #[test]
     fn test_situation_config_defaults_and_validate() {
@@ -1646,8 +1797,11 @@ mod tests {
         // Trust multiplier floor
         assert_eq!(config.retrieval.scoring.trust_multiplier_floor, 0.5);
 
-        // Challenge penalty
-        assert_eq!(config.retrieval.scoring.challenge_penalty, 0.10);
+        // Challenge penalty (per-class defaults)
+        assert_eq!(
+            config.retrieval.scoring.challenge_penalty,
+            ChallengePenalty::default()
+        );
 
         // Depth decay
         assert_eq!(config.retrieval.scoring.depth_decay_base, 0.82);
@@ -2145,12 +2299,16 @@ weight = 0.7
 
         // challenge_penalty > 1.0
         let mut config = EngramConfig::default();
-        config.retrieval.scoring.challenge_penalty = 1.1;
+        config.retrieval.scoring.challenge_penalty = ChallengePenalty::Flat(1.1);
         assert!(config.validate().is_err());
 
-        // challenge_penalty < 0.0
+        // challenge_penalty < 0.0 (per-class shape)
         let mut config = EngramConfig::default();
-        config.retrieval.scoring.challenge_penalty = -0.01;
+        config.retrieval.scoring.challenge_penalty = ChallengePenalty::PerClass {
+            fact: -0.01,
+            observation: 0.2,
+            decision: 0.05,
+        };
         assert!(config.validate().is_err());
 
         // valid defaults pass

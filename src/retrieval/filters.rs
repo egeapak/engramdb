@@ -6,7 +6,7 @@
 
 use crate::scope::physical;
 use crate::storage::{IndexFilterable, IndexForFiltering};
-use crate::types::MemoryType;
+use crate::types::{Epistemic, MemoryType};
 use chrono::{DateTime, Utc};
 
 /// Trait for index entries that can be filtered by `apply_index_filters`.
@@ -156,16 +156,25 @@ pub fn apply_index_filters<T: Filterable>(entries: Vec<T>, filters: &SearchFilte
 ///   for a non-finite bound so we never emit `criticality >= NaN`; the Rust
 ///   filter (`< min_crit` is always false for NaN, i.e. keeps everything)
 ///   remains authoritative in that degenerate case.
+/// * `epistemic` — pushed as `epistemic IN ('fact', ...)`, exactly like
+///   `types`. Values come from [`Epistemic::as_str`] (the persisted lowercase
+///   wire names), never raw user strings.
 /// * `exclude_expired_before` — `Some(now)` when expired memories must be
 ///   dropped, producing `(expires_at IS NULL OR expires_at > '<now>')`.
 ///   `expires_at` is a nullable rfc3339 Utf8 column; chrono's canonical UTC
 ///   rfc3339 strings (fixed `+00:00` offset, AutoSi fractions) sort
 ///   lexicographically in chronological order, so the string `>` agrees with a
 ///   `DateTime` comparison. `None` leaves expiry entirely to the caller.
+/// * `exclude_invalidated_before` — same shape over the `invalidated_at`
+///   column (§2.4 default exclusion). A future-dated `invalidated_at`
+///   (scheduled invalidation) still passes, exactly like a future
+///   `expires_at`.
 pub fn build_filter_predicate(
     types: Option<&[MemoryType]>,
+    epistemic: Option<&[Epistemic]>,
     min_criticality: Option<f64>,
     exclude_expired_before: Option<DateTime<Utc>>,
+    exclude_invalidated_before: Option<DateTime<Utc>>,
 ) -> Option<String> {
     let mut clauses: Vec<String> = Vec::new();
 
@@ -186,6 +195,17 @@ pub fn build_filter_predicate(
         }
     }
 
+    if let Some(classes) = epistemic {
+        if !classes.is_empty() {
+            let list = classes
+                .iter()
+                .map(|e| format!("'{}'", e.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            clauses.push(format!("epistemic IN ({})", list));
+        }
+    }
+
     if let Some(min_crit) = min_criticality {
         if min_crit.is_finite() {
             clauses.push(format!("criticality >= {}", min_crit));
@@ -195,6 +215,13 @@ pub fn build_filter_predicate(
     if let Some(now) = exclude_expired_before {
         clauses.push(format!(
             "(expires_at IS NULL OR expires_at > '{}')",
+            now.to_rfc3339()
+        ));
+    }
+
+    if let Some(now) = exclude_invalidated_before {
+        clauses.push(format!(
+            "(invalidated_at IS NULL OR invalidated_at > '{}')",
             now.to_rfc3339()
         ));
     }
@@ -240,43 +267,80 @@ mod tests {
     #[test]
     fn test_build_filter_predicate() {
         // No inputs -> whole-table scan.
-        assert_eq!(build_filter_predicate(None, None, None), None);
-        assert_eq!(build_filter_predicate(Some(&[]), None, None), None);
+        assert_eq!(build_filter_predicate(None, None, None, None, None), None);
+        assert_eq!(
+            build_filter_predicate(Some(&[]), Some(&[]), None, None, None),
+            None
+        );
 
         // Types format from the enum as lowercased Debug, single-quoted.
         assert_eq!(
             build_filter_predicate(
                 Some(&[MemoryType::Decision, MemoryType::Hazard]),
                 None,
+                None,
+                None,
                 None
             ),
             Some("type IN ('decision', 'hazard')".to_string())
         );
 
+        // Epistemic classes push down exactly like types.
+        assert_eq!(
+            build_filter_predicate(
+                None,
+                Some(&[Epistemic::Fact, Epistemic::Observation]),
+                None,
+                None,
+                None
+            ),
+            Some("epistemic IN ('fact', 'observation')".to_string())
+        );
+
         // Criticality is a plain Float64 comparison.
         assert_eq!(
-            build_filter_predicate(None, Some(0.9), None),
+            build_filter_predicate(None, None, Some(0.9), None, None),
             Some("criticality >= 0.9".to_string())
         );
 
         // A non-finite criticality bound is skipped (never emit `>= NaN`).
-        assert_eq!(build_filter_predicate(None, Some(f64::NAN), None), None);
+        assert_eq!(
+            build_filter_predicate(None, None, Some(f64::NAN), None, None),
+            None
+        );
 
         // Expiry clause guards the nullable rfc3339 column.
         let now = "2026-07-02T00:00:00+00:00"
             .parse::<DateTime<Utc>>()
             .unwrap();
         assert_eq!(
-            build_filter_predicate(None, None, Some(now)),
+            build_filter_predicate(None, None, None, Some(now), None),
             Some("(expires_at IS NULL OR expires_at > '2026-07-02T00:00:00+00:00')".to_string())
         );
 
-        // All three AND-combined in a stable order.
+        // Invalidated-exclusion mirrors the expiry clause (§2.4).
         assert_eq!(
-            build_filter_predicate(Some(&[MemoryType::Decision]), Some(0.5), Some(now)),
+            build_filter_predicate(None, None, None, None, Some(now)),
             Some(
-                "type IN ('decision') AND criticality >= 0.5 AND \
-                 (expires_at IS NULL OR expires_at > '2026-07-02T00:00:00+00:00')"
+                "(invalidated_at IS NULL OR invalidated_at > '2026-07-02T00:00:00+00:00')"
+                    .to_string()
+            )
+        );
+
+        // All clauses AND-combined in a stable order.
+        assert_eq!(
+            build_filter_predicate(
+                Some(&[MemoryType::Decision]),
+                Some(&[Epistemic::Decision]),
+                Some(0.5),
+                Some(now),
+                Some(now)
+            ),
+            Some(
+                "type IN ('decision') AND epistemic IN ('decision') AND \
+                 criticality >= 0.5 AND \
+                 (expires_at IS NULL OR expires_at > '2026-07-02T00:00:00+00:00') AND \
+                 (invalidated_at IS NULL OR invalidated_at > '2026-07-02T00:00:00+00:00')"
                     .to_string()
             )
         );

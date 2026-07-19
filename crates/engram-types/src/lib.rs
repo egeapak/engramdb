@@ -23,10 +23,11 @@ mod title_strategy;
 // Re-export all public types
 pub use challenge::Challenge;
 pub use config::{
-    DaemonConfig, EmbeddingBackend, EmbeddingsConfig, EngramConfig, EpistemicConfig, HooksConfig,
-    LogicalBonusConfig, MaintenanceConfig, NliConfig, ReindexOnModelChange, RerankConfig,
-    RetrievalConfig, ScopeProximityConfig, ScoringConfig, ScoringWeights, SearchConfig,
-    SituationConfig, SituationProfile, ThresholdsConfig, TrustWeights, DEFAULT_NLI_MODEL_REPO,
+    ChallengePenalty, DaemonConfig, EmbeddingBackend, EmbeddingsConfig, EngramConfig,
+    EpistemicConfig, HooksConfig, LogicalBonusConfig, MaintenanceConfig, NliConfig,
+    ReindexOnModelChange, RerankConfig, RetrievalConfig, ScopeProximityConfig, ScoringConfig,
+    ScoringWeights, SearchConfig, SituationConfig, SituationProfile, ThresholdsConfig,
+    TrustWeights, DEFAULT_NLI_MODEL_REPO,
 };
 pub use decay::{Decay, DecayStrategy};
 pub use env::in_process_override;
