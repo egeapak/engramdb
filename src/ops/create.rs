@@ -278,10 +278,11 @@ pub async fn create_memory(
                                 "NLI detected contradictions with existing memories"
                             );
                             let store_clone = store.clone();
+                            let new_meta = crate::ops::NewMemoryMeta::from(&saved);
                             tokio::spawn(async move {
                                 crate::ops::challenge_for_contradictions(
                                     &store_clone,
-                                    &saved.summary,
+                                    &new_meta,
                                     &contradictions,
                                 )
                                 .await;

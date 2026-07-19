@@ -20,6 +20,17 @@ use crate::types::EngramConfig;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
+/// Why a memory was planned for deletion (drives the execution-time
+/// re-validation predicate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcReason {
+    /// Composite score below the GC threshold (the pre-epistemic rule).
+    LowScore,
+    /// Validity window closed longer ago than
+    /// `[epistemic] invalidated_retention_days` (§2.4 retention).
+    InvalidatedRetention,
+}
+
 /// A GC deletion candidate identified during the planning phase.
 #[derive(Debug, Clone)]
 pub struct GcCandidate {
@@ -27,6 +38,7 @@ pub struct GcCandidate {
     /// `updated_at` observed at scoring time. Execution skips the deletion
     /// if the memory has been modified since (the score is stale).
     pub updated_at: DateTime<Utc>,
+    pub reason: GcReason,
 }
 
 /// The lock-free planning snapshot: what GC *would* delete.
@@ -95,8 +107,26 @@ pub async fn plan_gc(
         .cloned()
         .collect();
 
+    // §2.4 retention: memories whose validity window closed longer ago than
+    // `[epistemic] invalidated_retention_days` are purged regardless of
+    // score. `0` = keep forever.
+    let retention_days = config.epistemic.invalidated_retention_days;
+    let retention_cutoff =
+        (retention_days > 0).then(|| now - chrono::Duration::days(retention_days as i64));
+
     let mut candidates = Vec::new();
     for (_, memory) in &loaded {
+        if let Some(cutoff) = retention_cutoff {
+            if memory.invalidated_at.is_some_and(|t| t < cutoff) {
+                candidates.push(GcCandidate {
+                    id: memory.id.clone(),
+                    updated_at: memory.updated_at,
+                    reason: GcReason::InvalidatedRetention,
+                });
+                continue; // one candidacy per memory; retention wins
+            }
+        }
+
         let context = ScoringContext::scope_only(None, &[]);
         let breakdown = composite_score(memory, &context, config, now);
 
@@ -104,6 +134,7 @@ pub async fn plan_gc(
             candidates.push(GcCandidate {
                 id: memory.id.clone(),
                 updated_at: memory.updated_at,
+                reason: GcReason::LowScore,
             });
         }
     }
@@ -131,12 +162,28 @@ pub async fn execute_gc_plan(
     let mut skipped = Vec::new();
     let now = Utc::now();
 
+    // Recompute the retention cutoff for execution-time re-validation.
+    let retention_days = config.epistemic.invalidated_retention_days;
+    let retention_cutoff =
+        (retention_days > 0).then(|| now - chrono::Duration::days(retention_days as i64));
+
     for candidate in &plan.candidates {
         let context = ScoringContext::scope_only(None, &[]);
         let deleted = store
             .delete_if(&candidate.id, |memory| {
-                memory.updated_at == candidate.updated_at
-                    && composite_score(memory, &context, config, now).final_score < plan.threshold
+                if memory.updated_at != candidate.updated_at {
+                    return false; // modified since planning — stale decision
+                }
+                match candidate.reason {
+                    GcReason::LowScore => {
+                        composite_score(memory, &context, config, now).final_score < plan.threshold
+                    }
+                    // Still invalidated and still past retention (a §2.4
+                    // reopening would have bumped updated_at, but re-check
+                    // anyway — deletion is irreversible).
+                    GcReason::InvalidatedRetention => retention_cutoff
+                        .is_some_and(|cutoff| memory.invalidated_at.is_some_and(|t| t < cutoff)),
+                }
             })
             .await?;
         if deleted {
@@ -592,5 +639,112 @@ mod tests {
             "remaining candidates must still be processed after a skip"
         );
         assert_eq!(result.count, 1);
+    }
+}
+
+#[cfg(test)]
+mod invalidated_retention_tests {
+    use super::*;
+    use crate::storage::InMemoryRegistry;
+    use crate::types::{Memory, MemoryType, Provenance};
+    use chrono::Duration;
+    use tempfile::TempDir;
+
+    async fn setup() -> (TempDir, MemoryStore) {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        (tmp, store)
+    }
+
+    fn memory(id: &str, criticality: f64) -> Memory {
+        let mut m = Memory::new(MemoryType::Hazard, id, "content", Provenance::human());
+        m.id = id.to_string();
+        m.criticality = criticality;
+        m
+    }
+
+    #[tokio::test]
+    async fn gc_purges_invalidated_past_retention_only() {
+        let (_t, store) = setup().await;
+        let config = EngramConfig::default(); // retention 180d
+
+        // High-criticality (never a low-score candidate), invalidated 200
+        // days ago → retention candidate.
+        let mut old = memory("gc-old-invalid", 0.9);
+        old.invalidated_at = Some(Utc::now() - Duration::days(200));
+        store.create(&old).await.unwrap();
+
+        // Invalidated recently → kept.
+        let mut fresh = memory("gc-fresh-invalid", 0.9);
+        fresh.invalidated_at = Some(Utc::now() - Duration::days(5));
+        store.create(&fresh).await.unwrap();
+
+        // Live memory → kept.
+        store.create(&memory("gc-live", 0.9)).await.unwrap();
+
+        let result = gc_memories(&store, &config, false, None).await.unwrap();
+        assert_eq!(result.removed, vec!["gc-old-invalid".to_string()]);
+        assert!(store.get("gc-fresh-invalid").await.is_ok());
+        assert!(store.get("gc-live").await.is_ok());
+        assert!(store.get("gc-old-invalid").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn gc_retention_zero_keeps_forever_and_dry_run_previews() {
+        let (_t, store) = setup().await;
+
+        let mut old = memory("gc-keeper", 0.9);
+        old.invalidated_at = Some(Utc::now() - Duration::days(10_000));
+        store.create(&old).await.unwrap();
+
+        // retention 0 ⇒ keep forever.
+        let mut config = EngramConfig::default();
+        config.epistemic.invalidated_retention_days = 0;
+        let result = gc_memories(&store, &config, false, None).await.unwrap();
+        assert!(result.removed.is_empty());
+        assert!(store.get("gc-keeper").await.is_ok());
+
+        // Default retention + dry run ⇒ planned but not deleted.
+        let config = EngramConfig::default();
+        let result = gc_memories(&store, &config, true, None).await.unwrap();
+        assert_eq!(result.removed, vec!["gc-keeper".to_string()]);
+        assert!(
+            store.get("gc-keeper").await.is_ok(),
+            "dry run must not delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn gc_reopened_window_survives_execution_revalidation() {
+        let (_t, store) = setup().await;
+        let config = EngramConfig::default();
+
+        let mut old = memory("gc-reopened", 0.9);
+        old.invalidated_at = Some(Utc::now() - Duration::days(200));
+        store.create(&old).await.unwrap();
+
+        // Plan sees it as a retention candidate…
+        let plan = plan_gc(&store, &config, None).await.unwrap();
+        assert!(plan
+            .candidates
+            .iter()
+            .any(|c| c.id == "gc-reopened" && c.reason == GcReason::InvalidatedRetention));
+
+        // …but a §2.4 reopening lands before execution.
+        store
+            .update_with("gc-reopened", |m| {
+                m.invalidated_at = None;
+                m.superseded_by = None;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let result = execute_gc_plan(&store, &config, plan).await.unwrap();
+        assert!(result.removed.is_empty());
+        assert_eq!(result.skipped, vec!["gc-reopened".to_string()]);
+        assert!(store.get("gc-reopened").await.is_ok());
     }
 }

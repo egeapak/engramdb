@@ -23,7 +23,10 @@ pub mod stats;
 pub mod update;
 pub mod verify;
 
-pub use challenge::{challenge_for_contradictions, challenge_memory, ChallengeResult};
+pub use challenge::{
+    challenge_for_contradictions, challenge_memory, route_contradiction, ChallengeResult,
+    ConflictAction, NewMemoryMeta,
+};
 pub use compress::{
     compress_apply, compress_candidates, CompressApplyResult, CompressCandidate,
     CompressCandidatesResult,
@@ -31,10 +34,13 @@ pub use compress::{
 pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
 pub use delete::delete_memory;
 pub use doctor::{
-    doctor, doctor_environment, validate_models, CheckStatus, DoctorResult, DoctorSection,
-    EnvironmentCheck, EnvironmentDoctorResult,
+    doctor, doctor_environment, doctor_epistemic, validate_models, CheckStatus, DoctorResult,
+    DoctorSection, EnvironmentCheck, EnvironmentDoctorResult, EpistemicDoctorResult,
+    EpistemicFinding, EpistemicFindingKind,
 };
-pub use gc::{execute_gc_plan, gc_memories, plan_gc, GcCandidate, GcMaintenance, GcPlan, GcResult};
+pub use gc::{
+    execute_gc_plan, gc_memories, plan_gc, GcCandidate, GcMaintenance, GcPlan, GcReason, GcResult,
+};
 pub use get::get_memory;
 pub use list::{list_memories, parse_sort_field, ListParams, SortField};
 pub use maintenance::{auto_maintain, maintenance_status, MaintenanceReport, MaintenanceStatus};

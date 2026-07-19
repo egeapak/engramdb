@@ -28,6 +28,7 @@ coreml = ["onnxruntime", "ort/coreml", "engram-onnx/coreml"]
 xnnpack = ["onnxruntime", "ort/xnnpack", "engram-onnx/xnnpack"]
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 engram-types = { path = "../engram-types" }
 # ORT execution-provider wiring — optional so a `tract`-only build (no ONNX
 # Runtime) drops it entirely. Gated by the `onnxruntime` feature.

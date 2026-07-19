@@ -457,7 +457,7 @@ impl RetrievalEngine {
                     );
                     crate::nli::challenge_for_contradictions(
                         &store,
-                        &memory.summary,
+                        &crate::nli::NewMemoryMeta::from(&memory),
                         &contradictions,
                     )
                     .await;
