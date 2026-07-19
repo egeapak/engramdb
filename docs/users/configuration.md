@@ -40,10 +40,36 @@ relevance = 1.0                # fallback when embeddings unavailable
 
 [retrieval.scoring]
 trust_multiplier_floor = 0.5   # ceiling on how much low-trust memories are suppressed
-challenge_penalty = 0.10       # flat subtraction for challenged memories
+challenge_penalty = { fact = 0.15, observation = 0.20, decision = 0.05 }
+                               # per-epistemic-class subtraction for challenged memories;
+                               # a scalar (challenge_penalty = 0.10) is the legacy flat
+                               # form, still accepted and applied to every class
 depth_decay_base = 0.82        # base for exponential scope-depth decay
 depth_decay_floor = 0.3        # minimum scope score regardless of depth
 scope_multiplier_floor = 0.5   # neutral base for logical-only scope context
+
+[retrieval.scoring.situation]
+floor = 0.6                    # multiplier floor; 1.0 disables situation weighting
+
+[retrieval.scoring.situation.session_start]
+fact = 1.0
+observation = 0.5
+decision = 0.8
+
+[retrieval.scoring.situation.file_edit]
+fact = 0.7
+observation = 0.7
+decision = 1.0
+
+[retrieval.scoring.situation.debugging]
+fact = 0.6
+observation = 1.0
+decision = 0.7
+
+[retrieval.scoring.situation.design_choice]
+fact = 0.8
+observation = 0.7
+decision = 1.0
 
 [search]
 semantic_weight = 3.0          # weight on semantic similarity vs keyword
@@ -117,11 +143,36 @@ strategy = "t5"                # "t5" (default) | "keyword" | "none"
 
 [security]
 allow_cross_project_writes = true   # allow MCP tools to write to a different registered project
+
+[epistemic]
+observation_review_days = 90        # observations unverified for longer than this get a
+                                    # "re-verify or delete" doctor suggestion
+observation_half_life_days = 90     # default decay half-life applied when an
+                                    # observation-class memory gets no explicit decay
+observation_decay_floor = 0.2       # floor for that default observation decay
+demote_on_session_end = false       # SessionEnd hook demotes the session's task-scoped memories
+promotion_min_sessions = 3          # distinct later sessions retrieving a task-bound decision
+                                    # before promotion is suggested
+auto_promote = false                # maintenance auto-promotes instead of suggesting
+consolidation_min_sources = 3       # min mutually-consistent observations to merge into a fact
+consolidation_similarity = 0.85     # pairwise embedding similarity for consolidation clusters
+auto_consolidate = false            # maintenance auto-consolidates instead of suggesting
+invalidated_retention_days = 180    # days before gc may purge invalidated memories; 0 = keep forever
+
+[hooks]
+prompt_context_budget = 1000        # char budget for UserPromptSubmit / PreToolUse hook injection
+# class_order = ["decision", "fact", "observation"]
+                                    # optional uniform epistemic-class ordering for hook
+                                    # injection; unset = per-situation defaults
 ```
 
 ## Notes on selected sections
 
-- **`[retrieval.scoring]`** — composite formula: `score = base * scope_multiplier * trust_multiplier - challenge_penalty`, clamped to `[0, 1]`. `base` comes from whichever weight set applies (`with_query` / `with_keyword` / `scope_only` / `degraded`). The scope multiplier is the depth-decayed `path` match plus a logical bonus (≤ 0.3) when a `path` is supplied; with only `logical` context it is `scope_multiplier_floor + bonus` for related memories (bare floor for unscoped memories, 0 for unrelated ones); 1.0 (neutral) when no scope context is given.
+- **`[retrieval.scoring]`** — composite formula: `score = base * scope_multiplier * trust_multiplier * situation_multiplier - challenge_penalty`, clamped to `[0, 1]`. `base` comes from whichever weight set applies (`with_query` / `with_keyword` / `scope_only` / `degraded`). The scope multiplier is the depth-decayed `path` match plus a logical bonus (≤ 0.3) when a `path` is supplied; with only `logical` context it is `scope_multiplier_floor + bonus` for related memories (bare floor for unscoped memories, 0 for unrelated ones); 1.0 (neutral) when no scope context is given. The situation multiplier is 1.0 (neutral) when the query carries no situation.
+- **`challenge_penalty`** — per-epistemic-class by default: a contradicted observation is cheap to re-measure (0.20, suppressed hardest), a contradicted fact is probably stale (0.15), a contested decision must remain visible together with its dispute (0.05, mildest). The legacy scalar form (`challenge_penalty = 0.10`) still parses and applies flat to every class. All values must be in `[0, 1]`.
+- **`[retrieval.scoring.situation]`** — situation-conditioned class weighting, applied as a post-multiplier when a query (or hook) declares a situation (`session_start`, `file_edit`, `debugging`, `design_choice`): `multiplier = floor + (1 - floor) * profile[situation][class]`. Each profile value is in `[0, 1]`; with the default `floor = 0.6` a class can be down-weighted at most 40%. Set `floor = 1.0` to disable situation weighting entirely. Defaults per situation: session start favors facts, file edits favor decisions, debugging favors observations, design choices favor decisions.
+- **`[epistemic]`** — lifecycle knobs for epistemic classes. `observation_review_days` drives a `doctor` suggestion to re-verify (or delete) old unverified observations. `observation_half_life_days` / `observation_decay_floor` set the default decay for observation-class memories that don't specify one. `promotion_min_sessions` + `auto_promote` control when a task-scoped decision retrieved across distinct later sessions is promoted to project-wide (suggest by default, apply when `auto_promote = true`). `consolidation_min_sources` + `consolidation_similarity` + `auto_consolidate` control merging clusters of near-duplicate observations into a derived fact. `invalidated_retention_days` (default **180**, `0` = keep forever) is how long invalidated memories stay on disk before `gc` may purge them; until then they are also exempt from low-score GC. `demote_on_session_end = true` makes the SessionEnd hook demote the session's declared task's memories (same effect as `engramdb task complete`).
+- **`[hooks]`** — rendering knobs for the Claude Code hooks. `prompt_context_budget` (default **1000** chars) caps the UserPromptSubmit and PreToolUse injections (SessionStart has its own fixed 2000-char budget). `class_order` optionally replaces the per-situation epistemic-class ordering of injected memories (SessionStart: fact → decision → observation; file edits: decision → fact → observation) with one uniform list.
 - **`[embeddings]`** — changing `provider` or `dimensions` requires `engramdb reindex --embeddings-only`. See [embeddings.md](./embeddings.md) for fingerprinting and the model-change policy.
 - **`[trust_weights]`** — `Provenance` source maps to a trust weight (`human` highest, `inferred` lowest). The multiplier is `floor + (1 - floor) * weight`, so even fully `inferred` memories keep ≥50% of their raw score.
 - **`[nli]`** — off by default. Downloads ~50 MB and adds latency to `create`. When enabled, every `create` checks the top-`max_comparisons` similar memories and auto-challenges contradictions above `contradiction_threshold`.

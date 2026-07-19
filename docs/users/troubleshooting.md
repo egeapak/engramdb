@@ -70,6 +70,9 @@ Three common causes:
 **Search results look stale or wrong.**
 Run `engramdb reindex`. Then run `engramdb doctor` to see if there's a manifest/embedding fingerprint mismatch.
 
+**A memory disappeared from `list` / `query` but the file is still on disk.**
+It was probably invalidated — its validity window was closed by a superseding memory, an explicit invalidation (`engramdb update <id> --invalidate`, the "Invalidate" choice in `engramdb review`, or the MCP `resolve` tool), or compression (which invalidates its sources instead of deleting them). Invalidated memories are excluded by default; confirm with `engramdb list --include-invalidated` (also available on `query`). If it was closed by mistake, reopen it with `engramdb update <id> --clear-invalidated`. GC purges invalidated memories only after `[epistemic].invalidated_retention_days` (default 180; `0` = keep forever).
+
 ## Embeddings
 
 **"Embedding model unavailable" on every command.**
@@ -123,6 +126,10 @@ The plugin and `engramdb setup` both wrote hooks. Remove the manual entries from
 - Check working directory: hooks pass `--dir .`, so Claude Code's CWD matters.
 - For `pre-tool-use`, only `Read`/`Write`/`Edit` events fire, and only when `tool_input.file_path` is present.
 - For `session-start`, only memories with `criticality >= 0.6` (default) appear. Lower the threshold with `--min-criticality`.
+- Task-scoped memories (`--generality task`) are hidden from hook injection until the session declares the matching task (`engramdb task current <NAME>` or the MCP `task_current` tool).
+
+**Hooks keep warning "this edit may invalidate memory ...".**
+The edited file matches a memory's watch paths (`--invalidated-by`). Act on it once: `engramdb verify <id>` if the memory still holds, `engramdb update <id>` if it needs amending, or `engramdb update <id> --invalidate` if it no longer applies — an invalidated memory stops warning.
 
 ## Projects and worktrees
 

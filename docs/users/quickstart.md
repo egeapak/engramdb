@@ -35,6 +35,8 @@ Other fields you'll commonly set:
 - `--physical <glob>` — file paths or globs this memory applies to. Repeatable. Default is `/` (whole project).
 - `--logical <dot.path>` — logical scope (e.g. `auth.oauth`, `database.migrations`). Repeatable.
 - `--visibility shared|personal` — `personal` keeps it under the global data dir, not in the project tree (useful when you don't want to commit a memory).
+- `--premise "<condition>"` — what the memory depends on (e.g. `--premise "while we pin ort rc.12"`); injected context shows it as "— because ...".
+- `--invalidated-by <glob>` — paths whose change should trigger a re-check; when a Claude Code hook sees an edit under a watched path, it warns that the memory may be stale.
 
 ## 3. Query
 
@@ -75,8 +77,12 @@ engramdb get <id> --raw                    # raw markdown file
 ```bash
 engramdb update <id> --criticality 0.9 --tags-add migrations
 engramdb challenge <id> --evidence "ADR-007 reverses this; we moved back to SQLite"
+engramdb verify <id>          # confirm it's still accurate (refreshes fact decay)
+engramdb update <id> --invalidate   # it WAS true but no longer is; history stays queryable
 engramdb delete <id>          # asks for confirmation; use --force to skip
 ```
+
+For something that used to be true, prefer `--invalidate` over `delete`: the memory drops out of queries but remains inspectable with `--include-invalidated`.
 
 ## 6. Hook it into Claude Code
 

@@ -1181,7 +1181,8 @@ pub struct HooksConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class_order: Option<Vec<String>>,
 
-    /// Character budget for the UserPromptSubmit hook's context injection.
+    /// Character budget for the UserPromptSubmit and PreToolUse hooks'
+    /// context injection (SessionStart uses its own fixed 2000-char cap).
     #[serde(default = "HooksConfig::default_prompt_context_budget")]
     pub prompt_context_budget: usize,
 }
