@@ -79,7 +79,7 @@ Each entry includes `epistemic` (always) and `invalidated_at` / `valid_from` whe
 |-------|------|-------------|
 | `type` | `string` | One of: `decision`, `convention`, `hazard`, `context`, `intent`, `relationship`, `debug`, `preference`. Required. |
 | `content` | `string` | Main body (~500 tokens). Required. |
-| `summary` | `string` | One-line summary, ≤ 100 chars. Required. |
+| `summary` | `string` | One-line summary, ≤ 200 chars by default (configurable via `[content].summary_max_chars`). Required. |
 | `details?` | `string` | Extended details (lazy-loaded). |
 | `physical?` | `array[string]` | File paths or globs. Default `["/"]`. |
 | `logical?` | `array[string]` | Dot-notation domains. |

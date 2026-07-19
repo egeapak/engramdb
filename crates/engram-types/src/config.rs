@@ -1077,6 +1077,40 @@ pub struct EngramConfig {
     /// Claude Code hook rendering settings
     #[serde(default)]
     pub hooks: HooksConfig,
+
+    /// Memory content constraints (summary length, …)
+    #[serde(default)]
+    pub content: ContentConfig,
+}
+
+/// Default upper bound on a memory summary's length, in characters.
+///
+/// Historically hard-coded at 100, which agents routinely exceeded; raised
+/// to 200 and made configurable via `[content].summary_max_chars`.
+pub const DEFAULT_SUMMARY_MAX_CHARS: usize = 200;
+
+/// Memory-content constraints (`[content]` section).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContentConfig {
+    /// Maximum length (in characters) allowed for a memory's one-line
+    /// summary. Enforced on every create/update/resolve path. Defaults to
+    /// [`DEFAULT_SUMMARY_MAX_CHARS`].
+    #[serde(default = "ContentConfig::default_summary_max_chars")]
+    pub summary_max_chars: usize,
+}
+
+impl ContentConfig {
+    fn default_summary_max_chars() -> usize {
+        DEFAULT_SUMMARY_MAX_CHARS
+    }
+}
+
+impl Default for ContentConfig {
+    fn default() -> Self {
+        Self {
+            summary_max_chars: Self::default_summary_max_chars(),
+        }
+    }
 }
 
 /// Epistemic-class lifecycle settings (`[epistemic]` section).
@@ -1777,6 +1811,22 @@ mod tests {
         assert_eq!(parsed.hooks, HooksConfig::default());
         assert_eq!(parsed.hooks.prompt_context_budget, 1000);
         assert!(parsed.hooks.class_order.is_none());
+        assert_eq!(parsed.content, ContentConfig::default());
+    }
+
+    #[test]
+    fn test_content_config_defaults_and_override() {
+        // Default (no section present) ⇒ 200 chars.
+        let cfg = ContentConfig::default();
+        assert_eq!(cfg.summary_max_chars, DEFAULT_SUMMARY_MAX_CHARS);
+        assert_eq!(cfg.summary_max_chars, 200);
+
+        let parsed: EngramConfig = toml::from_str("").unwrap();
+        assert_eq!(parsed.content.summary_max_chars, 200);
+
+        // Explicit override is honored.
+        let parsed: EngramConfig = toml::from_str("[content]\nsummary_max_chars = 320\n").unwrap();
+        assert_eq!(parsed.content.summary_max_chars, 320);
     }
 
     /// Every `EmbeddingBackend` variant round-trips through `Display`/`FromStr`

@@ -26,7 +26,7 @@ Orthogonal to `type` is the **epistemic class** — what *kind of claim* the mem
 id          = "01933d12-..."          # UUID v7 (time-sortable). Auto-assigned.
 type        = "decision"               # see table above
 title       = "use PostgreSQL"         # short, used in filename; optional
-summary     = "Chose PostgreSQL over SQLite for concurrent writes"  # ≤100 chars
+summary     = "Chose PostgreSQL over SQLite for concurrent writes"  # ≤200 chars (configurable)
 content     = "We picked PostgreSQL because ..."   # ~500 tokens
 details     = "Long-form details here, lazy-loaded"  # optional
 physical    = ["src/db/**"]            # file paths or globs. Default ["/"] (whole project)
@@ -234,7 +234,7 @@ Windows close three ways — always an explicit act, never automatic: `create`/`
 
 These rules are enforced at write time:
 
-- `summary` must be ≤ 100 characters.
+- `summary` must be ≤ 200 characters by default (configurable via `[content].summary_max_chars`).
 - `criticality` must be in [0.0, 1.0].
 - `confidence` must be in [0.0, 1.0].
 - `decay.floor` must be in [0.0, 1.0].

@@ -45,7 +45,7 @@ Positional argument: content. Alternatively `-c, --content <text>`, or `-i, --in
 | Flag | Description |
 |------|-------------|
 | `-t, --type <T>` | `decision`, `convention`, `hazard`, `context`, `intent`, `relationship`, `debug`, `preference`. Required. |
-| `-s, --summary <text>` | One-line summary (≤100 chars). Required — if omitted, you're prompted for it interactively in a terminal; non-interactive runs fail without it. |
+| `-s, --summary <text>` | One-line summary (≤200 chars by default, configurable via `[content].summary_max_chars`). Required — if omitted, you're prompted for it interactively in a terminal; non-interactive runs fail without it. |
 | `-T, --title <text>` | Short title used in the on-disk filename. |
 | `-c, --content <text>` | Content body. Alternative to positional. |
 | `-p, --physical <glob>` | File path or glob. Repeatable. Default `/`. |
