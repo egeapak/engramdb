@@ -392,7 +392,7 @@ fn test_v2_writer_format_structure() {
     // Scope fields
     assert!(output.contains("- **Files:** `src/db/**`, `src/lib.rs`"));
     assert!(output.contains("- **Logical:** `infrastructure.database`"));
-    assert!(output.contains("- **Tags:** database, transactions"));
+    assert!(output.contains("- **Tags:** `database`, `transactions`"));
     assert!(output.contains("- **Criticality:** 0.95"));
     assert!(output.contains("- **Confidence:** 1"));
     assert!(output.contains("- **Visibility:** personal"));
@@ -806,7 +806,7 @@ fn test_v2_output_format_readable() {
     assert!(written.contains("## Details"));
     assert!(written.contains("## Scope"));
     assert!(written.contains("- **Files:** `src/db/**`"));
-    assert!(written.contains("- **Tags:** database, transactions, deadlock"));
+    assert!(written.contains("- **Tags:** `database`, `transactions`, `deadlock`"));
     assert!(written.contains("## Provenance"));
     assert!(written.contains("- **Source:** human"));
     assert!(written.contains("- **Reason:** Post-incident review of INC-2026-003"));
@@ -1528,4 +1528,102 @@ accessed_at: "2026-01-15T10:00:00Z"
 "#;
     let memory = parse_memory_file(file).unwrap();
     assert_eq!(memory.visibility, Visibility::Shared);
+}
+
+// ===========================================================================
+// Single-line-field injection & list-item corruption (roundtrip hardening)
+// ===========================================================================
+
+/// A physical glob with brace alternation (`{ts,tsx}`) and a tag containing a
+/// comma must survive the roundtrip. The parser used to split the field value
+/// on every comma, corrupting `src/**/*.{ts,tsx}` into two broken globs — and
+/// the first `update` persisted the corruption permanently.
+#[test]
+fn list_items_with_commas_roundtrip() {
+    let mut memory = sample_memory();
+    memory.physical = vec!["src/**/*.{ts,tsx}".to_string(), "docs/**".to_string()];
+    memory.logical = vec!["auth.oauth".to_string()];
+    memory.tags = vec!["a,b".to_string(), "plain".to_string()];
+
+    let text = write_memory_file(&memory).unwrap();
+    let parsed = parse_memory_file(&text).unwrap();
+
+    assert_eq!(parsed.physical, memory.physical);
+    assert_eq!(parsed.logical, memory.logical);
+    assert_eq!(parsed.tags, memory.tags);
+}
+
+/// Legacy files write tags without backticks — plain comma-split still works.
+#[test]
+fn legacy_unbackticked_tags_still_parse() {
+    let text = "- **Tags:** alpha, beta\n";
+    assert_eq!(parse_list_field(text, "Tags"), vec!["alpha", "beta"]);
+}
+
+/// A multi-line summary must not be able to inject a fake `## Content`
+/// heading that shadows the real content on re-parse (first-occurrence-wins).
+/// The writer collapses single-line fields, so the real content survives and
+/// the summary comes back newline-free.
+#[test]
+fn multiline_summary_cannot_shadow_content() {
+    let mut memory = sample_memory();
+    memory.title = Some("real title".to_string());
+    memory.summary = "line1\n## Content\nINJECTED".to_string();
+    memory.content = "REAL CONTENT".to_string();
+
+    let text = write_memory_file(&memory).unwrap();
+    let parsed = parse_memory_file(&text).unwrap();
+
+    assert_eq!(parsed.content, "REAL CONTENT");
+    assert_eq!(parsed.summary, "line1 ## Content INJECTED");
+}
+
+/// Same class via the H1 path: with no title, the summary becomes the H1
+/// heading and must collapse to one line instead of leaking body lines.
+#[test]
+fn multiline_summary_as_heading_collapses() {
+    let mut memory = sample_memory();
+    memory.summary = "first\n<!-- engramdb\nvisibility: personal\n-->".to_string();
+
+    let text = write_memory_file(&memory).unwrap();
+    let parsed = parse_memory_file(&text).unwrap();
+
+    assert_eq!(parsed.content, memory.content);
+    assert_eq!(
+        parsed.visibility,
+        Visibility::Shared,
+        "hidden-meta injection"
+    );
+}
+
+/// A provenance Reason containing a `**Created:** <old date>` marker must not
+/// hijack the memory's timestamps on re-parse: field parsing is anchored to
+/// line starts, and multi-line values are collapsed by the writer.
+#[test]
+fn provenance_reason_cannot_hijack_created_at() {
+    let mut memory = sample_memory();
+    memory.provenance = Provenance {
+        source: ProvenanceSource::Agent,
+        agent_id: None,
+        model: None,
+        session_id: None,
+        reason: Some("**Created:** 1999-01-01T00:00:00+00:00".to_string()),
+    };
+
+    let text = write_memory_file(&memory).unwrap();
+    let parsed = parse_memory_file(&text).unwrap();
+
+    assert_eq!(parsed.created_at, memory.created_at);
+    assert_eq!(
+        parsed.provenance.reason.as_deref(),
+        Some("**Created:** 1999-01-01T00:00:00+00:00"),
+        "the reason text itself must survive"
+    );
+
+    // Multi-line variant: the injected line is collapsed into the Reason
+    // value instead of becoming its own `- **Created:**` line.
+    memory.provenance.reason = Some("why\n- **Created:** 1999-01-01T00:00:00+00:00".to_string());
+    let text = write_memory_file(&memory).unwrap();
+    let parsed = parse_memory_file(&text).unwrap();
+    assert_eq!(parsed.created_at, memory.created_at);
 }

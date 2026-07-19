@@ -44,6 +44,31 @@ pub async fn run_migrate(
         }
     };
 
+    // Serialize against live MemoryStore mutations for the whole rewrite
+    // pass: without the per-project advisory lock, migrate's read → rewrite
+    // races a concurrent `update` (which runs under the lock) and writes the
+    // OLD parsed content back over it — silently losing the update. Dry runs
+    // read only and skip the lock. The lock id mirrors the personal-dir
+    // resolution above; with no manifest there is no shared lock to take
+    // (and no personal dir either), matching the store's own behavior.
+    let lock_project_id = if global {
+        Some(paths::GLOBAL_PROJECT_ID.to_string())
+    } else {
+        let manifest_path = engramdb_dir.join("manifest.toml");
+        if manifest_path.exists() {
+            engramdb::storage::manifest::load_manifest(&manifest_path)
+                .await
+                .ok()
+                .map(|m| m.project)
+        } else {
+            None
+        }
+    };
+    let _write_lock = match (&lock_project_id, dry_run) {
+        (Some(id), false) => Some(engramdb::storage::write_lock::acquire_write_lock(id).await?),
+        _ => None,
+    };
+
     let mut migrated = 0u32;
     let mut already_current = 0u32;
     let mut errors = Vec::new();
@@ -167,7 +192,12 @@ async fn migrate_dir(
         match parser.parse(&raw) {
             Ok(memory) => match writer.write(&memory) {
                 Ok(new_content) => {
-                    if let Err(e) = std::fs::write(&path, &new_content) {
+                    // Atomic temp-then-rename, same contract as the store's
+                    // own writers — a crash mid-write must never leave a
+                    // truncated memory file.
+                    if let Err(e) =
+                        engramdb::storage::store::atomic_write(&path, &new_content).await
+                    {
                         errors.push(format!("{}: write error: {e}", path.display()));
                     } else {
                         *migrated += 1;

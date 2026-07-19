@@ -412,23 +412,15 @@ impl LanceIndex {
 
     /// Return the number of entries in the memories table.
     ///
-    /// Selects only the `id` column and counts rows without deserialization.
+    /// Uses `count_rows` (O(table metadata)) rather than streaming a column —
+    /// this backs `check_staleness`, which runs on every CLI `list`/`query`/
+    /// `get`, so a full column scan here scaled every command with store size.
     pub async fn count(&self) -> Result<usize> {
         let table = self.open_table().await?;
-
-        let mut stream = table
-            .query()
-            .select(lancedb::query::Select::Columns(vec!["id".into()]))
-            .execute()
+        table
+            .count_rows(None)
             .await
-            .context("Failed to query LanceDB table for count")?;
-
-        let mut count = 0usize;
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.context("Failed to read batch")?;
-            count += batch.num_rows();
-        }
-        Ok(count)
+            .context("Failed to count LanceDB table rows")
     }
 
     /// Count rows and collect the distinct logical scopes in one
@@ -838,15 +830,23 @@ impl LanceIndex {
             return Ok(());
         }
         let table = self.open_chunks_table().await?;
-        let list = memory_ids
-            .iter()
-            .map(|id| format!("'{}'", id.replace('\'', "''")))
-            .collect::<Vec<_>>()
-            .join(", ");
-        table
-            .delete(&format!("memory_id IN ({list})"))
-            .await
-            .context("Failed to delete chunk batch")?;
+        // Bound the predicate size: a GC sweep can pass thousands of 36-char
+        // UUIDs, and an unbounded `IN (...)` builds a hundreds-of-KB SQL
+        // string DataFusion must parse in one go. Chunked deletes keep each
+        // statement small; each chunk commits separately, which is fine —
+        // callers treat chunk deletion as idempotent cleanup.
+        const DELETE_CHUNK_SIZE: usize = 500;
+        for batch in memory_ids.chunks(DELETE_CHUNK_SIZE) {
+            let list = batch
+                .iter()
+                .map(|id| format!("'{}'", id.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            table
+                .delete(&format!("memory_id IN ({list})"))
+                .await
+                .context("Failed to delete chunk batch")?;
+        }
         Ok(())
     }
 
@@ -873,6 +873,21 @@ impl LanceIndex {
             }
         }
         Ok(false)
+    }
+
+    /// Whether the chunks table holds ANY vectors at all (O(table metadata)
+    /// via `count_rows`).
+    ///
+    /// Distinguishes a store that has never embedded (a fresh project — no
+    /// fingerprint AND no vectors is normal, not "legacy") from a genuinely
+    /// legacy store whose existing vectors are of unknown model vintage.
+    pub async fn has_any_chunks(&self) -> Result<bool> {
+        let table = self.open_chunks_table().await?;
+        let rows = table
+            .count_rows(None)
+            .await
+            .context("Failed to count chunk rows")?;
+        Ok(rows > 0)
     }
 
     /// Set the memories-table `has_embedding` flag for one memory. A no-op when
@@ -1037,6 +1052,37 @@ impl LanceIndex {
         Ok(())
     }
 
+    /// The vector width of the on-disk chunks table, or `None` when the
+    /// table doesn't exist (or has no vector column).
+    ///
+    /// `ensure_chunks_table_exists` opens an existing table AS-IS, so after
+    /// a `[embeddings].dimensions` change the stored width can differ from
+    /// the configured `self.dimensions` — every upsert then fails against
+    /// the old schema. Callers about to re-embed everything use this to
+    /// decide whether the table must be recreated first (`clear_chunks`).
+    pub async fn chunks_table_dimensions(&self) -> Result<Option<usize>> {
+        let connection = Arc::clone(&self.connection);
+        let table = match connection
+            .open_table(&self.chunks_table_name)
+            .execute()
+            .await
+        {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+        let schema = table
+            .schema()
+            .await
+            .context("Failed to read LanceDB chunks table schema")?;
+        Ok(schema
+            .field_with_name("vector")
+            .ok()
+            .and_then(|field| match field.data_type() {
+                DataType::FixedSizeList(_, width) => Some(*width as usize),
+                _ => None,
+            }))
+    }
+
     /// Drop and recreate only the chunks (vectors) table.
     ///
     /// Recreates the table with the currently configured dimensions, so this
@@ -1052,6 +1098,21 @@ impl LanceIndex {
             .execute()
             .await
             .context("Failed to recreate LanceDB chunks table")?;
+
+        // Every vector is gone — reset the memories-table `has_embedding`
+        // mirror to match. Callers re-embed and re-set it per success;
+        // without this, a memory whose re-embed then FAILS (or a crash
+        // mid-loop) stays flagged `true` with zero chunks and is scored as
+        // "checked, found nothing" (sem = 0.0) instead of "no evidence"
+        // (sem = None) until a full reindex rebuilds the flags.
+        let table = self.open_table().await?;
+        table
+            .update()
+            .only_if("has_embedding = true")
+            .column("has_embedding", "false")
+            .execute()
+            .await
+            .context("Failed to reset has_embedding after chunk clear")?;
 
         Ok(())
     }
@@ -1568,10 +1629,29 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
                     .with_timezone(&Utc),
             )
         };
+        // Degrade a bad row, don't brick the store: memory files are
+        // untrusted input, and a hand-edited `floor = nan` survives the
+        // write side (serde_json emits non-finite floats as `null` without
+        // error) but fails deserialization here. Erroring would fail the
+        // whole batch — and this function feeds `list_for_filtering`, the
+        // entry point of EVERY retrieval — so one corrupt memory file would
+        // take down every query on the store with an error naming no
+        // memory. Score the row as undecayed instead and say which one.
         let decay: Option<Decay> = if decays.is_null(i) {
             None
         } else {
-            Some(serde_json::from_str(decays.value(i)).context("Failed to parse decay JSON")?)
+            match serde_json::from_str(decays.value(i)) {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    tracing::warn!(
+                        "ignoring unparseable decay JSON for memory {} (scoring it undecayed; \
+                         fix the memory file and reindex): {}",
+                        ids.value(i),
+                        e
+                    );
+                    None
+                }
+            }
         };
         let created_at: DateTime<Utc> = chrono::DateTime::parse_from_rfc3339(created_ats.value(i))
             .context("Failed to parse created_at")?

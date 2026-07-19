@@ -15,8 +15,6 @@ use async_trait::async_trait;
 #[cfg(feature = "onnxruntime")]
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 #[cfg(feature = "onnxruntime")]
-use std::path::PathBuf;
-#[cfg(feature = "onnxruntime")]
 use std::sync::{Arc, Mutex};
 
 /// A cross-encoder score for one input document.
@@ -56,12 +54,14 @@ impl LocalReranker {
     /// Load the cross-encoder named by `model_name` and return it as a shared
     /// trait object. Mirrors the embedding loader's cache-dir + execution-
     /// provider wiring: models cache under [`engram_storage::paths::model_cache_dir`]
-    /// and run on the ambient [`engram_onnx::execution_providers`]. Fails only
-    /// if `TextRerank::try_new` fails (e.g. model download/load error); the
-    /// cache-dir lookup falls back to a relative path rather than erroring.
+    /// and run on the ambient [`engram_onnx::execution_providers`]. A failed
+    /// cache-dir lookup is an error, exactly like the embedding/NLI/T5
+    /// loaders — falling back to a cwd-relative path would re-download the
+    /// ~1 GB model into whatever project the process runs in, violating the
+    /// unified-model-cache invariant.
     pub fn load(model_name: &str) -> Result<Arc<dyn Reranker>> {
-        let cache_dir = engram_storage::paths::model_cache_dir()
-            .unwrap_or_else(|_| PathBuf::from(".cache/engramdb/models"));
+        let cache_dir =
+            engram_storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let model = resolve_reranker_model(model_name);
         let mut options = RerankInitOptions::new(model)
@@ -106,13 +106,27 @@ impl Reranker for LocalReranker {
 }
 
 /// Map a reranker model name string to a fastembed `RerankerModel` enum variant.
+///
+/// The recognized default name is `bge-reranker-base`; anything else
+/// unrecognized falls back to it WITH a warning — a silent fallback let a
+/// typo (`bge-reranker-v2m3`) rerank with a different model than the user
+/// believes they configured.
 #[cfg(feature = "onnxruntime")]
 fn resolve_reranker_model(name: &str) -> RerankerModel {
     match name {
         "bge-reranker-v2-m3" => RerankerModel::BGERerankerV2M3,
         "jina-reranker-v1-turbo-en" => RerankerModel::JINARerankerV1TurboEn,
         "jina-reranker-v2-base-multilingual" => RerankerModel::JINARerankerV2BaseMultiligual,
-        _ => RerankerModel::BGERerankerBase, // default
+        "bge-reranker-base" => RerankerModel::BGERerankerBase,
+        other => {
+            tracing::warn!(
+                "unknown rerank.model '{}'; falling back to bge-reranker-base \
+                 (known: bge-reranker-base, bge-reranker-v2-m3, jina-reranker-v1-turbo-en, \
+                 jina-reranker-v2-base-multilingual)",
+                other
+            );
+            RerankerModel::BGERerankerBase
+        }
     }
 }
 
@@ -181,8 +195,19 @@ mod tract_reranker {
                 .get(BGE_TOKENIZER_FILE)
                 .context("fetch BGE tokenizer")?;
 
-            let tokenizer = Tokenizer::from_file(&tokenizer_path)
+            let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
                 .map_err(|e| anyhow::anyhow!("load tokenizer: {e}"))?;
+            // Don't trust the repo tokenizer.json's baked-in truncation or
+            // padding (the sibling MiniLM export ships a 128-token cap —
+            // see `embeddings::tract`). Truncate pairs at this model's real
+            // window; `score_blocking` pads to the fixed shape itself.
+            tokenizer
+                .with_truncation(Some(tokenizers::TruncationParams {
+                    max_length: MAX_TOKENS,
+                    ..Default::default()
+                }))
+                .map_err(|e| anyhow::anyhow!("set tokenizer truncation: {e}"))?;
+            tokenizer.with_padding(None);
 
             let mut infer = tract_onnx::onnx()
                 .model_for_path(&model_path)

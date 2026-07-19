@@ -79,18 +79,39 @@ pub async fn compress_candidates(
     })
 }
 
+/// Parameters for applying compression (mirrors `CreateParams`/`UpdateParams`).
+pub struct CompressApplyParams {
+    pub source_ids: Vec<String>,
+    pub summary: String,
+    pub content: String,
+    pub scope: Option<Vec<String>>,
+    pub tags: Option<Vec<String>>,
+    /// Forwarded to `create_memory` for the replacement summary — see there.
+    pub embed_async: bool,
+}
+
 /// Create a summary memory that supersedes the given source memories.
 ///
 /// The new memory is created as type Context with provenance agent("compress").
 /// The caller (typically an LLM agent) provides the summary and content.
+///
+/// `engine` embeds the replacement memory: compression deletes sources that
+/// had vectors, so leaving the consolidated summary UN-embedded would make
+/// exactly the compressed knowledge invisible to semantic search until a
+/// manual reindex. Pass the same engine the front-end uses for `create`.
 pub async fn compress_apply(
     store: &MemoryStore,
-    source_ids: Vec<String>,
-    summary: String,
-    content: String,
-    scope: Option<Vec<String>>,
-    tags: Option<Vec<String>>,
+    params: CompressApplyParams,
+    engine: Option<&crate::retrieval::engine::RetrievalEngine>,
 ) -> Result<CompressApplyResult> {
+    let CompressApplyParams {
+        source_ids,
+        summary,
+        content,
+        scope,
+        tags,
+        embed_async,
+    } = params;
     if source_ids.is_empty() {
         bail!("source_ids must not be empty");
     }
@@ -132,9 +153,9 @@ pub async fn compress_apply(
             decay_ttl: None,
             decay_floor: None,
             title_strategy: TitleStrategy::None,
-            embed_async: false,
+            embed_async,
         },
-        None,
+        engine,
     )
     .await?;
 
@@ -319,10 +340,14 @@ mod tests {
 
         let result = compress_apply(
             &store,
-            vec![id1.clone(), id2.clone()],
-            "Combined debug summary".to_string(),
-            "Merged content from debug 1 and 2".to_string(),
-            None,
+            CompressApplyParams {
+                source_ids: vec![id1.clone(), id2.clone()],
+                summary: "Combined debug summary".to_string(),
+                content: "Merged content from debug 1 and 2".to_string(),
+                scope: None,
+                tags: None,
+                embed_async: false,
+            },
             None,
         )
         .await
@@ -373,10 +398,14 @@ mod tests {
 
         let result = compress_apply(
             &store,
-            vec![real_id.clone(), ghost_id.clone()],
-            "Summary".to_string(),
-            "Content".to_string(),
-            None,
+            CompressApplyParams {
+                source_ids: vec![real_id.clone(), ghost_id.clone()],
+                summary: "Summary".to_string(),
+                content: "Content".to_string(),
+                scope: None,
+                tags: None,
+                embed_async: false,
+            },
             None,
         )
         .await
@@ -433,10 +462,14 @@ mod tests {
         // broken first, ok second: proves the loop continues past the failure.
         let err = compress_apply(
             &store,
-            vec![broken_id.clone(), ok_id.clone()],
-            "Summary".to_string(),
-            "Content".to_string(),
-            None,
+            CompressApplyParams {
+                source_ids: vec![broken_id.clone(), ok_id.clone()],
+                summary: "Summary".to_string(),
+                content: "Content".to_string(),
+                scope: None,
+                tags: None,
+                embed_async: false,
+            },
             None,
         )
         .await
@@ -478,10 +511,14 @@ mod tests {
 
         let result = compress_apply(
             &store,
-            vec!["nonexistent-id".to_string()],
-            "Summary".to_string(),
-            "Content".to_string(),
-            None,
+            CompressApplyParams {
+                source_ids: vec!["nonexistent-id".to_string()],
+                summary: "Summary".to_string(),
+                content: "Content".to_string(),
+                scope: None,
+                tags: None,
+                embed_async: false,
+            },
             None,
         )
         .await;
@@ -566,10 +603,14 @@ mod tests {
 
         let result = compress_apply(
             &store,
-            vec![],
-            "Summary".to_string(),
-            "Content".to_string(),
-            None,
+            CompressApplyParams {
+                source_ids: vec![],
+                summary: "Summary".to_string(),
+                content: "Content".to_string(),
+                scope: None,
+                tags: None,
+                embed_async: false,
+            },
             None,
         )
         .await;
@@ -589,10 +630,14 @@ mod tests {
 
         let result = compress_apply(
             &store,
-            vec![id],
-            "Compressed summary".to_string(),
-            "Compressed content".to_string(),
-            None,
+            CompressApplyParams {
+                source_ids: vec![id],
+                summary: "Compressed summary".to_string(),
+                content: "Compressed content".to_string(),
+                scope: None,
+                tags: None,
+                embed_async: false,
+            },
             None,
         )
         .await
@@ -612,11 +657,15 @@ mod tests {
 
         let result = compress_apply(
             &store,
-            vec![id],
-            "Scoped summary".to_string(),
-            "Scoped content".to_string(),
-            Some(vec!["app.auth".to_string(), "app.core".to_string()]),
-            Some(vec!["compressed".to_string(), "auth".to_string()]),
+            CompressApplyParams {
+                source_ids: vec![id],
+                summary: "Scoped summary".to_string(),
+                content: "Scoped content".to_string(),
+                scope: Some(vec!["app.auth".to_string(), "app.core".to_string()]),
+                tags: Some(vec!["compressed".to_string(), "auth".to_string()]),
+                embed_async: false,
+            },
+            None,
         )
         .await
         .unwrap();
@@ -641,10 +690,14 @@ mod tests {
 
         let result = compress_apply(
             &store,
-            vec![valid_id, "nonexistent-id".to_string()],
-            "Summary".to_string(),
-            "Content".to_string(),
-            None,
+            CompressApplyParams {
+                source_ids: vec![valid_id, "nonexistent-id".to_string()],
+                summary: "Summary".to_string(),
+                content: "Content".to_string(),
+                scope: None,
+                tags: None,
+                embed_async: false,
+            },
             None,
         )
         .await;

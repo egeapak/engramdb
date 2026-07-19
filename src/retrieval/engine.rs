@@ -539,6 +539,14 @@ impl RetrievalEngine {
                     (1.0 - weight) * candidates[idx].score + weight * norm_rerank
                 };
 
+                // The blend happens AFTER composite_score's non-finite guard,
+                // so a NaN cross-encoder logit (in-process model or daemon
+                // socket) would otherwise write NaN into the final score and
+                // scramble the ordering. Keep the original score instead.
+                if !blended.is_finite() {
+                    continue;
+                }
+
                 // NOTE: Only final_score and rerank are updated here.
                 // Other ScoreBreakdown fields (semantic, relevance, trust, etc.)
                 // retain their pre-rerank values for diagnostic transparency.
@@ -644,6 +652,11 @@ impl RetrievalEngine {
             query.min_criticality,
             (!include_expired).then(Utc::now),
         );
+        // Remember whether the predicate fired: when it did, the scan itself
+        // already narrowed the row set, so `total_entry_count` below counts
+        // post-predicate rows — NOT the whole store — and can no longer be
+        // used on its own to detect "the filters narrowed the candidates".
+        let pushdown_applied = pushdown_predicate.is_some();
         let all_entries = self
             .store
             .list_for_filtering_where(pushdown_predicate)
@@ -657,9 +670,16 @@ impl RetrievalEngine {
         // every front-end (CLI, MCP, hooks) identically. Relative paths and
         // absolute paths NOT under the project root pass through unchanged —
         // an outside path legitimately matches no repo-relative scope.
+        // `Some("")` is normalized to no-path here: Step 0's signal check
+        // already treats an empty path as absent, but the scoring path
+        // (`composite_score` counts `path.is_some()` as scope context while
+        // `calculate_pattern_score` returns 0.0 for an empty current path)
+        // would zero out every memory's scope multiplier — a Rank query with
+        // an empty-string path silently returned nothing.
         let query_path: Option<String> = query
             .path
             .as_ref()
+            .filter(|p| !p.is_empty())
             .map(|p| crate::storage::paths::relativize_path(p, &self.store.project_dir));
 
         // Step 2: Apply filters. Logical is NOT a filter — it only scores.
@@ -725,7 +745,12 @@ impl RetrievalEngine {
         // / semantic paths still load candidates below (they need content).
         if query.query.is_none() && query.mode == RetrievalMode::Rank {
             return self
-                .rank_scope_only_from_index(query, &filtered_entries, query_started)
+                .rank_scope_only_from_index(
+                    query,
+                    query_path.as_deref(),
+                    &filtered_entries,
+                    query_started,
+                )
                 .await;
         }
 
@@ -769,8 +794,14 @@ impl RetrievalEngine {
                     // whole-store search, where the windowing artifact is
                     // mild because little or nothing in the window is
                     // discarded.
-                    let restrict_ids: Option<Vec<String>> = (filtered_entries.len()
-                        < total_entry_count
+                    //
+                    // Narrowing happens in two places and both must count: the
+                    // Rust-side filters (visible as `filtered < total`) and the
+                    // LanceDB predicate pushdown (which narrows the scan before
+                    // `total_entry_count` is measured, so `filtered == total`
+                    // even though the store holds more rows).
+                    let narrowed = pushdown_applied || filtered_entries.len() < total_entry_count;
+                    let restrict_ids: Option<Vec<String>> = (narrowed
                         && filtered_entries.len() <= VECTOR_RESTRICT_MAX_IDS)
                         .then(|| filtered_entries.iter().map(|e| e.id.clone()).collect());
 
@@ -951,7 +982,10 @@ impl RetrievalEngine {
                 let has_tag = query.tags.as_ref().is_some_and(|filter_tags| {
                     !filter_tags.is_empty() && filter_tags.iter().any(|t| memory.tags.contains(t))
                 });
-                let user_scope_supplied = query.path.is_some() || !query.logical.is_empty();
+                // `query_path` (not `query.path`): an empty-string path was
+                // normalized away in Step 1.5 and must not count as a
+                // sufficiency signal — it filtered nothing.
+                let user_scope_supplied = query_path.is_some() || !query.logical.is_empty();
                 if !(has_kw || has_tag || user_scope_supplied) {
                     continue;
                 }
@@ -1060,18 +1094,19 @@ impl RetrievalEngine {
     /// Byte-identical to the main `query` path for
     /// `query.query == None && mode == Rank` — every scoring input is carried
     /// in the projection (schema v0.2.0), so this only skips the full file load.
+    /// `ctx_path` is the caller's Step-1.5 normalized query path — already
+    /// project-relativized and with `Some("")` collapsed to `None`. Deriving it
+    /// again here from `query.path` once dropped the empty-string collapse, so
+    /// the no-query Rank shape (the SessionStart hook) with `path: ""` zeroed
+    /// every scope multiplier and returned nothing.
     async fn rank_scope_only_from_index(
         &self,
         query: &RetrievalQuery,
+        ctx_path: Option<&str>,
         filtered_entries: &[crate::storage::IndexForFiltering],
         query_started: std::time::Instant,
     ) -> Result<RetrievalResult> {
         let now = Utc::now();
-        let query_path: Option<String> = query
-            .path
-            .as_ref()
-            .map(|p| crate::storage::paths::relativize_path(p, &self.store.project_dir));
-        let ctx_path = query_path.as_deref();
 
         let t_score = std::time::Instant::now();
         let mut candidates: Vec<ScoredCandidate> = filtered_entries
@@ -1238,6 +1273,20 @@ async fn embed_memory_with(
     }
     let chunk_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
 
+    // First-embed fingerprint stamp. Only `ops::reindex` ever stamped the
+    // manifest, so a store was born unstamped and STAYED unstamped through
+    // ordinary use — every query on a brand-new project then warned
+    // "no recorded embedding model (legacy store) — run
+    // `engramdb reindex --embeddings-only`". The vectors written here are by
+    // definition the current provider's, so if the store is unstamped and
+    // held no vectors before this write, this IS the moment its embedding
+    // model becomes known — record it. A genuinely legacy store (unstamped
+    // WITH pre-existing vectors of unknown vintage) must stay unstamped so
+    // the warning keeps pointing at the real remediation. Checked before the
+    // upsert (afterwards our own chunks make the store non-empty).
+    let stamp_first_embed = matches!(store.embedding_fingerprint().await, Ok(None))
+        && matches!(store.has_any_chunks().await, Ok(false));
+
     let t = std::time::Instant::now();
     let vectors = provider.embed_batch(&chunk_refs).await?;
     if let Some(t_) = telemetry {
@@ -1259,6 +1308,17 @@ async fn embed_memory_with(
     }
     if let Some(t_) = telemetry {
         t_.record("create.upsert_chunks", t.elapsed().as_secs_f64() * 1000.0);
+    }
+    if written && stamp_first_embed {
+        let fingerprint = crate::storage::manifest::EmbeddingFingerprint {
+            model: provider.model_id(),
+            dimensions: provider.dimensions(),
+        };
+        // Best-effort: a failed stamp only means the Untracked warning can
+        // still appear; never fail the embed over it.
+        if let Err(e) = store.set_embedding_fingerprint(fingerprint).await {
+            tracing::warn!("failed to stamp embedding fingerprint on first embed: {e}");
+        }
     }
     Ok(())
 }
@@ -1291,12 +1351,16 @@ async fn detect_contradictions_with(
         return Ok(vec![]);
     }
 
-    let mut candidate_memories: Vec<Memory> = Vec::new();
-    for candidate in &candidates {
-        if let Ok(mem) = store.get(&candidate.id).await {
-            candidate_memories.push(mem);
-        }
-    }
+    // Single batched load (one dir scan) instead of a per-candidate
+    // `store.get` (a full dir scan each) — this runs on every create/update
+    // with NLI enabled. Ids missing on disk are silently skipped, matching
+    // the old per-get error swallowing.
+    let candidate_ids: Vec<&str> = candidates.iter().map(|c| c.id.as_str()).collect();
+    let candidate_memories: Vec<Memory> = store
+        .get_batch(&candidate_ids)
+        .await
+        .map(|loaded| loaded.into_iter().map(|(_, m)| m).collect())
+        .unwrap_or_default();
 
     if candidate_memories.is_empty() {
         return Ok(vec![]);
@@ -1460,6 +1524,113 @@ mod tests {
             assert_eq!(sm.score_breakdown.criticality, expected.criticality);
             assert!((sm.score_breakdown.scope - expected.scope).abs() < 1e-9);
         }
+    }
+
+    /// The R2 fast path must honor Step 1.5's empty-path collapse: a no-query
+    /// Rank with `path: ""` (the natural MCP/hook degenerate) must rank like
+    /// `path: None`, not zero every scope multiplier and return nothing.
+    #[tokio::test]
+    async fn rank_from_index_empty_path_ranks_like_no_path() {
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut m = Memory::new(MemoryType::Decision, "D", "content", Provenance::human());
+        m.visibility = Visibility::Shared;
+        m.criticality = 0.9;
+        m.physical = vec!["src/**".to_string()];
+        store.create(&m).await.unwrap();
+
+        let engine = RetrievalEngine::new(store, EngramConfig::default());
+        let base = RetrievalQuery {
+            mode: RetrievalMode::Rank,
+            query: None,
+            ..Default::default()
+        };
+        let no_path = engine.query(&base).await.unwrap();
+        assert_eq!(no_path.retrieval_quality, "scope_only");
+        assert_eq!(no_path.memories.len(), 1);
+
+        let empty_path = engine
+            .query(&RetrievalQuery {
+                path: Some(String::new()),
+                ..base
+            })
+            .await
+            .unwrap();
+        assert_eq!(empty_path.retrieval_quality, "scope_only");
+        assert_eq!(
+            empty_path.memories.len(),
+            1,
+            "empty-string path must not zero the scope multiplier on the fast path"
+        );
+        assert_eq!(no_path.memories[0].score, empty_path.memories[0].score);
+    }
+
+    /// A fresh store must be stamped with the live provider's fingerprint by
+    /// its FIRST embed. Only `ops::reindex` ever stamped, so brand-new
+    /// projects stayed Untracked forever and every MCP query prescribed a
+    /// pointless `reindex --embeddings-only` ("legacy store").
+    #[tokio::test]
+    async fn first_embed_stamps_embedding_fingerprint() {
+        use crate::types::EngramConfig;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        assert!(store.embedding_fingerprint().await.unwrap().is_none());
+
+        let memory = stub_memory("first ever memory", 0.5);
+        store.create(&memory).await.unwrap();
+        let engine = RetrievalEngine::new(store.clone(), EngramConfig::default())
+            .with_embedding_provider(Arc::new(MarkerEmbeddingProvider));
+        engine.embed_memory(&memory).await.unwrap();
+
+        let fp = store
+            .embedding_fingerprint()
+            .await
+            .unwrap()
+            .expect("first embed must stamp the fingerprint");
+        assert_eq!(fp.model, "stub/marker");
+        assert_eq!(fp.dimensions, 384);
+    }
+
+    /// A genuinely legacy store — unstamped but holding vectors of unknown
+    /// model vintage — must NOT be stamped by a later embed: the Untracked
+    /// warning has to keep pointing at the real remediation (reindex).
+    #[tokio::test]
+    async fn embed_leaves_legacy_store_unstamped() {
+        use crate::types::EngramConfig;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        // Pre-existing vectors with no fingerprint = legacy store.
+        let old = stub_memory("legacy memory", 0.5);
+        store.create(&old).await.unwrap();
+        store
+            .upsert_chunks(&old.id, vec![vec![0.7f32; 384]])
+            .await
+            .unwrap();
+
+        let new = stub_memory("new memory", 0.5);
+        store.create(&new).await.unwrap();
+        let engine = RetrievalEngine::new(store.clone(), EngramConfig::default())
+            .with_embedding_provider(Arc::new(MarkerEmbeddingProvider));
+        engine.embed_memory(&new).await.unwrap();
+
+        assert!(
+            store.embedding_fingerprint().await.unwrap().is_none(),
+            "legacy vectors of unknown vintage must keep the store Untracked"
+        );
     }
 
     // Note: These tests would require a real MemoryStore instance,
@@ -3927,6 +4098,73 @@ mod tests {
              mid={mid_sem} far={far_sem}"
         );
         // And the ranking follows: the more-similar survivor ranks first.
+        assert_eq!(
+            result.memories[0].memory.id, tagged_mid.id,
+            "more-similar survivor must rank first"
+        );
+    }
+
+    /// Regression: a filter that is ENTIRELY served by the LanceDB predicate
+    /// pushdown (here `types`) must still restrict the vector search. After
+    /// the pushdown landed, `total_entry_count` counted post-predicate rows,
+    /// so `filtered == total` and the restriction never fired — the window
+    /// saturated with filtered-out fillers and both survivors degraded to
+    /// weak (sem = 0.0) evidence, exactly the mis-ranking the restriction
+    /// exists to prevent. Tags (the sibling test above) never regressed
+    /// because they are filtered Rust-side.
+    #[tokio::test]
+    async fn test_vector_search_pushdown_only_filter_still_restricts() {
+        use crate::types::MemoryType;
+
+        let (_dir, engine, mut tagged_mid, mut tagged_far) = pushdown_fixture().await;
+
+        // Re-type the two tagged memories as hazards so a `types` filter —
+        // which is pushed down into the scan predicate — is the only
+        // narrowing signal. The 8 closevec fillers stay Context.
+        for m in [&mut tagged_mid, &mut tagged_far] {
+            m.type_ = MemoryType::Hazard;
+            let mut update = crate::types::MemoryUpdate::new();
+            update.type_ = Some(MemoryType::Hazard);
+            engine.store().update(&m.id, update).await.unwrap();
+            engine.embed_memory(m).await.unwrap();
+        }
+
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Rank,
+                query: Some("queryvec".to_string()),
+                types: Some(vec![MemoryType::Hazard]),
+                max_results: Some(2),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.memories.len(), 2, "both hazards survive");
+        let by_id = |id: &str| {
+            result
+                .memories
+                .iter()
+                .find(|sm| sm.memory.id == id)
+                .unwrap()
+        };
+        let mid_sem = by_id(&tagged_mid.id)
+            .score_breakdown
+            .semantic
+            .expect("survivor must carry semantic evidence");
+        let far_sem = by_id(&tagged_far.id)
+            .score_breakdown
+            .semantic
+            .expect("survivor must carry semantic evidence");
+        assert!(
+            mid_sem > 0.0,
+            "pushdown-filtered survivor must get its REAL semantic score, got {mid_sem}"
+        );
+        assert!(
+            mid_sem > far_sem,
+            "semantic ordering must be preserved within the filter set: \
+             mid={mid_sem} far={far_sem}"
+        );
         assert_eq!(
             result.memories[0].memory.id, tagged_mid.id,
             "more-similar survivor must rank first"
