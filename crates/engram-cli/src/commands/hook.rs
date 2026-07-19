@@ -2258,7 +2258,18 @@ mod task_lifecycle_hook_tests {
             .unwrap();
         assert!(out.contains("Task-scoped decision"), "{out}");
 
-        // A different session keeps it suppressed.
+        // A different session with no mapping of its own falls back to the
+        // freshest declared mapping (the MCP-tool → hook bridge): the memory
+        // surfaces there too while the declaring mapping is fresh.
+        let out = process_session_start(temp_dir.path(), 0.5, r#"{"session_id":"sess-2"}"#)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(out.contains("Task-scoped decision"), "{out}");
+
+        // Once the declaring session's mapping is cleared (SessionEnd), the
+        // foreign session has nothing to fall back to → suppressed again.
+        task_state::clear_session_task(temp_dir.path(), "sess-1").unwrap();
         let out = process_session_start(temp_dir.path(), 0.5, r#"{"session_id":"sess-2"}"#)
             .await
             .unwrap()
