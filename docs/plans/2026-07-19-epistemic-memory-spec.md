@@ -177,7 +177,8 @@ pub invalidated_at: Option<DateTime<Utc>>,
 
 /// Id of the memory that superseded this one, when the window was closed
 /// by supersession (ADR-style reverse link of `supersedes`). None when
-/// closed by resolve/doctor without a successor.
+/// closed by `resolve invalidate` without a successor. (Doctor never
+/// closes windows — see writer rule 4.)
 #[serde(skip_serializing_if = "Option::is_none")]
 pub superseded_by: Option<String>,
 ```
@@ -188,7 +189,7 @@ Semantics:
   `is_active()` additionally requires not-invalidated. `valid_from` in the
   future is permitted but not specially handled (documented as unusual).
 - **Window-closing writers** (all via atomic `update_with` under the
-  per-project write lock):
+  per-project write lock; cited elsewhere as §2.4 writer 1–4):
   1. **Supersession**: when a create/update carries `supersedes: [ids]`,
      each referenced live memory gets `invalidated_at = now`,
      `superseded_by = <new id>`. This upgrades `supersedes` from
@@ -204,9 +205,13 @@ Semantics:
 - **Reopening** is allowed (`update` clearing `invalidated_at`/`superseded_by`)
   — invalidation is reversible, unlike deletion.
 - **Retrieval**: invalidated memories are excluded index-level by default
-  (mirrors expiry). New `include_invalidated: Option<bool>` on
-  `RetrievalQuery`, MCP `QueryInput`, `list`, and CLI. When included they are
-  scored normally and tagged `[invalidated <date>]` in output.
+  (mirrors expiry). The predicate is
+  `invalidated_at IS NULL OR invalidated_at > <now>` — a *future-dated*
+  `invalidated_at` (scheduled invalidation) is still valid now and **is**
+  returned, exactly like a future `expires_at`. New
+  `include_invalidated: Option<bool>` on `RetrievalQuery`, MCP `QueryInput`,
+  `list`, and CLI. When included they are scored normally and tagged
+  `[invalidated <date>]` in output.
 - **Retention**: `gc` gains a rule purging memories with
   `invalidated_at` older than `[epistemic] invalidated_retention_days`
   (default 180; `0` = keep forever). Same dry-run-first ethos as existing gc.
@@ -247,6 +252,8 @@ pub fn default_decay(type_: MemoryType, epistemic: Epistemic) -> Option<Decay> {
     }
     match epistemic {
         // Off-diagonal: the declared class wins over the type default.
+        // 90d/0.2 are the built-in constants; the create path substitutes
+        // config values when set — see the config note below.
         Epistemic::Observation =>
             Some(Decay::exponential(Duration::days(90)).with_floor(0.2)), // E2
         Epistemic::Fact => Some(Decay::none()), // facts flip; they don't fade
@@ -258,6 +265,13 @@ pub fn default_decay(type_: MemoryType, epistemic: Epistemic) -> Option<Decay> {
 `MemoryType::default_decay()` itself is unchanged and remains public.
 Explicit user-provided decay always wins over both defaults (existing
 precedence preserved).
+
+**Config note (E2 "tunable"):** the pure two-arg function carries the
+built-in constants; `ops::create` resolves the *effective* off-diagonal
+Observation default from `[epistemic] observation_half_life_days` /
+`observation_decay_floor` (§12), falling back to the constants. This keeps
+`engram-types` config-free at this call site while making the §12 keys live
+— they are consumed by the create path, not by the pure function.
 
 ## 3. File format (`crates/engram-storage/src/memory_file`)
 
@@ -312,7 +326,10 @@ by doctor and rendering, both of which read files. (`superseded_by` likewise
 stays file-only; it is display/audit data.) `valid_while.invalidated_by`
 *does* get a column — named `watch_paths` at the index layer to avoid
 confusion with the `invalidated_at` timestamp — because the PostToolUse hook
-must match edited paths against it at hook speed.
+must match edited paths against it at hook speed. Encoding follows the
+existing multi-value convention (`physical`/`logical`/`tags`):
+serde_json-encoded string in a Utf8 column, glob-matched in Rust after
+projection — never in a SQL predicate.
 
 Existing stores backfill via the standard reindex-on-open path (rebuild from
 `.md` files, seconds, vectors preserved — same as the R2/R3 `decay` /
@@ -321,8 +338,11 @@ Existing stores backfill via the standard reindex-on-open path (rebuild from
 ### 4.2 Projection & score-target parity
 
 `IndexForFiltering` (lance_index.rs:125) gains `epistemic`, `verified_at`,
-`generality`, `origin_task`. `ScoreTarget` (scoring/composite.rs:15) gains
-`epistemic: Epistemic` and `verified_at: Option<DateTime<Utc>>`.
+`generality`, `origin_task`, `invalidated_at`, and `watch_paths` (the last
+two serve the default-exclusion filter and the PostToolUse hook match
+respectively; `valid_from` is carried only in the displayable projection).
+`ScoreTarget` (scoring/composite.rs:15) gains `epistemic: Epistemic` and
+`verified_at: Option<DateTime<Utc>>`.
 
 **Invariant (parity):** `composite_score(&memory, ...)` and
 `composite_score_target(target_from_projection, ...)` produce identical
@@ -341,6 +361,7 @@ pub premise: Option<String>,
 pub invalidated_by: Vec<String>,
 pub origin_task: Option<String>,
 pub generality: Option<Generality>,
+pub valid_from: Option<DateTime<Utc>>,   // §2.4 backdating; rare, optional
 ```
 
 `create_memory` assembles `valid_while` from the last four (None if all
@@ -376,8 +397,11 @@ decisions, state what was chosen, over what alternatives, and why."
 
 Flags mirroring MCP: `--epistemic <fact|observation|decision>`,
 `--premise <text>`, `--invalidated-by <glob>` (repeatable),
-`--origin-task <name>`, `--generality <project|task>`. `update` gains the
-same flags plus `--clear-validity`.
+`--origin-task <name>`, `--generality <project|task>`,
+`--valid-from <rfc3339>`. `update` gains the same flags plus
+`--clear-validity` and `--clear-invalidated` (the §2.4 reopening surface:
+clears `invalidated_at` + `superseded_by`; mirrored on MCP `UpdateInput` as
+`clear_invalidated: bool`).
 
 ### 5.4 Output surfaces
 
@@ -396,7 +420,7 @@ enforces this; forgetting it means a permission prompt per invocation.
 
 | Tool | Inputs | Behavior | Description text (agent-facing) |
 |------|--------|----------|--------------------------------|
-| `verify` | `id`, optional `project` | §10.4: stamps `verified_at = now`; resets `NeedsReview`→`Active` when the review was doctor-initiated | "Confirm a memory is still accurate after checking it against the code. Stamps verified_at (facts rank fresher) and clears needs_review." |
+| `verify` | `id`, optional `project` | §10.4: stamps `verified_at = now`; resets `NeedsReview`→`Active` when the review was doctor-initiated | "Confirm a memory is still accurate after checking it against the code. Stamps verified_at (facts rank fresher) and clears doctor-flagged needs_review." |
 | `task_current` | `task` (name) or empty to read, optional `project` | §11.1: records/reads the session→task mapping | "Declare the task/feature this session is working on. Task-scoped memories from other tasks stay suppressed; yours surface." |
 | `task_complete` | `task`, optional `project` | §11.2: demotes task-bound memories | "Mark a task/feature finished. Its task-scoped decisions start decaying unless promoted; project-wide memories from the task are listed for review." |
 | `resolve` (extended) | existing + new action `invalidate` | closes the validity window (§2.4) instead of deleting; optional `superseded_by` id | description gains: "Prefer `invalidate` over `delete` when a memory *was* true but no longer is — history is kept and queryable." |
@@ -414,15 +438,17 @@ parameter, not a verb).
 `epistemic: Option<Vec<Epistemic>>`, applied index-level exactly like the
 existing `types` filter (filters.rs + `build_filter_predicate`), and
 `include_invalidated: Option<bool>` (default false — invalidated memories are
-excluded index-level via `invalidated_at IS NULL`, mirroring expiry
-handling). Both exposed on MCP `QueryInput`, `list`, and the CLI
+excluded index-level via `invalidated_at IS NULL OR invalidated_at > <now>`,
+mirroring the expiry predicate exactly, §2.4). Both exposed on MCP
+`QueryInput`, `list`, and the CLI
 (`--epistemic` repeatable, `--include-invalidated`). Both apply in Rank and
 Filter modes.
 
 ### 6.2 Situation
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]  // session_start / file_edit / debugging / design_choice
 pub enum Situation { SessionStart, FileEdit, Debugging, DesignChoice }
 ```
 
@@ -472,7 +498,10 @@ Interactions:
   age-conditioned. Decay remains the only age-sensitive channel
   (no-double-penalty rule).
 - `ScoreBreakdown` gains `situation_multiplier: f64` (1.0 when neutral) for
-  transparency; rendered by explain/debug output like the other multipliers.
+  transparency, and the field is **exposed end-to-end**: added to the MCP
+  `ScoreBreakdownOutput` struct (whose fields are hand-enumerated in
+  server.rs) so agents and the validation walkthrough can observe it. (The
+  CLI does not print breakdowns today; MCP is the observability surface.)
 
 Validation: each profile value and the floor must be in [0,1]
 (`SituationConfig::validate`, wired wherever `ScoringWeights::validate` is
@@ -527,9 +556,11 @@ decisions are premise-bound.
 the type as a per-line tag. Class order per situation:
 
 - SessionStart: facts → decisions (project-wide) → observations.
-- FileEdit (pre-tool-use): decisions/hazard-facts first (existing
-  hazard-first behavior preserved via type tag ordering inside the fact
-  group), then facts, then observations.
+- FileEdit (pre-tool-use): decisions first, then facts (hazard-typed
+  entries sort first *within* the fact group), then observations. (Note:
+  today's grouping has no explicit hazard-first rule — groups order by
+  first appearance in score order — so this is a new deliberate ordering,
+  not a preserved behavior.)
 
 ### 8.2 Per-class rendering (`format_memory_entry`)
 
@@ -568,9 +599,13 @@ Config: `[hooks] class_order` override (optional, default per §8.1).
 Today the plugin wires SessionStart and PreToolUse (`Read|Write|Edit`). Four
 additions, each a new `engramdb hook <event>` subcommand reading the event
 JSON from stdin and emitting `additionalContext` JSON (same contract as the
-existing two). All degrade gracefully: no daemon ⇒ `ConnectOnly` falls back
-per the existing hook policy; empty result ⇒ empty output, never an error
-exit. Wired in both `.claude-plugin/plugin.json` and the `setup.rs`
+existing two). All degrade gracefully: like the existing hooks, they build
+their engine via `build_engine_without_providers` — hooks skip provider
+resolution entirely and never load models in-process (note:
+`DaemonPolicy::ConnectOnly` would *not* give this guarantee — it falls back
+to in-process loading when no daemon runs — so hooks deliberately don't use
+the daemon policy layer at all); empty result ⇒ empty output, never an
+error exit. Wired in both `.claude-plugin/plugin.json` and the `setup.rs`
 settings.json fallback (kept in lockstep — see §16.3).
 
 #### 8.5.1 `user-prompt-submit` (UserPromptSubmit)
@@ -584,13 +619,18 @@ no match → no situation). Injects top-k results under a compact budget
 rendering. This is the highest-value addition: it surfaces
 *prompt*-relevant memories exactly when the agent forms its plan, and it is
 the only place situation inference can happen automatically for
-Debugging/DesignChoice. Keyword-only matching when embeddings are
-unavailable in-hook (never loads models in-process; daemon `ConnectOnly`).
+Debugging/DesignChoice. Retrieval is keyword-only (no providers in hooks,
+per the mechanism above); a "connect-if-live, else no providers" resolution
+mode enabling semantic hook retrieval via an already-running daemon is a
+possible later enhancement, out of scope here.
 
 #### 8.5.2 `post-tool-use` (PostToolUse, matcher `Write|Edit|MultiEdit`)
 
 After a successful file mutation, matches the edited path against the
-`watch_paths` index column (§4.1). On match, injects a warning:
+`watch_paths` index column (§4.1), **restricted to currently-valid memories**
+(the §2.4 default-exclusion predicate applies — this hook bypasses the query
+path, so it must apply the exclusion itself or invalidated memories would
+keep emitting warnings, violating §14.14). On match, injects a warning:
 `"⚠ this edit may invalidate memory <id> ('<summary>') — verify it or update/invalidate it"`.
 This converts §10.1's offline doctor check into a real-time signal at the
 moment of invalidation, closing the loop the user asked for: memories that
@@ -640,7 +680,8 @@ memories). Resolution by (new, existing) class pair:
   "resolve: supersede (`update --supersedes`, which closes the old window
   per §2.4) or reject". The NLI flow never auto-writes `supersedes` or
   closes windows itself — window closure is always an explicit agent/human
-  act (create/update with `supersedes`, or `resolve invalidate`).
+  act (create/update with `supersedes`, `resolve invalidate`, or
+  `compress_apply` — §2.4 writers 1–3).
 - *Premise challenge*: mild — challenge text
   `"premise may have changed: contradicted by <new-id> (NLI {score:.2})"`;
   decision-class penalty (0.05) applies; §8.2 rendering shows the rationale
@@ -745,7 +786,9 @@ Extends `ops::compress` rather than a new subsystem: a consolidation pass
 finds clusters of ≥ `consolidation_min_sources` (default 3) `Active`
 observation-class memories with pairwise embedding similarity ≥
 `consolidation_similarity` (default 0.85) and no pairwise NLI contradiction.
-For each cluster it (suggestion-first, same auto flag as §11.3):
+For each cluster it (suggestion-first; auto path behind its own
+`[epistemic] auto_consolidate` flag, default false, mirroring §11.3's
+pattern):
 
 - creates a Fact-class memory (type `context` unless all sources share a
   type) with `valid_while.derived_from = [source ids]`,
@@ -809,7 +852,9 @@ auto_consolidate = false
 invalidated_retention_days = 180 # §2.4 gc retention; 0 = keep forever
 
 [hooks]
-# class_order = ["fact", "decision", "observation"]   # optional override, §8.1
+# Optional override, §8.1. A single list applied uniformly to ALL
+# situations; when unset, the per-situation defaults of §8.1 apply.
+# class_order = ["fact", "decision", "observation"]
 prompt_context_budget = 1000     # §8.5.1 UserPromptSubmit injection budget
 ```
 
@@ -824,15 +869,31 @@ added, the cache key must be extended.
 |---|---|---|
 | `.md` files | serde defaults + type-derived materialization | none; fields stamp on next natural rewrite |
 | LanceDB | one bump 0.2.0→0.3.0, reindex-on-open backfill | none (columns derived from files) |
-| `supersedes` | becomes semantic (closes windows) **for new writes only** — pre-existing `supersedes` references are never retroactively closed | old memories referenced by old supersede lists stay retrievable exactly as today |
-| `compress_apply` | invalidates sources instead of deleting them | superseded sources linger (hidden from default queries) until gc retention purges them |
-| Scoring | diagonal decay invariant; neutral-on-missing situation | none without `situation`; with hooks: tuned profiles active (D4) — the **only** intended behavior change on upgrade |
-| Config | untagged `ChallengePenalty`; defaulted sections | none for existing configs except new per-class penalty defaults when no scalar is set |
+| `supersedes` | becomes semantic (closes windows) **for new writes only** — pre-existing `supersedes` references are never retroactively closed | intended change ③ |
+| `compress_apply` | invalidates sources instead of deleting them | intended change ④ |
+| Scoring | diagonal decay invariant; neutral-on-missing situation | none without `situation`; with hooks: intended change ① |
+| Config | untagged `ChallengePenalty`; defaulted sections | none for existing configs, except intended change ② when no scalar is set |
 | MCP/CLI | all new params optional | none |
 
-Note on D4: upgrading changes hook-driven ranking (session-start and
-pre-tool-use queries now carry a situation). This is intentional and called
-out in release notes; `floor = 1.0` is the one-line opt-out.
+**Intended behavior changes on upgrade** (the complete list — everything
+else must be provably inert; release notes must state all four):
+
+1. **Hook-driven ranking** (D4): session-start and pre-tool-use queries now
+   carry a situation, so tuned profiles reorder hook results. Opt-out:
+   `[retrieval.scoring.situation] floor = 1.0`.
+2. **Per-class challenge penalty defaults** (§7.2): stores with no scalar
+   `challenge_penalty` configured move from flat 0.10 to 0.15/0.20/0.05 —
+   challenged facts/observations score slightly lower, challenged decisions
+   slightly higher. Opt-out: set `challenge_penalty = 0.10`.
+3. **`supersedes` closes windows** for new writes (never retroactively).
+4. **`compress_apply` invalidates** sources instead of deleting them
+   (retained until gc retention purges).
+
+**Downgrade caveat** (for release notes): an older binary *reads* new-format
+files fine (serde ignores unknown fields; `parse_hidden_meta` degrades to
+defaults) — but any old-binary **rewrite** of a memory file (update,
+challenge, compress) silently drops the new fields, which can *resurrect*
+an invalidated memory. Downgrade is read-safe, not write-safe.
 
 ## 14. Invariants & acceptance criteria (test-plan feed)
 
@@ -846,8 +907,10 @@ out in release notes; `floor = 1.0` is the one-line opt-out.
    identical field values, including `epistemic`/`verified_at` (extend the
    existing parity coverage).
 4. **Neutrality**: `situation: None` ⇒ breakdown byte-identical to
-   pre-change scoring for every mode; `Flat` penalty config ⇒ identical to
-   current behavior.
+   pre-change scoring for every mode **for unchallenged memories** (a
+   challenged memory under default config shifts per intended change ② of
+   §13 — assert the *intended* delta, not identity); `Flat` penalty config ⇒
+   identical to current behavior for all memories.
 5. **Threshold composition (worst case)**: exact-scope, criticality 0.8,
    human, unchallenged memory stays ≥ `relevance_threshold` under every
    default profile value (mirror `test_trust_floor_prevents_extreme_compounding`).
@@ -954,4 +1017,7 @@ When §8.3 gating suppressed ≥1 task-scoped memory, the session-start
 injection appends one line:
 `"(N task-scoped memories hidden — declare task_current to surface yours.)"`
 — teaching the task mechanism exactly when it becomes relevant, at ~70 chars
-of budget.
+counted against the 2000-char budget. The hint is emitted **only when the
+`task_current` tool is registered** in the running build (it ships with the
+task-tool tranche) — the hook must never advertise a tool that isn't
+installed.
