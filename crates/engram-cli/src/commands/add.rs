@@ -46,17 +46,20 @@ pub struct AddParams {
     pub details_file: Option<PathBuf>,
 }
 
+/// Parsed `(epistemic, generality, valid_from)` flag triple.
+type EpistemicFlags = (
+    Option<engramdb::types::Epistemic>,
+    Option<engramdb::types::Generality>,
+    Option<chrono::DateTime<chrono::Utc>>,
+);
+
 /// Parse the epistemic/validity flags shared by all three add modes.
 /// Returns (epistemic, generality, valid_from) or a validation error.
 fn parse_epistemic_flags(
     epistemic: Option<&str>,
     generality: Option<&str>,
     valid_from: Option<&str>,
-) -> Result<(
-    Option<engramdb::types::Epistemic>,
-    Option<engramdb::types::Generality>,
-    Option<chrono::DateTime<chrono::Utc>>,
-)> {
+) -> Result<EpistemicFlags> {
     let epistemic = epistemic.map(engramdb::ops::parse_epistemic).transpose()?;
     let generality = generality
         .map(engramdb::ops::parse_generality)
