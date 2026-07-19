@@ -5,4 +5,7 @@
 //! circular dependency on `ops`. These re-exports keep the historical
 //! `ops::challenge_*` API stable for the CLI and MCP call sites.
 
-pub use crate::nli::challenge::{challenge_for_contradictions, challenge_memory, ChallengeResult};
+pub use crate::nli::challenge::{
+    challenge_for_contradictions, challenge_memory, route_contradiction, ChallengeResult,
+    ConflictAction, NewMemoryMeta,
+};
