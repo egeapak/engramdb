@@ -465,6 +465,7 @@ mod tests {
             hit: None,
             retrieval_quality: None,
             session_id: Some(sid.to_string()),
+            memory_ids: None,
         };
         persistence::append_events(
             &store.project_id,
