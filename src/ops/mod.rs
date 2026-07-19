@@ -29,8 +29,9 @@ pub use challenge::{
     ConflictAction, NewMemoryMeta,
 };
 pub use compress::{
-    compress_apply, compress_candidates, CompressApplyResult, CompressCandidate,
-    CompressCandidatesResult,
+    compress_apply, compress_candidates, consolidate_cluster_apply, consolidation_pass,
+    CompressApplyResult, CompressCandidate, CompressCandidatesResult, ConsolidationCluster,
+    ConsolidationReport,
 };
 pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
 pub use delete::delete_memory;
@@ -44,7 +45,10 @@ pub use gc::{
 };
 pub use get::get_memory;
 pub use list::{list_memories, parse_sort_field, ListParams, SortField};
-pub use maintenance::{auto_maintain, maintenance_status, MaintenanceReport, MaintenanceStatus};
+pub use maintenance::{
+    auto_maintain, auto_maintain_with_engine, maintenance_status, MaintenanceReport,
+    MaintenanceStatus,
+};
 pub use parsing::{
     parse_decay_strategy, parse_detail_level, parse_detail_level_or_default, parse_epistemic,
     parse_epistemic_filter, parse_generality, parse_memory_type, parse_situation, parse_status,
@@ -55,7 +59,10 @@ pub use reindex::{reindex, ReindexResult};
 pub use resolve::{resolve_memory, ResolveAction, ResolveParams, ResolveResult};
 pub use review::{review_memories, ReviewParams};
 pub use stats::{compute_stats, StoreStats};
-pub use task::{task_complete, task_current, TaskCompleteResult, TaskCurrentResult};
+pub use task::{
+    count_retrieval_sessions, promote_reconfirmed_memories, task_complete, task_current,
+    PromotionReport, TaskCompleteResult, TaskCurrentResult,
+};
 pub use update::{update_memory, UpdateParams};
 pub use verify::{verify_memory, VerifyResult};
 

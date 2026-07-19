@@ -669,3 +669,374 @@ mod tests {
         assert_eq!(count_before, count_after);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Consolidation (§11.4): observation clusters → derived fact
+// ---------------------------------------------------------------------------
+
+/// One consolidation candidate cluster.
+#[derive(Debug, Clone)]
+pub struct ConsolidationCluster {
+    pub source_ids: Vec<String>,
+    pub summaries: Vec<String>,
+}
+
+/// Report from one consolidation pass.
+#[derive(Debug, Default)]
+pub struct ConsolidationReport {
+    /// Candidate clusters (suggestion mode reports these; apply mode also
+    /// records what it created).
+    pub clusters: Vec<ConsolidationCluster>,
+    /// Ids of the Fact memories created (apply mode only).
+    pub created: Vec<String>,
+    /// True when embedding/NLI providers were unavailable and the pass
+    /// skipped (§14.11 graceful-skip contract).
+    pub skipped_no_providers: bool,
+}
+
+/// Union-find clustering over similarity pairs. Returns clusters of size ≥
+/// `min_size`, each sorted ascending. Pure so the geometry is testable
+/// without providers.
+pub fn cluster_pairs(n: usize, pairs: &[(usize, usize)], min_size: usize) -> Vec<Vec<usize>> {
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut Vec<usize>, x: usize) -> usize {
+        if parent[x] != x {
+            let root = find(parent, parent[x]);
+            parent[x] = root;
+        }
+        parent[x]
+    }
+    for &(a, b) in pairs {
+        if a >= n || b >= n {
+            continue;
+        }
+        let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+        if ra != rb {
+            parent[ra] = rb;
+        }
+    }
+    let mut groups: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    for i in 0..n {
+        let root = find(&mut parent, i);
+        groups.entry(root).or_default().push(i);
+    }
+    let mut clusters: Vec<Vec<usize>> = groups
+        .into_values()
+        .filter(|g| g.len() >= min_size.max(2))
+        .collect();
+    for c in &mut clusters {
+        c.sort_unstable();
+    }
+    clusters.sort_by_key(|c| c[0]);
+    clusters
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += (*x as f64) * (*y as f64);
+        na += (*x as f64) * (*x as f64);
+        nb += (*y as f64) * (*y as f64);
+    }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na.sqrt() * nb.sqrt())
+    }
+}
+
+/// §11.4 consolidation pass: find clusters of ≥
+/// `[epistemic] consolidation_min_sources` Active observation-class memories
+/// with pairwise embedding similarity ≥ `consolidation_similarity` and no
+/// pairwise NLI contradiction. Suggestion-first: clusters are returned;
+/// `apply` (the `[epistemic] auto_consolidate` path) additionally creates
+/// the derived Fact and demotes the sources.
+///
+/// Model-dependent steps run only where providers already run — with no
+/// embedding or NLI provider the pass skips gracefully with a logged notice.
+pub async fn consolidation_pass(
+    store: &MemoryStore,
+    engine: &crate::retrieval::engine::RetrievalEngine,
+    config: &crate::types::EngramConfig,
+    apply: bool,
+) -> Result<ConsolidationReport> {
+    use crate::types::{Epistemic, Status};
+
+    let mut report = ConsolidationReport::default();
+    if !engine.embeddings_available() || !engine.nli_available() {
+        tracing::info!(
+            "consolidation: skipped — embedding/NLI providers unavailable (graceful skip)"
+        );
+        report.skipped_no_providers = true;
+        return Ok(report);
+    }
+
+    let min_sources = config.epistemic.consolidation_min_sources as usize;
+    let similarity = config.epistemic.consolidation_similarity;
+    let ids = store.list_ids().await?;
+    let loaded = store.get_batch(&ids).await?;
+    let now = chrono::Utc::now();
+
+    let observations: Vec<&(String, crate::types::Memory)> = loaded
+        .iter()
+        .filter(|(_, m)| {
+            m.epistemic == Epistemic::Observation
+                && m.status == Status::Active
+                && !m.is_invalidated_at(now)
+        })
+        .collect();
+    if observations.len() < min_sources.max(2) {
+        return Ok(report);
+    }
+
+    // Embed each observation (summary + content). Failures drop the entry.
+    let mut vectors: Vec<Option<Vec<f32>>> = Vec::with_capacity(observations.len());
+    for (_, m) in &observations {
+        let text = format!("{} {}", m.summary, m.content);
+        vectors.push(engine.embed_text(&text).await);
+    }
+
+    // Pairwise similarity → union-find clusters.
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for i in 0..observations.len() {
+        for j in (i + 1)..observations.len() {
+            if let (Some(a), Some(b)) = (&vectors[i], &vectors[j]) {
+                if cosine(a, b) >= similarity {
+                    pairs.push((i, j));
+                }
+            }
+        }
+    }
+    let clusters = cluster_pairs(observations.len(), &pairs, min_sources);
+
+    for cluster in clusters {
+        // NLI gate: any pairwise contradiction disqualifies the cluster
+        // (contradictory observations are a dispute, not a consolidation).
+        let mut nli_pairs: Vec<(&str, &str)> = Vec::new();
+        for (pos, &i) in cluster.iter().enumerate() {
+            for &j in &cluster[pos + 1..] {
+                nli_pairs.push((
+                    observations[i].1.summary.as_str(),
+                    observations[j].1.summary.as_str(),
+                ));
+            }
+        }
+        let contradicted = match engine.nli_contradictions(&nli_pairs).await {
+            Some(scores) => scores
+                .iter()
+                .any(|s| *s as f64 >= config.nli.contradiction_threshold),
+            // NLI failed mid-pass: be conservative, skip the cluster.
+            None => true,
+        };
+        if contradicted {
+            continue;
+        }
+
+        let source_ids: Vec<String> = cluster.iter().map(|&i| observations[i].0.clone()).collect();
+        let summaries: Vec<String> = cluster
+            .iter()
+            .map(|&i| observations[i].1.summary.clone())
+            .collect();
+
+        if apply {
+            match consolidate_cluster_apply(store, &source_ids).await {
+                Ok(new_id) => report.created.push(new_id),
+                Err(e) => {
+                    tracing::warn!("consolidation apply failed for {source_ids:?}: {e}");
+                    continue;
+                }
+            }
+        }
+        report.clusters.push(ConsolidationCluster {
+            source_ids,
+            summaries,
+        });
+    }
+    Ok(report)
+}
+
+/// Apply one consolidation cluster (§11.4): create a Fact-class memory (type
+/// `context` unless all sources share a type) with
+/// `valid_while.derived_from = sources`, `provenance: inferred`,
+/// criticality = max(sources), decay = none — then DEMOTE the sources
+/// (decay → exponential 30d, floor 0.1). Sources are never deleted: they are
+/// the evidence the §10.3 derived-from check depends on.
+pub async fn consolidate_cluster_apply(
+    store: &MemoryStore,
+    source_ids: &[String],
+) -> Result<String> {
+    use crate::types::{Epistemic, Memory, MemoryType, Provenance, Validity};
+
+    if source_ids.len() < 2 {
+        bail!("a consolidation cluster needs at least 2 sources");
+    }
+    let mut sources = Vec::with_capacity(source_ids.len());
+    for id in source_ids {
+        sources.push(store.get(id).await?);
+    }
+
+    let common_type = sources
+        .windows(2)
+        .all(|w| w[0].type_ == w[1].type_)
+        .then(|| sources[0].type_)
+        .unwrap_or(MemoryType::Context);
+    let criticality = sources.iter().map(|m| m.criticality).fold(0.0f64, |a, b| {
+        if b.is_finite() {
+            a.max(b)
+        } else {
+            a
+        }
+    });
+
+    let mut summary = format!("Consolidated: {}", sources[0].summary);
+    if summary.len() > 100 {
+        summary = summary.chars().take(97).collect::<String>() + "...";
+    }
+    let content = sources
+        .iter()
+        .map(|m| format!("- {}", m.summary))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut fact = Memory::new(common_type, &summary, &content, Provenance::inferred());
+    fact.epistemic = Epistemic::Fact;
+    fact.criticality = criticality;
+    fact.decay = Some(crate::types::Decay::none());
+    fact.valid_while = Some(Validity {
+        derived_from: source_ids.to_vec(),
+        ..Default::default()
+    });
+    // Union the sources' scopes so the fact applies where its evidence did.
+    let mut physical: Vec<String> = sources.iter().flat_map(|m| m.physical.clone()).collect();
+    physical.sort();
+    physical.dedup();
+    fact.physical = physical;
+    let mut logical: Vec<String> = sources.iter().flat_map(|m| m.logical.clone()).collect();
+    logical.sort();
+    logical.dedup();
+    fact.logical = logical;
+
+    let new_id = store.create(&fact).await?;
+
+    // Demote sources: 30d exponential, floor 0.1 — evidence fades, never
+    // vanishes.
+    for id in source_ids {
+        let demoted = store
+            .update_with(id, |m| {
+                m.decay = Some(
+                    crate::types::Decay::exponential(chrono::Duration::days(30)).with_floor(0.1),
+                );
+                Ok(())
+            })
+            .await;
+        if let Err(e) = demoted {
+            tracing::warn!(memory_id = %id, "consolidation source demotion failed: {e}");
+        }
+    }
+    Ok(new_id)
+}
+
+#[cfg(test)]
+mod consolidation_tests {
+    use super::*;
+    use crate::storage::InMemoryRegistry;
+    use crate::types::{DecayStrategy, Epistemic, Memory, MemoryType, Provenance};
+    use tempfile::TempDir;
+
+    #[test]
+    fn cluster_pairs_union_find() {
+        // 0-1-2 chained, 3-4 pair, 5 isolated.
+        let pairs = [(0, 1), (1, 2), (3, 4)];
+        let clusters = cluster_pairs(6, &pairs, 3);
+        assert_eq!(clusters, vec![vec![0, 1, 2]]);
+        let clusters = cluster_pairs(6, &pairs, 2);
+        assert_eq!(clusters, vec![vec![0, 1, 2], vec![3, 4]]);
+        // Out-of-range pairs are ignored; empty input yields nothing.
+        assert!(cluster_pairs(2, &[(0, 5)], 2).is_empty());
+        assert!(cluster_pairs(0, &[], 2).is_empty());
+    }
+
+    #[tokio::test]
+    async fn consolidation_skips_without_providers() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let engine = crate::retrieval::engine::RetrievalEngine::new(
+            store.clone(),
+            crate::types::EngramConfig::default(),
+        );
+        let config = crate::types::EngramConfig::default();
+        let report = consolidation_pass(&store, &engine, &config, false)
+            .await
+            .unwrap();
+        assert!(report.skipped_no_providers);
+        assert!(report.clusters.is_empty());
+    }
+
+    #[tokio::test]
+    async fn consolidate_cluster_apply_creates_fact_and_demotes_sources() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        for (id, crit) in [("con-a", 0.4), ("con-b", 0.7), ("con-c", 0.5)] {
+            let mut m = Memory::new(
+                MemoryType::Debug,
+                format!("Observation {id}"),
+                "body",
+                Provenance::human(),
+            );
+            m.id = id.to_string();
+            m.criticality = crit;
+            m.physical = vec![format!("src/{id}.rs")];
+            store.create(&m).await.unwrap();
+        }
+
+        let ids: Vec<String> = ["con-a", "con-b", "con-c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let new_id = consolidate_cluster_apply(&store, &ids).await.unwrap();
+
+        let fact = store.get(&new_id).await.unwrap();
+        assert_eq!(fact.epistemic, Epistemic::Fact);
+        assert_eq!(fact.type_, MemoryType::Debug, "all sources share a type");
+        assert_eq!(fact.criticality, 0.7, "max of sources");
+        assert_eq!(
+            fact.valid_while.as_ref().unwrap().derived_from,
+            ids,
+            "derivation links recorded for the §10.3 cascade"
+        );
+        assert_eq!(
+            fact.provenance.source,
+            crate::types::ProvenanceSource::Inferred
+        );
+        assert_eq!(fact.decay.as_ref().unwrap().strategy, DecayStrategy::None);
+        assert_eq!(fact.physical.len(), 3, "scope union");
+
+        // Sources demoted, never deleted.
+        for id in &ids {
+            let m = store.get(id).await.unwrap();
+            let decay = m.decay.unwrap();
+            assert_eq!(decay.strategy, DecayStrategy::Exponential);
+            assert_eq!(decay.half_life, Some(chrono::Duration::days(30)));
+            assert_eq!(decay.floor, 0.1);
+        }
+
+        // Mixed types fall back to Context.
+        let mut other = Memory::new(MemoryType::Convention, "Other", "b", Provenance::human());
+        other.id = "con-d".to_string();
+        store.create(&other).await.unwrap();
+        let mixed: Vec<String> = vec!["con-a".into(), "con-d".into()];
+        let mixed_id = consolidate_cluster_apply(&store, &mixed).await.unwrap();
+        assert_eq!(
+            store.get(&mixed_id).await.unwrap().type_,
+            MemoryType::Context
+        );
+    }
+}

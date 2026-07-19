@@ -499,6 +499,36 @@ impl RetrievalEngine {
         &self.config
     }
 
+    /// Embed arbitrary text with the engine's embedding provider. `None`
+    /// when no provider is configured or the embed fails (logged). Used by
+    /// the §11.4 consolidation pass; NOT a retrieval path.
+    pub async fn embed_text(&self, text: &str) -> Option<Vec<f32>> {
+        let provider = self.embedding_provider.as_ref()?;
+        match provider.embed(text).await {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::debug!("embed_text failed (non-fatal): {e}");
+                None
+            }
+        }
+    }
+
+    /// Contradiction probabilities for text pairs via the NLI provider.
+    /// `None` when NLI is unavailable/disabled or classification fails.
+    pub async fn nli_contradictions(&self, pairs: &[(&str, &str)]) -> Option<Vec<f32>> {
+        if !self.config.nli.enabled {
+            return None;
+        }
+        let nli = self.nli_provider.as_ref()?;
+        match nli.classify_batch(pairs).await {
+            Ok(results) => Some(results.into_iter().map(|r| r.contradiction).collect()),
+            Err(e) => {
+                tracing::debug!("nli_contradictions failed (non-fatal): {e}");
+                None
+            }
+        }
+    }
+
     /// Get a mutable reference to the memory store.
     pub fn store_mut(&mut self) -> &mut MemoryStore {
         &mut self.store
