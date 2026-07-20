@@ -17,6 +17,7 @@
 //! cannot be determined.
 
 use super::error::{Result, StorageError};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tokio::fs as async_fs;
 
@@ -209,6 +210,54 @@ pub fn global_lancedb_dir() -> Result<PathBuf> {
     Ok(global_data_dir()?.join("global").join("lancedb"))
 }
 
+/// Returns the root directory for a named group memory store.
+///
+/// A *group store* is the generalization of the global store: an ordinary
+/// machine-local `MemoryStore` shared by a set of subscribed projects. Each
+/// group lives under `<global_data_dir>/groups/<group_id>/` and mirrors a
+/// normal project layout (`.engramdb/memories/`, `manifest.toml`, …) so every
+/// `MemoryStore` method works unchanged.
+pub fn group_store_dir(group_id: &str) -> Result<PathBuf> {
+    Ok(global_data_dir()?.join("groups").join(group_id))
+}
+
+/// Returns the LanceDB directory for a named group memory store.
+pub fn group_lancedb_dir(group_id: &str) -> Result<PathBuf> {
+    Ok(global_data_dir()?
+        .join("groups")
+        .join(group_id)
+        .join("lancedb"))
+}
+
+/// Compute a stable group ID from a human-readable group name.
+///
+/// The ID is 16 characters (matching the project ID width) but carries a
+/// `__g_` prefix so it can *never* collide with a real 16-hex project ID (hex
+/// digits never start with `_`) nor with [`GLOBAL_PROJECT_ID`] (`__global…`).
+/// [`is_group_id`] recognizes it by that prefix.
+///
+/// The name is trimmed and lowercased before hashing, so `"Backend Family"`,
+/// `" backend family "`, and `"backend family"` all resolve to the same group
+/// — group identity is name-based and case/whitespace-insensitive, like a
+/// slug. Twelve hex chars (6 bytes of SHA-256) follow the 4-char prefix for a
+/// total width of 16.
+pub fn compute_group_id(name: &str) -> String {
+    let normalized = name.trim().to_lowercase();
+    let mut hasher = Sha256::new();
+    hasher.update(normalized.as_bytes());
+    let result = hasher.finalize();
+    // Format the leading bytes explicitly rather than via `{:x}`: sha2 0.11's
+    // `finalize` returns a `hybrid_array::Array` that no longer implements
+    // `LowerHex` (see `project_id::hash_string`). Six bytes → twelve hex chars.
+    let hex: String = result.iter().take(6).map(|b| format!("{b:02x}")).collect();
+    format!("__g_{hex}")
+}
+
+/// Whether `id` is a group store ID (as produced by [`compute_group_id`]).
+pub fn is_group_id(id: &str) -> bool {
+    id.starts_with("__g_")
+}
+
 /// Returns the global registry path (`<global_config_dir>/registry.json`).
 ///
 /// Respects `ENGRAMDB_REGISTRY_PATH` env var for testing isolation.
@@ -349,6 +398,53 @@ mod tests {
     fn test_lancedb_dir() {
         let result = lancedb_dir("abc123").unwrap();
         assert!(result.ends_with("projects/abc123/lancedb"), "{result:?}");
+    }
+
+    // Group store paths mirror the global-store layout under `groups/<id>/`.
+    // Suffix assertions are component-wise (`Path::ends_with`) so they hold on
+    // Windows, exactly like `test_lancedb_dir` above.
+    #[test]
+    fn test_group_store_dir() {
+        let result = group_store_dir("__g_abc123def456").unwrap();
+        assert!(result.ends_with("groups/__g_abc123def456"), "{result:?}");
+    }
+
+    #[test]
+    fn test_group_lancedb_dir() {
+        let result = group_lancedb_dir("__g_abc123def456").unwrap();
+        assert!(
+            result.ends_with("groups/__g_abc123def456/lancedb"),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn test_compute_group_id_shape() {
+        let id = compute_group_id("Backend Family");
+        assert_eq!(id.len(), 16, "group id must be 16 chars: {id}");
+        assert!(id.starts_with("__g_"), "group id must be prefixed: {id}");
+        // The 12 chars after the prefix are lowercase hex.
+        assert!(id[4..].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_compute_group_id_stable_and_normalized() {
+        // Stable across calls, and case/whitespace-insensitive (name-based
+        // identity, like a slug).
+        let base = compute_group_id("Backend Family");
+        assert_eq!(base, compute_group_id("Backend Family"));
+        assert_eq!(base, compute_group_id("  backend family  "));
+        assert_eq!(base, compute_group_id("BACKEND FAMILY"));
+        // A different name must produce a different id.
+        assert_ne!(base, compute_group_id("Frontend Family"));
+    }
+
+    #[test]
+    fn test_is_group_id() {
+        assert!(is_group_id(&compute_group_id("anything")));
+        assert!(is_group_id("__g_0123456789ab"));
+        assert!(!is_group_id("abc123def4567890")); // real 16-hex project id
+        assert!(!is_group_id(GLOBAL_PROJECT_ID)); // the global store is not a group
     }
 
     #[test]

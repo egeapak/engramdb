@@ -757,6 +757,7 @@ mod tests {
             project_id: "stale-proj-001".to_string(),
             project_path: "/nonexistent/path/to/project".to_string(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
         registry.save(&reg).await.unwrap();
 

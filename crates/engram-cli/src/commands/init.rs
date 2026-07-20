@@ -496,6 +496,7 @@ mod tests {
             project_path: "/path/to/project".to_string(),
             project_id: "test-id".to_string(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
         let content = serde_json::to_string_pretty(&registry).unwrap();
         fs::write(&test_registry_path, content).unwrap();
@@ -523,11 +524,13 @@ mod tests {
             project_path: "/path/to/project1".to_string(),
             project_id: "id1".to_string(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
         registry.projects.push(RegistryEntry {
             project_path: "/path/to/project2".to_string(),
             project_id: "id2".to_string(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
 
         let content = serde_json::to_string_pretty(&registry).unwrap();

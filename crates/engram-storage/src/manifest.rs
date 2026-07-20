@@ -277,7 +277,7 @@ logical_scopes = []
         assert!(!schema_version_is_current("0.1.9"));
         assert!(!schema_version_is_current("0.2.0"));
         assert!(!schema_version_is_current("0.3.0")); // pre-audience, behind 0.4.0
-        // Ahead of current → must NOT migrate (no silent downgrade).
+                                                      // Ahead of current → must NOT migrate (no silent downgrade).
         assert!(schema_version_is_current("0.5.0"));
         assert!(schema_version_is_current("1.0.0"));
         // Short / unparseable forms.
