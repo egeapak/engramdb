@@ -37,16 +37,20 @@ pub struct QueryParams {
 /// memory passing the type/tag/criticality/physical filters, scored and
 /// sorted. `mode: Filter` requires at least one positive relevance signal
 /// (keyword, semantic, scope proximity, or tag match).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_query(
     dir: &Path,
     global: bool,
+    group: Option<String>,
     params: QueryParams,
     embedding_backend: Option<engramdb::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
     cell: &Arc<DaemonCell>,
     policy: DaemonPolicy,
 ) -> Result<()> {
-    let store = if global {
+    let store = if let Some(ref name) = group {
+        MemoryStore::open_group(&engramdb::storage::paths::compute_group_id(name)).await?
+    } else if global {
         MemoryStore::open_global().await?
     } else {
         MemoryStore::open(dir).await?
@@ -55,12 +59,23 @@ pub async fn run_query(
         formatter.print_warning(&warning);
     }
 
+    // Querying a shared store directly (`--global`/`--group`) — we ARE the
+    // shared store, so there is no cross-store fan-in to do.
+    let direct_shared = global || group.is_some();
+
     let show_scores = params.show_scores;
     // Capture the bits needed for an empty-result hint before `params` is moved.
     let mode = params.mode;
     let had_query = params.query.as_ref().is_some_and(|q| !q.is_empty());
-    let result =
-        compute_query_result(store, global, params, embedding_backend, cell, policy).await?;
+    let result = compute_query_result(
+        store,
+        direct_shared,
+        params,
+        embedding_backend,
+        cell,
+        policy,
+    )
+    .await?;
 
     formatter.print_retrieval_result(&result, show_scores);
 
@@ -94,7 +109,7 @@ pub async fn run_query(
 /// behavior is unit-testable offline.
 async fn compute_query_result(
     store: MemoryStore,
-    global: bool,
+    direct_shared: bool,
     params: QueryParams,
     embedding_backend: Option<engramdb::types::EmbeddingBackend>,
     cell: &Arc<DaemonCell>,
@@ -141,10 +156,9 @@ async fn compute_query_result(
         include_invalidated: Some(params.include_invalidated),
     };
 
-    // When querying the global store directly (`--global`), there is no
-    // cross-store fan-in to do — we ARE the shared store. Short-circuit exactly
-    // as before.
-    if global {
+    // When querying a shared store directly (`--global`/`--group`), there is no
+    // cross-store fan-in to do — we ARE the shared store. Short-circuit.
+    if direct_shared {
         return engramdb::ops::query_memories(&engine, &query).await;
     }
 
@@ -312,6 +326,7 @@ mod tests {
         let result = run_query(
             temp_dir.path(),
             false,
+            None,
             params,
             None,
             &formatter,
@@ -336,6 +351,7 @@ mod tests {
         let result = run_query(
             temp_dir.path(),
             false,
+            None,
             params,
             None,
             &formatter,
@@ -364,6 +380,7 @@ mod tests {
         let result = run_query(
             temp_dir.path(),
             false,
+            None,
             params,
             None,
             &formatter,
@@ -388,6 +405,7 @@ mod tests {
         let result = run_query(
             temp_dir.path(),
             false,
+            None,
             params,
             None,
             &formatter,
@@ -478,6 +496,7 @@ mod tests {
         let result = run_query(
             temp_dir.path(),
             false,
+            None,
             params,
             None,
             &formatter,

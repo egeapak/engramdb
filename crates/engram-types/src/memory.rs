@@ -215,11 +215,19 @@ pub struct Memory {
     pub visibility: Visibility,
 
     /// Multi-project audience — per-memory sharing precision. When `Some`, a
-    /// memory living in a group or the everyone/global store is only surfaced
-    /// for projects/groups whose id appears in this list. `None` ⇒ visible to
-    /// the whole store's group (the default). Meaningless for a memory in an
-    /// ordinary single-project store, which is already scoped positionally by
-    /// which store its file lives in. An empty list normalizes to `None`.
+    /// memory living in a group or the everyone/global store is only folded into
+    /// a project's queries when that project's id (or one of its subscribed
+    /// groups) appears in this list. `None` ⇒ visible to the whole store's group
+    /// (the default). Meaningless for a memory in an ordinary single-project
+    /// store, which is already scoped positionally by which store its file lives
+    /// in. An empty list normalizes to `None`.
+    ///
+    /// **Advisory, not a confidentiality boundary.** This is a *fan-in scoping*
+    /// mechanism: it narrows which cross-store memories surface in a project's
+    /// normal query, but anyone who queries the shared store *directly*
+    /// (`--global`/`--group`, or `get` by id) still sees the memory. Do not rely
+    /// on `audience` to keep a secret from a machine-local collaborator — the
+    /// registry that drives it is user-writable and treated as untrusted input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audience: Option<Vec<String>>,
 

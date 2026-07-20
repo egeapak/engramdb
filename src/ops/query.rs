@@ -121,14 +121,20 @@ pub struct ExtraStoresResult {
     pub unreadable: Vec<String>,
 }
 
-/// Over-fetch multiplier for the equalization candidate pool: each store is
-/// queried for up to `max * FACTOR` candidates (bounded by [`EQUALIZE_POOL_CAP`])
-/// so the post-merge cross-encoder can lift a genuinely-relevant memory that
-/// ranked below `max` under the incomparable per-store vector scores.
-const EQUALIZE_POOL_FACTOR: usize = 5;
-/// Hard cap on the equalization candidate pool, keeping the cross-encoder pass
-/// bounded even for a large `max`. The effective pool is never below `max`.
-const EQUALIZE_POOL_CAP: usize = 100;
+/// Over-fetch multiplier for the cross-store candidate pool: each shared store
+/// is queried for up to `max * FACTOR` candidates (bounded by
+/// [`FANIN_OVERFETCH_CAP`]). This serves two post-query passes that would
+/// otherwise be starved by a top-`max`-by-score cut:
+/// - the **audience filter**, so an audience-visible memory ranked below `max`
+///   is not evicted by higher-scored hidden ones before it is ever filtered; and
+/// - the optional **equalization rerank**, so the cross-encoder can lift a
+///   genuinely-relevant memory that ranked low under incomparable per-store
+///   vector scores.
+const FANIN_OVERFETCH_FACTOR: usize = 5;
+/// Hard cap on the cross-store candidate pool, keeping the extra query/scoring
+/// (and any cross-encoder pass) bounded even for a large `max`. The effective
+/// pool is never below `max`.
+const FANIN_OVERFETCH_CAP: usize = 100;
 
 /// Run `query` on `engine` (the session's own project store) and fold in
 /// results from any number of shared "extra" stores — the everyone/global
@@ -185,26 +191,27 @@ where
     Fut: std::future::Future<Output = Vec<(String, RetrievalEngine)>>,
 {
     let max = query.max_results.unwrap_or(10);
-    // When equalizing, over-fetch a deeper candidate pool from *every* store so
-    // the post-merge cross-encoder can lift a memory that ranked low under the
-    // incomparable per-store vector scores — the whole point of equalization.
-    // The final cut to `max` happens after the rerank. The pool is bounded so
-    // the extra cross-encoder pass stays cheap, and is never below `max`. On the
-    // common (non-equalizing) path `pool == max`, so behavior is unchanged.
-    let pool = if equalize_cross_store_scores {
-        max.saturating_mul(EQUALIZE_POOL_FACTOR)
-            .min(EQUALIZE_POOL_CAP)
-            .max(max)
-    } else {
-        max
-    };
+    // Over-fetch a deeper candidate pool from the EXTRA (shared) stores on every
+    // fan-in — not only when equalizing. The audience filter (and any
+    // equalization rerank) run *after* the per-store query returns, so a store
+    // that returned only its top-`max` by score would let audience-visible
+    // memories ranked below `max` be evicted by higher-scored hidden ones before
+    // we ever filter (data-integrity review). A deeper pool lets the filter see
+    // them; the final cut to `max` happens afterward. Bounded, never below
+    // `max`. (The ideal fix is an index-level `audience` predicate pushed into
+    // the store query — the LanceDB column exists — tracked as a follow-up.)
+    let extra_pool = max
+        .saturating_mul(FANIN_OVERFETCH_FACTOR)
+        .min(FANIN_OVERFETCH_CAP)
+        .max(max);
 
-    // Primary (own project) query. Over-fetch to `pool` only when equalizing;
-    // otherwise leave the caller's query untouched (preserving `max_results`,
-    // including `None` → the engine default).
+    // The primary (own project) store is never audience-filtered, so it only
+    // needs the deeper pool when equalizing (to let the cross-encoder lift a
+    // low-ranked own memory). Otherwise leave the caller's query untouched
+    // (preserving `max_results`, including `None` → the engine default).
     let mut result = if equalize_cross_store_scores {
         let mut primary_query = query.clone();
-        primary_query.max_results = Some(pool);
+        primary_query.max_results = Some(extra_pool);
         query_memories(engine, &primary_query).await?
     } else {
         query_memories(engine, query).await?
@@ -221,20 +228,20 @@ where
         });
     }
     // Cross-repo: drop the repo-relative path so physical proximity isn't
-    // scored against a foreign repo's file layout; over-fetch to `pool`.
+    // scored against a foreign repo's file layout; over-fetch to `extra_pool`
+    // (always) so the audience filter below has a deep enough candidate set.
     let mut extra_query = query.clone();
     extra_query.path = None;
-    if equalize_cross_store_scores {
-        extra_query.max_results = Some(pool);
-    }
+    extra_query.max_results = Some(extra_pool);
     // Fan out concurrently; each future borrows its engine and the shared
     // query immutably, so they poll together without contention.
     let extra_results =
         futures_util::future::join_all(extras.iter().map(|(_, e)| query_memories(e, &extra_query)))
             .await;
     // Fold in original order so dedup/tie-breaking is independent of completion
-    // order. Merge to `pool` (== `max` unless equalizing) so the deeper pool
-    // survives into the rerank.
+    // order. Audience-filter BEFORE truncation, then merge to `extra_pool` so
+    // the deeper visible set survives into the (optional) rerank and the final
+    // cut to `max`.
     let mut unreadable = Vec::new();
     for ((label, _), extra_result) in extras.iter().zip(extra_results) {
         match extra_result {
@@ -245,7 +252,7 @@ where
                     .filter(|sm| audience_allows(&sm.memory, viewer_ids))
                     .collect();
                 let visible_count = visible.len();
-                let duplicates = merge_scored_memories(&mut result.memories, visible, pool);
+                let duplicates = merge_scored_memories(&mut result.memories, visible, extra_pool);
                 result.total += visible_count.saturating_sub(duplicates);
             }
             Err(e) => {
@@ -293,10 +300,10 @@ where
             }
         }
     }
-    // If we over-fetched a deeper pool but equalization did not actually run
-    // (no reranker, no query text, weight 0, or a rerank error), trim back to
-    // the caller's `max`. When it did run, `rerank_merged` already truncated.
-    if pool > max && !equalized {
+    // Extras always over-fetch to `extra_pool`, so the merged result can exceed
+    // `max`. When equalization ran, `rerank_merged` already truncated; otherwise
+    // trim back to the caller's `max` here.
+    if !equalized {
         result.memories.truncate(max);
     }
 
@@ -726,6 +733,103 @@ mod tests {
         assert!(
             outcome.result.memories.len() <= 3,
             "final result must be truncated to max"
+        );
+    }
+
+    // Regression (data-integrity review): an audience-VISIBLE memory ranked
+    // below `max` must still surface even when higher-scored audience-HIDDEN
+    // memories would fill the top-`max`. This only holds if the fan-in
+    // over-fetches the extra store deeply enough that the audience filter runs
+    // before the cut to `max` (not after a top-`max`-by-score truncation).
+    #[tokio::test]
+    async fn audience_visible_memory_below_max_still_surfaces() {
+        use crate::retrieval::engine::{RetrievalEngine, RetrievalMode, RetrievalQuery};
+        use crate::storage::{InMemoryRegistry, MemoryStore};
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance};
+        use tempfile::TempDir;
+
+        let proj_dir = TempDir::new().unwrap();
+        let proj_store = MemoryStore::init(proj_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let proj_id = proj_store.project_id.clone();
+
+        let gid = crate::storage::paths::compute_group_id("audience-truncation-test");
+        let group = MemoryStore::init_group(&gid).await.unwrap();
+        // 15 HIGH-criticality memories hidden from the viewer (audience = a
+        // project the viewer is not) — these dominate the score order.
+        for i in 0..15 {
+            let mut m = Memory::new(
+                MemoryType::Convention,
+                format!("widget hidden {i}"),
+                "widget content",
+                Provenance::human(),
+            );
+            m.criticality = 0.9;
+            m.audience = Some(vec!["someone-else".to_string()]);
+            group.create(&m).await.unwrap();
+        }
+        // 1 LOW-criticality memory visible to everyone (audience = None) — it
+        // ranks well below `max` by score.
+        let mut visible = Memory::new(
+            MemoryType::Convention,
+            "widget public note",
+            "widget content",
+            Provenance::human(),
+        );
+        visible.criticality = 0.05;
+        group.create(&visible).await.unwrap();
+        drop(group);
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+        let proj_engine = RetrievalEngine::new(proj_store, config.clone());
+
+        let query = RetrievalQuery {
+            mode: RetrievalMode::Filter,
+            query: Some("widget".to_string()),
+            max_results: Some(5), // the public note ranks ~16th by score
+            ..Default::default()
+        };
+        // Viewer is only the project itself — NOT "someone-else".
+        let viewer: HashSet<String> = [proj_id].into_iter().collect();
+        let cfg = config.clone();
+        let gid_c = gid.clone();
+        let outcome =
+            query_memories_with_extra_stores(&proj_engine, &query, &viewer, false, || async move {
+                vec![(
+                    gid_c.clone(),
+                    RetrievalEngine::new(MemoryStore::open_group(&gid_c).await.unwrap(), cfg),
+                )]
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            outcome
+                .result
+                .memories
+                .iter()
+                .any(|m| m.memory.summary.contains("widget public note")),
+            "the audience-visible memory must surface despite ranking below max; got: {:?}",
+            outcome
+                .result
+                .memories
+                .iter()
+                .map(|m| m.memory.summary.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !outcome
+                .result
+                .memories
+                .iter()
+                .any(|m| m.memory.summary.contains("hidden")),
+            "no audience-hidden memory may leak to the viewer"
+        );
+        assert!(
+            outcome.result.memories.len() <= 5,
+            "result truncated to max"
         );
     }
 

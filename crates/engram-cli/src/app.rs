@@ -502,12 +502,20 @@ pub enum Command {
         /// Runs the same query against the global store and folds its hits
         /// into the project results (deduplicated, re-sorted, truncated).
         /// Ignored when `--global` is set (already querying the global store).
+        /// Note: groups this project is subscribed to already fan in
+        /// automatically; this flag only adds the everyone/global store.
         #[arg(long)]
         include_global: bool,
 
         /// Query the global (cross-project) memory store instead of the current project
         #[arg(long)]
         global: bool,
+
+        /// Query a named group store directly (instead of the current project).
+        /// Subscribed groups already fan into a normal project query; use this
+        /// to inspect one group's memories in isolation.
+        #[arg(long, conflicts_with = "global")]
+        group: Option<String>,
     },
 
     /// List all memories
@@ -624,6 +632,15 @@ pub enum Command {
         #[arg(long)]
         supersedes: Option<String>,
 
+        /// Set the per-memory audience (project/group ids) for a group/global
+        /// share (comma-separated). Only meaningful on a group/global memory.
+        #[arg(long, value_delimiter = ',')]
+        audience: Vec<String>,
+
+        /// Clear the audience (whole-group visibility). Wins over --audience.
+        #[arg(long)]
+        clear_audience: bool,
+
         /// Epistemic class: fact, observation, or decision (defaults from type)
         #[arg(long)]
         epistemic: Option<String>,
@@ -688,6 +705,10 @@ pub enum Command {
         /// Operate on the global (cross-project) memory store instead of the current project
         #[arg(long)]
         global: bool,
+
+        /// Update a memory in a named group store (instead of the current project)
+        #[arg(long, conflicts_with = "global")]
+        group: Option<String>,
     },
 
     /// Delete a memory

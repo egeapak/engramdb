@@ -174,6 +174,12 @@ impl MemoryStore {
         let global_dir = paths::global_store_dir()?;
         let engramdb_dir = paths::project_dir(&global_dir);
 
+        // Serialize lazy creation on the advisory write lock (as `init`/
+        // `init_group` do): the everyone/global store is also created lazily on
+        // first open, so concurrent first-writers must not race on table
+        // creation.
+        let _lock = write_lock::acquire_write_lock(paths::GLOBAL_PROJECT_ID).await?;
+
         async_fs::create_dir_all(&engramdb_dir).await?;
         async_fs::create_dir_all(paths::memories_dir(&global_dir)).await?;
 
@@ -214,6 +220,9 @@ impl MemoryStore {
             project_id,
             lance_index,
         };
+        // Release before migrating (a reindex re-acquires this lock), mirroring
+        // `init`.
+        drop(_lock);
         store.migrate_schema_if_needed().await?;
         Ok(store)
     }
@@ -266,6 +275,14 @@ impl MemoryStore {
         let group_dir = paths::group_store_dir(group_id)?;
         let engramdb_dir = paths::project_dir(&group_dir);
 
+        // Serialize lazy creation on the per-store advisory write lock, exactly
+        // as `init` does. Group stores are created lazily on first open (from a
+        // query fan-in or a `--group` write), so two concurrent multi-repo
+        // sessions can race here on LanceDB table creation without it — the
+        // loser would get a hard "table create failed". `acquire_write_lock`
+        // creates its own lock dir, so there is no bootstrap-ordering problem.
+        let _lock = write_lock::acquire_write_lock(group_id).await?;
+
         async_fs::create_dir_all(&engramdb_dir).await?;
         async_fs::create_dir_all(paths::memories_dir(&group_dir)).await?;
 
@@ -306,6 +323,9 @@ impl MemoryStore {
             project_id,
             lance_index,
         };
+        // Release before migrating (a reindex re-acquires this lock), mirroring
+        // `init`.
+        drop(_lock);
         store.migrate_schema_if_needed().await?;
         Ok(store)
     }

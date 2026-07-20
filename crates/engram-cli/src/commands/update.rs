@@ -31,6 +31,11 @@ pub struct UpdateParams {
     pub visibility: Option<String>,
     pub status: Option<String>,
     pub supersedes: Option<String>,
+    /// Set the per-memory audience (project/group ids) for a group/global share.
+    /// Empty ⇒ not provided (unchanged); pair with `clear_audience` to clear.
+    pub audience: Vec<String>,
+    /// Clear the audience (whole-group visibility). Wins over `audience`.
+    pub clear_audience: bool,
     pub epistemic: Option<String>,
     pub premise: Option<String>,
     pub invalidated_by: Vec<String>,
@@ -57,17 +62,25 @@ pub struct UpdateParams {
 /// * `dir` - The directory containing the EngramDB store
 /// * `params` - Update parameters (only non-None fields are updated)
 /// * `formatter` - Output formatter for success/error messages
+#[allow(clippy::too_many_arguments)]
 pub async fn run_update(
     dir: &Path,
     global: bool,
+    group: Option<String>,
     params: UpdateParams,
     embedding_backend: Option<engramdb::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
     cell: &Arc<DaemonCell>,
     policy: DaemonPolicy,
 ) -> Result<()> {
-    // Resolve the directory backing the target store (global or project).
-    let store_dir: PathBuf = if global {
+    let group_id = group
+        .as_deref()
+        .map(engramdb::storage::paths::compute_group_id);
+
+    // Resolve the directory backing the target store (group, global, or project).
+    let store_dir: PathBuf = if let Some(gid) = &group_id {
+        engramdb::storage::paths::group_store_dir(gid)?
+    } else if global {
         engramdb::storage::paths::global_store_dir()?
     } else {
         dir.to_path_buf()
@@ -124,7 +137,9 @@ pub async fn run_update(
         }
     }
 
-    let store = if global {
+    let store = if let Some(gid) = &group_id {
+        MemoryStore::open_group(gid).await?
+    } else if global {
         MemoryStore::open_global().await?
     } else {
         MemoryStore::open(dir).await?
@@ -223,6 +238,15 @@ pub async fn run_update(
             visibility,
             status,
             supersedes,
+            // `--clear-audience` clears (Some(empty) ⇒ whole-group), else a
+            // non-empty `--audience` sets it, else leave unchanged (None).
+            audience: if params.clear_audience {
+                Some(Vec::new())
+            } else if params.audience.is_empty() {
+                None
+            } else {
+                Some(params.audience)
+            },
             epistemic: params
                 .epistemic
                 .as_deref()

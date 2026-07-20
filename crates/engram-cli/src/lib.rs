@@ -324,6 +324,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             show_scores,
             include_global,
             global,
+            group,
         } => {
             let retrieval_mode = match mode.as_str() {
                 "rank" => engramdb::retrieval::engine::RetrievalMode::Rank,
@@ -342,6 +343,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             commands::query::run_query(
                 &dir,
                 global,
+                group,
                 QueryParams {
                     mode: retrieval_mode,
                     query: query_text,
@@ -413,6 +415,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             visibility,
             status,
             supersedes,
+            audience,
+            clear_audience,
             epistemic,
             premise,
             invalidated_by,
@@ -429,10 +433,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             decay_floor,
             editor,
             global,
+            group,
         } => {
             commands::update::run_update(
                 &dir,
                 global,
+                group,
                 UpdateParams {
                     id,
                     type_,
@@ -451,6 +457,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                     visibility,
                     status,
                     supersedes,
+                    audience,
+                    clear_audience,
                     epistemic,
                     premise,
                     invalidated_by,

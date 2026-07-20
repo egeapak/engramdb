@@ -100,6 +100,38 @@ pub struct CompressApplyParams {
 /// consolidated summary UN-embedded would make exactly the compressed
 /// knowledge invisible to semantic search until a manual reindex. Pass the
 /// same engine the front-end uses for `create`.
+/// The audience a consolidated memory should carry when it supersedes
+/// `sources` in a shared (group/global) store.
+///
+/// Safe-by-construction — it never widens visibility beyond the union of the
+/// sources' explicitly-listed audiences. If every source is unrestricted
+/// (`audience == None`), the result is `None` (whole-group). If any source is
+/// restricted, the result is the union of the restricted audiences; an
+/// unrestricted source contributes nothing, so consolidating a public source
+/// with a restricted one *over-restricts* the summary rather than re-publishing
+/// the restricted content store-wide. Returns `None` on a project-local store
+/// (audience is inert there), so consolidation outside a shared store is
+/// unchanged.
+fn consolidated_audience(
+    store: &MemoryStore,
+    sources: &[crate::types::Memory],
+) -> Option<Vec<String>> {
+    if !(store.is_group() || store.is_global()) {
+        return None;
+    }
+    let mut union: Vec<String> = Vec::new();
+    for s in sources {
+        if let Some(list) = &s.audience {
+            for id in list {
+                if !union.contains(id) {
+                    union.push(id.clone());
+                }
+            }
+        }
+    }
+    (!union.is_empty()).then_some(union)
+}
+
 pub async fn compress_apply(
     store: &MemoryStore,
     params: CompressApplyParams,
@@ -133,6 +165,20 @@ pub async fn compress_apply(
 
     let superseded_count = source_ids.len();
 
+    // On a shared store, carry a safe (never-widening) audience from the sources
+    // so consolidating an audience-restricted memory doesn't re-publish it to
+    // the whole group. No-op (None) on a project-local store, so the common path
+    // pays no extra reads.
+    let audience = if store.is_group() || store.is_global() {
+        let mut mems = Vec::with_capacity(source_ids.len());
+        for id in &source_ids {
+            mems.push(store.get(id).await?);
+        }
+        consolidated_audience(store, &mems)
+    } else {
+        None
+    };
+
     let result = create_memory(
         store,
         CreateParams {
@@ -149,7 +195,7 @@ pub async fn compress_apply(
             visibility: Visibility::Shared,
             provenance: Provenance::agent("compress"),
             supersedes: source_ids.clone(),
-            audience: None,
+            audience,
             epistemic: None,
             premise: None,
             invalidated_by: vec![],
@@ -1026,6 +1072,15 @@ pub async fn consolidate_cluster_apply(
     logical.dedup();
     fact.logical = logical;
 
+    // Shared-store hygiene: this path uses the raw `store.create` (not
+    // `create_memory`), so it must itself strip repo-relative physical scope and
+    // carry a safe (never-widening) audience — otherwise consolidation would
+    // leak local paths and re-publish audience-restricted content store-wide.
+    if store.is_group() || store.is_global() {
+        fact.physical.clear();
+        fact.audience = consolidated_audience(store, &sources);
+    }
+
     let new_id = store.create(&fact).await?;
 
     // Embed the derived fact so it participates in vector search immediately
@@ -1077,6 +1132,51 @@ mod consolidation_tests {
         // Out-of-range pairs are ignored; empty input yields nothing.
         assert!(cluster_pairs(2, &[(0, 5)], 2).is_empty());
         assert!(cluster_pairs(0, &[], 2).is_empty());
+    }
+
+    // Consolidating in a group store must NOT re-publish audience-restricted
+    // content store-wide: the merged memory inherits the union of the sources'
+    // restrictive audiences (a public source contributes nothing → over-restrict,
+    // never leak), and its physical scope is stripped (cross-repo hygiene).
+    #[tokio::test]
+    async fn consolidation_preserves_restrictive_audience_in_group_store() {
+        let gid = crate::storage::paths::compute_group_id("consolidate-audience-test");
+        let store = MemoryStore::init_group(&gid).await.unwrap();
+
+        let mut restricted = Memory::new(
+            MemoryType::Convention,
+            "rule a",
+            "content a",
+            Provenance::human(),
+        );
+        restricted.audience = Some(vec!["projX".to_string()]);
+        restricted.physical = vec!["src/a.rs".to_string()];
+        let id_a = store.create(&restricted).await.unwrap();
+
+        // audience None (public within the group).
+        let mut public = Memory::new(
+            MemoryType::Convention,
+            "rule b",
+            "content b",
+            Provenance::human(),
+        );
+        public.physical = vec!["src/b.rs".to_string()];
+        let id_b = store.create(&public).await.unwrap();
+
+        let new_id = consolidate_cluster_apply(&store, &[id_a, id_b], None)
+            .await
+            .unwrap();
+        let merged = store.get(&new_id).await.unwrap();
+
+        assert_eq!(
+            merged.audience,
+            Some(vec!["projX".to_string()]),
+            "merged memory must stay restricted to the restrictive source's audience"
+        );
+        assert!(
+            merged.physical.is_empty(),
+            "group-store consolidation must strip repo-relative physical scope"
+        );
     }
 
     #[tokio::test]

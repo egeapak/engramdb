@@ -114,6 +114,10 @@ pub async fn run_add(
     // mirrors how `--global` writes are ungated on the CLI.
     let store = if let Some(ref name) = group {
         let gid = engramdb::storage::paths::compute_group_id(name);
+        // Register the group in the registry so it is discoverable via
+        // `groups list`/`members` (open_group creates the store dir but never
+        // touches the roster). Idempotent upsert.
+        registry.create_group(name).await?;
         MemoryStore::open_group(&gid).await?
     } else if global {
         MemoryStore::open_global().await?
@@ -123,6 +127,16 @@ pub async fn run_add(
             Err(_) => MemoryStore::init(dir, registry).await?,
         }
     };
+
+    // `audience` only scopes a memory in a shared (group/global) store — it is
+    // never consulted for a project's own memories. Warn rather than silently
+    // persist an inert audience the user believes restricts visibility.
+    if !params.audience.is_empty() && group.is_none() && !global {
+        formatter.print_warning(
+            "--audience is ignored without --group or --global: a project-local memory is never \
+             audience-filtered. The memory will be created without audience scoping.",
+        );
+    }
 
     // Fail fast on an invalid summary BEFORE loading the embedding model.
     // Summary validation is config-driven but model-independent, so an
