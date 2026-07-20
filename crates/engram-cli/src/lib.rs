@@ -490,6 +490,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 commands::run_task_complete(&dir, global, &name, &formatter).await
             }
         },
+        Command::Config { top_tags, global } => {
+            commands::run_config(&dir, global, top_tags, &formatter).await
+        }
         Command::Stats {
             all_projects,
             global,

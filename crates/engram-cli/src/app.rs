@@ -662,6 +662,17 @@ pub enum Command {
         global: bool,
     },
 
+    /// Show effective config values, thresholds, and the store's top tags
+    Config {
+        /// Number of top tags to show (most-used first)
+        #[arg(long)]
+        top_tags: Option<usize>,
+
+        /// Show config for the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
+    },
+
     /// Show statistics
     Stats {
         /// Include the cross-project telemetry breakdown.
