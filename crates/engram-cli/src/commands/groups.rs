@@ -43,10 +43,10 @@ async fn group_memory_count(group_id: &str) -> Result<Option<usize>> {
     Ok(Some(store.count().await?))
 }
 
-/// Render a group's memory count for a human message: an explicit "0" when the
-/// store exists and is empty, "0 (not yet created)" when it has never been
-/// written, or "unreadable" when the store is corrupt (best-effort — the
-/// confirmation still proceeds).
+/// Render a group's memory count for a human message: "N memories" when the
+/// store exists, "0 memories (store not yet created)" when it has never been
+/// written, or an "unreadable" phrase when the store is corrupt (best-effort —
+/// the confirmation still proceeds).
 async fn describe_memory_count(group_id: &str) -> String {
     match group_memory_count(group_id).await {
         Ok(Some(n)) => format!("{n} {}", if n == 1 { "memory" } else { "memories" }),
@@ -105,13 +105,20 @@ pub async fn run_groups(
                     );
                 }
                 let count_desc = describe_memory_count(&gid).await;
+                let sharing = match subscriber_count {
+                    0 => "no other projects share it yet".to_string(),
+                    1 => "1 other project shares it".to_string(),
+                    n => format!("{n} other projects share it"),
+                };
                 formatter.print_warning(&format!(
                     "Subscribing project '{project_id}' to group '{name}' will fold {count_desc} \
                      into this project's queries, and let this project write to the group \
-                     (visible to all {} current subscriber(s)).",
-                    subscriber_count
+                     ({sharing})."
                 ));
-                if !prompter.confirm("Continue?", true).unwrap_or(false) {
+                // Default to declining (Enter aborts), matching the repo's other
+                // confirmations (`projects delete`/`prune`); `--yes` is the
+                // scripted path.
+                if !prompter.confirm("Continue?", false).unwrap_or(false) {
                     formatter.print_message("Aborted.");
                     return Ok(());
                 }
@@ -155,7 +162,9 @@ pub async fn run_groups(
                     "Unsubscribing will stop project '{project_id}' from seeing group '{name}'s \
                      {count_desc} in its queries. The group and its memories are not deleted."
                 ));
-                if !prompter.confirm("Continue?", true).unwrap_or(false) {
+                // Default to declining (Enter aborts), matching the repo's other
+                // confirmations (`projects delete`/`prune`).
+                if !prompter.confirm("Continue?", false).unwrap_or(false) {
                     formatter.print_message("Aborted.");
                     return Ok(());
                 }
@@ -203,7 +212,6 @@ pub async fn run_groups(
             let known = reg.groups.iter().any(|g| g.group_id == gid);
             drop(reg);
 
-            let count_desc = describe_memory_count(&gid).await;
             if !known {
                 formatter.print_message(&format!(
                     "Group '{name}' (id: {gid}) is not in the registry. Create it with \
@@ -212,6 +220,9 @@ pub async fn run_groups(
                 return Ok(());
             }
 
+            // Only counted for a known group (avoids a wasted store read on the
+            // unknown-group path above).
+            let count_desc = describe_memory_count(&gid).await;
             formatter.print_message(&format!("Group '{name}' (id: {gid}) holds {count_desc}."));
             if members.is_empty() {
                 formatter.print_hint("No projects are subscribed to this group yet.");
@@ -426,6 +437,58 @@ mod tests {
 
         let loaded = reg.load().await.unwrap();
         assert!(subscriptions_of(&loaded, &pid).is_empty());
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_declined_keeps_subscription() {
+        let dir = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let pid = registered_project(&reg, dir.path()).await;
+        let gid = compute_group_id("grp");
+        reg.create_group("grp").await.unwrap();
+        reg.subscribe(&pid, &gid).await.unwrap();
+
+        let prompter = MockPrompter::new(vec!["no"]);
+        run_groups(
+            dir.path(),
+            &reg,
+            GroupsCommand::Unsubscribe {
+                name: "grp".into(),
+                yes: false,
+            },
+            &prompter,
+            &fmt(),
+        )
+        .await
+        .unwrap();
+
+        let loaded = reg.load().await.unwrap();
+        assert!(
+            subscriptions_of(&loaded, &pid).iter().any(|g| g == &gid),
+            "declining must keep the subscription"
+        );
+    }
+
+    #[tokio::test]
+    async fn members_unknown_group_is_noop_without_prompt() {
+        let dir = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        registered_project(&reg, dir.path()).await;
+
+        // Group never created → the !known branch reports and returns; no prompt,
+        // no store read.
+        let prompter = MockPrompter::new(vec![]);
+        run_groups(
+            dir.path(),
+            &reg,
+            GroupsCommand::Members {
+                name: "never-made".into(),
+            },
+            &prompter,
+            &fmt(),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

@@ -635,6 +635,77 @@ impl RetrievalEngine {
         Ok(())
     }
 
+    /// Cross-store rerank **equalization** (P2, multi-project memories).
+    ///
+    /// When a merged result set is assembled from stores embedded with
+    /// *different* models (a project and a subscribed group whose embedding
+    /// fingerprints differ), their vector-derived scores are computed in
+    /// different spaces and are not directly comparable — the merged ranking can
+    /// be arbitrary across the store boundary. A single cross-encoder pass over
+    /// the merged union re-scores every entry with one model-agnostic scorer,
+    /// making the ranking comparable again. The caller runs this only when a
+    /// fingerprint actually differs (the same-fingerprint fast path skips it),
+    /// so it is not on the common query path.
+    ///
+    /// Unlike [`apply_rerank`], which reranks only the top `top_n` of a single
+    /// store's candidates, this reranks the **whole** `memories` union: a
+    /// foreign-store memory that landed low under its own model's scores could
+    /// be the genuinely best answer, so equalization must be able to lift it.
+    /// No-op (returns `Ok(false)`) when no reranker is configured/enabled or the
+    /// blend weight is zero — the caller then keeps the per-store scores.
+    /// Re-sorts by the blended score and truncates to `max`. Best-effort: the
+    /// caller treats an `Err` as "keep per-store scores".
+    pub async fn rerank_merged(
+        &self,
+        query_text: &str,
+        memories: &mut Vec<ScoredMemory>,
+        max: usize,
+    ) -> anyhow::Result<bool> {
+        let reranker = match &self.reranker {
+            Some(r) if self.config.rerank.enabled => Arc::clone(r),
+            _ => return Ok(false),
+        };
+        if memories.is_empty() {
+            return Ok(false);
+        }
+        let weight = self.config.rerank.weight.clamp(0.0, 1.0);
+        if weight < f64::EPSILON {
+            return Ok(false);
+        }
+
+        let documents: Vec<String> = memories
+            .iter()
+            .map(|sm| rerank_document(&sm.memory))
+            .collect();
+        let rerank_results = reranker.rerank(query_text, &documents).await?;
+
+        // Blend exactly as `apply_rerank`: original scores are in [0, 1], the
+        // cross-encoder logit is unbounded so squash it with a sigmoid, and skip
+        // any non-finite blend rather than scrambling the order.
+        for result in &rerank_results {
+            let idx = result.index;
+            if idx < memories.len() {
+                let raw_rerank = result.score as f64;
+                let norm_rerank = 1.0 / (1.0 + (-raw_rerank).exp());
+                let blended = (1.0 - weight) * memories[idx].score + weight * norm_rerank;
+                if !blended.is_finite() {
+                    continue;
+                }
+                memories[idx].score = blended;
+                memories[idx].score_breakdown.final_score = blended;
+                memories[idx].score_breakdown.rerank = Some(raw_rerank);
+            }
+        }
+
+        memories.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        memories.truncate(max);
+        Ok(true)
+    }
+
     /// Query memories with unified ranked / filtered retrieval.
     ///
     /// Two modes:

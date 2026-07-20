@@ -289,6 +289,56 @@ pub fn expected_embedding_fingerprint(config: &EngramConfig) -> Option<Embedding
     }
 }
 
+/// Read the embedding fingerprint stamped in a shared store's manifest.
+///
+/// `store_id` is a group id (`__g_…`) or the global store id
+/// (`GLOBAL_PROJECT_ID`); the path is resolved accordingly. Returns `None` when
+/// the store doesn't exist, has no manifest, or the manifest carries no
+/// fingerprint (a legacy/unstamped store — only `reindex` stamps one). One cheap
+/// manifest read, no store open (so it never creates the store).
+pub async fn shared_store_fingerprint(store_id: &str) -> Option<EmbeddingFingerprint> {
+    let store_dir = if crate::storage::paths::is_group_id(store_id) {
+        crate::storage::paths::group_store_dir(store_id).ok()?
+    } else {
+        crate::storage::paths::global_store_dir().ok()?
+    };
+    let manifest_path = crate::storage::paths::project_dir(&store_dir).join("manifest.toml");
+    crate::storage::manifest::load_manifest(&manifest_path)
+        .await
+        .ok()?
+        .embedding
+}
+
+/// Decide whether a cross-store fan-in warrants post-merge rerank
+/// **equalization** (P2, multi-project memories).
+///
+/// Returns `true` iff the project resolves an embedding model *and* at least one
+/// of `shared_store_ids` (subscribed group ids and/or the global store id) has a
+/// stamped fingerprint whose model or dimensions differ from the project's —
+/// i.e. that store's vectors live in a different space and its scores are not
+/// directly comparable. When every shared store either matches or is unstamped,
+/// this returns `false` (the same-fingerprint fast path: no extra cross-encoder
+/// pass). Conservative by design: an *unstamped* store does not trigger
+/// equalization (we can't prove drift; the `doctor` group check nudges a reindex
+/// instead), and a keyword-only project (no embedding model) never needs it
+/// because keyword scores are model-independent and already comparable.
+pub async fn cross_store_equalization_needed(
+    config: &EngramConfig,
+    shared_store_ids: &[String],
+) -> bool {
+    let Some(project_fp) = expected_embedding_fingerprint(config) else {
+        return false;
+    };
+    for id in shared_store_ids {
+        if let Some(store_fp) = shared_store_fingerprint(id).await {
+            if project_fp.model != store_fp.model || project_fp.dimensions != store_fp.dimensions {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Comparison of a store's stored embedding fingerprint vs the model in use.
 pub struct EmbeddingModelReport {
     pub status: EmbeddingModelStatus,

@@ -783,10 +783,18 @@ async fn check_subscribed_groups(dir: &Path) -> Vec<EnvironmentCheck> {
         return Vec::new();
     }
 
-    // The project's own expected embedding fingerprint — what its vectors use,
-    // and the yardstick each subscribed group is compared against. `None` when
-    // the project resolves no embedding model (keyword-only): then there is
-    // nothing to drift from, so we report readability only.
+    // The project's *expected* (config-derived) embedding fingerprint is the
+    // yardstick each subscribed group is compared against. We deliberately use
+    // expected rather than the project's *stored* manifest fingerprint: the
+    // common case is an untracked project store (only `reindex` stamps a
+    // fingerprint) that nonetheless embeds with the default model, and expected
+    // captures that where stored would be `None`. The one case this misses — a
+    // project whose stored vectors drifted from its config — is already
+    // hard-failed by `check_embedding_model_identity`, and using expected keeps
+    // this check consistent with the P2 equalizer
+    // (`cross_store_equalization_needed`), which is config-only. `None` here ⇒
+    // the project resolves no embedding model (keyword-only), so there is
+    // nothing to drift from and we report readability only.
     let config_path = dir.join(".engramdb").join("config.toml");
     let config = crate::storage::config::load_config_or_default(&config_path).await;
     let project_fp = super::expected_embedding_fingerprint(&config);
@@ -817,9 +825,12 @@ async fn check_one_group(
     let store_dir = match crate::storage::paths::group_store_dir(gid) {
         Ok(d) => d,
         Err(e) => {
+            // Advisory like every other branch here — a path-resolution failure
+            // must not flip the exit code (see the fn doc: cross-store issues
+            // never fail the project's own run).
             return EnvironmentCheck {
                 name: check_name,
-                passed: false,
+                passed: true,
                 message: format!("cannot resolve group store path: {e}"),
                 suggestion: None,
                 details: vec![],
@@ -2637,6 +2648,70 @@ mod tests {
             c.message.contains("no memories yet"),
             "uncreated group must read as empty, got: {}",
             c.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_subscribed_groups_warns_on_model_drift() {
+        use crate::storage::manifest::{load_manifest, save_manifest, EmbeddingFingerprint};
+        use crate::storage::RegistryBackend;
+        use crate::types::{Memory, MemoryType, Provenance};
+
+        let temp_dir = TempDir::new().unwrap();
+        let registry = crate::storage::FileRegistry::global().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        let pid = store.project_id.clone();
+
+        let gid = registry.create_group("drift-grp").await.unwrap();
+        registry.subscribe(&pid, &gid).await.unwrap();
+        let group = MemoryStore::open_group(&gid).await.unwrap();
+        group
+            .create(&Memory::new(
+                MemoryType::Convention,
+                "c",
+                "content",
+                Provenance::human(),
+            ))
+            .await
+            .unwrap();
+        drop(group);
+
+        // The project's expected fingerprint is the yardstick; stamp the group's
+        // manifest with a DIFFERENT model (same dimensions) to force a clean
+        // model Mismatch. Skip if this build resolves no embedding model
+        // (`--no-default-features`): then there's nothing to drift from.
+        let config_path = temp_dir.path().join(".engramdb").join("config.toml");
+        let config = crate::storage::config::load_config_or_default(&config_path).await;
+        let Some(project_fp) = crate::ops::expected_embedding_fingerprint(&config) else {
+            return;
+        };
+
+        let group_manifest = crate::storage::paths::project_dir(
+            &crate::storage::paths::group_store_dir(&gid).unwrap(),
+        )
+        .join("manifest.toml");
+        let mut m = load_manifest(&group_manifest).await.unwrap();
+        m.embedding = Some(EmbeddingFingerprint {
+            model: format!("{}-DIFFERENT", project_fp.model),
+            dimensions: project_fp.dimensions,
+            composition: project_fp.composition.clone(),
+        });
+        save_manifest(&group_manifest, &m).await.unwrap();
+
+        let checks = check_subscribed_groups(temp_dir.path()).await;
+        assert_eq!(checks.len(), 1);
+        let c = &checks[0];
+        // Drift is advisory — it must warn but never flip the exit code.
+        assert!(c.passed, "drift must not fail the run");
+        assert_eq!(c.status, Some(CheckStatus::Warn));
+        assert!(
+            c.message.contains("MODEL DRIFT"),
+            "expected a model-drift warning, got: {}",
+            c.message
+        );
+        assert!(
+            c.suggestion.is_some(),
+            "drift should suggest a realignment path"
         );
     }
 
