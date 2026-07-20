@@ -1177,6 +1177,7 @@ impl EngramDbServer {
                     .map(|p| engramdb::storage::EmbeddingFingerprint {
                         model: p.model_id(),
                         dimensions: p.dimensions(),
+                        composition: config.embeddings.composition_id(),
                     });
             let report = ops::embedding_model_report(&store, current).await;
             if !report.status.is_consistent() {
@@ -1286,6 +1287,7 @@ impl EngramDbServer {
                 .map(|p| engramdb::storage::EmbeddingFingerprint {
                     model: p.model_id(),
                     dimensions: p.dimensions(),
+                    composition: config.embeddings.composition_id(),
                 });
         Some((mode, ops::embedding_model_report(&store, current).await))
     }

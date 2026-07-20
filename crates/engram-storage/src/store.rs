@@ -2177,6 +2177,7 @@ mod tests {
         let fingerprint = manifest::EmbeddingFingerprint {
             model: "onnx/all-MiniLM-L6-v2-q".to_string(),
             dimensions: 384,
+            composition: None,
         };
         store
             .set_embedding_fingerprint(fingerprint.clone())
@@ -2588,6 +2589,7 @@ mod tests {
         let fingerprint = manifest::EmbeddingFingerprint {
             model: "onnx/race-test-model".to_string(),
             dimensions: 384,
+            composition: None,
         };
 
         let mut tasks = Vec::new();

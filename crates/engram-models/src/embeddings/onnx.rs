@@ -44,6 +44,27 @@ pub const ONNX_NOMIC_EMBED_TEXT: OnnxModelSpec = OnnxModelSpec {
     name: "nomic-embed-text-v1.5",
 };
 
+/// nomic-embed-text-v1.5 int8-quantized (same repo, `onnx/model_quantized.onnx`,
+/// ~131 MB vs ~522 MB fp32). Same 768-dim output and 8192 token context.
+/// Used by the embedding-quality benchmark matrix (`examples/embed_matrix.rs`).
+pub const ONNX_NOMIC_EMBED_TEXT_Q: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::NomicEmbedTextV15Q,
+    dimensions: 768,
+    max_tokens: 8192,
+    name: "nomic-embed-text-v1.5-q",
+};
+
+/// bge-small-en-v1.5 int8-quantized (`Qdrant/bge-small-en-v1.5-onnx-Q`,
+/// ~64 MB): retrieval-tuned English model, same 384 dims as MiniLM but a
+/// 512-token context. Candidate replacement for the default; benchmarked in
+/// `examples/embed_matrix.rs`.
+pub const ONNX_BGE_SMALL_EN_Q: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::BGESmallENV15Q,
+    dimensions: 384,
+    max_tokens: 512,
+    name: "bge-small-en-v1.5-q",
+};
+
 /// mxbai-embed-large-v1: 1024-dimensional, 512 token context.
 pub const ONNX_MXBAI_EMBED_LARGE: OnnxModelSpec = OnnxModelSpec {
     fastembed_model: EmbeddingModel::MxbaiEmbedLargeV1,

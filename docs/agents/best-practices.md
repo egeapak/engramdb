@@ -94,7 +94,7 @@ Facts usually need neither — they're verifiable against the repo directly.
 ## Sizing content
 
 - **`summary`** ≤ 200 chars by default (configurable via `[content].summary_max_chars`). Hard limit.
-- **`content`** ~500 tokens soft target. The semantic embedding is computed over `summary + content`. Longer content is **not** lost: it's split into ~`max_tokens`-sized chunks (256 by default) and every chunk is embedded and searched independently. Keep the main point in `content` and push bulk detail to `details` (which is not embedded) so retrieval stays focused rather than diluted across many chunks.
+- **`content`** ~500 tokens soft target. Each memory is embedded as a metadata vector (`"{title}. {summary}. tags: …"`) plus its content split into ~`max_tokens`-sized chunks (256 by default), every vector searched independently with the best match winning — so title/tags are semantically searchable and longer content is chunked rather than truncated. Keep the main point in `content` and push bulk detail to `details` (which is not embedded) so retrieval stays focused rather than diluted across many chunks. (`embeddings.metadata_vector = false` reverts to the legacy single `summary + content` embedding.)
 
 > These limits, the retrieval thresholds, and the store's most-used tags are all readable at runtime via the [`config`](./mcp-tools.md#config-read-only) tool — call it once at the start of a session rather than hard-coding the numbers above.
 - **`details`** anything longer. Lazy-loaded — only fetched when `detail_level: "full"`. Use for code snippets, long rationale, links.

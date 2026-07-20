@@ -81,6 +81,8 @@ provider = "onnx"              # "all-minilm" (384d) | "nomic-embed-text" (768d)
 dimensions = 384               # must match the provider
 max_tokens = 256               # truncate inputs longer than this
 reindex_on_model_change = "warn"   # "off" | "warn" | "auto" | "error"
+metadata_vector = true         # embed "{title}. {summary}. tags: ..." as an extra vector per memory
+                               # (toggling changes vector composition: run `engramdb reindex --embeddings-only`)
 # pool_size = 2                # independent embedding sessions; omit to auto-size (cores/2) in daemon/MCP, 1 in one-shot CLI
 
 [scope_proximity]

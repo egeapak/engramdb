@@ -1,0 +1,1390 @@
+{
+  "memories": [
+    {
+      "id": "m01",
+      "type": "decision",
+      "title": "Axum chosen over Actix-web",
+      "summary": "Orderflow API uses axum because tower middleware composes and the team knows tower.",
+      "content": "We chose axum over actix-web for the orderflow API. Axum builds directly on tower and hyper, so middleware like timeouts, rate limiting, and tracing compose as ordinary tower layers, and the team already knew tower from internal services. Actix-web's actor heritage and separate middleware model added concepts without adding capability for our workload.",
+      "tags": [
+        "rust",
+        "axum",
+        "http",
+        "framework"
+      ],
+      "logical": [
+        "orderflow.api"
+      ]
+    },
+    {
+      "id": "m02",
+      "type": "decision",
+      "title": "Access token TTL fifteen minutes",
+      "summary": "Access tokens live 15 minutes: fast revocation without a blacklist, negligible refresh load.",
+      "content": "Access tokens for the orderflow API live for 15 minutes, decided in the auth review. The tradeoff: shorter lifetimes mean revocation takes effect quickly (a disabled account is locked out within 15 minutes with no token blacklist infrastructure), while longer lifetimes reduce refresh traffic. At 15 minutes, refresh calls add about 2 rps at current scale, which is negligible. We rejected sliding expiration because it makes the worst-case revocation window unbounded for an active attacker. Service-to-service tokens are separate: those are minted per-request by the internal STS and live 60 seconds. If product ever asks for remember-me, the answer is a longer refresh token, never a longer access token.",
+      "tags": [
+        "jwt",
+        "auth",
+        "ttl",
+        "access-token"
+      ],
+      "logical": [
+        "orderflow.auth"
+      ]
+    },
+    {
+      "id": "m03",
+      "type": "hazard",
+      "title": "Refresh token rotation reuse hazard",
+      "summary": "Rotation revokes the whole token family on reuse; client retries can trip it, grace window added.",
+      "content": "Refresh tokens rotate on every use: each refresh call returns a new refresh token and invalidates the presented one, and presenting an already-used token is treated as theft, so the entire token family is revoked and the user must sign in again. The hazard: clients on flaky networks that time out and retry a refresh with the same token will trip reuse detection and log themselves out. The mobile team hit this in the field. Mitigation shipped server-side: a 10-second grace window during which replaying the immediately-previous token returns the same new token instead of revoking. Do not widen the window without security review, and never disable family revocation, because it is the only defense once a refresh token leaks.",
+      "tags": [
+        "jwt",
+        "refresh-token",
+        "rotation",
+        "reuse-detection"
+      ],
+      "logical": [
+        "orderflow.auth"
+      ]
+    },
+    {
+      "id": "m04",
+      "type": "convention",
+      "title": "Compile-time checked sqlx queries",
+      "summary": "Use sqlx::query_as!/query! macros only; CI builds with SQLX_OFFLINE=true from the .sqlx dir.",
+      "content": "Always use the sqlx::query_as! and query! macros so SQL is checked against the schema at compile time. Raw sqlx::query strings are only allowed inside migration tooling. CI builds with SQLX_OFFLINE=true against the committed .sqlx directory, so the pipeline never needs a live database.",
+      "tags": [
+        "sqlx",
+        "postgres",
+        "compile-time",
+        "macros"
+      ],
+      "logical": [
+        "orderflow.db"
+      ],
+      "code_dense": true
+    },
+    {
+      "id": "m05",
+      "type": "hazard",
+      "title": "Stale sqlx offline cache fix",
+      "summary": "'No cached data for query' means the offline cache is stale; run cargo sqlx prepare and commit.",
+      "content": "If the build fails with 'no cached data for this query' after changing any SQL, the offline cache is stale. Run cargo sqlx prepare --workspace against a running dev database and commit the regenerated .sqlx directory. Forgetting the commit breaks CI for everyone, since CI builds offline.",
+      "tags": [
+        "sqlx",
+        "offline-cache",
+        "postgres"
+      ],
+      "logical": [
+        "orderflow.db"
+      ],
+      "code_dense": true
+    },
+    {
+      "id": "m06",
+      "type": "decision",
+      "title": "Cache eviction policy allkeys-lru",
+      "summary": "Cache tier runs maxmemory 2gb with allkeys-lru; every key is re-derivable so eviction is safe.",
+      "content": "The cache tier runs with maxmemory 2gb and maxmemory-policy allkeys-lru. Everything we cache is re-derivable from Postgres, so evicting any key is always safe, and allkeys-lru lets hot keys win without us managing TTLs precisely. We rejected volatile-lru because a large fraction of our keys carry no TTL, leaving it nothing to evict, and we learned the hard way that the default noeviction policy turns memory pressure into write errors: an early incident where SETs started failing under load. Eviction metrics are exported; alert if evicted keys per second sustains above 1000, which means the working set no longer fits and the instance needs resizing.",
+      "tags": [
+        "redis",
+        "eviction",
+        "lru",
+        "maxmemory"
+      ],
+      "logical": [
+        "orderflow.cache"
+      ]
+    },
+    {
+      "id": "m07",
+      "type": "insight",
+      "title": "Redis pubsub silent message loss postmortem",
+      "summary": "A failover dropped pubsub subscribers silently; status fan-out moved to Kafka for replayability.",
+      "content": "For about forty minutes on a Tuesday evening, order status updates stopped reaching the notification service, and customers who had just paid saw their orders stuck in 'processing' even though fulfillment was proceeding normally. Support tickets spiked, but every dashboard for the API tier was green: request latency normal, error rate flat, queue depths nominal. That mismatch was the first clue that the failure was in the fan-out path, not the write path.\n\nThe fan-out at the time used Redis pub/sub. The order service published a small JSON payload to the order-status channel after each state transition, and the notification service held a subscriber connection. During the incident window our managed Redis performed an automatic failover from primary to replica. Pub/sub subscriptions do not survive a failover: the subscriber's connection was closed, the client library reconnected happily for regular commands, but the SUBSCRIBE was never re-issued because the reconnect hook only restored the command connection, not the subscriber state. Publishes went to a channel with zero listeners, and since pub/sub is fire-and-forget, Redis reported success to the publisher and dropped every message on the floor. There is no backlog, no offset, no redelivery.\n\nWe only detected it when a support lead escalated. Remediation during the incident was embarrassingly simple: restarting the notification service re-established the subscription and new updates flowed. But the forty minutes of missed transitions had to be replayed by a one-off script that diffed order states against notification history, which took the rest of the evening to write and verify.\n\nThe durable fix landed in three parts. First, status fan-out moved off pub/sub entirely and onto the existing Kafka topic for order events, which gives us replay and consumer offsets; pub/sub remains only for best-effort cache invalidation hints where loss is acceptable. Second, the subscriber wrapper now re-issues SUBSCRIBE inside the reconnect callback and increments a redis_resubscribe_total counter so we can alert on churn. A synthetic canary also publishes a heartbeat every 30 seconds, the notification service exports the age of the last heartbeat it saw, and that alarm pages at 120 seconds, so a repeat of this failure mode would be caught in about two minutes instead of forty. Third, the review found that slow subscribers were at risk of silent disconnection under load too: the server-side buffer cap for pub/sub clients was still at its default, so we raised client-output-buffer-limit pubsub to 64mb 16mb 60 to stop the server from killing subscribers during bursts.",
+      "tags": [
+        "redis",
+        "pubsub",
+        "outage",
+        "postmortem"
+      ],
+      "logical": [
+        "orderflow.cache"
+      ],
+      "fact_pos": "end"
+    },
+    {
+      "id": "m08",
+      "type": "convention",
+      "title": "Kafka topic naming scheme",
+      "summary": "Topics are orderflow.<domain>.<event>.v<N>; version bumps only on breaking schema changes.",
+      "content": "Kafka topic names follow orderflow.<domain>.<event>.v<N>, for example orderflow.payments.captured.v1. The version suffix bumps only on breaking schema changes; additive Avro fields stay on v1. Consumers must tolerate unknown fields for exactly this reason.",
+      "tags": [
+        "kafka",
+        "naming",
+        "topics",
+        "avro"
+      ],
+      "logical": [
+        "orderflow.events"
+      ]
+    },
+    {
+      "id": "m09",
+      "type": "insight",
+      "title": "Settlement consumer lag rebalance storm",
+      "summary": "Slow per-record I/O in the poll loop caused a rebalance livelock; bounded batches fixed it.",
+      "content": "The settlement consumer fell four million messages behind over a weekend, yet the pods looked healthy. Lag on orderflow.payments.captured.v1 had crept up since Friday's release, and by Monday the group sat in a permanent rebalance loop: join, get partitions, process briefly, get kicked, rejoin. The release had added a per-record enrichment call to the payment provider's API inside the poll loop, each call taking 150 to 400 milliseconds.\n\nWith the default fetch size a single poll returned hundreds of records, so one loop iteration could take several minutes. The broker's liveness rule is unforgiving: exceed kafka.consumer.max.poll.interval.ms and the coordinator declares the consumer dead, revokes its partitions, and triggers a rebalance. Our processing blew past the default five minutes, so each pod was repeatedly declared dead mid-batch, its work redone by the next assignee, which was then also declared dead. The group burned CPU reprocessing the same records while making no progress: a classic livelock. We stabilized it by pausing enrichment behind a config flag to drain the backlog overnight, then made the calls concurrent within each batch, bounded by a tokio::sync::Semaphore of 32 in-flight requests. The lasting fix bounds both time and volume: max.poll.interval.ms went up to 600000, and OF_CONSUMER_MAX_POLL_RECORDS=50 now caps records per poll so the worst-case iteration stays near thirty seconds even when the provider degrades to its SLA ceiling. The env var maps onto the max-records setting in our consumer wrapper (src/events/consumer.rs) and is set per-deployment in helm/values-prod.yaml, never in code.\n\nTwo monitoring gaps made this worse than it needed to be. Lag alerting keyed on absolute lag with a threshold so high it only fired Sunday night; it now also alerts on the lag derivative, any group growing for 30 minutes straight. And we had no metric for time per poll iteration, which would have pointed at the cause immediately; the wrapper now exports poll_loop_duration_seconds as a histogram. The rule of thumb we wrote down: never do unbounded-latency I/O inside the poll loop without a bound on records per poll, because the failure mode is not slowness, it is a rebalance storm that looks exactly like healthy pods doing nothing at all.",
+      "tags": [
+        "kafka",
+        "consumer-lag",
+        "rebalance",
+        "postmortem"
+      ],
+      "logical": [
+        "orderflow.events"
+      ],
+      "fact_pos": "straddle",
+      "code_dense": true
+    },
+    {
+      "id": "m10",
+      "type": "decision",
+      "title": "Twelve partitions for orders topic",
+      "summary": "Orders topic has 12 partitions keyed by order_id, oversized because repartitioning breaks ordering.",
+      "content": "orderflow.orders.placed.v1 has 12 partitions, keyed by order_id so all events for one order stay ordered on one partition. We sized for roughly twice the consumer parallelism we expect at projected peak: partition count is effectively a ceiling on consumer instances, and increasing it later on a keyed topic breaks the key-to-partition mapping, so historical events for an order would interleave with new ones. We deliberately oversized upfront rather than plan a repartition. The same reasoning makes 12 the default for new keyed topics unless a throughput estimate justifies otherwise. Replication factor 3, min.insync.replicas 2, and acks=all for anything that feeds money movement.",
+      "tags": [
+        "kafka",
+        "partitions",
+        "throughput",
+        "ordering"
+      ],
+      "logical": [
+        "orderflow.events"
+      ]
+    },
+    {
+      "id": "m11",
+      "type": "hazard",
+      "title": "Stripe webhooks need raw body",
+      "summary": "Verify webhook signatures against raw body bytes; Json extractor re-serialization breaks the HMAC.",
+      "content": "Stripe webhook signature verification must run against the raw request body bytes. Axum's Json extractor consumes and re-serializes the body, which changes key order and whitespace and breaks the HMAC comparison. Use bytes::Bytes in the handler, verify the signature header first, and only then deserialize.",
+      "tags": [
+        "stripe",
+        "webhooks",
+        "signature",
+        "hmac"
+      ],
+      "logical": [
+        "orderflow.payments"
+      ]
+    },
+    {
+      "id": "m12",
+      "type": "decision",
+      "title": "Payment idempotency design and environments",
+      "summary": "Idempotency keys plus a reconciliation job guarantee at-most-once charging across retries.",
+      "content": "Charging a customer exactly once is the single most important invariant in orderflow, so the payment path is built around idempotency at every hop rather than trusting any one component. This memory records the design and the operational switches around it.\n\nEvery checkout attempt mints an idempotency key of the form order_id:attempt_seq, stored in the payment_intents table before we ever call the processor. The same key is passed to Stripe in the Idempotency-Key header, so a network timeout followed by a client retry replays the same logical request and Stripe returns the original result instead of creating a second charge. The attempt sequence only increments when a human or the retry policy deliberately starts a new attempt (card declined, user switched cards); it never increments on transport-level retries. On our side, the payment_intents row acts as a write-ahead record: state transitions from created to submitted to confirmed or failed are compare-and-swap updates, so two racing workers cannot both submit. If we crash between submitting and recording confirmation, a reconciliation job runs every ten minutes, lists recent charges from the processor, and heals any intent stuck in submitted for more than fifteen minutes by querying the charge status rather than resubmitting.\n\nRefunds follow the same pattern with their own key family, order_id:refund:seq, because reusing the charge key would collide with the original request inside the processor's dedupe window.\n\nAlternatives we rejected: relying solely on Stripe's dedupe, because their idempotency window is 24 hours and our reconciliation horizon is longer; and a distributed lock around checkout, which adds a dependency and still does not survive a crash after submit. The key-plus-reconciliation design, implemented in src/payments/intent.rs and src/payments/reconcile.rs, has run for a year without a confirmed double charge.\n\nEnvironment handling matters here more than anywhere else in the codebase. All non-production deployments talk to Stripe test mode with keys sourced from the of-payments-sandbox secret; production pods mount of-payments-live. The service refuses to boot if the key prefix (sk_test_ versus sk_live_) disagrees with the deployment environment label, a guard that has caught two misconfigured staging rollouts. The reconciliation job always runs read-only against whichever mode the pod is keyed for, so it is safe everywhere. For local development the sandbox is always the default, and there is exactly one escape hatch, deliberately an obscure env var rather than a config file entry so nobody enables it by accident: setting OF_STRIPE_SANDBOX_DISABLED=1 makes the service load live-mode keys and forces the confirmation step to require a second interactive approval.",
+      "tags": [
+        "stripe",
+        "payments",
+        "idempotency",
+        "exactly-once"
+      ],
+      "logical": [
+        "orderflow.payments"
+      ],
+      "fact_pos": "end",
+      "code_dense": true
+    },
+    {
+      "id": "m13",
+      "type": "fact",
+      "title": "Production Postgres sizing and pools",
+      "summary": "RDS Postgres 15; each pod's PgPool caps at 40 connections, 6 replicas, RDS max 500.",
+      "content": "Production Postgres is RDS db.r6g.2xlarge running Postgres 15. Each API pod holds a sqlx PgPool capped at 40 connections; with 6 replicas that leaves comfortable headroom under the RDS max_connections of 500, including migrations and ad-hoc sessions.",
+      "tags": [
+        "postgres",
+        "rds",
+        "connection-pool"
+      ],
+      "logical": [
+        "orderflow.db"
+      ]
+    },
+    {
+      "id": "m14",
+      "type": "hazard",
+      "title": "Postgres NOT NULL migration locks orders table",
+      "summary": "Adding a required column takes a table lock; go nullable, backfill, then validate the constraint.",
+      "content": "Adding a required column to the orders table is the classic way to take checkout down. On Postgres 15 the table rewrite is no longer the problem, since a constant default is metadata-only, but the schema change still needs a heavyweight table lock for a moment, and if it queues behind one long-running query, every subsequent read and write on orders queues behind it. The deploy pattern: add the column as nullable, backfill in batches of 10,000 rows with pauses, then add the constraint using NOT VALID plus a separate VALIDATE step. Always set a short per-statement lock timeout in schema-change sessions so a blocked change fails fast and retries off-peak instead of stalling live traffic.",
+      "tags": [
+        "postgres",
+        "migrations",
+        "ddl",
+        "access-exclusive-lock"
+      ],
+      "logical": [
+        "orderflow.db"
+      ]
+    },
+    {
+      "id": "m15",
+      "type": "insight",
+      "title": "Checkout deadlocks under flash-sale load",
+      "summary": "Checkout and restock locked stock rows in opposite orders; sorted acquisition ended the deadlocks.",
+      "content": "Under the spring flash-sale load, checkout requests began failing in bursts of five to ten, all within the same second, a few times an hour. The API surfaced them as 500s, and the database logs showed SQLSTATE 40P01, deadlock detected: two processes each waiting on a row the other already held, until the detector killed one. The bursts lined up exactly with the hourly restock job's schedule, which was the first real lead.\n\nThe two participants were always the same pair of code paths. Checkout reserved inventory by updating stock rows for each line item in cart order, meaning whatever order the customer happened to add items. The restock job updated the same stock rows in warehouse-feed order. When a two-item checkout ran while restock touched the same two SKUs in the opposite order, each transaction grabbed one row and waited forever on the other until the detector broke the tie by killing one of them.\n\nThe fix had three layers. The structural one: every code path that updates multiple stock rows now sorts the SKUs lexicographically first, so lock acquisition order is globally consistent and the cycle cannot form at all. The tactical one: the restock worker consumes its queue with SELECT ... FOR UPDATE SKIP LOCKED, so instead of queueing behind a checkout it skips the contended row and circles back on the next pass; restock is eventually-consistent by nature, so skipping is free. And the safety net: no transaction is allowed to wait unboundedly anymore, because lock_timeout is set to 4s via ALTER ROLE orderflow_app, turning a pathological queue into a fast, retryable failure instead of a pile-up. The API layer retries deadlock and lock-timeout failures up to three times with jitter, so the remaining rare collisions became invisible retries.\n\nTwo things we learned that were not obvious from the docs. First, the deadlock detector only wakes after deadlock_timeout, one second by default, so every deadlock costs at least a second of held locks for everything queued behind either participant; the blast radius is much bigger than the two transactions involved. Second, ORDER BY in a subquery does not guarantee UPDATE lock order across plans; we had a fix that sorted in SQL and still deadlocked because the planner rewrote it. The reliable pattern is locking rows explicitly in a sorted loop or using SKIP LOCKED semantics. A regression test now runs twenty concurrent tasks hammering two SKUs in mixed order for five seconds and asserts zero deadlock errors reach the API layer; it caught one reintroduction within a month.",
+      "tags": [
+        "postgres",
+        "deadlock",
+        "locking",
+        "transactions"
+      ],
+      "logical": [
+        "orderflow.db"
+      ],
+      "fact_pos": "start",
+      "code_dense": true
+    },
+    {
+      "id": "m16",
+      "type": "convention",
+      "title": "Error handling layering convention",
+      "summary": "thiserror in library crates, anyhow in the binary, one IntoResponse mapping to problem+json.",
+      "content": "Library crates return thiserror enums; the binary uses anyhow with context. At the HTTP boundary every error maps to an RFC 7807 problem+json response through a single IntoResponse impl. Handlers never construct status codes ad hoc, so error shape stays consistent across the API.",
+      "tags": [
+        "rust",
+        "errors",
+        "problem-details",
+        "conventions"
+      ],
+      "logical": [
+        "orderflow.api"
+      ]
+    },
+    {
+      "id": "m17",
+      "type": "decision",
+      "title": "Zero-downtime rolling deploy settings",
+      "summary": "maxSurge 1, maxUnavailable 0, deep readiness, trivial liveness, preStop sleep 5 for LB drain.",
+      "content": "Deploys use rolling updates with maxSurge 1 and maxUnavailable 0: one new pod comes up, must pass readiness, then one old pod drains. Readiness at /healthz/ready verifies Postgres and Kafka connectivity so a pod that cannot serve never joins the load balancer. Liveness at /healthz/live is a trivial in-process check, deliberately, because tying liveness to dependencies turns a database blip into a cluster-wide restart storm. Every pod has a preStop sleep of 5 seconds so endpoint removal propagates before the process receives SIGTERM. This combination is why deploys drop zero requests; do not speed up rollouts by raising maxUnavailable without understanding what it trades away.",
+      "tags": [
+        "kubernetes",
+        "deploy",
+        "rolling-update",
+        "probes"
+      ],
+      "logical": [
+        "orderflow.infra"
+      ]
+    },
+    {
+      "id": "m18",
+      "type": "insight",
+      "title": "OOMKilled checkout pods postmortem",
+      "summary": "Checkout pods died with exit code 137; allocator arena fragmentation, not a leak, was the cause.",
+      "content": "Checkout pods began restarting during the evening peak, two or three per hour, each restart taking a handful of in-flight requests with it. kubectl described the terminations as exit code 137, which means the kernel's cgroup enforcement killed the process for exceeding its memory limit: not a panic, not a crash loop, just steady growth until the ceiling.\n\nThe confusing part was that heap profiling showed nothing wrong. Our own allocations plateaued around 180MB regardless of load. Yet container RSS climbed continuously through the day, from about 250MB at deploy to past the limit after eight or nine hours of traffic. Classic slow-leak shape, but no leak anywhere in the heap profile, which stalled the investigation for two days.\n\nThe gap between heap and RSS pointed at the allocator. We run glibc malloc, and glibc creates up to eight arenas per CPU core to reduce contention; on our four-core nodes that is up to 32 arenas, each of which grows its own free lists and rarely returns memory to the kernel. Tokio's work-stealing runtime makes it worse: allocations migrate across worker threads, so freed chunks land in different arenas than they were allocated from, and fragmentation compounds. The memory was not leaked, it was stranded in arena free lists, invisible to the heap profiler because from the application's point of view it was already free.\n\nWe validated the theory in staging by replaying an afternoon of production traffic: default settings reproduced the climb, and capping arenas flattened it almost completely. Follow-ups worth knowing about before the fix itself: we evaluated switching to jemalloc, which handles this fragmentation pattern better out of the box, and it sits on the backlog behind a benchmark. The container dashboard now graphs RSS alongside heap so divergence is visible at a glance. And an alert fires when any pod's RSS crosses 85 percent of its limit for 15 minutes, which would have surfaced this weeks earlier, when the growth first started, instead of at the point where the kills began.\n\nThe fix that shipped has two parts. MALLOC_ARENA_MAX=2 is now set in the deployment env for every Rust service, which cut steady-state RSS by roughly 40 percent and eliminated the growth trend entirely. And because headroom beats cleverness, the checkout deployment's memory limit went from 512Mi to 768Mi with the request set equal to the limit, so the scheduler reserves what the ceiling allows, the pod is never the node's preferred eviction victim, and the QoS class stays Guaranteed.",
+      "tags": [
+        "kubernetes",
+        "memory",
+        "oom",
+        "postmortem"
+      ],
+      "logical": [
+        "orderflow.infra"
+      ],
+      "fact_pos": "end"
+    },
+    {
+      "id": "m19",
+      "type": "fact",
+      "title": "Staging cluster and namespace",
+      "summary": "Staging is the blue-fin EKS cluster, namespace of-staging; auto-deploy on merge to main.",
+      "content": "Staging runs in the blue-fin EKS cluster, namespace of-staging. Deploys go out automatically on merge to main; production requires a manual promote step in the deploy workflow, gated on the staging smoke suite.",
+      "tags": [
+        "kubernetes",
+        "staging",
+        "eks",
+        "environments"
+      ],
+      "logical": [
+        "orderflow.infra"
+      ]
+    },
+    {
+      "id": "m20",
+      "type": "convention",
+      "title": "Required tracing span fields",
+      "summary": "All services log via tracing with JSON output; request spans must carry order_id and request_id.",
+      "content": "All services log through the tracing crate with the JSON subscriber. Every request span must carry order_id and request_id fields; dashboards and alerts key off those two, so a span missing order_id is effectively invisible to on-call tooling. The span macros in of-telemetry enforce the fields at compile time, so use those instead of raw tracing::info_span.",
+      "tags": [
+        "tracing",
+        "structured-logging",
+        "observability",
+        "json-logs"
+      ],
+      "logical": [
+        "orderflow.api"
+      ],
+      "code_dense": true
+    },
+    {
+      "id": "m21",
+      "type": "hazard",
+      "title": "Redis cache stampede on cold deploy",
+      "summary": "Post-deploy cold cache sent concurrent misses to Postgres; coalescing, jitter, and warming fixed it.",
+      "content": "Twice after deploys, the read replicas went to 100 percent CPU: a fresh release invalidates the hot cache entries, and thousands of concurrent requests all miss the same handful of keys and recompute against Postgres simultaneously, the classic dogpile. Mitigations, all now in place: request coalescing in the app so only one recompute per key is in flight while other callers wait on it; TTL jitter of plus or minus 10 percent so entries stop expiring in synchronized waves; and the release pipeline warms the 50 hottest keys before pods take traffic. If you add a new expensive cached query, wire it through the coalescing helper in cache::coalesce. Bypassing the helper quietly reintroduces the failure mode.",
+      "tags": [
+        "redis",
+        "thundering-herd",
+        "singleflight",
+        "dogpile"
+      ],
+      "logical": [
+        "orderflow.cache"
+      ]
+    },
+    {
+      "id": "m22",
+      "type": "decision",
+      "title": "Public endpoint rate limiting",
+      "summary": "tower_governor throttles public endpoints at 100 req/min per IP; internal traffic bypasses.",
+      "content": "Public endpoints are throttled to 100 requests per minute per source IP using tower_governor as a layer. Internal service-to-service traffic bypasses the limiter via the mTLS identity header. We chose the in-process layer over an Envoy sidecar so the limits live in code review next to the routes they protect.",
+      "tags": [
+        "rate-limiting",
+        "tower-governor",
+        "throttling"
+      ],
+      "logical": [
+        "orderflow.api"
+      ]
+    },
+    {
+      "id": "m23",
+      "type": "insight",
+      "title": "Axum body extractor ordering",
+      "summary": "Exactly one body-consuming extractor per handler and it must be the last argument.",
+      "content": "Lost half a day to 'the trait bound is not satisfied' on a handler that compiled fine before gaining a parameter. The rule: in axum, exactly one extractor may consume the request body (Json, Bytes, Multipart, String) and it must be the final argument of the handler, because everything after it would need a body that is already gone. Path, Query, State, and header extractors go first, body extractor last. The compiler error never says this; it points at the handler signature with an opaque trait bound. Escape hatch: put #[debug_handler] on any handler that will not compile and the diagnostic becomes readable prose that names the offending argument.",
+      "tags": [
+        "axum",
+        "extractors",
+        "handlers",
+        "debugging"
+      ],
+      "logical": [
+        "orderflow.api"
+      ]
+    },
+    {
+      "id": "m24",
+      "type": "fact",
+      "title": "Kafka cluster runs on MSK",
+      "summary": "AWS MSK, 3 brokers across AZs, TLS everywhere, IAM auth; bootstrap via of-kafka-bootstrap alias.",
+      "content": "The Kafka cluster is AWS MSK with three brokers spread across availability zones, TLS on every listener, and IAM authentication so there are no SASL/SCRAM secrets to rotate. Broker endpoints resolve through the of-kafka-bootstrap Route53 alias, never hardcoded broker hostnames.",
+      "tags": [
+        "kafka",
+        "msk",
+        "iam",
+        "infra"
+      ],
+      "logical": [
+        "orderflow.events"
+      ]
+    },
+    {
+      "id": "m25",
+      "type": "hazard",
+      "title": "Token clock skew tolerance",
+      "summary": "Fast device clocks made fresh tokens look not-yet-valid; validation allows 30 seconds tolerance.",
+      "content": "Signed auth tokens were intermittently rejected as not-yet-valid, clustered heavily on mobile. Root cause: handset clocks drift, and some devices sat several seconds fast, so a freshly issued token's nbf and iat claims appeared to be in the future and validation refused it. Support tickets showed an instant 401 right after successful authentication, impossible to reproduce from NTP-synced desks. The validator now allows 30 seconds of tolerance on nbf and iat, and the same 30 seconds past exp, no more. Roughly half a percent of mobile authentications were failing this way before the change. If it recurs, check whether a new client platform validates with its own stricter defaults.",
+      "tags": [
+        "jwt",
+        "clock-skew",
+        "leeway",
+        "nbf"
+      ],
+      "logical": [
+        "orderflow.auth"
+      ]
+    },
+    {
+      "id": "m26",
+      "type": "decision",
+      "title": "Transactional outbox for domain events",
+      "summary": "Events are written to outbox_events in the same transaction as domain rows; a dispatcher publishes.",
+      "content": "Early on, the order service wrote to Postgres and then published the corresponding event to Kafka as two separate steps, and we paid for it twice in one quarter. Once, a pod died between the insert and the publish, so an order existed with no event and the fulfillment pipeline never picked it up. The reverse also happened: the publish succeeded, then the surrounding transaction rolled back on a constraint violation, and downstream consumers processed an event for an order that did not exist. Both incidents were small in customer impact and large in engineering hours, because reconciling ghost events against real rows is miserable detective work.\n\nThe decision: all domain events now go through a transactional outbox. Handlers insert the event payload into the outbox_events table in the same Postgres transaction that mutates the domain tables. Commit means the state change and its event are durable together; rollback means neither exists. No event can ever describe a state that was not committed, and no committed state can silently miss its event.\n\nA dispatcher task owns the publish side. It reads unsent rows in insertion order, publishes them to Kafka with the aggregate id as the partition key to preserve per-order ordering, and marks rows sent only after the broker acks. At-least-once is the contract, since a crash between ack and mark re-publishes, so every consumer must be idempotent, which Kafka semantics already required of them anyway. A weekly job deletes sent rows older than 14 days, keeping the table small enough that the unsent scan stays comfortably on an index.\n\nOne operational note: the dispatcher exports outbox_unsent_rows and outbox_oldest_unsent_seconds. The second one is the alarm that matters. Age growing while volume looks normal means publishing is stuck, and that is precisely the condition the old two-step design could never even detect.\n\nWe considered CDC with Debezium instead: tailing the WAL avoids polling entirely and is the textbook answer at larger scale. We rejected it for now because it adds Kafka Connect as a new stateful piece of infrastructure with its own failure modes and upgrade treadmill, for a throughput we can trivially handle in-process. If we ever sustain more than a few thousand events per second, revisit that call; the outbox schema was designed to be CDC-compatible, so migrating is a dispatcher swap, not a rewrite. Meanwhile the polling knobs stay deliberately boring and live in the environment: the dispatcher wakes every OF_OUTBOX_POLL_MS=200 milliseconds and drains up to 500 rows per cycle, which clears our worst observed burst in under three seconds while keeping idle database load negligible.",
+      "tags": [
+        "kafka",
+        "outbox",
+        "postgres",
+        "consistency"
+      ],
+      "logical": [
+        "orderflow.events"
+      ],
+      "fact_pos": "end"
+    },
+    {
+      "id": "m27",
+      "type": "insight",
+      "title": "Black Friday load test findings",
+      "summary": "Load test at 6x peak reshaped capacity plans: pool limits, pre-scaling, queue-depth alarms.",
+      "content": "If you remember one number from the Black Friday load test, make it this: OF_ORDER_QUEUE_DEPTH_ALARM=5000 is the pager threshold in the intake service, because queue depth, not latency, turned out to be the leading indicator of overload. How we got there: we load-tested the full checkout path six weeks before Black Friday, and the exercise changed half the capacity plan, which is the strongest argument for repeating it every year. The k6 scenario replayed anonymized production traffic shapes at two, four, and six times the previous year's peak against the staging cluster scaled to production spec, with the payment processor in test mode and a synthetic bank-latency injector in front of it.\n\nFinding one: the API tier was not the bottleneck, the database connection pools were. At four times peak, p99 latency jumped from 210 milliseconds to over three seconds while API CPU sat at 40 percent. Pods were queueing on the sqlx pool. The pool cap per pod times replica count had been tuned for normal traffic against the RDS connection ceiling; under aggressive horizontal scale-out the arithmetic inverted, and adding pods made contention worse. For the sale window we resize to fewer, larger pods instead of raising the global connection budget.\n\nFinding two: autoscaling reacts too slowly for a cliff-shaped ramp. HPA on CPU with the default stabilization window took four minutes to double capacity, and the queue that built during those minutes took another ten to drain. We now pre-scale ahead of announced sale windows with a scheduled scaler, and HPA is the backstop rather than the plan: maxReplicas went from 12 to 24, and the scale-up stabilization window drops to 30 seconds under the sale profile.\n\nFinding three is the queue-depth story from the opening line. In every single run, the order intake queue's depth started climbing about ninety seconds before p99 crossed the SLO, so depth became the primary sale-day alarm; at the 5000 threshold there is still roughly two minutes of headroom to act before customers feel anything. The runbook's first action at that alarm is shedding non-critical load, recommendation refreshes and receipt re-renders, via the priority flag, which bought back 30 percent capacity in the drill.\n\nNumbers worth remembering from the final six-times run after all fixes: p99 checkout latency 340 milliseconds against a 350 millisecond target, zero capacity-caused 5xx, database CPU peaking at 71 percent, intake queue never above 1800. The gap analysis lists the two scenarios we did not test, a payment provider brownout and a mid-sale deploy, and both are on next year's list. The staging scale-up cost about 900 dollars for the window, which the first prevented incident repays a few hundred times over.",
+      "tags": [
+        "load-testing",
+        "k6",
+        "capacity",
+        "hpa"
+      ],
+      "logical": [
+        "orderflow.infra"
+      ],
+      "fact_pos": "start"
+    },
+    {
+      "id": "m28",
+      "type": "decision",
+      "title": "Vite over webpack for dashly",
+      "summary": "Dashly builds with Vite; dev server cold start dropped from 40s to under 2s.",
+      "content": "Dashly is built with Vite rather than webpack or CRA. Dev server cold start went from about 40 seconds to under 2, and the plugin surface we need (React, SVGR, bundle visualizer) is first-party or actively maintained. The esbuild-based transform pipeline is also what keeps CI typecheck and build times sane.",
+      "tags": [
+        "vite",
+        "build",
+        "react",
+        "tooling"
+      ],
+      "logical": [
+        "dashly.build"
+      ]
+    },
+    {
+      "id": "m29",
+      "type": "convention",
+      "title": "tRPC router organization",
+      "summary": "One router per domain under src/server/routers, merged in root.ts; verb-first procedure names.",
+      "content": "tRPC routers live one-per-domain under src/server/routers (orders.ts, flags.ts, analytics.ts) and are merged in root.ts. Procedures are named verb-first: listOrders, getFlag, exportReport. No router may import another router; shared logic goes in src/server/services instead.",
+      "tags": [
+        "trpc",
+        "routers",
+        "conventions"
+      ],
+      "logical": [
+        "dashly.api"
+      ]
+    },
+    {
+      "id": "m30",
+      "type": "hazard",
+      "title": "Invalidate queries after tRPC mutations",
+      "summary": "React Query stays stale after mutations unless onSuccess invalidates the affected queries.",
+      "content": "React Query does not know a tRPC mutation changed server data. After a mutation succeeds you must invalidate the affected queries yourself: const utils = trpc.useUtils(), then utils.orders.list.invalidate() in onSuccess. We shipped a bug where the orders table kept showing deleted rows until a page refresh because the delete mutation invalidated nothing. Convention now: every mutation's onSuccess must either invalidate the queries it affects or perform a typed optimistic update with rollback in onError; silent mutations get rejected in review. Beware the interaction with refetchOnWindowFocus, which papers over missing invalidations in dev, because you alt-tab and it refetches. That is exactly how these bugs reach staging looking fine.",
+      "tags": [
+        "trpc",
+        "react-query",
+        "cache-invalidation"
+      ],
+      "logical": [
+        "dashly.api"
+      ],
+      "code_dense": true
+    },
+    {
+      "id": "m31",
+      "type": "decision",
+      "title": "Playwright chosen over Cypress",
+      "summary": "WebKit coverage, free parallel sharding, and trace recording decided the e2e framework choice.",
+      "content": "We chose Playwright over Cypress for dashly's e2e suite. Deciding factors: WebKit coverage, since a meaningful share of checkout traffic is Safari and Cypress cannot drive it; free built-in parallelization with sharding, where Cypress gates parallel runs behind its paid dashboard; first-class trace recording for post-hoc debugging of CI failures; and native TypeScript without a bundling detour. Cypress's interactive runner is genuinely nicer for authoring, which we accepted losing. Multi-tab and iframe scenarios, which our OAuth and payment flows both need, are supported directly rather than fought. Migrating the existing 40 Cypress specs took one sprint using a codemod for common patterns and hand-porting the rest.",
+      "tags": [
+        "playwright",
+        "cypress",
+        "e2e",
+        "testing"
+      ],
+      "logical": [
+        "dashly.testing"
+      ]
+    },
+    {
+      "id": "m32",
+      "type": "hazard",
+      "title": "Playwright retry flakiness on checkout spec",
+      "summary": "The checkout spec failed intermittently in CI from expiring shared auth state and cart collisions.",
+      "content": "The checkout spec became the least trusted file in the e2e suite: it failed on roughly 8 percent of CI runs, always passed on a second attempt, and never failed locally. Because CI re-ran failing specs twice, the suite stayed green and the problem stayed invisible until someone graphed first-attempt failures and found the checkout spec alone accounted for most of them. Automatic re-runs are painkillers, not cures; that graph is now a standing dashboard. Recorded traces from genuine failed attempts showed two distinct failure modes tangled together.\n\nIn the first mode, the test began normally and then, somewhere mid-flow, a request came back 302 to /login and every later assertion failed with elements not found. That was an auth-lifetime problem: the suite logs in once in a setup project and writes the session to a storage state file that all workers reuse, and on long CI runs the file written at minute zero was still being used at minute seventy by the last shard, well past the backend session cookie's lifetime. The fix keeps the artifact fresh: setup now checks the file's age and regenerates it once it is older than STORAGE_STATE_TTL_MIN=90, comfortably inside the backend's two-hour session window, and each shard runs setup independently instead of sharing one artifact across the whole matrix.\n\nIn the second mode, the cart page showed items the test never added, and totals assertions failed with amounts from nowhere. That was a shared-fixture problem: all workers authenticated as the same seeded user, so parallel specs mutated one cart concurrently, worker A's add-to-cart landing between worker B's add and its assert. The fix was worker-scoped accounts, where the seed script provisions e2e-user-{workerIndex} and a fixture hands each worker its own credentials, plus serial execution within the checkout describe block, since those specs intentionally share cart state from step to step.\n\nFirst-attempt pass rate went from 92 to 99.8 percent over the following month, and the global re-run allowance dropped from two to one, with an eye toward zero. The lesson written on the wall: a spec that only fails in CI is almost always an environment-lifetime or shared-state problem, and the recorded trace of one genuine failed attempt is worth more than any amount of local reproduction effort.",
+      "tags": [
+        "playwright",
+        "flaky",
+        "e2e",
+        "storage-state"
+      ],
+      "logical": [
+        "dashly.testing"
+      ],
+      "fact_pos": "straddle"
+    },
+    {
+      "id": "m33",
+      "type": "convention",
+      "title": "Running e2e tests locally",
+      "summary": "pnpm e2e:local builds, serves the prod bundle on 4173, seeds the test db, opens the UI runner.",
+      "content": "Run the e2e suite locally with pnpm e2e:local. It builds the app, serves the production bundle on port 4173 via vite preview, seeds the test database, and opens the interactive UI runner. Use pnpm e2e:headless for the CI-equivalent run, and pnpm e2e:local --grep checkout to scope to one area.",
+      "tags": [
+        "e2e",
+        "playwright",
+        "local-dev",
+        "scripts"
+      ],
+      "logical": [
+        "dashly.testing"
+      ],
+      "code_dense": true
+    },
+    {
+      "id": "m34",
+      "type": "decision",
+      "title": "Feature flag rollout ladder",
+      "summary": "Risky changes ship behind LaunchDarkly flags: 1, 10, 50, 100 percent with a one-day soak each.",
+      "content": "Every risky change ships behind a LaunchDarkly flag, and rollouts follow a fixed ladder: 1 percent, then 10, then 50, then 100, with a minimum one-day soak at each rung while error rate, latency, and the feature's guardrail metric hold. Flags target by workspace id, not user id, so everyone in a workspace sees consistent behavior; mixed states inside one team generated the confused support tickets that taught us this. Flag keys follow dash-<area>-<change>, like dash-checkout-v2 or dash-nav-redesign. Percentage changes happen in the LD UI but must be announced in the release channel with a link to the metrics view. Silent percentage bumps are how you lose the ability to correlate a regression with its cause.",
+      "tags": [
+        "launchdarkly",
+        "feature-flags",
+        "rollout"
+      ],
+      "logical": [
+        "dashly.flags"
+      ]
+    },
+    {
+      "id": "m35",
+      "type": "hazard",
+      "title": "Stale feature flag removal checklist",
+      "summary": "Fully rolled-out flags must die within two sprints: remove code paths, archive, grep, re-snapshot.",
+      "content": "Fully rolled-out flags must be deleted within two sprints, and deleted means the whole checklist: remove both code paths and the conditional, archive the flag in LaunchDarkly rather than just turning it off, grep the key across the monorepo including docs and dashboards, and re-record any snapshot tests that embedded the flagged output. The motivating incident: a flag fully rolled out for two years got toggled off during a housekeeping pass of the LD dashboard, by someone reasonably assuming unarchived flags at 100 percent were dead, and search broke for an hour because the off path still existed in code and still ran, just wrongly. Stale flags are not neutral clutter; each one is a remotely operable switch wired to code nobody remembers.",
+      "tags": [
+        "feature-flags",
+        "cleanup",
+        "tech-debt",
+        "launchdarkly"
+      ],
+      "logical": [
+        "dashly.flags"
+      ]
+    },
+    {
+      "id": "m36",
+      "type": "fact",
+      "title": "Analytics land in BigQuery",
+      "summary": "Events flow through Segment into BigQuery dataset dashly_prod_events; raw tables keep 180 days.",
+      "content": "Product analytics events flow through Segment and land in the BigQuery dataset dashly_prod_events, one table per event name. Raw tables retain 180 days; modeled tables built by dbt keep full history. Access goes through the analytics-readers group, not personal service accounts.",
+      "tags": [
+        "analytics",
+        "segment",
+        "bigquery"
+      ],
+      "logical": [
+        "dashly.analytics"
+      ]
+    },
+    {
+      "id": "m37",
+      "type": "hazard",
+      "title": "Page versus track event misuse",
+      "summary": "Tab switches logged as pageviews doubled counts; events must be cataloged and use the wrapper.",
+      "content": "Pageview counts doubled overnight and an exec dashboard went red before anyone found the cause: a well-meaning PR had instrumented dashboard tab switches as page() calls, and the analytics vendor SDK treats page() as a full pageview while track() is an in-app action. The distinction drives downstream sessionization, so misuse corrupts metrics well beyond the one event. Rules now enforced: every new event name must exist in the event catalog sheet before the PR merges, names are Object Action in title case (Order Exported), and all instrumentation goes through the wrapper in src/lib/analytics.ts. Direct SDK imports are lint-banned, which is also what lets us swap vendors or add consent gating in exactly one place.",
+      "tags": [
+        "segment",
+        "tracking-plan",
+        "instrumentation"
+      ],
+      "logical": [
+        "dashly.analytics"
+      ]
+    },
+    {
+      "id": "m38",
+      "type": "insight",
+      "title": "CI build heap exhaustion fix",
+      "summary": "Production builds died in CI with JS heap OOM; chunk splitting plus a bigger heap cap fixed it.",
+      "content": "The production build started dying in CI with FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory the week we added the charting library, and only in CI. Every laptop built it fine, which sent us down a false trail of blaming the runner image. The real difference was simpler: dev machines have 32GB of RAM and node's default old-space cap scales with available memory, while the CI runners have 8GB and the build genuinely needed more than the cap allowed there.\n\nThe growth was real, not a leak. Bundling holds every module's AST and transformed output in memory simultaneously during chunk generation, and the charting library plus its dependency graph roughly doubled our module count. Sourcemaps make it dramatically worse, roughly doubling the peak again, and we cannot turn them off because the error tracker needs them for readable production stack traces.\n\nOne dead end worth recording so nobody repeats it: setting build.sourcemap to hidden does not reduce build memory at all, it only stops the map reference comment from being emitted while the maps are still generated in full. Splitting the build across two jobs, vendor then app, also looked attractive, but rollup cannot do incremental cross-job chunking, so it would have meant a custom two-pass setup for maybe 20 percent savings.\n\nWhat actually shipped, in increasing order of durability: manualChunks in build.rollupOptions.output now splits the vendor graph into four stable chunks (react ecosystem, charting, the API client layer, everything else), which lowered the peak because chunk generation processes smaller graphs, and as a side effect improved long-term caching since a charting upgrade no longer invalidates the react vendor chunk. The build job also records peak RSS with /usr/bin/time -v and the number lands on the CI dashboard, so the next dependency that doubles memory shows up as a trend rather than a surprise failure at the worst possible moment. And the blunt but necessary part, because even the split graph exceeds node's conservative default on an 8GB runner: the build job env now sets NODE_OPTIONS=--max-old-space-size=6144, raising the heap cap to fit the runner's actual RAM. Peak usage landed around 5.1GB with comfortable headroom, and build time actually dropped by 40 seconds because GC pressure fell.",
+      "tags": [
+        "vite",
+        "rollup",
+        "ci",
+        "memory"
+      ],
+      "logical": [
+        "dashly.build"
+      ],
+      "fact_pos": "end",
+      "code_dense": true
+    },
+    {
+      "id": "m39",
+      "type": "convention",
+      "title": "React component file conventions",
+      "summary": "Function components, named exports only, tests and stories colocated, one component per file.",
+      "content": "React components are function components only, named exports only (default exports break grep and auto-import), colocated with their tests and stories: Button.tsx, Button.test.tsx, Button.stories.tsx. One component per file, and hooks extracted once they exceed one screen.",
+      "tags": [
+        "react",
+        "conventions",
+        "components"
+      ],
+      "logical": [
+        "dashly.frontend"
+      ]
+    },
+    {
+      "id": "m40",
+      "type": "decision",
+      "title": "Server state via React Query only",
+      "summary": "No Redux in dashly: server state lives in React Query via tRPC; UI state uses zustand.",
+      "content": "Server state lives in React Query via tRPC hooks exclusively; there is no Redux in dashly and PRs adding it will be rejected. Ephemeral UI state, like modals and wizard steps, uses zustand stores, one per feature. The split is deliberate: server cache problems and UI state problems have different tools.",
+      "tags": [
+        "react-query",
+        "zustand",
+        "state-management",
+        "redux"
+      ],
+      "logical": [
+        "dashly.frontend"
+      ]
+    },
+    {
+      "id": "m41",
+      "type": "hazard",
+      "title": "Vite env prefix gotcha",
+      "summary": "Client-visible env vars must start with VITE_; everything else is silently undefined in the bundle.",
+      "content": "Client-visible environment variables must be prefixed VITE_ (for example VITE_API_URL); anything unprefixed is silently undefined in browser code, no warning, no build error. And never put a secret behind the prefix: the value is inlined into the public bundle at build time and ships to every visitor.",
+      "tags": [
+        "vite",
+        "env-vars",
+        "dotenv",
+        "import-meta-env"
+      ],
+      "logical": [
+        "dashly.build"
+      ],
+      "code_dense": true
+    },
+    {
+      "id": "m42",
+      "type": "insight",
+      "title": "Hydration mismatch from timestamps",
+      "summary": "Server rendered UTC, client re-rendered local zone; render stable ISO, upgrade client-side only.",
+      "content": "Order timestamps caused a hydration mismatch: the server rendered them in UTC, the client re-rendered in the viewer's local zone, and React saw different text for the same node, throwing the mismatch warning while visibly flickering the value. The fix pattern, now standard: the server renders a stable representation (an ISO string), and a client-only <LocalTime> component upgrades it to the local zone after mount, so first paint matches the server by construction. Never format wall-clock values during server render with anything locale- or zone-dependent. Unit and e2e runs pin TZ=America/New_York so a developer in another zone cannot make time-dependent snapshots pass locally while failing in CI.",
+      "tags": [
+        "react",
+        "hydration",
+        "ssr",
+        "timezones"
+      ],
+      "logical": [
+        "dashly.frontend"
+      ]
+    },
+    {
+      "id": "m43",
+      "type": "decision",
+      "title": "pnpm and Turborepo monorepo layout",
+      "summary": "pnpm workspaces plus Turborepo: apps/dashly with packages/ui, tokens, config; remote cache in CI.",
+      "content": "Dashly is a pnpm workspace monorepo orchestrated by Turborepo: apps/dashly (the web app), packages/ui (shared components), packages/tokens (design tokens), packages/config (shared tsconfig and eslint). Turborepo's task graph re-runs lint, test, and build only for packages whose inputs changed, and the remote cache in GitHub Actions cut median CI time from 14 minutes to 6. We evaluated Nx and found it heavier than needed; its generators and plugin system solve problems we do not have at four packages. Rules that keep this working: packages declare real dependencies in package.json with no reaching across via relative paths, and anything imported by two packages gets promoted into a package rather than duplicated.",
+      "tags": [
+        "pnpm",
+        "turborepo",
+        "monorepo"
+      ],
+      "logical": [
+        "dashly.build"
+      ]
+    },
+    {
+      "id": "m44",
+      "type": "fact",
+      "title": "Design tokens package workflow",
+      "summary": "@dashly/tokens ships design tokens; a Figma sync job opens PRs; hex literals fail lint.",
+      "content": "Design tokens ship from packages/tokens as @dashly/tokens; a Figma sync job opens a PR whenever tokens change upstream. Colors are consumed only via the CSS variables generated from the package, and raw hex literals in component styles fail lint.",
+      "tags": [
+        "design-tokens",
+        "figma",
+        "css"
+      ],
+      "logical": [
+        "dashly.frontend"
+      ]
+    },
+    {
+      "id": "m45",
+      "type": "insight",
+      "title": "Checkout conversion drop investigation",
+      "summary": "An 18 percent purchase-metric dip was adblock measurement loss, fixed with first-party collection.",
+      "content": "The Monday dashboards showed purchase completion down 18 percent week over week with flat traffic and a stable payment-flow error rate, the kind of contradiction that means either the product broke silently or the measurement did. Finance's revenue numbers were flat too, which pointed hard at measurement: real purchases were happening and we were not seeing all of them.\n\nThe funnel made it stranger: every step from landing through payment looked normal, and the final purchase-completed event was where the whole deficit lived. Segmenting the missing events by browser closed the case. The gap was almost entirely Chrome, and almost entirely versions released that same week. A browser update had promoted a popular content blocker's ruleset, and the analytics vendor's script domain had landed on the new blocklist. Users running the extension loaded the app fine, since we bundle our own code first-party, but the third-party collection script never loaded for them, so their events went nowhere. Earlier funnel steps looked normal only because they are dominated by users without the extension, while completed purchases had revenue as an independent ground truth that exposed the gap. The durable fix moved collection first-party: events now post to /t/ingest on our own domain, a thin proxy in the BFF that forwards to the vendor server-side, invisible to client-side blocklists and fully under our data controls.\n\nShort-term, while the proxy was being built, we restored honesty in reporting by annotating the dashboards with the estimated blocked fraction, about 22 percent of Chrome sessions that week, so nobody made decisions against a number we knew was wrong. During the proxy rollout we also found an unrelated landmine worth its own warning: analytics.config.ts still had sampleRate: 0.25 left over from a load test months earlier, silently discarding three quarters of events in an environment flag that had leaked to a slice of production. It was reverted the same day, and changes to that file now require a second reviewer.\n\nThe standing lessons: any metric dip that finance does not confirm is a measurement bug until proven otherwise; browser-release weeks correlate with tracking anomalies, so check the blocklists first; and revenue is the only funnel step with an independent source of truth, so we now alert on the ratio between measured purchases and settled payments, which would have caught this within hours instead of days.",
+      "tags": [
+        "analytics",
+        "adblock",
+        "funnel",
+        "incident"
+      ],
+      "logical": [
+        "dashly.analytics"
+      ],
+      "fact_pos": "straddle"
+    },
+    {
+      "id": "m46",
+      "type": "convention",
+      "title": "Commit and changeset conventions",
+      "summary": "Conventional Commits enforced by commitlint; user-facing PRs must include a changeset file.",
+      "content": "Commits follow Conventional Commits (feat:, fix:, chore:) enforced by commitlint in CI. Releasable packages use changesets: every user-facing PR must include a changeset file or the check fails. Release notes are generated, never hand-written.",
+      "tags": [
+        "git",
+        "conventional-commits",
+        "changesets"
+      ],
+      "logical": [
+        "dashly.process"
+      ]
+    },
+    {
+      "id": "m47",
+      "type": "hazard",
+      "title": "tRPC batch URLs rejected at edge",
+      "summary": "Batched GET URLs can exceed edge limits; maxURLLength 2000 splits batches or falls back to POST.",
+      "content": "tRPC batches concurrent queries into one HTTP GET whose URL encodes every batched call, so it grows with dashboard complexity. Behind our CDN, over-long request URLs get rejected at the edge before they ever reach the origin; users with many widgets on screen saw intermittent failures that no server log would ever show, because the requests never arrived. The fix: httpBatchLink is configured with maxURLLength: 2000, above which the client splits the batch or falls back to POST. If you build a data-dense screen and see edge-level failures for exactly the heaviest users, check request length first. Origin logs staying clean while users see errors is the signature of this class of problem.",
+      "tags": [
+        "trpc",
+        "cloudflare",
+        "414",
+        "url-length",
+        "batching"
+      ],
+      "logical": [
+        "dashly.api"
+      ]
+    },
+    {
+      "id": "m48",
+      "type": "fact",
+      "title": "Staging access for dashly",
+      "summary": "staging.dashly.app sits behind Cloudflare Access; demo workspace acme-demo resets nightly.",
+      "content": "Staging lives at staging.dashly.app behind Cloudflare Access; authenticate with your work Google account. The seeded demo workspace is acme-demo and resets nightly at 04:00 UTC, so anything you set up there has a one-day shelf life.",
+      "tags": [
+        "staging",
+        "cloudflare-access",
+        "environments"
+      ],
+      "logical": [
+        "dashly.infra"
+      ]
+    },
+    {
+      "id": "m49",
+      "type": "insight",
+      "title": "Checkout-v2 rollout blank page incident",
+      "summary": "Flag SDK init with no timeout blanked checkout for slow connections; defaults now fail closed.",
+      "content": "The checkout-v2 rollout was supposed to be the boring kind: 1 percent for a day, then 10, watching error rates and completion at each step. At the 10 percent step, support started reporting blank checkout pages, but the error dashboards were quiet and the experiment metrics looked fine, which cost us forty minutes of disbelief before we found the failure sitting between the flag SDK and first paint.\n\nThe blank pages were not errors. The checkout route gated rendering on flag evaluation: it awaited the SDK's ready promise before deciding which checkout to mount. For most users the SDK initializes in tens of milliseconds from cache, but for first-visit users on slow connections the network round trip ran long, and our code had no timeout, so the page rendered nothing while it waited. Worse, when the SDK eventually gave up internally, the fallback took the default value path, and the default in code was the new checkout, so the cohort with the worst initialization experience also got the least-tested code path. Defaults in code must be the old behavior; a flag's job is to turn things on, and failure must mean off.\n\nThe postmortem's sharpest observation explains the quiet dashboards: the harmed users never rendered enough to emit any events at all, so their absence inflated every average instead of dragging one down. Guardrail metrics now include session-started-but-no-first-paint, which would have fired within five minutes of the rollout step.\n\nEvery part of the lesson is now enforced. Code defaults for all rollout flags are the control path, verified by a lint rule that fails any treatment-valued default on a flag whose key matches the rollout naming pattern. Flag evaluation for route-level gates is bounded: initialization races a timeout of LD_SDK_TIMEOUT_MS=1500, and on timeout we render the control experience immediately while recording a flag_timeout event, so degraded sessions become measurable instead of invisible. And every rollout ships with a dedicated kill switch separate from the percentage flag itself: dash-checkout-v2-kill short-circuits the gate server-side in the BFF, so turning the experiment off never depends on clients re-fetching flag state or on the SDK being reachable at all. The switch that turns something off must not share failure modes with the thing it turns off.",
+      "tags": [
+        "feature-flags",
+        "launchdarkly",
+        "incident",
+        "rollout"
+      ],
+      "logical": [
+        "dashly.flags"
+      ],
+      "fact_pos": "end"
+    },
+    {
+      "id": "m50",
+      "type": "decision",
+      "title": "Session cookies via BFF, no browser tokens",
+      "summary": "Auth lives in an HttpOnly session cookie set by the BFF; nothing readable by page scripts.",
+      "content": "Dashly keeps auth material out of reach of injected scripts: no tokens in browser storage, period. The tRPC BFF terminates the session and sets an HttpOnly, Secure, SameSite=Lax cookie; page code cannot read it, so a compromised dependency cannot exfiltrate credentials. The API tier never sees the cookie either; the BFF exchanges the session for a short-lived internal token per request. Costs we accepted: CSRF now matters, handled with a double-submit token on mutating routes, and future native mobile clients will need a different flow. This gets re-litigated roughly annually when someone wants to call the API directly from the frontend; the answer stays no, and this memory is the rationale to link.",
+      "tags": [
+        "auth",
+        "bff",
+        "cookies",
+        "xss",
+        "localstorage"
+      ],
+      "logical": [
+        "dashly.api"
+      ]
+    },
+    {
+      "id": "m51",
+      "type": "hazard",
+      "title": "React StrictMode double effects in dev",
+      "summary": "Dev-only double mounting fires effects twice; dedupe analytics, never disable the behavior.",
+      "content": "In development React 18 intentionally mounts, unmounts, and remounts every component, so effects run twice. Our analytics wrapper fired duplicate events locally until we added a dev-only dedupe. Never fix this by turning the double-invoke off; it exists to catch missing effect cleanups, and it caught two real ones during the checkout rewrite.",
+      "tags": [
+        "react",
+        "strict-mode",
+        "effects"
+      ],
+      "logical": [
+        "dashly.frontend"
+      ]
+    },
+    {
+      "id": "m52",
+      "type": "fact",
+      "title": "CI pipeline shape",
+      "summary": "GitHub Actions: lint, typecheck, unit on push; e2e sharded 4 ways on src PRs; merge queue.",
+      "content": "CI runs on GitHub Actions: lint, typecheck, and unit tests on every push; the e2e suite runs sharded four ways only on PRs touching src/. Merges go through the merge queue, which re-runs the full matrix against the queued state before landing.",
+      "tags": [
+        "ci",
+        "github-actions",
+        "sharding",
+        "merge-queue"
+      ],
+      "logical": [
+        "dashly.testing"
+      ]
+    },
+    {
+      "id": "m53",
+      "type": "insight",
+      "title": "Bundle size budgets in CI",
+      "summary": "size-limit enforces 250 KB gzipped entry and 400 KB initial JS; failures follow a fixed playbook.",
+      "content": "size-limit runs in CI with two budgets: 250 KB gzipped for the entry chunk and 400 KB for total initial JS. The check exists because the numbers only move one direction unattended; it failed three times in its first quarter, each catching a dependency someone assumed was small (a date library pulling every locale, an icon pack imported un-tree-shakeably, a markdown renderer for one tooltip). Biggest single win since: lazy-loading the chart panel behind route-level code splitting, worth 96 KB off initial. Playbook when the check fails: run pnpm analyze to open the bundle visualizer, then lazy-load, replace, or get an explicit budget bump approved in review. Never just raise the number to make CI green.",
+      "tags": [
+        "bundle-size",
+        "size-limit",
+        "performance"
+      ],
+      "logical": [
+        "dashly.build"
+      ]
+    },
+    {
+      "id": "m54",
+      "type": "insight",
+      "title": "Friday deploy broke Safari checkout",
+      "summary": "A regex lookbehind threw a parse-time SyntaxError in older Safari, killing the entry chunk.",
+      "content": "Friday afternoon deploy, and within twenty minutes support had a cluster of reports that checkout showed nothing at all: not an error page, just a blank white viewport. We could not reproduce it on any office machine. The common thread took embarrassingly long to spot because the error tracker was silent: every affected user was on Safari, mostly iOS 15 devices, and the tracker was silent precisely because the page died before the tracker's own bundle ever executed.\n\nThe deploy that triggered it was the coupon-code parser rewrite, which used a regular expression with lookbehind. Older Safari does not support lookbehind assertions, and unlike a missing API, an unsupported regex feature is a syntax error at parse time: the JavaScript engine rejects the entire chunk containing it, nothing in that chunk runs, and since the offending code had been bundled into the main entry chunk, the app never booted at all. The console on a borrowed iPhone showed SyntaxError: Invalid regular expression: invalid group specifier name, which became the search string that cracked the whole investigation open.\n\nThe root cause behind the root cause: during the Vite migration the year before, the browserslist config had been dropped, and the build silently fell back to targeting modern engines only. Nobody noticed for a year because runtime APIs get polyfilled by other layers, and most new syntax we write is old enough; the lookbehind was simply the first thing we shipped that older-but-supported browsers reject at parse time rather than at call time.\n\nFixes, in order. The regex was rewritten the same evening without lookbehind, since dropping the affected users was never on the table: Safari is roughly a fifth of checkout traffic and heavier on mobile. eslint-plugin-es-x now fails CI on syntax and regex features newer than the supported floor, which is the layer that actually catches regex issues, because build targets do not transpile regex features. The e2e suite gained a smoke job that boots the built bundle in WebKit, the engine family that keeps catching what Chromium-only testing misses. And the build got its explicit floor back: build.target is now set to es2019 in vite.config.ts, matching the oldest engine we support, so the bundler transpiles newer syntax instead of passing it straight through to browsers that cannot parse it.",
+      "tags": [
+        "safari",
+        "browserslist",
+        "vite",
+        "incident"
+      ],
+      "logical": [
+        "dashly.build"
+      ],
+      "fact_pos": "end"
+    },
+    {
+      "id": "m55",
+      "type": "decision",
+      "title": "URL path API versioning",
+      "summary": "Public API versions in the path (/v1); only additive changes within a version; /v2 means breakage.",
+      "content": "orderflow's public API versions in the URL path, as in /v1/orders. Only additive changes are allowed within a version: new optional fields, new endpoints. Breaking changes mean /v2 plus a six-month deprecation window announced in the changelog. Internal service APIs are exempt; they version by deploy.",
+      "tags": [
+        "api",
+        "versioning",
+        "compatibility"
+      ],
+      "logical": [
+        "orderflow.api"
+      ]
+    },
+    {
+      "id": "m56",
+      "type": "insight",
+      "title": "MSK IAM auth failure debugging map",
+      "summary": "Every MSK IAM failure surfaces as one opaque access-denied error; here is the triage order.",
+      "content": "Every consumer in the of-staging namespace started crash-looping at 09:14 with SaslAuthenticationException: Access denied as the first log line, and that string is the only error MSK's IAM layer will ever show you, regardless of which of half a dozen distinct things is actually wrong. This memory is the debugging map we wished we had that morning, in the order that finds problems fastest.\n\nStep one, client config: the consumer must set kafka.security.protocol=SASL_SSL and sasl.mechanism=AWS_MSK_IAM, and the aws-msk-iam-auth callback handler has to be on the classpath equivalent in our Rust wrapper, which for us means the msk_iam feature flag on of-kafka-client. A plain misbuild without that feature produces the exact same access-denied string as a real permissions problem.\n\nStep two, identity: confirm what the pod actually is. Run aws sts get-caller-identity from a debug container in the same pod spec. If it returns the node role instead of the service role, IRSA is broken: check the eks.amazonaws.com/role-arn annotation on the of-orders-sa service account and the projected token volume. That morning, this was the failure: a Terraform refactor had renamed the IAM role, and the role's trust policy condition still pinned the old service account name, so sts:AssumeRoleWithWebIdentity was failing silently and every pod fell back to the node role, which has no Kafka permissions at all.\n\nStep three, policy: the role needs kafka-cluster:Connect on the cluster ARN plus kafka-cluster:ReadData and kafka-cluster:DescribeGroup on topic and group ARNs. The trap here is that MSK topic ARNs embed the cluster UUID, so a policy copy-pasted from another cluster looks plausible and matches nothing. Use the ARNs from terraform output, never hand-typed ones.\n\nStep four, the network red herring: security groups and broker DNS produce connection timeouts, not access denied, so if you are staring at the denied error, stop checking security groups; that distinction alone would have saved us half an hour.\n\nDetection got two upgrades after the incident: the consumer wrapper now exports kafka_consumer_connection_error_total labeled by error class, with an alert on any sustained nonzero rate in any namespace, and the deploy pipeline runs a one-shot canary consumer against a probe topic before rolling the real workloads, so an auth regression fails the deploy instead of the morning.",
+      "tags": [
+        "kafka",
+        "msk",
+        "iam",
+        "debugging"
+      ],
+      "logical": [
+        "orderflow.events"
+      ],
+      "fact_pos": "start",
+      "code_dense": true
+    },
+    {
+      "id": "m57",
+      "type": "convention",
+      "title": "Dev proxy and local HTTPS setup",
+      "summary": "The Vite dev server proxies /api and /trpc to a local or remote backend; HTTPS via mkcert.",
+      "content": "The fastest way to point your local frontend at a different backend is the env var in the first line of .env.local: VITE_DEV_PROXY_TARGET overrides where the dev server forwards API traffic, defaulting to http://localhost:8787 where the local BFF runs. Set it to the staging origin when you need real data behind your local UI, and never commit that change.\n\nThe mechanics live in vite.config.ts under server.proxy: both /api and /trpc are forwarded to the target with changeOrigin: true, and ws: true so tRPC subscriptions survive the hop. The proxy exists so browser code always talks same-origin in development, which keeps cookie behavior identical to production; without it, the session cookie's SameSite settings behave differently locally and auth bugs hide until staging.\n\nHTTPS locally is required for the Secure cookie flag, so first-time setup runs pnpm setup:certs, which uses mkcert to mint a locally trusted certificate pair into .certs/ (gitignored) and installs the local CA. After that, pnpm dev serves https://localhost:5173 and the BFF accepts the forwarded traffic without any browser warnings. If teammates see NET::ERR_CERT_AUTHORITY_INVALID, they skipped the mkcert -install step; if curl works but the browser refuses, the CA landed in the wrong trust store, which happens on machines with both system and browser stores.\n\nTroubleshooting order for a dead proxy: ECONNREFUSED in the dev server log means the target is not running, so start the BFF or point the target env var at staging. A 502 with html in the body means you pointed at the app origin instead of the BFF origin on staging; the correct target is the api subdomain. Hanging requests with no log line at all usually mean a stale dev server holding the old env value, because Vite reads env files at startup only; restart pnpm dev after any change to .env.local, since hot reload will not pick it up.\n\nOne boundary we hold deliberately: the proxy config never rewrites paths. The BFF mounts at the same paths in every environment, so a request that works locally works in production byte for byte. If you find yourself wanting a rewrite rule, the BFF route is wrong, not the proxy.",
+      "tags": [
+        "vite",
+        "dev-server",
+        "proxy",
+        "https",
+        "mkcert"
+      ],
+      "logical": [
+        "dashly.build"
+      ],
+      "fact_pos": "start",
+      "code_dense": true
+    },
+    {
+      "id": "m58",
+      "type": "insight",
+      "title": "OpenTelemetry collector rollout",
+      "summary": "All services now export OTLP to a shared collector, which owns sampling, batching, and enrichment.",
+      "content": "Tracing used to go straight from each service to the vendor, which meant every service carried vendor credentials, made its own sampling decision, and re-implemented batching. The bill grew with traffic, the sampling was inconsistent enough that cross-service traces arrived half-missing, and rotating the vendor API key meant redeploying everything. Moving to a shared OpenTelemetry collector fixed all three at once, and this memory records the shape of the rollout plus the two mistakes worth not repeating.\n\nThe collector runs as a two-replica deployment in its own namespace, fronted by a ClusterIP service. The pipeline is deliberately short: OTLP gRPC receiver, then memory_limiter first in the processor chain so the collector sheds load instead of dying when a service goes span-crazy, then k8sattributes to stamp pod and namespace metadata onto every span, then the batch processor, then the vendor exporter carrying the only copy of the API key in the whole system. Services got simpler in the same commit: no vendor SDK, no credentials, just the OTLP exporter from the standard SDK pointed at one place. The wiring for that is the part everyone asks about, and it is a single line in the base Helm chart: OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.of-observability.svc.cluster.local:4317 flows to every service, gRPC on 4317 rather than HTTP on 4318, and nothing ships spans directly to the vendor anymore.\n\nSampling moved to the collector's tail_sampling processor with three policies: keep every trace with an error status, keep everything slower than two seconds, and probabilistically keep 10 percent of the rest. Tail sampling is what made cross-service traces whole again, since the keep-or-drop decision now happens once per trace instead of independently in each service.\n\nMistake one: we initially sized the batch processor by the defaults, and under peak load the collector's exporter queue overflowed, silently dropping spans; send_batch_size 8192 with a queue size of 5000 stopped that, and the collector's own otelcol_exporter_send_failed_spans metric is now on the on-call dashboard, because a dropping collector looks exactly like quiet, well-behaved services. Mistake two: we forgot the collector itself needs tracing, and debugging its first bad deploy meant reading raw logs; it now exports its own telemetry through a second minimal pipeline, which felt silly right up until it was indispensable.",
+      "tags": [
+        "opentelemetry",
+        "tracing",
+        "collector",
+        "observability"
+      ],
+      "logical": [
+        "orderflow.infra"
+      ],
+      "fact_pos": "straddle",
+      "code_dense": true
+    },
+    {
+      "id": "m59",
+      "type": "insight",
+      "title": "BigQuery purchase event backfill",
+      "summary": "The adblock outage left a nine-day analytics hole; a server-side backfill rebuilt it dedupably.",
+      "content": "The adblock measurement outage left a nine-day hole in dashly_prod_events, and every downstream chart with a week-over-week comparison stayed wrong for a month after the collection fix, because the missing history kept rolling through the comparison windows. Backfilling it properly turned out to be its own project, and the mechanics are worth recording because we will need them again.\n\nThe source of truth for the missing purchase events was the payment provider's settlement records, which the BFF already mirrors into Postgres. A one-off loader walked those rows, reconstructed each purchase-completed event with its original timestamp and workspace id, and streamed them into BigQuery. Two properties made the backfill safe to re-run when it inevitably crashed partway. First, every reconstructed event carries a deterministic insertId derived from the payment id, so BigQuery's streaming dedupe makes retries idempotent within its window, and a uniqueness check in dbt catches anything beyond it. Second, every backfilled row sets is_backfilled true, so analysts can exclude reconstructed data when methodology matters. Throughput tuning was the fiddly part, and the numbers that finally worked are the ones to reuse: the loader settled at ANALYTICS_BACKFILL_BATCH=20000 rows per streaming insert chunk, after 50000 tripped the per-request payload cap and produced 403 rateLimitExceeded backoff spirals during business hours, while 20000 ran clean at roughly ten minutes per backfilled day.\n\nOrder of operations mattered more than expected. The raw tables had to land first, then dbt run --full-refresh on the purchase models so the incremental logic did not skip the inserted history, then a manual refresh of the two dashboards with hardcoded date logic that no amount of correct data would fix. The full-refresh step is the one people forget: incremental models had already processed those dates and will not revisit them on a normal run, so the backfilled rows silently never reach the modeled layer.\n\nValidation was a three-way reconciliation: settlement records against backfilled raw events against the modeled tables, per day, with the acceptable delta set at zero because the source was exact rather than sampled. The final report showed one missing day recovered at 100 percent and eight at 100 percent minus a handful of refunded-then-disputed edge cases, all documented in the backfill readme next to the loader script.",
+      "tags": [
+        "bigquery",
+        "analytics",
+        "backfill",
+        "dbt"
+      ],
+      "logical": [
+        "dashly.analytics"
+      ],
+      "fact_pos": "straddle",
+      "code_dense": true
+    },
+    {
+      "id": "m60",
+      "type": "insight",
+      "title": "Rust CI cache thrash fix",
+      "summary": "The Actions cache blew past the repo limit and thrashed; pruning what gets cached fixed cold builds.",
+      "content": "Rust CI times crept from eight minutes to twenty-five over a quarter, and the proximate cause was invisible from any single run: the GitHub Actions cache for the repo had blown past the 10GB limit, so caches were being evicted in LRU order, and by morning in each timezone the first builds of the day were effectively cold. Every individual run looked like an unlucky cache miss; only the cache-usage page told the real story, with the target directory caches for three toolchain variants crowding everything else out.\n\nThe fixes were mostly about caching less, not more. We moved from hand-rolled actions/cache steps to Swatinem/rust-cache@v2, which already knows the right things to exclude: it skips the target/debug incremental directories, prunes stale dependencies from the registry cache, and keys correctly on the toolchain and lockfile without us maintaining the key expression. Our old hand-built key, rust-v4 plus a hash of Cargo.lock, missed the rustc minor version, so every toolchain bump silently poisoned a week of builds with near-miss restores that restored artifacts the compiler then rejected and rebuilt anyway, which is worse than a clean miss because the restore itself costs ninety seconds.\n\nWe also stopped caching the fuzz and bench target directories entirely; they rebuilt rarely enough that caching them cost more in eviction pressure on the hot caches than it ever saved in build time. sccache with an S3 backend got a serious evaluation as the bigger hammer, and the numbers were genuinely better on paper, but it adds a credential path and a failure mode to every build for maybe ninety seconds of savings at our scale, so it lost to boring.\n\nTwo settings carry most of the result. The cache action's cache-on-failure stays true, because a failed build that compiled most of the workspace is still a warm cache worth keeping. And the single biggest lever was setting CARGO_INCREMENTAL=0 in the workflow env: incremental compilation artifacts are enormous, keyed to a single machine's paths, and useless across CI runs, and dropping them cut the stored cache from 9.8GB to 3.1GB, which ended the eviction thrash and brought the morning cold builds back under ten minutes.",
+      "tags": [
+        "ci",
+        "rust",
+        "cargo",
+        "github-actions",
+        "caching"
+      ],
+      "logical": [
+        "orderflow.infra"
+      ],
+      "fact_pos": "end",
+      "code_dense": true
+    }
+  ],
+  "queries": [
+    {
+      "id": "q01",
+      "text": "jwt refresh rotation",
+      "archetype": "keyword",
+      "relevant": {
+        "m03": 2,
+        "m02": 1
+      }
+    },
+    {
+      "id": "q02",
+      "text": "kafka consumer lag",
+      "archetype": "keyword",
+      "relevant": {
+        "m09": 2,
+        "m10": 1
+      }
+    },
+    {
+      "id": "q03",
+      "text": "sqlx offline prepare",
+      "archetype": "keyword",
+      "relevant": {
+        "m05": 2,
+        "m04": 1
+      }
+    },
+    {
+      "id": "q04",
+      "text": "vite env variables",
+      "archetype": "keyword",
+      "relevant": {
+        "m41": 2
+      }
+    },
+    {
+      "id": "q05",
+      "text": "stripe webhook signature",
+      "archetype": "keyword",
+      "relevant": {
+        "m11": 2
+      }
+    },
+    {
+      "id": "q06",
+      "text": "bundle size budget",
+      "archetype": "keyword",
+      "relevant": {
+        "m53": 2,
+        "m38": 1
+      }
+    },
+    {
+      "id": "q07",
+      "text": "how do we run the e2e tests locally?",
+      "archetype": "natural",
+      "relevant": {
+        "m33": 2,
+        "m52": 1
+      }
+    },
+    {
+      "id": "q08",
+      "text": "why did we pick axum instead of actix for the api?",
+      "archetype": "natural",
+      "relevant": {
+        "m01": 2
+      }
+    },
+    {
+      "id": "q09",
+      "text": "what's the safe way to add a required column to a big table without downtime?",
+      "archetype": "natural",
+      "relevant": {
+        "m14": 2,
+        "m15": 1
+      }
+    },
+    {
+      "id": "q10",
+      "text": "how do we roll out risky features to production gradually?",
+      "archetype": "natural",
+      "relevant": {
+        "m34": 2,
+        "m49": 1,
+        "m35": 1
+      }
+    },
+    {
+      "id": "q11",
+      "text": "where does our product analytics data actually end up?",
+      "archetype": "natural",
+      "relevant": {
+        "m36": 2,
+        "m37": 1,
+        "m59": 1
+      }
+    },
+    {
+      "id": "q12",
+      "text": "do we use redux for state management in the web app?",
+      "archetype": "natural",
+      "relevant": {
+        "m40": 2
+      }
+    },
+    {
+      "id": "q13",
+      "text": "playwright retry flakiness",
+      "archetype": "title_echo",
+      "relevant": {
+        "m32": 2,
+        "m31": 1
+      }
+    },
+    {
+      "id": "q14",
+      "text": "react strictmode double effects",
+      "archetype": "title_echo",
+      "relevant": {
+        "m51": 2
+      }
+    },
+    {
+      "id": "q15",
+      "text": "postgres not null migration locks",
+      "archetype": "title_echo",
+      "relevant": {
+        "m14": 2
+      }
+    },
+    {
+      "id": "q16",
+      "text": "oomkilled checkout pods",
+      "archetype": "title_echo",
+      "relevant": {
+        "m18": 2,
+        "m17": 1
+      }
+    },
+    {
+      "id": "q17",
+      "text": "redis cache stampede",
+      "archetype": "title_echo",
+      "relevant": {
+        "m21": 2,
+        "m06": 1
+      }
+    },
+    {
+      "id": "q18",
+      "text": "checkout conversion drop",
+      "archetype": "title_echo",
+      "relevant": {
+        "m45": 2
+      }
+    },
+    {
+      "id": "q19",
+      "text": "thundering herd",
+      "archetype": "tag_only",
+      "relevant": {
+        "m21": 2
+      }
+    },
+    {
+      "id": "q20",
+      "text": "xss localstorage",
+      "archetype": "tag_only",
+      "relevant": {
+        "m50": 2
+      }
+    },
+    {
+      "id": "q21",
+      "text": "cloudflare 414",
+      "archetype": "tag_only",
+      "relevant": {
+        "m47": 2
+      }
+    },
+    {
+      "id": "q22",
+      "text": "segment tracking plan",
+      "archetype": "tag_only",
+      "relevant": {
+        "m37": 2,
+        "m36": 1
+      }
+    },
+    {
+      "id": "q23",
+      "text": "jwt leeway",
+      "archetype": "tag_only",
+      "relevant": {
+        "m25": 2
+      }
+    },
+    {
+      "id": "q24",
+      "text": "access exclusive ddl",
+      "archetype": "tag_only",
+      "relevant": {
+        "m14": 2,
+        "m15": 1
+      }
+    },
+    {
+      "id": "q25",
+      "text": "what env var disables the payment sandbox?",
+      "archetype": "buried_fact",
+      "relevant": {
+        "m12": 2
+      }
+    },
+    {
+      "id": "q26",
+      "text": "what did we set max poll records to for the settlement consumer?",
+      "archetype": "buried_fact",
+      "relevant": {
+        "m09": 2
+      }
+    },
+    {
+      "id": "q27",
+      "text": "which sqlstate error code did the checkout deadlocks throw?",
+      "archetype": "buried_fact",
+      "relevant": {
+        "m15": 2
+      }
+    },
+    {
+      "id": "q28",
+      "text": "how old can the e2e storage state file get before it is regenerated?",
+      "archetype": "buried_fact",
+      "relevant": {
+        "m32": 2
+      }
+    },
+    {
+      "id": "q29",
+      "text": "what memory limit did we settle on for the checkout pods?",
+      "archetype": "buried_fact",
+      "relevant": {
+        "m18": 2
+      }
+    },
+    {
+      "id": "q30",
+      "text": "which node flag fixed the ci build heap crash?",
+      "archetype": "buried_fact",
+      "relevant": {
+        "m38": 2
+      }
+    },
+    {
+      "id": "q31",
+      "text": "customers get kicked out the moment they log in on their phone",
+      "archetype": "paraphrase",
+      "relevant": {
+        "m25": 2
+      }
+    },
+    {
+      "id": "q32",
+      "text": "shopper charged twice after hitting the pay button again and again",
+      "archetype": "paraphrase",
+      "relevant": {
+        "m12": 2
+      }
+    },
+    {
+      "id": "q33",
+      "text": "the site is completely dead for people on old apple phones",
+      "archetype": "paraphrase",
+      "relevant": {
+        "m54": 2
+      }
+    },
+    {
+      "id": "q34",
+      "text": "dates briefly show one thing then switch right after the page loads",
+      "archetype": "paraphrase",
+      "relevant": {
+        "m42": 2
+      }
+    },
+    {
+      "id": "q35",
+      "text": "slowing down callers that hit us too frequently",
+      "archetype": "paraphrase",
+      "relevant": {
+        "m22": 2
+      }
+    },
+    {
+      "id": "q36",
+      "text": "announcements went out for updates that were later undone",
+      "archetype": "paraphrase",
+      "relevant": {
+        "m26": 2
+      }
+    },
+    {
+      "id": "q37",
+      "text": "how long do access tokens last?",
+      "archetype": "distractor_trap",
+      "relevant": {
+        "m02": 2,
+        "m03": 1
+      }
+    },
+    {
+      "id": "q38",
+      "text": "what eviction policy does the cache run?",
+      "archetype": "distractor_trap",
+      "relevant": {
+        "m06": 2
+      }
+    },
+    {
+      "id": "q39",
+      "text": "how many partitions does the orders topic have?",
+      "archetype": "distractor_trap",
+      "relevant": {
+        "m10": 2,
+        "m09": 1
+      }
+    },
+    {
+      "id": "q40",
+      "text": "webhook events failing signature verification",
+      "archetype": "distractor_trap",
+      "relevant": {
+        "m11": 2
+      }
+    },
+    {
+      "id": "q41",
+      "text": "why did we choose our e2e framework over cypress?",
+      "archetype": "distractor_trap",
+      "relevant": {
+        "m31": 2
+      }
+    },
+    {
+      "id": "q42",
+      "text": "checklist for removing an old feature flag",
+      "archetype": "distractor_trap",
+      "relevant": {
+        "m35": 2,
+        "m34": 1
+      }
+    },
+    {
+      "id": "q43",
+      "text": "what error message shows up when msk iam auth breaks?",
+      "archetype": "buried_fact",
+      "relevant": {
+        "m56": 2,
+        "m24": 1
+      }
+    },
+    {
+      "id": "q44",
+      "text": "which env var points the local dev proxy at a different backend?",
+      "archetype": "buried_fact",
+      "relevant": {
+        "m57": 2
+      }
+    },
+    {
+      "id": "q45",
+      "text": "what endpoint do services export otlp traces to?",
+      "archetype": "buried_fact",
+      "relevant": {
+        "m58": 2
+      }
+    },
+    {
+      "id": "q46",
+      "text": "what batch size does the analytics backfill job use?",
+      "archetype": "buried_fact",
+      "relevant": {
+        "m59": 2
+      }
+    },
+    {
+      "id": "q47",
+      "text": "which env var stopped the rust ci cache from ballooning?",
+      "archetype": "buried_fact",
+      "relevant": {
+        "m60": 2
+      }
+    },
+    {
+      "id": "q48",
+      "text": "what is the name of the checkout rollout kill switch flag?",
+      "archetype": "buried_fact",
+      "relevant": {
+        "m49": 2,
+        "m34": 1
+      }
+    }
+  ]
+}

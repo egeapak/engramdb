@@ -27,7 +27,8 @@ pub use config::{
     EngramConfig, EpistemicConfig, HooksConfig, LogicalBonusConfig, MaintenanceConfig, NliConfig,
     ReindexOnModelChange, RerankConfig, RetrievalConfig, ScopeProximityConfig, ScoringConfig,
     ScoringWeights, SearchConfig, SituationConfig, SituationProfile, ThresholdsConfig,
-    TrustWeights, CONTENT_SOFT_TOKEN_TARGET, DEFAULT_NLI_MODEL_REPO, DEFAULT_SUMMARY_MAX_CHARS,
+    TrustWeights, COMPOSITION_METADATA_V1, CONTENT_SOFT_TOKEN_TARGET, DEFAULT_NLI_MODEL_REPO,
+    DEFAULT_SUMMARY_MAX_CHARS,
 };
 pub use decay::{Decay, DecayStrategy};
 pub use env::in_process_override;

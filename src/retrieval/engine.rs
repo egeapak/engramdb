@@ -324,13 +324,16 @@ impl RetrievalEngine {
     }
 
     /// Identity of the embedding model in use, for stamping the store
-    /// after a (re)embed. `None` when embeddings are disabled.
+    /// after a (re)embed. `None` when embeddings are disabled. Includes the
+    /// embed-text composition (from `embeddings.metadata_vector`) so a later
+    /// composition flip is detected the same way a model swap is.
     pub fn embedding_fingerprint(&self) -> Option<crate::storage::EmbeddingFingerprint> {
         self.embedding_provider
             .as_ref()
             .map(|p| crate::storage::EmbeddingFingerprint {
                 model: p.model_id(),
                 dimensions: p.dimensions(),
+                composition: self.config.embeddings.composition_id(),
             })
     }
 
@@ -401,6 +404,7 @@ impl RetrievalEngine {
                 &self.store,
                 memory,
                 chunk_tokens,
+                self.config.embeddings.metadata_vector,
                 self.ingest_telemetry().as_ref(),
             )
             .await?;
@@ -428,6 +432,7 @@ impl RetrievalEngine {
         let chunk_tokens =
             effective_chunk_tokens(self.config.embeddings.max_tokens, provider.max_tokens());
         let store = self.store.clone();
+        let metadata_vector = self.config.embeddings.metadata_vector;
         let nli_provider = if self.config.nli.enabled {
             self.nli_provider.as_ref().map(Arc::clone)
         } else {
@@ -442,6 +447,7 @@ impl RetrievalEngine {
                 &store,
                 &memory,
                 chunk_tokens,
+                metadata_vector,
                 telemetry.as_ref(),
             )
             .await
@@ -577,14 +583,7 @@ impl RetrievalEngine {
         let documents: Vec<String> = candidates[..top_n]
             .iter()
             .map(|c| match memory_map.get(&c.id) {
-                Some(memory) => {
-                    let mut doc = format!("{} {}", memory.summary, memory.content);
-                    if let Some(ref details) = memory.details {
-                        doc.push(' ');
-                        doc.push_str(details);
-                    }
-                    doc
-                }
+                Some(memory) => rerank_document(memory),
                 None => String::new(),
             })
             .collect();
@@ -1370,17 +1369,117 @@ fn effective_chunk_tokens(config_max_tokens: usize, provider_max_tokens: usize) 
     config_max_tokens.min(provider_max_tokens).max(1)
 }
 
+/// Build the texts whose vectors represent `memory` in the chunk table.
+///
+/// With `metadata_vector` **on** (the default), the memory is represented by
+/// a dedicated metadata row — `"{title}. {summary}. tags: {tags}"` — plus the
+/// content chunked on its own. Title/tag signal becomes reachable by vector
+/// search (it was previously absent from the embeddings entirely) while
+/// content chunks stay undiluted; the store's max-score aggregation picks
+/// whichever row matches best. Benchmarked as the `fieldvec` variant in
+/// `docs/contributors/embedding-analysis.md` (E1): MRR@10 ~0.75 → 0.89.
+///
+/// With it **off**, the legacy composition: `"{summary} {content}"` chunked
+/// as one text.
+///
+/// Empty fields degrade gracefully (a missing title / empty tags just drop
+/// out of the metadata row); an entirely empty memory yields no texts, which
+/// the caller treats as "delete any stored chunks".
+pub(crate) fn embedding_texts(
+    memory: &Memory,
+    chunk_tokens: usize,
+    metadata_vector: bool,
+) -> Vec<String> {
+    if !metadata_vector {
+        let text = format!("{} {}", memory.summary, memory.content);
+        return crate::embeddings::chunk_text(&text, chunk_tokens);
+    }
+
+    // The metadata row is normally one chunk; chunk_text guards the
+    // pathological case (enormous tag lists) the same way content is guarded.
+    let meta = metadata_row(memory).unwrap_or_default();
+    let mut texts = crate::embeddings::chunk_text(&meta, chunk_tokens);
+    texts.extend(crate::embeddings::chunk_text(&memory.content, chunk_tokens));
+    texts
+}
+
+/// The memory's tags, trimmed and comma-joined; `None` when there are none.
+fn joined_tags(memory: &Memory) -> Option<String> {
+    let tags = memory
+        .tags
+        .iter()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    (!tags.is_empty()).then_some(tags)
+}
+
+/// The metadata row embedded alongside content chunks:
+/// `"{title}. {summary}. tags: {tags}"`, with absent fields dropping out.
+/// `None` when every part is empty.
+fn metadata_row(memory: &Memory) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(title) = memory
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        parts.push(title.to_string());
+    }
+    let summary = memory.summary.trim();
+    if !summary.is_empty() {
+        parts.push(summary.to_string());
+    }
+    if let Some(tags) = joined_tags(memory) {
+        parts.push(format!("tags: {tags}"));
+    }
+    (!parts.is_empty()).then(|| parts.join(". "))
+}
+
+/// The document string the cross-encoder reranker scores against the query.
+///
+/// Mirrors the embedding-side composition ([`embedding_texts`] /
+/// [`metadata_row`]): title and tags are included so a candidate surfaced
+/// via its metadata vector is re-scored on text that still contains the
+/// matched signal — otherwise the reranker would systematically demote
+/// exactly the title/tag matches the metadata vector was added to surface
+/// (review finding).
+fn rerank_document(memory: &Memory) -> String {
+    let mut doc = String::new();
+    if let Some(title) = memory
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        doc.push_str(title);
+        doc.push_str(". ");
+    }
+    doc.push_str(&memory.summary);
+    doc.push(' ');
+    doc.push_str(&memory.content);
+    if let Some(ref details) = memory.details {
+        doc.push(' ');
+        doc.push_str(details);
+    }
+    if let Some(tags) = joined_tags(memory) {
+        doc.push_str(&format!(" tags: {tags}"));
+    }
+    doc
+}
+
 async fn embed_memory_with(
     provider: &dyn EmbeddingProvider,
     store: &MemoryStore,
     memory: &Memory,
     chunk_tokens: usize,
+    metadata_vector: bool,
     telemetry: Option<&IngestTelemetry>,
 ) -> anyhow::Result<()> {
-    let text = format!("{} {}", memory.summary, memory.content);
-
     let t = std::time::Instant::now();
-    let chunks = crate::embeddings::chunk_text(&text, chunk_tokens);
+    let chunks = embedding_texts(memory, chunk_tokens, metadata_vector);
     if let Some(t_) = telemetry {
         t_.record("create.chunk_text", t.elapsed().as_secs_f64() * 1000.0);
     }
@@ -1431,6 +1530,10 @@ async fn embed_memory_with(
         let fingerprint = crate::storage::manifest::EmbeddingFingerprint {
             model: provider.model_id(),
             dimensions: provider.dimensions(),
+            // Mirrors `EmbeddingsConfig::composition_id` — `metadata_vector`
+            // here IS `config.embeddings.metadata_vector` at every call site.
+            composition: metadata_vector
+                .then(|| crate::storage::manifest::COMPOSITION_METADATA_V1.to_string()),
         };
         // Best-effort: a failed stamp only means the Untracked warning can
         // still appear; never fail the embed over it.
@@ -1618,9 +1721,16 @@ mod tests {
         store.create(&existing).await.unwrap();
 
         let embed: Arc<dyn EmbeddingProvider> = Arc::new(ConstantEmbedding);
-        embed_memory_with(embed.as_ref(), &store, &existing, embed.max_tokens(), None)
-            .await
-            .unwrap();
+        embed_memory_with(
+            embed.as_ref(),
+            &store,
+            &existing,
+            embed.max_tokens(),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
 
         let mut config = EngramConfig::default();
         config.nli.enabled = true;
@@ -1662,6 +1772,87 @@ mod tests {
         assert_eq!(effective_chunk_tokens(128, 256), 128); // smaller is honoured
         assert_eq!(effective_chunk_tokens(1000, 256), 256); // never exceeds model
         assert_eq!(effective_chunk_tokens(0, 256), 1); // floored at 1
+    }
+
+    fn mem_for_texts(title: Option<&str>, summary: &str, content: &str, tags: &[&str]) -> Memory {
+        let mut m = Memory::new(
+            crate::types::MemoryType::Context,
+            summary,
+            content,
+            crate::types::Provenance::human(),
+        );
+        m.title = title.map(str::to_string);
+        m.tags = tags.iter().map(|t| t.to_string()).collect();
+        m
+    }
+
+    #[test]
+    fn embedding_texts_metadata_row_plus_content_chunks() {
+        let m = mem_for_texts(
+            Some("JWT refresh rotation"),
+            "Refresh tokens rotate on use",
+            "The auth service rotates refresh tokens on every use.",
+            &["jwt", "auth"],
+        );
+        let texts = embedding_texts(&m, 256, true);
+        assert_eq!(texts.len(), 2, "metadata row + one content chunk");
+        assert_eq!(
+            texts[0],
+            "JWT refresh rotation. Refresh tokens rotate on use. tags: jwt, auth"
+        );
+        assert_eq!(
+            texts[1],
+            "The auth service rotates refresh tokens on every use."
+        );
+    }
+
+    #[test]
+    fn embedding_texts_degrades_without_title_and_tags() {
+        let m = mem_for_texts(None, "Just a summary", "Some content here.", &[]);
+        let texts = embedding_texts(&m, 256, true);
+        assert_eq!(texts, vec!["Just a summary", "Some content here."]);
+
+        // Whitespace-only title and empty tag entries drop out too.
+        let m = mem_for_texts(Some("  "), "Summary", "Content.", &["", "  "]);
+        let texts = embedding_texts(&m, 256, true);
+        assert_eq!(texts, vec!["Summary", "Content."]);
+    }
+
+    #[test]
+    fn embedding_texts_empty_memory_yields_nothing() {
+        let m = mem_for_texts(None, "", "", &[]);
+        assert!(embedding_texts(&m, 256, true).is_empty());
+        assert!(embedding_texts(&m, 256, false).is_empty());
+    }
+
+    #[test]
+    fn embedding_texts_metadata_only_when_content_empty() {
+        let m = mem_for_texts(Some("Title"), "Summary", "", &["tag"]);
+        let texts = embedding_texts(&m, 256, true);
+        assert_eq!(texts, vec!["Title. Summary. tags: tag"]);
+    }
+
+    #[test]
+    fn embedding_texts_legacy_composition_when_disabled() {
+        let m = mem_for_texts(
+            Some("Title is ignored"),
+            "Summary",
+            "Content body.",
+            &["ignored"],
+        );
+        let texts = embedding_texts(&m, 256, false);
+        assert_eq!(texts, vec!["Summary Content body."]);
+    }
+
+    #[test]
+    fn embedding_texts_long_content_still_chunks() {
+        let long: Vec<String> = (0..400).map(|i| format!("word{i}")).collect();
+        let m = mem_for_texts(Some("T"), "S", &long.join(" "), &["x"]);
+        let texts = embedding_texts(&m, 256, true);
+        // 1 metadata row + 400 words at 192-word blocks (runt-merged tail).
+        assert!(texts.len() >= 3, "got {}", texts.len());
+        assert_eq!(texts[0], "T. S. tags: x");
+        assert!(texts[1].starts_with("word0"));
     }
 
     /// Shared reranker across all tests in this module to avoid loading the
@@ -1847,6 +2038,105 @@ mod tests {
             .expect("first embed must stamp the fingerprint");
         assert_eq!(fp.model, "stub/marker");
         assert_eq!(fp.dimensions, 384);
+        // The default config embeds the metadata-vector composition; the
+        // stamp must record it so a later flag flip is detected.
+        assert_eq!(
+            fp.composition.as_deref(),
+            Some(crate::storage::manifest::COMPOSITION_METADATA_V1)
+        );
+    }
+
+    /// The `metadata_vector` flag must flow from config through
+    /// `embed_memory` to the actual embedded texts — off yields the single
+    /// legacy `"{summary} {content}"` text, on yields metadata row +
+    /// content chunks. Pins the config plumbing, not just the pure helper.
+    #[tokio::test]
+    async fn embed_memory_composition_follows_config_flag() {
+        use crate::types::EngramConfig;
+        use std::sync::Mutex;
+        use tempfile::TempDir;
+
+        struct CapturingProvider(Mutex<Vec<String>>);
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for CapturingProvider {
+            async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+                self.0.lock().unwrap().push(text.to_string());
+                Ok(vec![0.5f32; 384])
+            }
+            async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+                let mut captured = self.0.lock().unwrap();
+                for t in texts {
+                    captured.push((*t).to_string());
+                }
+                Ok(vec![vec![0.5f32; 384]; texts.len()])
+            }
+            fn dimensions(&self) -> usize {
+                384
+            }
+            fn max_tokens(&self) -> usize {
+                256
+            }
+            fn model_id(&self) -> String {
+                "stub/capturing".to_string()
+            }
+        }
+
+        let mut memory = stub_memory("summary here", 0.5);
+        memory.title = Some("A Title".to_string());
+        memory.content = "content body".to_string();
+        memory.tags = vec!["alpha".to_string(), "beta".to_string()];
+
+        for (flag, expected) in [
+            (false, vec!["summary here content body".to_string()]),
+            (
+                true,
+                vec![
+                    "A Title. summary here. tags: alpha, beta".to_string(),
+                    "content body".to_string(),
+                ],
+            ),
+        ] {
+            let temp_dir = TempDir::new().unwrap();
+            let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+                .await
+                .unwrap();
+            store.create(&memory).await.unwrap();
+
+            let provider = Arc::new(CapturingProvider(Mutex::new(Vec::new())));
+            let mut config = EngramConfig::default();
+            config.embeddings.metadata_vector = flag;
+            let engine = RetrievalEngine::new(store.clone(), config)
+                .with_embedding_provider(Arc::clone(&provider) as Arc<dyn EmbeddingProvider>);
+            engine.embed_memory(&memory).await.unwrap();
+
+            let captured = provider.0.lock().unwrap().clone();
+            assert_eq!(captured, expected, "metadata_vector = {flag}");
+            let chunks = store.export_chunks(&memory.id).await.unwrap();
+            assert_eq!(chunks.len(), expected.len(), "metadata_vector = {flag}");
+        }
+    }
+
+    /// The reranker document must carry the same title/tag signal the
+    /// metadata vector embeds — otherwise candidates surfaced via that
+    /// vector are re-scored on text without the matched terms and get
+    /// systematically demoted.
+    #[test]
+    fn rerank_document_includes_title_and_tags() {
+        let mut m = mem_for_texts(
+            Some("JWT rotation"),
+            "Tokens rotate",
+            "The service rotates credentials.",
+            &["jwt", "auth"],
+        );
+        m.details = Some("Extra details.".to_string());
+        assert_eq!(
+            rerank_document(&m),
+            "JWT rotation. Tokens rotate The service rotates credentials. Extra details. tags: jwt, auth"
+        );
+
+        // Absent title/tags degrade to the legacy summary+content(+details).
+        let plain = mem_for_texts(None, "Sum", "Body.", &[]);
+        assert_eq!(rerank_document(&plain), "Sum Body.");
     }
 
     /// A genuinely legacy store — unstamped but holding vectors of unknown
@@ -3206,6 +3496,7 @@ mod tests {
             &store,
             &existing,
             embed_arc.max_tokens(),
+            true,
             None,
         )
         .await
@@ -3304,6 +3595,7 @@ mod tests {
             &store,
             &existing,
             embed_arc.max_tokens(),
+            true,
             None,
         )
         .await

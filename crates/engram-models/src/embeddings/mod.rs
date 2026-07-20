@@ -20,7 +20,7 @@ pub use ollama::{
 #[cfg(feature = "onnxruntime")]
 pub use onnx::{
     OnnxModelSpec, OnnxProvider, DEFAULT_ONNX_EMBEDDING, ONNX_ALL_MINILM, ONNX_ALL_MINILM_Q,
-    ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT,
+    ONNX_BGE_SMALL_EN_Q, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT, ONNX_NOMIC_EMBED_TEXT_Q,
 };
 pub use pool::PooledEmbeddingProvider;
 #[cfg(feature = "tract")]
