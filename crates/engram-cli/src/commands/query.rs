@@ -55,10 +55,33 @@ pub async fn run_query(
     }
 
     let show_scores = params.show_scores;
+    // Capture the bits needed for an empty-result hint before `params` is moved.
+    let mode = params.mode;
+    let had_query = params.query.as_ref().is_some_and(|q| !q.is_empty());
     let result =
         compute_query_result(store, global, params, embedding_backend, cell, policy).await?;
 
     formatter.print_retrieval_result(&result, show_scores);
+
+    // Explain an empty result rather than leaving the user at `total: 0`.
+    // A free-text query in `rank` mode is scored (semantic + keyword) but
+    // gated by `retrieval.relevance_threshold` (default 0.45); memories that
+    // match only weakly fall below it and silently vanish. `filter` mode uses
+    // a looser threshold and surfaces keyword/tag/scope matches. The hint is a
+    // no-op in JSON mode (structured output speaks for itself).
+    if result.memories.is_empty() && had_query {
+        match mode {
+            RetrievalMode::Rank => formatter.print_hint(
+                "No memories cleared the rank relevance threshold. Try `--mode filter` for \
+                 free-text search, broaden the query, or lower `retrieval.relevance_threshold` \
+                 in .engramdb/config.toml.",
+            ),
+            RetrievalMode::Filter => formatter.print_hint(
+                "No memories matched. Try broader terms, add `--path`/`--logical` context, or \
+                 `--mode rank` to browse everything by score.",
+            ),
+        }
+    }
 
     Ok(())
 }
