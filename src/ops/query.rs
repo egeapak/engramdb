@@ -121,6 +121,15 @@ pub struct ExtraStoresResult {
     pub unreadable: Vec<String>,
 }
 
+/// Over-fetch multiplier for the equalization candidate pool: each store is
+/// queried for up to `max * FACTOR` candidates (bounded by [`EQUALIZE_POOL_CAP`])
+/// so the post-merge cross-encoder can lift a genuinely-relevant memory that
+/// ranked below `max` under the incomparable per-store vector scores.
+const EQUALIZE_POOL_FACTOR: usize = 5;
+/// Hard cap on the equalization candidate pool, keeping the cross-encoder pass
+/// bounded even for a large `max`. The effective pool is never below `max`.
+const EQUALIZE_POOL_CAP: usize = 100;
+
 /// Run `query` on `engine` (the session's own project store) and fold in
 /// results from any number of shared "extra" stores — the everyone/global
 /// store and each subscribed group store — reusing [`merge_scored_memories`].
@@ -175,26 +184,57 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Vec<(String, RetrievalEngine)>>,
 {
-    let mut result = query_memories(engine, query).await?;
+    let max = query.max_results.unwrap_or(10);
+    // When equalizing, over-fetch a deeper candidate pool from *every* store so
+    // the post-merge cross-encoder can lift a memory that ranked low under the
+    // incomparable per-store vector scores — the whole point of equalization.
+    // The final cut to `max` happens after the rerank. The pool is bounded so
+    // the extra cross-encoder pass stays cheap, and is never below `max`. On the
+    // common (non-equalizing) path `pool == max`, so behavior is unchanged.
+    let pool = if equalize_cross_store_scores {
+        max.saturating_mul(EQUALIZE_POOL_FACTOR)
+            .min(EQUALIZE_POOL_CAP)
+            .max(max)
+    } else {
+        max
+    };
+
+    // Primary (own project) query. Over-fetch to `pool` only when equalizing;
+    // otherwise leave the caller's query untouched (preserving `max_results`,
+    // including `None` → the engine default).
+    let mut result = if equalize_cross_store_scores {
+        let mut primary_query = query.clone();
+        primary_query.max_results = Some(pool);
+        query_memories(engine, &primary_query).await?
+    } else {
+        query_memories(engine, query).await?
+    };
+
     let extras = extra_engines().await;
     if extras.is_empty() {
+        // Nothing to fan in. If we over-fetched a deeper primary pool, trim it
+        // back to `max` (no extras ⇒ no cross-store equalization to run).
+        result.memories.truncate(max);
         return Ok(ExtraStoresResult {
             result,
             unreadable: Vec::new(),
         });
     }
-    let max = query.max_results.unwrap_or(10);
     // Cross-repo: drop the repo-relative path so physical proximity isn't
-    // scored against a foreign repo's file layout.
+    // scored against a foreign repo's file layout; over-fetch to `pool`.
     let mut extra_query = query.clone();
     extra_query.path = None;
+    if equalize_cross_store_scores {
+        extra_query.max_results = Some(pool);
+    }
     // Fan out concurrently; each future borrows its engine and the shared
     // query immutably, so they poll together without contention.
     let extra_results =
         futures_util::future::join_all(extras.iter().map(|(_, e)| query_memories(e, &extra_query)))
             .await;
     // Fold in original order so dedup/tie-breaking is independent of completion
-    // order.
+    // order. Merge to `pool` (== `max` unless equalizing) so the deeper pool
+    // survives into the rerank.
     let mut unreadable = Vec::new();
     for ((label, _), extra_result) in extras.iter().zip(extra_results) {
         match extra_result {
@@ -205,7 +245,7 @@ where
                     .filter(|sm| audience_allows(&sm.memory, viewer_ids))
                     .collect();
                 let visible_count = visible.len();
-                let duplicates = merge_scored_memories(&mut result.memories, visible, max);
+                let duplicates = merge_scored_memories(&mut result.memories, visible, pool);
                 result.total += visible_count.saturating_sub(duplicates);
             }
             Err(e) => {
@@ -225,12 +265,14 @@ where
     // P2: cross-store rerank equalization. Memories merged from stores embedded
     // with different models carry scores from different vector spaces, so their
     // relative ranking across the store boundary is arbitrary. A single
-    // cross-encoder pass over the merged union re-scores every entry with one
-    // model-agnostic scorer, restoring a comparable ranking. The caller sets
-    // `equalize_cross_store_scores` only when a fingerprint actually differs
-    // (the same-fingerprint fast path leaves it false), so this is off the
-    // common query path. It needs a query text signal and is best-effort — a
-    // rerank failure (or no reranker configured) keeps the per-store scores.
+    // cross-encoder pass over the merged (over-fetched) union re-scores every
+    // entry with one model-agnostic scorer and truncates to `max`, restoring a
+    // comparable ranking. The caller sets `equalize_cross_store_scores` only
+    // when a fingerprint actually differs (the same-fingerprint fast path leaves
+    // it false), so this is off the common query path. It needs a query text
+    // signal and is best-effort — a rerank failure (or no reranker configured)
+    // keeps the per-store scores.
+    let mut equalized = false;
     if equalize_cross_store_scores {
         if let Some(q) = query
             .query
@@ -240,6 +282,7 @@ where
         {
             match engine.rerank_merged(q, &mut result.memories, max).await {
                 Ok(true) => {
+                    equalized = true;
                     result.retrieval_quality = format!("{}+equalized", result.retrieval_quality);
                 }
                 Ok(false) => {}
@@ -249,6 +292,12 @@ where
                 ),
             }
         }
+    }
+    // If we over-fetched a deeper pool but equalization did not actually run
+    // (no reranker, no query text, weight 0, or a rerank error), trim back to
+    // the caller's `max`. When it did run, `rerank_merged` already truncated.
+    if pool > max && !equalized {
+        result.memories.truncate(max);
     }
 
     Ok(ExtraStoresResult { result, unreadable })
@@ -565,6 +614,118 @@ mod tests {
         assert!(
             !outcome.unreadable.contains(&gid_ok),
             "the healthy store must not be reported unreadable"
+        );
+    }
+
+    // Regression for the P2 review: equalization must be able to lift a memory
+    // that ranked BELOW `max` under the incomparable per-store scores. That only
+    // works if the fan-in over-fetches a deeper pool when equalizing (otherwise
+    // the good memory is truncated away before the cross-encoder ever sees it).
+    // A deterministic marker reranker on the project engine scores the marked
+    // memory highest; without the over-fetch the marked memory (lowest prior
+    // score, rank > max) would never reach the rerank.
+    #[tokio::test]
+    async fn equalization_lifts_a_sub_max_memory_via_overfetch() {
+        use crate::retrieval::engine::{RetrievalEngine, RetrievalMode, RetrievalQuery};
+        use crate::retrieval::reranker::{RerankScore, Reranker};
+        use crate::storage::{InMemoryRegistry, MemoryStore};
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance};
+        use tempfile::TempDir;
+
+        struct MarkerReranker;
+        #[async_trait::async_trait]
+        impl Reranker for MarkerReranker {
+            async fn rerank(&self, _q: &str, docs: &[String]) -> anyhow::Result<Vec<RerankScore>> {
+                Ok(docs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, d)| RerankScore {
+                        index,
+                        score: if d.contains("LIFTME") { 12.0 } else { -12.0 },
+                    })
+                    .collect())
+            }
+        }
+
+        let proj_dir = TempDir::new().unwrap();
+        let proj_store = MemoryStore::init(proj_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        // Group store: six high-criticality fillers rank above `max`, and one
+        // low-criticality marked memory ranks below it.
+        let gid = crate::storage::paths::compute_group_id("overfetch-equalize-test");
+        let group = MemoryStore::init_group(&gid).await.unwrap();
+        for i in 0..6 {
+            let mut m = Memory::new(
+                MemoryType::Convention,
+                format!("widget filler {i}"),
+                "widget content",
+                Provenance::human(),
+            );
+            m.criticality = 0.9;
+            group.create(&m).await.unwrap();
+        }
+        let mut winner = Memory::new(
+            MemoryType::Convention,
+            "widget LIFTME winner",
+            "widget content",
+            Provenance::human(),
+        );
+        winner.criticality = 0.05;
+        group.create(&winner).await.unwrap();
+        drop(group);
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+        config.rerank.enabled = true;
+        config.rerank.weight = 1.0;
+
+        let proj_engine = RetrievalEngine::new(proj_store, config.clone())
+            .with_reranker(std::sync::Arc::new(MarkerReranker));
+
+        let query = RetrievalQuery {
+            mode: RetrievalMode::Filter,
+            query: Some("widget".to_string()),
+            max_results: Some(3), // marked memory ranks ~7th → excluded without over-fetch
+            ..Default::default()
+        };
+        let viewer: HashSet<String> = HashSet::new();
+        let cfg = config.clone();
+        let gid_c = gid.clone();
+        // equalize = true: the fan-in over-fetches, so the marked memory is in
+        // the merged pool for the cross-encoder to lift.
+        let outcome =
+            query_memories_with_extra_stores(&proj_engine, &query, &viewer, true, || async move {
+                vec![(
+                    gid_c.clone(),
+                    RetrievalEngine::new(MemoryStore::open_group(&gid_c).await.unwrap(), cfg),
+                )]
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            outcome
+                .result
+                .memories
+                .first()
+                .is_some_and(|m| m.memory.summary.contains("LIFTME")),
+            "over-fetch + equalization must surface and lift the sub-`max` marked memory; got: {:?}",
+            outcome
+                .result
+                .memories
+                .iter()
+                .map(|m| m.memory.summary.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            outcome.result.retrieval_quality.contains("+equalized"),
+            "retrieval_quality must record that equalization ran"
+        );
+        assert!(
+            outcome.result.memories.len() <= 3,
+            "final result must be truncated to max"
         );
     }
 

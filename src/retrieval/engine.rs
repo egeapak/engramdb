@@ -2074,6 +2074,79 @@ mod tests {
         assert_eq!(memories[1].score, 0.1);
     }
 
+    /// Equalization must be able to *reorder* the merged union, not just no-op:
+    /// a memory that ranked low by its prior (incomparable) score is lifted to
+    /// the top when the cross-encoder scores it highest. Uses a deterministic
+    /// marker reranker so no model load is needed.
+    #[tokio::test]
+    async fn rerank_merged_reorders_by_cross_encoder() {
+        use crate::retrieval::reranker::{RerankScore, Reranker};
+        use crate::scoring::ScoreBreakdown;
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance};
+        use tempfile::TempDir;
+
+        // Scores any document containing "LIFTME" far above the rest.
+        struct MarkerReranker;
+        #[async_trait::async_trait]
+        impl Reranker for MarkerReranker {
+            async fn rerank(
+                &self,
+                _query: &str,
+                documents: &[String],
+            ) -> anyhow::Result<Vec<RerankScore>> {
+                Ok(documents
+                    .iter()
+                    .enumerate()
+                    .map(|(index, d)| RerankScore {
+                        index,
+                        score: if d.contains("LIFTME") { 12.0 } else { -12.0 },
+                    })
+                    .collect())
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut config = EngramConfig::default();
+        config.rerank.enabled = true;
+        config.rerank.weight = 1.0; // fully trust the cross-encoder for a clean assert
+        let engine =
+            RetrievalEngine::new(store, config).with_reranker(std::sync::Arc::new(MarkerReranker));
+
+        let sm = |summary: &str, score: f64| ScoredMemory {
+            memory: Memory::new(
+                MemoryType::Decision,
+                summary,
+                "content",
+                Provenance::human(),
+            ),
+            score,
+            score_breakdown: ScoreBreakdown::default(),
+        };
+        // The marked memory has the LOWEST prior score, so a no-op rerank would
+        // leave it last.
+        let mut memories = vec![
+            sm("alpha", 0.9),
+            sm("beta", 0.8),
+            sm("gamma LIFTME winner", 0.1),
+        ];
+        let ran = engine
+            .rerank_merged("query", &mut memories, 10)
+            .await
+            .unwrap();
+        assert!(ran, "a configured reranker must run");
+        assert!(
+            memories[0].memory.summary.contains("LIFTME"),
+            "the cross-encoder must lift the marked memory to the top despite its low prior score; \
+             got order: {:?}",
+            memories.iter().map(|m| &m.memory.summary).collect::<Vec<_>>()
+        );
+        // Truncation to `max` still applies (here max=10 > len, so all kept).
+        assert_eq!(memories.len(), 3);
+    }
+
     /// The R2 fast path must honor Step 1.5's empty-path collapse: a no-query
     /// Rank with `path: ""` (the natural MCP/hook degenerate) must rank like
     /// `path: None`, not zero every scope multiplier and return nothing.
