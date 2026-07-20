@@ -699,6 +699,9 @@ pub fn provider_cache_key(
         max_tokens: _,
         // Reindex *policy* — what to do on a model change, not which model.
         reindex_on_model_change: _,
+        // Embed-text *composition*, applied per embed call — the same loaded
+        // session serves both compositions; not model identity.
+        metadata_vector: _,
         // The caller passes the RESOLVED pool size (auto `cores/2` applied),
         // which is what actually sizes the bundle.
         pool_size: _,

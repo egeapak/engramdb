@@ -395,6 +395,7 @@ impl RetrievalEngine {
                 &self.store,
                 memory,
                 chunk_tokens,
+                self.config.embeddings.metadata_vector,
                 self.ingest_telemetry().as_ref(),
             )
             .await?;
@@ -422,6 +423,7 @@ impl RetrievalEngine {
         let chunk_tokens =
             effective_chunk_tokens(self.config.embeddings.max_tokens, provider.max_tokens());
         let store = self.store.clone();
+        let metadata_vector = self.config.embeddings.metadata_vector;
         let nli_provider = if self.config.nli.enabled {
             self.nli_provider.as_ref().map(Arc::clone)
         } else {
@@ -436,6 +438,7 @@ impl RetrievalEngine {
                 &store,
                 &memory,
                 chunk_tokens,
+                metadata_vector,
                 telemetry.as_ref(),
             )
             .await
@@ -1364,17 +1367,70 @@ fn effective_chunk_tokens(config_max_tokens: usize, provider_max_tokens: usize) 
     config_max_tokens.min(provider_max_tokens).max(1)
 }
 
+/// Build the texts whose vectors represent `memory` in the chunk table.
+///
+/// With `metadata_vector` **on** (the default), the memory is represented by
+/// a dedicated metadata row — `"{title}. {summary}. tags: {tags}"` — plus the
+/// content chunked on its own. Title/tag signal becomes reachable by vector
+/// search (it was previously absent from the embeddings entirely) while
+/// content chunks stay undiluted; the store's max-score aggregation picks
+/// whichever row matches best. Benchmarked as the `fieldvec` variant in
+/// `docs/contributors/embedding-analysis.md` (E1): MRR@10 ~0.75 → 0.89.
+///
+/// With it **off**, the legacy composition: `"{summary} {content}"` chunked
+/// as one text.
+///
+/// Empty fields degrade gracefully (a missing title / empty tags just drop
+/// out of the metadata row); an entirely empty memory yields no texts, which
+/// the caller treats as "delete any stored chunks".
+pub(crate) fn embedding_texts(
+    memory: &Memory,
+    chunk_tokens: usize,
+    metadata_vector: bool,
+) -> Vec<String> {
+    if !metadata_vector {
+        let text = format!("{} {}", memory.summary, memory.content);
+        return crate::embeddings::chunk_text(&text, chunk_tokens);
+    }
+
+    let mut meta_parts: Vec<&str> = Vec::new();
+    let title = memory.title.as_deref().unwrap_or("").trim();
+    if !title.is_empty() {
+        meta_parts.push(title);
+    }
+    let summary = memory.summary.trim();
+    if !summary.is_empty() {
+        meta_parts.push(summary);
+    }
+    let tags = memory
+        .tags
+        .iter()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let tags_clause = format!("tags: {tags}");
+    if !tags.is_empty() {
+        meta_parts.push(&tags_clause);
+    }
+
+    // The metadata row is normally one chunk; chunk_text guards the
+    // pathological case (enormous tag lists) the same way content is guarded.
+    let mut texts = crate::embeddings::chunk_text(&meta_parts.join(". "), chunk_tokens);
+    texts.extend(crate::embeddings::chunk_text(&memory.content, chunk_tokens));
+    texts
+}
+
 async fn embed_memory_with(
     provider: &dyn EmbeddingProvider,
     store: &MemoryStore,
     memory: &Memory,
     chunk_tokens: usize,
+    metadata_vector: bool,
     telemetry: Option<&IngestTelemetry>,
 ) -> anyhow::Result<()> {
-    let text = format!("{} {}", memory.summary, memory.content);
-
     let t = std::time::Instant::now();
-    let chunks = crate::embeddings::chunk_text(&text, chunk_tokens);
+    let chunks = embedding_texts(memory, chunk_tokens, metadata_vector);
     if let Some(t_) = telemetry {
         t_.record("create.chunk_text", t.elapsed().as_secs_f64() * 1000.0);
     }
@@ -1612,9 +1668,16 @@ mod tests {
         store.create(&existing).await.unwrap();
 
         let embed: Arc<dyn EmbeddingProvider> = Arc::new(ConstantEmbedding);
-        embed_memory_with(embed.as_ref(), &store, &existing, embed.max_tokens(), None)
-            .await
-            .unwrap();
+        embed_memory_with(
+            embed.as_ref(),
+            &store,
+            &existing,
+            embed.max_tokens(),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
 
         let mut config = EngramConfig::default();
         config.nli.enabled = true;
@@ -1656,6 +1719,87 @@ mod tests {
         assert_eq!(effective_chunk_tokens(128, 256), 128); // smaller is honoured
         assert_eq!(effective_chunk_tokens(1000, 256), 256); // never exceeds model
         assert_eq!(effective_chunk_tokens(0, 256), 1); // floored at 1
+    }
+
+    fn mem_for_texts(title: Option<&str>, summary: &str, content: &str, tags: &[&str]) -> Memory {
+        let mut m = Memory::new(
+            crate::types::MemoryType::Context,
+            summary,
+            content,
+            crate::types::Provenance::human(),
+        );
+        m.title = title.map(str::to_string);
+        m.tags = tags.iter().map(|t| t.to_string()).collect();
+        m
+    }
+
+    #[test]
+    fn embedding_texts_metadata_row_plus_content_chunks() {
+        let m = mem_for_texts(
+            Some("JWT refresh rotation"),
+            "Refresh tokens rotate on use",
+            "The auth service rotates refresh tokens on every use.",
+            &["jwt", "auth"],
+        );
+        let texts = embedding_texts(&m, 256, true);
+        assert_eq!(texts.len(), 2, "metadata row + one content chunk");
+        assert_eq!(
+            texts[0],
+            "JWT refresh rotation. Refresh tokens rotate on use. tags: jwt, auth"
+        );
+        assert_eq!(
+            texts[1],
+            "The auth service rotates refresh tokens on every use."
+        );
+    }
+
+    #[test]
+    fn embedding_texts_degrades_without_title_and_tags() {
+        let m = mem_for_texts(None, "Just a summary", "Some content here.", &[]);
+        let texts = embedding_texts(&m, 256, true);
+        assert_eq!(texts, vec!["Just a summary", "Some content here."]);
+
+        // Whitespace-only title and empty tag entries drop out too.
+        let m = mem_for_texts(Some("  "), "Summary", "Content.", &["", "  "]);
+        let texts = embedding_texts(&m, 256, true);
+        assert_eq!(texts, vec!["Summary", "Content."]);
+    }
+
+    #[test]
+    fn embedding_texts_empty_memory_yields_nothing() {
+        let m = mem_for_texts(None, "", "", &[]);
+        assert!(embedding_texts(&m, 256, true).is_empty());
+        assert!(embedding_texts(&m, 256, false).is_empty());
+    }
+
+    #[test]
+    fn embedding_texts_metadata_only_when_content_empty() {
+        let m = mem_for_texts(Some("Title"), "Summary", "", &["tag"]);
+        let texts = embedding_texts(&m, 256, true);
+        assert_eq!(texts, vec!["Title. Summary. tags: tag"]);
+    }
+
+    #[test]
+    fn embedding_texts_legacy_composition_when_disabled() {
+        let m = mem_for_texts(
+            Some("Title is ignored"),
+            "Summary",
+            "Content body.",
+            &["ignored"],
+        );
+        let texts = embedding_texts(&m, 256, false);
+        assert_eq!(texts, vec!["Summary Content body."]);
+    }
+
+    #[test]
+    fn embedding_texts_long_content_still_chunks() {
+        let long: Vec<String> = (0..400).map(|i| format!("word{i}")).collect();
+        let m = mem_for_texts(Some("T"), "S", &long.join(" "), &["x"]);
+        let texts = embedding_texts(&m, 256, true);
+        // 1 metadata row + 400 words at 192-word blocks (runt-merged tail).
+        assert!(texts.len() >= 3, "got {}", texts.len());
+        assert_eq!(texts[0], "T. S. tags: x");
+        assert!(texts[1].starts_with("word0"));
     }
 
     /// Shared reranker across all tests in this module to avoid loading the
@@ -3200,6 +3344,7 @@ mod tests {
             &store,
             &existing,
             embed_arc.max_tokens(),
+            true,
             None,
         )
         .await
@@ -3298,6 +3443,7 @@ mod tests {
             &store,
             &existing,
             embed_arc.max_tokens(),
+            true,
             None,
         )
         .await

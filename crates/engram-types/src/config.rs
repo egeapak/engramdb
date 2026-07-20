@@ -769,6 +769,19 @@ pub struct EmbeddingsConfig {
     #[serde(default)]
     pub reindex_on_model_change: ReindexOnModelChange,
 
+    /// Embed a per-memory metadata vector (`"{title}. {summary}. tags: …"`)
+    /// as an extra chunk row alongside the content chunks (default: true).
+    ///
+    /// The offline benchmark (`docs/contributors/embedding-analysis.md`, E1)
+    /// showed this lifts MRR@10 ~0.75→0.89 by making title/tag signal
+    /// reachable by vector search without diluting content chunks. When
+    /// false, the legacy composition (`"{summary} {content}"` chunked as one
+    /// text) is used. Toggling this changes what vectors *should* contain —
+    /// run `engramdb reindex --embeddings-only` afterwards; it is not a
+    /// model change, so the embedding fingerprint does not detect it.
+    #[serde(default = "default_metadata_vector")]
+    pub metadata_vector: bool,
+
     /// Number of independent embedding model sessions to load and
     /// round-robin across.
     ///
@@ -817,6 +830,13 @@ pub fn available_cores() -> usize {
         .unwrap_or(1)
 }
 
+/// Serde default for [`EmbeddingsConfig::metadata_vector`]: on. Existing
+/// config files without the field pick the new composition up on upgrade
+/// (their next `reindex --embeddings-only` or re-embed writes it).
+fn default_metadata_vector() -> bool {
+    true
+}
+
 impl Default for EmbeddingsConfig {
     fn default() -> Self {
         Self {
@@ -825,6 +845,7 @@ impl Default for EmbeddingsConfig {
             dimensions: 384,
             max_tokens: 256,
             reindex_on_model_change: ReindexOnModelChange::default(),
+            metadata_vector: true,
             pool_size: None,
         }
     }

@@ -12,12 +12,15 @@ purpose-built labeled corpus.
 
 ## TL;DR — ranked recommendations
 
+> **Status:** recommendations #1 (metadata vector, `embeddings.metadata_vector`,
+> default on) and #4 (runt-merge in `chunk_text`) are implemented.
+
 | # | Change | Evidence | Cost |
 |---|--------|----------|------|
-| 1 | **Embed a metadata vector per memory** (`"{title}. {summary}. tags: …"` as an extra chunk row alongside the content chunks) | MRR@10 0.75 → 0.89, P@1 0.67 → 0.85 on the default model; consistent on all 4 models tested (13 queries improved / 2 worsened). Tag-only queries go from MRR 0.15 to 0.78. | +1 vector per memory; a `reindex --embeddings-only`; no schema change (chunk table already holds N vectors, max-aggregation already handles it) |
+| 1 | **Embed a metadata vector per memory** (`"{title}. {summary}. tags: …"` as an extra chunk row alongside the content chunks) — **implemented, default on** | MRR@10 0.75 → 0.89, P@1 0.67 → 0.85 on the default model; consistent on all 4 models tested (13 queries improved / 2 worsened). Tag-only queries go from MRR 0.15 to 0.78. | +1 vector per memory; a `reindex --embeddings-only`; no schema change (chunk table already holds N vectors, max-aggregation already handles it) |
 | 2 | **Keep int8 MiniLM as the default model** — do not switch to BGE-small or nomic | BGE-small-q only matches MiniLM after adding its query prefix *and* the metadata vector (R@5 0.948 vs 0.920 — inside the noise floor) at 6.8× the latency (98.8 vs 14.6 ms/text). nomic-q int8 is far worse on every cell and 8.6× slower. | none (status quo) |
 | 3 | **Keep 256-token chunks and max aggregation** | Budget sweep 64–256 is flat (±2 pts); mean aggregation *loses* up to 24 pts MRR on buried-fact queries; chunking beats no-chunking (truncation loses 5 pts R@5 overall, 14 pts on straddle-fact memories) | none (status quo) |
-| 4 | **Merge trailing runt chunks** (<32 words into the previous chunk) | Small but clean: nDCG 0.780 → 0.817-run-1 / equal-or-better canonical, 5 improved / 0 worsened, and 7% *fewer* vectors | ~10 lines in `chunk_text` |
+| 4 | **Merge trailing runt chunks** (<32 words into the previous chunk) — **implemented** | Small but clean: nDCG 0.780 → 0.817-run-1 / equal-or-better canonical, 5 improved / 0 worsened, and 7% *fewer* vectors | ~10 lines in `chunk_text` |
 | 5 | **Token-aware chunk budget for code-dense text** (defect, mild today) | 25% of corpus chunks (50% of code-dense ones) exceed the 256-token model limit — up to 70 trailing tokens silently truncated. Recall impact currently mild (code-dense R@5 0.96) because queries rarely target only the truncated tail, but it's silent data loss that worsens with denser code. | tokenizer-based packing, or a smaller word-per-token factor when identifier density is high |
 | 6 | Don't bother: query instruction prefixes for MiniLM, structured label prefixes (`type: … | scope: …`), sentence-aware or overlapping chunking, mean/top-2 aggregation | Each was tested; none produced gains above the noise floor, and several regress (details below) | — |
 

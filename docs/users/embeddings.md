@@ -1,6 +1,6 @@
 # Embedding Models
 
-Every memory's `summary + content` is embedded into a fixed-dimensional vector and stored alongside metadata in a single LanceDB table. Embeddings are **optional** — with `--no-embeddings` or a failed model load, query degrades to relevance-only (keyword search still works).
+Every memory is embedded as one **metadata vector** (`"{title}. {summary}. tags: …"`) plus its content chunked into one or more content vectors, stored alongside metadata in a single LanceDB table; at query time the best-matching vector represents the memory (max-score aggregation). Set `embeddings.metadata_vector = false` to revert to the legacy single `summary + content` composition (then run `engramdb reindex --embeddings-only`). Embeddings are **optional** — with `--no-embeddings` or a failed model load, query degrades to relevance-only (keyword search still works).
 
 ## Available models
 
