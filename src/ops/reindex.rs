@@ -373,11 +373,12 @@ mod tests {
         assert!(result.errors.is_empty());
         assert!(result.warnings.is_empty());
 
-        // The short test memory embeds to exactly one chunk — the three
-        // stale chunks must be replaced, not appended to.
+        // The short test memory embeds to exactly two chunks (metadata row +
+        // content chunk under the default `metadata_vector` composition) —
+        // the three stale chunks must be replaced, not appended to.
         let chunks = store.export_chunks(&mem.id).await.unwrap();
-        assert_eq!(chunks.len(), 1, "stale chunks must be replaced");
-        assert_eq!(chunks[0], vec![0.5f32; 384]);
+        assert_eq!(chunks.len(), 2, "stale chunks must be replaced");
+        assert!(chunks.iter().all(|c| c == &vec![0.5f32; 384]));
 
         // Ghost chunks are gone too.
         assert_eq!(
@@ -474,9 +475,10 @@ mod tests {
         );
         assert_eq!(chunks[0], vec![0.25f32; 384]);
 
-        // B's own memory was re-embedded with the live provider.
+        // B's own memory was re-embedded with the live provider (two rows:
+        // metadata + content under the default composition).
         let b_chunks = store_b.export_chunks(&mem_b.id).await.unwrap();
-        assert_eq!(b_chunks, vec![vec![0.5f32; 384]]);
+        assert_eq!(b_chunks, vec![vec![0.5f32; 384], vec![0.5f32; 384]]);
     }
 
     /// CRITICAL guard: on a partial (here: total) embedding failure, the
