@@ -87,6 +87,80 @@ pub fn merge_scored_memories(
     duplicates
 }
 
+/// Whether a memory from a shared (group or everyone/global) store is visible
+/// to a viewer identified by `viewer_ids` — the querying project's own id plus
+/// every group it subscribes to.
+///
+/// `audience == None` ⇒ visible to the whole store's group (the default). A
+/// `Some(list)` audience restricts visibility to viewers whose id (project or
+/// subscribed group) appears in the list — the per-memory sharing precision
+/// half of the `audience` field. The write side lives with `create`/`update`.
+pub fn audience_allows(memory: &crate::types::Memory, viewer_ids: &HashSet<String>) -> bool {
+    match &memory.audience {
+        None => true,
+        Some(list) => list.iter().any(|id| viewer_ids.contains(id)),
+    }
+}
+
+/// Run `query` on `engine` (the session's own project store) and fold in
+/// results from any number of shared "extra" stores — the everyone/global
+/// store and each subscribed group store — reusing [`merge_scored_memories`].
+///
+/// This is the N-way generalization of [`query_memories_with_global`]: the
+/// global store is simply the built-in "everyone" group, one extra store among
+/// the subscribed groups. `extra_engines` is invoked lazily (building an engine
+/// loads the embedding model), so a caller with global disabled and no
+/// subscriptions returns an empty vec and the primary result is untouched.
+///
+/// Two cross-repo corrections are applied to every extra store, because a
+/// shared memory is authored against a *different* repo than the querying one:
+/// - **Physical scope is suppressed.** Physical scopes are repo-relative, so
+///   the querying repo's `path` is dropped from the extra-store query — a
+///   foreign-repo path must not earn (or lose) physical-proximity score.
+///   Logical scope, which is repo-independent, still applies.
+/// - **Audience is enforced.** A shared memory surfaces only when
+///   [`audience_allows`] passes for `viewer_ids`, giving per-memory sharing
+///   precision without a second copy.
+///
+/// Best-effort by contract: a failed extra-store query is skipped (project
+/// results still return), matching the `include_global` band it generalizes.
+/// The combined `total` counts only *visible* (audience-passing) extra
+/// memories, so it never leaks the existence of memories hidden from the viewer.
+pub async fn query_memories_with_extra_stores<F, Fut>(
+    engine: &RetrievalEngine,
+    query: &RetrievalQuery,
+    viewer_ids: &HashSet<String>,
+    extra_engines: F,
+) -> Result<RetrievalResult>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Vec<RetrievalEngine>>,
+{
+    let mut result = query_memories(engine, query).await?;
+    let extras = extra_engines().await;
+    if extras.is_empty() {
+        return Ok(result);
+    }
+    let max = query.max_results.unwrap_or(10);
+    // Cross-repo: drop the repo-relative path so physical proximity isn't
+    // scored against a foreign repo's file layout.
+    let mut extra_query = query.clone();
+    extra_query.path = None;
+    for extra in &extras {
+        if let Ok(extra_result) = query_memories(extra, &extra_query).await {
+            let visible: Vec<ScoredMemory> = extra_result
+                .memories
+                .into_iter()
+                .filter(|sm| audience_allows(&sm.memory, viewer_ids))
+                .collect();
+            let visible_count = visible.len();
+            let duplicates = merge_scored_memories(&mut result.memories, visible, max);
+            result.total += visible_count.saturating_sub(duplicates);
+        }
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +255,34 @@ mod tests {
         let mut project = vec![scored("p1", 0.5)];
         merge_scored_memories(&mut project, vec![scored("g1", 0.9)], 0);
         assert!(project.is_empty());
+    }
+
+    fn viewer(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn audience_none_is_visible_to_any_viewer() {
+        let m = scored("x", 0.5).memory; // audience defaults to None
+        assert!(m.audience.is_none());
+        assert!(audience_allows(&m, &viewer(&[])));
+        assert!(audience_allows(&m, &viewer(&["projA"])));
+    }
+
+    #[test]
+    fn audience_some_requires_project_or_group_membership() {
+        let mut m = scored("x", 0.5).memory;
+        m.audience = Some(vec!["projA".to_string(), "__g_grpx".to_string()]);
+
+        // Own project id in the audience → visible.
+        assert!(audience_allows(&m, &viewer(&["projA"])));
+        // A subscribed group in the audience → visible (viewer_ids carries the
+        // project's own id plus every group it subscribes to).
+        assert!(audience_allows(&m, &viewer(&["projB", "__g_grpx"])));
+        // Neither the viewer's project nor any subscribed group is listed →
+        // hidden. Per-memory precision: not everyone in the store sees it.
+        assert!(!audience_allows(&m, &viewer(&["projB", "__g_other"])));
+        // No identity at all → hidden.
+        assert!(!audience_allows(&m, &viewer(&[])));
     }
 }

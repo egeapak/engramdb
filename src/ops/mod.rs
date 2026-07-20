@@ -56,7 +56,10 @@ pub use parsing::{
     parse_epistemic_filter, parse_generality, parse_memory_type, parse_situation, parse_status,
     parse_type_filter, parse_visibility, validate_score,
 };
-pub use query::{merge_scored_memories, query_memories, query_memories_with_global};
+pub use query::{
+    audience_allows, merge_scored_memories, query_memories, query_memories_with_extra_stores,
+    query_memories_with_global,
+};
 pub use reindex::{reindex, ReindexResult};
 pub use resolve::{resolve_memory, ResolveAction, ResolveParams, ResolveResult};
 pub use review::{count_recency_stale, review_memories, ReviewParams};
