@@ -14,6 +14,7 @@ pub mod delete;
 pub mod doctor;
 pub mod gc;
 pub mod get;
+pub mod groups;
 pub mod hook;
 pub mod init;
 pub mod list;
@@ -40,6 +41,7 @@ pub use delete::run_delete;
 pub use doctor::run_doctor;
 pub use gc::run_gc;
 pub use get::run_get;
+pub use groups::run_groups;
 pub use hook::{
     run_hook_post_tool_use, run_hook_pre_compact, run_hook_pre_tool_use, run_hook_session_end,
     run_hook_session_start, run_hook_user_prompt_submit,

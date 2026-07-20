@@ -6,7 +6,8 @@ use anyhow::Result;
 use engramdb::daemon::{DaemonCell, DaemonPolicy};
 use engramdb::ops::validate_score;
 use engramdb::retrieval::engine::{RetrievalMode, RetrievalQuery, RetrievalResult};
-use engramdb::storage::MemoryStore;
+use engramdb::storage::{MemoryStore, RegistryBackend};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -99,6 +100,10 @@ async fn compute_query_result(
     cell: &Arc<DaemonCell>,
     policy: DaemonPolicy,
 ) -> Result<RetrievalResult> {
+    // Capture the querying store's own project id before `store` is consumed by
+    // `engine_for` — it seeds `viewer_ids` (audience precision) and looks up
+    // this project's group subscriptions in the registry.
+    let project_id = store.project_id.clone();
     let engine = engine_for(store, embedding_backend, cell, policy).await;
 
     let types = engramdb::ops::parse_type_filter(Some(&params.type_filter))?;
@@ -136,14 +141,47 @@ async fn compute_query_result(
         include_invalidated: Some(params.include_invalidated),
     };
 
-    // Optionally fold in global-store memories via the shared band
-    // (ops::query_memories_with_global). Skipped when already querying the
-    // global store (`--global`) — nothing extra to merge.
-    let include_global = params.include_global && !global;
+    // When querying the global store directly (`--global`), there is no
+    // cross-store fan-in to do — we ARE the shared store. Short-circuit exactly
+    // as before.
+    if global {
+        return engramdb::ops::query_memories(&engine, &query).await;
+    }
+
+    // N-way fan-in (ops::query_memories_with_extra_stores): fold in every group
+    // this project subscribes to (by default — that's the point of subscribing)
+    // plus the everyone/global store (only behind `--include-global`, matching
+    // the old `query_memories_with_global` band). `viewer_ids` — the project's
+    // own id plus each subscribed group — drives the per-memory `audience`
+    // filter so a restricted shared memory only surfaces for a listed viewer.
+    //
+    // With no subscriptions and `--include-global` off, `extra_engines` yields
+    // an empty vec and the result is byte-for-byte the project-only query.
+    let registry = engramdb::storage::FileRegistry::global()?.load().await?;
+    let subscriptions: Vec<String> =
+        engramdb::storage::registry::subscriptions_of(&registry, &project_id).to_vec();
+    let include_global = params.include_global;
+
+    let mut viewer_ids: HashSet<String> = HashSet::new();
+    viewer_ids.insert(project_id);
+    viewer_ids.extend(subscriptions.iter().cloned());
+
     let result =
-        engramdb::ops::query_memories_with_global(&engine, &query, include_global, || async {
-            let global_store = MemoryStore::open_global().await.ok()?;
-            Some(engine_for(global_store, embedding_backend, cell, policy).await)
+        engramdb::ops::query_memories_with_extra_stores(&engine, &query, &viewer_ids, || async {
+            let mut engines = Vec::new();
+            // Subscribed group stores fan in by default.
+            for gid in &subscriptions {
+                if let Ok(group_store) = MemoryStore::open_group(gid).await {
+                    engines.push(engine_for(group_store, embedding_backend, cell, policy).await);
+                }
+            }
+            // The everyone/global store folds in only when requested.
+            if include_global {
+                if let Ok(global_store) = MemoryStore::open_global().await {
+                    engines.push(engine_for(global_store, embedding_backend, cell, policy).await);
+                }
+            }
+            engines
         })
         .await?;
 

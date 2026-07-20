@@ -253,10 +253,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             editor,
             details_file,
             global,
+            group,
         } => {
             commands::add::run_add(
                 &dir,
                 global,
+                group,
                 &registry,
                 AddParams {
                     type_str: type_,
@@ -643,6 +645,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Projects { command } => {
             commands::run_projects(&dir, &registry, command, &formatter, &prompter).await
+        }
+        Command::Groups { command } => {
+            commands::run_groups(&dir, &registry, command, &formatter).await
         }
     }
 }

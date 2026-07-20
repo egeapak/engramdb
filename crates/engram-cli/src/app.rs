@@ -153,6 +153,35 @@ pub enum ProjectsCommand {
     },
 }
 
+/// Subcommands for `engramdb groups` (multi-project memory group stores).
+///
+/// A *group* is a named, machine-local memory store that a set of projects
+/// subscribe to — the tier between one project and the machine-wide global
+/// store. Membership lives in `registry.json` as per-project `subscriptions`.
+#[derive(Subcommand)]
+pub enum GroupsCommand {
+    /// Create a named group store (idempotent; prints its group id).
+    Create {
+        /// Human-readable group name (case/whitespace-normalized into a stable id)
+        name: String,
+    },
+    /// Subscribe the current project to a group (creating the group if needed).
+    ///
+    /// Subscribed groups fan into this project's queries by default, and the
+    /// project may write to the group without tripping the cross-project gate.
+    Subscribe {
+        /// Group name to subscribe to
+        name: String,
+    },
+    /// Unsubscribe the current project from a group (forgiving if not subscribed).
+    Unsubscribe {
+        /// Group name to unsubscribe from
+        name: String,
+    },
+    /// List all known groups and the current project's subscriptions.
+    List,
+}
+
 /// Output format for CLI commands.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum OutputFormat {
@@ -347,6 +376,13 @@ pub enum Command {
         /// Operate on the global (cross-project) memory store instead of the current project
         #[arg(long)]
         global: bool,
+
+        /// Write the memory into the named group store instead of the current
+        /// project. Repo-relative physical scope is stripped on group writes
+        /// (see the multi-project-memories design). Mutually exclusive with
+        /// `--global`.
+        #[arg(long, conflicts_with = "global")]
+        group: Option<String>,
     },
 
     /// Get a memory by ID
@@ -711,6 +747,12 @@ pub enum Command {
     Projects {
         #[command(subcommand)]
         command: Option<ProjectsCommand>,
+    },
+
+    /// Manage multi-project memory groups and this project's subscriptions
+    Groups {
+        #[command(subcommand)]
+        command: GroupsCommand,
     },
 
     /// Challenge a memory's validity
@@ -2151,6 +2193,86 @@ mod tests {
             } => assert_eq!(project_id, "child-id"),
             _ => panic!("Expected Projects Unlink command"),
         }
+    }
+
+    // ---- groups (multi-project memory membership) ----
+
+    #[test]
+    fn test_groups_create_parsing() {
+        let cli = Cli::try_parse_from(["engramdb", "groups", "create", "Backend Family"]).unwrap();
+        match cli.command {
+            Command::Groups {
+                command: GroupsCommand::Create { name },
+            } => assert_eq!(name, "Backend Family"),
+            _ => panic!("Expected Groups Create command"),
+        }
+    }
+
+    #[test]
+    fn test_groups_subscribe_unsubscribe_parsing() {
+        let cli = Cli::try_parse_from(["engramdb", "groups", "subscribe", "grp"]).unwrap();
+        match cli.command {
+            Command::Groups {
+                command: GroupsCommand::Subscribe { name },
+            } => assert_eq!(name, "grp"),
+            _ => panic!("Expected Groups Subscribe command"),
+        }
+
+        let cli = Cli::try_parse_from(["engramdb", "groups", "unsubscribe", "grp"]).unwrap();
+        match cli.command {
+            Command::Groups {
+                command: GroupsCommand::Unsubscribe { name },
+            } => assert_eq!(name, "grp"),
+            _ => panic!("Expected Groups Unsubscribe command"),
+        }
+    }
+
+    #[test]
+    fn test_groups_list_parsing() {
+        let cli = Cli::try_parse_from(["engramdb", "groups", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Groups {
+                command: GroupsCommand::List
+            }
+        ));
+    }
+
+    #[test]
+    fn test_groups_requires_subcommand() {
+        // Unlike `projects` (which defaults to Info), `groups` requires an
+        // explicit subcommand.
+        assert!(Cli::try_parse_from(["engramdb", "groups"]).is_err());
+    }
+
+    #[test]
+    fn test_add_group_flag_parses_and_conflicts_with_global() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "add",
+            "-t",
+            "decision",
+            "-c",
+            "x",
+            "-s",
+            "y",
+            "--group",
+            "Backend Family",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add { group, global, .. } => {
+                assert_eq!(group.as_deref(), Some("Backend Family"));
+                assert!(!global);
+            }
+            _ => panic!("Expected Add command"),
+        }
+
+        // `--group` and `--global` are mutually exclusive.
+        assert!(Cli::try_parse_from([
+            "engramdb", "add", "-t", "decision", "-c", "x", "-s", "y", "--group", "g", "--global",
+        ])
+        .is_err());
     }
 
     // Add: supersedes and decay param parsing (7 tests)

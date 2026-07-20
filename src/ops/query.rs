@@ -261,6 +261,113 @@ mod tests {
         ids.iter().map(|s| s.to_string()).collect()
     }
 
+    // End-to-end fan-in: a memory created in a real group store surfaces in a
+    // subscribed project's query (filter mode, keyword-only — no embeddings),
+    // and a per-memory `audience` restriction hides it from a non-listed
+    // viewer while still showing it to a listed one. This exercises the N-way
+    // fan-in the CLI/MCP query handlers drive, without any ML dependency.
+    #[tokio::test]
+    async fn extra_stores_fan_in_group_respects_audience() {
+        use crate::retrieval::engine::{RetrievalEngine, RetrievalMode, RetrievalQuery};
+        use crate::storage::{InMemoryRegistry, MemoryStore};
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance};
+        use tempfile::TempDir;
+
+        // Querying project store (the viewer) — starts empty.
+        let proj_dir = TempDir::new().unwrap();
+        let proj_store = MemoryStore::init(proj_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let proj_id = proj_store.project_id.clone();
+
+        // A real group store shared across projects.
+        let gid = crate::storage::paths::compute_group_id("fan-in-audience-test");
+        let group_store = MemoryStore::init_group(&gid).await.unwrap();
+
+        // Group-wide memory (audience None) — visible to any subscriber.
+        let open = Memory::new(
+            MemoryType::Convention,
+            "open widget convention",
+            "the widget content is shared",
+            Provenance::human(),
+        );
+        group_store.create(&open).await.unwrap();
+
+        // Restricted memory (audience = a different project) — per-memory
+        // precision: only a listed viewer may see it.
+        let mut restricted = Memory::new(
+            MemoryType::Convention,
+            "restricted widget rule",
+            "the widget content is restricted",
+            Provenance::human(),
+        );
+        restricted.audience = Some(vec!["restricted-target-proj".to_string()]);
+        group_store.create(&restricted).await.unwrap();
+        drop(group_store);
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0; // keep all keyword candidates
+        let proj_engine = RetrievalEngine::new(proj_store, config.clone());
+
+        let query = RetrievalQuery {
+            mode: RetrievalMode::Filter,
+            query: Some("widget".to_string()),
+            max_results: Some(10),
+            ..Default::default()
+        };
+
+        // Viewer 1: only the project's own id (NOT the restricted audience).
+        let viewer_plain: HashSet<String> = [proj_id.clone()].into_iter().collect();
+        let cfg = config.clone();
+        let gid1 = gid.clone();
+        let result =
+            query_memories_with_extra_stores(&proj_engine, &query, &viewer_plain, || async move {
+                vec![RetrievalEngine::new(
+                    MemoryStore::open_group(&gid1).await.unwrap(),
+                    cfg,
+                )]
+            })
+            .await
+            .unwrap();
+        assert!(
+            result
+                .memories
+                .iter()
+                .any(|m| m.memory.summary.contains("open widget")),
+            "group-wide (audience None) memory must surface for a subscriber"
+        );
+        assert!(
+            !result
+                .memories
+                .iter()
+                .any(|m| m.memory.summary.contains("restricted")),
+            "audience-restricted memory must be hidden from a non-listed viewer"
+        );
+
+        // Viewer 2: carries the restricted audience id → now sees it.
+        let viewer_listed: HashSet<String> = [proj_id, "restricted-target-proj".to_string()]
+            .into_iter()
+            .collect();
+        let cfg2 = config.clone();
+        let gid2 = gid.clone();
+        let result2 =
+            query_memories_with_extra_stores(&proj_engine, &query, &viewer_listed, || async move {
+                vec![RetrievalEngine::new(
+                    MemoryStore::open_group(&gid2).await.unwrap(),
+                    cfg2,
+                )]
+            })
+            .await
+            .unwrap();
+        assert!(
+            result2
+                .memories
+                .iter()
+                .any(|m| m.memory.summary.contains("restricted")),
+            "audience-restricted memory must surface for a listed viewer"
+        );
+    }
+
     #[test]
     fn audience_none_is_visible_to_any_viewer() {
         let m = scored("x", 0.5).memory; // audience defaults to None

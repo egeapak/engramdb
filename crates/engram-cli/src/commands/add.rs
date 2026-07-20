@@ -87,6 +87,7 @@ fn parse_epistemic_flags(
 pub async fn run_add(
     dir: &Path,
     global: bool,
+    group: Option<String>,
     registry: &dyn RegistryBackend,
     params: AddParams,
     embedding_backend: Option<engramdb::types::EmbeddingBackend>,
@@ -95,8 +96,16 @@ pub async fn run_add(
     cell: &Arc<DaemonCell>,
     policy: DaemonPolicy,
 ) -> Result<()> {
-    // Open or initialize store. The global store auto-initializes on open.
-    let store = if global {
+    // Open or initialize store. The global and group stores auto-initialize on
+    // open. `--group <name>` routes the write to the named group store (the
+    // multi-project-memories tier); `create_memory` strips repo-relative
+    // physical scope on group/global writes. On the CLI the user acts directly,
+    // so there is no confused-deputy gate here (unlike the MCP surface) — this
+    // mirrors how `--global` writes are ungated on the CLI.
+    let store = if let Some(ref name) = group {
+        let gid = engramdb::storage::paths::compute_group_id(name);
+        MemoryStore::open_group(&gid).await?
+    } else if global {
         MemoryStore::open_global().await?
     } else {
         match MemoryStore::open(dir).await {

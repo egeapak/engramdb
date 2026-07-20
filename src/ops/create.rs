@@ -141,11 +141,23 @@ pub async fn create_memory(
     let summary = params.summary;
 
     // Use default physical scope if empty
-    let physical = if params.physical.is_empty() {
+    let mut physical = if params.physical.is_empty() {
         vec!["/".to_string()]
     } else {
         params.physical
     };
+
+    // Scope hygiene (cross-repo correctness): physical scopes are repo-relative
+    // file paths, meaningless in any other repo. A group/everyone(global) store
+    // is shared across repos, so a stored physical path would earn (or lose)
+    // physical-proximity score against a foreign repo's layout. Strip it on the
+    // write path so the record carries no misleading physical scope; logical
+    // scope (repo-independent dot-notation) is retained. This mirrors the
+    // read-side suppression in `query_memories_with_extra_stores`. See the
+    // multi-project-memories design doc's scope-hygiene note.
+    if store.is_group() || store.is_global() {
+        physical.clear();
+    }
 
     // Build memory
     let mut memory = Memory::new(params.type_, &summary, &params.content, params.provenance);
@@ -404,6 +416,32 @@ mod tests {
         let mut p = minimal_create_params();
         p.criticality = f64::NAN;
         assert!(create_memory(&store, p, None).await.is_err());
+    }
+
+    // Scope hygiene: a memory created into a group (or everyone/global) store
+    // must not carry a physical scope, even when physical paths were supplied —
+    // repo-relative paths are meaningless cross-repo. See the strip in
+    // `create_memory` and the multi-project-memories design doc.
+    #[tokio::test]
+    async fn create_into_group_store_strips_physical_scope() {
+        let group_id = crate::storage::paths::compute_group_id("scope-hygiene-test");
+        let store = MemoryStore::init_group(&group_id).await.unwrap();
+
+        let mut params = minimal_create_params();
+        params.physical = vec!["src/main.rs".to_string(), "src/lib.rs".to_string()];
+        params.logical = vec!["backend.api".to_string()];
+
+        let result = create_memory(&store, params, None).await.unwrap();
+        let memory = store.get(&result.id).await.unwrap();
+
+        // Physical scope stripped despite being supplied.
+        assert!(
+            memory.physical.is_empty(),
+            "group-store memory must have empty physical scope, got {:?}",
+            memory.physical
+        );
+        // Logical scope (repo-independent) is retained.
+        assert_eq!(memory.logical, vec!["backend.api".to_string()]);
     }
 
     /// Title generator that returns a fixed string, to prove `title_for`
