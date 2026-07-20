@@ -6,6 +6,7 @@
 
 pub mod challenge;
 pub mod compress;
+pub mod config;
 pub mod create;
 pub mod delete;
 pub mod doctor;
@@ -33,6 +34,7 @@ pub use compress::{
     CompressApplyParams, CompressApplyResult, CompressCandidate, CompressCandidatesResult,
     ConsolidationCluster, ConsolidationReport,
 };
+pub use config::{top_tags, AgentConfigView, TagCount, DEFAULT_TOP_TAGS};
 pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
 pub use delete::delete_memory;
 pub use doctor::{

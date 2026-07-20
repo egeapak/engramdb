@@ -105,6 +105,22 @@ pub async fn run_add(
         }
     };
 
+    // Fail fast on an invalid summary BEFORE loading the embedding model.
+    // Summary validation is config-driven but model-independent, so an
+    // over-limit (or empty / multi-line) `--summary` should not pay the
+    // embedding-model load cost that `engine_for` incurs. `create_memory`
+    // still re-validates authoritatively (covering the interactive/editor
+    // paths, where the summary isn't known yet, and the MCP surface); this is
+    // a pure fast-fail for the direct path where the summary is already known.
+    if let Some(ref summary) = params.summary {
+        let config_path = store.project_dir.join(".engramdb").join("config.toml");
+        let summary_max_chars = engramdb::storage::config::load_config_or_default(&config_path)
+            .await
+            .content
+            .summary_max_chars;
+        engramdb::ops::validate_summary(summary, summary_max_chars)?;
+    }
+
     // Build engine for auto-embedding on create
     let engine = engine_for(store.clone(), embedding_backend, cell, policy).await;
 

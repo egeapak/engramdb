@@ -55,9 +55,19 @@ pub async fn resolve_memory(store: &MemoryStore, params: ResolveParams) -> Resul
         }
         ResolveAction::Update => {
             // Same summary contract as create/update — resolve must not be a
-            // back door for empty/oversized/multi-line summaries.
+            // back door for empty/oversized/multi-line summaries. resolve has
+            // no engine to carry config, so read `[content].summary_max_chars`
+            // fresh from the store's config (matches the per-op config reads
+            // elsewhere); falls back to the default when absent.
             if let Some(summary) = params.updated_summary.as_deref() {
-                super::validate_summary(summary)?;
+                let config_path =
+                    crate::storage::paths::project_dir(&store.project_dir).join("config.toml");
+                let summary_max_chars =
+                    crate::storage::config::load_config_or_default(&config_path)
+                        .await
+                        .content
+                        .summary_max_chars;
+                super::validate_summary(summary, summary_max_chars)?;
             }
             // Atomic update: set content/summary, status, clear challenges, set verified_at
             let mut update = MemoryUpdate::new();

@@ -79,7 +79,7 @@ Each entry includes `epistemic` (always) and `invalidated_at` / `valid_from` whe
 |-------|------|-------------|
 | `type` | `string` | One of: `decision`, `convention`, `hazard`, `context`, `intent`, `relationship`, `debug`, `preference`. Required. |
 | `content` | `string` | Main body (~500 tokens). Required. |
-| `summary` | `string` | One-line summary, ≤ 100 chars. Required. |
+| `summary` | `string` | One-line summary, ≤ 200 chars by default (configurable via `[content].summary_max_chars`). Required. |
 | `details?` | `string` | Extended details (lazy-loaded). |
 | `physical?` | `array[string]` | File paths or globs. Default `["/"]`. |
 | `logical?` | `array[string]` | Dot-notation domains. |
@@ -288,6 +288,21 @@ Returns `{ task, demoted, kept_custom_decay, project_wide_review }`.
 | Param | Type | Description |
 |-------|------|-------------|
 | `all_projects?` | `bool` | Include per-project runtime telemetry breakdown. |
+| `project?` | `string` | See conventions. |
+
+### `config` (read-only)
+
+**Effective config values and store vocabulary** — call this once at the start of a session to learn the limits and thresholds that govern the other tools, and to get a feel for what is already in memory. Returns:
+
+- `limits` — `summary_max_chars` (hard cap `create` enforces), `content_soft_token_target`, and `embedding_chunk_tokens` (per-chunk embedding window; content past one window is chunked and still embedded, not truncated).
+- `retrieval` — `default_max_results`, `relevance_threshold` (min score a `query` result clears), `search_threshold`, `search_semantic_weight`, `include_expired`.
+- `features` — `rerank_enabled` / `rerank_top_n`, `contradiction_detection_enabled` (whether `challenge`'s NLI is on), and the `title_strategy` used when `create` gets no title.
+- `embedding` — `provider` and vector `dimensions`.
+- `top_tags` — the most-used unique tags with counts, most-used first.
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `top_tags?` | `int` | Number of top tags to include (most-used first). Default 20. |
 | `project?` | `string` | See conventions. |
 
 ### `doctor` (read-only unless `fix: true`)

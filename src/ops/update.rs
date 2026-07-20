@@ -83,9 +83,13 @@ pub async fn update_memory(
     }
     // Validate the summary exactly as create does — without this, update was
     // a back door for empty/oversized/multi-line summaries that create
-    // rejects (and that downstream single-line rendering relies on).
+    // rejects (and that downstream single-line rendering relies on). Use the
+    // same configurable `[content].summary_max_chars` bound as create.
     if let Some(summary) = params.summary.as_deref() {
-        super::validate_summary(summary)?;
+        let summary_max_chars = engine
+            .map(RetrievalEngine::summary_max_chars)
+            .unwrap_or(crate::types::DEFAULT_SUMMARY_MAX_CHARS);
+        super::validate_summary(summary, summary_max_chars)?;
     }
 
     // Parse the decay strategy up front (it doesn't depend on the stored

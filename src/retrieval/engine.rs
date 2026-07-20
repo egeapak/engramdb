@@ -317,6 +317,12 @@ impl RetrievalEngine {
         self.embedding_provider.is_some()
     }
 
+    /// Configured maximum summary length (`[content].summary_max_chars`), used
+    /// by the create/update/compress paths to validate/truncate summaries.
+    pub fn summary_max_chars(&self) -> usize {
+        self.config.content.summary_max_chars
+    }
+
     /// Identity of the embedding model in use, for stamping the store
     /// after a (re)embed. `None` when embeddings are disabled. Includes the
     /// embed-text composition (from `embeddings.metadata_vector`) so a later

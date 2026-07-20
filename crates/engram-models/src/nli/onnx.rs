@@ -152,9 +152,9 @@ impl OnnxNliProvider {
         // The shipped repos' tokenizer.json carries `"truncation": null`, so
         // without an explicit cap the encoding is as long as the input.
         // DeBERTa (relative positions) won't hard-fail on an oversized pair,
-        // but attention is O(n²) — one multi-KB summary (update paths and
-        // hand-edited files don't enforce the 100-char create limit
-        // historically) stalls every NLI check while holding the session
+        // but attention is O(n²) — one multi-KB summary (hand-edited files
+        // don't enforce the configurable create-path summary length limit)
+        // stalls every NLI check while holding the session
         // mutex — and scores past the 512-token training regime are noise.
         // `LongestFirst` trims the longer of premise/hypothesis first,
         // matching standard HF pair handling.

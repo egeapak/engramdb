@@ -1,6 +1,6 @@
 //! EngramDB MCP server implementation.
 //!
-//! Defines the server struct, all MCP tools (22), resources (2), and prompts (2).
+//! Defines the server struct, all MCP tools (23), resources (2), and prompts (2).
 //! Tools delegate to the `ops` layer; the server opens a fresh `MemoryStore`
 //! per request so it always sees the latest on-disk state.
 
@@ -44,7 +44,9 @@ struct CreateInput {
     )]
     content: String,
 
-    #[schemars(description = "One-line summary, max 100 chars (required)")]
+    #[schemars(
+        description = "One-line summary, max 200 chars by default (configurable via [content].summary_max_chars) (required)"
+    )]
     summary: String,
 
     #[schemars(description = "Extended details (lazy-loaded)")]
@@ -539,6 +541,19 @@ struct StatsInput {
     )]
     #[serde(default)]
     all_projects: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ConfigInput {
+    #[schemars(
+        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+    )]
+    project: Option<String>,
+    #[schemars(
+        description = "Number of top unique tags to include (most-used first). Default 20."
+    )]
+    #[serde(default)]
+    top_tags: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2331,6 +2346,40 @@ impl EngramDbServer {
                     p_obj.insert(k, v);
                 }
             }
+        }
+
+        let r = serde_json::to_string(&payload)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
+    }
+
+    #[tool(
+        name = "config",
+        description = "Effective config values and store vocabulary to help use the tools well: summary/content limits to respect on `create`, retrieval/search thresholds and result caps, which optional features (rerank, contradiction detection) are on, and the top unique tags already in memory."
+    )]
+    async fn memory_config(
+        &self,
+        Parameters(input): Parameters<ConfigInput>,
+    ) -> Result<String, String> {
+        let _scope = self.scope("config", input.project.as_deref());
+        let config = self.load_config_for(input.project.as_deref()).await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
+
+        let view = ops::AgentConfigView::from_config(&config);
+        let limit = input.top_tags.unwrap_or(ops::DEFAULT_TOP_TAGS);
+        let tags = ops::top_tags(&store, limit)
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+
+        let mut payload = serde_json::to_value(&view)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        if let serde_json::Value::Object(ref mut obj) = payload {
+            obj.insert(
+                "top_tags".to_string(),
+                serde_json::to_value(&tags)
+                    .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?,
+            );
         }
 
         let r = serde_json::to_string(&payload)

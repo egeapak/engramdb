@@ -27,7 +27,7 @@ Rules of thumb for using EngramDB well.
 
 The `summary` is the most-searched field. It's tokenized against semantic queries and shown in every result. Write it to be:
 
-- **Short** — ≤ 100 chars hard limit; aim for ~50.
+- **Short** — ≤ 200 chars hard limit (configurable); aim for ~50.
 - **Search-shaped** — subject + verb + object. Imagine someone typing this into Google.
 - **Self-contained** — no pronouns or references that require context to understand.
 
@@ -93,8 +93,10 @@ Facts usually need neither — they're verifiable against the repo directly.
 
 ## Sizing content
 
-- **`summary`** ≤ 100 chars. Hard limit.
-- **`content`** ~500 tokens soft target. Each memory is embedded as a metadata vector (`"{title}. {summary}. tags: …"`) plus its content chunked into one or more content vectors (~`max_tokens` each, best-matching vector wins) — so title/tags are semantically searchable and long content is chunked rather than truncated. Keep content focused anyway: the high-level fact belongs in `content`, long detail in `details`. (`embeddings.metadata_vector = false` reverts to the legacy single `summary + content` embedding.)
+- **`summary`** ≤ 200 chars by default (configurable via `[content].summary_max_chars`). Hard limit.
+- **`content`** ~500 tokens soft target. Each memory is embedded as a metadata vector (`"{title}. {summary}. tags: …"`) plus its content split into ~`max_tokens`-sized chunks (256 by default), every vector searched independently with the best match winning — so title/tags are semantically searchable and longer content is chunked rather than truncated. Keep the main point in `content` and push bulk detail to `details` (which is not embedded) so retrieval stays focused rather than diluted across many chunks. (`embeddings.metadata_vector = false` reverts to the legacy single `summary + content` embedding.)
+
+> These limits, the retrieval thresholds, and the store's most-used tags are all readable at runtime via the [`config`](./mcp-tools.md#config-read-only) tool — call it once at the start of a session rather than hard-coding the numbers above.
 - **`details`** anything longer. Lazy-loaded — only fetched when `detail_level: "full"`. Use for code snippets, long rationale, links.
 
 If you find yourself writing > 1000 tokens of `content`, you almost always want to split:
@@ -136,5 +138,5 @@ The global store (`project: "global"`) is for things that apply across projects:
 - **Creating memories that just restate what the user said.** "User wants dark mode" isn't a memory; it's a preference. If it's durable, use `type: preference`. If it's a one-off, don't store it.
 - **Creating one memory per file.** Memories are about facts, not files. Multiple files can share a memory; multiple memories can apply to the same file.
 - **Using `tags` for everything.** Tags are for things that don't fit `type` or scope. Don't use them to encode the type (use `type` for that) or the scope (use `physical`/`logical` for that).
-- **Overlong `summary`.** It will be rejected by validation. If you can't fit it in 100 chars, the memory is too broad — split it.
+- **Overlong `summary`.** It will be rejected by validation. If you can't fit it in the configured limit (200 chars by default), the memory is too broad — split it.
 - **Putting confidential data in memories.** They go into LanceDB (often under the global data dir) and shared memories live in `.engramdb/memories/` which is committed to git. Tokens, passwords, API keys — never.
