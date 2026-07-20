@@ -1880,22 +1880,30 @@ impl EngramDbServer {
                 std::collections::HashSet::new();
             viewer_ids.insert(project_id);
             viewer_ids.extend(subscriptions.iter().cloned());
-            ops::query_memories_with_extra_stores(&engine, &query, &viewer_ids, || async {
-                let mut engines = Vec::new();
-                for gid in &subscriptions {
-                    if let Ok(e) = self.build_group_engine(gid).await {
-                        engines.push(e);
+            let outcome =
+                ops::query_memories_with_extra_stores(&engine, &query, &viewer_ids, || async {
+                    let mut engines = Vec::new();
+                    for gid in &subscriptions {
+                        if let Ok(e) = self.build_group_engine(gid).await {
+                            engines.push((gid.clone(), e));
+                        }
                     }
-                }
-                if include_global {
-                    if let Ok(e) = self.build_engine_for(Some("global")).await {
-                        engines.push(e);
+                    if include_global {
+                        if let Ok(e) = self.build_engine_for(Some("global")).await {
+                            engines.push(("global".to_string(), e));
+                        }
                     }
-                }
-                engines
-            })
-            .await
-            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?
+                    engines
+                })
+                .await
+                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            if !outcome.unreadable.is_empty() {
+                tracing::warn!(
+                    stores = ?outcome.unreadable,
+                    "some subscribed/global stores were unreadable and were skipped in fan-in"
+                );
+            }
+            outcome.result
         };
 
         let memories: Vec<ScoredMemoryOutput> = result

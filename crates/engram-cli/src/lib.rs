@@ -647,7 +647,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             commands::run_projects(&dir, &registry, command, &formatter, &prompter).await
         }
         Command::Groups { command } => {
-            commands::run_groups(&dir, &registry, command, &formatter).await
+            commands::run_groups(&dir, &registry, command, &prompter, &formatter).await
         }
     }
 }

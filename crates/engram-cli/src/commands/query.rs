@@ -166,26 +166,44 @@ async fn compute_query_result(
     viewer_ids.insert(project_id);
     viewer_ids.extend(subscriptions.iter().cloned());
 
-    let result =
+    let outcome =
         engramdb::ops::query_memories_with_extra_stores(&engine, &query, &viewer_ids, || async {
             let mut engines = Vec::new();
-            // Subscribed group stores fan in by default.
+            // Subscribed group stores fan in by default. A group that fails to
+            // open (missing/corrupt store dir) is skipped here; `doctor`'s
+            // group-readability check is the authoritative surface for it.
             for gid in &subscriptions {
                 if let Ok(group_store) = MemoryStore::open_group(gid).await {
-                    engines.push(engine_for(group_store, embedding_backend, cell, policy).await);
+                    engines.push((
+                        gid.clone(),
+                        engine_for(group_store, embedding_backend, cell, policy).await,
+                    ));
                 }
             }
             // The everyone/global store folds in only when requested.
             if include_global {
                 if let Ok(global_store) = MemoryStore::open_global().await {
-                    engines.push(engine_for(global_store, embedding_backend, cell, policy).await);
+                    engines.push((
+                        "global".to_string(),
+                        engine_for(global_store, embedding_backend, cell, policy).await,
+                    ));
                 }
             }
             engines
         })
         .await?;
 
-    Ok(result)
+    // A shared store that opened but failed to query is best-effort skipped;
+    // warn so a silently-missing group's memories are explainable (doctor has
+    // the full diagnosis).
+    if !outcome.unreadable.is_empty() {
+        tracing::warn!(
+            stores = ?outcome.unreadable,
+            "some subscribed/global stores were unreadable and were skipped; run `engramdb doctor`"
+        );
+    }
+
+    Ok(outcome.result)
 }
 
 #[cfg(test)]

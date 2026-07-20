@@ -333,6 +333,19 @@ pub fn subscriptions_of<'a>(registry: &'a Registry, project_id: &str) -> &'a [St
         .unwrap_or(&[])
 }
 
+/// The project ids subscribed to `group_id` — the group's read blast radius.
+///
+/// A pure read helper for the membership UX (`groups members`): every project
+/// that folds this group into its queries, and would see a write to it.
+pub fn subscribers_of<'a>(registry: &'a Registry, group_id: &str) -> Vec<&'a str> {
+    registry
+        .projects
+        .iter()
+        .filter(|e| e.subscriptions.iter().any(|g| g == group_id))
+        .map(|e| e.project_id.as_str())
+        .collect()
+}
+
 /// Collect all direct children of `project_id`.
 pub fn list_children<'a>(registry: &'a Registry, project_id: &str) -> Vec<&'a RegistryEntry> {
     registry
@@ -1269,6 +1282,34 @@ mod tests {
         assert_eq!(subscriptions_of(&reg, "proj"), ["__g_a", "__g_b"]);
         // Unknown project → empty slice, not a panic.
         assert!(subscriptions_of(&reg, "unknown").is_empty());
+    }
+
+    #[test]
+    fn test_subscribers_of_returns_all_member_projects() {
+        let mut reg = Registry::default();
+        reg.projects.push(RegistryEntry {
+            project_id: "p1".into(),
+            project_path: "/p1".into(),
+            parent_project_id: None,
+            subscriptions: vec!["__g_shared".into(), "__g_a".into()],
+        });
+        reg.projects.push(RegistryEntry {
+            project_id: "p2".into(),
+            project_path: "/p2".into(),
+            parent_project_id: None,
+            subscriptions: vec!["__g_shared".into()],
+        });
+        reg.projects.push(RegistryEntry {
+            project_id: "p3".into(),
+            project_path: "/p3".into(),
+            parent_project_id: None,
+            subscriptions: vec![],
+        });
+        let mut members = subscribers_of(&reg, "__g_shared");
+        members.sort_unstable();
+        assert_eq!(members, ["p1", "p2"]);
+        // A group nobody subscribes to has no members.
+        assert!(subscribers_of(&reg, "__g_nobody").is_empty());
     }
 
     // ---- create_group ----

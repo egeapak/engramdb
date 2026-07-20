@@ -102,6 +102,25 @@ pub fn audience_allows(memory: &crate::types::Memory, viewer_ids: &HashSet<Strin
     }
 }
 
+/// Outcome of a cross-store fan-in query.
+///
+/// Carries the merged [`RetrievalResult`] plus the labels of any extra stores
+/// that could **not** be read. That second field is the empty-vs-corrupt
+/// distinction the fan-in used to swallow: an *empty* store returns `Ok` with no
+/// memories and contributes nothing (never reported); a *corrupt/unreadable*
+/// store's query errors and its label lands in `unreadable` so a front-end can
+/// surface it (e.g. a `doctor` hint) instead of the memory silently vanishing.
+/// The query itself still succeeds regardless — fan-in is best-effort by
+/// contract.
+#[derive(Debug)]
+pub struct ExtraStoresResult {
+    /// The project result with every readable extra store merged in.
+    pub result: RetrievalResult,
+    /// Labels (group ids / `"global"`) of extra stores whose query failed.
+    /// Empty on the happy path.
+    pub unreadable: Vec<String>,
+}
+
 /// Run `query` on `engine` (the session's own project store) and fold in
 /// results from any number of shared "extra" stores — the everyone/global
 /// store and each subscribed group store — reusing [`merge_scored_memories`].
@@ -110,7 +129,9 @@ pub fn audience_allows(memory: &crate::types::Memory, viewer_ids: &HashSet<Strin
 /// global store is simply the built-in "everyone" group, one extra store among
 /// the subscribed groups. `extra_engines` is invoked lazily (building an engine
 /// loads the embedding model), so a caller with global disabled and no
-/// subscriptions returns an empty vec and the primary result is untouched.
+/// subscriptions returns an empty vec and the primary result is untouched. Each
+/// engine is paired with a **label** (its group id, or `"global"`) used only to
+/// name the store in the `unreadable` report.
 ///
 /// Two cross-repo corrections are applied to every extra store, because a
 /// shared memory is authored against a *different* repo than the querying one:
@@ -122,43 +143,74 @@ pub fn audience_allows(memory: &crate::types::Memory, viewer_ids: &HashSet<Strin
 ///   [`audience_allows`] passes for `viewer_ids`, giving per-memory sharing
 ///   precision without a second copy.
 ///
+/// **Parallelized:** the extra-store queries run concurrently (`join_all`); the
+/// merge then folds them in the original engine order so dedup stays
+/// deterministic regardless of which store finishes first (the project entry,
+/// and among extras the earlier-listed store, wins a tie).
+///
 /// Best-effort by contract: a failed extra-store query is skipped (project
-/// results still return), matching the `include_global` band it generalizes.
-/// The combined `total` counts only *visible* (audience-passing) extra
-/// memories, so it never leaks the existence of memories hidden from the viewer.
+/// results still return) but its label is recorded in
+/// [`ExtraStoresResult::unreadable`] and logged, matching the `include_global`
+/// band it generalizes. The combined `total` counts only *visible*
+/// (audience-passing) extra memories, so it never leaks the existence of
+/// memories hidden from the viewer.
 pub async fn query_memories_with_extra_stores<F, Fut>(
     engine: &RetrievalEngine,
     query: &RetrievalQuery,
     viewer_ids: &HashSet<String>,
     extra_engines: F,
-) -> Result<RetrievalResult>
+) -> Result<ExtraStoresResult>
 where
     F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Vec<RetrievalEngine>>,
+    Fut: std::future::Future<Output = Vec<(String, RetrievalEngine)>>,
 {
     let mut result = query_memories(engine, query).await?;
     let extras = extra_engines().await;
     if extras.is_empty() {
-        return Ok(result);
+        return Ok(ExtraStoresResult {
+            result,
+            unreadable: Vec::new(),
+        });
     }
     let max = query.max_results.unwrap_or(10);
     // Cross-repo: drop the repo-relative path so physical proximity isn't
     // scored against a foreign repo's file layout.
     let mut extra_query = query.clone();
     extra_query.path = None;
-    for extra in &extras {
-        if let Ok(extra_result) = query_memories(extra, &extra_query).await {
-            let visible: Vec<ScoredMemory> = extra_result
-                .memories
-                .into_iter()
-                .filter(|sm| audience_allows(&sm.memory, viewer_ids))
-                .collect();
-            let visible_count = visible.len();
-            let duplicates = merge_scored_memories(&mut result.memories, visible, max);
-            result.total += visible_count.saturating_sub(duplicates);
+    // Fan out concurrently; each future borrows its engine and the shared
+    // query immutably, so they poll together without contention.
+    let extra_results =
+        futures_util::future::join_all(extras.iter().map(|(_, e)| query_memories(e, &extra_query)))
+            .await;
+    // Fold in original order so dedup/tie-breaking is independent of completion
+    // order.
+    let mut unreadable = Vec::new();
+    for ((label, _), extra_result) in extras.iter().zip(extra_results) {
+        match extra_result {
+            Ok(extra_result) => {
+                let visible: Vec<ScoredMemory> = extra_result
+                    .memories
+                    .into_iter()
+                    .filter(|sm| audience_allows(&sm.memory, viewer_ids))
+                    .collect();
+                let visible_count = visible.len();
+                let duplicates = merge_scored_memories(&mut result.memories, visible, max);
+                result.total += visible_count.saturating_sub(duplicates);
+            }
+            Err(e) => {
+                // A corrupt/unreadable extra store — distinct from an empty one,
+                // which returns Ok with no memories. Skip it (best-effort), but
+                // record and log the failure rather than swallowing it.
+                tracing::warn!(
+                    store = %label,
+                    error = %e,
+                    "shared store query failed; skipping it in cross-store fan-in"
+                );
+                unreadable.push(label.clone());
+            }
         }
     }
-    Ok(result)
+    Ok(ExtraStoresResult { result, unreadable })
 }
 
 #[cfg(test)]
@@ -322,13 +374,14 @@ mod tests {
         let gid1 = gid.clone();
         let result =
             query_memories_with_extra_stores(&proj_engine, &query, &viewer_plain, || async move {
-                vec![RetrievalEngine::new(
-                    MemoryStore::open_group(&gid1).await.unwrap(),
-                    cfg,
+                vec![(
+                    gid1.clone(),
+                    RetrievalEngine::new(MemoryStore::open_group(&gid1).await.unwrap(), cfg),
                 )]
             })
             .await
-            .unwrap();
+            .unwrap()
+            .result;
         assert!(
             result
                 .memories
@@ -352,19 +405,115 @@ mod tests {
         let gid2 = gid.clone();
         let result2 =
             query_memories_with_extra_stores(&proj_engine, &query, &viewer_listed, || async move {
-                vec![RetrievalEngine::new(
-                    MemoryStore::open_group(&gid2).await.unwrap(),
-                    cfg2,
+                vec![(
+                    gid2.clone(),
+                    RetrievalEngine::new(MemoryStore::open_group(&gid2).await.unwrap(), cfg2),
                 )]
             })
             .await
-            .unwrap();
+            .unwrap()
+            .result;
         assert!(
             result2
                 .memories
                 .iter()
                 .any(|m| m.memory.summary.contains("restricted")),
             "audience-restricted memory must surface for a listed viewer"
+        );
+    }
+
+    // A corrupt/unreadable extra store must be *reported* (its label in
+    // `unreadable`) rather than silently swallowed — and must NOT fail the whole
+    // query: the project result and any healthy extra stores still come back.
+    // This is the empty-vs-corrupt distinction on the query path (an empty store
+    // returns Ok with no memories and is never reported).
+    #[tokio::test]
+    async fn extra_stores_corrupt_store_is_reported_not_fatal() {
+        use crate::retrieval::engine::{RetrievalEngine, RetrievalMode, RetrievalQuery};
+        use crate::storage::{InMemoryRegistry, MemoryStore};
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance};
+        use tempfile::TempDir;
+
+        let proj_dir = TempDir::new().unwrap();
+        let proj_store = MemoryStore::init(proj_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        // A healthy group with one group-wide memory.
+        let gid_ok = crate::storage::paths::compute_group_id("corrupt-test-healthy");
+        let group_ok = MemoryStore::init_group(&gid_ok).await.unwrap();
+        group_ok
+            .create(&Memory::new(
+                MemoryType::Convention,
+                "healthy widget convention",
+                "the widget content is healthy",
+                Provenance::human(),
+            ))
+            .await
+            .unwrap();
+        drop(group_ok);
+
+        // A "corrupt" group: initialize it, build its engine (open succeeds),
+        // then delete its LanceDB directory out from under the open handle so
+        // the subsequent query errors.
+        let gid_bad = crate::storage::paths::compute_group_id("corrupt-test-broken");
+        let _group_bad = MemoryStore::init_group(&gid_bad).await.unwrap();
+        drop(_group_bad);
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+        let proj_engine = RetrievalEngine::new(proj_store, config.clone());
+
+        let query = RetrievalQuery {
+            mode: RetrievalMode::Filter,
+            query: Some("widget".to_string()),
+            max_results: Some(10),
+            ..Default::default()
+        };
+
+        let viewer: HashSet<String> = HashSet::new();
+        let cfg_ok = config.clone();
+        let cfg_bad = config.clone();
+        let gid_ok_c = gid_ok.clone();
+        let gid_bad_c = gid_bad.clone();
+        let outcome =
+            query_memories_with_extra_stores(&proj_engine, &query, &viewer, || async move {
+                let ok_engine =
+                    RetrievalEngine::new(MemoryStore::open_group(&gid_ok_c).await.unwrap(), cfg_ok);
+                let bad_engine = RetrievalEngine::new(
+                    MemoryStore::open_group(&gid_bad_c).await.unwrap(),
+                    cfg_bad,
+                );
+                // Corrupt the bad group after its engine is built.
+                let bad_lance = crate::storage::paths::group_lancedb_dir(&gid_bad_c).unwrap();
+                let _ = std::fs::remove_dir_all(&bad_lance);
+                std::fs::write(&bad_lance, b"not a directory").unwrap();
+                vec![
+                    (gid_ok_c.clone(), ok_engine),
+                    (gid_bad_c.clone(), bad_engine),
+                ]
+            })
+            .await
+            .unwrap();
+
+        // The healthy group's memory still surfaces...
+        assert!(
+            outcome
+                .result
+                .memories
+                .iter()
+                .any(|m| m.memory.summary.contains("healthy widget")),
+            "a healthy extra store must still merge in despite a sibling being corrupt"
+        );
+        // ...and the corrupt group is reported, not swallowed.
+        assert!(
+            outcome.unreadable.contains(&gid_bad),
+            "a corrupt extra store must be reported in `unreadable`, got {:?}",
+            outcome.unreadable
+        );
+        assert!(
+            !outcome.unreadable.contains(&gid_ok),
+            "the healthy store must not be reported unreadable"
         );
     }
 

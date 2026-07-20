@@ -58,7 +58,7 @@ pub use parsing::{
 };
 pub use query::{
     audience_allows, merge_scored_memories, query_memories, query_memories_with_extra_stores,
-    query_memories_with_global,
+    query_memories_with_global, ExtraStoresResult,
 };
 pub use reindex::{reindex, ReindexResult};
 pub use resolve::{resolve_memory, ResolveAction, ResolveParams, ResolveResult};

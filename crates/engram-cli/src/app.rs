@@ -169,17 +169,34 @@ pub enum GroupsCommand {
     ///
     /// Subscribed groups fan into this project's queries by default, and the
     /// project may write to the group without tripping the cross-project gate.
+    /// Prints the blast radius (group memory count + current subscribers) and
+    /// confirms first; pair with --yes in non-interactive contexts.
     Subscribe {
         /// Group name to subscribe to
         name: String,
+        /// Skip the blast-radius confirmation prompt (required in JSON mode)
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
     /// Unsubscribe the current project from a group (forgiving if not subscribed).
+    ///
+    /// Prints the blast radius (memories this project will stop seeing) and
+    /// confirms first; pair with --yes in non-interactive contexts.
     Unsubscribe {
         /// Group name to unsubscribe from
         name: String,
+        /// Skip the blast-radius confirmation prompt (required in JSON mode)
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
     /// List all known groups and the current project's subscriptions.
     List,
+    /// List the projects subscribed to a group (its blast radius) and how many
+    /// memories the group holds.
+    Members {
+        /// Group name to inspect
+        name: String,
+    },
 }
 
 /// Output format for CLI commands.
@@ -2210,19 +2227,28 @@ mod tests {
 
     #[test]
     fn test_groups_subscribe_unsubscribe_parsing() {
+        // Default: no --yes flag.
         let cli = Cli::try_parse_from(["engramdb", "groups", "subscribe", "grp"]).unwrap();
         match cli.command {
             Command::Groups {
-                command: GroupsCommand::Subscribe { name },
-            } => assert_eq!(name, "grp"),
+                command: GroupsCommand::Subscribe { name, yes },
+            } => {
+                assert_eq!(name, "grp");
+                assert!(!yes);
+            }
             _ => panic!("Expected Groups Subscribe command"),
         }
 
-        let cli = Cli::try_parse_from(["engramdb", "groups", "unsubscribe", "grp"]).unwrap();
+        // --yes bypasses the confirmation prompt.
+        let cli =
+            Cli::try_parse_from(["engramdb", "groups", "unsubscribe", "grp", "--yes"]).unwrap();
         match cli.command {
             Command::Groups {
-                command: GroupsCommand::Unsubscribe { name },
-            } => assert_eq!(name, "grp"),
+                command: GroupsCommand::Unsubscribe { name, yes },
+            } => {
+                assert_eq!(name, "grp");
+                assert!(yes);
+            }
             _ => panic!("Expected Groups Unsubscribe command"),
         }
     }
@@ -2236,6 +2262,17 @@ mod tests {
                 command: GroupsCommand::List
             }
         ));
+    }
+
+    #[test]
+    fn test_groups_members_parsing() {
+        let cli = Cli::try_parse_from(["engramdb", "groups", "members", "grp"]).unwrap();
+        match cli.command {
+            Command::Groups {
+                command: GroupsCommand::Members { name },
+            } => assert_eq!(name, "grp"),
+            _ => panic!("Expected Groups Members command"),
+        }
     }
 
     #[test]
