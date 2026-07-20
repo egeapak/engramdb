@@ -254,6 +254,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             details_file,
             global,
             group,
+            audience,
         } => {
             commands::add::run_add(
                 &dir,
@@ -275,6 +276,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     details,
                     visibility_str: visibility,
                     supersedes,
+                    audience,
                     epistemic,
                     premise,
                     invalidated_by,

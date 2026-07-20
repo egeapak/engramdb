@@ -74,6 +74,11 @@ struct CreateInput {
     supersedes: Option<Vec<String>>,
 
     #[schemars(
+        description = "Audience for a group/global share: the project ids and/or group ids that may see this memory. Omit for whole-group visibility. Only meaningful when writing into a group (project: \"group:<name>\") or the global store; inert on a project-local memory."
+    )]
+    audience: Option<Vec<String>>,
+
+    #[schemars(
         description = "Epistemic class: fact (structural, verifiable against the repo), observation (measured empirically, may go stale), decision (chosen over alternatives, valid while its premise holds). Defaults from type; set only when it differs."
     )]
     epistemic: Option<String>,
@@ -1750,6 +1755,7 @@ impl EngramDbServer {
                 visibility,
                 provenance: Provenance::agent("mcp"),
                 supersedes: input.supersedes.unwrap_or_default(),
+                audience: input.audience.filter(|a| !a.is_empty()),
                 epistemic,
                 premise: input.premise,
                 invalidated_by: input.invalidated_by.unwrap_or_default(),

@@ -37,6 +37,7 @@ mod title_integration {
             visibility: Visibility::Shared,
             provenance: Provenance::human(),
             supersedes: vec![],
+            audience: None,
             epistemic: None,
             premise: None,
             invalidated_by: vec![],

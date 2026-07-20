@@ -129,8 +129,10 @@ project with no group memories behaves byte-for-byte as today.
      `subscriptions` (`engram-storage`).
   3. N-way fan-in read with the `audience` index filter; global folded in as the
      everyone group (`src/ops/query.rs`, `src/retrieval/engine.rs`).
-  4. Write ergonomics (`--group` / `project:"group:X"`) + membership CLI +
-     `allow_cross_project_writes` extension (`engram-cli`, `engram-mcp`).
+  4. Write ergonomics (`--group` / `project:"group:X"`), per-memory `audience`
+     write surface (CLI `add --audience`, MCP `create` `audience`; empty ⇒
+     whole-group), membership CLI + `allow_cross_project_writes` extension
+     (`engram-cli`, `engram-mcp`).
   5. Scope hygiene: strip physical on group writes; suppress physical multiplier
      for group-origin results.
 - **P1 — safety/ergonomics. ✅ implemented.** membership add/remove/list UX

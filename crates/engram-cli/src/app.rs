@@ -334,6 +334,12 @@ pub enum Command {
         #[arg(long)]
         visibility: Option<String>,
 
+        /// Audience for a group/global share: project and/or group ids that may
+        /// see this memory (comma-separated). Omit for whole-group visibility.
+        /// Only meaningful with --group or --global.
+        #[arg(long, value_delimiter = ',')]
+        audience: Vec<String>,
+
         /// IDs of memories this one supersedes (comma-separated)
         #[arg(long)]
         supersedes: Option<String>,
@@ -2332,6 +2338,46 @@ mod tests {
             Command::Add { supersedes, .. } => {
                 assert_eq!(supersedes, Some("id1,id2,id3".to_string()));
             }
+            _ => panic!("Expected Add command"),
+        }
+    }
+
+    #[test]
+    fn test_add_audience_flag() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "add",
+            "-t",
+            "decision",
+            "-c",
+            "content",
+            "-s",
+            "summary",
+            "--group",
+            "backend-family",
+            "--audience",
+            "projA,__g_x",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add {
+                audience, group, ..
+            } => {
+                assert_eq!(audience, vec!["projA".to_string(), "__g_x".to_string()]);
+                assert_eq!(group, Some("backend-family".to_string()));
+            }
+            _ => panic!("Expected Add command"),
+        }
+    }
+
+    #[test]
+    fn test_add_audience_defaults_empty() {
+        let cli = Cli::try_parse_from([
+            "engramdb", "add", "-t", "decision", "-c", "content", "-s", "summary",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add { audience, .. } => assert!(audience.is_empty()),
             _ => panic!("Expected Add command"),
         }
     }

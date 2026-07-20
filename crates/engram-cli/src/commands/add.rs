@@ -31,6 +31,9 @@ pub struct AddParams {
     pub details: Option<String>,
     pub visibility_str: Option<String>,
     pub supersedes: Option<String>,
+    /// Per-memory audience (project/group ids) for a group/global share; empty
+    /// ⇒ visible to the whole target store's group.
+    pub audience: Vec<String>,
     pub epistemic: Option<String>,
     pub premise: Option<String>,
     pub invalidated_by: Vec<String>,
@@ -52,6 +55,13 @@ type EpistemicFlags = (
     Option<engramdb::types::Generality>,
     Option<chrono::DateTime<chrono::Utc>>,
 );
+
+/// Normalize a CLI `--audience` list into the `CreateParams` field: an empty
+/// list ⇒ `None` (visible to the whole target store's group) rather than an
+/// empty audience that would hide the memory from everyone.
+fn audience_opt(audience: &[String]) -> Option<Vec<String>> {
+    (!audience.is_empty()).then(|| audience.to_vec())
+}
 
 /// Parse the epistemic/validity flags shared by all three add modes.
 /// Returns (epistemic, generality, valid_from) or a validation error.
@@ -234,6 +244,7 @@ async fn run_direct_mode(
             visibility,
             provenance: Provenance::human(),
             supersedes,
+            audience: audience_opt(&params.audience),
             epistemic: parsed_epistemic,
             premise: params.premise,
             invalidated_by: params.invalidated_by,
@@ -383,6 +394,7 @@ async fn run_interactive_mode(
             visibility,
             provenance: Provenance::human(),
             supersedes: vec![],
+            audience: audience_opt(&params.audience),
             epistemic: parsed_epistemic,
             premise: params.premise,
             invalidated_by: params.invalidated_by,
@@ -493,6 +505,7 @@ async fn run_editor_mode(
             visibility: parsed.visibility,
             provenance: Provenance::human(),
             supersedes: vec![],
+            audience: audience_opt(&params.audience),
             epistemic: parsed_epistemic,
             premise: params.premise,
             invalidated_by: params.invalidated_by,
@@ -705,6 +718,7 @@ mod tests {
             details: None,
             visibility_str: None,
             supersedes: None,
+            audience: vec![],
             epistemic: None,
             premise: None,
             invalidated_by: vec![],
@@ -763,6 +777,7 @@ mod tests {
             details: None,
             visibility_str: None,
             supersedes: None,
+            audience: vec![],
             epistemic: None,
             premise: None,
             invalidated_by: vec![],
@@ -822,6 +837,7 @@ mod tests {
             details: None,
             visibility_str: None,
             supersedes: None,
+            audience: vec![],
             epistemic: None,
             premise: None,
             invalidated_by: vec![],
@@ -881,6 +897,7 @@ mod tests {
             details: None,
             visibility_str: None,
             supersedes: None,
+            audience: vec![],
             epistemic: None,
             premise: None,
             invalidated_by: vec![],
