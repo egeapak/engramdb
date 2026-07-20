@@ -214,6 +214,15 @@ pub struct Memory {
     /// Visibility level
     pub visibility: Visibility,
 
+    /// Multi-project audience — per-memory sharing precision. When `Some`, a
+    /// memory living in a group or the everyone/global store is only surfaced
+    /// for projects/groups whose id appears in this list. `None` ⇒ visible to
+    /// the whole store's group (the default). Meaningless for a memory in an
+    /// ordinary single-project store, which is already scoped positionally by
+    /// which store its file lives in. An empty list normalizes to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<Vec<String>>,
+
     /// Challenges to this memory's validity
     #[serde(default)]
     pub challenges: Vec<Challenge>,
@@ -269,6 +278,7 @@ impl Memory {
             supersedes: vec![],
             status: Status::Active,
             visibility: Visibility::Shared,
+            audience: None,
             challenges: vec![],
             verified_at: None,
             created_at: now,
@@ -404,6 +414,11 @@ pub struct MemoryUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility: Option<Visibility>,
 
+    /// `Some(list)` replaces `audience`; an empty list clears it to `None`
+    /// (mirroring how an all-empty `Validity` clears `valid_while`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audience: Option<Vec<String>>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified_at: Option<DateTime<Utc>>,
 
@@ -491,6 +506,15 @@ impl MemoryUpdate {
         }
         if let Some(visibility) = self.visibility {
             memory.visibility = visibility;
+        }
+        if let Some(ref audience) = self.audience {
+            // Empty list clears the field (write-path guard that keeps a
+            // meaningless empty audience off disk), mirroring `valid_while`.
+            memory.audience = if audience.is_empty() {
+                None
+            } else {
+                Some(audience.clone())
+            };
         }
         if let Some(verified_at) = self.verified_at {
             memory.verified_at = Some(verified_at);
@@ -681,6 +705,7 @@ mod tests {
             status: Some(Status::NeedsReview),
             challenges: None,
             visibility: Some(Visibility::Personal),
+            audience: None,
             verified_at: Some(Utc::now()),
             expires_at: Some(Utc::now() + Duration::days(30)),
         };

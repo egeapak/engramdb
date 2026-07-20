@@ -114,6 +114,7 @@ mod tests {
             supersedes: vec![],
             status: Status::Active,
             visibility: Visibility::Shared,
+            audience: None,
             challenges: vec![],
             verified_at: None,
             created_at: chrono::Utc::now(),

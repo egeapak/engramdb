@@ -32,6 +32,7 @@ fn sample_memory() -> Memory {
         supersedes: vec![],
         status: Status::Active,
         visibility: Visibility::Shared,
+        audience: None,
         challenges: vec![],
         verified_at: None,
         created_at: "2026-01-15T10:00:00Z".parse().unwrap(),
@@ -67,6 +68,7 @@ fn full_memory() -> Memory {
         supersedes: vec!["old-id-1".to_string()],
         status: Status::Active,
         visibility: Visibility::Personal,
+        audience: None,
         challenges: vec![],
         verified_at: None,
         created_at: "2026-01-15T10:00:00Z".parse().unwrap(),
@@ -567,6 +569,33 @@ fn test_v2_personal_visibility_roundtrip() {
     assert_eq!(reparsed.visibility, Visibility::Personal);
 }
 
+#[test]
+fn test_v2_audience_roundtrip() {
+    let writer = V2Writer;
+    let parser = V2Parser;
+
+    // None ⇒ no audience line in the hidden block, parses back as None.
+    let mut memory = sample_memory();
+    assert!(memory.audience.is_none());
+    let written = writer.write(&memory).unwrap();
+    assert!(!written.contains("audience"));
+    assert_eq!(parser.parse(&written).unwrap().audience, None);
+
+    // Some(list) ⇒ survives the round trip.
+    memory.audience = Some(vec!["proj-a".to_string(), "group-x".to_string()]);
+    let written = writer.write(&memory).unwrap();
+    assert_eq!(
+        parser.parse(&written).unwrap().audience,
+        Some(vec!["proj-a".to_string(), "group-x".to_string()])
+    );
+
+    // An empty list normalizes away to None on write (write-path guard).
+    memory.audience = Some(vec![]);
+    let written = writer.write(&memory).unwrap();
+    assert!(!written.contains("audience"));
+    assert_eq!(parser.parse(&written).unwrap().audience, None);
+}
+
 // ===========================================================================
 // Migration path: V1 → V2
 // ===========================================================================
@@ -804,6 +833,7 @@ fn test_v2_output_format_readable() {
         supersedes: vec![],
         status: Status::Active,
         visibility: Visibility::Shared,
+        audience: None,
         challenges: vec![],
         verified_at: None,
         created_at: "2026-01-15T10:00:00Z".parse().unwrap(),

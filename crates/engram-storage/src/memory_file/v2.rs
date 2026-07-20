@@ -99,6 +99,11 @@ struct HiddenMeta {
     decay: Option<Decay>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     supersedes: Vec<String>,
+    /// Multi-project audience (per-memory sharing precision). `None` ⇒ visible
+    /// to the whole store's group. Machine metadata, so it lives in the hidden
+    /// block rather than the human-facing frontmatter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audience: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     challenges: Vec<Challenge>,
 }
@@ -200,6 +205,9 @@ fn parse_v2(frontmatter: &str, body: &str) -> Result<Memory> {
         supersedes: hidden.supersedes,
         status: fm.status,
         visibility: hidden.visibility.unwrap_or(visibility_from_scope),
+        // Normalize an empty audience away on read so a hand-edited file can't
+        // smuggle a "visible to nobody" list into the domain model.
+        audience: hidden.audience.filter(|a| !a.is_empty()),
         challenges: hidden.challenges,
         verified_at: hidden.verified_at,
         created_at,
@@ -343,6 +351,7 @@ fn write_v2(memory: &Memory) -> Result<String> {
         superseded_by: memory.superseded_by.clone(),
         decay: memory.decay.clone(),
         supersedes: memory.supersedes.clone(),
+        audience: memory.audience.clone().filter(|a| !a.is_empty()),
         challenges: memory.challenges.clone(),
     };
     let hidden_yaml = serde_yaml_ng::to_string(&hidden)?;

@@ -118,6 +118,12 @@ pub struct IndexEntry {
     pub invalidated_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub watch_paths: Vec<String>,
+    // Added in schema v0.4.0 (multi-project memories). JSON of
+    // `Option<Vec<String>>`, null when None. Restricts which projects/groups a
+    // group- or everyone-store memory surfaces for; ignored (positionally
+    // scoped) in an ordinary single-project store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<Vec<String>>,
 }
 
 /// Lightweight metadata for aggregation/stats queries (7 columns).
@@ -167,6 +173,11 @@ pub struct IndexForFiltering {
     pub origin_task: Option<String>,
     pub invalidated_at: Option<DateTime<Utc>>,
     pub watch_paths: Vec<String>,
+    /// Multi-project audience (schema v0.4.0). `None` ⇒ visible to the whole
+    /// store's group; `Some(list)` ⇒ only surfaces for a project/group whose id
+    /// is in the list. Read here so the multi-store fan-in can filter group- and
+    /// everyone-store candidates in Rust without loading the `.md` file.
+    pub audience: Option<Vec<String>>,
 }
 
 /// Filterable/displayable entry (15 columns).
@@ -251,6 +262,7 @@ impl From<&Memory> for IndexEntry {
                 .as_ref()
                 .map(|v| v.invalidated_by.clone())
                 .unwrap_or_default(),
+            audience: memory.audience.clone(),
         }
     }
 }
@@ -351,6 +363,10 @@ impl LanceIndex {
             Field::new("valid_from", DataType::Utf8, true),
             Field::new("invalidated_at", DataType::Utf8, true),
             Field::new("watch_paths", DataType::Utf8, false),
+            // Added in schema v0.4.0 (multi-project memories). Nullable JSON of
+            // `Option<Vec<String>>` — null when the memory has no audience
+            // restriction — following the `decay` nullable-Utf8 convention.
+            Field::new("audience", DataType::Utf8, true),
         ]))
     }
 
@@ -711,6 +727,7 @@ impl LanceIndex {
             "origin_task".into(),
             "invalidated_at".into(),
             "watch_paths".into(),
+            "audience".into(),
         ]));
         if let Some(pred) = predicate {
             query = query.only_if(pred);
@@ -1379,6 +1396,7 @@ impl LanceIndex {
         let mut valid_froms: Vec<Option<String>> = Vec::with_capacity(n);
         let mut invalidated_ats: Vec<Option<String>> = Vec::with_capacity(n);
         let mut watch_paths_col = Vec::with_capacity(n);
+        let mut audiences: Vec<Option<String>> = Vec::with_capacity(n);
 
         for entry in entries {
             ids.push(entry.id.clone());
@@ -1414,6 +1432,10 @@ impl LanceIndex {
                 serde_json::to_string(&entry.watch_paths)
                     .context("Failed to serialize watch_paths")?,
             );
+            audiences.push(match &entry.audience {
+                Some(a) => Some(serde_json::to_string(a).context("Failed to serialize audience")?),
+                None => None,
+            });
         }
 
         let batch = RecordBatch::try_new(
@@ -1442,6 +1464,7 @@ impl LanceIndex {
                 Arc::new(StringArray::from(valid_froms)) as ArrayRef,
                 Arc::new(StringArray::from(invalidated_ats)) as ArrayRef,
                 Arc::new(StringArray::from(watch_paths_col)) as ArrayRef,
+                Arc::new(StringArray::from(audiences)) as ArrayRef,
             ],
         )
         .context("Failed to create RecordBatch")?;
@@ -1791,6 +1814,12 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
         .as_any()
         .downcast_ref::<StringArray>()
         .context("Failed to cast 'watch_paths'")?;
+    let audience_col = batch
+        .column_by_name("audience")
+        .context("Missing 'audience' column")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("Failed to cast 'audience'")?;
 
     let mut entries = Vec::with_capacity(batch.num_rows());
     for i in 0..batch.num_rows() {
@@ -1856,6 +1885,25 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
         };
         let watch_paths: Vec<String> = serde_json::from_str(watch_paths_col.value(i))
             .context("Failed to parse watch_paths JSON")?;
+        // Nullable JSON; a hand-edited unparseable value degrades to "no
+        // audience restriction" rather than bricking every query on the store
+        // (mirrors the `decay` degrade-don't-brick handling above).
+        let audience: Option<Vec<String>> = if audience_col.is_null(i) {
+            None
+        } else {
+            match serde_json::from_str(audience_col.value(i)) {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    tracing::warn!(
+                        "ignoring unparseable audience JSON for memory {} (treating it as \
+                         unrestricted; fix the memory file and reindex): {}",
+                        ids.value(i),
+                        e
+                    );
+                    None
+                }
+            }
+        };
 
         entries.push(IndexForFiltering {
             id: ids.value(i).to_string(),
@@ -1880,6 +1928,7 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
             },
             invalidated_at,
             watch_paths,
+            audience,
         });
     }
     Ok(entries)
@@ -1974,6 +2023,7 @@ mod tests {
             supersedes: vec![],
             status: Status::Active,
             visibility: Visibility::Shared,
+            audience: None,
             challenges: vec![],
             verified_at: None,
             created_at: Utc::now(),
@@ -2021,6 +2071,33 @@ mod tests {
         let entries = lance.list_filterable().await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].epistemic, engram_types::Epistemic::Observation);
+    }
+
+    /// Schema v0.4.0: the `audience` column must survive the write→read round
+    /// trip through the filtering projection (where the multi-store fan-in reads
+    /// it), including the None case that stores a null cell.
+    #[tokio::test]
+    async fn test_audience_roundtrip_through_for_filtering() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        // None ⇒ null cell ⇒ reads back as None.
+        let mut none_entry = create_test_entry("aud-none");
+        none_entry.audience = None;
+        lance.upsert(&none_entry).await.unwrap();
+
+        // Some(list) ⇒ JSON cell ⇒ reads back intact.
+        let mut some_entry = create_test_entry("aud-some");
+        some_entry.audience = Some(vec!["proj-a".to_string(), "group-x".to_string()]);
+        lance.upsert(&some_entry).await.unwrap();
+
+        let entries = lance.list_for_filtering().await.unwrap();
+        let by_id = |id: &str| entries.iter().find(|e| e.id == id).unwrap().clone();
+        assert_eq!(by_id("aud-none").audience, None);
+        assert_eq!(
+            by_id("aud-some").audience,
+            Some(vec!["proj-a".to_string(), "group-x".to_string()])
+        );
     }
 
     #[tokio::test]
