@@ -13,7 +13,15 @@ purpose-built labeled corpus.
 ## TL;DR — ranked recommendations
 
 > **Status:** recommendations #1 (metadata vector, `embeddings.metadata_vector`,
-> default on) and #4 (runt-merge in `chunk_text`) are implemented.
+> default on) and #4 (runt handling in `chunk_text`) are implemented. Two
+> team-review refinements on top of the benchmarked variants: the trailing
+> runt is **rebalanced** with its predecessor (re-split at the midpoint)
+> rather than appended — appending would push an already-full chunk past the
+> provider's silent token truncation and drop the runt's text (E3 showed the
+> word budget already runs hot); and the composition is recorded in the store
+> manifest (`EmbeddingFingerprint.composition`) so doctor/query warn on
+> mixed-composition stores and `reindex_on_model_change = auto/error`
+> policies apply to composition drift too.
 
 | # | Change | Evidence | Cost |
 |---|--------|----------|------|

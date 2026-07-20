@@ -94,7 +94,7 @@ Facts usually need neither — they're verifiable against the repo directly.
 ## Sizing content
 
 - **`summary`** ≤ 100 chars. Hard limit.
-- **`content`** ~500 tokens soft target. The semantic embedding is computed over `summary + content`, and longer content doesn't help retrieval — the model embeds the first ~256 tokens anyway (`max_tokens`).
+- **`content`** ~500 tokens soft target. Each memory is embedded as a metadata vector (`"{title}. {summary}. tags: …"`) plus its content chunked into one or more content vectors (~`max_tokens` each, best-matching vector wins) — so title/tags are semantically searchable and long content is chunked rather than truncated. Keep content focused anyway: the high-level fact belongs in `content`, long detail in `details`. (`embeddings.metadata_vector = false` reverts to the legacy single `summary + content` embedding.)
 - **`details`** anything longer. Lazy-loaded — only fetched when `detail_level: "full"`. Use for code snippets, long rationale, links.
 
 If you find yourself writing > 1000 tokens of `content`, you almost always want to split:

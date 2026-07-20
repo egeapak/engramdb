@@ -27,7 +27,7 @@ pub use config::{
     EpistemicConfig, HooksConfig, LogicalBonusConfig, MaintenanceConfig, NliConfig,
     ReindexOnModelChange, RerankConfig, RetrievalConfig, ScopeProximityConfig, ScoringConfig,
     ScoringWeights, SearchConfig, SituationConfig, SituationProfile, ThresholdsConfig,
-    TrustWeights, DEFAULT_NLI_MODEL_REPO,
+    TrustWeights, COMPOSITION_METADATA_V1, DEFAULT_NLI_MODEL_REPO,
 };
 pub use decay::{Decay, DecayStrategy};
 pub use env::in_process_override;

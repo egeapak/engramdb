@@ -798,7 +798,23 @@ pub struct EmbeddingsConfig {
     pub pool_size: Option<usize>,
 }
 
+/// Composition id recorded in the store manifest when the metadata-vector
+/// embed composition is in use (see [`EmbeddingsConfig::metadata_vector`]).
+/// `None`/absent in a manifest means the legacy `"{summary} {content}"`
+/// composition — exactly what pre-tracking manifests deserialize to.
+pub const COMPOSITION_METADATA_V1: &str = "metadata-v1";
+
 impl EmbeddingsConfig {
+    /// The embed-text composition id this config produces:
+    /// [`COMPOSITION_METADATA_V1`] when the metadata vector is on, `None`
+    /// for the legacy composition. The single config→manifest mapping — the
+    /// stamping sites (first-embed, reindex) and the expected-fingerprint
+    /// check all go through here so they can never disagree.
+    pub fn composition_id(&self) -> Option<String> {
+        self.metadata_vector
+            .then(|| COMPOSITION_METADATA_V1.to_string())
+    }
+
     /// Resolve the configured embedding pool size for a machine with
     /// `cores` logical CPUs: the configured value clamped to `[1, cores]`,
     /// else auto `cores/2` (also ≥ 1).
@@ -1860,12 +1876,27 @@ mod tests {
         let legacy: EmbeddingsConfig =
             toml::from_str("provider = \"onnx\"\ndimensions = 384\nmax_tokens = 256\n").unwrap();
         assert_eq!(legacy.reindex_on_model_change, ReindexOnModelChange::Warn);
+        // Same back-compat contract for `metadata_vector`: legacy tables
+        // default it ON (the benchmarked composition), and the composition
+        // id follows the flag.
+        assert!(legacy.metadata_vector);
+        assert_eq!(
+            legacy.composition_id().as_deref(),
+            Some(COMPOSITION_METADATA_V1)
+        );
+        let off: EmbeddingsConfig = toml::from_str(
+            "provider = \"onnx\"\ndimensions = 384\nmax_tokens = 256\nmetadata_vector = false\n",
+        )
+        .unwrap();
+        assert!(!off.metadata_vector);
+        assert_eq!(off.composition_id(), None);
 
         // And the in-code defaults agree.
         assert_eq!(
             EmbeddingsConfig::default().reindex_on_model_change,
             ReindexOnModelChange::Warn
         );
+        assert!(EmbeddingsConfig::default().metadata_vector);
         assert_eq!(
             EngramConfig::default().embeddings.reindex_on_model_change,
             ReindexOnModelChange::Warn

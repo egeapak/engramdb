@@ -83,6 +83,17 @@ pub struct Manifest {
     pub embedding: Option<EmbeddingFingerprint>,
 }
 
+/// Composition id recorded when the metadata-vector embed composition is in
+/// use (`embeddings.metadata_vector = true`): a per-memory
+/// `"{title}. {summary}. tags: …"` row plus content-only chunks. The absent /
+/// `None` composition means the legacy `"{summary} {content}"` single text —
+/// which is exactly what every pre-tracking manifest deserializes to, so
+/// upgraded stores are detected without a schema migration. Defined in
+/// `engram-types` next to `EmbeddingsConfig::composition_id` (the single
+/// config→manifest mapping); re-exported here beside the fingerprint it
+/// stamps.
+pub use engram_types::COMPOSITION_METADATA_V1;
+
 /// Identity of the embedding model a store's vectors were generated with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmbeddingFingerprint {
@@ -92,6 +103,13 @@ pub struct EmbeddingFingerprint {
     /// Embedding dimensionality (also baked into the Arrow schema; kept
     /// here for diagnostics and early, clear dimension-change detection).
     pub dimensions: usize,
+    /// Embed-text composition the vectors were built from. `None` = legacy
+    /// `"{summary} {content}"`; [`COMPOSITION_METADATA_V1`] = metadata row +
+    /// content chunks. Same model, different text — a mismatch means
+    /// title/tag signal is missing from (or unexpectedly present in) stored
+    /// vectors until a `reindex --embeddings-only`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition: Option<String>,
 }
 
 /// How a store's stored embedding fingerprint compares to the embedding
@@ -104,6 +122,13 @@ pub enum EmbeddingModelStatus {
     Mismatch { stored: String, current: String },
     /// Embedding dimensionality changed (writes would fail the Arrow schema).
     DimensionMismatch { stored: usize, current: usize },
+    /// Same model, but the embed-text composition changed (e.g. the
+    /// metadata-vector default flipped on upgrade): old vectors lack the
+    /// metadata row, so ranking is skewed between old and new memories.
+    CompositionMismatch {
+        stored: Option<String>,
+        current: Option<String>,
+    },
     /// Legacy store with no fingerprint — model identity unknown/unverified.
     Untracked { current: String },
 }
@@ -117,7 +142,12 @@ impl EmbeddingModelStatus {
 
 impl EmbeddingFingerprint {
     /// Compare this stored fingerprint against the model currently in use.
-    pub fn status(&self, current_model: &str, current_dims: usize) -> EmbeddingModelStatus {
+    pub fn status(
+        &self,
+        current_model: &str,
+        current_dims: usize,
+        current_composition: Option<&str>,
+    ) -> EmbeddingModelStatus {
         if self.dimensions != current_dims {
             EmbeddingModelStatus::DimensionMismatch {
                 stored: self.dimensions,
@@ -127,6 +157,11 @@ impl EmbeddingFingerprint {
             EmbeddingModelStatus::Mismatch {
                 stored: self.model.clone(),
                 current: current_model.to_string(),
+            }
+        } else if self.composition.as_deref() != current_composition {
+            EmbeddingModelStatus::CompositionMismatch {
+                stored: self.composition.clone(),
+                current: current_composition.map(str::to_string),
             }
         } else {
             EmbeddingModelStatus::Match
@@ -140,9 +175,10 @@ pub fn embedding_status(
     stored: Option<&EmbeddingFingerprint>,
     current_model: &str,
     current_dims: usize,
+    current_composition: Option<&str>,
 ) -> EmbeddingModelStatus {
     match stored {
-        Some(fp) => fp.status(current_model, current_dims),
+        Some(fp) => fp.status(current_model, current_dims, current_composition),
         None => EmbeddingModelStatus::Untracked {
             current: current_model.to_string(),
         },
@@ -306,18 +342,19 @@ logical_scopes = []
         let fp = EmbeddingFingerprint {
             model: "onnx/all-MiniLM-L6-v2-q".to_string(),
             dimensions: 384,
+            composition: None,
         };
 
-        // Match: same model, same dims.
+        // Match: same model, same dims, same (legacy) composition.
         assert_eq!(
-            embedding_status(Some(&fp), "onnx/all-MiniLM-L6-v2-q", 384),
+            embedding_status(Some(&fp), "onnx/all-MiniLM-L6-v2-q", 384, None),
             EmbeddingModelStatus::Match
         );
-        assert!(embedding_status(Some(&fp), "onnx/all-MiniLM-L6-v2-q", 384).is_consistent());
+        assert!(embedding_status(Some(&fp), "onnx/all-MiniLM-L6-v2-q", 384, None).is_consistent());
 
         // Mismatch: same dims, different model.
         assert_eq!(
-            embedding_status(Some(&fp), "onnx/all-MiniLM-L6-v2", 384),
+            embedding_status(Some(&fp), "onnx/all-MiniLM-L6-v2", 384, None),
             EmbeddingModelStatus::Mismatch {
                 stored: "onnx/all-MiniLM-L6-v2-q".to_string(),
                 current: "onnx/all-MiniLM-L6-v2".to_string(),
@@ -328,16 +365,65 @@ logical_scopes = []
         // (arm priority: dimensions checked before model — a regression here
         // would misclassify a schema-breaking change as a soft Mismatch).
         assert_eq!(
-            embedding_status(Some(&fp), "onnx/nomic-embed-text-v1.5", 768),
+            embedding_status(Some(&fp), "onnx/nomic-embed-text-v1.5", 768, None),
             EmbeddingModelStatus::DimensionMismatch {
                 stored: 384,
                 current: 768,
             }
         );
 
+        // CompositionMismatch: same model + dims, composition changed — the
+        // upgrade path (legacy-stamped store, metadata-vector default on).
+        assert_eq!(
+            embedding_status(
+                Some(&fp),
+                "onnx/all-MiniLM-L6-v2-q",
+                384,
+                Some(COMPOSITION_METADATA_V1)
+            ),
+            EmbeddingModelStatus::CompositionMismatch {
+                stored: None,
+                current: Some(COMPOSITION_METADATA_V1.to_string()),
+            }
+        );
+        // ...and the reverse (user turned the flag off after stamping).
+        let fp_meta = EmbeddingFingerprint {
+            composition: Some(COMPOSITION_METADATA_V1.to_string()),
+            ..fp.clone()
+        };
+        assert_eq!(
+            embedding_status(Some(&fp_meta), "onnx/all-MiniLM-L6-v2-q", 384, None),
+            EmbeddingModelStatus::CompositionMismatch {
+                stored: Some(COMPOSITION_METADATA_V1.to_string()),
+                current: None,
+            }
+        );
+        // Matching metadata-v1 composition on both sides is consistent.
+        assert!(embedding_status(
+            Some(&fp_meta),
+            "onnx/all-MiniLM-L6-v2-q",
+            384,
+            Some(COMPOSITION_METADATA_V1)
+        )
+        .is_consistent());
+        // A model swap outranks the composition delta (one remediation
+        // message, the more severe one).
+        assert_eq!(
+            embedding_status(
+                Some(&fp),
+                "onnx/all-MiniLM-L6-v2",
+                384,
+                Some(COMPOSITION_METADATA_V1)
+            ),
+            EmbeddingModelStatus::Mismatch {
+                stored: "onnx/all-MiniLM-L6-v2-q".to_string(),
+                current: "onnx/all-MiniLM-L6-v2".to_string(),
+            }
+        );
+
         // Untracked: legacy store, no fingerprint.
         assert_eq!(
-            embedding_status(None, "onnx/all-MiniLM-L6-v2-q", 384),
+            embedding_status(None, "onnx/all-MiniLM-L6-v2-q", 384, None),
             EmbeddingModelStatus::Untracked {
                 current: "onnx/all-MiniLM-L6-v2-q".to_string(),
             }
@@ -352,6 +438,10 @@ logical_scopes = []
             EmbeddingModelStatus::DimensionMismatch {
                 stored: 1,
                 current: 2,
+            },
+            EmbeddingModelStatus::CompositionMismatch {
+                stored: None,
+                current: Some(COMPOSITION_METADATA_V1.to_string()),
             },
             EmbeddingModelStatus::Untracked {
                 current: "x".into(),
@@ -373,6 +463,7 @@ logical_scopes = []
         original.embedding = Some(EmbeddingFingerprint {
             model: "onnx/all-MiniLM-L6-v2-q".to_string(),
             dimensions: 384,
+            composition: Some(COMPOSITION_METADATA_V1.to_string()),
         });
 
         save_manifest(&path, &original).await.unwrap();

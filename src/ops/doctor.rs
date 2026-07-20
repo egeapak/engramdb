@@ -687,30 +687,48 @@ async fn check_embedding_model_identity(dir: &Path) -> EnvironmentCheck {
     // Render it as a warning so it never flips the exit code. `Mismatch` and
     // `DimensionMismatch` are genuine correctness bugs (search served from
     // stale/mixed vectors) and stay hard failures.
-    let (passed, message, suggestion, status) =
-        match embedding_status(stored.as_ref(), &expected.model, expected.dimensions) {
-            EmbeddingModelStatus::Match => (true, format!("ok: {}", expected.model), None, None),
-            EmbeddingModelStatus::Untracked { current } => (
-                true,
-                format!("untracked (legacy store); current model {current}"),
-                Some(reindex.to_string()),
-                Some(CheckStatus::Warn),
-            ),
-            EmbeddingModelStatus::Mismatch { stored, current } => (
-                false,
-                format!(
+    let (passed, message, suggestion, status) = match embedding_status(
+        stored.as_ref(),
+        &expected.model,
+        expected.dimensions,
+        expected.composition.as_deref(),
+    ) {
+        EmbeddingModelStatus::Match => (true, format!("ok: {}", expected.model), None, None),
+        EmbeddingModelStatus::Untracked { current } => (
+            true,
+            format!("untracked (legacy store); current model {current}"),
+            Some(reindex.to_string()),
+            Some(CheckStatus::Warn),
+        ),
+        EmbeddingModelStatus::Mismatch { stored, current } => (
+            false,
+            format!(
                 "MISMATCH: stored {stored}, current {current} — search uses stale/mixed vectors"
             ),
-                Some(reindex.to_string()),
-                None,
+            Some(reindex.to_string()),
+            None,
+        ),
+        EmbeddingModelStatus::DimensionMismatch { stored, current } => (
+            false,
+            format!("DIMENSION MISMATCH: stored {stored}d vs current {current}d"),
+            Some(reindex.to_string()),
+            None,
+        ),
+        // Advisory like Untracked: old vectors still work, they just lack the
+        // metadata row (or unexpectedly carry one) — ranking skew, not
+        // corruption. Warn without flipping the exit code.
+        EmbeddingModelStatus::CompositionMismatch { stored, current } => (
+            true,
+            format!(
+                "composition changed: stored {}, current {} — old memories rank \
+                 without title/tag signal",
+                stored.as_deref().unwrap_or("legacy"),
+                current.as_deref().unwrap_or("legacy")
             ),
-            EmbeddingModelStatus::DimensionMismatch { stored, current } => (
-                false,
-                format!("DIMENSION MISMATCH: stored {stored}d vs current {current}d"),
-                Some(reindex.to_string()),
-                None,
-            ),
-        };
+            Some(reindex.to_string()),
+            Some(CheckStatus::Warn),
+        ),
+    };
     EnvironmentCheck {
         name,
         passed,

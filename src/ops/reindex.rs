@@ -387,12 +387,14 @@ mod tests {
             "only re-embedded memories may remain in the chunks table"
         );
 
-        // Clean success stamps the new model's fingerprint.
+        // Clean success stamps the new model's fingerprint, including the
+        // composition id for the default metadata-vector configuration.
         assert_eq!(
             store.embedding_fingerprint().await.unwrap(),
             Some(EmbeddingFingerprint {
                 model: "onnx/stub-model".to_string(),
                 dimensions: 384,
+                composition: Some(crate::storage::manifest::COMPOSITION_METADATA_V1.to_string()),
             })
         );
     }
@@ -497,6 +499,7 @@ mod tests {
         let original = EmbeddingFingerprint {
             model: "onnx/old-model".to_string(),
             dimensions: 384,
+            composition: None,
         };
         store
             .set_embedding_fingerprint(original.clone())

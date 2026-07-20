@@ -226,6 +226,7 @@ fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
 pub fn expected_embedding_fingerprint(config: &EngramConfig) -> Option<EmbeddingFingerprint> {
     let backend = resolve_backend(config.embeddings.backend, None);
     let specs = provider_specs(config.embeddings.provider.as_str())?;
+    let composition = config.embeddings.composition_id();
 
     // Explicit Ollama.
     #[cfg(feature = "ollama")]
@@ -233,6 +234,7 @@ pub fn expected_embedding_fingerprint(config: &EngramConfig) -> Option<Embedding
         return Some(EmbeddingFingerprint {
             model: format!("ollama/{}", specs.ollama.model_name),
             dimensions: specs.ollama.dimensions,
+            composition,
         });
     }
 
@@ -243,6 +245,7 @@ pub fn expected_embedding_fingerprint(config: &EngramConfig) -> Option<Embedding
         return Some(EmbeddingFingerprint {
             model: format!("tract/{}", spec.name),
             dimensions: spec.dimensions,
+            composition,
         });
     }
 
@@ -255,6 +258,7 @@ pub fn expected_embedding_fingerprint(config: &EngramConfig) -> Option<Embedding
         return Some(EmbeddingFingerprint {
             model: format!("onnx/{}", specs.onnx.name),
             dimensions: specs.onnx.dimensions,
+            composition,
         });
     }
 
@@ -267,6 +271,7 @@ pub fn expected_embedding_fingerprint(config: &EngramConfig) -> Option<Embedding
         return Some(EmbeddingFingerprint {
             model: format!("tract/{}", spec.name),
             dimensions: spec.dimensions,
+            composition,
         });
     }
 
@@ -274,7 +279,7 @@ pub fn expected_embedding_fingerprint(config: &EngramConfig) -> Option<Embedding
     // disabled.
     #[cfg(all(not(feature = "onnxruntime"), not(feature = "tract")))]
     {
-        let _ = (backend, &specs);
+        let _ = (backend, &specs, composition);
         None
     }
 }
@@ -300,7 +305,12 @@ pub async fn embedding_model_report(
         };
     };
     let stored = store.embedding_fingerprint().await.ok().flatten();
-    let status = embedding_status(stored.as_ref(), &current.model, current.dimensions);
+    let status = embedding_status(
+        stored.as_ref(),
+        &current.model,
+        current.dimensions,
+        current.composition.as_deref(),
+    );
     // Untracked warns about vectors of unknown model vintage — but a store
     // with NO vectors has nothing stale to warn about. A brand-new project
     // is unstamped until its first embed (which stamps it — see
@@ -332,6 +342,16 @@ pub async fn embedding_model_report(
              {current}). Run `engramdb reindex --embeddings-only` before using \
              memory search."
         )),
+        EmbeddingModelStatus::CompositionMismatch { stored, current } => {
+            let stored = stored.as_deref().unwrap_or("legacy");
+            let current = current.as_deref().unwrap_or("legacy");
+            Some(format!(
+                "EngramDB: the embedding text composition changed (stored {stored}, \
+                 current {current} — e.g. the metadata-vector default). Vectors \
+                 embedded before the change are ranked inconsistently with new \
+                 ones — run `engramdb reindex --embeddings-only` to re-embed."
+            ))
+        }
     };
     EmbeddingModelReport { status, warning }
 }
@@ -1142,6 +1162,7 @@ mod tests {
         let current = EmbeddingFingerprint {
             model: "onnx/all-MiniLM-L6-v2-q".to_string(),
             dimensions: 384,
+            composition: None,
         };
 
         // Fresh store: unstamped, zero vectors — quiet.

@@ -1587,6 +1587,7 @@ async fn reindex_re_embeds_in_error_mode_despite_mismatch() {
         .set_embedding_fingerprint(engramdb::storage::EmbeddingFingerprint {
             model: "onnx/bogus-old-model".to_string(),
             dimensions: 384,
+            composition: None,
         })
         .await
         .unwrap();
