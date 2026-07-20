@@ -12,7 +12,7 @@
 //! independent of the MCP layer.
 
 use crate::storage::MemoryStore;
-use crate::types::{EngramConfig, TitleStrategy, CONTENT_SOFT_TOKEN_TARGET, MAX_SUMMARY_CHARS};
+use crate::types::{EngramConfig, TitleStrategy, CONTENT_SOFT_TOKEN_TARGET};
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -54,8 +54,8 @@ pub const DEFAULT_TOP_TAGS: usize = 20;
 /// Limits an agent should respect when authoring a memory.
 #[derive(Debug, Clone, Serialize)]
 pub struct LimitsView {
-    /// Hard cap on `summary` length (bytes; == chars for ASCII). `create`
-    /// rejects longer summaries.
+    /// Hard cap on `summary` length, in characters (`[content].summary_max_chars`,
+    /// default 200). `create`/`update` reject longer summaries.
     pub summary_max_chars: usize,
     /// Soft target for `content` length in tokens (not enforced). Longer
     /// content is not lost — it is chunked and every chunk is embedded — but
@@ -121,7 +121,7 @@ impl AgentConfigView {
     pub fn from_config(config: &EngramConfig) -> Self {
         Self {
             limits: LimitsView {
-                summary_max_chars: MAX_SUMMARY_CHARS,
+                summary_max_chars: config.content.summary_max_chars,
                 content_soft_token_target: CONTENT_SOFT_TOKEN_TARGET,
                 embedding_chunk_tokens: config.embeddings.max_tokens,
             },
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn config_view_reflects_defaults() {
         let view = AgentConfigView::from_config(&EngramConfig::default());
-        assert_eq!(view.limits.summary_max_chars, 100);
+        assert_eq!(view.limits.summary_max_chars, 200);
         assert_eq!(view.limits.content_soft_token_target, 500);
         assert_eq!(view.limits.embedding_chunk_tokens, 256);
         assert_eq!(view.retrieval.default_max_results, 10);
@@ -240,9 +240,13 @@ mod tests {
         config.rerank.enabled = true;
         config.nli.enabled = true;
         config.retrieval.max_results = 25;
+        // A configured `[content].summary_max_chars` must surface verbatim —
+        // the view reflects the effective limit, not a hard-coded constant.
+        config.content.summary_max_chars = 320;
         let view = AgentConfigView::from_config(&config);
         assert!(view.features.rerank_enabled);
         assert!(view.features.contradiction_detection_enabled);
         assert_eq!(view.retrieval.default_max_results, 25);
+        assert_eq!(view.limits.summary_max_chars, 320);
     }
 }

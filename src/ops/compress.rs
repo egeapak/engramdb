@@ -991,9 +991,14 @@ pub async fn consolidate_cluster_apply(
         }
     });
 
+    let summary_max_chars = engine
+        .map(crate::retrieval::engine::RetrievalEngine::summary_max_chars)
+        .unwrap_or(crate::types::DEFAULT_SUMMARY_MAX_CHARS);
     let mut summary = format!("Consolidated: {}", sources[0].summary);
-    if summary.chars().count() > 100 {
-        summary = summary.chars().take(97).collect::<String>() + "...";
+    if summary.chars().count() > summary_max_chars {
+        // Reserve 3 chars for the ellipsis so the result still fits the bound.
+        let keep = summary_max_chars.saturating_sub(3);
+        summary = summary.chars().take(keep).collect::<String>() + "...";
     }
     let content = sources
         .iter()

@@ -44,7 +44,9 @@ struct CreateInput {
     )]
     content: String,
 
-    #[schemars(description = "One-line summary, max 100 chars (required)")]
+    #[schemars(
+        description = "One-line summary, max 200 chars by default (configurable via [content].summary_max_chars) (required)"
+    )]
     summary: String,
 
     #[schemars(description = "Extended details (lazy-loaded)")]

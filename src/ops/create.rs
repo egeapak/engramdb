@@ -88,12 +88,17 @@ async fn title_for(
     crate::title::generate_title(strategy, text).await
 }
 
-/// Validate that a summary is non-empty, single-line, and within the
-/// character limit. Single-line matters beyond cosmetics: the memory-file
-/// writer renders the summary on one structural line (H1 or `**Summary:**`),
-/// so embedded newlines would be collapsed on write anyway — reject them up
-/// front instead of silently rewriting the caller's text.
-pub fn validate_summary(summary: &str) -> Result<()> {
+/// Validate that a summary is non-empty, single-line, and within
+/// `max_chars` characters. Single-line matters beyond cosmetics: the
+/// memory-file writer renders the summary on one structural line (H1 or
+/// `**Summary:**`), so embedded newlines would be collapsed on write anyway —
+/// reject them up front instead of silently rewriting the caller's text.
+///
+/// `max_chars` comes from `[content].summary_max_chars`
+/// (default [`crate::types::DEFAULT_SUMMARY_MAX_CHARS`]); callers without a
+/// resolved config should pass that default. The bound is measured in
+/// characters, not bytes, so multibyte summaries are not penalized.
+pub fn validate_summary(summary: &str, max_chars: usize) -> Result<()> {
     let trimmed = summary.trim();
     if trimmed.is_empty() {
         anyhow::bail!("Summary cannot be empty");
@@ -101,12 +106,9 @@ pub fn validate_summary(summary: &str) -> Result<()> {
     if trimmed.contains(['\n', '\r']) {
         anyhow::bail!("Summary must be a single line");
     }
-    if trimmed.len() > crate::types::MAX_SUMMARY_CHARS {
-        anyhow::bail!(
-            "Summary must be <= {} characters (got {})",
-            crate::types::MAX_SUMMARY_CHARS,
-            trimmed.len()
-        );
+    let len = trimmed.chars().count();
+    if len > max_chars {
+        anyhow::bail!("Summary must be <= {max_chars} characters (got {len})");
     }
     Ok(())
 }
@@ -120,7 +122,10 @@ pub async fn create_memory(
     params: CreateParams,
     engine: Option<&RetrievalEngine>,
 ) -> Result<CreateResult> {
-    validate_summary(&params.summary)?;
+    let summary_max_chars = engine
+        .map(RetrievalEngine::summary_max_chars)
+        .unwrap_or(crate::types::DEFAULT_SUMMARY_MAX_CHARS);
+    validate_summary(&params.summary, summary_max_chars)?;
     // Validate scores here, in the shared ops core, so EVERY create path
     // (direct CLI flags, interactive prompts, editor, MCP) is covered — not
     // just the CLI direct path. Out-of-range/NaN scores corrupt the scoring
@@ -612,22 +617,31 @@ mod tests {
 
     #[test]
     fn test_validate_summary_rejects_empty() {
-        assert!(validate_summary("").is_err());
-        assert!(validate_summary("   ").is_err());
-        assert!(validate_summary("\n\t").is_err());
+        use crate::types::DEFAULT_SUMMARY_MAX_CHARS as MAX;
+        assert!(validate_summary("", MAX).is_err());
+        assert!(validate_summary("   ", MAX).is_err());
+        assert!(validate_summary("\n\t", MAX).is_err());
     }
 
     #[test]
     fn test_validate_summary_rejects_too_long() {
-        let long = "a".repeat(101);
-        assert!(validate_summary(&long).is_err());
+        use crate::types::DEFAULT_SUMMARY_MAX_CHARS as MAX;
+        // Default bound is 200, so the historical 101 is now valid.
+        assert!(validate_summary(&"a".repeat(101), MAX).is_ok());
+        assert!(validate_summary(&"a".repeat(MAX + 1), MAX).is_err());
+        // The bound is configurable — a smaller limit rejects sooner.
+        assert!(validate_summary(&"a".repeat(101), 100).is_err());
+        // Measured in characters, not bytes: 200 multibyte chars fit.
+        assert!(validate_summary(&"é".repeat(MAX), MAX).is_ok());
+        assert!(validate_summary(&"é".repeat(MAX + 1), MAX).is_err());
     }
 
     #[test]
     fn test_validate_summary_accepts_valid() {
-        assert!(validate_summary("Short summary").is_ok());
-        assert!(validate_summary(&"a".repeat(100)).is_ok());
-        assert!(validate_summary("x").is_ok());
+        use crate::types::DEFAULT_SUMMARY_MAX_CHARS as MAX;
+        assert!(validate_summary("Short summary", MAX).is_ok());
+        assert!(validate_summary(&"a".repeat(MAX), MAX).is_ok());
+        assert!(validate_summary("x", MAX).is_ok());
     }
 
     #[tokio::test]
@@ -641,13 +655,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_create_memory_accepts_summary_over_legacy_100_limit() {
+        // The default bound was raised from 100 to 200 — a 150-char summary
+        // that create used to reject must now succeed.
+        let (_temp, store) = setup_test_store().await;
+        let mut params = minimal_create_params();
+        params.summary = "a".repeat(150);
+        let result = create_memory(&store, params, None).await;
+        assert!(result.is_ok(), "150-char summary should be accepted now");
+    }
+
+    #[tokio::test]
     async fn test_create_memory_fails_with_too_long_summary() {
         let (_temp, store) = setup_test_store().await;
         let mut params = minimal_create_params();
-        params.summary = "a".repeat(101);
+        // Past the raised default (200) — still rejected.
+        params.summary = "a".repeat(crate::types::DEFAULT_SUMMARY_MAX_CHARS + 1);
         let result = create_memory(&store, params, None).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("100"));
+        assert!(result.unwrap_err().to_string().contains("200"));
     }
 
     #[tokio::test]

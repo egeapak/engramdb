@@ -165,7 +165,8 @@ pub struct Memory {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub superseded_by: Option<String>,
 
-    /// Brief summary (≤100 chars)
+    /// Brief one-line summary. Length is bounded by
+    /// `[content].summary_max_chars` (default 200) on the create/update paths.
     pub summary: String,
 
     /// Optional short title (a few words) for human-readable filenames.

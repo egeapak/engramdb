@@ -1492,7 +1492,7 @@ async fn config_exposes_limits_and_defaults() {
         .await;
     let val = parse_ok(&result);
 
-    assert_eq!(val["limits"]["summary_max_chars"], 100);
+    assert_eq!(val["limits"]["summary_max_chars"], 200);
     assert_eq!(val["limits"]["content_soft_token_target"], 500);
     assert_eq!(val["retrieval"]["default_max_results"], 10);
     assert!(val["retrieval"]["relevance_threshold"].is_number());
