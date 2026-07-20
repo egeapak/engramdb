@@ -1880,8 +1880,21 @@ impl EngramDbServer {
                 std::collections::HashSet::new();
             viewer_ids.insert(project_id);
             viewer_ids.extend(subscriptions.iter().cloned());
-            let outcome =
-                ops::query_memories_with_extra_stores(&engine, &query, &viewer_ids, || async {
+            // P2: only equalize cross-store scores when a fanned-in store's
+            // embedding fingerprint actually differs from this project's (the
+            // same-fingerprint fast path skips the extra cross-encoder pass).
+            let mut shared_store_ids = subscriptions.clone();
+            if include_global {
+                shared_store_ids.push(engramdb::storage::paths::GLOBAL_PROJECT_ID.to_string());
+            }
+            let equalize =
+                ops::cross_store_equalization_needed(engine.config(), &shared_store_ids).await;
+            let outcome = ops::query_memories_with_extra_stores(
+                &engine,
+                &query,
+                &viewer_ids,
+                equalize,
+                || async {
                     let mut engines = Vec::new();
                     for gid in &subscriptions {
                         if let Ok(e) = self.build_group_engine(gid).await {
@@ -1894,9 +1907,10 @@ impl EngramDbServer {
                         }
                     }
                     engines
-                })
-                .await
-                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+                },
+            )
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
             if !outcome.unreadable.is_empty() {
                 tracing::warn!(
                     stores = ?outcome.unreadable,

@@ -166,8 +166,23 @@ async fn compute_query_result(
     viewer_ids.insert(project_id);
     viewer_ids.extend(subscriptions.iter().cloned());
 
-    let outcome =
-        engramdb::ops::query_memories_with_extra_stores(&engine, &query, &viewer_ids, || async {
+    // P2: decide whether the fan-in needs cross-store rerank equalization. Only
+    // true when a subscribed group (or the everyone/global store, if folded in)
+    // was embedded with a model whose fingerprint differs from this project's —
+    // otherwise the scores are already comparable and we take the fast path.
+    let mut shared_store_ids = subscriptions.clone();
+    if include_global {
+        shared_store_ids.push(engramdb::storage::paths::GLOBAL_PROJECT_ID.to_string());
+    }
+    let equalize =
+        engramdb::ops::cross_store_equalization_needed(engine.config(), &shared_store_ids).await;
+
+    let outcome = engramdb::ops::query_memories_with_extra_stores(
+        &engine,
+        &query,
+        &viewer_ids,
+        equalize,
+        || async {
             let mut engines = Vec::new();
             // Subscribed group stores fan in by default. A group that fails to
             // open (missing/corrupt store dir) is skipped here; `doctor`'s
@@ -190,8 +205,9 @@ async fn compute_query_result(
                 }
             }
             engines
-        })
-        .await?;
+        },
+    )
+    .await?;
 
     // A shared store that opened but failed to query is best-effort skipped;
     // warn so a silently-missing group's memories are explainable (doctor has

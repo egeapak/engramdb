@@ -1284,4 +1284,63 @@ mod tests {
         assert_eq!(fp.model, provider.model_id());
         assert_eq!(fp.dimensions, provider.dimensions());
     }
+
+    // P2: `cross_store_equalization_needed` must fire only on a *confirmed*
+    // embedding-fingerprint difference between the project and a shared store —
+    // the same-fingerprint (and unstamped-store) cases take the fast path.
+    #[tokio::test]
+    async fn cross_store_equalization_needed_detects_drift() {
+        use crate::storage::manifest::{load_manifest, save_manifest, EmbeddingFingerprint};
+        use crate::types::EngramConfig;
+
+        async fn stamp(gid: &str, fp: &EmbeddingFingerprint) {
+            let path = crate::storage::paths::project_dir(
+                &crate::storage::paths::group_store_dir(gid).unwrap(),
+            )
+            .join("manifest.toml");
+            let mut m = load_manifest(&path).await.unwrap();
+            m.embedding = Some(fp.clone());
+            save_manifest(&path, &m).await.unwrap();
+        }
+
+        let config = EngramConfig::default();
+        // Skip when this build resolves no embedding model (nothing to drift).
+        let Some(project_fp) = expected_embedding_fingerprint(&config) else {
+            return;
+        };
+
+        // No shared stores → never needs equalization.
+        assert!(!cross_store_equalization_needed(&config, &[]).await);
+
+        // Freshly created but *unstamped* group store → conservative fast path
+        // (we can't confirm drift, so we don't equalize).
+        let gid_untracked = crate::storage::paths::compute_group_id("equalize-untracked");
+        drop(MemoryStore::init_group(&gid_untracked).await.unwrap());
+        assert!(shared_store_fingerprint(&gid_untracked).await.is_none());
+        assert!(!cross_store_equalization_needed(&config, &[gid_untracked]).await);
+
+        // Group stamped with the SAME fingerprint → fast path (false).
+        let gid_same = crate::storage::paths::compute_group_id("equalize-same");
+        drop(MemoryStore::init_group(&gid_same).await.unwrap());
+        stamp(&gid_same, &project_fp).await;
+        assert_eq!(
+            shared_store_fingerprint(&gid_same).await,
+            Some(project_fp.clone())
+        );
+        assert!(!cross_store_equalization_needed(&config, std::slice::from_ref(&gid_same)).await);
+
+        // Group stamped with a DIFFERENT model → needs equalization (true).
+        let gid_diff = crate::storage::paths::compute_group_id("equalize-diff");
+        drop(MemoryStore::init_group(&gid_diff).await.unwrap());
+        let drifted = EmbeddingFingerprint {
+            model: format!("{}-X", project_fp.model),
+            dimensions: project_fp.dimensions,
+            composition: project_fp.composition.clone(),
+        };
+        stamp(&gid_diff, &drifted).await;
+        assert!(cross_store_equalization_needed(&config, std::slice::from_ref(&gid_diff)).await);
+
+        // Mixed aligned + drifted → any single drift triggers equalization.
+        assert!(cross_store_equalization_needed(&config, &[gid_same, gid_diff]).await);
+    }
 }

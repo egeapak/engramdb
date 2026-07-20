@@ -148,6 +148,16 @@ pub struct ExtraStoresResult {
 /// deterministic regardless of which store finishes first (the project entry,
 /// and among extras the earlier-listed store, wins a tie).
 ///
+/// **Cross-store rerank equalization (P2):** when `equalize_cross_store_scores`
+/// is set, a single cross-encoder pass re-scores the whole merged union with one
+/// model-agnostic scorer after merging — the fix for stores embedded with
+/// different models producing incomparable vector scores. The caller sets it
+/// only on confirmed embedding-fingerprint drift
+/// ([`cross_store_equalization_needed`](crate::ops::cross_store_equalization_needed));
+/// the same-fingerprint fast path leaves it `false` and this is skipped. It
+/// needs a query text signal and is best-effort (a rerank failure keeps the
+/// per-store scores).
+///
 /// Best-effort by contract: a failed extra-store query is skipped (project
 /// results still return) but its label is recorded in
 /// [`ExtraStoresResult::unreadable`] and logged, matching the `include_global`
@@ -158,6 +168,7 @@ pub async fn query_memories_with_extra_stores<F, Fut>(
     engine: &RetrievalEngine,
     query: &RetrievalQuery,
     viewer_ids: &HashSet<String>,
+    equalize_cross_store_scores: bool,
     extra_engines: F,
 ) -> Result<ExtraStoresResult>
 where
@@ -210,6 +221,36 @@ where
             }
         }
     }
+
+    // P2: cross-store rerank equalization. Memories merged from stores embedded
+    // with different models carry scores from different vector spaces, so their
+    // relative ranking across the store boundary is arbitrary. A single
+    // cross-encoder pass over the merged union re-scores every entry with one
+    // model-agnostic scorer, restoring a comparable ranking. The caller sets
+    // `equalize_cross_store_scores` only when a fingerprint actually differs
+    // (the same-fingerprint fast path leaves it false), so this is off the
+    // common query path. It needs a query text signal and is best-effort — a
+    // rerank failure (or no reranker configured) keeps the per-store scores.
+    if equalize_cross_store_scores {
+        if let Some(q) = query
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+        {
+            match engine.rerank_merged(q, &mut result.memories, max).await {
+                Ok(true) => {
+                    result.retrieval_quality = format!("{}+equalized", result.retrieval_quality);
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "cross-store rerank equalization failed; keeping per-store scores"
+                ),
+            }
+        }
+    }
+
     Ok(ExtraStoresResult { result, unreadable })
 }
 
@@ -372,16 +413,21 @@ mod tests {
         let viewer_plain: HashSet<String> = [proj_id.clone()].into_iter().collect();
         let cfg = config.clone();
         let gid1 = gid.clone();
-        let result =
-            query_memories_with_extra_stores(&proj_engine, &query, &viewer_plain, || async move {
+        let result = query_memories_with_extra_stores(
+            &proj_engine,
+            &query,
+            &viewer_plain,
+            false,
+            || async move {
                 vec![(
                     gid1.clone(),
                     RetrievalEngine::new(MemoryStore::open_group(&gid1).await.unwrap(), cfg),
                 )]
-            })
-            .await
-            .unwrap()
-            .result;
+            },
+        )
+        .await
+        .unwrap()
+        .result;
         assert!(
             result
                 .memories
@@ -403,16 +449,21 @@ mod tests {
             .collect();
         let cfg2 = config.clone();
         let gid2 = gid.clone();
-        let result2 =
-            query_memories_with_extra_stores(&proj_engine, &query, &viewer_listed, || async move {
+        let result2 = query_memories_with_extra_stores(
+            &proj_engine,
+            &query,
+            &viewer_listed,
+            false,
+            || async move {
                 vec![(
                     gid2.clone(),
                     RetrievalEngine::new(MemoryStore::open_group(&gid2).await.unwrap(), cfg2),
                 )]
-            })
-            .await
-            .unwrap()
-            .result;
+            },
+        )
+        .await
+        .unwrap()
+        .result;
         assert!(
             result2
                 .memories
@@ -477,7 +528,7 @@ mod tests {
         let gid_ok_c = gid_ok.clone();
         let gid_bad_c = gid_bad.clone();
         let outcome =
-            query_memories_with_extra_stores(&proj_engine, &query, &viewer, || async move {
+            query_memories_with_extra_stores(&proj_engine, &query, &viewer, false, || async move {
                 let ok_engine =
                     RetrievalEngine::new(MemoryStore::open_group(&gid_ok_c).await.unwrap(), cfg_ok);
                 let bad_engine = RetrievalEngine::new(

@@ -2037,6 +2037,43 @@ mod tests {
         }
     }
 
+    /// Cross-store equalization (`rerank_merged`) is a no-op when no reranker is
+    /// configured: it returns `Ok(false)` and leaves the merged scores/order
+    /// untouched, so the caller keeps the per-store scores.
+    #[tokio::test]
+    async fn rerank_merged_is_noop_without_reranker() {
+        use crate::scoring::ScoreBreakdown;
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        // A plain engine has no reranker attached (see `with_reranker`).
+        let engine = RetrievalEngine::new(store, EngramConfig::default());
+
+        let sm = |summary: &str, score: f64| ScoredMemory {
+            memory: Memory::new(
+                MemoryType::Decision,
+                summary,
+                "content",
+                Provenance::human(),
+            ),
+            score,
+            score_breakdown: ScoreBreakdown::default(),
+        };
+        let mut memories = vec![sm("a", 0.9), sm("b", 0.1)];
+        let ran = engine
+            .rerank_merged("query", &mut memories, 10)
+            .await
+            .unwrap();
+        assert!(!ran, "no reranker configured ⇒ no-op");
+        assert_eq!(memories.len(), 2);
+        assert_eq!(memories[0].score, 0.9);
+        assert_eq!(memories[1].score, 0.1);
+    }
+
     /// The R2 fast path must honor Step 1.5's empty-path collapse: a no-query
     /// Rank with `path: ""` (the natural MCP/hook degenerate) must rank like
     /// `path: None`, not zero every scope multiplier and return nothing.

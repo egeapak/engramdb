@@ -1,6 +1,6 @@
 # Multi-Project Memories
 
-Status: **accepted design, P0 in progress**
+Status: **accepted design; P0–P2 implemented, P3 deferred**
 Date: 2026-07-20
 Branch: `claude/multi-project-memories-o4u0vf`
 
@@ -133,14 +133,21 @@ project with no group memories behaves byte-for-byte as today.
      `allow_cross_project_writes` extension (`engram-cli`, `engram-mcp`).
   5. Scope hygiene: strip physical on group writes; suppress physical multiplier
      for group-origin results.
-- **P1 — safety/ergonomics.** membership add/remove/list UX with blast-radius
-  confirmation; parallelized fan-in; empty-vs-corrupt store distinction;
-  fingerprint-drift `doctor` check.
-- **P2 — ranking correctness.** post-merge rerank equalization (same-fingerprint
-  fast path).
+- **P1 — safety/ergonomics. ✅ implemented.** membership add/remove/list UX
+  (`groups subscribe/unsubscribe/members`) with blast-radius confirmation
+  (default-decline prompt, `--yes` bypass, JSON-mode gate); parallelized fan-in
+  (`join_all`, deterministic merge order); empty-vs-corrupt store distinction
+  (`ExtraStoresResult::unreadable`); fingerprint-drift `doctor` check (the
+  "Group subscriptions" subsection: readability + embedding-fingerprint
+  alignment per subscribed group).
+- **P2 — ranking correctness. ✅ implemented.** post-merge rerank equalization
+  (`RetrievalEngine::rerank_merged` over the merged union, gated by
+  `ops::cross_store_equalization_needed`; same-fingerprint / unstamped-store
+  fast path skips the extra cross-encoder pass).
 - **P3 (deferred) — git distribution.** in-repo hub store; nullable
   `origin_group_id` frontmatter for one-way regenerable projections; resolvability
-  `doctor` check.
+  `doctor` check. Still deferred per Decision 1 (cross-machine distribution is
+  explicitly out of scope for the single-machine model).
 
 ## Non-goals (for P0)
 
