@@ -48,6 +48,7 @@ const MCP_TOOL_SUFFIXES: &[&str] = &[
     "task_complete",
     "review",
     "stats",
+    "config",
     "doctor",
     "gc",
     "reindex",

@@ -101,8 +101,12 @@ pub fn validate_summary(summary: &str) -> Result<()> {
     if trimmed.contains(['\n', '\r']) {
         anyhow::bail!("Summary must be a single line");
     }
-    if trimmed.len() > 100 {
-        anyhow::bail!("Summary must be <= 100 characters (got {})", trimmed.len());
+    if trimmed.len() > crate::types::MAX_SUMMARY_CHARS {
+        anyhow::bail!(
+            "Summary must be <= {} characters (got {})",
+            crate::types::MAX_SUMMARY_CHARS,
+            trimmed.len()
+        );
     }
     Ok(())
 }

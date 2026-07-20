@@ -16,6 +16,18 @@ use serde::{Deserialize, Serialize};
 
 pub use super::title_strategy::TitleStrategy;
 
+/// Maximum length of a memory's one-line `summary`, in bytes (matches the
+/// `.len()` check in `ops::create::validate_summary`; ASCII summaries make
+/// bytes == chars). Single source of truth so the validator and the value
+/// surfaced to agents (the MCP `config` tool) can never drift.
+pub const MAX_SUMMARY_CHARS: usize = 100;
+
+/// Soft target for a memory's `content` length, in tokens. Not enforced —
+/// longer content is accepted — but the embedding model only encodes the
+/// first `embeddings.max_tokens` tokens, so content past this adds storage
+/// without improving retrieval. Surfaced to agents via the MCP `config` tool.
+pub const CONTENT_SOFT_TOKEN_TARGET: usize = 500;
+
 /// Default HuggingFace repo for the NLI contradiction-detection model.
 ///
 /// Single source of truth for the `[nli].model` default. The ONNX NLI loader's
