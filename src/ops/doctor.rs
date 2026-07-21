@@ -327,10 +327,23 @@ pub async fn doctor_environment(
                 status: Some(CheckStatus::Warn),
             });
         }
+        // Group subscriptions (multi-project memories): one check per subscribed
+        // group — readability + embedding-fingerprint alignment. Omitted
+        // entirely when the project subscribes to no groups.
+        let group_checks = check_subscribed_groups(dir).await;
+        let project_subsections = if group_checks.is_empty() {
+            vec![]
+        } else {
+            vec![DoctorSubSection {
+                name: "Group subscriptions".to_string(),
+                checks: group_checks,
+            }]
+        };
+
         sections.push(DoctorSection {
             name: "Project".to_string(),
             checks: project_checks,
-            subsections: vec![],
+            subsections: project_subsections,
         });
         sc
     };
@@ -731,6 +744,208 @@ async fn check_embedding_model_identity(dir: &Path) -> EnvironmentCheck {
     };
     EnvironmentCheck {
         name,
+        passed,
+        message,
+        suggestion,
+        details: vec![],
+        status,
+    }
+}
+
+/// For each group this project subscribes to, check that the group store is
+/// readable and that its embedding fingerprint aligns with the project's own.
+///
+/// A **drift** (the group embedded its vectors with a different model than the
+/// project) means cross-store scores are computed by different models and are
+/// not directly comparable — the merged ranking can be skewed. P2's post-merge
+/// rerank equalization is the model-agnostic fix; until then, reindexing the
+/// group (or the project) onto a shared embedding model realigns them. An
+/// **unreadable** subscribed store means that group's memories silently vanish
+/// from this project's queries, so it is surfaced here rather than only logged
+/// on the hot path. Both are advisory (never flip the exit code): the project's
+/// own operation is unaffected.
+///
+/// Returns an empty vec when the project subscribes to no groups, so the caller
+/// can omit the whole subsection.
+async fn check_subscribed_groups(dir: &Path) -> Vec<EnvironmentCheck> {
+    use crate::storage::registry::subscriptions_of;
+    use crate::storage::RegistryBackend;
+
+    let project_id = crate::storage::project_id::compute_project_id(dir);
+    let Some(reg) = (match crate::storage::FileRegistry::global() {
+        Ok(r) => r.load().await.ok(),
+        Err(_) => None,
+    }) else {
+        return Vec::new();
+    };
+    let subs = subscriptions_of(&reg, &project_id);
+    if subs.is_empty() {
+        return Vec::new();
+    }
+
+    // The project's *expected* (config-derived) embedding fingerprint is the
+    // yardstick each subscribed group is compared against. We deliberately use
+    // expected rather than the project's *stored* manifest fingerprint: the
+    // common case is an untracked project store (only `reindex` stamps a
+    // fingerprint) that nonetheless embeds with the default model, and expected
+    // captures that where stored would be `None`. The one case this misses — a
+    // project whose stored vectors drifted from its config — is already
+    // hard-failed by `check_embedding_model_identity`, and using expected keeps
+    // this check consistent with the P2 equalizer
+    // (`cross_store_equalization_needed`), which is config-only. `None` here ⇒
+    // the project resolves no embedding model (keyword-only), so there is
+    // nothing to drift from and we report readability only.
+    let config_path = dir.join(".engramdb").join("config.toml");
+    let config = crate::storage::config::load_config_or_default(&config_path).await;
+    let project_fp = super::expected_embedding_fingerprint(&config);
+
+    let mut checks = Vec::new();
+    for gid in subs {
+        let name = reg
+            .groups
+            .iter()
+            .find(|g| &g.group_id == gid)
+            .map(|g| g.name.clone())
+            .unwrap_or_else(|| gid.clone());
+        checks.push(check_one_group(gid, &name, project_fp.as_ref()).await);
+    }
+    checks
+}
+
+/// Readability + fingerprint-alignment check for a single subscribed group.
+/// See [`check_subscribed_groups`] for the rationale and severities.
+async fn check_one_group(
+    gid: &str,
+    name: &str,
+    project_fp: Option<&crate::storage::manifest::EmbeddingFingerprint>,
+) -> EnvironmentCheck {
+    use crate::storage::{embedding_status, EmbeddingModelStatus};
+
+    let check_name = format!("Group '{name}'");
+    let store_dir = match crate::storage::paths::group_store_dir(gid) {
+        Ok(d) => d,
+        Err(e) => {
+            // Advisory like every other branch here — a path-resolution failure
+            // must not flip the exit code (see the fn doc: cross-store issues
+            // never fail the project's own run).
+            return EnvironmentCheck {
+                name: check_name,
+                passed: true,
+                message: format!("cannot resolve group store path: {e}"),
+                suggestion: None,
+                details: vec![],
+                status: Some(CheckStatus::Warn),
+            };
+        }
+    };
+    let engramdb_dir = crate::storage::paths::project_dir(&store_dir);
+
+    // Never written to → empty, not a problem (and don't create it just to
+    // count). This is the empty side of the empty-vs-corrupt distinction.
+    if !engramdb_dir.exists() {
+        return EnvironmentCheck {
+            name: check_name,
+            passed: true,
+            message: format!("subscribed (id: {gid}); no memories yet"),
+            suggestion: None,
+            details: vec![],
+            status: Some(CheckStatus::Info),
+        };
+    }
+
+    // Readability: a store dir that exists but won't open/count is corrupt —
+    // its memories silently drop out of fan-in.
+    let count = match crate::storage::MemoryStore::open_group(gid).await {
+        Ok(store) => store.count().await.unwrap_or(0),
+        Err(e) => {
+            return EnvironmentCheck {
+                name: check_name,
+                passed: true,
+                message: format!("UNREADABLE (id: {gid}): {e}"),
+                suggestion: Some(
+                    "the group store is corrupt; its memories drop out of this project's \
+                     queries. Recreate or reindex the group store."
+                        .to_string(),
+                ),
+                details: vec![],
+                status: Some(CheckStatus::Warn),
+            };
+        }
+    };
+
+    // Fingerprint alignment. With no project-side model resolved there's
+    // nothing to compare — report readability only.
+    let Some(pfp) = project_fp else {
+        return EnvironmentCheck {
+            name: check_name,
+            passed: true,
+            message: format!("subscribed (id: {gid}); {count} memories"),
+            suggestion: None,
+            details: vec![],
+            status: Some(CheckStatus::Info),
+        };
+    };
+
+    let group_manifest = engramdb_dir.join("manifest.toml");
+    let group_fp = crate::storage::manifest::load_manifest(&group_manifest)
+        .await
+        .ok()
+        .and_then(|m| m.embedding);
+
+    let realign = "reindex the group (or the project) onto a shared embedding model, or rely on \
+                   the post-merge rerank pass to equalize scores";
+    let (passed, message, suggestion, status) = match embedding_status(
+        group_fp.as_ref(),
+        &pfp.model,
+        pfp.dimensions,
+        pfp.composition.as_deref(),
+    ) {
+        EmbeddingModelStatus::Match => (
+            true,
+            format!("aligned on {}; {count} memories", pfp.model),
+            None,
+            Some(CheckStatus::Pass),
+        ),
+        // The group store predates fingerprint stamping. Its vectors may or may
+        // not match; we can't tell, so advise a reindex but don't alarm.
+        EmbeddingModelStatus::Untracked { .. } => (
+            true,
+            format!("group store not fingerprinted (legacy); {count} memories"),
+            Some("run `engramdb reindex --embeddings-only` on the group to stamp it".to_string()),
+            Some(CheckStatus::Info),
+        ),
+        EmbeddingModelStatus::Mismatch { stored, current } => (
+            true,
+            format!(
+                "MODEL DRIFT: group embedded with {stored}, project uses {current} — cross-store \
+                 ranking may be skewed ({count} memories)"
+            ),
+            Some(realign.to_string()),
+            Some(CheckStatus::Warn),
+        ),
+        EmbeddingModelStatus::DimensionMismatch { stored, current } => (
+            true,
+            format!(
+                "DIMENSION DRIFT: group {stored}d vs project {current}d — cross-store ranking may \
+                 be skewed ({count} memories)"
+            ),
+            Some(realign.to_string()),
+            Some(CheckStatus::Warn),
+        ),
+        // Composition-only drift (title/tag signal) is minor ranking skew, not
+        // model incompatibility.
+        EmbeddingModelStatus::CompositionMismatch { .. } => (
+            true,
+            format!(
+                "composition differs from project's; minor cross-store ranking skew ({count} \
+                 memories)"
+            ),
+            Some(realign.to_string()),
+            Some(CheckStatus::Info),
+        ),
+    };
+    EnvironmentCheck {
+        name: check_name,
         passed,
         message,
         suggestion,
@@ -2350,6 +2565,154 @@ mod tests {
         assert!(!store_check.passed);
         assert_eq!(store_check.message, "not found");
         assert!(store_check.suggestion.as_ref().unwrap().contains("init"));
+    }
+
+    // ---- subscribed-group checks (multi-project memories) ----
+
+    #[tokio::test]
+    async fn test_check_subscribed_groups_empty_when_no_subscriptions() {
+        // A project with no group subscriptions yields no group checks at all,
+        // so the doctor omits the whole subsection.
+        let temp_dir = TempDir::new().unwrap();
+        let checks = check_subscribed_groups(temp_dir.path()).await;
+        assert!(checks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_check_subscribed_groups_reports_readable_group() {
+        use crate::storage::RegistryBackend;
+        use crate::types::{Memory, MemoryType, Provenance};
+
+        let temp_dir = TempDir::new().unwrap();
+        // doctor reads the global file registry (redirected per-process by the
+        // test-isolation arm), so register + subscribe through it.
+        let registry = crate::storage::FileRegistry::global().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        let pid = store.project_id.clone();
+
+        let gid = registry.create_group("doctor-grp").await.unwrap();
+        registry.subscribe(&pid, &gid).await.unwrap();
+        let group = MemoryStore::open_group(&gid).await.unwrap();
+        group
+            .create(&Memory::new(
+                MemoryType::Convention,
+                "group convention",
+                "shared content",
+                Provenance::human(),
+            ))
+            .await
+            .unwrap();
+        drop(group);
+
+        let checks = check_subscribed_groups(temp_dir.path()).await;
+        assert_eq!(checks.len(), 1, "one subscribed group ⇒ one check");
+        let c = &checks[0];
+        assert_eq!(c.name, "Group 'doctor-grp'");
+        // A freshly-written store isn't fingerprint-stamped (only reindex does
+        // that), so the reachable-but-untracked path reports Info/Pass — never a
+        // failure that would flip the exit code.
+        assert!(
+            c.passed,
+            "a readable subscribed group must not fail the run"
+        );
+        assert!(
+            matches!(c.status, Some(CheckStatus::Info) | Some(CheckStatus::Pass)),
+            "expected Info/Pass, got {:?} ({})",
+            c.status,
+            c.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_subscribed_groups_reports_uncreated_group_as_empty() {
+        use crate::storage::RegistryBackend;
+        // Subscribed to a group whose store was never written (no store dir) →
+        // the empty side of empty-vs-corrupt: a benign Info, not a warning.
+        let temp_dir = TempDir::new().unwrap();
+        let registry = crate::storage::FileRegistry::global().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        let pid = store.project_id.clone();
+
+        // Register the group in the roster and subscribe, but never open/write
+        // its store, so no store dir exists on disk.
+        let gid = crate::storage::paths::compute_group_id("never-written-grp");
+        registry.create_group("never-written-grp").await.unwrap();
+        registry.subscribe(&pid, &gid).await.unwrap();
+
+        let checks = check_subscribed_groups(temp_dir.path()).await;
+        assert_eq!(checks.len(), 1);
+        let c = &checks[0];
+        assert!(c.passed);
+        assert_eq!(c.status, Some(CheckStatus::Info));
+        assert!(
+            c.message.contains("no memories yet"),
+            "uncreated group must read as empty, got: {}",
+            c.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_subscribed_groups_warns_on_model_drift() {
+        use crate::storage::manifest::{load_manifest, save_manifest, EmbeddingFingerprint};
+        use crate::storage::RegistryBackend;
+        use crate::types::{Memory, MemoryType, Provenance};
+
+        let temp_dir = TempDir::new().unwrap();
+        let registry = crate::storage::FileRegistry::global().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        let pid = store.project_id.clone();
+
+        let gid = registry.create_group("drift-grp").await.unwrap();
+        registry.subscribe(&pid, &gid).await.unwrap();
+        let group = MemoryStore::open_group(&gid).await.unwrap();
+        group
+            .create(&Memory::new(
+                MemoryType::Convention,
+                "c",
+                "content",
+                Provenance::human(),
+            ))
+            .await
+            .unwrap();
+        drop(group);
+
+        // The project's expected fingerprint is the yardstick; stamp the group's
+        // manifest with a DIFFERENT model (same dimensions) to force a clean
+        // model Mismatch. Skip if this build resolves no embedding model
+        // (`--no-default-features`): then there's nothing to drift from.
+        let config_path = temp_dir.path().join(".engramdb").join("config.toml");
+        let config = crate::storage::config::load_config_or_default(&config_path).await;
+        let Some(project_fp) = crate::ops::expected_embedding_fingerprint(&config) else {
+            return;
+        };
+
+        let group_manifest = crate::storage::paths::project_dir(
+            &crate::storage::paths::group_store_dir(&gid).unwrap(),
+        )
+        .join("manifest.toml");
+        let mut m = load_manifest(&group_manifest).await.unwrap();
+        m.embedding = Some(EmbeddingFingerprint {
+            model: format!("{}-DIFFERENT", project_fp.model),
+            dimensions: project_fp.dimensions,
+            composition: project_fp.composition.clone(),
+        });
+        save_manifest(&group_manifest, &m).await.unwrap();
+
+        let checks = check_subscribed_groups(temp_dir.path()).await;
+        assert_eq!(checks.len(), 1);
+        let c = &checks[0];
+        // Drift is advisory — it must warn but never flip the exit code.
+        assert!(c.passed, "drift must not fail the run");
+        assert_eq!(c.status, Some(CheckStatus::Warn));
+        assert!(
+            c.message.contains("MODEL DRIFT"),
+            "expected a model-drift warning, got: {}",
+            c.message
+        );
+        assert!(
+            c.suggestion.is_some(),
+            "drift should suggest a realignment path"
+        );
     }
 
     #[tokio::test]

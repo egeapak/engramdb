@@ -35,6 +35,7 @@ fn params(n: usize, embed_async: bool) -> CreateParams {
         visibility: Visibility::Shared,
         provenance: Provenance::agent("timing"),
         supersedes: vec![],
+        audience: None,
         epistemic: None,
         premise: None,
         invalidated_by: vec![],

@@ -74,6 +74,11 @@ struct CreateInput {
     supersedes: Option<Vec<String>>,
 
     #[schemars(
+        description = "Audience for a group/global share: the project ids and/or group ids the memory is scoped to in cross-store fan-in. Omit for whole-group visibility. Only meaningful when writing into a group (project: \"group:<name>\") or the global store; inert on a project-local memory. Advisory scoping, NOT a confidentiality boundary — a direct query of the shared store still returns it."
+    )]
+    audience: Option<Vec<String>>,
+
+    #[schemars(
         description = "Epistemic class: fact (structural, verifiable against the repo), observation (measured empirically, may go stale), decision (chosen over alternatives, valid while its premise holds). Defaults from type; set only when it differs."
     )]
     epistemic: Option<String>,
@@ -122,7 +127,7 @@ struct CreateInput {
     title_strategy: Option<String>,
 
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -186,7 +191,7 @@ struct QueryInput {
     include_global: Option<bool>,
 
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -197,7 +202,7 @@ struct GetInput {
     id: String,
 
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -254,6 +259,11 @@ struct UpdateInput {
     supersedes: Option<Vec<String>>,
 
     #[schemars(
+        description = "Set the per-memory audience (project/group ids) for a group/global share. Omit to leave unchanged; pass an empty list to clear it to whole-group visibility. Only meaningful on a memory in a group/global store."
+    )]
+    audience: Option<Vec<String>>,
+
+    #[schemars(
         description = "Epistemic class: fact (structural, verifiable against the repo), observation (measured empirically, may go stale), decision (chosen over alternatives, valid while its premise holds). Defaults from type; set only when it differs."
     )]
     epistemic: Option<String>,
@@ -304,7 +314,7 @@ struct UpdateInput {
     decay_floor: Option<f64>,
 
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -315,7 +325,7 @@ struct DeleteInput {
     id: String,
 
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -332,7 +342,7 @@ struct ChallengeInput {
     source_file: Option<String>,
 
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -361,7 +371,7 @@ struct ReviewInput {
     stale_after_days: Option<u64>,
 
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -388,7 +398,7 @@ struct ResolveInput {
     superseded_by: Option<String>,
 
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -399,7 +409,7 @@ struct VerifyInput {
     id: String,
 
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -412,7 +422,7 @@ struct TaskCurrentInput {
     task: Option<String>,
 
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -423,7 +433,7 @@ struct TaskCompleteInput {
     task: String,
 
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -437,7 +447,7 @@ struct CompressCandidatesInput {
     threshold: Option<f64>,
 
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -460,7 +470,7 @@ struct CompressApplyInput {
     tags: Option<Vec<String>>,
 
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -474,7 +484,7 @@ struct GcInput {
     threshold: Option<f64>,
 
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -488,7 +498,7 @@ struct ReindexInput {
     index_only: Option<bool>,
 
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -525,7 +535,7 @@ struct ListInput {
     limit: Option<usize>,
 
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -533,7 +543,7 @@ struct ListInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct StatsInput {
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
     #[schemars(
@@ -546,7 +556,7 @@ struct StatsInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ConfigInput {
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
     #[schemars(
@@ -559,7 +569,7 @@ struct ConfigInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct DoctorInput {
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, or \"global\" for cross-project memories. Omit for current project."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
     #[schemars(
@@ -955,6 +965,13 @@ impl EngramDbServer {
         matches!(project, Some("global"))
     }
 
+    /// Returns `true` if the given project override targets a named group store
+    /// (the `group:<name>` form). See [`Self::resolve_dir`] for how the group
+    /// name is turned into a group store directory.
+    fn is_group_target(project: Option<&str>) -> bool {
+        matches!(project, Some(s) if s.starts_with("group:"))
+    }
+
     /// Resolve the target project directory from an optional project override.
     ///
     /// - `None`: returns the effective (hierarchy-resolved) dir for the
@@ -972,6 +989,17 @@ impl EngramDbServer {
             None => return Ok(self.effective_dir.clone()),
             Some("global") => {
                 return engramdb::storage::paths::global_store_dir()
+                    .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()));
+            }
+            // `group:<name>` targets a named group store (the multi-project
+            // memories tier between one project and machine-global). The name
+            // is normalized into a stable group id and mapped to its store
+            // directory — checked before the 16-hex project-id form so a group
+            // name can never be misread as a project id.
+            Some(s) if s.strip_prefix("group:").is_some() => {
+                let name = s.strip_prefix("group:").unwrap();
+                let gid = engramdb::storage::paths::compute_group_id(name);
+                return engramdb::storage::paths::group_store_dir(&gid)
                     .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()));
             }
             Some(s) => s,
@@ -1043,6 +1071,16 @@ impl EngramDbServer {
                 .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()));
         }
 
+        // A `group:<name>` target opens (creating if necessary) the named group
+        // store, mirroring how `global` routes to `open_global` above.
+        if Self::is_group_target(project) {
+            let name = project.unwrap().strip_prefix("group:").unwrap();
+            let gid = engramdb::storage::paths::compute_group_id(name);
+            return MemoryStore::open_group(&gid)
+                .await
+                .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()));
+        }
+
         let dir = self.resolve_dir(project).await?;
         let engramdb_dir = dir.join(".engramdb");
         if !engramdb_dir.exists() {
@@ -1103,12 +1141,21 @@ impl EngramDbServer {
     /// - `project` is `None` (the session's own project), or
     /// - `project` is `"global"` (the shared global store is the intended
     ///   cross-project store), or
+    /// - `project` is `"group:<name>"` and the session's own project is
+    ///   subscribed to that group (a member writing to its own group is not a
+    ///   cross-project write), or
     /// - the override resolves to the session's *own* root project id (a
     ///   worktree of the session's own project is not cross-project), or
     /// - the session's config allows cross-project writes (the default).
     ///
-    /// Otherwise (a different registered project, gate off) returns a
-    /// structured error and the write is refused.
+    /// Otherwise (a different registered project, or a group the session is not
+    /// a member of, with the gate off) returns a structured error and the write
+    /// is refused.
+    ///
+    /// This authz is **registry-trust-level (advisory)**: group membership is
+    /// read from the user-writable `registry.json`, the same untrusted-input
+    /// trust surface as the existing project routing — it is not a hard security
+    /// boundary.
     async fn check_cross_project_write(&self, project: Option<&str>) -> Result<(), String> {
         // The session's own project and the shared global store are always
         // permitted, without touching the registry or config.
@@ -1116,6 +1163,46 @@ impl EngramDbServer {
             None => return Ok(()),
             Some("global") => return Ok(()),
             Some(_) => {}
+        }
+
+        // A `group:<name>` target is always allowed when the session's own
+        // project is a member (subscribed) — mirroring how `"global"` (the
+        // built-in everyone group) is always allowed. A non-member group write
+        // falls through to the `allow_cross_project_writes` config gate below,
+        // so it is gated rather than hard-blocked.
+        if Self::is_group_target(project) {
+            let name = project.unwrap().strip_prefix("group:").unwrap();
+            let gid = engramdb::storage::paths::compute_group_id(name);
+            let registry = self
+                .registry
+                .load()
+                .await
+                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            // The session's own root project id — computed the same way as the
+            // `own_id` in the general branch below (effective_dir is already the
+            // main worktree's path, so this is the root project).
+            let own_id = engramdb::storage::project_id::compute_project_id(&self.effective_dir);
+            if engramdb::storage::registry::subscriptions_of(&registry, &own_id)
+                .iter()
+                .any(|g| g == &gid)
+            {
+                return Ok(());
+            }
+            // Non-member: fall through to the config gate (gated, not blocked).
+            let config = self.load_config_for(None).await?;
+            if config.security.allow_cross_project_writes {
+                return Ok(());
+            }
+            return Err(error_response(
+                ErrorCode::ValidationError,
+                &format!(
+                    "Cross-project writes are disabled by \
+                     [security].allow_cross_project_writes = false. This session's project \
+                     (id: {own_id}) is not subscribed to group '{name}' (id: {gid}), so it may \
+                     not write there. Subscribe with `engramdb groups subscribe {name}`, or omit \
+                     the `project` parameter to write to your own project.",
+                ),
+            ));
         }
 
         // Resolve the override to its project root exactly as `resolve_dir`
@@ -1232,6 +1319,33 @@ impl EngramDbServer {
             .with_stats(self.stats.clone())
             .with_project_id(pid)
             .with_session_id(Some(self.session_id.clone()))
+    }
+
+    /// Build a retrieval engine for a subscribed **group store**, identified by
+    /// its group id, for read fan-in only.
+    ///
+    /// Unlike [`Self::build_engine_for`], the subscriptions carry group *ids*,
+    /// not the `group:<name>` override form, so this opens the group store
+    /// directly. It also uses the **non-enforcing** provider path (like
+    /// [`Self::assemble_engine_for`]): fan-in is best-effort, so a group's
+    /// embedding-model mismatch must not fail the subscriber's own query.
+    async fn build_group_engine(&self, group_id: &str) -> Result<RetrievalEngine, String> {
+        let dir = engramdb::storage::paths::group_store_dir(group_id)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        let store = MemoryStore::open_group(group_id)
+            .await
+            .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()))?;
+        let config_path = dir.join(".engramdb").join("config.toml");
+        let config = load_config_or_default(&config_path).await;
+        let providers = Self::resolve_providers(
+            &self.provider_cache,
+            &self.daemon,
+            self.embedding_backend,
+            &config,
+            &dir,
+        )
+        .await;
+        Ok(self.finish_engine(store, config, providers, group_id.to_string()))
     }
 
     /// Evaluate the primary project's embedding-model identity for the
@@ -1646,6 +1760,7 @@ impl EngramDbServer {
                 visibility,
                 provenance: Provenance::agent("mcp"),
                 supersedes: input.supersedes.unwrap_or_default(),
+                audience: input.audience.filter(|a| !a.is_empty()),
                 epistemic,
                 premise: input.premise,
                 invalidated_by: input.invalidated_by.unwrap_or_default(),
@@ -1745,15 +1860,76 @@ impl EngramDbServer {
             situation,
         };
 
-        // Merge global memories if requested and not already targeting the
-        // global store (shared band — see ops::query_memories_with_global).
-        let include_global =
-            input.include_global.unwrap_or(false) && !Self::is_global(input.project.as_deref());
-        let result = ops::query_memories_with_global(&engine, &query, include_global, || async {
-            self.build_engine_for(Some("global")).await.ok()
-        })
-        .await
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        // Cross-store read fan-in (ops::query_memories_with_extra_stores). When
+        // the query already targets a shared store (`global` or a `group:`
+        // store) directly, there is nothing extra to fold in — short-circuit,
+        // mirroring the CLI `--global` case. Otherwise fan in every group the
+        // resolved project subscribes to (by DEFAULT — the point of
+        // subscribing) plus the everyone/global store (only behind
+        // `include_global`, matching the old `query_memories_with_global`
+        // band). `viewer_ids` — the resolved project's own id plus each
+        // subscribed group — drives the per-memory `audience` filter so a
+        // restricted shared memory only surfaces for a listed viewer. Like the
+        // write gate, this visibility is registry-trust-level (advisory).
+        let targets_shared_store = Self::is_global(input.project.as_deref())
+            || Self::is_group_target(input.project.as_deref());
+        let result = if targets_shared_store {
+            ops::query_memories(&engine, &query)
+                .await
+                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?
+        } else {
+            let project_id = self.pid_for_input(input.project.as_deref());
+            let registry = self
+                .registry
+                .load()
+                .await
+                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            let subscriptions: Vec<String> =
+                engramdb::storage::registry::subscriptions_of(&registry, &project_id).to_vec();
+            let include_global = input.include_global.unwrap_or(false);
+            let mut viewer_ids: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            viewer_ids.insert(project_id);
+            viewer_ids.extend(subscriptions.iter().cloned());
+            // P2: only equalize cross-store scores when a fanned-in store's
+            // embedding fingerprint actually differs from this project's (the
+            // same-fingerprint fast path skips the extra cross-encoder pass).
+            let mut shared_store_ids = subscriptions.clone();
+            if include_global {
+                shared_store_ids.push(engramdb::storage::paths::GLOBAL_PROJECT_ID.to_string());
+            }
+            let equalize =
+                ops::cross_store_equalization_needed(engine.config(), &shared_store_ids).await;
+            let outcome = ops::query_memories_with_extra_stores(
+                &engine,
+                &query,
+                &viewer_ids,
+                equalize,
+                || async {
+                    let mut engines = Vec::new();
+                    for gid in &subscriptions {
+                        if let Ok(e) = self.build_group_engine(gid).await {
+                            engines.push((gid.clone(), e));
+                        }
+                    }
+                    if include_global {
+                        if let Ok(e) = self.build_engine_for(Some("global")).await {
+                            engines.push(("global".to_string(), e));
+                        }
+                    }
+                    engines
+                },
+            )
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            if !outcome.unreadable.is_empty() {
+                tracing::warn!(
+                    stores = ?outcome.unreadable,
+                    "some subscribed/global stores were unreadable and were skipped in fan-in"
+                );
+            }
+            outcome.result
+        };
 
         let memories: Vec<ScoredMemoryOutput> = result
             .memories
@@ -1904,6 +2080,8 @@ impl EngramDbServer {
                 title: input.title,
                 status,
                 supersedes: input.supersedes,
+                // Some(list) sets (empty clears); None leaves unchanged.
+                audience: input.audience,
                 epistemic,
                 premise: input.premise,
                 invalidated_by: input.invalidated_by,
@@ -2760,15 +2938,24 @@ impl ServerHandler for EngramDbServer {
                  for task-specific choices. Declare situation on query when debugging \
                  or weighing a design choice. \
                  All tools accept an optional `project` parameter (absolute path, 16-char \
-                 project ID, or \"global\") to operate on a different project's memories. \
+                 project ID, \"global\", or \"group:<name>\") to operate on a different \
+                 store's memories. \
                  Use project=\"global\" for cross-project memories like personal preferences, \
                  coding conventions, or knowledge that applies everywhere. \
-                 Use include_global=true on query to merge global memories into results. \
+                 Use project=\"group:<name>\" to write to or read a named group store shared \
+                 by a set of related projects (set up on the CLI with `engramdb groups \
+                 subscribe <name>`); a project's subscribed groups fan into its queries \
+                 automatically. \
+                 Use include_global=true on query to also merge the everyone/global store. \
                  Omit `project` to use the current project. \
                  When you finish the task you were assigned, reflect: if anything durable \
                  about the project, the environment/tooling, or the user's preferences came \
                  up (not task minutiae), query existing memories, then create the new ones \
-                 and challenge contradictions. Suggested, not required."
+                 and challenge contradictions. If a durable decision or convention applies \
+                 to more than the current project — e.g. you are working across a set of \
+                 related repos — save it once to a shared store (project=\"group:<name>\" \
+                 for that set, or project=\"global\" for everywhere) instead of only the \
+                 current project, so every relevant project surfaces it. Suggested, not required."
                 .to_string();
             if let Some(w) = &self.embedding_warning {
                 s.push_str("\n\nIMPORTANT — ACTION NEEDED: ");

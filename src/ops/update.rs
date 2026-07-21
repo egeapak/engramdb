@@ -29,6 +29,10 @@ pub struct UpdateParams {
     pub visibility: Option<Visibility>,
     pub status: Option<Status>,
     pub supersedes: Option<Vec<String>>,
+    /// Per-memory audience for a group/global share. `None` ⇒ leave unchanged;
+    /// `Some(list)` replaces it; `Some(empty)` clears it to whole-group
+    /// visibility (see [`crate::types::MemoryUpdate::audience`]).
+    pub audience: Option<Vec<String>>,
     /// Reclassify the memory's epistemic class.
     pub epistemic: Option<Epistemic>,
     /// Validity-condition edits, merged into the existing `valid_while`
@@ -107,6 +111,15 @@ pub async fn update_memory(
     // the list itself is moved into the update closure below.
     let supersedes_for_close = params.supersedes.clone();
 
+    // Scope hygiene (cross-repo correctness): a group/everyone(global) store is
+    // shared across repos, so a repo-relative physical scope is meaningless (and
+    // leaks a local path) there. `create_memory` strips it on write; `update`
+    // MUST do the same or an update could reintroduce a physical scope the
+    // create path forbade. When targeting a shared store, force any supplied
+    // physical scope to empty (a `None` — "don't change" — is left untouched so
+    // an unrelated field update doesn't rewrite scope).
+    let strip_physical = store.is_group() || store.is_global();
+
     // Merge the params into the memory atomically: `update_with` re-reads the
     // memory inside the per-project write lock, so two concurrent updates
     // cannot snapshot the same old state and silently erase each other's
@@ -120,13 +133,18 @@ pub async fn update_memory(
             update.summary = params.summary;
             update.title = params.title;
             update.details = params.details;
-            update.physical = params.physical;
+            update.physical = if strip_physical {
+                params.physical.as_ref().map(|_| Vec::new())
+            } else {
+                params.physical
+            };
             update.logical = params.logical;
             update.criticality = params.criticality;
             update.confidence = params.confidence;
             update.visibility = params.visibility;
             update.status = params.status;
             update.supersedes = params.supersedes;
+            update.audience = params.audience;
             // Reclassifying `epistemic` deliberately does NOT touch decay:
             // update never changes decay unless the caller passes decay
             // fields explicitly (unlike create, which derives a class-default
@@ -296,6 +314,57 @@ mod tests {
         store.create(&memory).await.unwrap()
     }
 
+    // The audience UPDATE surface: set, leave-unchanged, and clear.
+    #[tokio::test]
+    async fn update_sets_and_clears_audience() {
+        let group_id = crate::storage::paths::compute_group_id("update-audience-test");
+        let store = MemoryStore::init_group(&group_id).await.unwrap();
+        let id = create_test_memory(&store).await;
+
+        // Set.
+        let mut p = empty_update_params();
+        p.audience = Some(vec!["projA".to_string(), "__g_x".to_string()]);
+        update_memory(&store, &id, p, None).await.unwrap();
+        assert_eq!(
+            store.get(&id).await.unwrap().audience,
+            Some(vec!["projA".to_string(), "__g_x".to_string()])
+        );
+
+        // An unrelated update (audience None ⇒ unchanged) must not wipe it.
+        let mut p = empty_update_params();
+        p.summary = Some("New summary".to_string());
+        update_memory(&store, &id, p, None).await.unwrap();
+        assert_eq!(
+            store.get(&id).await.unwrap().audience,
+            Some(vec!["projA".to_string(), "__g_x".to_string()])
+        );
+
+        // Clear (empty list ⇒ whole-group visibility).
+        let mut p = empty_update_params();
+        p.audience = Some(vec![]);
+        update_memory(&store, &id, p, None).await.unwrap();
+        assert_eq!(store.get(&id).await.unwrap().audience, None);
+    }
+
+    // Scope hygiene: an update targeting a shared store must strip repo-relative
+    // physical scope (as create does), so an edit can't reintroduce a local path
+    // into a cross-repo store.
+    #[tokio::test]
+    async fn update_strips_physical_on_group_store() {
+        let group_id = crate::storage::paths::compute_group_id("update-physical-strip-test");
+        let store = MemoryStore::init_group(&group_id).await.unwrap();
+        let id = create_test_memory(&store).await;
+
+        let mut p = empty_update_params();
+        p.physical = Some(vec!["src/secret/local.rs".to_string()]);
+        update_memory(&store, &id, p, None).await.unwrap();
+
+        assert!(
+            store.get(&id).await.unwrap().physical.is_empty(),
+            "a group-store update must strip physical scope"
+        );
+    }
+
     fn empty_update_params() -> UpdateParams {
         UpdateParams {
             type_: None,
@@ -313,6 +382,7 @@ mod tests {
             visibility: None,
             status: None,
             supersedes: None,
+            audience: None,
             epistemic: None,
             premise: None,
             invalidated_by: None,
@@ -713,6 +783,7 @@ mod epistemic_update_tests {
             visibility: None,
             status: None,
             supersedes: None,
+            audience: None,
             epistemic: None,
             premise: None,
             invalidated_by: None,

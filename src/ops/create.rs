@@ -26,6 +26,14 @@ pub struct CreateParams {
     pub visibility: Visibility,
     pub provenance: Provenance,
     pub supersedes: Vec<String>,
+    /// Per-memory sharing precision for a memory written into a group or the
+    /// everyone/global store: the project ids and/or group ids that may see it.
+    /// `None` ⇒ visible to the whole store's group (the common case). `Some`
+    /// restricts it to the listed audience (see [`crate::ops::audience_allows`]).
+    /// Inert on a project-local memory (audience is only consulted when a shared
+    /// store is fanned in), so it is meaningful only alongside a group/global
+    /// write.
+    pub audience: Option<Vec<String>>,
     /// Epistemic class; `None` ⇒ `type_.default_epistemic()`.
     pub epistemic: Option<Epistemic>,
     /// Free-text premise the memory depends on (`valid_while.premise`).
@@ -141,11 +149,23 @@ pub async fn create_memory(
     let summary = params.summary;
 
     // Use default physical scope if empty
-    let physical = if params.physical.is_empty() {
+    let mut physical = if params.physical.is_empty() {
         vec!["/".to_string()]
     } else {
         params.physical
     };
+
+    // Scope hygiene (cross-repo correctness): physical scopes are repo-relative
+    // file paths, meaningless in any other repo. A group/everyone(global) store
+    // is shared across repos, so a stored physical path would earn (or lose)
+    // physical-proximity score against a foreign repo's layout. Strip it on the
+    // write path so the record carries no misleading physical scope; logical
+    // scope (repo-independent dot-notation) is retained. This mirrors the
+    // read-side suppression in `query_memories_with_extra_stores`. See the
+    // multi-project-memories design doc's scope-hygiene note.
+    if store.is_group() || store.is_global() {
+        physical.clear();
+    }
 
     // Build memory
     let mut memory = Memory::new(params.type_, &summary, &params.content, params.provenance);
@@ -203,6 +223,9 @@ pub async fn create_memory(
     memory.details = params.details;
     memory.visibility = params.visibility;
     memory.supersedes = params.supersedes;
+    // Normalize an empty audience list to `None` (whole-group visibility) so an
+    // empty `--audience` never accidentally hides a memory from everyone.
+    memory.audience = params.audience.filter(|a| !a.is_empty());
 
     // Apply custom decay config if any decay fields are provided
     if params.decay_strategy.is_some()
@@ -363,6 +386,7 @@ mod tests {
             visibility: Visibility::Shared,
             provenance: Provenance::human(),
             supersedes: vec![],
+            audience: None,
             epistemic: None,
             premise: None,
             invalidated_by: vec![],
@@ -404,6 +428,65 @@ mod tests {
         let mut p = minimal_create_params();
         p.criticality = f64::NAN;
         assert!(create_memory(&store, p, None).await.is_err());
+    }
+
+    // Scope hygiene: a memory created into a group (or everyone/global) store
+    // must not carry a physical scope, even when physical paths were supplied —
+    // repo-relative paths are meaningless cross-repo. See the strip in
+    // `create_memory` and the multi-project-memories design doc.
+    #[tokio::test]
+    async fn create_into_group_store_strips_physical_scope() {
+        let group_id = crate::storage::paths::compute_group_id("scope-hygiene-test");
+        let store = MemoryStore::init_group(&group_id).await.unwrap();
+
+        let mut params = minimal_create_params();
+        params.physical = vec!["src/main.rs".to_string(), "src/lib.rs".to_string()];
+        params.logical = vec!["backend.api".to_string()];
+
+        let result = create_memory(&store, params, None).await.unwrap();
+        let memory = store.get(&result.id).await.unwrap();
+
+        // Physical scope stripped despite being supplied.
+        assert!(
+            memory.physical.is_empty(),
+            "group-store memory must have empty physical scope, got {:?}",
+            memory.physical
+        );
+        // Logical scope (repo-independent) is retained.
+        assert_eq!(memory.logical, vec!["backend.api".to_string()]);
+    }
+
+    // The audience write path (multi-project memories): a non-empty
+    // `CreateParams.audience` is persisted onto the memory so the read-side
+    // `audience_allows` filter can enforce per-memory sharing precision.
+    #[tokio::test]
+    async fn create_persists_audience() {
+        let group_id = crate::storage::paths::compute_group_id("audience-create-test");
+        let store = MemoryStore::init_group(&group_id).await.unwrap();
+
+        let mut params = minimal_create_params();
+        params.audience = Some(vec!["projA".to_string(), "__g_x".to_string()]);
+
+        let result = create_memory(&store, params, None).await.unwrap();
+        let memory = store.get(&result.id).await.unwrap();
+        assert_eq!(
+            memory.audience,
+            Some(vec!["projA".to_string(), "__g_x".to_string()])
+        );
+    }
+
+    // An empty audience list must normalize to `None` (whole-group visibility)
+    // rather than persist an empty audience that would hide the memory from
+    // everyone — the guard in `create_memory`.
+    #[tokio::test]
+    async fn create_normalizes_empty_audience_to_none() {
+        let (_t, store) = setup_test_store().await;
+        let mut params = minimal_create_params();
+        params.audience = Some(vec![]);
+
+        let result = create_memory(&store, params, None).await.unwrap();
+        let memory = store.get(&result.id).await.unwrap();
+        assert_eq!(memory.audience, None);
     }
 
     /// Title generator that returns a fixed string, to prove `title_for`
@@ -746,6 +829,7 @@ mod epistemic_create_tests {
             visibility: Visibility::Shared,
             provenance: Provenance::human(),
             supersedes: vec![],
+            audience: None,
             epistemic: None,
             premise: None,
             invalidated_by: vec![],

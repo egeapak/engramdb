@@ -31,6 +31,9 @@ pub struct AddParams {
     pub details: Option<String>,
     pub visibility_str: Option<String>,
     pub supersedes: Option<String>,
+    /// Per-memory audience (project/group ids) for a group/global share; empty
+    /// ⇒ visible to the whole target store's group.
+    pub audience: Vec<String>,
     pub epistemic: Option<String>,
     pub premise: Option<String>,
     pub invalidated_by: Vec<String>,
@@ -52,6 +55,13 @@ type EpistemicFlags = (
     Option<engramdb::types::Generality>,
     Option<chrono::DateTime<chrono::Utc>>,
 );
+
+/// Normalize a CLI `--audience` list into the `CreateParams` field: an empty
+/// list ⇒ `None` (visible to the whole target store's group) rather than an
+/// empty audience that would hide the memory from everyone.
+fn audience_opt(audience: &[String]) -> Option<Vec<String>> {
+    (!audience.is_empty()).then(|| audience.to_vec())
+}
 
 /// Parse the epistemic/validity flags shared by all three add modes.
 /// Returns (epistemic, generality, valid_from) or a validation error.
@@ -87,6 +97,7 @@ fn parse_epistemic_flags(
 pub async fn run_add(
     dir: &Path,
     global: bool,
+    group: Option<String>,
     registry: &dyn RegistryBackend,
     params: AddParams,
     embedding_backend: Option<engramdb::types::EmbeddingBackend>,
@@ -95,8 +106,20 @@ pub async fn run_add(
     cell: &Arc<DaemonCell>,
     policy: DaemonPolicy,
 ) -> Result<()> {
-    // Open or initialize store. The global store auto-initializes on open.
-    let store = if global {
+    // Open or initialize store. The global and group stores auto-initialize on
+    // open. `--group <name>` routes the write to the named group store (the
+    // multi-project-memories tier); `create_memory` strips repo-relative
+    // physical scope on group/global writes. On the CLI the user acts directly,
+    // so there is no confused-deputy gate here (unlike the MCP surface) — this
+    // mirrors how `--global` writes are ungated on the CLI.
+    let store = if let Some(ref name) = group {
+        let gid = engramdb::storage::paths::compute_group_id(name);
+        // Register the group in the registry so it is discoverable via
+        // `groups list`/`members` (open_group creates the store dir but never
+        // touches the roster). Idempotent upsert.
+        registry.create_group(name).await?;
+        MemoryStore::open_group(&gid).await?
+    } else if global {
         MemoryStore::open_global().await?
     } else {
         match MemoryStore::open(dir).await {
@@ -104,6 +127,16 @@ pub async fn run_add(
             Err(_) => MemoryStore::init(dir, registry).await?,
         }
     };
+
+    // `audience` only scopes a memory in a shared (group/global) store — it is
+    // never consulted for a project's own memories. Warn rather than silently
+    // persist an inert audience the user believes restricts visibility.
+    if !params.audience.is_empty() && group.is_none() && !global {
+        formatter.print_warning(
+            "--audience is ignored without --group or --global: a project-local memory is never \
+             audience-filtered. The memory will be created without audience scoping.",
+        );
+    }
 
     // Fail fast on an invalid summary BEFORE loading the embedding model.
     // Summary validation is config-driven but model-independent, so an
@@ -225,6 +258,7 @@ async fn run_direct_mode(
             visibility,
             provenance: Provenance::human(),
             supersedes,
+            audience: audience_opt(&params.audience),
             epistemic: parsed_epistemic,
             premise: params.premise,
             invalidated_by: params.invalidated_by,
@@ -374,6 +408,7 @@ async fn run_interactive_mode(
             visibility,
             provenance: Provenance::human(),
             supersedes: vec![],
+            audience: audience_opt(&params.audience),
             epistemic: parsed_epistemic,
             premise: params.premise,
             invalidated_by: params.invalidated_by,
@@ -484,6 +519,7 @@ async fn run_editor_mode(
             visibility: parsed.visibility,
             provenance: Provenance::human(),
             supersedes: vec![],
+            audience: audience_opt(&params.audience),
             epistemic: parsed_epistemic,
             premise: params.premise,
             invalidated_by: params.invalidated_by,
@@ -696,6 +732,7 @@ mod tests {
             details: None,
             visibility_str: None,
             supersedes: None,
+            audience: vec![],
             epistemic: None,
             premise: None,
             invalidated_by: vec![],
@@ -754,6 +791,7 @@ mod tests {
             details: None,
             visibility_str: None,
             supersedes: None,
+            audience: vec![],
             epistemic: None,
             premise: None,
             invalidated_by: vec![],
@@ -813,6 +851,7 @@ mod tests {
             details: None,
             visibility_str: None,
             supersedes: None,
+            audience: vec![],
             epistemic: None,
             premise: None,
             invalidated_by: vec![],
@@ -872,6 +911,7 @@ mod tests {
             details: None,
             visibility_str: None,
             supersedes: None,
+            audience: vec![],
             epistemic: None,
             premise: None,
             invalidated_by: vec![],

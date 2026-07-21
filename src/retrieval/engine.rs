@@ -635,6 +635,77 @@ impl RetrievalEngine {
         Ok(())
     }
 
+    /// Cross-store rerank **equalization** (P2, multi-project memories).
+    ///
+    /// When a merged result set is assembled from stores embedded with
+    /// *different* models (a project and a subscribed group whose embedding
+    /// fingerprints differ), their vector-derived scores are computed in
+    /// different spaces and are not directly comparable — the merged ranking can
+    /// be arbitrary across the store boundary. A single cross-encoder pass over
+    /// the merged union re-scores every entry with one model-agnostic scorer,
+    /// making the ranking comparable again. The caller runs this only when a
+    /// fingerprint actually differs (the same-fingerprint fast path skips it),
+    /// so it is not on the common query path.
+    ///
+    /// Unlike [`apply_rerank`], which reranks only the top `top_n` of a single
+    /// store's candidates, this reranks the **whole** `memories` union: a
+    /// foreign-store memory that landed low under its own model's scores could
+    /// be the genuinely best answer, so equalization must be able to lift it.
+    /// No-op (returns `Ok(false)`) when no reranker is configured/enabled or the
+    /// blend weight is zero — the caller then keeps the per-store scores.
+    /// Re-sorts by the blended score and truncates to `max`. Best-effort: the
+    /// caller treats an `Err` as "keep per-store scores".
+    pub async fn rerank_merged(
+        &self,
+        query_text: &str,
+        memories: &mut Vec<ScoredMemory>,
+        max: usize,
+    ) -> anyhow::Result<bool> {
+        let reranker = match &self.reranker {
+            Some(r) if self.config.rerank.enabled => Arc::clone(r),
+            _ => return Ok(false),
+        };
+        if memories.is_empty() {
+            return Ok(false);
+        }
+        let weight = self.config.rerank.weight.clamp(0.0, 1.0);
+        if weight < f64::EPSILON {
+            return Ok(false);
+        }
+
+        let documents: Vec<String> = memories
+            .iter()
+            .map(|sm| rerank_document(&sm.memory))
+            .collect();
+        let rerank_results = reranker.rerank(query_text, &documents).await?;
+
+        // Blend exactly as `apply_rerank`: original scores are in [0, 1], the
+        // cross-encoder logit is unbounded so squash it with a sigmoid, and skip
+        // any non-finite blend rather than scrambling the order.
+        for result in &rerank_results {
+            let idx = result.index;
+            if idx < memories.len() {
+                let raw_rerank = result.score as f64;
+                let norm_rerank = 1.0 / (1.0 + (-raw_rerank).exp());
+                let blended = (1.0 - weight) * memories[idx].score + weight * norm_rerank;
+                if !blended.is_finite() {
+                    continue;
+                }
+                memories[idx].score = blended;
+                memories[idx].score_breakdown.final_score = blended;
+                memories[idx].score_breakdown.rerank = Some(raw_rerank);
+            }
+        }
+
+        memories.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        memories.truncate(max);
+        Ok(true)
+    }
+
     /// Query memories with unified ranked / filtered retrieval.
     ///
     /// Two modes:
@@ -1964,6 +2035,116 @@ mod tests {
             assert_eq!(sm.score_breakdown.criticality, expected.criticality);
             assert!((sm.score_breakdown.scope - expected.scope).abs() < 1e-9);
         }
+    }
+
+    /// Cross-store equalization (`rerank_merged`) is a no-op when no reranker is
+    /// configured: it returns `Ok(false)` and leaves the merged scores/order
+    /// untouched, so the caller keeps the per-store scores.
+    #[tokio::test]
+    async fn rerank_merged_is_noop_without_reranker() {
+        use crate::scoring::ScoreBreakdown;
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        // A plain engine has no reranker attached (see `with_reranker`).
+        let engine = RetrievalEngine::new(store, EngramConfig::default());
+
+        let sm = |summary: &str, score: f64| ScoredMemory {
+            memory: Memory::new(
+                MemoryType::Decision,
+                summary,
+                "content",
+                Provenance::human(),
+            ),
+            score,
+            score_breakdown: ScoreBreakdown::default(),
+        };
+        let mut memories = vec![sm("a", 0.9), sm("b", 0.1)];
+        let ran = engine
+            .rerank_merged("query", &mut memories, 10)
+            .await
+            .unwrap();
+        assert!(!ran, "no reranker configured ⇒ no-op");
+        assert_eq!(memories.len(), 2);
+        assert_eq!(memories[0].score, 0.9);
+        assert_eq!(memories[1].score, 0.1);
+    }
+
+    /// Equalization must be able to *reorder* the merged union, not just no-op:
+    /// a memory that ranked low by its prior (incomparable) score is lifted to
+    /// the top when the cross-encoder scores it highest. Uses a deterministic
+    /// marker reranker so no model load is needed.
+    #[tokio::test]
+    async fn rerank_merged_reorders_by_cross_encoder() {
+        use crate::retrieval::reranker::{RerankScore, Reranker};
+        use crate::scoring::ScoreBreakdown;
+        use crate::types::{EngramConfig, Memory, MemoryType, Provenance};
+        use tempfile::TempDir;
+
+        // Scores any document containing "LIFTME" far above the rest.
+        struct MarkerReranker;
+        #[async_trait::async_trait]
+        impl Reranker for MarkerReranker {
+            async fn rerank(
+                &self,
+                _query: &str,
+                documents: &[String],
+            ) -> anyhow::Result<Vec<RerankScore>> {
+                Ok(documents
+                    .iter()
+                    .enumerate()
+                    .map(|(index, d)| RerankScore {
+                        index,
+                        score: if d.contains("LIFTME") { 12.0 } else { -12.0 },
+                    })
+                    .collect())
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut config = EngramConfig::default();
+        config.rerank.enabled = true;
+        config.rerank.weight = 1.0; // fully trust the cross-encoder for a clean assert
+        let engine =
+            RetrievalEngine::new(store, config).with_reranker(std::sync::Arc::new(MarkerReranker));
+
+        let sm = |summary: &str, score: f64| ScoredMemory {
+            memory: Memory::new(
+                MemoryType::Decision,
+                summary,
+                "content",
+                Provenance::human(),
+            ),
+            score,
+            score_breakdown: ScoreBreakdown::default(),
+        };
+        // The marked memory has the LOWEST prior score, so a no-op rerank would
+        // leave it last.
+        let mut memories = vec![
+            sm("alpha", 0.9),
+            sm("beta", 0.8),
+            sm("gamma LIFTME winner", 0.1),
+        ];
+        let ran = engine
+            .rerank_merged("query", &mut memories, 10)
+            .await
+            .unwrap();
+        assert!(ran, "a configured reranker must run");
+        assert!(
+            memories[0].memory.summary.contains("LIFTME"),
+            "the cross-encoder must lift the marked memory to the top despite its low prior score; \
+             got order: {:?}",
+            memories.iter().map(|m| &m.memory.summary).collect::<Vec<_>>()
+        );
+        // Truncation to `max` still applies (here max=10 > len, so all kept).
+        assert_eq!(memories.len(), 3);
     }
 
     /// The R2 fast path must honor Step 1.5's empty-path collapse: a no-query

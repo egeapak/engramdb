@@ -153,6 +153,52 @@ pub enum ProjectsCommand {
     },
 }
 
+/// Subcommands for `engramdb groups` (multi-project memory group stores).
+///
+/// A *group* is a named, machine-local memory store that a set of projects
+/// subscribe to — the tier between one project and the machine-wide global
+/// store. Membership lives in `registry.json` as per-project `subscriptions`.
+#[derive(Subcommand)]
+pub enum GroupsCommand {
+    /// Create a named group store (idempotent; prints its group id).
+    Create {
+        /// Human-readable group name (case/whitespace-normalized into a stable id)
+        name: String,
+    },
+    /// Subscribe the current project to a group (creating the group if needed).
+    ///
+    /// Subscribed groups fan into this project's queries by default, and the
+    /// project may write to the group without tripping the cross-project gate.
+    /// Prints the blast radius (group memory count + current subscribers) and
+    /// confirms first; pair with --yes in non-interactive contexts.
+    Subscribe {
+        /// Group name to subscribe to
+        name: String,
+        /// Skip the blast-radius confirmation prompt (required in JSON mode)
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// Unsubscribe the current project from a group (forgiving if not subscribed).
+    ///
+    /// Prints the blast radius (memories this project will stop seeing) and
+    /// confirms first; pair with --yes in non-interactive contexts.
+    Unsubscribe {
+        /// Group name to unsubscribe from
+        name: String,
+        /// Skip the blast-radius confirmation prompt (required in JSON mode)
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// List all known groups and the current project's subscriptions.
+    List,
+    /// List the projects subscribed to a group (its blast radius) and how many
+    /// memories the group holds.
+    Members {
+        /// Group name to inspect
+        name: String,
+    },
+}
+
 /// Output format for CLI commands.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum OutputFormat {
@@ -288,6 +334,12 @@ pub enum Command {
         #[arg(long)]
         visibility: Option<String>,
 
+        /// Audience for a group/global share: project and/or group ids that may
+        /// see this memory (comma-separated). Omit for whole-group visibility.
+        /// Only meaningful with --group or --global.
+        #[arg(long, value_delimiter = ',')]
+        audience: Vec<String>,
+
         /// IDs of memories this one supersedes (comma-separated)
         #[arg(long)]
         supersedes: Option<String>,
@@ -347,6 +399,13 @@ pub enum Command {
         /// Operate on the global (cross-project) memory store instead of the current project
         #[arg(long)]
         global: bool,
+
+        /// Write the memory into the named group store instead of the current
+        /// project. Repo-relative physical scope is stripped on group writes
+        /// (see the multi-project-memories design). Mutually exclusive with
+        /// `--global`.
+        #[arg(long, conflicts_with = "global")]
+        group: Option<String>,
     },
 
     /// Get a memory by ID
@@ -443,12 +502,20 @@ pub enum Command {
         /// Runs the same query against the global store and folds its hits
         /// into the project results (deduplicated, re-sorted, truncated).
         /// Ignored when `--global` is set (already querying the global store).
+        /// Note: groups this project is subscribed to already fan in
+        /// automatically; this flag only adds the everyone/global store.
         #[arg(long)]
         include_global: bool,
 
         /// Query the global (cross-project) memory store instead of the current project
         #[arg(long)]
         global: bool,
+
+        /// Query a named group store directly (instead of the current project).
+        /// Subscribed groups already fan into a normal project query; use this
+        /// to inspect one group's memories in isolation.
+        #[arg(long, conflicts_with = "global")]
+        group: Option<String>,
     },
 
     /// List all memories
@@ -565,6 +632,15 @@ pub enum Command {
         #[arg(long)]
         supersedes: Option<String>,
 
+        /// Set the per-memory audience (project/group ids) for a group/global
+        /// share (comma-separated). Only meaningful on a group/global memory.
+        #[arg(long, value_delimiter = ',')]
+        audience: Vec<String>,
+
+        /// Clear the audience (whole-group visibility). Wins over --audience.
+        #[arg(long)]
+        clear_audience: bool,
+
         /// Epistemic class: fact, observation, or decision (defaults from type)
         #[arg(long)]
         epistemic: Option<String>,
@@ -629,6 +705,10 @@ pub enum Command {
         /// Operate on the global (cross-project) memory store instead of the current project
         #[arg(long)]
         global: bool,
+
+        /// Update a memory in a named group store (instead of the current project)
+        #[arg(long, conflicts_with = "global")]
+        group: Option<String>,
     },
 
     /// Delete a memory
@@ -711,6 +791,12 @@ pub enum Command {
     Projects {
         #[command(subcommand)]
         command: Option<ProjectsCommand>,
+    },
+
+    /// Manage multi-project memory groups and this project's subscriptions
+    Groups {
+        #[command(subcommand)]
+        command: GroupsCommand,
     },
 
     /// Challenge a memory's validity
@@ -2153,6 +2239,106 @@ mod tests {
         }
     }
 
+    // ---- groups (multi-project memory membership) ----
+
+    #[test]
+    fn test_groups_create_parsing() {
+        let cli = Cli::try_parse_from(["engramdb", "groups", "create", "Backend Family"]).unwrap();
+        match cli.command {
+            Command::Groups {
+                command: GroupsCommand::Create { name },
+            } => assert_eq!(name, "Backend Family"),
+            _ => panic!("Expected Groups Create command"),
+        }
+    }
+
+    #[test]
+    fn test_groups_subscribe_unsubscribe_parsing() {
+        // Default: no --yes flag.
+        let cli = Cli::try_parse_from(["engramdb", "groups", "subscribe", "grp"]).unwrap();
+        match cli.command {
+            Command::Groups {
+                command: GroupsCommand::Subscribe { name, yes },
+            } => {
+                assert_eq!(name, "grp");
+                assert!(!yes);
+            }
+            _ => panic!("Expected Groups Subscribe command"),
+        }
+
+        // --yes bypasses the confirmation prompt.
+        let cli =
+            Cli::try_parse_from(["engramdb", "groups", "unsubscribe", "grp", "--yes"]).unwrap();
+        match cli.command {
+            Command::Groups {
+                command: GroupsCommand::Unsubscribe { name, yes },
+            } => {
+                assert_eq!(name, "grp");
+                assert!(yes);
+            }
+            _ => panic!("Expected Groups Unsubscribe command"),
+        }
+    }
+
+    #[test]
+    fn test_groups_list_parsing() {
+        let cli = Cli::try_parse_from(["engramdb", "groups", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Groups {
+                command: GroupsCommand::List
+            }
+        ));
+    }
+
+    #[test]
+    fn test_groups_members_parsing() {
+        let cli = Cli::try_parse_from(["engramdb", "groups", "members", "grp"]).unwrap();
+        match cli.command {
+            Command::Groups {
+                command: GroupsCommand::Members { name },
+            } => assert_eq!(name, "grp"),
+            _ => panic!("Expected Groups Members command"),
+        }
+    }
+
+    #[test]
+    fn test_groups_requires_subcommand() {
+        // Unlike `projects` (which defaults to Info), `groups` requires an
+        // explicit subcommand.
+        assert!(Cli::try_parse_from(["engramdb", "groups"]).is_err());
+    }
+
+    #[test]
+    fn test_add_group_flag_parses_and_conflicts_with_global() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "add",
+            "-t",
+            "decision",
+            "-c",
+            "x",
+            "-s",
+            "y",
+            "--group",
+            "Backend Family",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add { group, global, .. } => {
+                assert_eq!(group.as_deref(), Some("Backend Family"));
+                assert!(!global);
+            }
+            _ => panic!("Expected Add command"),
+        }
+
+        // `--group` and `--global` are mutually exclusive.
+        assert!(Cli::try_parse_from([
+            "engramdb", "add", "-t", "decision", "-c", "x", "-s", "y", "--group", "g", "--global",
+        ])
+        .is_err());
+    }
+
     // Add: supersedes and decay param parsing (7 tests)
     #[test]
     fn test_add_supersedes_flag() {
@@ -2173,6 +2359,46 @@ mod tests {
             Command::Add { supersedes, .. } => {
                 assert_eq!(supersedes, Some("id1,id2,id3".to_string()));
             }
+            _ => panic!("Expected Add command"),
+        }
+    }
+
+    #[test]
+    fn test_add_audience_flag() {
+        let cli = Cli::try_parse_from([
+            "engramdb",
+            "add",
+            "-t",
+            "decision",
+            "-c",
+            "content",
+            "-s",
+            "summary",
+            "--group",
+            "backend-family",
+            "--audience",
+            "projA,__g_x",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add {
+                audience, group, ..
+            } => {
+                assert_eq!(audience, vec!["projA".to_string(), "__g_x".to_string()]);
+                assert_eq!(group, Some("backend-family".to_string()));
+            }
+            _ => panic!("Expected Add command"),
+        }
+    }
+
+    #[test]
+    fn test_add_audience_defaults_empty() {
+        let cli = Cli::try_parse_from([
+            "engramdb", "add", "-t", "decision", "-c", "content", "-s", "summary",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add { audience, .. } => assert!(audience.is_empty()),
             _ => panic!("Expected Add command"),
         }
     }

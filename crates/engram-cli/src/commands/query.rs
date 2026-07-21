@@ -6,7 +6,8 @@ use anyhow::Result;
 use engramdb::daemon::{DaemonCell, DaemonPolicy};
 use engramdb::ops::validate_score;
 use engramdb::retrieval::engine::{RetrievalMode, RetrievalQuery, RetrievalResult};
-use engramdb::storage::MemoryStore;
+use engramdb::storage::{MemoryStore, RegistryBackend};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -36,16 +37,20 @@ pub struct QueryParams {
 /// memory passing the type/tag/criticality/physical filters, scored and
 /// sorted. `mode: Filter` requires at least one positive relevance signal
 /// (keyword, semantic, scope proximity, or tag match).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_query(
     dir: &Path,
     global: bool,
+    group: Option<String>,
     params: QueryParams,
     embedding_backend: Option<engramdb::types::EmbeddingBackend>,
     formatter: &OutputFormatter,
     cell: &Arc<DaemonCell>,
     policy: DaemonPolicy,
 ) -> Result<()> {
-    let store = if global {
+    let store = if let Some(ref name) = group {
+        MemoryStore::open_group(&engramdb::storage::paths::compute_group_id(name)).await?
+    } else if global {
         MemoryStore::open_global().await?
     } else {
         MemoryStore::open(dir).await?
@@ -54,12 +59,23 @@ pub async fn run_query(
         formatter.print_warning(&warning);
     }
 
+    // Querying a shared store directly (`--global`/`--group`) — we ARE the
+    // shared store, so there is no cross-store fan-in to do.
+    let direct_shared = global || group.is_some();
+
     let show_scores = params.show_scores;
     // Capture the bits needed for an empty-result hint before `params` is moved.
     let mode = params.mode;
     let had_query = params.query.as_ref().is_some_and(|q| !q.is_empty());
-    let result =
-        compute_query_result(store, global, params, embedding_backend, cell, policy).await?;
+    let result = compute_query_result(
+        store,
+        direct_shared,
+        params,
+        embedding_backend,
+        cell,
+        policy,
+    )
+    .await?;
 
     formatter.print_retrieval_result(&result, show_scores);
 
@@ -93,12 +109,16 @@ pub async fn run_query(
 /// behavior is unit-testable offline.
 async fn compute_query_result(
     store: MemoryStore,
-    global: bool,
+    direct_shared: bool,
     params: QueryParams,
     embedding_backend: Option<engramdb::types::EmbeddingBackend>,
     cell: &Arc<DaemonCell>,
     policy: DaemonPolicy,
 ) -> Result<RetrievalResult> {
+    // Capture the querying store's own project id before `store` is consumed by
+    // `engine_for` — it seeds `viewer_ids` (audience precision) and looks up
+    // this project's group subscriptions in the registry.
+    let project_id = store.project_id.clone();
     let engine = engine_for(store, embedding_backend, cell, policy).await;
 
     let types = engramdb::ops::parse_type_filter(Some(&params.type_filter))?;
@@ -136,18 +156,84 @@ async fn compute_query_result(
         include_invalidated: Some(params.include_invalidated),
     };
 
-    // Optionally fold in global-store memories via the shared band
-    // (ops::query_memories_with_global). Skipped when already querying the
-    // global store (`--global`) — nothing extra to merge.
-    let include_global = params.include_global && !global;
-    let result =
-        engramdb::ops::query_memories_with_global(&engine, &query, include_global, || async {
-            let global_store = MemoryStore::open_global().await.ok()?;
-            Some(engine_for(global_store, embedding_backend, cell, policy).await)
-        })
-        .await?;
+    // When querying a shared store directly (`--global`/`--group`), there is no
+    // cross-store fan-in to do — we ARE the shared store. Short-circuit.
+    if direct_shared {
+        return engramdb::ops::query_memories(&engine, &query).await;
+    }
 
-    Ok(result)
+    // N-way fan-in (ops::query_memories_with_extra_stores): fold in every group
+    // this project subscribes to (by default — that's the point of subscribing)
+    // plus the everyone/global store (only behind `--include-global`, matching
+    // the old `query_memories_with_global` band). `viewer_ids` — the project's
+    // own id plus each subscribed group — drives the per-memory `audience`
+    // filter so a restricted shared memory only surfaces for a listed viewer.
+    //
+    // With no subscriptions and `--include-global` off, `extra_engines` yields
+    // an empty vec and the result is byte-for-byte the project-only query.
+    let registry = engramdb::storage::FileRegistry::global()?.load().await?;
+    let subscriptions: Vec<String> =
+        engramdb::storage::registry::subscriptions_of(&registry, &project_id).to_vec();
+    let include_global = params.include_global;
+
+    let mut viewer_ids: HashSet<String> = HashSet::new();
+    viewer_ids.insert(project_id);
+    viewer_ids.extend(subscriptions.iter().cloned());
+
+    // P2: decide whether the fan-in needs cross-store rerank equalization. Only
+    // true when a subscribed group (or the everyone/global store, if folded in)
+    // was embedded with a model whose fingerprint differs from this project's —
+    // otherwise the scores are already comparable and we take the fast path.
+    let mut shared_store_ids = subscriptions.clone();
+    if include_global {
+        shared_store_ids.push(engramdb::storage::paths::GLOBAL_PROJECT_ID.to_string());
+    }
+    let equalize =
+        engramdb::ops::cross_store_equalization_needed(engine.config(), &shared_store_ids).await;
+
+    let outcome = engramdb::ops::query_memories_with_extra_stores(
+        &engine,
+        &query,
+        &viewer_ids,
+        equalize,
+        || async {
+            let mut engines = Vec::new();
+            // Subscribed group stores fan in by default. A group that fails to
+            // open (missing/corrupt store dir) is skipped here; `doctor`'s
+            // group-readability check is the authoritative surface for it.
+            for gid in &subscriptions {
+                if let Ok(group_store) = MemoryStore::open_group(gid).await {
+                    engines.push((
+                        gid.clone(),
+                        engine_for(group_store, embedding_backend, cell, policy).await,
+                    ));
+                }
+            }
+            // The everyone/global store folds in only when requested.
+            if include_global {
+                if let Ok(global_store) = MemoryStore::open_global().await {
+                    engines.push((
+                        "global".to_string(),
+                        engine_for(global_store, embedding_backend, cell, policy).await,
+                    ));
+                }
+            }
+            engines
+        },
+    )
+    .await?;
+
+    // A shared store that opened but failed to query is best-effort skipped;
+    // warn so a silently-missing group's memories are explainable (doctor has
+    // the full diagnosis).
+    if !outcome.unreadable.is_empty() {
+        tracing::warn!(
+            stores = ?outcome.unreadable,
+            "some subscribed/global stores were unreadable and were skipped; run `engramdb doctor`"
+        );
+    }
+
+    Ok(outcome.result)
 }
 
 #[cfg(test)]
@@ -181,6 +267,7 @@ mod tests {
             supersedes: vec![],
             status: Status::Active,
             visibility: Visibility::Shared,
+            audience: None,
             challenges: vec![],
             verified_at: None,
             created_at: chrono::Utc::now(),
@@ -239,6 +326,7 @@ mod tests {
         let result = run_query(
             temp_dir.path(),
             false,
+            None,
             params,
             None,
             &formatter,
@@ -263,6 +351,7 @@ mod tests {
         let result = run_query(
             temp_dir.path(),
             false,
+            None,
             params,
             None,
             &formatter,
@@ -291,6 +380,7 @@ mod tests {
         let result = run_query(
             temp_dir.path(),
             false,
+            None,
             params,
             None,
             &formatter,
@@ -315,6 +405,7 @@ mod tests {
         let result = run_query(
             temp_dir.path(),
             false,
+            None,
             params,
             None,
             &formatter,
@@ -405,6 +496,7 @@ mod tests {
         let result = run_query(
             temp_dir.path(),
             false,
+            None,
             params,
             None,
             &formatter,

@@ -293,6 +293,7 @@ mod tests {
             project_id: "test-proj".to_string(),
             project_path: temp_dir.path().to_string_lossy().to_string(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
         let registry = InMemoryRegistry::with(data);
         let formatter = OutputFormatter::new(None, false, true);
@@ -325,6 +326,7 @@ mod tests {
             project_id: "test-proj".to_string(),
             project_path: temp_dir.path().to_string_lossy().to_string(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
         let registry = InMemoryRegistry::with(data);
         let formatter = OutputFormatter::new(None, false, true);
@@ -358,11 +360,13 @@ mod tests {
             project_id: "parent".to_string(),
             project_path: parent_tmp.path().to_string_lossy().to_string(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
         data.projects.push(RegistryEntry {
             project_id: "child".to_string(),
             project_path: child_tmp.path().to_string_lossy().to_string(),
             parent_project_id: Some("parent".to_string()),
+            subscriptions: vec![],
         });
         let registry = InMemoryRegistry::with(data);
         let formatter = OutputFormatter::new(None, false, true);
@@ -411,6 +415,7 @@ mod tests {
             project_id: "gone".to_string(),
             project_path: "/nonexistent/prune-test-path".to_string(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
         let registry = InMemoryRegistry::with(data);
         let formatter = OutputFormatter::new(None, true, true);
@@ -438,6 +443,7 @@ mod tests {
             project_id: "gone".to_string(),
             project_path: "/nonexistent/prune-test-path".to_string(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
         let registry = InMemoryRegistry::with(data);
         let formatter = OutputFormatter::new(None, true, true);

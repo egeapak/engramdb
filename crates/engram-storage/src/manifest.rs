@@ -20,10 +20,11 @@ use std::path::Path;
 /// `.md` files) on open. `0.2.0` added the `decay` + `has_embedding` columns
 /// (R2/R3); `0.3.0` added the seven epistemic columns (`epistemic`,
 /// `verified_at`, `generality`, `origin_task`, `valid_from`,
-/// `invalidated_at`, `watch_paths`). A store whose manifest records an older
+/// `invalidated_at`, `watch_paths`); `0.4.0` added the `audience` column
+/// (multi-project memories). A store whose manifest records an older
 /// version is transparently re-indexed once on open (seconds, no re-embed)
 /// and stamped up to this.
-pub const CURRENT_SCHEMA_VERSION: &str = "0.3.0";
+pub const CURRENT_SCHEMA_VERSION: &str = "0.4.0";
 
 /// The pre-migration baseline, used as the serde default so a manifest written
 /// before the field existed parses as "needs migration" rather than failing.
@@ -275,11 +276,12 @@ logical_scopes = []
         assert!(!schema_version_is_current("0.1.0"));
         assert!(!schema_version_is_current("0.1.9"));
         assert!(!schema_version_is_current("0.2.0"));
-        // Ahead of current → must NOT migrate (no silent downgrade).
-        assert!(schema_version_is_current("0.4.0"));
+        assert!(!schema_version_is_current("0.3.0")); // pre-audience, behind 0.4.0
+                                                      // Ahead of current → must NOT migrate (no silent downgrade).
+        assert!(schema_version_is_current("0.5.0"));
         assert!(schema_version_is_current("1.0.0"));
         // Short / unparseable forms.
-        assert!(schema_version_is_current("0.3")); // 0.3.0, equal
+        assert!(!schema_version_is_current("0.3")); // 0.3.0, behind 0.4.0
         assert!(!schema_version_is_current("0.2")); // 0.2.0, behind
         assert!(!schema_version_is_current("garbage"));
         assert!(!schema_version_is_current(""));

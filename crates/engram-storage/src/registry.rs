@@ -26,6 +26,30 @@ pub struct RegistryEntry {
     /// root of the hierarchy; the child has no local storage of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_project_id: Option<String>,
+    /// Group stores this project is subscribed to (see the multi-project
+    /// memories design). Membership is a *separate* concept from
+    /// `parent_project_id`: parent links are worktree routing (a sub-project
+    /// has no storage of its own), whereas a subscription only widens *reads*
+    /// to fan in the named group's store at query time. Conflating the two
+    /// would misroute group writes from inside a worktree, so they are kept
+    /// distinct fields. The everyone/global group is implicit (every project
+    /// is a member) and is never listed here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subscriptions: Vec<String>,
+}
+
+/// A named group store known to this machine.
+///
+/// The roster maps a stable `group_id` (see `paths::compute_group_id`) to the
+/// human-readable `name` it was minted from, so tooling can list groups by
+/// name without re-deriving ids. The group's memories live in its own
+/// machine-local store; this entry only records that the group exists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupEntry {
+    /// Stable, underscore-prefixed group identifier (`paths::compute_group_id`).
+    pub group_id: String,
+    /// Human-readable name the group id was derived from.
+    pub name: String,
 }
 
 /// Global registry of all EngramDB projects on this machine.
@@ -33,6 +57,9 @@ pub struct RegistryEntry {
 pub struct Registry {
     /// List of all registered projects
     pub projects: Vec<RegistryEntry>,
+    /// Roster of named group stores known on this machine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<GroupEntry>,
 }
 
 /// Trait for registry persistence backends.
@@ -94,6 +121,35 @@ pub trait RegistryBackend: Send + Sync {
     /// back to a root.
     async fn set_parent(&self, project_id: &str, parent_project_id: Option<&str>) -> Result<()> {
         set_parent_impl(self, project_id, parent_project_id).await
+    }
+
+    /// Subscribe an already-registered project to a group store.
+    ///
+    /// Idempotent: subscribing to a group the project already belongs to is a
+    /// no-op. Returns an error if `project_id` is not in the registry (same
+    /// contract as [`set_parent`](Self::set_parent) — you can only subscribe a
+    /// known project).
+    async fn subscribe(&self, project_id: &str, group_id: &str) -> Result<()> {
+        subscribe_impl(self, project_id, group_id).await
+    }
+
+    /// Unsubscribe a project from a group store.
+    ///
+    /// Idempotent and forgiving: removing a subscription the project doesn't
+    /// have (or that isn't in the registry) is a no-op, not an error — the
+    /// desired end state (not subscribed) already holds.
+    async fn unsubscribe(&self, project_id: &str, group_id: &str) -> Result<()> {
+        unsubscribe_impl(self, project_id, group_id).await
+    }
+
+    /// Register a named group store, returning its stable `group_id`.
+    ///
+    /// Idempotent: creating a group whose id already exists updates its
+    /// recorded `name` (a rename that maps to the same normalized id) rather
+    /// than adding a duplicate. The id is derived from the name via
+    /// `paths::compute_group_id`, so the same name always yields the same id.
+    async fn create_group(&self, name: &str) -> Result<String> {
+        create_group_impl(self, name).await
     }
 
     /// Acquire the backend's cross-process mutation lock for a manual
@@ -168,6 +224,7 @@ where
             project_id: project_id.to_string(),
             project_path: path_str,
             parent_project_id: parent_project_id.map(|s| s.to_string()),
+            subscriptions: vec![],
         });
     }
 
@@ -197,6 +254,96 @@ where
         })?;
     entry.parent_project_id = parent_project_id.map(|s| s.to_string());
     backend.save(&registry).await
+}
+
+/// Load → mutate → save body shared by the trait's default `subscribe` and
+/// [`FileRegistry`]'s lock-wrapped override. Calls only `load`/`save`.
+async fn subscribe_impl<B>(backend: &B, project_id: &str, group_id: &str) -> Result<()>
+where
+    B: RegistryBackend + ?Sized,
+{
+    let mut registry = backend.load().await?;
+    let entry = registry
+        .projects
+        .iter_mut()
+        .find(|e| e.project_id == project_id)
+        .ok_or_else(|| {
+            super::error::StorageError::Validation(format!(
+                "Project '{}' not found in registry",
+                project_id
+            ))
+        })?;
+    // Idempotent add: a duplicate subscription would be harmless at read time
+    // but pollutes the persisted list, so guard it.
+    if !entry.subscriptions.iter().any(|g| g == group_id) {
+        entry.subscriptions.push(group_id.to_string());
+    }
+    backend.save(&registry).await
+}
+
+/// Load → mutate → save body shared by the trait's default `unsubscribe` and
+/// [`FileRegistry`]'s lock-wrapped override. Calls only `load`/`save`.
+async fn unsubscribe_impl<B>(backend: &B, project_id: &str, group_id: &str) -> Result<()>
+where
+    B: RegistryBackend + ?Sized,
+{
+    let mut registry = backend.load().await?;
+    // A missing project (or missing subscription) is not an error: the end
+    // state we want — the project not subscribed to `group_id` — already holds.
+    if let Some(entry) = registry
+        .projects
+        .iter_mut()
+        .find(|e| e.project_id == project_id)
+    {
+        entry.subscriptions.retain(|g| g != group_id);
+    }
+    backend.save(&registry).await
+}
+
+/// Load → mutate → save body shared by the trait's default `create_group` and
+/// [`FileRegistry`]'s lock-wrapped override. Calls only `load`/`save`.
+async fn create_group_impl<B>(backend: &B, name: &str) -> Result<String>
+where
+    B: RegistryBackend + ?Sized,
+{
+    let group_id = paths::compute_group_id(name);
+    let mut registry = backend.load().await?;
+    // Idempotent upsert keyed on the stable id: re-creating an existing group
+    // just refreshes its recorded name (a rename onto the same normalized id).
+    if let Some(existing) = registry.groups.iter_mut().find(|g| g.group_id == group_id) {
+        existing.name = name.to_string();
+    } else {
+        registry.groups.push(GroupEntry {
+            group_id: group_id.clone(),
+            name: name.to_string(),
+        });
+    }
+    backend.save(&registry).await?;
+    Ok(group_id)
+}
+
+/// The group subscriptions of `project_id`, or an empty slice if the project
+/// is not in the registry. A pure read helper for the fan-in read path.
+pub fn subscriptions_of<'a>(registry: &'a Registry, project_id: &str) -> &'a [String] {
+    registry
+        .projects
+        .iter()
+        .find(|e| e.project_id == project_id)
+        .map(|e| e.subscriptions.as_slice())
+        .unwrap_or(&[])
+}
+
+/// The project ids subscribed to `group_id` — the group's read blast radius.
+///
+/// A pure read helper for the membership UX (`groups members`): every project
+/// that folds this group into its queries, and would see a write to it.
+pub fn subscribers_of<'a>(registry: &'a Registry, group_id: &str) -> Vec<&'a str> {
+    registry
+        .projects
+        .iter()
+        .filter(|e| e.subscriptions.iter().any(|g| g == group_id))
+        .map(|e| e.project_id.as_str())
+        .collect()
 }
 
 /// Collect all direct children of `project_id`.
@@ -389,6 +536,21 @@ impl RegistryBackend for FileRegistry {
         set_parent_impl(self, project_id, parent_project_id).await
     }
 
+    async fn subscribe(&self, project_id: &str, group_id: &str) -> Result<()> {
+        let _lock = write_lock::acquire_lock_file(self.lock_path()).await?;
+        subscribe_impl(self, project_id, group_id).await
+    }
+
+    async fn unsubscribe(&self, project_id: &str, group_id: &str) -> Result<()> {
+        let _lock = write_lock::acquire_lock_file(self.lock_path()).await?;
+        unsubscribe_impl(self, project_id, group_id).await
+    }
+
+    async fn create_group(&self, name: &str) -> Result<String> {
+        let _lock = write_lock::acquire_lock_file(self.lock_path()).await?;
+        create_group_impl(self, name).await
+    }
+
     async fn lock_exclusive(&self) -> Result<Option<write_lock::WriteLockGuard>> {
         Ok(Some(write_lock::acquire_lock_file(self.lock_path()).await?))
     }
@@ -463,6 +625,7 @@ mod tests {
             project_id: "test-id".to_string(),
             project_path: "/tmp/test".to_string(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
 
         file_registry.save(&registry).await.unwrap();
@@ -666,6 +829,7 @@ mod tests {
             project_id: "mem-id".to_string(),
             project_path: "/tmp/mem".to_string(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
 
         registry.save(&data).await.unwrap();
@@ -706,11 +870,13 @@ mod tests {
             project_id: "pre-1".to_string(),
             project_path: "/tmp/pre".to_string(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
         data.projects.push(RegistryEntry {
             project_id: "pre-2".to_string(),
             project_path: "/tmp/pre2".to_string(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
 
         let registry = InMemoryRegistry::with(data);
@@ -783,6 +949,7 @@ mod tests {
             project_id: "solo".into(),
             project_path: "/tmp/solo".into(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
         assert_eq!(resolve_root_project_id(&reg, "solo"), "solo");
     }
@@ -794,11 +961,13 @@ mod tests {
             project_id: "root".into(),
             project_path: "/tmp/root".into(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
         reg.projects.push(RegistryEntry {
             project_id: "child".into(),
             project_path: "/tmp/child".into(),
             parent_project_id: Some("root".into()),
+            subscriptions: vec![],
         });
         assert_eq!(resolve_root_project_id(&reg, "child"), "root");
     }
@@ -810,16 +979,19 @@ mod tests {
             project_id: "a".into(),
             project_path: "/a".into(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
         reg.projects.push(RegistryEntry {
             project_id: "b".into(),
             project_path: "/b".into(),
             parent_project_id: Some("a".into()),
+            subscriptions: vec![],
         });
         reg.projects.push(RegistryEntry {
             project_id: "c".into(),
             project_path: "/c".into(),
             parent_project_id: Some("b".into()),
+            subscriptions: vec![],
         });
         assert_eq!(resolve_root_project_id(&reg, "c"), "a");
     }
@@ -831,11 +1003,13 @@ mod tests {
             project_id: "a".into(),
             project_path: "/a".into(),
             parent_project_id: Some("b".into()),
+            subscriptions: vec![],
         });
         reg.projects.push(RegistryEntry {
             project_id: "b".into(),
             project_path: "/b".into(),
             parent_project_id: Some("a".into()),
+            subscriptions: vec![],
         });
         // Must terminate even with a cycle; return value can be either node.
         let root = resolve_root_project_id(&reg, "a");
@@ -924,6 +1098,7 @@ mod tests {
             project_id: project_id.to_string(),
             project_path: path.to_string_lossy().to_string(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
         reg
     }
@@ -1018,6 +1193,152 @@ mod tests {
         assert_eq!(reg.projects[0].parent_project_id, None);
     }
 
+    #[test]
+    fn test_registry_missing_subscriptions_and_groups_deserialize_as_empty() {
+        // Backward-compat with older registry.json files written before the
+        // multi-project-memories fields existed: neither `subscriptions` on an
+        // entry nor the top-level `groups` roster may be required.
+        let json = r#"{
+            "projects": [
+                {"project_id": "x", "project_path": "/x"}
+            ]
+        }"#;
+        let reg: Registry = serde_json::from_str(json).unwrap();
+        assert_eq!(reg.projects.len(), 1);
+        assert!(reg.projects[0].subscriptions.is_empty());
+        assert!(reg.groups.is_empty());
+    }
+
+    // ---- subscriptions ----
+
+    #[tokio::test]
+    async fn test_subscribe_is_idempotent() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        registry.update(temp_dir.path(), "proj").await.unwrap();
+
+        registry.subscribe("proj", "__g_group1").await.unwrap();
+        // A second subscribe to the same group must not duplicate the entry.
+        registry.subscribe("proj", "__g_group1").await.unwrap();
+        registry.subscribe("proj", "__g_group2").await.unwrap();
+
+        let loaded = registry.load().await.unwrap();
+        assert_eq!(
+            loaded.projects[0].subscriptions,
+            vec!["__g_group1".to_string(), "__g_group2".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_errors_when_project_missing() {
+        let registry = InMemoryRegistry::new();
+        let err = registry
+            .subscribe("nonexistent", "__g_group")
+            .await
+            .expect_err("subscribe on missing project should error");
+        assert!(format!("{err}").contains("nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn test_unsubscribe_removes_and_is_forgiving() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        registry.update(temp_dir.path(), "proj").await.unwrap();
+        registry.subscribe("proj", "__g_group1").await.unwrap();
+
+        registry.unsubscribe("proj", "__g_group1").await.unwrap();
+        // Removing an absent subscription (or an unknown project) is a no-op.
+        registry.unsubscribe("proj", "__g_group1").await.unwrap();
+        registry.unsubscribe("ghost", "__g_group1").await.unwrap();
+
+        let loaded = registry.load().await.unwrap();
+        assert!(loaded.projects[0].subscriptions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_subscriptions_survive_plain_update() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        registry.update(temp_dir.path(), "proj").await.unwrap();
+        registry.subscribe("proj", "__g_group1").await.unwrap();
+
+        // A plain re-registration (the common `init`/`open` path) must not wipe
+        // subscriptions, exactly as it preserves `parent_project_id`.
+        registry.update(temp_dir.path(), "proj").await.unwrap();
+
+        let loaded = registry.load().await.unwrap();
+        assert_eq!(loaded.projects[0].subscriptions, vec!["__g_group1"]);
+    }
+
+    #[test]
+    fn test_subscriptions_of_returns_list_or_empty() {
+        let mut reg = Registry::default();
+        reg.projects.push(RegistryEntry {
+            project_id: "proj".into(),
+            project_path: "/proj".into(),
+            parent_project_id: None,
+            subscriptions: vec!["__g_a".into(), "__g_b".into()],
+        });
+        assert_eq!(subscriptions_of(&reg, "proj"), ["__g_a", "__g_b"]);
+        // Unknown project → empty slice, not a panic.
+        assert!(subscriptions_of(&reg, "unknown").is_empty());
+    }
+
+    #[test]
+    fn test_subscribers_of_returns_all_member_projects() {
+        let mut reg = Registry::default();
+        reg.projects.push(RegistryEntry {
+            project_id: "p1".into(),
+            project_path: "/p1".into(),
+            parent_project_id: None,
+            subscriptions: vec!["__g_shared".into(), "__g_a".into()],
+        });
+        reg.projects.push(RegistryEntry {
+            project_id: "p2".into(),
+            project_path: "/p2".into(),
+            parent_project_id: None,
+            subscriptions: vec!["__g_shared".into()],
+        });
+        reg.projects.push(RegistryEntry {
+            project_id: "p3".into(),
+            project_path: "/p3".into(),
+            parent_project_id: None,
+            subscriptions: vec![],
+        });
+        let mut members = subscribers_of(&reg, "__g_shared");
+        members.sort_unstable();
+        assert_eq!(members, ["p1", "p2"]);
+        // A group nobody subscribes to has no members.
+        assert!(subscribers_of(&reg, "__g_nobody").is_empty());
+    }
+
+    // ---- create_group ----
+
+    #[tokio::test]
+    async fn test_create_group_returns_stable_id_and_is_idempotent() {
+        let registry = InMemoryRegistry::new();
+
+        let id1 = registry.create_group("Backend Family").await.unwrap();
+        assert_eq!(id1, paths::compute_group_id("Backend Family"));
+
+        // Re-creating the same group (case/whitespace-insensitive) yields the
+        // same id and does not add a duplicate roster entry.
+        let id2 = registry.create_group("  backend family ").await.unwrap();
+        assert_eq!(id1, id2);
+
+        let loaded = registry.load().await.unwrap();
+        assert_eq!(loaded.groups.len(), 1);
+        assert_eq!(loaded.groups[0].group_id, id1);
+        // The recorded name refreshes to the most recent spelling.
+        assert_eq!(loaded.groups[0].name, "  backend family ");
+
+        // A distinct group is added as a separate roster entry.
+        let other = registry.create_group("Frontend Family").await.unwrap();
+        assert_ne!(id1, other);
+        let loaded = registry.load().await.unwrap();
+        assert_eq!(loaded.groups.len(), 2);
+    }
+
     #[tokio::test]
     async fn test_file_registry_load_corrupted_json_returns_error() {
         let temp_dir = TempDir::new().unwrap();
@@ -1090,21 +1411,25 @@ mod tests {
             project_id: "root".into(),
             project_path: "/root".into(),
             parent_project_id: None,
+            subscriptions: vec![],
         });
         reg.projects.push(RegistryEntry {
             project_id: "a".into(),
             project_path: "/a".into(),
             parent_project_id: Some("root".into()),
+            subscriptions: vec![],
         });
         reg.projects.push(RegistryEntry {
             project_id: "a1".into(),
             project_path: "/a1".into(),
             parent_project_id: Some("a".into()),
+            subscriptions: vec![],
         });
         reg.projects.push(RegistryEntry {
             project_id: "b".into(),
             project_path: "/b".into(),
             parent_project_id: Some("root".into()),
+            subscriptions: vec![],
         });
         reg
     }
@@ -1147,11 +1472,13 @@ mod tests {
             project_id: "a".into(),
             project_path: "/a".into(),
             parent_project_id: Some("b".into()),
+            subscriptions: vec![],
         });
         reg.projects.push(RegistryEntry {
             project_id: "b".into(),
             project_path: "/b".into(),
             parent_project_id: Some("a".into()),
+            subscriptions: vec![],
         });
         let mut desc = collect_descendants(&reg, "a");
         desc.sort();

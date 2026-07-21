@@ -56,7 +56,10 @@ pub use parsing::{
     parse_epistemic_filter, parse_generality, parse_memory_type, parse_situation, parse_status,
     parse_type_filter, parse_visibility, validate_score,
 };
-pub use query::{merge_scored_memories, query_memories, query_memories_with_global};
+pub use query::{
+    audience_allows, merge_scored_memories, query_memories, query_memories_with_extra_stores,
+    query_memories_with_global, ExtraStoresResult,
+};
 pub use reindex::{reindex, ReindexResult};
 pub use resolve::{resolve_memory, ResolveAction, ResolveParams, ResolveResult};
 pub use review::{count_recency_stale, review_memories, ReviewParams};
@@ -284,6 +287,61 @@ pub fn expected_embedding_fingerprint(config: &EngramConfig) -> Option<Embedding
         let _ = (backend, &specs, composition);
         None
     }
+}
+
+/// Read the embedding fingerprint stamped in a shared store's manifest.
+///
+/// `store_id` is a group id (`__g_…`) or the global store id
+/// (`GLOBAL_PROJECT_ID`); the path is resolved accordingly. Returns `None` when
+/// the store doesn't exist, has no manifest, or the manifest carries no
+/// fingerprint (a legacy/unstamped store — only `reindex` stamps one). One cheap
+/// manifest read, no store open (so it never creates the store).
+pub async fn shared_store_fingerprint(store_id: &str) -> Option<EmbeddingFingerprint> {
+    let store_dir = if crate::storage::paths::is_group_id(store_id) {
+        crate::storage::paths::group_store_dir(store_id).ok()?
+    } else {
+        crate::storage::paths::global_store_dir().ok()?
+    };
+    let manifest_path = crate::storage::paths::project_dir(&store_dir).join("manifest.toml");
+    crate::storage::manifest::load_manifest(&manifest_path)
+        .await
+        .ok()?
+        .embedding
+}
+
+/// Decide whether a cross-store fan-in warrants post-merge rerank
+/// **equalization** (P2, multi-project memories).
+///
+/// Returns `true` iff the project resolves an embedding model *and* at least one
+/// of `shared_store_ids` (subscribed group ids and/or the global store id) has a
+/// stamped fingerprint that differs from the project's in **any** field — model,
+/// dimensions, *or* composition. A composition difference (e.g. one store
+/// embedded `"{summary} {content}"` and another added title/tag signal) skews
+/// cross-store ranking exactly like a model change does — the same condition
+/// `embedding_status` reports as `CompositionMismatch` — so it must trigger
+/// equalization too. When every shared store either matches or is unstamped, this
+/// returns `false` (the same-fingerprint fast path: no extra cross-encoder pass).
+/// Conservative by design: an *unstamped* store does not trigger equalization (we
+/// can't prove drift; the `doctor` group check nudges a reindex instead), and a
+/// keyword-only project (no embedding model) never needs it because keyword
+/// scores are model-independent and already comparable.
+pub async fn cross_store_equalization_needed(
+    config: &EngramConfig,
+    shared_store_ids: &[String],
+) -> bool {
+    let Some(project_fp) = expected_embedding_fingerprint(config) else {
+        return false;
+    };
+    for id in shared_store_ids {
+        if let Some(store_fp) = shared_store_fingerprint(id).await {
+            // Whole-fingerprint compare (`EmbeddingFingerprint: PartialEq`) so a
+            // composition-only drift is caught alongside model/dimension drift.
+            if project_fp != store_fp {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Comparison of a store's stored embedding fingerprint vs the model in use.
@@ -1230,5 +1288,100 @@ mod tests {
         let fp = expected_embedding_fingerprint(&onnx_config("onnx")).unwrap();
         assert_eq!(fp.model, provider.model_id());
         assert_eq!(fp.dimensions, provider.dimensions());
+    }
+
+    // P2: `cross_store_equalization_needed` must fire only on a *confirmed*
+    // embedding-fingerprint difference between the project and a shared store —
+    // the same-fingerprint (and unstamped-store) cases take the fast path.
+    #[tokio::test]
+    async fn cross_store_equalization_needed_detects_drift() {
+        use crate::storage::manifest::{load_manifest, save_manifest, EmbeddingFingerprint};
+        use crate::types::EngramConfig;
+
+        // Stamp a shared store's manifest, routing group ids vs the global id
+        // the same way `shared_store_fingerprint` does.
+        async fn stamp(store_id: &str, fp: &EmbeddingFingerprint) {
+            let dir = if crate::storage::paths::is_group_id(store_id) {
+                crate::storage::paths::group_store_dir(store_id).unwrap()
+            } else {
+                crate::storage::paths::global_store_dir().unwrap()
+            };
+            let path = crate::storage::paths::project_dir(&dir).join("manifest.toml");
+            let mut m = load_manifest(&path).await.unwrap();
+            m.embedding = Some(fp.clone());
+            save_manifest(&path, &m).await.unwrap();
+        }
+
+        let config = EngramConfig::default();
+        // Skip when this build resolves no embedding model (nothing to drift).
+        let Some(project_fp) = expected_embedding_fingerprint(&config) else {
+            return;
+        };
+
+        // No shared stores → never needs equalization.
+        assert!(!cross_store_equalization_needed(&config, &[]).await);
+
+        // Freshly created but *unstamped* group store → conservative fast path
+        // (we can't confirm drift, so we don't equalize).
+        let gid_untracked = crate::storage::paths::compute_group_id("equalize-untracked");
+        drop(MemoryStore::init_group(&gid_untracked).await.unwrap());
+        assert!(shared_store_fingerprint(&gid_untracked).await.is_none());
+        assert!(!cross_store_equalization_needed(&config, &[gid_untracked]).await);
+
+        // Group stamped with the SAME fingerprint → fast path (false).
+        let gid_same = crate::storage::paths::compute_group_id("equalize-same");
+        drop(MemoryStore::init_group(&gid_same).await.unwrap());
+        stamp(&gid_same, &project_fp).await;
+        assert_eq!(
+            shared_store_fingerprint(&gid_same).await,
+            Some(project_fp.clone())
+        );
+        assert!(!cross_store_equalization_needed(&config, std::slice::from_ref(&gid_same)).await);
+
+        // Group stamped with a DIFFERENT model → needs equalization (true).
+        let gid_diff = crate::storage::paths::compute_group_id("equalize-diff");
+        drop(MemoryStore::init_group(&gid_diff).await.unwrap());
+        let drifted = EmbeddingFingerprint {
+            model: format!("{}-X", project_fp.model),
+            dimensions: project_fp.dimensions,
+            composition: project_fp.composition.clone(),
+        };
+        stamp(&gid_diff, &drifted).await;
+        assert!(cross_store_equalization_needed(&config, std::slice::from_ref(&gid_diff)).await);
+
+        // Composition-only drift (same model + dims) → still needs equalization
+        // (whole-fingerprint compare), because it skews cross-store ranking just
+        // like a model change.
+        let gid_comp = crate::storage::paths::compute_group_id("equalize-composition");
+        drop(MemoryStore::init_group(&gid_comp).await.unwrap());
+        let comp_drift = EmbeddingFingerprint {
+            model: project_fp.model.clone(),
+            dimensions: project_fp.dimensions,
+            composition: Some(format!(
+                "{}-alt",
+                project_fp.composition.clone().unwrap_or_default()
+            )),
+        };
+        stamp(&gid_comp, &comp_drift).await;
+        assert!(
+            cross_store_equalization_needed(&config, std::slice::from_ref(&gid_comp)).await,
+            "composition-only drift must trigger equalization"
+        );
+
+        // Global store id routes through the `else` (global) branch of
+        // `shared_store_fingerprint` — a drifted global store is detected via
+        // GLOBAL_PROJECT_ID, not just group ids.
+        use crate::storage::paths::GLOBAL_PROJECT_ID;
+        drop(MemoryStore::open_global().await.unwrap());
+        let global_id = GLOBAL_PROJECT_ID.to_string();
+        stamp(&global_id, &drifted).await;
+        assert_eq!(shared_store_fingerprint(&global_id).await, Some(drifted));
+        assert!(
+            cross_store_equalization_needed(&config, std::slice::from_ref(&global_id)).await,
+            "a drifted global store must be detected via GLOBAL_PROJECT_ID"
+        );
+
+        // Mixed aligned + drifted → any single drift triggers equalization.
+        assert!(cross_store_equalization_needed(&config, &[gid_same, gid_diff]).await);
     }
 }

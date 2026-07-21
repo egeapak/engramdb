@@ -82,7 +82,7 @@ rayon = "1"
 
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net", "process"] }
-futures-util = { version = "0.3", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 async-trait = "0.1"
 
 # Logging

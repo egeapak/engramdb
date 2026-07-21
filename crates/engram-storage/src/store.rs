@@ -174,6 +174,12 @@ impl MemoryStore {
         let global_dir = paths::global_store_dir()?;
         let engramdb_dir = paths::project_dir(&global_dir);
 
+        // Serialize lazy creation on the advisory write lock (as `init`/
+        // `init_group` do): the everyone/global store is also created lazily on
+        // first open, so concurrent first-writers must not race on table
+        // creation.
+        let _lock = write_lock::acquire_write_lock(paths::GLOBAL_PROJECT_ID).await?;
+
         async_fs::create_dir_all(&engramdb_dir).await?;
         async_fs::create_dir_all(paths::memories_dir(&global_dir)).await?;
 
@@ -214,6 +220,9 @@ impl MemoryStore {
             project_id,
             lance_index,
         };
+        // Release before migrating (a reindex re-acquires this lock), mirroring
+        // `init`.
+        drop(_lock);
         store.migrate_schema_if_needed().await?;
         Ok(store)
     }
@@ -250,6 +259,109 @@ impl MemoryStore {
     /// Returns `true` if this store is the global memory store.
     pub fn is_global(&self) -> bool {
         self.project_id == paths::GLOBAL_PROJECT_ID
+    }
+
+    /// Initialize a named group memory store.
+    ///
+    /// A *group store* is the generalization of the global store: an ordinary
+    /// machine-local store shared by a set of subscribed projects (see the
+    /// multi-project-memories design). It lives under
+    /// `<global_data_dir>/groups/<group_id>/` and mirrors a normal project
+    /// layout so all `MemoryStore` methods work unchanged — this is a
+    /// near-verbatim copy of [`init_global`](Self::init_global) rooted at the
+    /// group paths, with `project_id = group_id` and a `group:<id>` manifest
+    /// name so a group store is self-describing on disk.
+    pub async fn init_group(group_id: &str) -> Result<Self> {
+        let group_dir = paths::group_store_dir(group_id)?;
+        let engramdb_dir = paths::project_dir(&group_dir);
+
+        // Serialize lazy creation on the per-store advisory write lock, exactly
+        // as `init` does. Group stores are created lazily on first open (from a
+        // query fan-in or a `--group` write), so two concurrent multi-repo
+        // sessions can race here on LanceDB table creation without it — the
+        // loser would get a hard "table create failed". `acquire_write_lock`
+        // creates its own lock dir, so there is no bootstrap-ordering problem.
+        let _lock = write_lock::acquire_write_lock(group_id).await?;
+
+        async_fs::create_dir_all(&engramdb_dir).await?;
+        async_fs::create_dir_all(paths::memories_dir(&group_dir)).await?;
+
+        // Create manifest
+        let manifest_path = engramdb_dir.join("manifest.toml");
+        if !manifest_path.exists() {
+            let manifest = manifest::Manifest {
+                project: format!("group:{group_id}"),
+                ..Default::default()
+            };
+            manifest::save_manifest(&manifest_path, &manifest).await?;
+        }
+
+        // Create empty config if missing
+        let config_path = engramdb_dir.join("config.toml");
+        if !config_path.exists() {
+            async_fs::write(
+                &config_path,
+                "# EngramDB group configuration\n# See documentation for available settings\n",
+            )
+            .await?;
+        }
+
+        let project_id = group_id.to_string();
+
+        // Create group LanceDB directory
+        let lance_path = paths::group_lancedb_dir(group_id)?;
+        async_fs::create_dir_all(&lance_path).await?;
+
+        let config: engram_types::EngramConfig = load_config_or_default(&config_path).await;
+
+        let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
+            .await
+            .map_err(|e| StorageError::Validation(format!("Group LanceDB init failed: {}", e)))?;
+
+        let store = Self {
+            project_dir: group_dir,
+            project_id,
+            lance_index,
+        };
+        // Release before migrating (a reindex re-acquires this lock), mirroring
+        // `init`.
+        drop(_lock);
+        store.migrate_schema_if_needed().await?;
+        Ok(store)
+    }
+
+    /// Open a named group memory store, creating it if necessary.
+    pub async fn open_group(group_id: &str) -> Result<Self> {
+        let group_dir = paths::group_store_dir(group_id)?;
+        let engramdb_dir = paths::project_dir(&group_dir);
+
+        if !engramdb_dir.exists() {
+            return Self::init_group(group_id).await;
+        }
+
+        let project_id = group_id.to_string();
+        let lance_path = paths::group_lancedb_dir(group_id)?;
+        async_fs::create_dir_all(&lance_path).await?;
+
+        let config_path = engramdb_dir.join("config.toml");
+        let config: engram_types::EngramConfig = load_config_or_default(&config_path).await;
+
+        let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
+            .await
+            .map_err(|e| StorageError::Validation(format!("Group LanceDB open failed: {}", e)))?;
+
+        let store = Self {
+            project_dir: group_dir,
+            project_id,
+            lance_index,
+        };
+        store.migrate_schema_if_needed().await?;
+        Ok(store)
+    }
+
+    /// Returns `true` if this store is a named group memory store.
+    pub fn is_group(&self) -> bool {
+        paths::is_group_id(&self.project_id)
     }
 
     /// Open an existing EngramDB store.
@@ -3494,6 +3606,47 @@ mod tests {
             .await
             .unwrap();
         assert!(!store.is_global());
+    }
+
+    // ---- group stores (generalization of the global store) ----
+
+    #[tokio::test]
+    async fn test_group_init_open_roundtrip() {
+        // Group stores live under `<ENGRAMDB_DATA_DIR>/groups/<id>/`, which the
+        // ctor test-isolation arm redirects to a per-process temp dir — no
+        // global-test lock needed (unlike the global store, whose fixed path is
+        // shared across the process). A distinct group id per test name keeps
+        // parallel group tests from colliding even within the process.
+        let group_id = paths::compute_group_id("test-group-roundtrip");
+        let store = MemoryStore::init_group(&group_id).await.unwrap();
+        assert!(store.is_group());
+        assert!(!store.is_global());
+        assert_eq!(store.project_id, group_id);
+
+        let group_dir = paths::group_store_dir(&group_id).unwrap();
+        assert!(group_dir.join(".engramdb").exists());
+        assert!(group_dir.join(".engramdb/memories").exists());
+        assert!(group_dir.join(".engramdb/manifest.toml").exists());
+        assert!(paths::group_lancedb_dir(&group_id).unwrap().exists());
+
+        let memory = create_test_memory("group-mem-001", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+
+        // Reopen via `open_group` (existing dir → no re-init) and confirm the
+        // memory persisted and the store still reports as a group.
+        let reopened = MemoryStore::open_group(&group_id).await.unwrap();
+        assert!(reopened.is_group());
+        let retrieved = reopened.get("group-mem-001").await.unwrap();
+        assert_eq!(retrieved.id, "group-mem-001");
+    }
+
+    #[tokio::test]
+    async fn test_group_is_not_group_for_regular_store() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        assert!(!store.is_group());
     }
 
     // ===================================================================

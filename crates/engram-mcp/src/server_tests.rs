@@ -74,6 +74,7 @@ fn create_input(type_: &str, summary: &str, content: &str) -> CreateInput {
         confidence: None,
         visibility: None,
         supersedes: None,
+        audience: None,
         decay_strategy: None,
         decay_half_life: None,
         decay_ttl: None,
@@ -139,6 +140,7 @@ async fn create_with_all_fields() {
         confidence: Some(0.7),
         visibility: Some("personal".to_string()),
         supersedes: Some(vec![]),
+        audience: None,
         decay_strategy: Some("exponential".to_string()),
         decay_half_life: Some(86400),
         decay_ttl: None,
@@ -280,6 +282,7 @@ async fn update_summary() {
             title: None,
             status: None,
             supersedes: None,
+            audience: None,
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,
@@ -327,6 +330,7 @@ async fn update_type() {
             title: None,
             status: None,
             supersedes: None,
+            audience: None,
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,
@@ -374,6 +378,7 @@ async fn update_status() {
             visibility: None,
             title: None,
             supersedes: None,
+            audience: None,
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,
@@ -433,6 +438,7 @@ async fn update_tags_add_remove() {
             title: None,
             status: None,
             supersedes: None,
+            audience: None,
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,
@@ -487,6 +493,7 @@ async fn update_criticality_validation() {
             title: None,
             status: None,
             supersedes: None,
+            audience: None,
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,
@@ -531,6 +538,7 @@ async fn update_decay_params() {
             title: None,
             status: None,
             supersedes: None,
+            audience: None,
             decay_ttl: None,
             project: None,
         }))
@@ -1963,6 +1971,7 @@ fn update_input(id: &str, project: Option<String>) -> UpdateInput {
         title: None,
         status: None,
         supersedes: None,
+        audience: None,
         decay_strategy: None,
         decay_half_life: None,
         decay_ttl: None,
@@ -2214,6 +2223,7 @@ async fn cross_project_update() {
             title: None,
             status: None,
             supersedes: None,
+            audience: None,
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,
@@ -2568,6 +2578,7 @@ async fn global_create_with_all_fields() {
         confidence: Some(0.95),
         visibility: Some("shared".to_string()),
         supersedes: Some(vec![]),
+        audience: None,
         decay_strategy: None,
         decay_half_life: None,
         decay_ttl: None,
@@ -2642,6 +2653,7 @@ async fn global_update() {
             title: None,
             status: None,
             supersedes: None,
+            audience: None,
             decay_strategy: None,
             decay_half_life: None,
             decay_ttl: None,
@@ -2761,12 +2773,16 @@ async fn global_retrieve() {
     )
     .await;
 
+    // No `path` signal: physical scope is stripped on writes into the
+    // everyone/global store (repo-relative paths are meaningless cross-repo —
+    // see the multi-project-memories scope-hygiene rule), so a global memory
+    // carries no physical scope to match a `path` against. Rank-all still
+    // surfaces it by criticality/decay.
     let result = server
         .memory_query(Parameters(QueryInput {
             epistemic: None,
             situation: None,
             include_invalidated: None,
-            path: Some("/".to_string()),
             project: global_project(),
             ..query_input("rank")
         }))
@@ -3560,12 +3576,14 @@ async fn global_retrieve_detail_levels() {
     server.memory_create(Parameters(input)).await.unwrap();
 
     for level in &["summary", "content", "full"] {
+        // No `path` signal — physical scope is stripped on global-store writes
+        // (scope hygiene), so rank-all (not path-matching) is what surfaces a
+        // global memory. This test exercises detail-level rendering.
         let result = server
             .memory_query(Parameters(QueryInput {
                 epistemic: None,
                 situation: None,
                 include_invalidated: None,
-                path: Some("/".to_string()),
                 detail_level: Some(level.to_string()),
                 project: global_project(),
                 ..query_input("rank")
@@ -4757,6 +4775,7 @@ async fn verify_tool_stamps_and_update_reopens() {
         title: None,
         status: None,
         supersedes: None,
+        audience: None,
         decay_strategy: None,
         decay_half_life: None,
         decay_ttl: None,
