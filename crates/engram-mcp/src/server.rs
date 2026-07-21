@@ -2951,7 +2951,11 @@ impl ServerHandler for EngramDbServer {
                  When you finish the task you were assigned, reflect: if anything durable \
                  about the project, the environment/tooling, or the user's preferences came \
                  up (not task minutiae), query existing memories, then create the new ones \
-                 and challenge contradictions. Suggested, not required."
+                 and challenge contradictions. If a durable decision or convention applies \
+                 to more than the current project — e.g. you are working across a set of \
+                 related repos — save it once to a shared store (project=\"group:<name>\" \
+                 for that set, or project=\"global\" for everywhere) instead of only the \
+                 current project, so every relevant project surfaces it. Suggested, not required."
                 .to_string();
             if let Some(w) = &self.embedding_warning {
                 s.push_str("\n\nIMPORTANT — ACTION NEEDED: ");

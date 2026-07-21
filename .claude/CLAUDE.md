@@ -244,4 +244,8 @@ This project uses EngramDB as a persistent memory store via MCP.
 - **Before answering any project question** (conventions, workflows, architecture, tooling, "how do we..."), call `query` with `mode: "filter"` and a `query` of relevant keywords.
 - **Before modifying files**, call `query` with `mode: "rank"` and the file `path` to surface known decisions, hazards, or conventions.
 - **After discovering** important patterns, decisions, hazards, or conventions, store them with `create`.
+- **When a decision or convention spans multiple related projects** (a monorepo family / a set of repos you're working on together on this machine), save it to a shared store instead of only the current project, so every relevant project surfaces it:
+  - Write to a named group with `project: "group:<name>"` (set up once per project with `engramdb groups subscribe <name>` on the CLI; subscribed groups fan into a project's queries automatically). Use this for knowledge shared by a *specific set* of related repos.
+  - Write to `project: "global"` for knowledge that applies *everywhere* (personal preferences, machine-wide conventions).
+  - To share a *single* memory to an arbitrary subset of projects, set `audience` to their project/group ids on `create`/`update` (a group- or global-store write with `audience: [...]` surfaces only for the listed projects). Omit `audience` for whole-group visibility. Note: `audience` is advisory fan-in scoping, not a confidentiality boundary.
 - **If you find contradictory information**, use `challenge` to flag the memory for review.
