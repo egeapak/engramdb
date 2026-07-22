@@ -169,6 +169,9 @@ prompt_context_budget = 1000        # char budget for UserPromptSubmit / PreTool
 
 [content]
 summary_max_chars = 200             # max length (chars) of a memory summary on create/update/resolve
+
+[cli]
+project_list_grouping = "auto"      # projects-list layout: auto | always | none
 ```
 
 ## Notes on selected sections
@@ -179,6 +182,7 @@ summary_max_chars = 200             # max length (chars) of a memory summary on 
 - **`[epistemic]`** — lifecycle knobs for epistemic classes. `observation_review_days` drives a `doctor` suggestion to re-verify (or delete) old unverified observations. `observation_half_life_days` / `observation_decay_floor` set the default decay for observation-class memories that don't specify one. `promotion_min_sessions` + `auto_promote` control when a task-scoped decision retrieved across distinct later sessions is promoted to project-wide (suggest by default, apply when `auto_promote = true`). `consolidation_min_sources` + `consolidation_similarity` + `auto_consolidate` control merging clusters of near-duplicate observations into a derived fact. `invalidated_retention_days` (default **180**, `0` = keep forever) is how long invalidated memories stay on disk before `gc` may purge them; until then they are also exempt from low-score GC. `demote_on_session_end = true` makes the SessionEnd hook demote the session's declared task's memories (same effect as `engramdb task complete`).
 - **`[hooks]`** — rendering knobs for the Claude Code hooks. `prompt_context_budget` (default **1000** chars) caps the UserPromptSubmit and PreToolUse injections (SessionStart has its own fixed 2000-char budget). `class_order` optionally replaces the per-situation epistemic-class ordering of injected memories (SessionStart: fact → decision → observation; file edits: decision → fact → observation) with one uniform list.
 - **`[content]`** — memory-content constraints. `summary_max_chars` (default **200**) is the maximum length, in characters, of a memory's one-line summary; it is enforced on every `create` / `update` / `resolve --update` path and bounds the auto-generated summary of a `compress`/consolidate merge. Measured in characters (not bytes), so multibyte summaries are not penalized.
+- **`[cli]`** — human-readable CLI output preferences (ignored by the MCP surface and every `--json` path). `project_list_grouping` controls how `engramdb projects list` lays out its directory tree: `auto` (default) prints a folder header only for directories holding two or more projects and renders a lone project inline on a full-path line; `always` prints a header above every project (rows show just the basename); `none` prints a flat list of full-path rows with no headers. In all three modes worktree sub-projects nest under their real parent and rows are sorted by path.
 - **`[embeddings]`** — changing `provider` or `dimensions` requires `engramdb reindex --embeddings-only`. See [embeddings.md](./embeddings.md) for fingerprinting and the model-change policy.
 - **`[trust_weights]`** — `Provenance` source maps to a trust weight (`human` highest, `inferred` lowest). The multiplier is `floor + (1 - floor) * weight`, so even fully `inferred` memories keep ≥50% of their raw score.
 - **`[nli]`** — off by default. Downloads ~50 MB and adds latency to `create`. When enabled, every `create` checks the top-`max_comparisons` similar memories and auto-challenges contradictions above `contradiction_threshold`.

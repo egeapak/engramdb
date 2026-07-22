@@ -191,10 +191,23 @@ fn projects_list_pretty_shows_at_least_current_project() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let path = dir.path().to_string_lossy().to_string();
+    // The list now renders a directory-grouped tree: a project shows under its
+    // folder header (basename) or, for a lone folder, inline on a full-path
+    // line. Either way its basename appears. The old `parent:` follow-up line
+    // is gone — the tree conveys hierarchy structurally.
+    let basename = dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
     assert!(
-        stdout.contains(&path) || stdout.contains("No registered"),
-        "expected current project path or empty marker: {stdout}"
+        stdout.contains(&basename) || stdout.contains("No registered"),
+        "expected current project (basename {basename}) or empty marker: {stdout}"
+    );
+    assert!(
+        !stdout.contains("parent:"),
+        "tree output must not print the old `parent:` line: {stdout}"
     );
 }
 
@@ -547,6 +560,108 @@ fn projects_link_and_unlink_round_trip() {
         child_entry.get("parent_project_id").is_none()
             || child_entry["parent_project_id"].is_null(),
         "parent link must be gone after unlink: {child_entry}"
+    );
+}
+
+/// After linking child → parent, the pretty `projects list` renders the child
+/// nested beneath its parent with the `↳` marker, and never prints the old
+/// `parent:` follow-up line (the tree conveys the relationship structurally).
+#[test]
+fn projects_list_pretty_nests_worktree_under_parent() {
+    let env = IsolatedEnv::new();
+    let parent_dir = TempDir::new().unwrap();
+    let child_dir = TempDir::new().unwrap();
+    init_isolated(&env, parent_dir.path());
+    init_isolated(&env, child_dir.path());
+
+    let parent_id = project_id_of(&env, parent_dir.path());
+    let child_id = project_id_of(&env, child_dir.path());
+
+    isolated_cmd(&env)
+        .args(["projects", "link", &child_id, "--parent", &parent_id])
+        .assert()
+        .success();
+
+    let output = isolated_cmd(&env)
+        .args(["--no-color", "--format", "pretty", "projects", "list"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Short ids are truncated to 13 chars in the rendered output.
+    let child_short = &child_id[..13.min(child_id.len())];
+    let parent_short = &parent_id[..13.min(parent_id.len())];
+
+    // The child appears on a nested `↳` row.
+    let child_line = stdout
+        .lines()
+        .find(|l| l.contains(child_short))
+        .unwrap_or_else(|| panic!("child must appear in list:\n{stdout}"));
+    assert!(
+        child_line.contains('↳'),
+        "child must render as a nested worktree row: {child_line:?}"
+    );
+
+    // The parent appears above the child on a non-nested row.
+    let parent_idx = stdout
+        .lines()
+        .position(|l| l.contains(parent_short) && !l.contains('↳'))
+        .unwrap_or_else(|| panic!("parent root row must appear:\n{stdout}"));
+    let child_idx = stdout
+        .lines()
+        .position(|l| l.contains(child_short))
+        .unwrap();
+    assert!(
+        parent_idx < child_idx,
+        "parent must be listed above its nested child:\n{stdout}"
+    );
+
+    // The old `parent:` follow-up line must be gone.
+    assert!(
+        !stdout.contains("parent:"),
+        "tree output must not print the old `parent:` line:\n{stdout}"
+    );
+}
+
+/// `[cli].project_list_grouping = "none"` disables directory headers: the
+/// list renders as flat full-path rows. Guards the config → renderer wiring.
+#[test]
+fn projects_list_grouping_none_from_config_is_flat() {
+    let env = IsolatedEnv::new();
+    let dir = TempDir::new().unwrap();
+    init_isolated(&env, dir.path());
+
+    // Force the flat (headerless) mode via the project config.
+    std::fs::write(
+        dir.path().join(".engramdb").join("config.toml"),
+        "[cli]\nproject_list_grouping = \"none\"\n",
+    )
+    .unwrap();
+
+    let output = isolated_cmd(&env)
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--no-color",
+            "--format",
+            "pretty",
+            "projects",
+            "list",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Exactly one project registered → exactly one full-path row, no header,
+    // no blank separators.
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 1, "flat mode → single row, got:\n{stdout}");
+    assert!(
+        lines[0].contains(dir.path().to_str().unwrap()),
+        "flat mode row must carry the full path: {}",
+        lines[0]
     );
 }
 

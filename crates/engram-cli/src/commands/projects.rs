@@ -6,6 +6,7 @@ use crate::prompter::Prompter;
 use anyhow::Result;
 use engramdb::ops::projects;
 use engramdb::storage::RegistryBackend;
+use engramdb::types::ProjectListGrouping;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 
@@ -16,6 +17,7 @@ pub async fn run_projects(
     command: Option<ProjectsCommand>,
     formatter: &OutputFormatter,
     prompter: &dyn Prompter,
+    grouping: ProjectListGrouping,
 ) -> Result<()> {
     let command = command.unwrap_or(ProjectsCommand::Info);
 
@@ -43,7 +45,7 @@ pub async fn run_projects(
                     parent_project_id: e.parent_project_id,
                 })
                 .collect();
-            formatter.print_project_list(&output);
+            formatter.print_project_list(&output, grouping);
         }
         ProjectsCommand::Delete {
             project_id,
@@ -309,6 +311,7 @@ mod tests {
             }),
             &formatter,
             &prompter,
+            ProjectListGrouping::default(),
         )
         .await;
 
@@ -342,6 +345,7 @@ mod tests {
             }),
             &formatter,
             &prompter,
+            ProjectListGrouping::default(),
         )
         .await;
 
@@ -382,6 +386,7 @@ mod tests {
             }),
             &formatter,
             &prompter,
+            ProjectListGrouping::default(),
         )
         .await;
         assert!(result.is_ok(), "CLI returns Ok and prints a warning");
@@ -402,6 +407,7 @@ mod tests {
             Some(ProjectsCommand::Prune { force: false }),
             &formatter,
             &prompter,
+            ProjectListGrouping::default(),
         )
         .await;
         assert!(result.is_ok());
@@ -428,6 +434,7 @@ mod tests {
             Some(ProjectsCommand::Prune { force: false }),
             &formatter,
             &prompter,
+            ProjectListGrouping::default(),
         )
         .await;
         assert!(result.is_err(), "JSON mode without --force must error");
@@ -455,6 +462,7 @@ mod tests {
             Some(ProjectsCommand::Prune { force: true }),
             &formatter,
             &prompter,
+            ProjectListGrouping::default(),
         )
         .await
         .unwrap();
@@ -490,6 +498,7 @@ mod tests {
             }),
             &formatter,
             &prompter,
+            ProjectListGrouping::default(),
         )
         .await
         .unwrap();
@@ -514,6 +523,7 @@ mod tests {
             }),
             &formatter,
             &prompter,
+            ProjectListGrouping::default(),
         )
         .await
         .unwrap();
