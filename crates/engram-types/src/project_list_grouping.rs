@@ -44,6 +44,16 @@ impl ProjectListGrouping {
     }
 }
 
+/// Enables `Option<ProjectListGrouping>` as a Clap arg (Clap uses `FromStr`
+/// when the type isn't a `ValueEnum`) without a clap dependency in this crate,
+/// mirroring [`EmbeddingBackend`](crate::config::EmbeddingBackend).
+impl std::str::FromStr for ProjectListGrouping {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).map_err(|e| e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

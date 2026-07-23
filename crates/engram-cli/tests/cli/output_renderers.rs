@@ -665,6 +665,88 @@ fn projects_list_grouping_none_from_config_is_flat() {
     );
 }
 
+/// The per-invocation `--group` flag overrides the config default: config asks
+/// for `always` (headers), the flag forces `none` (flat), and the flag wins.
+#[test]
+fn projects_list_group_flag_overrides_config() {
+    let env = IsolatedEnv::new();
+    let dir = TempDir::new().unwrap();
+    init_isolated(&env, dir.path());
+
+    // Config says "always" (every folder gets a header line).
+    std::fs::write(
+        dir.path().join(".engramdb").join("config.toml"),
+        "[cli]\nproject_list_grouping = \"always\"\n",
+    )
+    .unwrap();
+
+    // Sanity: without the flag, "always" prints a header + a basename row (2
+    // non-empty lines for the single project).
+    let cfg_only = isolated_cmd(&env)
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--no-color",
+            "--format",
+            "pretty",
+            "projects",
+            "list",
+        ])
+        .output()
+        .unwrap();
+    assert!(cfg_only.status.success());
+    let cfg_stdout = String::from_utf8_lossy(&cfg_only.stdout);
+    let cfg_lines: Vec<&str> = cfg_stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    assert_eq!(
+        cfg_lines.len(),
+        2,
+        "always mode → header + basename row, got:\n{cfg_stdout}"
+    );
+
+    // With `--group none`, the flag overrides config → a single flat row.
+    let overridden = isolated_cmd(&env)
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--no-color",
+            "--format",
+            "pretty",
+            "projects",
+            "list",
+            "--group",
+            "none",
+        ])
+        .output()
+        .unwrap();
+    assert!(overridden.status.success());
+    let stdout = String::from_utf8_lossy(&overridden.stdout);
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "--group none must override config → single flat row, got:\n{stdout}"
+    );
+    assert!(
+        lines[0].contains(dir.path().to_str().unwrap()),
+        "overridden flat row must carry the full path: {}",
+        lines[0]
+    );
+}
+
+/// An invalid `--group` value is rejected at parse time with a helpful error.
+#[test]
+fn projects_list_group_flag_rejects_invalid() {
+    let env = IsolatedEnv::new();
+    isolated_cmd(&env)
+        .args(["projects", "list", "--group", "bogus"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Invalid project list grouping"));
+}
+
 fn list_projects_json(env: &IsolatedEnv) -> Vec<serde_json::Value> {
     let out = isolated_cmd(env)
         .args(["--json", "projects", "list"])

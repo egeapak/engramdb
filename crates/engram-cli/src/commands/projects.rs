@@ -34,7 +34,7 @@ pub async fn run_projects(
                 parent_project_id: info.parent_project_id,
             });
         }
-        ProjectsCommand::List => {
+        ProjectsCommand::List { group } => {
             let entries = projects::list_projects(registry).await?;
             let output: Vec<ProjectListOutput> = entries
                 .into_iter()
@@ -45,7 +45,8 @@ pub async fn run_projects(
                     parent_project_id: e.parent_project_id,
                 })
                 .collect();
-            formatter.print_project_list(&output, grouping);
+            // The per-invocation `--group` flag overrides the config default.
+            formatter.print_project_list(&output, group.unwrap_or(grouping));
         }
         ProjectsCommand::Delete {
             project_id,
