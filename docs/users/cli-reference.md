@@ -314,13 +314,26 @@ Invoked by Claude Code, not manually. See [claude-code.md](./claude-code.md#how-
 
 ```bash
 engramdb projects info                          # current project info (default)
-engramdb projects list                          # all registered projects with hierarchy
+engramdb projects list [--group auto|always|none]  # all registered projects as a tree
 engramdb projects stats                         # cross-project aggregate stats
 engramdb projects delete <project_id> [-f] [--cascade]
 engramdb projects link <child_id> --parent <parent_id>
 engramdb projects unlink <project_id>
 engramdb projects prune [-f]
 ```
+
+`projects list` renders a directory tree: projects are grouped under
+filesystem-folder headers and worktree sub-projects nest under their real
+parent (marked `↳`). `--group` sets the grouping for one run, overriding the
+`[cli].project_list_grouping` config default:
+
+- `auto` (default) — a folder header only for directories with two or more
+  projects; a lone project renders inline on a full-path line.
+- `always` — a header above every folder; project rows show just the basename.
+- `none` — a flat list of full-path rows, no headers.
+
+Worktree nesting and path sorting apply in every mode. `--json` output is
+unaffected by `--group`: it stays a flat array carrying `parent_project_id`.
 
 See [projects-and-worktrees.md](./projects-and-worktrees.md).
 
