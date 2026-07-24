@@ -17,13 +17,14 @@ mod decay;
 pub mod env;
 mod epistemic;
 mod memory;
+mod project_list_grouping;
 mod provenance;
 mod title_strategy;
 
 // Re-export all public types
 pub use challenge::Challenge;
 pub use config::{
-    ChallengePenalty, ContentConfig, DaemonConfig, EmbeddingBackend, EmbeddingsConfig,
+    ChallengePenalty, CliConfig, ContentConfig, DaemonConfig, EmbeddingBackend, EmbeddingsConfig,
     EngramConfig, EpistemicConfig, HooksConfig, LogicalBonusConfig, MaintenanceConfig, NliConfig,
     ReindexOnModelChange, RerankConfig, RetrievalConfig, ScopeProximityConfig, ScoringConfig,
     ScoringWeights, SearchConfig, SituationConfig, SituationProfile, ThresholdsConfig,
@@ -34,5 +35,6 @@ pub use decay::{Decay, DecayStrategy};
 pub use env::in_process_override;
 pub use epistemic::{Epistemic, Generality, Situation, Validity};
 pub use memory::{default_decay, Memory, MemoryType, MemoryUpdate, Status, Visibility};
+pub use project_list_grouping::ProjectListGrouping;
 pub use provenance::{Provenance, ProvenanceSource};
 pub use title_strategy::TitleStrategy;

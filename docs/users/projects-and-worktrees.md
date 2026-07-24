@@ -65,7 +65,8 @@ The global data directory is `<global_data_dir>/projects/<global_id>/` (no `.eng
 The global registry tracks every project you've init'd. It supports parent-child relationships and cleanup.
 
 ```bash
-engramdb projects list                                 # full registry with hierarchy
+engramdb projects list                                 # full registry as a tree
+engramdb projects list --group none                    # flat, one full path per line
 engramdb projects info                                 # current project
 engramdb projects stats                                # aggregate stats
 engramdb projects delete <id> [-f] [--cascade]         # remove from registry + delete data
@@ -73,6 +74,24 @@ engramdb projects link <child_id> --parent <parent_id> # link as sub-project
 engramdb projects unlink <child_id>                    # promote back to root
 engramdb projects prune [-f]                           # remove stale registry entries + orphan data
 ```
+
+`projects list` prints a directory tree. Projects are grouped under their
+containing folder and sorted by path; a worktree (or any linked sub-project)
+nests under its real parent with a `↳` marker:
+
+```
+/Users/you/Projects/ceiba
+  d66b6ed0c9bfc  audivi (ok)
+  3e7b6e498d687  gatekeeper (ok)
+    ↳ ae0cb5f27789a  gatekeeper-fda-gaps (ok)   # a linked worktree of gatekeeper
+```
+
+The grouping is configurable via `[cli].project_list_grouping` (`auto`
+default / `always` / `none`) and can be overridden per run with `--group`
+(see [configuration.md](./configuration.md#notes-on-selected-sections)). The
+`(ok)` / `(missing)` marker reports whether the project still exists on disk.
+For scripting, `engramdb projects list --json` emits a flat array where each
+entry carries `parent_project_id`, regardless of the grouping mode.
 
 `delete` refuses by default if the project has children — you must either unlink them first or pass `--cascade` to delete the whole subtree.
 

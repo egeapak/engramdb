@@ -14,6 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use super::project_list_grouping::ProjectListGrouping;
 pub use super::title_strategy::TitleStrategy;
 
 /// Soft target for a memory's `content` length, in tokens. Not enforced —
@@ -1124,6 +1125,22 @@ pub struct EngramConfig {
     /// Memory content constraints (summary length, …)
     #[serde(default)]
     pub content: ContentConfig,
+
+    /// CLI-only display preferences (project-list grouping, …)
+    #[serde(default)]
+    pub cli: CliConfig,
+}
+
+/// CLI-only display preferences (`[cli]` section).
+///
+/// These affect only the human-readable terminal output of the `engramdb`
+/// binary; the MCP surface and every `--json` path ignore them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CliConfig {
+    /// How `projects list` groups projects under filesystem-directory
+    /// headers. Defaults to [`ProjectListGrouping::Auto`].
+    #[serde(default)]
+    pub project_list_grouping: ProjectListGrouping,
 }
 
 /// Default upper bound on a memory summary's length, in characters.
@@ -1870,6 +1887,19 @@ mod tests {
         // Explicit override is honored.
         let parsed: EngramConfig = toml::from_str("[content]\nsummary_max_chars = 320\n").unwrap();
         assert_eq!(parsed.content.summary_max_chars, 320);
+    }
+
+    #[test]
+    fn test_cli_config_defaults_and_override() {
+        // Absent section ⇒ Auto grouping.
+        let parsed: EngramConfig = toml::from_str("").unwrap();
+        assert_eq!(parsed.cli, CliConfig::default());
+        assert_eq!(parsed.cli.project_list_grouping, ProjectListGrouping::Auto);
+
+        // Explicit override is honored (on-disk lowercase spelling).
+        let parsed: EngramConfig =
+            toml::from_str("[cli]\nproject_list_grouping = \"none\"\n").unwrap();
+        assert_eq!(parsed.cli.project_list_grouping, ProjectListGrouping::None);
     }
 
     /// Every `EmbeddingBackend` variant round-trips through `Display`/`FromStr`

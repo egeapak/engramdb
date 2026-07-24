@@ -8,9 +8,10 @@
 //! The formatter automatically detects terminal capabilities and adjusts formatting
 //! accordingly.
 
+use crate::project_tree::{build_render_model, RenderLine};
 use engramdb::retrieval::engine::{RetrievalResult, ScoredMemory};
 use engramdb::storage::IndexFilterable;
-use engramdb::types::{Memory, MemoryType, Status};
+use engramdb::types::{Memory, MemoryType, ProjectListGrouping, Status};
 use owo_colors::{OwoColorize, Stream};
 use serde_json;
 use std::io::{self, IsTerminal};
@@ -949,74 +950,70 @@ impl OutputFormatter {
     }
 
     /// Print a list of projects in the configured format.
-    pub fn print_project_list(&self, entries: &[ProjectListOutput]) {
-        match self.format {
-            OutputFormat::Json => {
-                println!("{}", serde_json::to_string_pretty(entries).unwrap());
-            }
-            OutputFormat::Pretty => {
-                if entries.is_empty() {
-                    println!("No registered projects.");
-                    return;
-                }
-                for entry in entries {
-                    let id_short = short_id(&entry.project_id);
-                    let id_display = if self.use_color {
-                        id_short
-                            .if_supports_color(Stream::Stdout, |text| text.cyan())
-                            .to_string()
-                    } else {
-                        id_short.to_string()
-                    };
-                    let status = if entry.exists {
-                        "ok".to_string()
-                    } else if self.use_color {
-                        "missing"
-                            .if_supports_color(Stream::Stdout, |text| text.red())
-                            .to_string()
-                    } else {
-                        "missing".to_string()
-                    };
-                    let indent = if entry.parent_project_id.is_some() {
-                        "  ↳ "
-                    } else {
-                        ""
-                    };
-                    println!(
-                        "{}{} {} ({})",
-                        indent, id_display, entry.project_path, status,
-                    );
-                    if let Some(parent) = entry.parent_project_id.as_deref() {
-                        let parent_short = short_id(parent);
-                        let parent_display = if self.use_color {
-                            parent_short
-                                .if_supports_color(Stream::Stdout, |text| text.dimmed())
-                                .to_string()
-                        } else {
-                            parent_short.to_string()
-                        };
-                        println!("      parent: {}", parent_display);
-                    }
+    ///
+    /// Pretty/Plain render a real tree: worktree sub-projects nest under their
+    /// actual parent, grouped under filesystem-directory headers per
+    /// `grouping`. JSON stays a flat array (with `parent_project_id`) so
+    /// scripts and the MCP surface keep a stable shape regardless of grouping.
+    pub fn print_project_list(&self, entries: &[ProjectListOutput], grouping: ProjectListGrouping) {
+        if let OutputFormat::Json = self.format {
+            println!("{}", serde_json::to_string_pretty(entries).unwrap());
+            return;
+        }
+
+        if entries.is_empty() {
+            println!("No registered projects.");
+            return;
+        }
+
+        for line in build_render_model(entries, grouping) {
+            println!("{}", self.render_project_line(&line));
+        }
+    }
+
+    /// Render one [`RenderLine`] to a styled (Pretty) or plain string.
+    fn render_project_line(&self, line: &RenderLine) -> String {
+        match line {
+            RenderLine::Blank => String::new(),
+            RenderLine::Header(dir) => {
+                if self.use_color {
+                    dir.if_supports_color(Stream::Stdout, |t| t.dimmed())
+                        .to_string()
+                } else {
+                    dir.clone()
                 }
             }
-            OutputFormat::Plain => {
-                if entries.is_empty() {
-                    println!("No registered projects.");
-                    return;
-                }
-                for entry in entries {
-                    let id_short = short_id(&entry.project_id);
-                    let status = if entry.exists { "ok" } else { "missing" };
-                    let prefix = if entry.parent_project_id.is_some() {
-                        "  "
-                    } else {
-                        ""
-                    };
-                    println!("{}{} {} {}", prefix, id_short, entry.project_path, status,);
-                    if let Some(parent) = entry.parent_project_id.as_deref() {
-                        println!("    parent: {}", short_id(parent));
-                    }
-                }
+            RenderLine::Project {
+                project_id,
+                depth,
+                under_header,
+                label,
+                exists,
+            } => {
+                // Header rows indent 2; worktree children add 2 per level and a
+                // `↳` marker. Inline/none rows start at column 0.
+                let base = if *under_header { 2 } else { 0 };
+                let spaces = " ".repeat(base + depth * 2);
+                let marker = if *depth > 0 { "↳ " } else { "" };
+
+                let id_short = short_id(project_id);
+                let id_display = if self.use_color {
+                    id_short
+                        .if_supports_color(Stream::Stdout, |t| t.cyan())
+                        .to_string()
+                } else {
+                    id_short.to_string()
+                };
+                let status = if *exists {
+                    "ok".to_string()
+                } else if self.use_color {
+                    "missing"
+                        .if_supports_color(Stream::Stdout, |t| t.red())
+                        .to_string()
+                } else {
+                    "missing".to_string()
+                };
+                format!("{spaces}{marker}{id_display} {label} ({status})")
             }
         }
     }

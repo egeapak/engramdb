@@ -21,6 +21,7 @@ pub mod app;
 pub mod commands;
 pub mod engine;
 pub mod output;
+pub mod project_tree;
 pub mod prompter;
 pub mod validation;
 
@@ -654,7 +655,15 @@ pub async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Projects { command } => {
-            commands::run_projects(&dir, &registry, command, &formatter, &prompter).await
+            commands::run_projects(
+                &dir,
+                &registry,
+                command,
+                &formatter,
+                &prompter,
+                config.cli.project_list_grouping,
+            )
+            .await
         }
         Command::Groups { command } => {
             commands::run_groups(&dir, &registry, command, &prompter, &formatter).await
