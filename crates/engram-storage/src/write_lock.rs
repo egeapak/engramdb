@@ -10,7 +10,6 @@
 
 use super::error::{Result, StorageError};
 use super::paths;
-use fs4::fs_std::FileExt;
 use std::fs::File;
 use std::path::Path;
 
@@ -62,7 +61,7 @@ pub(crate) async fn acquire_lock_file(lock_path: std::path::PathBuf) -> Result<W
             .truncate(false)
             .write(true)
             .open(&lock_path)?;
-        file.lock_exclusive()?;
+        file.lock()?;
         Ok(WriteLockGuard { _file: file })
     })
     .await
