@@ -107,7 +107,14 @@ pub enum ProjectsCommand {
     /// Show info about the current project (default)
     Info,
     /// List all registered projects
-    List,
+    List {
+        /// Directory-header grouping for this listing, overriding the
+        /// `[cli].project_list_grouping` config: `auto` (header only for
+        /// folders with 2+ projects), `always` (header per folder), or
+        /// `none` (flat, full-path rows). Worktrees nest in every mode.
+        #[arg(long, value_name = "MODE")]
+        group: Option<engramdb::types::ProjectListGrouping>,
+    },
     /// Remove a project from the registry and delete its global data.
     ///
     /// Refuses by default when the project has sub-projects (children).

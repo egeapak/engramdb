@@ -306,6 +306,7 @@ impl FixAction {
                     Some(ProjectsCommand::Prune { force: true }),
                     formatter,
                     &crate::prompter::InquirePrompter,
+                    engramdb::types::ProjectListGrouping::default(),
                 )
                 .await
             }

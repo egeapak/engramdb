@@ -28,9 +28,11 @@ fn projects_list() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // The directory path should appear in the list
+    // The list groups projects into a directory tree; the current project
+    // appears at least by its basename (under a folder header or inline).
+    let basename = dir.path().file_name().unwrap().to_str().unwrap();
     assert!(
-        stdout.contains(dir.path().to_str().unwrap()) || stdout.contains("project"),
+        stdout.contains(basename) || stdout.contains("project"),
         "Projects list should reference the project: {}",
         stdout
     );
