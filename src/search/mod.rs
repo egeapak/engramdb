@@ -29,8 +29,16 @@
 //! require semantic understanding.
 
 pub mod keyword;
-pub mod normalize;
+
+/// Text normalization, re-exported from `engram-types`.
+///
+/// The implementation lives one layer down because the storage crate
+/// precomputes stems on the write path and must produce byte-identical output
+/// to what this crate computes at query time — and storage cannot depend
+/// upward on the core. Re-exporting keeps `crate::search::normalize::*`
+/// resolving unchanged.
+pub use engram_types::normalize;
 
 // Re-export main functions
 pub use keyword::{keyword_search, normalize_keyword_score, query_token_count};
-pub use normalize::{normalize, normalize_set, NORMALIZER_STAMP};
+pub use normalize::{normalize_counts, normalize_set, NORMALIZER_STAMP};
