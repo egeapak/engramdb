@@ -262,6 +262,8 @@ fn probe_name(p: Probe) -> &'static str {
         Probe::Idf => "IDF/stopwords",
         Probe::Typo => "Typo",
         Probe::Discrimination => "Discrimination",
+        Probe::LengthNorm => "LengthNorm",
+        Probe::TermFreq => "TermFreq",
     }
 }
 
@@ -269,7 +271,7 @@ fn print_table(title: &str, rows: &[(String, [Metrics; 4])]) {
     println!("\n{title}");
     println!(
         "{:<16} {:>4}   {:>17}   {:>17}   {:>17}   {:>17}",
-        "", "n", "A current", "B bm25 stem", "C B+fuzzy", "D fuzzy no-stem"
+        "", "n", "A current", "B bm25 only", "C +stemming", "D +fuzzy"
     );
     print!("{:<16} {:>4}", "probe", "");
     for _ in 0..4 {
@@ -314,13 +316,19 @@ async fn main() -> Result<()> {
     let mut regressions: Vec<String> = Vec::new();
 
     for (query, relevant, probe, note) in SCENARIOS {
+        // Ablation ladder — each arm adds exactly ONE thing to the one before,
+        // so a movement can be attributed to the feature that caused it:
+        //   A  current scorer
+        //   B  + BM25 scoring (IDF, TF saturation, length norm), no stemming
+        //   C  + stemming
+        //   D  + fuzzy matching
+        // An earlier version had no "BM25 alone" cell, which made it
+        // impossible to tell whether BM25's *scoring* contributed anything
+        // independent of its tokenizer.
         let a = rank_current(query, &memories);
-        // B is pure BM25 with exact term matching (`Some(0)`); C adds AUTO
-        // fuzziness (`None`). Getting these the right way round is the whole
-        // point of separating the two arms.
-        let b = rank_bm25(&table, query, Some(0)).await?;
-        let c = rank_bm25(&table, query, None).await?;
-        let d = rank_bm25(&table_nostem, query, None).await?;
+        let b = rank_bm25(&table_nostem, query, Some(0)).await?;
+        let c = rank_bm25(&table, query, Some(0)).await?;
+        let d = rank_bm25(&table, query, None).await?;
 
         let entry = per_probe.entry(probe_name(*probe)).or_default();
         for (slot, ranked) in entry.iter_mut().zip([&a, &b, &c, &d]) {

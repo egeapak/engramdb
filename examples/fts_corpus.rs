@@ -157,6 +157,31 @@ pub const CORPUS: &[(&str, &str, &[&str], &str)] = &[
      "The log structured write path targets high rate sharded ingest and requires an explicit specification to be installed. Our write pattern is a single upsert per memory on a local store, so it stays off."),
     ("m48", "Blob columns are unused because content lives in files", &["storage"],
      "The large object storage path would matter if bodies were kept in the table. They are not; the table holds metadata and vectors, and the markdown file remains authoritative."),
+
+    // --- BM25 stress cases -------------------------------------------------
+    //
+    // The entries below exist to exercise BM25's *scoring* rather than its
+    // tokenizer: length normalisation and term-frequency saturation. Without
+    // them the corpus has no document where "matched a query word" and "is
+    // actually about that word" come apart, and a scorer with no notion of
+    // document length or term density can never be shown to be wrong.
+
+    // Deliberately long and unfocused: touches many topics in passing, so it
+    // collides with lots of queries while being the right answer to none of
+    // them. A scorer without length normalisation over-rewards it because it
+    // simply contains more words.
+    ("m49", "Onboarding notes covering the whole system", &["onboarding", "overview"],
+     "This is a broad tour for new contributors. It mentions the store and the memory files and the index and the daemon and the socket and the config and the schema and the migration and the reranker and the embedding model and the scoring formula and the decay strategies and the scope matching and the retrieval modes and the hooks and the CLI output and the telemetry counters and the garbage collection sweep and the compression candidates and the group stores and the audience lists and the build profiles and the linker and the fuzz targets and the release process. None of these are explained in any depth here; each has its own dedicated memory which should be preferred whenever a question is actually about that topic, because this page only names them in passing without describing behaviour, rationale, configuration, or failure modes."),
+
+    // Repeats a common term many times without being the best answer about
+    // it. Rewards raw term frequency; BM25 saturates, a linear count does not.
+    ("m50", "Meeting notes where the daemon came up repeatedly", &["notes"],
+     "We talked about the daemon. Someone asked whether the daemon should start automatically and whether the daemon should stop on idle and whether the daemon logs enough. The daemon came up again later when discussing the daemon socket and the daemon lifetime. No decisions were recorded about the daemon in this meeting; see the dedicated daemon memories for the actual behaviour."),
+
+    // Short and precise: the correct answer to a question that m49 and m50
+    // both partially collide with.
+    ("m51", "The idle timeout is configurable per deployment", &["daemon", "config"],
+     "Set the idle timeout in configuration to control how long an unused process lingers before exiting."),
 ];
 
 /// What retrieval property a scenario probes. Used to break the results down
@@ -176,6 +201,13 @@ pub enum Probe {
     Typo,
     /// Query terms are individually common but the combination is specific.
     Discrimination,
+    /// A long, unfocused document collides with the query while a short,
+    /// precise one is the real answer. Needs document-length normalisation —
+    /// a mechanism stemming cannot supply.
+    LengthNorm,
+    /// A document repeats a query term many times without being the best
+    /// answer about it. Needs term-frequency saturation.
+    TermFreq,
 }
 
 /// `(query, relevant ids, probe, note)`
@@ -361,6 +393,57 @@ pub const SCENARIOS: &[(&str, &[&str], Probe, &str)] = &[
         &["m26"],
         Probe::Discrimination,
         "'socket' appears in several",
+    ),
+    // -- Length normalisation: the sprawling m49 collides with all of these,
+    // -- naming each topic verbatim while explaining none of them.
+    (
+        "garbage collection sweep",
+        &["m32"],
+        Probe::LengthNorm,
+        "m49 name-drops it verbatim",
+    ),
+    (
+        "compression candidates",
+        &["m33"],
+        Probe::LengthNorm,
+        "m49 name-drops it verbatim",
+    ),
+    (
+        "decay strategies",
+        &["m21"],
+        Probe::LengthNorm,
+        "m49 name-drops it verbatim",
+    ),
+    (
+        "audience lists",
+        &["m41"],
+        Probe::LengthNorm,
+        "m49 name-drops it verbatim",
+    ),
+    (
+        "scope matching",
+        &["m20", "m23", "m24"],
+        Probe::LengthNorm,
+        "m49 name-drops it verbatim",
+    ),
+    // -- Term frequency: m50 says "daemon" six times but answers nothing ----
+    (
+        "daemon idle timeout",
+        &["m51", "m12"],
+        Probe::TermFreq,
+        "m50 repeats 'daemon'",
+    ),
+    (
+        "daemon socket",
+        &["m14", "m26", "m11"],
+        Probe::TermFreq,
+        "m50 uses this exact pair",
+    ),
+    (
+        "daemon lifetime",
+        &["m12"],
+        Probe::TermFreq,
+        "m50 uses this exact phrase",
     ),
 ];
 
