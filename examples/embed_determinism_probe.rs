@@ -21,7 +21,23 @@ use engramdb::embeddings::{
     ONNX_ALL_MINILM_Q,
 };
 
-const TEXT: &str = "hello";
+/// Inputs of increasing length: a single token, a short phrase, and a
+/// realistic memory-sized chunk. If reproducibility depends on sequence
+/// length, this shows it.
+const TEXTS: &[(&str, &str)] = &[
+    ("1tok", "hello"),
+    ("short", "the retrieval engine caches providers per process"),
+    (
+        "long",
+        "We chose LanceDB over Qdrant for the vector store because it embeds \
+         in-process with zero external services, supports the Arrow columnar \
+         format we already use for the metadata table, and lets a single table \
+         hold both the filterable metadata and the embedding vectors. The \
+         alternative would have meant running a separate service per project, \
+         which is unacceptable for a tool that has to start instantly inside a \
+         coding agent session and leave no daemon behind when it exits.",
+    ),
+];
 
 fn spread(vectors: &[Vec<f32>]) -> f32 {
     let mut worst = 0.0f32;
@@ -36,29 +52,49 @@ fn spread(vectors: &[Vec<f32>]) -> f32 {
     worst
 }
 
-async fn probe(name: &str, spec: OnnxModelSpec, iters: usize) -> Result<()> {
-    let Ok(provider) = OnnxProvider::with_model(spec) else {
+async fn probe(name: &str, spec: OnnxModelSpec, iters: usize, intra: usize) -> Result<()> {
+    let Ok(provider) =
+        OnnxProvider::with_model_on_intra(spec, engramdb::onnx_ep::Backend::Cpu, Some(intra))
+    else {
         println!("{name:<16} unavailable");
         return Ok(());
     };
-    let mut singles = Vec::new();
-    let mut batched = Vec::new();
-    for _ in 0..iters {
-        singles.push(provider.embed(TEXT).await?);
-        batched.push(provider.embed_batch(&[TEXT]).await?.remove(0));
+    for (label, text) in TEXTS {
+        let mut singles = Vec::new();
+        let mut batched = Vec::new();
+        for _ in 0..iters {
+            singles.push(provider.embed(text).await?);
+            batched.push(provider.embed_batch(&[text]).await?.remove(0));
+        }
+        // Cross-path: is embed() the same as a 1-element embed_batch()?
+        let mut both = singles.clone();
+        both.extend(batched.iter().cloned());
+        println!(
+            "  {name:<16} {label:<6} distinct: {:>2}/{:<3} | max spread {:.6} \
+             | min cosine {:.6}",
+            distinct(&both),
+            both.len(),
+            spread(&both),
+            min_pairwise_cosine(&both),
+        );
     }
-    // Cross-path: is embed() the same as a 1-element embed_batch()?
-    let mut both = singles.clone();
-    both.extend(batched.iter().cloned());
-    println!(
-        "{name:<16} max element spread — embed(): {:.6}  embed_batch(): {:.6}  both: {:.6}  \
-         | min pairwise cosine: {:.6}",
-        spread(&singles),
-        spread(&batched),
-        spread(&both),
-        min_pairwise_cosine(&both),
-    );
     Ok(())
+}
+
+/// How many *different* vectors the repeats produced. 1 = fully reproducible.
+/// A small number with a large spread means rare outliers, not drift.
+fn distinct(vectors: &[Vec<f32>]) -> usize {
+    let mut seen: Vec<&Vec<f32>> = Vec::new();
+    for v in vectors {
+        if !seen.iter().any(|s| {
+            s.iter()
+                .zip(v.iter())
+                .all(|(a, b)| (a - b).abs() < f32::EPSILON)
+        }) {
+            seen.push(v);
+        }
+    }
+    seen.len()
 }
 
 /// The retrieval-relevant question: do the repeats still point the same way?
@@ -102,10 +138,17 @@ async fn main() -> Result<()> {
         }));
     }
 
-    println!("max element-wise spread over {iters} repeats of {TEXT:?} (load threads: {load})");
-    probe("minilm-l6-q", ONNX_ALL_MINILM_Q, iters).await?;
-    probe("minilm-l12-q", ONNX_ALL_MINILM_L12_Q, iters).await?;
-    probe("minilm-l6-fp32", ONNX_ALL_MINILM, iters).await?;
+    println!(
+        "{iters} repeats x {} texts, per (model, intra_threads). \
+         background load threads: {load}",
+        TEXTS.len()
+    );
+    for intra in [1usize, 2, 4] {
+        println!("-- intra_threads = {intra} --");
+        probe("minilm-l6-q", ONNX_ALL_MINILM_Q, iters, intra).await?;
+        probe("minilm-l12-q", ONNX_ALL_MINILM_L12_Q, iters, intra).await?;
+        probe("minilm-l6-fp32", ONNX_ALL_MINILM, iters, intra).await?;
+    }
 
     stop.store(true, Ordering::Relaxed);
     for h in handles {

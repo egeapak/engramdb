@@ -78,8 +78,8 @@ use crate::embeddings::{
 };
 #[cfg(feature = "onnxruntime")]
 use crate::embeddings::{
-    OnnxModelSpec, OnnxProvider, DEFAULT_ONNX_EMBEDDING, ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_Q,
-    ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT,
+    OnnxModelSpec, OnnxProvider, DEFAULT_ONNX_EMBEDDING, ONNX_ALL_MINILM_L12,
+    ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_Q, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT,
 };
 #[cfg(feature = "tract")]
 use crate::embeddings::{
@@ -215,6 +215,19 @@ fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
         "all-minilm-l12" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_ALL_MINILM_L12_Q,
+            #[cfg(feature = "tract")]
+            tract: Some(TRACT_ALL_MINILM_L12),
+            #[cfg(feature = "ollama")]
+            ollama: ALL_MINILM,
+        },
+        // The reproducible option. int8 embeddings are not deterministic under
+        // CPU load — the same text can embed to materially different vectors,
+        // and those vectors are persisted — while fp32 is bit-exact in every
+        // condition measured. Costs ~4x the disk and ~1.3x the latency. See
+        // `docs/contributors/embedding-model-alternatives.md` (R6).
+        "all-minilm-l12-fp32" => ProviderSpecs {
+            #[cfg(feature = "onnxruntime")]
+            onnx: ONNX_ALL_MINILM_L12,
             #[cfg(feature = "tract")]
             tract: Some(TRACT_ALL_MINILM_L12),
             #[cfg(feature = "ollama")]
@@ -1204,6 +1217,7 @@ mod tests {
         assert!(provider_specs("all-minilm").is_some());
         assert!(provider_specs("all-minilm-l6").is_some());
         assert!(provider_specs("all-minilm-l12").is_some());
+        assert!(provider_specs("all-minilm-l12-fp32").is_some());
         assert!(provider_specs("nomic-embed-text").is_some());
         assert!(provider_specs("mxbai-embed-large").is_some());
         assert!(provider_specs("definitely-not-a-model").is_none());
@@ -1225,6 +1239,13 @@ mod tests {
         // Same dimensionality across the family: swapping depth needs a
         // re-embed, never a schema or config change.
         assert_eq!(l6.dimensions, l12.dimensions);
+
+        // The reproducible fp32 pin is the same model at a different
+        // precision, and must fingerprint distinctly so a switch reindexes.
+        let fp32 = expected_embedding_fingerprint(&onnx_config("all-minilm-l12-fp32")).unwrap();
+        assert_eq!(fp32.model, "onnx/all-MiniLM-L12-v2");
+        assert_ne!(fp32.model, l12.model);
+        assert_eq!(fp32.dimensions, l12.dimensions);
     }
 
     #[cfg(feature = "onnxruntime")]

@@ -251,48 +251,70 @@ recommendation.
   here; if create latency ever becomes the complaint, the decode-step count and
   the `keyword` fallback are the levers, not a different model.
 
-### R6 · int8 embeddings are not reproducible under CPU load — fp32 is
+### R6 · int8 embeddings are not reproducible under CPU load — fp32 is, and thread pinning does not help
 
 R2 treated run-to-run ranking drift as a measurement nuisance. Chasing an
 intermittent failure of `embeddings::onnx::tests::test_embed_consistency`
-showed it is more than that. `examples/embed_determinism_probe.rs` embeds one
-text 30 times through a single provider and reports the spread:
+showed it is much more than that. `examples/embed_determinism_probe.rs` embeds
+one text 30 times through a single provider, on both the `embed()` and
+`embed_batch()` paths (60 vectors), and counts how many are actually distinct.
 
-| Model | idle: max element spread | idle: min pairwise cosine | 8 busy threads: max spread | 8 busy threads: min cosine |
+With 8 background threads saturating a 4-core host:
+
+| Model | intra_threads | 1-token text | short text | long text (realistic chunk) |
 |---|---|---|---|---|
-| `all-MiniLM-L6-v2-q` (int8, old default) | 0.000000 | 1.000000 | 0.131810 | **0.567** |
-| `all-MiniLM-L12-v2-q` (int8, new default) | 0.012851 | 0.998040 | 0.036983 | **0.969** |
-| `all-MiniLM-L6-v2` (**fp32**) | 0.000000 | **1.000000** | 0.000000 | **1.000000** |
+| `all-MiniLM-L6-v2-q` (int8) | 1 | 3 distinct, cos 0.33 | 2, cos 1.00 | **23 distinct, cos −0.03** |
+| `all-MiniLM-L6-v2-q` (int8) | 2 | 1, cos 1.00 | 2, cos 1.00 | **23 distinct, cos 0.45** |
+| `all-MiniLM-L6-v2-q` (int8) | 4 | 2, cos 0.98 | 4, cos 0.90 | **20 distinct, cos 0.33** |
+| `all-MiniLM-L12-v2-q` (int8) | 1 | 7, cos 0.98 | 3, cos 0.98 | **45 distinct, cos 0.32** |
+| `all-MiniLM-L12-v2-q` (int8) | 2 | 8, cos 0.29 | 8, cos 0.14 | **31 distinct, cos 0.46** |
+| `all-MiniLM-L12-v2-q` (int8) | 4 | 6, cos 0.01 | 11, cos −0.03 | **43 distinct, cos −0.07** |
+| **`all-MiniLM-L6-v2` (fp32)** | **1 / 2 / 4** | **1, cos 1.000000** | **1, cos 1.000000** | **1, cos 1.000000** |
 
-A pairwise cosine of 0.567 between two embeddings of the same string is not
-rounding — it is a different vector. The full test suite (heavier, more varied
-contention than the probe's synthetic load) has produced 0.71 across the
-`embed()` / `embed_batch()` paths on the L12 default.
+Counts are distinct vectors out of 60; `cos` is the minimum pairwise cosine.
+A cosine of −0.07 between two embeddings of the *same string* is not
+round-off — the vectors are unrelated. At idle, everything except one L12 cell
+is reproducible, so this is specifically a **contention-triggered, int8-only**
+failure that gets worse with sequence length.
+
+**Thread pinning does not fix it.** That was the leading hypothesis (the Python
+mirror of this harness became bit-identical at `intra_op_num_threads = 1`), and
+`fastembed`'s `InitOptions::with_intra_threads` makes it a one-line change — but
+measured across 1, 2 and 4 intra-op threads the int8 models are broken at every
+setting, and 1 thread is not even the best of them. fp32 is exact at all three.
+The pattern (int8 only, load-triggered, worse with longer sequences, indifferent
+to thread count) points at the quantized kernels' buffer handling rather than
+reduction order, but this pass did not isolate it further.
 
 **Why it matters.** Vectors are computed once at create time and persisted. A
-memory written while the machine is busy — which is exactly when a coding agent
-is running builds and tests — can be indexed with a degraded vector, and no
-warning fires because nothing is comparing it to anything. This is a plausible
-contributor to the pre-existing flakes CLAUDE.md already documents around
-semantic-query tests.
+memory written while the machine is busy — exactly when a coding agent is
+running builds and tests — can be indexed with a vector unrelated to its text,
+and nothing warns, because nothing compares it to anything afterwards.
 
-**Likely cause** is ONNX Runtime's multi-threaded execution of the dynamically
-quantized kernels: the Python mirror of this harness went from ±0.1 MRR
-run-to-run to bit-identical across three runs purely by setting
-`intra_op_num_threads = 1`. fp32 being exact under the same threading points
-the same way — it is the quantized path specifically.
+**What shipped here.**
 
-**Not fixed here**, because the plausible fixes trade against latency and
-deserve their own measurement: pinning ORT's intra-op threads for the embedding
-session (the repo already has this plumbing for T5 via `intra_threads`), or
-moving the default to fp32 (128 MB and ~1.3× slower for L12, but exact). What
-this pass did do is stop asserting a determinism that does not exist:
-`test_embed_consistency` and `test_embed_batch_single_matches_embed` now assert
-a loose cosine floor as a wiring check, and a new `fp32_embedding_is_bit_exact`
-carries the real determinism guard on the model that actually provides it.
+- The knob, without the default change: `ENGRAMDB_ONNX_INTRA_THREADS` now also
+  applies to the `fastembed` embedding sessions (it previously only reached the
+  directly-built NLI/T5 sessions) via `engram_onnx::intra_threads_override`.
+  The *default* is deliberately left as ONNX Runtime's own, because pinning
+  buys no determinism and `engram_onnx::intra_threads()` (cores/2) benchmarks
+  **1.7× slower on the batch/create path** (39.3 vs 23.0 ms/text for L12-q).
+- An escape hatch: `[embeddings].provider = "all-minilm-l12-fp32"` selects the
+  bit-exact fp32 build of the default model. Costs ~4× the disk (128 MB) and
+  ~1.3× the latency, and fingerprints distinctly so switching triggers a
+  reindex.
+- Honest tests. `test_embed_consistency` asserted 1e-6 element-wise equality on
+  the int8 default; no cosine floor is safe there either, since the measured
+  minimum reaches 0. It is now `test_embed_returns_usable_vector` (right shape,
+  finite, non-zero — the wiring regression those tests actually guard), and the
+  real determinism guard lives in `fp32_embedding_is_bit_exact`, on the model
+  that provides it.
 
-L12-q's much better worst case (0.969 vs 0.567) is an independent argument for
-recommendation 2, separate from its ranking quality.
+**Not resolved:** whether to move the default to fp32. That trades 96 MB and
+~30% embed latency for correctness under load, and these numbers come from one
+platform (x86_64 Linux, ORT 1.24.2 from the pyke prebuilt) — the int8 kernels
+differ on Apple silicon, so the finding should be reproduced there before a
+default changes. Run the probe on the target platform to decide.
 
 ## Caveats
 

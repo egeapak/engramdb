@@ -82,11 +82,25 @@ fn default_intra_threads() -> usize {
 /// `ENGRAMDB_ONNX_INTRA_THREADS` (e.g. `=1` to restore the old serial
 /// behavior, or higher to experiment).
 pub fn intra_threads() -> usize {
+    intra_threads_override().unwrap_or_else(default_intra_threads)
+}
+
+/// The explicitly configured intra-op thread count, or `None` when
+/// `ENGRAMDB_ONNX_INTRA_THREADS` is unset.
+///
+/// For sessions we build ourselves (NLI, T5) there is no "leave it alone"
+/// option — a `SessionBuilder` needs a number — so those use
+/// [`intra_threads`]. `fastembed` sessions (embeddings, reranker) are
+/// different: not calling `with_intra_threads` leaves ONNX Runtime's own
+/// default in place, which benchmarks as ~1.7× faster on the batch path than
+/// [`default_intra_threads`] on a 4-core host. So they honor the env override
+/// when it is set and otherwise keep ORT's default, which is what this
+/// accessor expresses.
+pub fn intra_threads_override() -> Option<usize> {
     std::env::var("ENGRAMDB_ONNX_INTRA_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n != 0)
-        .unwrap_or_else(default_intra_threads)
 }
 
 #[cfg(all(feature = "coreml", target_os = "macos"))]

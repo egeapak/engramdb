@@ -9,6 +9,7 @@ Every memory is embedded as one **metadata vector** (`"{title}. {summary}. tags:
 | `all-minilm` (alias `onnx`) | ONNX / tract | 384 | **Default.** Tracks the shipped default model — today all-MiniLM-**L12**-v2 int8, ~33 MB. |
 | `all-minilm-l12` | ONNX / tract | 384 | Pins the 12-layer model explicitly. Same thing as the default today. |
 | `all-minilm-l6` | ONNX / tract | 384 | Pins the 6-layer model (~22 MB) — the pre-L12 default. ~2× faster to embed, measurably worse ranking. Use to stay put across a default change without reindexing. |
+| `all-minilm-l12-fp32` | ONNX / tract | 384 | The **bit-reproducible** build of the default model (~128 MB, ~1.3× slower). The int8 models can return different vectors for the same text when the machine is under load; fp32 cannot. See [embedding-model-alternatives.md](../contributors/embedding-model-alternatives.md) (R6). |
 | `nomic-embed-text` | ONNX or Ollama | 768 | Better quality, longer context support, slower. |
 | `mxbai-embed-large` | ONNX or Ollama | 1024 | Best quality, biggest model, slowest. |
 

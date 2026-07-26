@@ -164,11 +164,29 @@ impl OnnxProvider {
     }
 
     /// Create a new ONNX provider with the specified model on an explicit
-    /// execution backend.
+    /// execution backend, honoring `ENGRAMDB_ONNX_INTRA_THREADS` when set and
+    /// otherwise leaving ONNX Runtime's own thread default in place.
     ///
     /// Used by the benchmark suite to compare CPU vs Core ML on identical
     /// workloads; production code should use [`OnnxProvider::with_model`].
     pub fn with_model_on(spec: OnnxModelSpec, backend: engram_onnx::Backend) -> Result<Self> {
+        Self::with_model_on_intra(spec, backend, engram_onnx::intra_threads_override())
+    }
+
+    /// Create a provider with an explicit intra-op thread count (`None` leaves
+    /// ONNX Runtime's default).
+    ///
+    /// Exposed mainly for `examples/embed_determinism_probe.rs`. Note that
+    /// thread count is **not** the lever it looks like: the int8 models are
+    /// irreproducible under CPU load at 1, 2 *and* 4 intra-op threads (the
+    /// probe measures up to 45 distinct vectors across 60 embeddings of one
+    /// text, with pairwise cosine reaching 0), while fp32 is bit-exact in every
+    /// condition. See `docs/contributors/embedding-model-alternatives.md` (R6).
+    pub fn with_model_on_intra(
+        spec: OnnxModelSpec,
+        backend: engram_onnx::Backend,
+        intra_threads: Option<usize>,
+    ) -> Result<Self> {
         let cache_dir =
             engram_storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -194,6 +212,9 @@ impl OnnxProvider {
         let mut options = InitOptions::new(spec.fastembed_model)
             .with_cache_dir(cache_dir)
             .with_max_length(spec.max_tokens);
+        if let Some(n) = intra_threads {
+            options = options.with_intra_threads(n.max(1));
+        }
         let eps = engram_onnx::providers_for(backend);
         if !eps.is_empty() {
             options = options.with_execution_providers(eps);
@@ -386,69 +407,40 @@ mod tests {
         }
     }
 
-    /// Agreement floor for "the same text embeds to the same vector" **on the
-    /// int8 default**.
-    ///
-    /// These two assertions used to demand element-wise equality within 1e-6,
-    /// and flaked. That bound was never sound: the int8 models are not
-    /// reproducible on a busy machine. `examples/embed_determinism_probe.rs`
-    /// embeds one text 30 times through one provider and reports, under CPU
-    /// saturation, a minimum pairwise cosine of 0.97 (L12 default) and 0.57
-    /// (the older L6 int8 model); the full test suite has produced 0.71. The
-    /// fp32 model is bit-exact in every condition — see
-    /// [`fp32_embedding_is_bit_exact`], which is where the real determinism
-    /// guard now lives.
-    ///
-    /// So this floor is deliberately loose. It is not a quality bar; it is a
-    /// wiring check that still fails loudly for what these tests exist to catch
-    /// — a provider returning a zero or unrelated vector (cosine ≈ 0). Tighten
-    /// it only if the underlying instability is fixed (e.g. by pinning ORT's
-    /// intra-op thread count). See
-    /// `docs/contributors/embedding-model-alternatives.md` (R6).
-    const CONSISTENCY_MIN_COSINE: f32 = 0.4;
-
-    fn cosine(a: &[f32], b: &[f32]) -> f32 {
-        let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-        let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if na == 0.0 || nb == 0.0 {
-            return 0.0;
-        }
-        dot / (na * nb)
-    }
-
+    /// The int8 default cannot be asserted reproducible — see
+    /// [`fp32_embedding_is_bit_exact`] for why, and
+    /// `docs/contributors/embedding-model-alternatives.md` (R6) for the data.
+    /// What *is* guaranteed is that a call returns a usable vector, so that is
+    /// what this checks: right shape, finite, non-degenerate. It still fails
+    /// for the regression these tests were written to catch — a provider
+    /// wired to return zeros or garbage.
     #[tokio::test]
-    async fn test_embed_consistency() {
+    async fn test_embed_returns_usable_vector() {
         if let Some(provider) = try_provider() {
-            let text = "hello";
-            let embedding1 = provider.embed(text).await.unwrap();
-            let embedding2 = provider.embed(text).await.unwrap();
-
-            assert_eq!(embedding1.len(), embedding2.len());
-            let cos = cosine(&embedding1, &embedding2);
-            assert!(
-                cos >= CONSISTENCY_MIN_COSINE,
-                "repeated embed() diverged: cosine {cos} < {CONSISTENCY_MIN_COSINE}"
-            );
+            for text in ["hello", "the retrieval engine caches providers"] {
+                let v = provider.embed(text).await.unwrap();
+                assert_eq!(v.len(), provider.dimensions());
+                assert!(v.iter().all(|x| x.is_finite()), "embedding must be finite");
+                assert!(
+                    v.iter().any(|&x| x != 0.0),
+                    "embedding must not be all zeros"
+                );
+            }
         }
     }
 
+    /// `embed` and a one-element `embed_batch` must run the *same* path. They
+    /// cannot be asserted bit-equal on the int8 default (R6), so this asserts
+    /// the structural equivalence that does hold; the numerical equivalence is
+    /// covered on fp32 by [`fp32_embedding_is_bit_exact`].
     #[tokio::test]
     async fn test_embed_batch_single_matches_embed() {
         if let Some(provider) = try_provider() {
             let text = "test text";
-            let single_embedding = provider.embed(text).await.unwrap();
-            let batch_embeddings = provider.embed_batch(&[text]).await.unwrap();
-
-            assert_eq!(batch_embeddings.len(), 1);
-            let batch_embedding = &batch_embeddings[0];
-
-            assert_eq!(single_embedding.len(), batch_embedding.len());
-            let cos = cosine(&single_embedding, batch_embedding);
-            assert!(
-                cos >= CONSISTENCY_MIN_COSINE,
-                "embed() and embed_batch() diverged: cosine {cos} < {CONSISTENCY_MIN_COSINE}"
-            );
+            let single = provider.embed(text).await.unwrap();
+            let batch = provider.embed_batch(&[text]).await.unwrap();
+            assert_eq!(batch.len(), 1);
+            assert_eq!(single.len(), batch[0].len());
         }
     }
 
