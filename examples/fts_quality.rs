@@ -17,19 +17,17 @@
 //!
 //! ## What is compared
 //!
+//! An ablation ladder — each arm adds exactly ONE thing to the one before, so
+//! a movement is attributable to the feature that caused it:
+//!
 //! * **A — current**: `engramdb::search::keyword_search` over loaded memories.
-//! * **B — BM25**: a LanceDB inverted index over `summary` / `tags` / `content`
-//!   with stemming and stop-word removal on, queried as a boolean should-query
-//!   whose three clauses carry the same 3/2/1 field boosts, so the *intent* of
-//!   the existing weighting is preserved and only the term-weighting model
-//!   changes.
-//! * **C — BM25 + fuzzy**: as B, with AUTO fuzziness, to isolate how much of
-//!   any win is typo tolerance rather than IDF/stemming.
-//! * **D — fuzzy, no stemming**: a second index built with `stem(false)`.
-//!   Fuzzy matching compares the query term against the terms actually stored
-//!   in the index, which are *stems* when stemming is on, so the two features
-//!   can interfere. D tells stemming and fuzziness apart instead of leaving a
-//!   null result ambiguous.
+//! * **B — + BM25 scoring**: a LanceDB inverted index over `summary` / `tags` /
+//!   `content` with stemming OFF, queried as a boolean should-query whose three
+//!   clauses carry the same 3/2/1 field boosts. Only the term-weighting model
+//!   changes (IDF, term-frequency saturation, length normalisation), so this
+//!   arm isolates BM25's *scoring* from its tokenizer.
+//! * **C — + stemming**: as B with `stem(true)`.
+//! * **D — + fuzzy**: as C with AUTO fuzziness.
 //!
 //! Metrics are Recall@1, Recall@5 and MRR, reported per probe category so a
 //! win can be attributed to a mechanism instead of being a single average that
@@ -264,6 +262,7 @@ fn probe_name(p: Probe) -> &'static str {
         Probe::Discrimination => "Discrimination",
         Probe::LengthNorm => "LengthNorm",
         Probe::TermFreq => "TermFreq",
+        Probe::TieBreak => "TieBreak",
     }
 }
 

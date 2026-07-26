@@ -182,6 +182,33 @@ pub const CORPUS: &[(&str, &str, &[&str], &str)] = &[
     // both partially collide with.
     ("m51", "The idle timeout is configurable per deployment", &["daemon", "config"],
      "Set the idle timeout in configuration to control how long an unused process lingers before exiting."),
+
+    // --- Tie-break pairs ---------------------------------------------------
+    //
+    // Each pair is constructed so the CURRENT scorer must score both members
+    // *identically*: the summaries contain the same query terms, and both
+    // contents contain every query term at least once. Because the scorer
+    // compares distinct-token sets, "mentions it once in passing" and "is
+    // entirely about it" are indistinguishable. The decoy is listed first so
+    // an exact tie resolves the wrong way under a stable sort.
+
+    // Pair A — query "retry policy"
+    ("m52", "Retry policy came up in an old design review", &["notes"],
+     "A wide ranging review covering deployment, packaging, logging, metrics, alerting, the release checklist, the rollback procedure, the on call rotation, and the escalation path. The retry policy was mentioned once and deferred without a decision being recorded anywhere in this document."),
+    ("m53", "Retry policy for transient network failures", &["reliability", "decision"],
+     "The retry policy applies to transient network failures. Retry three times with exponential backoff, and treat a retry budget exhaustion as a hard failure. This policy is the one to follow."),
+
+    // Pair B — query "cache invalidation"
+    ("m54", "Cache invalidation was raised during onboarding", &["notes"],
+     "New joiners ask about many subsystems: the build, the test harness, the linter, the formatter, the documentation site, the changelog, the issue triage rota, and the support handover. Cache invalidation came up briefly and was answered verbally."),
+    ("m55", "Cache invalidation happens on config change", &["config", "decision"],
+     "Cache invalidation is triggered whenever a model affecting field changes. The cache key covers the fields that alter results, so invalidation is precise rather than wholesale."),
+
+    // Pair C — query "backpressure"
+    ("m56", "Backpressure listed among future work", &["notes"],
+     "The roadmap section enumerates possible directions including sharding, tiering, replication, quotas, auditing, multi tenancy, and cost accounting. Backpressure appears in that list with no further detail."),
+    ("m57", "Backpressure is applied by bounding the queue", &["performance", "decision"],
+     "Backpressure comes from a bounded queue. When the queue is full the producer blocks, which propagates backpressure upstream instead of growing memory without limit."),
 ];
 
 /// What retrieval property a scenario probes. Used to break the results down
@@ -208,6 +235,16 @@ pub enum Probe {
     /// A document repeats a query term many times without being the best
     /// answer about it. Needs term-frequency saturation.
     TermFreq,
+    /// Two documents whose *summaries* match the query identically, differing
+    /// only in how strongly the content is about it. The current scorer
+    /// compares distinct-token sets per field, so once both contents contain
+    /// the query terms at all the scores are exactly equal and the winner is
+    /// decided by store order — an arbitrary tiebreak. BM25 can separate them
+    /// on term density and length.
+    ///
+    /// The decoy is placed FIRST in the corpus in each pair, so a genuine tie
+    /// surfaces as a miss rather than being masked by stable-sort luck.
+    TieBreak,
 }
 
 /// `(query, relevant ids, probe, note)`
@@ -444,6 +481,25 @@ pub const SCENARIOS: &[(&str, &[&str], Probe, &str)] = &[
         &["m12"],
         Probe::TermFreq,
         "m50 uses this exact phrase",
+    ),
+    // -- Tie-break: summaries match equally, only content density differs ---
+    (
+        "retry policy",
+        &["m53"],
+        Probe::TieBreak,
+        "m52 mentions it once; both summaries carry both terms",
+    ),
+    (
+        "cache invalidation",
+        &["m55"],
+        Probe::TieBreak,
+        "m54 mentions it once; both summaries carry both terms",
+    ),
+    (
+        "backpressure",
+        &["m57"],
+        Probe::TieBreak,
+        "m56 lists it; both summaries carry the term",
     ),
 ];
 
