@@ -18,7 +18,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use engramdb::embeddings::{
     EmbeddingProvider, OnnxModelSpec, OnnxProvider, ONNX_ALL_MINILM, ONNX_ALL_MINILM_L12_Q,
-    ONNX_ALL_MINILM_Q,
+    ONNX_ALL_MINILM_L12_U8, ONNX_ALL_MINILM_Q,
 };
 
 /// Inputs of increasing length: a single token, a short phrase, and a
@@ -143,11 +143,31 @@ async fn main() -> Result<()> {
          background load threads: {load}",
         TEXTS.len()
     );
-    for intra in [1usize, 2, 4] {
+    // One model per process is the point of PROBE_MODELS: loading several ORT
+    // sessions in one process is itself a source of contention, so a clean
+    // single-model reading needs the others out of the way.
+    let filter: Option<Vec<String>> = std::env::var("PROBE_MODELS")
+        .ok()
+        .map(|s| s.split(',').map(|m| m.trim().to_string()).collect());
+    let want = |k: &str| filter.as_ref().is_none_or(|f| f.iter().any(|m| m == k));
+    let intras: Vec<usize> = std::env::var("PROBE_INTRA")
+        .ok()
+        .map(|s| s.split(',').filter_map(|n| n.trim().parse().ok()).collect())
+        .unwrap_or_else(|| vec![1, 2, 4]);
+    for intra in intras {
         println!("-- intra_threads = {intra} --");
-        probe("minilm-l6-q", ONNX_ALL_MINILM_Q, iters, intra).await?;
-        probe("minilm-l12-q", ONNX_ALL_MINILM_L12_Q, iters, intra).await?;
-        probe("minilm-l6-fp32", ONNX_ALL_MINILM, iters, intra).await?;
+        if want("minilm-l6-q") {
+            probe("minilm-l6-q", ONNX_ALL_MINILM_Q, iters, intra).await?;
+        }
+        if want("minilm-l12-q") {
+            probe("minilm-l12-q", ONNX_ALL_MINILM_L12_Q, iters, intra).await?;
+        }
+        if want("minilm-l12-u8") {
+            probe("minilm-l12-u8", ONNX_ALL_MINILM_L12_U8, iters, intra).await?;
+        }
+        if want("minilm-l6-fp32") {
+            probe("minilm-l6-fp32", ONNX_ALL_MINILM, iters, intra).await?;
+        }
     }
 
     stop.store(true, Ordering::Relaxed);

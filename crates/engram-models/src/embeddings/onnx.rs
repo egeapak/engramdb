@@ -6,6 +6,20 @@ use async_trait::async_trait;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use std::sync::{Arc, Mutex};
 
+/// An ONNX export that `fastembed`'s built-in registry doesn't point at, loaded
+/// through its user-defined-model path instead.
+///
+/// Needed because the registry hardcodes one file per model, and for the MiniLM
+/// family that file is the **signed-int8** `model_quantized.onnx` — the export
+/// that ONNX Runtime cannot execute reproducibly (see [`ONNX_ALL_MINILM_L12_U8`]).
+#[derive(Debug, Clone, Copy)]
+pub struct HfModelFile {
+    /// HuggingFace repo id.
+    pub repo: &'static str,
+    /// ONNX file within the repo.
+    pub model_file: &'static str,
+}
+
 /// Specification for a fastembed-supported ONNX model.
 #[derive(Debug, Clone)]
 pub struct OnnxModelSpec {
@@ -16,6 +30,11 @@ pub struct OnnxModelSpec {
     /// detect model swaps. Distinguishes fp32 vs int8. Used as
     /// `onnx/<name>` in the embedding fingerprint.
     pub name: &'static str,
+    /// When set, load this file via `hf-hub` + `TextEmbedding::try_new_from_user_defined`
+    /// instead of whatever `fastembed_model` resolves to in fastembed's registry.
+    /// `fastembed_model` is still used for the pooling and quantization
+    /// metadata, so it must name the same architecture.
+    pub hf_override: Option<HfModelFile>,
 }
 
 /// all-MiniLM-L6-v2: 384-dimensional, 256 token context (fp32).
@@ -24,6 +43,7 @@ pub const ONNX_ALL_MINILM: OnnxModelSpec = OnnxModelSpec {
     dimensions: 384,
     max_tokens: 256,
     name: "all-MiniLM-L6-v2",
+    hf_override: None,
 };
 
 /// all-MiniLM-L6-v2 int8-quantized (`Xenova/all-MiniLM-L6-v2`,
@@ -36,6 +56,7 @@ pub const ONNX_ALL_MINILM_Q: OnnxModelSpec = OnnxModelSpec {
     dimensions: 384,
     max_tokens: 256,
     name: "all-MiniLM-L6-v2-q",
+    hf_override: None,
 };
 
 /// nomic-embed-text-v1.5: 768-dimensional, 8192 token context.
@@ -44,6 +65,7 @@ pub const ONNX_NOMIC_EMBED_TEXT: OnnxModelSpec = OnnxModelSpec {
     dimensions: 768,
     max_tokens: 8192,
     name: "nomic-embed-text-v1.5",
+    hf_override: None,
 };
 
 /// nomic-embed-text-v1.5 int8-quantized (same repo, `onnx/model_quantized.onnx`,
@@ -54,6 +76,7 @@ pub const ONNX_NOMIC_EMBED_TEXT_Q: OnnxModelSpec = OnnxModelSpec {
     dimensions: 768,
     max_tokens: 8192,
     name: "nomic-embed-text-v1.5-q",
+    hf_override: None,
 };
 
 /// bge-small-en-v1.5 int8-quantized (`Qdrant/bge-small-en-v1.5-onnx-Q`,
@@ -65,6 +88,7 @@ pub const ONNX_BGE_SMALL_EN_Q: OnnxModelSpec = OnnxModelSpec {
     dimensions: 384,
     max_tokens: 512,
     name: "bge-small-en-v1.5-q",
+    hf_override: None,
 };
 
 /// snowflake-arctic-embed-xs int8-quantized (`snowflake/snowflake-arctic-embed-xs`,
@@ -77,6 +101,7 @@ pub const ONNX_ARCTIC_XS_Q: OnnxModelSpec = OnnxModelSpec {
     dimensions: 384,
     max_tokens: 512,
     name: "snowflake-arctic-embed-xs-q",
+    hf_override: None,
 };
 
 /// snowflake-arctic-embed-xs **fp32** (`snowflake/snowflake-arctic-embed-xs`,
@@ -91,6 +116,7 @@ pub const ONNX_ARCTIC_XS: OnnxModelSpec = OnnxModelSpec {
     dimensions: 384,
     max_tokens: 256,
     name: "snowflake-arctic-embed-xs",
+    hf_override: None,
 };
 
 /// snowflake-arctic-embed-s int8-quantized (`snowflake/snowflake-arctic-embed-s`,
@@ -102,6 +128,7 @@ pub const ONNX_ARCTIC_S_Q: OnnxModelSpec = OnnxModelSpec {
     dimensions: 384,
     max_tokens: 512,
     name: "snowflake-arctic-embed-s-q",
+    hf_override: None,
 };
 
 /// all-MiniLM-L12-v2 int8-quantized (`Xenova/all-MiniLM-L12-v2`,
@@ -113,6 +140,7 @@ pub const ONNX_ALL_MINILM_L12_Q: OnnxModelSpec = OnnxModelSpec {
     dimensions: 384,
     max_tokens: 256,
     name: "all-MiniLM-L12-v2-q",
+    hf_override: None,
 };
 
 /// all-MiniLM-L12-v2 **fp32** (`Xenova/all-MiniLM-L12-v2`, `onnx/model.onnx`,
@@ -124,6 +152,7 @@ pub const ONNX_ALL_MINILM_L12: OnnxModelSpec = OnnxModelSpec {
     dimensions: 384,
     max_tokens: 256,
     name: "all-MiniLM-L12-v2",
+    hf_override: None,
 };
 
 /// mxbai-embed-large-v1: 1024-dimensional, 512 token context.
@@ -132,26 +161,89 @@ pub const ONNX_MXBAI_EMBED_LARGE: OnnxModelSpec = OnnxModelSpec {
     dimensions: 1024,
     name: "mxbai-embed-large-v1",
     max_tokens: 512,
+    hf_override: None,
+};
+
+/// all-MiniLM-L12-v2 **uint8**-quantized (`Xenova/all-MiniLM-L12-v2`,
+/// `onnx/model_uint8.onnx`, ~32 MB — same size as the int8 export).
+///
+/// This is the quantized export that is actually *correct*. ONNX Runtime cannot
+/// execute the signed-int8 MiniLM exports reproducibly: under CPU contention the
+/// same text comes back as a materially different vector (measured: 26/30
+/// distinct embeddings of one string, minimum pairwise cosine −0.03, cosine
+/// against fp32 as low as 0.03). That is
+/// [onnxruntime#6004](https://github.com/microsoft/onnxruntime/issues/6004) —
+/// signed-int8 quantized models read uninitialized memory, confirmed under
+/// valgrind, while **uint8 models are unaffected**. Our exports were exactly the
+/// reported shape: `DynamicQuantizeLinear` + `MatMulInteger` over signed INT8
+/// initializers.
+///
+/// Measured on the uint8 export, same corpus and load: **1/60 distinct
+/// (cosine 1.000000)** — bit-reproducible at every thread count — and *better*
+/// retrieval than the int8 export it replaces (MRR@10 0.969 vs 0.948, P@1 0.958
+/// vs 0.917), edging fp32 (0.958) at a quarter of its size.
+///
+/// **Caveat — the runtime matters as much as the export.** Those reproducibility
+/// numbers hold on the *official* ONNX Runtime build. On the pyke prebuilt that
+/// `ort`'s `download-binaries` feature ships (tested 1.24.2 and 1.24.4, the
+/// newest compatible with the pinned `ort` 2.0.0-rc.12), **uint8 is corrupted
+/// too** — 44/60 distinct. Same file, same CPU, only the linked runtime differs.
+/// So on a stock build this spec is chosen for its quality and for being the
+/// export that is correct once the runtime is fixed, *not* because it is
+/// reproducible there. `provider = "all-minilm-l12-fp32"` is the
+/// correctness-first option on a stock build. See
+/// `docs/contributors/embedding-model-alternatives.md` (R6).
+pub const ONNX_ALL_MINILM_L12_U8: OnnxModelSpec = OnnxModelSpec {
+    // The int8 variant supplies the right pooling (Mean) and quantization
+    // (Dynamic) metadata; `hf_override` swaps only the weights file.
+    fastembed_model: EmbeddingModel::AllMiniLML12V2Q,
+    dimensions: 384,
+    max_tokens: 256,
+    name: "all-MiniLM-L12-v2-u8",
+    hf_override: Some(HfModelFile {
+        repo: "Xenova/all-MiniLM-L12-v2",
+        model_file: "onnx/model_uint8.onnx",
+    }),
+};
+
+/// all-MiniLM-L6-v2 **uint8**-quantized (`Xenova/all-MiniLM-L6-v2`,
+/// `onnx/model_uint8.onnx`, ~22 MB). The 6-layer counterpart of
+/// [`ONNX_ALL_MINILM_L12_U8`], for `provider = "all-minilm-l6"` — reproducible
+/// for the same reason, MRR@10 0.943 on the corpus.
+pub const ONNX_ALL_MINILM_L6_U8: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::AllMiniLML6V2Q,
+    dimensions: 384,
+    max_tokens: 256,
+    name: "all-MiniLM-L6-v2-u8",
+    hf_override: Some(HfModelFile {
+        repo: "Xenova/all-MiniLM-L6-v2",
+        model_file: "onnx/model_uint8.onnx",
+    }),
 };
 
 /// Default embedding model (single source of truth, mirrors
 /// `DEFAULT_T5_MODEL` / `DEFAULT_NLI_MODEL`).
 ///
-/// int8 [`ONNX_ALL_MINILM_L12_Q`] — the model sweep in
-/// `docs/contributors/embedding-model-alternatives.md` (R1/R2) measured it as
-/// the best model on the retrieval corpus: MRR@10 0.958 vs 0.920 and P@1 0.938
-/// vs 0.875 against the previous 6-layer default, beating even fp32 L6 (0.930)
-/// — so the gain is depth, not quantization precision — and returning
-/// identical rankings on 3/3 repeats where the L6 int8 model swings ±0.023 MRR
-/// run-to-run on identical input. Costs 2.0× warm embed latency (2.83 → 5.70 ms)
-/// and +10 MB on disk; cold start actually improves (171 → 146 ms).
+/// **uint8** [`ONNX_ALL_MINILM_L12_U8`], chosen on two independent findings from
+/// `docs/contributors/embedding-model-alternatives.md`:
 ///
-/// Same family, same 384 dims, same 256-token window, same tokenizer, so this
-/// is a drop-in: no config or schema change. Existing stores detect the
-/// `model_id()` change through the manifest fingerprint and are repaired by
-/// `engramdb reindex --embeddings-only`, exactly as the fp32→int8 switch was.
-/// Pin the old model with `[embeddings].provider = "all-minilm-l6"`.
-pub const DEFAULT_ONNX_EMBEDDING: OnnxModelSpec = ONNX_ALL_MINILM_L12_Q;
+/// - *Depth* (R1): the 12-layer MiniLM beats the 6-layer one on the retrieval
+///   corpus by more than the noise floor, winning 6/6 paired runs with
+///   non-overlapping ranges, and beats fp32 L6 too — so the gain is layers, not
+///   precision. It costs ~2× warm embed latency (still single-digit ms) and
+///   +10 MB.
+/// - *Quantization scheme* (R6): the **signed-int8** exports are not executable
+///   reproducibly by ONNX Runtime (onnxruntime#6004 — uninitialized reads,
+///   valgrind-confirmed), so under CPU load the same text could be indexed as an
+///   unrelated vector. The uint8 export is bit-reproducible at the same size and
+///   scores *better* (MRR@10 0.969 vs 0.948).
+///
+/// Same family, 384 dims, 256-token window and tokenizer as every other MiniLM
+/// spec, so this is a drop-in: no config or schema change. Existing stores
+/// detect the `model_id()` change through the manifest fingerprint and are
+/// repaired by `engramdb reindex --embeddings-only`. Pin the older models with
+/// `[embeddings].provider = "all-minilm-l6"` / `"all-minilm-l12-int8"`.
+pub const DEFAULT_ONNX_EMBEDDING: OnnxModelSpec = ONNX_ALL_MINILM_L12_U8;
 
 /// ONNX-based embedding provider using fastembed.
 ///
@@ -207,9 +299,12 @@ impl OnnxProvider {
         // Offline mode: don't let fastembed reach the network. If the model
         // isn't already cached, fail fast rather than downloading it.
         if engram_storage::paths::offline_enabled() {
-            let repo = TextEmbedding::get_model_info(&spec.fastembed_model)
-                .map(|info| info.model_code.clone())
-                .unwrap_or_default();
+            let repo = match spec.hf_override {
+                Some(o) => o.repo.to_string(),
+                None => TextEmbedding::get_model_info(&spec.fastembed_model)
+                    .map(|info| info.model_code.clone())
+                    .unwrap_or_default(),
+            };
             if !engram_storage::paths::hf_repo_cached(&repo) {
                 anyhow::bail!(
                     "offline mode (ENGRAMDB_OFFLINE) and model '{}' ({}) is not cached",
@@ -217,6 +312,16 @@ impl OnnxProvider {
                     repo
                 );
             }
+        }
+
+        if let Some(source) = spec.hf_override {
+            let model = Self::load_user_defined(&spec, source, backend, intra_threads, cache_dir)?;
+            return Ok(Self {
+                model: Arc::new(Mutex::new(model)),
+                dimensions: spec.dimensions,
+                max_tokens: spec.max_tokens,
+                model_id: format!("onnx/{}", spec.name),
+            });
         }
 
         // Propagate the spec's context window: fastembed defaults tokenizer
@@ -242,6 +347,62 @@ impl OnnxProvider {
             max_tokens: spec.max_tokens,
             model_id: format!("onnx/{}", spec.name),
         })
+    }
+
+    /// Load an [`HfModelFile`] through fastembed's user-defined-model path.
+    ///
+    /// fastembed's registry hardcodes one weights file per model, so selecting a
+    /// different export (the uint8 MiniLM builds) means fetching the bytes
+    /// ourselves and handing them over. Everything else is kept identical to the
+    /// registry path on purpose: the same shared model cache, the same execution
+    /// providers, the same context window, and the pooling / quantization
+    /// metadata read from `spec.fastembed_model` — so this is a weights swap,
+    /// not a different pipeline.
+    fn load_user_defined(
+        spec: &OnnxModelSpec,
+        source: HfModelFile,
+        backend: engram_onnx::Backend,
+        intra_threads: Option<usize>,
+        cache_dir: std::path::PathBuf,
+    ) -> Result<TextEmbedding> {
+        use fastembed::{
+            InitOptionsUserDefined, Pooling, TokenizerFiles, UserDefinedEmbeddingModel,
+        };
+
+        let api = hf_hub::api::sync::ApiBuilder::new()
+            .with_cache_dir(cache_dir)
+            .build()
+            .context("init HuggingFace API")?;
+        let repo = api.model(source.repo.to_string());
+        let read = |file: &str| -> Result<Vec<u8>> {
+            let path = repo
+                .get(file)
+                .with_context(|| format!("fetch {}/{file}", source.repo))?;
+            std::fs::read(&path).with_context(|| format!("read {}", path.display()))
+        };
+
+        let onnx_file = read(source.model_file)?;
+        let tokenizer_files = TokenizerFiles {
+            tokenizer_file: read("tokenizer.json")?,
+            config_file: read("config.json")?,
+            special_tokens_map_file: read("special_tokens_map.json")?,
+            tokenizer_config_file: read("tokenizer_config.json")?,
+        };
+
+        let pooling = TextEmbedding::get_default_pooling_method(&spec.fastembed_model)
+            .unwrap_or(Pooling::Mean);
+        let model = UserDefinedEmbeddingModel::new(onnx_file, tokenizer_files)
+            .with_pooling(pooling)
+            .with_quantization(TextEmbedding::get_quantization_mode(&spec.fastembed_model));
+
+        let mut options = InitOptionsUserDefined::new()
+            .with_execution_providers(engram_onnx::providers_for(backend))
+            .with_max_length(spec.max_tokens);
+        if let Some(n) = intra_threads {
+            options = options.with_intra_threads(n.max(1));
+        }
+        TextEmbedding::try_new_from_user_defined(model, options)
+            .with_context(|| format!("Failed to initialize embedding model '{}'", spec.name))
     }
 
     /// Create a new ONNX provider with [`DEFAULT_ONNX_EMBEDDING`].

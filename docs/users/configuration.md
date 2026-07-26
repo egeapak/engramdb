@@ -77,7 +77,7 @@ threshold = 0.2                # minimum keyword-search score
 
 [embeddings]
 backend = "auto"               # "auto" | "onnx" | "ollama"
-provider = "onnx"              # "all-minilm" (384d, tracks the default) | "all-minilm-l12" | "all-minilm-l12-fp32" (reproducible) | "all-minilm-l6" | "nomic-embed-text" (768d) | "mxbai-embed-large" (1024d)
+provider = "onnx"              # "all-minilm" (384d, tracks the default) | "all-minilm-l12" | "all-minilm-l6" | "all-minilm-l12-fp32" (reproducible on any runtime) | "all-minilm-{l12,l6}-int8" (legacy) | "nomic-embed-text" (768d) | "mxbai-embed-large" (1024d)
 dimensions = 384               # must match the provider
 max_tokens = 256               # truncate inputs longer than this
 reindex_on_model_change = "warn"   # "off" | "warn" | "auto" | "error"

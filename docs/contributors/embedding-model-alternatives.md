@@ -20,6 +20,7 @@ the two default changes, not a proposal.
 
 | # | Change | Evidence | Cost |
 |---|--------|----------|------|
+| 0 | **Per-model, per-action cost table** for tuning defaults — `examples/model_cost_matrix.rs` (new) | See R8. Headline: T5 titling costs **241 ms per create** against 0.12 ms for keyword; rerank at the shipped `top_n = 50` costs ~0.9 s/query even with the fast reranker. | — |
 | 1 | **Reranker default → `jina-reranker-v1-turbo-en`** (from `bge-reranker-base`) — **applied** | 7.3× smaller (145 MB vs 1060 MB), 3.4× faster per pair (82 vs 278 ms), 11× faster to load. And at the shipped `weight = 0.5` it is the *only* one that helps at all: bge-reranker-base reproduces the un-reranked ranking exactly, so the old default bought nothing for ~5.6 s/query. | One-line config default. **Zero migration** — rerank scores are not persisted. |
 | 2 | **Embedding default → `all-MiniLM-L12-v2-q`** (from `-L6-`) — **applied** | Wins **6/6 paired runs** with non-overlapping ranges: MRR@10 mean 0.953 (range 0.938–0.958) vs 0.907 (0.875–0.920); P@1 0.931 vs 0.868. Beats fp32 L6 too, so the gain is depth, not quantization precision. | +10 MB (22 → 32 MB), 2.0× warm embed latency (2.83 → 5.70 ms), one `reindex --embeddings-only`. Same 384 dims and 256-token window ⇒ no config/schema change. Pin the old model with `provider = "all-minilm-l6"`. |
 | 3 | **Don't** switch to snowflake-arctic-embed (xs or s), on **either** the ONNX or the tract/Intel-Mac path | ONNX: arctic-xs-q is free on cost (22 MB, 0.94× warm latency) but lands at MRR 0.914 prefixed / 0.903 raw over 6 runs — indistinguishable from the L6 model it would replace (0.907), well below L12 (0.953). tract: arctic-xs-fp32 loads and matches L6-fp32 on cost exactly (86 MB, 894 vs 906 ms) but loses on quality (MRR 0.920 prefixed / 0.889 raw vs **0.930**, nDCG 0.904 vs 0.927) and needs query-prefix plumbing EngramDB does not have. See R7. | — |
@@ -32,7 +33,7 @@ the two default changes, not a proposal.
 | Role | Model | Size on disk | Default? | Why this one |
 |------|-------|--------------|----------|--------------|
 | Embedding | `all-MiniLM-L6-v2` **int8** | 22 MB | was **on**, now `all-minilm-l6` | Lever-B A/B: 1.4–1.9× faster and ~4× smaller than fp32 at cosine ≈ 0.99 |
-| Embedding | **`all-MiniLM-L12-v2` int8** (`Xenova/all-MiniLM-L12-v2`) | 32 MB | **on** (new) | R1/R2 below |
+| Embedding | **`all-MiniLM-L12-v2` uint8** (`Xenova/…`, `model_uint8.onnx`) | 32 MB | **on** (new) | R1 (depth) + R6 (quantization scheme) |
 | Embedding (tract) | `all-MiniLM-L12-v2` **fp32** | 128 MB | Intel Mac only | No native ORT; int8 has no tract build. Tracks the ONNX default's depth so a shared store differs only in precision |
 | Reranker | `bge-reranker-base` fp32 | **1060 MB** | was default, still selectable | Historical default; a no-op at the shipped blend weight (R3) |
 | Reranker | **`jina-reranker-v1-turbo-en` fp32** (`jinaai/…`) | **145 MB** | **default** (new), still off unless `rerank.enabled` | R3 below |
@@ -82,7 +83,7 @@ ranges over 6 runs* rather than on one delta.
 
 ## Results
 
-### R1 · Embedding models — `all-MiniLM-L12-v2-q` wins
+### R1 · Embedding models — the 12-layer MiniLM wins
 
 Quality at the production cell (`fieldvec_c256`, max agg). The three
 shortlisted models were run **6 times each**; they report the mean and the
@@ -90,8 +91,8 @@ full observed range. Others are a single run.
 
 | Model | dim | P@1 | MRR@10 | MRR range (n=6) | R@5 | nDCG@10 |
 |---|---|---|---|---|---|---|
-| `minilm-q` (the **previous** default) | 384 | 0.868 | 0.907 | 0.875 – 0.920 | 0.920 | 0.910 |
-| **`minilm-l12-q`** (**new default**) | 384 | **0.931** | **0.953** | **0.938 – 0.958** | 0.913 | 0.933 |
+| `minilm-q` (L6, int8) | 384 | 0.868 | 0.907 | 0.875 – 0.920 | 0.920 | 0.910 |
+| **`minilm-l12-q`** (L12, int8 — superseded by the uint8 build, R6) | 384 | **0.931** | **0.953** | **0.938 – 0.958** | 0.913 | 0.933 |
 | `arctic-xs-q` (raw) | 384 | 0.865 | 0.903 | 0.896 – 0.913 | 0.918 | 0.898 |
 | `arctic-xs-q` (+ query prefix) | 384 | 0.892 | 0.914 | 0.901 – 0.927 | 0.891 | 0.900 |
 | `minilm-fp32` | 384 | 0.896 | 0.930 | — | 0.931 | 0.927 |
@@ -251,7 +252,7 @@ recommendation.
   here; if create latency ever becomes the complaint, the decode-step count and
   the `keyword` fallback are the levers, not a different model.
 
-### R6 · int8 embeddings are not reproducible under CPU load — fp32 is, and thread pinning does not help
+### R6 · Quantized embeddings were not reproducible — root cause and fix
 
 R2 treated run-to-run ranking drift as a measurement nuisance. Chasing an
 intermittent failure of `embeddings::onnx::tests::test_embed_consistency`
@@ -277,55 +278,64 @@ round-off — the vectors are unrelated. At idle, everything except one L12 cell
 is reproducible, so this is specifically a **contention-triggered, int8-only**
 failure that gets worse with sequence length.
 
-**Thread pinning does not fix it, and the fault is below EngramDB.**
-`crates/engram-models/examples/int8_determinism_bisect.rs` bisects the stack —
-same text, 40 repeats, 8 background load threads:
+**It is a known ONNX Runtime bug in the *signed*-int8 path, and there is a fix.**
+The bisect (`crates/engram-models/examples/int8_determinism_bisect.rs`) first
+ruled out everything above the runtime: EngramDB's provider, `fastembed`,
+tokenization and pooling all drop out, because a raw `ort::Session` fed an input
+tensor **tokenized once and reused verbatim** still returns different vectors
+(38/40 distinct for int8, 1/40 for fp32). No session option helps — sweeping
+`intra_threads`, `GraphOptimizationLevel::Disable`, `memory_pattern=false` and
+ORT's own `deterministic_compute` leaves every int8 cell broken.
 
-| Layer | L12-q (int8) | L6-q (int8) | L6 (fp32) |
-|---|---|---|---|
-| L1 `OnnxProvider` (tokio + mutex) | 24/40 distinct | 25/40 | **1/40** |
-| L2 `fastembed` (one thread, no tokio) | 36/40 | 8/40 | **1/40** |
-| L3 raw `ort::Session`, **input tensor tokenized once and reused verbatim** | 38/40 | 15/40 | **1/40** |
+Corruption tracks **preemption**: holding ORT to one thread and varying only the
+competing threads on a 4-core host gives 1/20 distinct at 0–1 load threads, 2–4
+at 4, and 10–13 at 16. Giving ORT a dedicated core while other processes
+saturate the machine is nearly clean; sharing a core with the load is worst.
 
-L3 removes EngramDB's wrapper, `fastembed`, tokenization and pooling from the
-picture: byte-identical input tensors go into `session.run`, different results
-come out. So neither our code nor `fastembed` is implicated — it is ONNX
-Runtime.
+That is [onnxruntime#6004](https://github.com/microsoft/onnxruntime/issues/6004),
+open since 2020: **signed-INT8 quantized models read uninitialized memory**
+(valgrind-confirmed), while **UINT8 quantized models are unaffected**. Our
+exports were exactly the reported shape — `DynamicQuantizeLinear` +
+`MatMulInteger` over signed INT8 initializers (144 of them in L12).
 
-Inside ORT, no session option helps. Sweeping `intra_threads`,
-`GraphOptimizationLevel::Disable`, `memory_pattern=false` and ORT's own
-`deterministic_compute` leaves every int8 cell broken (8–34/40 distinct) and
-every fp32 cell exact (1/40). It reproduces identically against **two different
-ONNX Runtime builds** — the linked pyke 1.24.2 static lib and the official
-1.28.0 shared lib — so it is not a regression in one build.
+`Xenova/all-MiniLM-{L6,L12}-v2` already publish `onnx/model_uint8.onnx` at the
+same size, so the fix needs no self-hosted model. Measured on the same corpus
+and load:
 
-What *does* predict it is **how often the inference thread is preempted**.
-Holding everything fixed at one ORT thread and varying only the number of
-competing threads on this 4-core host:
-
-| Background load threads | 0 | 1 | 4 (= cores) | 16 (4× oversubscribed) |
+| Export | distinct / 30 | min pairwise cosine | cosine vs fp32 | P@1 / MRR@10 / nDCG@10 |
 |---|---|---|---|---|
-| L12-q (int8) distinct / 20 | **1** | **1** | 2 | **13** |
-| L6-q (int8) distinct / 20 | **1** | **1** | 4 | **10** |
-| L6 fp32 distinct / 20 | 1 | 1 | 1 | 1 |
+| int8 `model_quantized.onnx` (was default) | 26–27 | −0.03 | **0.03–0.23** | 0.917 / 0.948 / 0.937 |
+| **uint8 `model_uint8.onnx`** | **1** | **1.000000** | 0.977 | **0.958 / 0.969 / 0.953** |
+| int8 + `reduce_range=True` | 24–25 | 0.05 | 0.18 | — |
+| fp32 (control) | 1 | 1.000000 | 1.000 | 0.938 / 0.958 / 0.941 |
 
-Pinning the process to a single core *together with* the load threads makes it
-worse (11–14/20); giving ORT a core to itself while other processes saturate
-the rest of the machine makes it nearly clean (2–4/20). Corruption tracks
-context switches — not parallelism, and not machine load as such.
+uint8 is a strict improvement: bit-reproducible, *better* retrieval than the
+int8 export (and than fp32), identical 32 MB. `DEFAULT_ONNX_EMBEDDING` is now
+`ONNX_ALL_MINILM_L12_U8`, loaded through fastembed's user-defined-model path
+(`OnnxProvider::load_user_defined`) because fastembed's registry hardcodes the
+int8 file.
 
-The most likely mechanism — inferred from this evidence, not directly proven —
-is **corruption of extended CPU register state across context switches**. This
-host is an Intel Xeon advertising `amx_tile` / `amx_int8` and `avx512_vnni`;
-ONNX Runtime's MLAS uses those int8 paths for quantized GEMMs, and AMX in
-particular holds 8 KB of TILEDATA in registers whose preservation depends on
-XSAVE/XRSTOR plus kernel and hypervisor support (`XFD` lazy state allocation).
-fp32 GEMMs use ordinary AVX-512 vector registers, which save and restore
-correctly here. That fits every observation: int8-only, proportional to
-preemption, indifferent to every knob *above* the kernel, worse for longer
-sequences (a longer GEMM spans more preemption windows), and identical across
-ORT versions. Confirming it would require forcing MLAS off the AMX path, which
-ORT does not expose.
+**The runtime matters as much as the export — and this is the open item.**
+Those uint8 numbers hold on the *official* ONNX Runtime build. On the **pyke
+prebuilt** that `ort`'s `download-binaries` feature ships, uint8 is corrupted
+too (44/60 distinct). Tested:
+
+| Linked ONNX Runtime | int8 | uint8 |
+|---|---|---|
+| pyke prebuilt 1.24.2 (what ships today) | broken | **broken** |
+| pyke prebuilt 1.24.4 (newest compatible with `ort` 2.0.0-rc.12) | broken | **broken** |
+| official 1.28.0 shared library | broken | **1/60 distinct, cosine 1.000000** |
+
+Same model file, same CPU, same load — only the linked runtime differs. So the
+complete fix is **uint8 export + a non-pyke ONNX Runtime**, and the second half
+is a packaging decision: `ORT_STRATEGY=system ORT_PREFER_DYNAMIC_LINK=1
+ORT_LIB_LOCATION=<dir with official libonnxruntime.so>` is verified to work
+(the official 1.28 lib satisfies the 1.24 C API the `ort` crate targets).
+Upgrading the `ort` crate is *not* an alternative: 2.0.0-rc.12 is its newest
+release and pins ONNX Runtime 1.24.
+
+Until the runtime moves, no quantized export is reproducible on a stock build;
+`provider = "all-minilm-l12-fp32"` is the correctness-first option there.
 
 **Why it matters.** Vectors are computed once at create time and persisted. A
 memory written while the machine is busy — exactly when a coding agent is
@@ -421,6 +431,55 @@ For scale, note tract is far slower than the "~3× ONNX" the user docs claim:
 true sequence length while tract pads to 256. That is pre-existing behavior, not
 a regression, but it is the reason depth is expensive there.
 
+### R8 · Per-model, per-action cost — the table for tuning defaults
+
+`examples/model_cost_matrix.rs` measures every model against every action it
+performs, on one host, with weights already cached. Read `per_unit` *within* a
+row: "embed 1 query" uses a real (short) query, "embed batch of 16" uses real
+256-token chunks, so the batch row's higher per-text cost is sequence length,
+not batching overhead.
+
+| Role | Model | Action | mean ms | p95 ms | per unit |
+|---|---|---|---|---|---|
+| embedding | **L12-u8 (default)** | load (cold session) | 220 | — | — |
+| embedding | **L12-u8 (default)** | embed 1 query | **6.1** | 7.7 | 6.1 / text |
+| embedding | **L12-u8 (default)** | embed batch of 16 chunks | 428 | 587 | 26.7 / text |
+| embedding | L6-u8 | embed 1 query | 3.1 | 4.4 | 3.1 / text |
+| embedding | L6-u8 | embed batch of 16 | 223 | 300 | 13.9 / text |
+| embedding | L12-int8 | embed 1 query | 6.5 | 8.7 | 6.5 / text |
+| embedding | L12-fp32 | embed 1 query | 8.2 | 11.1 | 8.2 / text |
+| embedding | L12-fp32 | embed batch of 16 | 732 | 776 | 45.8 / text |
+| embedding | arctic-xs-int8 | embed 1 query | 3.5 | 5.1 | 3.5 / text |
+| reranker | **jina-turbo (default)** | load (cold) | 382 | — | — |
+| reranker | **jina-turbo (default)** | score 1 pair | **18.7** | 21.5 | 18.7 / pair |
+| reranker | bge-reranker-base | load (cold) | 5206 | — | — |
+| reranker | bge-reranker-base | score 1 pair | 93.9 | 107 | 93.9 / pair |
+| nli | deberta-xsmall-q (default) | load (cold) | 867 | — | — |
+| nli | deberta-xsmall-q (default) | 1 premise/hypothesis pair | **173** | 253 | 173 / pair |
+| nli | deberta-xsmall-fp32 | 1 pair | 226 | 321 | 226 / pair |
+| title | **t5-small-q (default)** | load (cold) | 270 | — | — |
+| title | **t5-small-q (default)** | generate 1 title | **241** | 312 | 241 / title |
+| title | t5-small-fp32 | generate 1 title | 299 | 318 | 299 / title |
+| title | keyword (RAKE, no model) | generate 1 title | **0.12** | 0.30 | 0.12 / title |
+
+Reading it against the shipped config:
+
+- **A query costs ~6 ms of embedding.** Everything else on the query path is
+  opt-in: rerank at the default `top_n = 50` adds **~0.9 s** with jina-turbo
+  (and would have added ~4.7 s with the old bge default). If reranking is ever
+  turned on by default, `top_n` should come down with it — at 20 it is ~370 ms.
+- **A create is dominated by titling, not embedding.** A 3-chunk memory embeds
+  in ~80 ms; T5 titling adds **241 ms** on top, ~2000× the keyword strategy's
+  0.12 ms. T5 is the single most expensive default in the stack. It is
+  daemon-amortized for *load* (270 ms once) but the 241 ms is per memory, every
+  memory. `engramdb add` already forces keyword; whether MCP `create` should is
+  a live question this table is meant to inform.
+- **NLI at 173 ms/pair × `max_comparisons = 10`** is up to ~1.7 s per challenge —
+  which is why it is off by default.
+- Quantization buys less than expected on the query path (6.1 ms uint8 vs 8.2 ms
+  fp32, 1.3×) but a lot on the batch path (26.7 vs 45.8 ms/text, 1.7×), so the
+  fp32 fallback is more affordable for query-heavy than for write-heavy use.
+
 ## Caveats
 
 - Same synthetic 60-memory / 48-query corpus as the earlier study, with the
@@ -450,8 +509,11 @@ a regression, but it is the reason depth is expensive there.
 cargo run --release --example embed_matrix              # embedding quality
 cargo run --release --example embed_model_bench         # embedding latency / footprint
 cargo run --release --example rerank_bench              # reranker quality + cost
-PROBE_LOAD_THREADS=8 \
-  cargo run --release --example embed_determinism_probe # int8 reproducibility (R6)
+cargo run --release --example model_cost_matrix         # every model x every action (R8)
+cargo run --release --features tract --example tract_model_bench
+PROBE_LOAD_THREADS=16 \
+  cargo run --release --example embed_determinism_probe # reproducibility (R6)
+cargo run --release -p engram-models --example int8_determinism_bisect
 
 EMBED_EVAL_MODELS=minilm-q,minilm-l12-q,arctic-xs-q cargo run --release --example embed_matrix
 EMBED_BENCH_MODELS=minilm-q,minilm-l12-q EMBED_BENCH_ITERS=200 \

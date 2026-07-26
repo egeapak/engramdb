@@ -79,7 +79,8 @@ use crate::embeddings::{
 #[cfg(feature = "onnxruntime")]
 use crate::embeddings::{
     OnnxModelSpec, OnnxProvider, DEFAULT_ONNX_EMBEDDING, ONNX_ALL_MINILM_L12,
-    ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_Q, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT,
+    ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_L12_U8, ONNX_ALL_MINILM_L6_U8, ONNX_ALL_MINILM_Q,
+    ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT,
 };
 #[cfg(feature = "tract")]
 use crate::embeddings::{
@@ -206,7 +207,7 @@ fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
         },
         "all-minilm-l6" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
-            onnx: ONNX_ALL_MINILM_Q,
+            onnx: ONNX_ALL_MINILM_L6_U8,
             #[cfg(feature = "tract")]
             tract: Some(TRACT_ALL_MINILM),
             #[cfg(feature = "ollama")]
@@ -214,17 +215,34 @@ fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
         },
         "all-minilm-l12" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
+            onnx: ONNX_ALL_MINILM_L12_U8,
+            #[cfg(feature = "tract")]
+            tract: Some(TRACT_ALL_MINILM_L12),
+            #[cfg(feature = "ollama")]
+            ollama: ALL_MINILM,
+        },
+        // The signed-int8 exports. Kept selectable so an existing store can
+        // stay on its current vectors without a reindex, and so the
+        // reproducibility finding stays reproducible — but they are NOT a
+        // default: ONNX Runtime executes them non-reproducibly under CPU load
+        // (onnxruntime#6004). See `docs/contributors/embedding-model-alternatives.md` (R6).
+        "all-minilm-l12-int8" => ProviderSpecs {
+            #[cfg(feature = "onnxruntime")]
             onnx: ONNX_ALL_MINILM_L12_Q,
             #[cfg(feature = "tract")]
             tract: Some(TRACT_ALL_MINILM_L12),
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
         },
-        // The reproducible option. int8 embeddings are not deterministic under
-        // CPU load — the same text can embed to materially different vectors,
-        // and those vectors are persisted — while fp32 is bit-exact in every
-        // condition measured. Costs ~4x the disk and ~1.3x the latency. See
-        // `docs/contributors/embedding-model-alternatives.md` (R6).
+        "all-minilm-l6-int8" => ProviderSpecs {
+            #[cfg(feature = "onnxruntime")]
+            onnx: ONNX_ALL_MINILM_Q,
+            #[cfg(feature = "tract")]
+            tract: Some(TRACT_ALL_MINILM),
+            #[cfg(feature = "ollama")]
+            ollama: ALL_MINILM,
+        },
+        // fp32: bit-exact like uint8, but 4x the disk and ~1.4x the latency.
         "all-minilm-l12-fp32" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_ALL_MINILM_L12,
@@ -1218,6 +1236,8 @@ mod tests {
         assert!(provider_specs("all-minilm-l6").is_some());
         assert!(provider_specs("all-minilm-l12").is_some());
         assert!(provider_specs("all-minilm-l12-fp32").is_some());
+        assert!(provider_specs("all-minilm-l12-int8").is_some());
+        assert!(provider_specs("all-minilm-l6-int8").is_some());
         assert!(provider_specs("nomic-embed-text").is_some());
         assert!(provider_specs("mxbai-embed-large").is_some());
         assert!(provider_specs("definitely-not-a-model").is_none());
@@ -1232,8 +1252,8 @@ mod tests {
         let l6 = expected_embedding_fingerprint(&onnx_config("all-minilm-l6")).unwrap();
         let l12 = expected_embedding_fingerprint(&onnx_config("all-minilm-l12")).unwrap();
         let default = expected_embedding_fingerprint(&onnx_config("all-minilm")).unwrap();
-        assert_eq!(l6.model, "onnx/all-MiniLM-L6-v2-q");
-        assert_eq!(l12.model, "onnx/all-MiniLM-L12-v2-q");
+        assert_eq!(l6.model, "onnx/all-MiniLM-L6-v2-u8");
+        assert_eq!(l12.model, "onnx/all-MiniLM-L12-v2-u8");
         assert_ne!(l6.model, l12.model);
         assert_eq!(default.model, l12.model, "default must be L12");
         // Same dimensionality across the family: swapping depth needs a
