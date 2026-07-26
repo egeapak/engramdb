@@ -65,6 +65,40 @@ pub const ONNX_BGE_SMALL_EN_Q: OnnxModelSpec = OnnxModelSpec {
     name: "bge-small-en-v1.5-q",
 };
 
+/// snowflake-arctic-embed-xs int8-quantized (`snowflake/snowflake-arctic-embed-xs`,
+/// `onnx/model_quantized.onnx`, ~23 MB): retrieval-tuned 22M-parameter model in
+/// the *same* size class as MiniLM-L6, same 384 dims, 512-token context.
+/// Expects the `ARCTIC_QUERY_PREFIX` on the query side. Benchmarked in
+/// `examples/embed_matrix.rs`.
+pub const ONNX_ARCTIC_XS_Q: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::SnowflakeArcticEmbedXSQ,
+    dimensions: 384,
+    max_tokens: 512,
+    name: "snowflake-arctic-embed-xs-q",
+};
+
+/// snowflake-arctic-embed-s int8-quantized (`snowflake/snowflake-arctic-embed-s`,
+/// `onnx/model_quantized.onnx`, ~34 MB): the 33M-parameter step up from
+/// [`ONNX_ARCTIC_XS_Q`], still 384 dims. Benchmarked in
+/// `examples/embed_matrix.rs`.
+pub const ONNX_ARCTIC_S_Q: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::SnowflakeArcticEmbedSQ,
+    dimensions: 384,
+    max_tokens: 512,
+    name: "snowflake-arctic-embed-s-q",
+};
+
+/// all-MiniLM-L12-v2 int8-quantized (`Xenova/all-MiniLM-L12-v2`,
+/// `onnx/model_quantized.onnx`, ~33 MB): the 12-layer sibling of the default,
+/// same 384 dims and 256-token context. The "same family, 2× the depth"
+/// reference point for the model sweep in `examples/embed_matrix.rs`.
+pub const ONNX_ALL_MINILM_L12_Q: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::AllMiniLML12V2Q,
+    dimensions: 384,
+    max_tokens: 256,
+    name: "all-MiniLM-L12-v2-q",
+};
+
 /// mxbai-embed-large-v1: 1024-dimensional, 512 token context.
 pub const ONNX_MXBAI_EMBED_LARGE: OnnxModelSpec = OnnxModelSpec {
     fastembed_model: EmbeddingModel::MxbaiEmbedLargeV1,
