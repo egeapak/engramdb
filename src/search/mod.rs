@@ -23,6 +23,8 @@
 //! require semantic understanding.
 
 pub mod keyword;
+pub mod normalize;
 
 // Re-export main functions
 pub use keyword::{keyword_search, normalize_keyword_score, query_token_count};
+pub use normalize::{normalize, normalize_set, NORMALIZER_STAMP};

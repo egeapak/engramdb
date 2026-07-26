@@ -2446,6 +2446,7 @@ dependencies = [
  "rand 0.10.2",
  "rayon",
  "reqwest 0.13.4",
+ "rust-stemmers",
  "rustix",
  "serde",
  "serde_json",

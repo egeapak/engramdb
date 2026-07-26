@@ -78,6 +78,11 @@ sha2 = "0.11"
 dirs = "6"
 jwalk = "0.8"
 rayon = "1"
+# Snowball stemmer for the keyword scorer. Its only dependencies are serde and
+# serde_derive, both already in the tree, so this adds no transitive weight.
+# See `src/search/normalize.rs` for why stemming (rather than BM25) is what the
+# relevance harness measured as the actual quality gap.
+rust-stemmers = "1"
 
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net", "process"] }

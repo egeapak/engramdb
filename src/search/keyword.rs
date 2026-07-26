@@ -3,6 +3,7 @@
 use std::borrow::Borrow;
 use std::collections::HashSet;
 
+use crate::search::normalize;
 use crate::types::Memory;
 
 /// Perform keyword search on a collection of memories
@@ -28,8 +29,10 @@ use crate::types::Memory;
 /// # Returns
 /// Vector of (index, relevance_score) tuples, sorted by score descending
 pub fn keyword_search<M: Borrow<Memory>>(query: &str, memories: &[M]) -> Vec<(usize, f64)> {
-    // Tokenize query into lowercase words
-    let query_tokens: Vec<String> = tokenize(query);
+    // Normalized, stemmed, deduplicated query terms. Deduplication matters:
+    // the loop below awards points per token, so a repeated word used to be
+    // counted once per occurrence.
+    let query_tokens: Vec<String> = normalize::normalize(query);
 
     if query_tokens.is_empty() {
         return vec![];
@@ -88,26 +91,26 @@ pub fn normalize_keyword_score(raw: f64, num_query_tokens: usize) -> f64 {
 /// Optimized to avoid per-token `String` allocations: lowercases the full
 /// text once, then splits into `&str` slices of the lowered buffer.
 fn calculate_keyword_score(query_tokens: &[String], memory: &Memory) -> f64 {
-    let summary_lower = memory.summary.to_lowercase();
-    let content_lower = memory.content.to_lowercase();
-
-    let summary_tokens: HashSet<&str> = split_tokens(&summary_lower).collect();
-    let content_tokens: HashSet<&str> = split_tokens(&content_lower).collect();
-    let tag_lowers: Vec<String> = memory.tags.iter().map(|t| t.to_lowercase()).collect();
-    let tag_tokens: HashSet<&str> = tag_lowers.iter().flat_map(|t| split_tokens(t)).collect();
+    let summary_stems = normalize::normalize_set(&memory.summary);
+    let content_stems = normalize::normalize_set(&memory.content);
+    let tag_stems: HashSet<String> = memory
+        .tags
+        .iter()
+        .flat_map(|t| normalize::normalize(t))
+        .collect();
 
     let mut weighted_matches = 0.0;
 
     for token in query_tokens {
-        if summary_tokens.contains(token.as_str()) {
+        if summary_stems.contains(token) {
             weighted_matches += 3.0;
         }
 
-        if tag_tokens.contains(token.as_str()) {
+        if tag_stems.contains(token) {
             weighted_matches += 2.0;
         }
 
-        if content_tokens.contains(token.as_str()) {
+        if content_stems.contains(token) {
             weighted_matches += 1.0;
         }
     }
@@ -115,30 +118,16 @@ fn calculate_keyword_score(query_tokens: &[String], memory: &Memory) -> f64 {
     weighted_matches
 }
 
-/// Split lowercased text into non-empty alphanumeric token slices.
-fn split_tokens(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|s| !s.is_empty())
-}
-
-/// Count the number of tokens in a query string.
+/// Count the scoreable terms in a query.
 ///
-/// Uses the same tokenization logic as `keyword_search` so that
-/// `num_query_tokens` is consistent with the actual tokens scored.
+/// Must stay consistent with what [`keyword_search`] actually scores, because
+/// [`normalize_keyword_score`] centres its sigmoid on `3 * this`. Both call
+/// [`normalize::normalize`], so stopword removal and deduplication are
+/// reflected on both sides: "what is the flock for" counts 1, not 5, and its
+/// midpoint is set accordingly instead of demanding five matches that can
+/// never occur.
 pub fn query_token_count(query: &str) -> usize {
-    let lower = query.to_lowercase();
-    split_tokens(&lower).count()
-}
-
-/// Tokenize a string into lowercase words.
-///
-/// Splits on non-alphanumeric characters and filters out empty strings.
-fn tokenize(text: &str) -> Vec<String> {
-    text.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect()
+    normalize::normalize(query).len()
 }
 
 #[cfg(test)]
@@ -180,16 +169,30 @@ mod tests {
         }
     }
 
+    /// The scorer's notion of a "token" now comes from `search::normalize`:
+    /// stopwords are dropped and the remainder is stemmed. Previously this
+    /// asserted the raw split, which kept "this", "is" and "a" as scoreable
+    /// terms — each worth 3 points against any summary containing them.
     #[test]
-    fn test_tokenize() {
-        let tokens = tokenize("Hello, World! This is a test.");
-        assert_eq!(tokens, vec!["hello", "world", "this", "is", "a", "test"]);
+    fn test_query_tokens_drop_stopwords_and_stem() {
+        let tokens = normalize::normalize("Hello, World! This is a test.");
+        assert_eq!(tokens, vec!["hello", "world", "test"]);
     }
 
     #[test]
-    fn test_tokenize_empty() {
-        let tokens = tokenize("");
-        assert_eq!(tokens.len(), 0);
+    fn test_query_tokens_empty() {
+        assert!(normalize::normalize("").is_empty());
+    }
+
+    /// `query_token_count` centres the normalization sigmoid, so it has to
+    /// agree with what is actually scored — otherwise the midpoint demands
+    /// matches for terms that were never searched for.
+    #[test]
+    fn test_query_token_count_matches_scored_terms() {
+        assert_eq!(query_token_count("what is the flock for"), 1);
+        assert_eq!(query_token_count("retry policy backoff"), 3);
+        // Repeats collapse; they used to inflate both the count and the score.
+        assert_eq!(query_token_count("daemon daemon daemon"), 1);
     }
 
     #[test]
