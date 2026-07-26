@@ -16,6 +16,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use futures_util::stream::StreamExt;
+use lancedb::expr::{col, is_in, lit};
 use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::table::OptimizeAction;
 use lancedb::{connect, Connection, Table};
@@ -499,10 +500,8 @@ impl LanceIndex {
     /// Delete an entry by ID from the memories table.
     pub async fn delete(&self, id: &str) -> Result<()> {
         let table = self.open_table().await?;
-        let escaped_id = id.replace('\'', "''");
-
         table
-            .delete(&format!("id = '{}'", escaped_id))
+            .delete(&col("id").eq(lit(id)))
             .await
             .context("Failed to delete entry")?;
         Ok(())
@@ -591,17 +590,23 @@ impl LanceIndex {
     /// Returns all matching IDs; callers handle 0/1/many disambiguation.
     pub async fn find_ids_by_prefix(&self, prefix: &str) -> Result<Vec<String>> {
         let table = self.open_table().await?;
-        // Escape SQL special chars for LIKE pattern and single-quote for string literal
-        let escaped = prefix
-            .replace('\'', "''")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let filter = format!("id LIKE '{}%'", escaped);
+        // The pattern still escapes the LIKE metacharacters `%` and `_` —
+        // that is pattern semantics (a literal `_` in a stem must not act as
+        // a single-char wildcard), not quoting. Quoting is gone: `lit` carries
+        // the pattern as a typed value, so no `'` doubling is needed or
+        // possible to forget.
+        let pattern = format!(
+            "{}%",
+            prefix
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
 
         let mut stream = table
             .query()
             .select(lancedb::query::Select::Columns(vec!["id".into()]))
-            .only_if(filter)
+            .only_if_expr(col("id").like(lit(pattern)))
             .execute()
             .await
             .context("Failed to query LanceDB table for prefix match")?;
@@ -703,11 +708,13 @@ impl LanceIndex {
     /// every row into Rust.
     ///
     /// The `predicate` string is a DataFusion SQL boolean expression over the
-    /// `memories` table columns. Callers MUST build it from trusted, already
-    /// validated data (e.g. enum-formatted type names, numeric literals) using
-    /// the same single-quote-escaping discipline as [`Self::vector_search`] and
-    /// [`Self::find_ids_by_prefix`] — no raw user strings. A `None` predicate
-    /// scans the whole table (identical to `list_for_filtering`).
+    /// `memories` table columns. Because it is raw SQL *text*, callers MUST
+    /// build it from trusted, already-validated data (enum-formatted type
+    /// names, numeric literals) and escape any string literal themselves.
+    /// Prefer [`Self::list_for_filtering_where_expr`], which takes literals as
+    /// typed values and removes that obligation — every predicate site in this
+    /// file now uses the typed form. A `None` predicate scans the whole table
+    /// (identical to `list_for_filtering`).
     ///
     /// The pushdown is a pure narrowing optimization: the caller still applies
     /// the equivalent filters in Rust (`apply_index_filters`), so a
@@ -809,8 +816,7 @@ impl LanceIndex {
         let mut op = table.merge_insert(&["memory_id", "chunk_index"]);
         op.when_matched_update_all(None);
         op.when_not_matched_insert_all();
-        let escaped_id = memory_id.replace('\'', "''");
-        op.when_not_matched_by_source_delete(Some(format!("memory_id = '{}'", escaped_id)));
+        op.when_not_matched_by_source_delete_expr(col("memory_id").eq(lit(memory_id)));
         op.execute(Box::new(batches))
             .await
             .context("Failed to upsert chunks")?;
@@ -855,7 +861,6 @@ impl LanceIndex {
     /// migrated memories stay searchable without re-embedding.
     pub async fn chunks_for_memory(&self, memory_id: &str) -> Result<Vec<Vec<f32>>> {
         let table = self.open_chunks_table().await?;
-        let escaped_id = memory_id.replace('\'', "''");
 
         let mut stream = table
             .query()
@@ -863,7 +868,7 @@ impl LanceIndex {
                 "chunk_index".into(),
                 "vector".into(),
             ]))
-            .only_if(format!("memory_id = '{}'", escaped_id))
+            .only_if_expr(col("memory_id").eq(lit(memory_id)))
             .execute()
             .await
             .context("Failed to query chunks for memory")?;
@@ -900,10 +905,8 @@ impl LanceIndex {
     /// Delete all chunks for a given memory_id.
     pub async fn delete_chunks(&self, memory_id: &str) -> Result<()> {
         let table = self.open_chunks_table().await?;
-        let escaped_id = memory_id.replace('\'', "''");
-
         table
-            .delete(&format!("memory_id = '{}'", escaped_id))
+            .delete(&col("memory_id").eq(lit(memory_id)))
             .await
             .context("Failed to delete chunks")?;
 
@@ -921,19 +924,15 @@ impl LanceIndex {
         }
         let table = self.open_chunks_table().await?;
         // Bound the predicate size: a GC sweep can pass thousands of 36-char
-        // UUIDs, and an unbounded `IN (...)` builds a hundreds-of-KB SQL
-        // string DataFusion must parse in one go. Chunked deletes keep each
-        // statement small; each chunk commits separately, which is fine —
-        // callers treat chunk deletion as idempotent cleanup.
+        // UUIDs, and an unbounded `IN (...)` builds one enormous predicate the
+        // planner must chew through in a single go. Chunked deletes keep each
+        // one small; each chunk commits separately, which is fine — callers
+        // treat chunk deletion as idempotent cleanup.
         const DELETE_CHUNK_SIZE: usize = 500;
         for batch in memory_ids.chunks(DELETE_CHUNK_SIZE) {
-            let list = batch
-                .iter()
-                .map(|id| format!("'{}'", id.replace('\'', "''")))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let list = batch.iter().map(lit).collect::<Vec<_>>();
             table
-                .delete(&format!("memory_id IN ({list})"))
+                .delete(&is_in(col("memory_id"), list))
                 .await
                 .context("Failed to delete chunk batch")?;
         }
@@ -947,11 +946,10 @@ impl LanceIndex {
     /// chunks must not reset the flag to false).
     pub async fn has_chunks(&self, memory_id: &str) -> Result<bool> {
         let table = self.open_chunks_table().await?;
-        let escaped_id = memory_id.replace('\'', "''");
         let mut stream = table
             .query()
             .select(lancedb::query::Select::Columns(vec!["memory_id".into()]))
-            .only_if(format!("memory_id = '{}'", escaped_id))
+            .only_if_expr(col("memory_id").eq(lit(memory_id)))
             .limit(1)
             .execute()
             .await
@@ -985,10 +983,16 @@ impl LanceIndex {
     /// R3 projection column in sync with chunk-table presence.
     pub async fn set_has_embedding(&self, memory_id: &str, value: bool) -> Result<()> {
         let table = self.open_table().await?;
-        let escaped_id = memory_id.replace('\'', "''");
+        // `UpdateBuilder` is the one predicate site lancedb 0.31 has no
+        // expression variant for — its `filter` field is a `String`. Rather
+        // than hand-escape here, build the same typed expression as everywhere
+        // else and let lancedb's own renderer produce the SQL, so the quoting
+        // rule still lives in the library and not in this file.
+        let filter = lancedb::expr::expr_to_sql_string(&col("id").eq(lit(memory_id)))
+            .context("Failed to render has_embedding update filter")?;
         table
             .update()
-            .only_if(format!("id = '{}'", escaped_id))
+            .only_if(filter)
             .column("has_embedding", if value { "true" } else { "false" })
             .execute()
             .await
@@ -1051,15 +1055,11 @@ impl LanceIndex {
             .nprobes(VECTOR_SEARCH_NPROBES)
             .refine_factor(VECTOR_SEARCH_REFINE_FACTOR);
         if let Some(ids) = restrict_to {
-            // Memory ids are server-generated UUIDs, but reuse the same
-            // single-quote escaping discipline as every other predicate in
-            // this file rather than trusting that.
-            let id_list = ids
-                .iter()
-                .map(|id| format!("'{}'", id.replace('\'', "''")))
-                .collect::<Vec<_>>()
-                .join(", ");
-            vector_query = vector_query.only_if(format!("memory_id IN ({})", id_list));
+            // Typed literals: the ids never become query text, so there is no
+            // escaping step to get wrong. An empty `ids` yields an `IN ()`
+            // that matches nothing, which is the documented behaviour.
+            let id_list = ids.iter().map(lit).collect::<Vec<_>>();
+            vector_query = vector_query.only_if_expr(is_in(col("memory_id"), id_list));
         }
         let mut stream = vector_query
             .execute()
@@ -1484,10 +1484,16 @@ impl LanceIndex {
     /// Paired with [`Self::create_tag_search_index`]; correct with or without
     /// the index (it only changes speed).
     pub fn tag_contains_predicate(tag: &str) -> String {
-        // The needle is a JSON string literal, so escape exactly what
-        // `serde_json` would have written, then escape for SQL.
+        lancedb::expr::expr_to_sql_string(&Self::tag_contains_expr(tag))
+            .expect("contains() over string literals always renders")
+    }
+
+    /// Expression form of [`Self::tag_contains_predicate`]. The needle is the
+    /// tag as `serde_json` would have written it inside the array — including
+    /// the surrounding quotes, which is what makes it an exact-token match.
+    pub fn tag_contains_expr(tag: &str) -> lancedb::expr::DfExpr {
         let json_token = serde_json::to_string(tag).unwrap_or_else(|_| format!("\"{tag}\""));
-        format!("contains(tags, '{}')", json_token.replace('\'', "''"))
+        lancedb::expr::contains(col("tags"), lit(json_token))
     }
 
     /// [`Self::list_for_filtering_where`] driven by a type-safe Datafusion
@@ -2808,12 +2814,13 @@ mod tests {
         assert_eq!(entries[0].visibility, Visibility::Personal);
     }
 
-    /// SQL-injection / quote-escaping guard: every site that interpolates a
-    /// memory id into a LanceDB `only_if` filter (delete, find_by_prefix,
-    /// chunks_for_memory, delete_chunks) calls `replace('\'', "''")`. If
-    /// that escaping ever regresses, an id like `foo'bar` either errors at
-    /// the SQL layer or silently matches the wrong row. These tests drive
-    /// every quote-escape site with a literal quote in the id.
+    /// Quote-handling guard: every site that puts a memory id into a LanceDB
+    /// predicate (delete, find_by_prefix, chunks_for_memory, delete_chunks)
+    /// now passes it as a typed `lit(..)` rather than splicing it into SQL
+    /// text, so an id like `foo'bar` can neither error at the SQL layer nor
+    /// silently match the wrong row. These tests drive every one of those
+    /// sites with a literal quote in the id, and would catch a regression
+    /// back to hand-built predicate strings.
     #[tokio::test]
     async fn test_delete_with_quote_in_id() {
         let temp_dir = TempDir::new().unwrap();
@@ -2875,6 +2882,72 @@ mod tests {
         assert!(set.contains(a));
         assert!(set.contains(b));
         assert!(!set.contains("y-no-match"));
+    }
+
+    /// Typed literals fix *quoting*, not LIKE *pattern* semantics: `%` and `_`
+    /// inside a caller-supplied prefix must still be matched literally, not as
+    /// wildcards. `find_ids_by_prefix` escapes them for exactly this reason,
+    /// and this pins that behaviour.
+    #[tokio::test]
+    async fn test_find_ids_by_prefix_treats_like_metacharacters_literally() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        // `a_c` must match the literal underscore, not "a<any char>c".
+        lance.upsert(&create_test_entry("a_c-real")).await.unwrap();
+        lance.upsert(&create_test_entry("abc-decoy")).await.unwrap();
+        // `100%` must match a literal percent, not "everything after 100".
+        lance.upsert(&create_test_entry("100%-real")).await.unwrap();
+        lance.upsert(&create_test_entry("100-decoy")).await.unwrap();
+
+        let underscore = lance.find_ids_by_prefix("a_c").await.unwrap();
+        assert_eq!(
+            underscore,
+            vec!["a_c-real"],
+            "`_` must not act as a single-char wildcard"
+        );
+
+        let percent = lance.find_ids_by_prefix("100%").await.unwrap();
+        assert_eq!(
+            percent,
+            vec!["100%-real"],
+            "`%` must not act as a multi-char wildcard"
+        );
+
+        // A backslash is escaped too, so it cannot neutralise the following char.
+        lance.upsert(&create_test_entry("bs\\_x")).await.unwrap();
+        let backslash = lance.find_ids_by_prefix("bs\\_").await.unwrap();
+        assert_eq!(backslash, vec!["bs\\_x"]);
+    }
+
+    /// The batched chunk delete builds one `IN (...)` per 500 ids; drive it
+    /// with a quote-bearing id to pin the typed-literal path.
+    #[tokio::test]
+    async fn test_delete_chunks_batch_with_quote_in_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        let quoted = "batch'id";
+        let plain = "batch-plain";
+        for id in [quoted, plain] {
+            lance.upsert(&create_test_entry(id)).await.unwrap();
+            lance
+                .upsert_chunks(id, vec![vec![0.5f32; 384]])
+                .await
+                .unwrap();
+        }
+
+        lance
+            .delete_chunks_batch(&[quoted.to_string()])
+            .await
+            .unwrap();
+
+        assert!(lance.chunks_for_memory(quoted).await.unwrap().is_empty());
+        assert_eq!(
+            lance.chunks_for_memory(plain).await.unwrap().len(),
+            1,
+            "the batch delete must not touch the unlisted id"
+        );
     }
 
     /// `vector_search` bails when the query dimension doesn't match the
