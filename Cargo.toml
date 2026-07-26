@@ -131,6 +131,13 @@ harness = false
 name = "daemon_lifecycle"
 harness = false
 
+# Measures the three LanceDB leverage options (scalar indexes, typed filter
+# expressions, tag pushdown via the FM index) plus the in-Rust keyword scorer
+# they would replace. Kept separate from `benchmarks` so it can be run alone.
+[[bench]]
+name = "index_leverage"
+harness = false
+
 # Dev/test disk diet: full debug info across the ~400-crate dependency tree
 # (lance, datafusion, arrow, ort, …) made a single `--all-features` debug
 # build ~25 GB — enough to exhaust CI sandboxes and small dev machines.

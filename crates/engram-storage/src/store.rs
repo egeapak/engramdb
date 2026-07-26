@@ -903,6 +903,43 @@ impl MemoryStore {
             })
     }
 
+    /// [`Self::list_for_filtering_where`] driven by a type-safe expression.
+    /// See [`LanceIndex::list_for_filtering_where_expr`].
+    pub async fn list_for_filtering_where_expr(
+        &self,
+        predicate: lancedb::expr::DfExpr,
+    ) -> Result<Vec<IndexForFiltering>> {
+        self.lance_index
+            .list_for_filtering_where_expr(predicate)
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!(
+                    "LanceDB list_for_filtering_where_expr failed: {}",
+                    e
+                ))
+            })
+    }
+
+    /// Build the memories-table scalar indexes. See
+    /// [`LanceIndex::create_scalar_indexes`]. Best-effort: a scalar index only
+    /// changes predicate speed, never which rows match.
+    pub async fn create_scalar_indexes(&self) -> Result<Vec<String>> {
+        self.lance_index.create_scalar_indexes().await.map_err(|e| {
+            StorageError::Validation(format!("LanceDB create_scalar_indexes failed: {}", e))
+        })
+    }
+
+    /// Build the FM substring index on `tags`. See
+    /// [`LanceIndex::create_tag_search_index`].
+    pub async fn create_tag_search_index(&self) -> Result<bool> {
+        self.lance_index
+            .create_tag_search_index()
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB create_tag_search_index failed: {}", e))
+            })
+    }
+
     /// List lightweight metadata summaries for all memories (7 columns).
     pub async fn list_summary(&self) -> Result<Vec<IndexSummary>> {
         self.lance_index
