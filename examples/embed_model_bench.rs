@@ -26,8 +26,8 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use engramdb::embeddings::{
     chunk_text, EmbeddingProvider, OnnxModelSpec, OnnxProvider, ONNX_ALL_MINILM,
-    ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_Q, ONNX_ARCTIC_S_Q, ONNX_ARCTIC_XS_Q,
-    ONNX_BGE_SMALL_EN_Q,
+    ONNX_ALL_MINILM_L12, ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_Q, ONNX_ARCTIC_S_Q,
+    ONNX_ARCTIC_XS_Q, ONNX_BGE_SMALL_EN_Q,
 };
 use serde::Deserialize;
 
@@ -35,35 +35,53 @@ use serde::Deserialize;
 /// window — the production default (`EmbeddingsConfig::max_tokens`).
 const FIXED_BUDGET_TOKENS: usize = 256;
 
-/// Candidate models, with the HuggingFace repo id `fastembed` pulls them from
-/// (carried here rather than queried, because this crate has no `fastembed`
-/// dependency — only `engram-models` does).
-const CANDIDATES: &[(&str, OnnxModelSpec, &str)] = &[
-    ("minilm-q", ONNX_ALL_MINILM_Q, "Xenova/all-MiniLM-L6-v2"),
+/// Candidate models, with the HuggingFace repo id **and file** `fastembed`
+/// pulls them from (carried here rather than queried, because this crate has no
+/// `fastembed` dependency — only `engram-models` does). The file matters: a repo
+/// hosting both an fp32 and a quantized export would otherwise have its size
+/// reported as whichever is larger.
+const CANDIDATES: &[(&str, OnnxModelSpec, &str, &str)] = &[
+    (
+        "minilm-q",
+        ONNX_ALL_MINILM_Q,
+        "Xenova/all-MiniLM-L6-v2",
+        "model_quantized.onnx",
+    ),
     (
         "minilm-fp32",
         ONNX_ALL_MINILM,
         "Qdrant/all-MiniLM-L6-v2-onnx",
+        "model.onnx",
     ),
     (
         "arctic-xs-q",
         ONNX_ARCTIC_XS_Q,
         "snowflake/snowflake-arctic-embed-xs",
+        "model_quantized.onnx",
     ),
     (
         "arctic-s-q",
         ONNX_ARCTIC_S_Q,
         "snowflake/snowflake-arctic-embed-s",
+        "model_quantized.onnx",
     ),
     (
         "minilm-l12-q",
         ONNX_ALL_MINILM_L12_Q,
         "Xenova/all-MiniLM-L12-v2",
+        "model_quantized.onnx",
+    ),
+    (
+        "minilm-l12-fp32",
+        ONNX_ALL_MINILM_L12,
+        "Xenova/all-MiniLM-L12-v2",
+        "model.onnx",
     ),
     (
         "bge-small-q",
         ONNX_BGE_SMALL_EN_Q,
         "Qdrant/bge-small-en-v1.5-onnx-Q",
+        "model_optimized.onnx",
     ),
 ];
 
@@ -92,10 +110,13 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[idx]
 }
 
-/// Bytes of the largest cached `.onnx` under `repo`'s hub-cache directory —
-/// the weights the daemon holds resident and a first run downloads. Returns
-/// `None` when nothing matches (no number beats a wrong number).
-fn cached_weight_bytes(repo: &str) -> Option<u64> {
+/// Bytes of the cached `file` under `repo`'s hub-cache directory — the weights
+/// the daemon holds resident and a first run downloads. Matching the exact file
+/// (not just the repo) matters: `Xenova/all-MiniLM-L12-v2` hosts both the fp32
+/// and quantized exports, and reporting the larger for both made the int8
+/// default look like a 127 MB download. Returns `None` when nothing matches (no
+/// number beats a wrong number).
+fn cached_weight_bytes(repo: &str, file: &str) -> Option<u64> {
     let root = engramdb::storage::paths::model_cache_dir().ok()?;
     let needle = format!("models--{}", repo.replace('/', "--"));
     let mut best = 0u64;
@@ -109,7 +130,7 @@ fn cached_weight_bytes(repo: &str) -> Option<u64> {
             let Ok(meta) = entry.metadata() else { continue };
             if meta.is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "onnx")
+            } else if path.file_name().is_some_and(|n| n == file)
                 && path.to_string_lossy().contains(&needle)
                 && meta.len() > best
             {
@@ -136,6 +157,7 @@ async fn bench_model(
     key: &'static str,
     spec: OnnxModelSpec,
     repo: &str,
+    file: &str,
     docs: &[String],
     queries: &[String],
     iters: usize,
@@ -184,7 +206,7 @@ async fn bench_model(
     Ok(Row {
         key,
         model_id: provider.model_id(),
-        disk_mb: cached_weight_bytes(repo).map(|b| b as f64 / 1_048_576.0),
+        disk_mb: cached_weight_bytes(repo, file).map(|b| b as f64 / 1_048_576.0),
         cold_ms,
         warm_mean,
         warm_p50: percentile(&samples, 0.50),
@@ -227,12 +249,12 @@ async fn main() -> Result<()> {
     );
 
     let mut rows = Vec::new();
-    for (key, spec, repo) in CANDIDATES {
+    for (key, spec, repo, file) in CANDIDATES {
         if filter.as_ref().is_some_and(|f| !f.iter().any(|k| k == key)) {
             continue;
         }
         println!("--- {key} ---");
-        match bench_model(key, spec.clone(), repo, &docs, &queries, iters).await {
+        match bench_model(key, spec.clone(), repo, file, &docs, &queries, iters).await {
             Ok(row) => rows.push(row),
             Err(e) => println!("  skipped: {e:#}"),
         }

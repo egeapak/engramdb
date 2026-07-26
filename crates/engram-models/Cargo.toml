@@ -67,3 +67,9 @@ tempfile = "3"
 [dev-dependencies]
 engram-test-support = { path = "../engram-test-support" }
 ctor = "1"
+
+# Drives `fastembed` and `ort` directly to isolate where int8 nondeterminism
+# comes from; neither exists without the ONNX Runtime stack.
+[[example]]
+name = "int8_determinism_bisect"
+required-features = ["onnxruntime"]

@@ -30,7 +30,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use engramdb::embeddings::{
     chunk_text, EmbeddingProvider, OnnxModelSpec, OnnxProvider, ONNX_ALL_MINILM,
-    ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_Q, ONNX_ARCTIC_S_Q, ONNX_ARCTIC_XS_Q,
+    ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_Q, ONNX_ARCTIC_S_Q, ONNX_ARCTIC_XS, ONNX_ARCTIC_XS_Q,
     ONNX_BGE_SMALL_EN_Q, ONNX_NOMIC_EMBED_TEXT_Q,
 };
 use engramdb::onnx_ep::Backend;
@@ -432,6 +432,13 @@ const MODELS: &[ModelUnderTest] = &[
     ModelUnderTest {
         key: "arctic-xs-q",
         spec: ONNX_ARCTIC_XS_Q,
+        query_prefix: Some(ARCTIC_QUERY_PREFIX),
+        doc_prefix: None,
+    },
+    // fp32 arctic: the only form the tract (Intel-Mac) path can load.
+    ModelUnderTest {
+        key: "arctic-xs-fp32",
+        spec: ONNX_ARCTIC_XS,
         query_prefix: Some(ARCTIC_QUERY_PREFIX),
         doc_prefix: None,
     },

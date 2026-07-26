@@ -22,7 +22,7 @@ the two default changes, not a proposal.
 |---|--------|----------|------|
 | 1 | **Reranker default → `jina-reranker-v1-turbo-en`** (from `bge-reranker-base`) — **applied** | 7.3× smaller (145 MB vs 1060 MB), 3.4× faster per pair (82 vs 278 ms), 11× faster to load. And at the shipped `weight = 0.5` it is the *only* one that helps at all: bge-reranker-base reproduces the un-reranked ranking exactly, so the old default bought nothing for ~5.6 s/query. | One-line config default. **Zero migration** — rerank scores are not persisted. |
 | 2 | **Embedding default → `all-MiniLM-L12-v2-q`** (from `-L6-`) — **applied** | Wins **6/6 paired runs** with non-overlapping ranges: MRR@10 mean 0.953 (range 0.938–0.958) vs 0.907 (0.875–0.920); P@1 0.931 vs 0.868. Beats fp32 L6 too, so the gain is depth, not quantization precision. | +10 MB (22 → 32 MB), 2.0× warm embed latency (2.83 → 5.70 ms), one `reindex --embeddings-only`. Same 384 dims and 256-token window ⇒ no config/schema change. Pin the old model with `provider = "all-minilm-l6"`. |
-| 3 | **Don't** switch to snowflake-arctic-embed (xs or s) | arctic-xs-q is genuinely free on cost (same 22 MB, 0.94× warm latency, 1.66× faster cold start) but over 6 runs lands at MRR 0.914 with its query prefix / 0.903 without — statistically indistinguishable from the L6 model it would replace (0.907), and well below L12 (0.953). The prefix is also plumbing EngramDB does not have. arctic-s-q is worse than arctic-xs-q at 2.2× the latency. | — |
+| 3 | **Don't** switch to snowflake-arctic-embed (xs or s), on **either** the ONNX or the tract/Intel-Mac path | ONNX: arctic-xs-q is free on cost (22 MB, 0.94× warm latency) but lands at MRR 0.914 prefixed / 0.903 raw over 6 runs — indistinguishable from the L6 model it would replace (0.907), well below L12 (0.953). tract: arctic-xs-fp32 loads and matches L6-fp32 on cost exactly (86 MB, 894 vs 906 ms) but loses on quality (MRR 0.920 prefixed / 0.889 raw vs **0.930**, nDCG 0.904 vs 0.927) and needs query-prefix plumbing EngramDB does not have. See R7. | — |
 | 4 | **Don't** switch to static (model2vec) embeddings as the default | 100–450× faster and ONNX-free, but costs 6.6 pts MRR and collapses paraphrase queries (MRR 0.66 → 0.28). Worth keeping on the shelf for the tract/no-ORT build, not for the default path. | — |
 | 5 | Re-confirmed: **don't** switch to bge-small / nomic / mxbai / fp32 MiniLM | Reproduced E2 with cleaner instrumentation. bge-small-q is 5.7× slower for no reliable gain; nomic-q is catastrophic here (MRR 0.642 at best); fp32 MiniLM is 1.31× slower and *worse* than L12-q. | — |
 | 6 | **Open issue found while benchmarking: int8 embeddings are not reproducible under CPU load.** The same text through the same provider can come back with pairwise cosine **0.57** (old L6 default) / **0.71** (observed in the test suite). fp32 is bit-exact in every condition. | `examples/embed_determinism_probe.rs` (new). Not a ranking subtlety — a materially different vector for identical input, persisted at create time. | Not fixed here; see R6 for the likely cause (ORT intra-op threading) and the options. L12-q is the more robust of the two int8 models, which is an independent argument for recommendation 2. |
@@ -341,9 +341,11 @@ and nothing warns, because nothing compares it to anything afterwards.
   buys no determinism and `engram_onnx::intra_threads()` (cores/2) benchmarks
   **1.7× slower on the batch/create path** (39.3 vs 23.0 ms/text for L12-q).
 - An escape hatch: `[embeddings].provider = "all-minilm-l12-fp32"` selects the
-  bit-exact fp32 build of the default model. Costs ~4× the disk (128 MB) and
-  ~1.3× the latency, and fingerprints distinctly so switching triggers a
-  reindex.
+  bit-exact fp32 build of the default model. Measured cost against the int8
+  default: **127 MB vs 32 MB** on disk, **7.89 vs 5.55 ms** warm per query
+  (1.42×), **45.4 vs 23.0 ms/text** on the batch/create path (1.97×), and
+  **365 vs 151 ms** cold start (2.4×). It fingerprints distinctly, so switching
+  triggers a reindex.
 - Honest tests. `test_embed_consistency` asserted 1e-6 element-wise equality on
   the int8 default; no cosine floor is safe there either, since the measured
   minimum reaches 0. It is now `test_embed_returns_usable_vector` (right shape,
@@ -354,7 +356,9 @@ and nothing warns, because nothing compares it to anything afterwards.
 **Not resolved:** whether to move the default to fp32. On the evidence here
 that is the only thing that actually fixes it — fp32 was exact in 100% of cells,
 across both ORT builds, every session option, and every preemption level — but
-it costs 96 MB of download and ~30% embed latency.
+it costs +95 MB of download, 1.4× query latency and 2.0× create latency
+(measured, see the escape-hatch numbers above; an earlier draft of this document
+under-stated the create-path cost as ~30%).
 
 The blocker on deciding is **scope**: every number above comes from one host
 (x86_64 Linux, Intel Xeon with AMX, inside a VM). Apple silicon has no
@@ -371,6 +375,51 @@ cargo run --release -p engram-models --example int8_determinism_bisect
 Worth reporting upstream to `onnxruntime` either way — a byte-identical input
 tensor returning different results is a runtime bug, not a quantization
 trade-off.
+
+### R7 · The tract / Intel-Mac path — arctic evaluated, and the L12 default walked back
+
+The Intel-Mac build has no prebuilt ONNX Runtime, so it runs `tract`, which is
+fp32-only. Two things make it a different decision from the ONNX default:
+`tract` builds a runnable for the **fixed `[1, max_tokens]` shape** and pads
+every input to it, so a one-line query costs a full 256-token forward pass; and
+there is no int8 option at all.
+
+Measured on the tract engine (`examples/tract_model_bench.rs`, new), all fp32:
+
+| Model | disk | cold ms | warm mean | ms/text (batch 8) | quality: P@1 / MRR@10 / nDCG@10 |
+|---|---|---|---|---|---|
+| `all-MiniLM-L12-v2-fp32` | 127 MB | 2359 | 1843 ms | 1862 | ≈ 0.95 MRR |
+| **`all-MiniLM-L6-v2-fp32`** | **86 MB** | 1159 | **906 ms** | 942 | **0.896 / 0.930 / 0.927** |
+| `arctic-embed-xs-fp32` (+ prefix) | 86 MB | 1196 | 894 ms | 944 | 0.896 / 0.920 / 0.904 |
+| `arctic-embed-xs-fp32` (raw) | 86 MB | 1196 | 894 ms | 944 | 0.833 / 0.889 / 0.889 |
+
+Two findings:
+
+**arctic-xs does load under tract, and is a genuine cost-peer of L6-fp32** —
+identical 86 MB, 894 vs 906 ms. But it loses on quality even in fp32 (MRR 0.920
+prefixed, 0.889 raw, vs L6's 0.930; nDCG 0.904 vs 0.927), and the prefixed
+number needs query-side plumbing that does not exist. Same verdict as the ONNX
+path, for the same reason: it is a cost-peer, not a quality win.
+
+*Caveat on the first measurement:* at arctic's native 512-token window it
+benchmarked 1.9× slower than the MiniLM specs. That was the fixed-shape padding,
+not the model — on tract, `max_tokens` is a pure cost multiplier. `TRACT_ARCTIC_XS`
+therefore declares 256, matching the chunk budget, and the numbers above are at
+equal shape.
+
+**The tract default is deliberately *not* the ONNX default.** Following the ONNX
+switch to L12 would have cost Intel Macs 127 MB and 1843 ms per embed instead of
+86 MB and 906 ms — a 2× regression on the one platform with no ONNX Runtime —
+to buy about +0.02 MRR. `DEFAULT_TRACT_EMBEDDING` stays `all-MiniLM-L6-v2-fp32`;
+`tract_default_is_dimension_compatible_with_onnx_default` pins the invariant that
+actually matters (same 384 dims, same chunk budget) and lets model identity
+differ. `provider = "all-minilm-l12"` selects the deeper model on tract for
+anyone who wants it.
+
+For scale, note tract is far slower than the "~3× ONNX" the user docs claim:
+906 ms vs ~4 ms for the same fp32 model on ONNX Runtime, because ONNX runs the
+true sequence length while tract pads to 256. That is pre-existing behavior, not
+a regression, but it is the reason depth is expensive there.
 
 ## Caveats
 

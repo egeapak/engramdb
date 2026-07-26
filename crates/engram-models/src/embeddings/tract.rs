@@ -76,8 +76,43 @@ pub const TRACT_ALL_MINILM_L12: TractModelSpec = TractModelSpec {
     name: "all-MiniLM-L12-v2-fp32",
 };
 
+/// snowflake-arctic-embed-xs fp32 (`snowflake/snowflake-arctic-embed-xs`,
+/// `onnx/model.onnx`, ~86 MB), 384-dimensional. Same 6-layer/22M size class as
+/// [`TRACT_ALL_MINILM`], evaluated as a candidate for the tract (Intel-Mac)
+/// path where the int8 exports don't load and download size and CPU cost bite
+/// hardest. Benchmarked by `examples/tract_model_bench.rs`.
+/// `max_tokens` is deliberately 256 rather than arctic's native 512: the tract
+/// provider builds a runnable for the fixed `[1, max_tokens]` shape and pads
+/// every input to it, so on this path the context window is a pure **cost**
+/// multiplier, not a capability. At 512 this model measured 1.9× slower than
+/// the 256-token MiniLM specs purely from the padding, while the chunker
+/// budgets chunks at 256 anyway.
+pub const TRACT_ARCTIC_XS: TractModelSpec = TractModelSpec {
+    repo: "snowflake/snowflake-arctic-embed-xs",
+    model_file: "onnx/model.onnx",
+    tokenizer_file: "tokenizer.json",
+    dimensions: 384,
+    max_tokens: 256,
+    name: "snowflake-arctic-embed-xs-fp32",
+};
+
 /// The default tract embedding model.
-pub const DEFAULT_TRACT_EMBEDDING: TractModelSpec = TRACT_ALL_MINILM_L12;
+///
+/// **Deliberately the 6-layer model, while the ONNX default is 12-layer.** The
+/// two paths are not comparable: tract builds a runnable for the fixed
+/// `[1, max_tokens]` shape and pads every input to it, so a query costs a full
+/// 256-token forward pass — measured at ~906 ms here versus ~4 ms for the same
+/// model on ONNX Runtime. Doubling the depth doubles that (L12-fp32 measured
+/// 1843 ms and 127 MB, vs 906 ms and 86 MB for L6-fp32) to buy roughly
+/// +0.02 MRR. On the one platform that has no ONNX Runtime at all, that is the
+/// wrong side of the trade.
+///
+/// The invariant that *must* hold across the two defaults is dimensionality
+/// (384) — see `tract_default_is_dimension_compatible_with_onnx_default`. Model
+/// identity may differ; the manifest fingerprint records `tract/…` vs `onnx/…`
+/// either way, so moving a store between an Intel Mac and any other machine
+/// already prompts `reindex --embeddings-only`.
+pub const DEFAULT_TRACT_EMBEDDING: TractModelSpec = TRACT_ALL_MINILM;
 
 type RunnableTractModel = Arc<RunnableModel<TypedFact, Box<dyn TypedOp>>>;
 
@@ -431,21 +466,23 @@ mod tests {
         }
     }
 
-    /// The tract default must stay the fp32 counterpart of the ONNX default —
-    /// same model, different precision. If they drift apart, a store shared
-    /// between an Intel Mac and any other machine silently changes *models* on
-    /// each switch rather than just precision, and `cosine_matches_onnx_fp32`
-    /// stops testing backend equivalence.
+    /// The two backend defaults may be different *models* (see
+    /// [`DEFAULT_TRACT_EMBEDDING`] for why tract stays on the 6-layer one), but
+    /// they must agree on dimensionality and context window. A mismatch there
+    /// is not a quality trade-off — it would change the vector width a store is
+    /// built with depending on which machine wrote it.
     #[cfg(feature = "onnxruntime")]
     #[test]
-    fn tract_default_tracks_onnx_default_model() {
+    fn tract_default_is_dimension_compatible_with_onnx_default() {
         use crate::embeddings::DEFAULT_ONNX_EMBEDDING;
-        let onnx_base = DEFAULT_ONNX_EMBEDDING.name.trim_end_matches("-q");
-        let tract_base = DEFAULT_TRACT_EMBEDDING.name.trim_end_matches("-fp32");
         assert_eq!(
-            onnx_base, tract_base,
-            "tract default ({}) and ONNX default ({}) must be the same model",
+            DEFAULT_TRACT_EMBEDDING.dimensions, DEFAULT_ONNX_EMBEDDING.dimensions,
+            "tract default ({}) and ONNX default ({}) must produce the same width",
             DEFAULT_TRACT_EMBEDDING.name, DEFAULT_ONNX_EMBEDDING.name
+        );
+        assert_eq!(
+            DEFAULT_TRACT_EMBEDDING.max_tokens, DEFAULT_ONNX_EMBEDDING.max_tokens,
+            "both defaults must budget chunks the same way"
         );
     }
 
@@ -459,11 +496,17 @@ mod tests {
         // Must be the fp32 ONNX spec for the SAME model the tract default
         // loads — otherwise this asserts nothing about backend equivalence and
         // just compares two different models (it did, briefly, when the ONNX
-        // default moved to L12 and this side was left on L6).
-        use crate::embeddings::{OnnxProvider, ONNX_ALL_MINILM_L12};
+        // default moved to L12 and this side was left on L6). The assertion
+        // below pins that correspondence so the pair can't silently drift.
+        use crate::embeddings::{OnnxProvider, ONNX_ALL_MINILM};
+        assert_eq!(
+            DEFAULT_TRACT_EMBEDDING.name.trim_end_matches("-fp32"),
+            ONNX_ALL_MINILM.name,
+            "this test must compare tract against the ONNX build of the same model"
+        );
         let (Some(tract), Some(onnx)) = (
             TractEmbeddingProvider::try_new(),
-            OnnxProvider::try_with_model(ONNX_ALL_MINILM_L12),
+            OnnxProvider::try_with_model(ONNX_ALL_MINILM),
         ) else {
             eprintln!("Skipping: tract or fp32 ONNX model unavailable");
             return;

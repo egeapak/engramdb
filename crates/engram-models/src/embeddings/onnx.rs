@@ -79,6 +79,20 @@ pub const ONNX_ARCTIC_XS_Q: OnnxModelSpec = OnnxModelSpec {
     name: "snowflake-arctic-embed-xs-q",
 };
 
+/// snowflake-arctic-embed-xs **fp32** (`snowflake/snowflake-arctic-embed-xs`,
+/// `onnx/model.onnx`, ~86 MB): the unquantized counterpart of
+/// [`ONNX_ARCTIC_XS_Q`], and the same file
+/// [`crate::embeddings::TRACT_ARCTIC_XS`] loads. Benchmarked because the
+/// tract (Intel-Mac) path is fp32-only, so the int8 arctic numbers say nothing
+/// about it. `max_tokens` matches the tract spec's 256 so the two engines are
+/// measured on the same shape.
+pub const ONNX_ARCTIC_XS: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::SnowflakeArcticEmbedXS,
+    dimensions: 384,
+    max_tokens: 256,
+    name: "snowflake-arctic-embed-xs",
+};
+
 /// snowflake-arctic-embed-s int8-quantized (`snowflake/snowflake-arctic-embed-s`,
 /// `onnx/model_quantized.onnx`, ~34 MB): the 33M-parameter step up from
 /// [`ONNX_ARCTIC_XS_Q`], still 384 dims. Benchmarked in
