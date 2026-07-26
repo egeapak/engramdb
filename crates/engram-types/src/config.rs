@@ -33,6 +33,18 @@ pub const CONTENT_SOFT_TOKEN_TARGET: usize = 500;
 /// ~3.7× less RAM, identical id2label).
 pub const DEFAULT_NLI_MODEL_REPO: &str = "Xenova/nli-deberta-v3-xsmall";
 
+/// Single source of truth for the `[rerank].model` default. `crate::rerank`'s
+/// `resolve_reranker_model` must map this name to a real model and use it as
+/// the unknown-name fallback; a unit test in that module asserts no drift.
+/// Lives here, in the `types` foundation, for the same reason as
+/// [`DEFAULT_NLI_MODEL_REPO`].
+///
+/// `jina-reranker-v1-turbo-en` over the historical `bge-reranker-base`: 7.3×
+/// smaller (145 MB vs 1060 MB), 6.2× faster per pair, 28× faster to load, and
+/// better nDCG@10 on the retrieval corpus — dominant on every measured axis.
+/// See `docs/contributors/embedding-model-alternatives.md` (R3).
+pub const DEFAULT_RERANK_MODEL: &str = "jina-reranker-v1-turbo-en";
+
 /// Weights for scoring components.
 ///
 /// Trust and scope are applied as multipliers on the entire score,
@@ -948,9 +960,9 @@ pub struct RerankConfig {
     /// Whether reranking is enabled (default: false)
     pub enabled: bool,
 
-    /// Reranker model name (default: "bge-reranker-base").
-    /// Supported: "bge-reranker-base", "bge-reranker-v2-m3",
-    /// "jina-reranker-v1-turbo-en", "jina-reranker-v2-base-multilingual".
+    /// Reranker model name (default: [`DEFAULT_RERANK_MODEL`]).
+    /// Supported: "jina-reranker-v1-turbo-en", "bge-reranker-base",
+    /// "bge-reranker-v2-m3", "jina-reranker-v2-base-multilingual".
     pub model: String,
 
     /// Number of top candidates to rerank (default: 50).
@@ -982,7 +994,10 @@ impl Default for RerankConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            model: "bge-reranker-base".to_string(),
+            // Single source of truth, same discipline as `NliConfig::default`:
+            // never a hand-copied literal, so the default can't drift from the
+            // model `resolve_reranker_model` actually selects.
+            model: DEFAULT_RERANK_MODEL.to_string(),
             top_n: 50,
             weight: 0.5,
         }
@@ -2354,7 +2369,7 @@ similarity_threshold = 0.4
     fn test_rerank_config_defaults() {
         let config = RerankConfig::default();
         assert!(!config.enabled);
-        assert_eq!(config.model, "bge-reranker-base");
+        assert_eq!(config.model, DEFAULT_RERANK_MODEL);
         assert_eq!(config.top_n, 50);
         assert_eq!(config.weight, 0.5);
     }
@@ -2363,7 +2378,7 @@ similarity_threshold = 0.4
     fn test_rerank_config_disabled_by_default() {
         let config = EngramConfig::default();
         assert!(!config.rerank.enabled);
-        assert_eq!(config.rerank.model, "bge-reranker-base");
+        assert_eq!(config.rerank.model, DEFAULT_RERANK_MODEL);
         assert_eq!(config.rerank.top_n, 50);
         assert_eq!(config.rerank.weight, 0.5);
     }
@@ -2388,7 +2403,7 @@ weight = 0.7
     fn test_rerank_config_defaults_when_omitted() {
         let config: EngramConfig = toml::from_str("").unwrap();
         assert!(!config.rerank.enabled);
-        assert_eq!(config.rerank.model, "bge-reranker-base");
+        assert_eq!(config.rerank.model, DEFAULT_RERANK_MODEL);
         assert_eq!(config.rerank.top_n, 50);
         assert_eq!(config.rerank.weight, 0.5);
     }

@@ -78,11 +78,14 @@ use crate::embeddings::{
 };
 #[cfg(feature = "onnxruntime")]
 use crate::embeddings::{
-    OnnxModelSpec, OnnxProvider, DEFAULT_ONNX_EMBEDDING, ONNX_MXBAI_EMBED_LARGE,
-    ONNX_NOMIC_EMBED_TEXT,
+    OnnxModelSpec, OnnxProvider, DEFAULT_ONNX_EMBEDDING, ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_Q,
+    ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT,
 };
 #[cfg(feature = "tract")]
-use crate::embeddings::{TractEmbeddingProvider, TractModelSpec, TRACT_ALL_MINILM};
+use crate::embeddings::{
+    TractEmbeddingProvider, TractModelSpec, DEFAULT_TRACT_EMBEDDING, TRACT_ALL_MINILM,
+    TRACT_ALL_MINILM_L12,
+};
 use crate::nli::NliProvider;
 #[cfg(feature = "onnxruntime")]
 use crate::nli::OnnxNliProvider;
@@ -190,11 +193,30 @@ struct ProviderSpecs {
 /// (embeddings disabled). The ONE place the provider→spec table lives.
 fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
     Some(match provider {
+        // `all-minilm` tracks whatever the shipped default is (today L12);
+        // `all-minilm-l6` / `-l12` pin a specific depth, so a store can stay on
+        // the old model — and skip the reindex — across a default change.
         "onnx" | "all-minilm" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: DEFAULT_ONNX_EMBEDDING,
             #[cfg(feature = "tract")]
+            tract: Some(DEFAULT_TRACT_EMBEDDING),
+            #[cfg(feature = "ollama")]
+            ollama: ALL_MINILM,
+        },
+        "all-minilm-l6" => ProviderSpecs {
+            #[cfg(feature = "onnxruntime")]
+            onnx: ONNX_ALL_MINILM_Q,
+            #[cfg(feature = "tract")]
             tract: Some(TRACT_ALL_MINILM),
+            #[cfg(feature = "ollama")]
+            ollama: ALL_MINILM,
+        },
+        "all-minilm-l12" => ProviderSpecs {
+            #[cfg(feature = "onnxruntime")]
+            onnx: ONNX_ALL_MINILM_L12_Q,
+            #[cfg(feature = "tract")]
+            tract: Some(TRACT_ALL_MINILM_L12),
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
         },
@@ -1180,9 +1202,29 @@ mod tests {
     fn provider_specs_table_resolves_known_and_rejects_unknown() {
         assert!(provider_specs("onnx").is_some());
         assert!(provider_specs("all-minilm").is_some());
+        assert!(provider_specs("all-minilm-l6").is_some());
+        assert!(provider_specs("all-minilm-l12").is_some());
         assert!(provider_specs("nomic-embed-text").is_some());
         assert!(provider_specs("mxbai-embed-large").is_some());
         assert!(provider_specs("definitely-not-a-model").is_none());
+    }
+
+    /// The depth pins must select genuinely different models, and `all-minilm`
+    /// must track the shipped default. Without this, a user pinning
+    /// `all-minilm-l6` to avoid the L12 reindex would silently get L12 anyway.
+    #[cfg(feature = "onnxruntime")]
+    #[test]
+    fn minilm_depth_pins_are_distinct_and_default_tracks_l12() {
+        let l6 = expected_embedding_fingerprint(&onnx_config("all-minilm-l6")).unwrap();
+        let l12 = expected_embedding_fingerprint(&onnx_config("all-minilm-l12")).unwrap();
+        let default = expected_embedding_fingerprint(&onnx_config("all-minilm")).unwrap();
+        assert_eq!(l6.model, "onnx/all-MiniLM-L6-v2-q");
+        assert_eq!(l12.model, "onnx/all-MiniLM-L12-v2-q");
+        assert_ne!(l6.model, l12.model);
+        assert_eq!(default.model, l12.model, "default must be L12");
+        // Same dimensionality across the family: swapping depth needs a
+        // re-embed, never a schema or config change.
+        assert_eq!(l6.dimensions, l12.dimensions);
     }
 
     #[cfg(feature = "onnxruntime")]

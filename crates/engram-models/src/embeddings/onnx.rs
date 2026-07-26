@@ -28,7 +28,9 @@ pub const ONNX_ALL_MINILM: OnnxModelSpec = OnnxModelSpec {
 
 /// all-MiniLM-L6-v2 int8-quantized (`Xenova/all-MiniLM-L6-v2`,
 /// `onnx/model_quantized.onnx`, ~22 MB vs ~86 MB fp32). Same 384-dim
-/// output; for the CPU latency/footprint A/B.
+/// output; for the CPU latency/footprint A/B. The default up to the
+/// L12 switch — still selectable as `[embeddings].provider = "all-minilm-l6"`
+/// by anyone who wants the smaller/faster model and no reindex.
 pub const ONNX_ALL_MINILM_Q: OnnxModelSpec = OnnxModelSpec {
     fastembed_model: EmbeddingModel::AllMiniLML6V2Q,
     dimensions: 384,
@@ -89,14 +91,25 @@ pub const ONNX_ARCTIC_S_Q: OnnxModelSpec = OnnxModelSpec {
 };
 
 /// all-MiniLM-L12-v2 int8-quantized (`Xenova/all-MiniLM-L12-v2`,
-/// `onnx/model_quantized.onnx`, ~33 MB): the 12-layer sibling of the default,
-/// same 384 dims and 256-token context. The "same family, 2× the depth"
-/// reference point for the model sweep in `examples/embed_matrix.rs`.
+/// `onnx/model_quantized.onnx`, ~33 MB): the 12-layer sibling of
+/// [`ONNX_ALL_MINILM_Q`], same 384 dims and 256-token context. **This is
+/// [`DEFAULT_ONNX_EMBEDDING`]** — see there for the evidence.
 pub const ONNX_ALL_MINILM_L12_Q: OnnxModelSpec = OnnxModelSpec {
     fastembed_model: EmbeddingModel::AllMiniLML12V2Q,
     dimensions: 384,
     max_tokens: 256,
     name: "all-MiniLM-L12-v2-q",
+};
+
+/// all-MiniLM-L12-v2 **fp32** (`Xenova/all-MiniLM-L12-v2`, `onnx/model.onnx`,
+/// ~128 MB): the unquantized counterpart of [`ONNX_ALL_MINILM_L12_Q`], and the
+/// same file [`crate::embeddings::TRACT_ALL_MINILM_L12`] loads — which is what
+/// makes the tract-vs-ONNX numerical-equivalence test a like-for-like check.
+pub const ONNX_ALL_MINILM_L12: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::AllMiniLML12V2,
+    dimensions: 384,
+    max_tokens: 256,
+    name: "all-MiniLM-L12-v2",
 };
 
 /// mxbai-embed-large-v1: 1024-dimensional, 512 token context.
@@ -110,14 +123,21 @@ pub const ONNX_MXBAI_EMBED_LARGE: OnnxModelSpec = OnnxModelSpec {
 /// Default embedding model (single source of truth, mirrors
 /// `DEFAULT_T5_MODEL` / `DEFAULT_NLI_MODEL`).
 ///
-/// int8 [`ONNX_ALL_MINILM_Q`] — the Lever B A/B showed it 1.4–1.9× faster
-/// (2.5–6× under CPU contention), ~4× smaller, with no measurable
-/// retrieval-quality loss (cosine vs fp32 ≈ 0.99, 4/4 ranking agreement).
-/// Safe to default now that the embedding model identity is persisted and
-/// a mismatch is surfaced/enforced via `embeddings.reindex_on_model_change`
-/// (existing fp32 stores are flagged on connect and fixed by
-/// `engramdb reindex --embeddings-only`).
-pub const DEFAULT_ONNX_EMBEDDING: OnnxModelSpec = ONNX_ALL_MINILM_Q;
+/// int8 [`ONNX_ALL_MINILM_L12_Q`] — the model sweep in
+/// `docs/contributors/embedding-model-alternatives.md` (R1/R2) measured it as
+/// the best model on the retrieval corpus: MRR@10 0.958 vs 0.920 and P@1 0.938
+/// vs 0.875 against the previous 6-layer default, beating even fp32 L6 (0.930)
+/// — so the gain is depth, not quantization precision — and returning
+/// identical rankings on 3/3 repeats where the L6 int8 model swings ±0.023 MRR
+/// run-to-run on identical input. Costs 2.0× warm embed latency (2.83 → 5.70 ms)
+/// and +10 MB on disk; cold start actually improves (171 → 146 ms).
+///
+/// Same family, same 384 dims, same 256-token window, same tokenizer, so this
+/// is a drop-in: no config or schema change. Existing stores detect the
+/// `model_id()` change through the manifest fingerprint and are repaired by
+/// `engramdb reindex --embeddings-only`, exactly as the fp32→int8 switch was.
+/// Pin the old model with `[embeddings].provider = "all-minilm-l6"`.
+pub const DEFAULT_ONNX_EMBEDDING: OnnxModelSpec = ONNX_ALL_MINILM_L12_Q;
 
 /// ONNX-based embedding provider using fastembed.
 ///
@@ -366,6 +386,37 @@ mod tests {
         }
     }
 
+    /// Agreement floor for "the same text embeds to the same vector" **on the
+    /// int8 default**.
+    ///
+    /// These two assertions used to demand element-wise equality within 1e-6,
+    /// and flaked. That bound was never sound: the int8 models are not
+    /// reproducible on a busy machine. `examples/embed_determinism_probe.rs`
+    /// embeds one text 30 times through one provider and reports, under CPU
+    /// saturation, a minimum pairwise cosine of 0.97 (L12 default) and 0.57
+    /// (the older L6 int8 model); the full test suite has produced 0.71. The
+    /// fp32 model is bit-exact in every condition — see
+    /// [`fp32_embedding_is_bit_exact`], which is where the real determinism
+    /// guard now lives.
+    ///
+    /// So this floor is deliberately loose. It is not a quality bar; it is a
+    /// wiring check that still fails loudly for what these tests exist to catch
+    /// — a provider returning a zero or unrelated vector (cosine ≈ 0). Tighten
+    /// it only if the underlying instability is fixed (e.g. by pinning ORT's
+    /// intra-op thread count). See
+    /// `docs/contributors/embedding-model-alternatives.md` (R6).
+    const CONSISTENCY_MIN_COSINE: f32 = 0.4;
+
+    fn cosine(a: &[f32], b: &[f32]) -> f32 {
+        let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+        let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if na == 0.0 || nb == 0.0 {
+            return 0.0;
+        }
+        dot / (na * nb)
+    }
+
     #[tokio::test]
     async fn test_embed_consistency() {
         if let Some(provider) = try_provider() {
@@ -373,11 +424,12 @@ mod tests {
             let embedding1 = provider.embed(text).await.unwrap();
             let embedding2 = provider.embed(text).await.unwrap();
 
-            // Same text should produce identical embeddings
             assert_eq!(embedding1.len(), embedding2.len());
-            for (a, b) in embedding1.iter().zip(embedding2.iter()) {
-                assert!((a - b).abs() < 1e-6, "Embeddings should be identical");
-            }
+            let cos = cosine(&embedding1, &embedding2);
+            assert!(
+                cos >= CONSISTENCY_MIN_COSINE,
+                "repeated embed() diverged: cosine {cos} < {CONSISTENCY_MIN_COSINE}"
+            );
         }
     }
 
@@ -391,14 +443,32 @@ mod tests {
             assert_eq!(batch_embeddings.len(), 1);
             let batch_embedding = &batch_embeddings[0];
 
-            // embed_batch(&["text"]) should equal vec![embed("text")]
             assert_eq!(single_embedding.len(), batch_embedding.len());
-            for (a, b) in single_embedding.iter().zip(batch_embedding.iter()) {
-                assert!(
-                    (a - b).abs() < 1e-6,
-                    "Single and batch embeddings should match"
-                );
-            }
+            let cos = cosine(&single_embedding, batch_embedding);
+            assert!(
+                cos >= CONSISTENCY_MIN_COSINE,
+                "embed() and embed_batch() diverged: cosine {cos} < {CONSISTENCY_MIN_COSINE}"
+            );
         }
+    }
+
+    /// The determinism guard the int8 tests above can no longer be: fp32 is
+    /// bit-exact across calls and across the single/batch paths, in every load
+    /// condition measured. If this ever flakes, the provider — not the
+    /// quantization — is broken.
+    ///
+    /// Self-skips when the ~86 MB fp32 model isn't cached (CI / offline).
+    #[tokio::test]
+    async fn fp32_embedding_is_bit_exact() {
+        let Some(provider) = OnnxProvider::try_with_model(ONNX_ALL_MINILM) else {
+            eprintln!("Skipping: fp32 ONNX model not available");
+            return;
+        };
+        let text = "deterministic across calls and across the batch path";
+        let a = provider.embed(text).await.unwrap();
+        let b = provider.embed(text).await.unwrap();
+        let c = provider.embed_batch(&[text]).await.unwrap().remove(0);
+        assert_eq!(a, b, "repeated fp32 embed() must be bit-identical");
+        assert_eq!(a, c, "fp32 embed() and embed_batch() must be bit-identical");
     }
 }

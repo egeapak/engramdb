@@ -1927,9 +1927,9 @@ mod tests {
     }
 
     /// Shared reranker across all tests in this module to avoid loading the
-    /// ~100MB ONNX model once per test (which causes OOM when parallel).
-    /// Built through the `engram-models` loader (default BGE reranker base) so
-    /// the core crate needs no direct `fastembed` dependency, even in tests.
+    /// ONNX model once per test (which causes OOM when parallel). Built through
+    /// the `engram-models` loader at the shipped default so the core crate needs
+    /// no direct `fastembed` dependency, even in tests.
     ///
     /// The `fastembed` loader (`LocalReranker`) only exists with `onnxruntime`;
     /// on a pure-`tract` build there is no in-process reranker, so `try_reranker`
@@ -1939,7 +1939,7 @@ mod tests {
         use crate::retrieval::reranker::LocalReranker;
         use std::sync::LazyLock;
         static SHARED_RERANKER: LazyLock<Option<Arc<dyn Reranker>>> =
-            LazyLock::new(|| LocalReranker::load("bge-reranker-base").ok());
+            LazyLock::new(|| LocalReranker::load(crate::types::DEFAULT_RERANK_MODEL).ok());
         SHARED_RERANKER.clone()
     }
 

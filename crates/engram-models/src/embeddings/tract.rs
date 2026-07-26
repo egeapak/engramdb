@@ -61,8 +61,23 @@ pub const TRACT_ALL_MINILM: TractModelSpec = TractModelSpec {
     name: "all-MiniLM-L6-v2-fp32",
 };
 
+/// all-MiniLM-L12-v2 fp32 (`Xenova/all-MiniLM-L12-v2`, `onnx/model.onnx`),
+/// 384-dimensional, 256 token context. The fp32 counterpart of the ONNX
+/// default [`crate::embeddings::DEFAULT_ONNX_EMBEDDING`] — the tract backend
+/// tracks the ONNX default's *model* so an Intel Mac and a non-Intel machine
+/// sharing a store differ only in precision (as before the L12 switch), not in
+/// which model produced the vectors.
+pub const TRACT_ALL_MINILM_L12: TractModelSpec = TractModelSpec {
+    repo: "Xenova/all-MiniLM-L12-v2",
+    model_file: "onnx/model.onnx",
+    tokenizer_file: "tokenizer.json",
+    dimensions: 384,
+    max_tokens: 256,
+    name: "all-MiniLM-L12-v2-fp32",
+};
+
 /// The default tract embedding model.
-pub const DEFAULT_TRACT_EMBEDDING: TractModelSpec = TRACT_ALL_MINILM;
+pub const DEFAULT_TRACT_EMBEDDING: TractModelSpec = TRACT_ALL_MINILM_L12;
 
 type RunnableTractModel = Arc<RunnableModel<TypedFact, Box<dyn TypedOp>>>;
 
@@ -416,6 +431,24 @@ mod tests {
         }
     }
 
+    /// The tract default must stay the fp32 counterpart of the ONNX default —
+    /// same model, different precision. If they drift apart, a store shared
+    /// between an Intel Mac and any other machine silently changes *models* on
+    /// each switch rather than just precision, and `cosine_matches_onnx_fp32`
+    /// stops testing backend equivalence.
+    #[cfg(feature = "onnxruntime")]
+    #[test]
+    fn tract_default_tracks_onnx_default_model() {
+        use crate::embeddings::DEFAULT_ONNX_EMBEDDING;
+        let onnx_base = DEFAULT_ONNX_EMBEDDING.name.trim_end_matches("-q");
+        let tract_base = DEFAULT_TRACT_EMBEDDING.name.trim_end_matches("-fp32");
+        assert_eq!(
+            onnx_base, tract_base,
+            "tract default ({}) and ONNX default ({}) must be the same model",
+            DEFAULT_TRACT_EMBEDDING.name, DEFAULT_ONNX_EMBEDDING.name
+        );
+    }
+
     /// Correctness bar for the backend swap: tract's fp32 output must match the
     /// fp32 ONNX Runtime output (the experiment measured cosine 1.00000). Runs
     /// only in a both-engines build and self-skips if either fp32 model isn't
@@ -423,10 +456,14 @@ mod tests {
     #[cfg(feature = "onnxruntime")]
     #[tokio::test]
     async fn cosine_matches_onnx_fp32() {
-        use crate::embeddings::{OnnxProvider, ONNX_ALL_MINILM};
+        // Must be the fp32 ONNX spec for the SAME model the tract default
+        // loads — otherwise this asserts nothing about backend equivalence and
+        // just compares two different models (it did, briefly, when the ONNX
+        // default moved to L12 and this side was left on L6).
+        use crate::embeddings::{OnnxProvider, ONNX_ALL_MINILM_L12};
         let (Some(tract), Some(onnx)) = (
             TractEmbeddingProvider::try_new(),
-            OnnxProvider::try_with_model(ONNX_ALL_MINILM),
+            OnnxProvider::try_with_model(ONNX_ALL_MINILM_L12),
         ) else {
             eprintln!("Skipping: tract or fp32 ONNX model unavailable");
             return;

@@ -1,6 +1,6 @@
 # Model-stack alternatives: smaller / faster / better candidates
 
-*2026-07-26 · benchmark assets: `examples/embed_matrix.rs`, `examples/embed_model_bench.rs`, corpus `examples/data/embed_eval.json`*
+*2026-07-26 · benchmark assets: `examples/embed_matrix.rs`, `examples/embed_model_bench.rs`, `examples/rerank_bench.rs`, `examples/embed_determinism_probe.rs`, corpus `examples/data/embed_eval.json`*
 
 Companion to [embedding-analysis.md](./embedding-analysis.md), which studied
 *chunking and field composition* and closed E2 ("model swap") with **keep
@@ -15,22 +15,27 @@ on this corpus by a clear margin.
 
 ## TL;DR — ranked recommendations
 
+Recommendations 1 and 2 are **applied** — this document is the evidence behind
+the two default changes, not a proposal.
+
 | # | Change | Evidence | Cost |
 |---|--------|----------|------|
-| 1 | **Switch the reranker default to `jina-reranker-v1-turbo-en`** (from `bge-reranker-base`) | 7.3× smaller (145 MB vs 1060 MB), 6.2× faster per pair (80 vs 494 ms), 28× faster to load, and *slightly better* quality (nDCG@10 0.910 vs 0.904). Strictly dominant on every axis measured. | One-line config default. **Zero migration** — rerank scores are not persisted, and the name is already accepted by `resolve_reranker_model`. |
-| 2 | **Switch the embedding default to `all-MiniLM-L12-v2-q`** | Best model on the corpus: MRR@10 0.958 vs 0.920, P@1 0.938 vs 0.875, nDCG 0.942 vs 0.915 — and **bit-stable across repeats** where the current L6 default swings ±0.023 MRR run-to-run on identical input. | +10 MB (22 → 32 MB), 2.0× warm embed latency (2.83 → 5.70 ms), one `reindex --embeddings-only`. Same 384 dims, same 256-token window ⇒ no config/schema change. |
-| 3 | **Don't** switch to snowflake-arctic-embed (xs or s) | arctic-xs-q is genuinely free on cost (same 22 MB, 0.94× warm latency, 1.6× faster cold start) but only reaches parity on quality, and *only with* a query instruction prefix EngramDB does not currently emit. arctic-s-q is worse than arctic-xs-q at 2.2× the latency. | — |
+| 1 | **Reranker default → `jina-reranker-v1-turbo-en`** (from `bge-reranker-base`) — **applied** | 7.3× smaller (145 MB vs 1060 MB), 3.4× faster per pair (82 vs 278 ms), 11× faster to load. And at the shipped `weight = 0.5` it is the *only* one that helps at all: bge-reranker-base reproduces the un-reranked ranking exactly, so the old default bought nothing for ~5.6 s/query. | One-line config default. **Zero migration** — rerank scores are not persisted. |
+| 2 | **Embedding default → `all-MiniLM-L12-v2-q`** (from `-L6-`) — **applied** | Wins **6/6 paired runs** with non-overlapping ranges: MRR@10 mean 0.953 (range 0.938–0.958) vs 0.907 (0.875–0.920); P@1 0.931 vs 0.868. Beats fp32 L6 too, so the gain is depth, not quantization precision. | +10 MB (22 → 32 MB), 2.0× warm embed latency (2.83 → 5.70 ms), one `reindex --embeddings-only`. Same 384 dims and 256-token window ⇒ no config/schema change. Pin the old model with `provider = "all-minilm-l6"`. |
+| 3 | **Don't** switch to snowflake-arctic-embed (xs or s) | arctic-xs-q is genuinely free on cost (same 22 MB, 0.94× warm latency, 1.66× faster cold start) but over 6 runs lands at MRR 0.914 with its query prefix / 0.903 without — statistically indistinguishable from the L6 model it would replace (0.907), and well below L12 (0.953). The prefix is also plumbing EngramDB does not have. arctic-s-q is worse than arctic-xs-q at 2.2× the latency. | — |
 | 4 | **Don't** switch to static (model2vec) embeddings as the default | 100–450× faster and ONNX-free, but costs 6.6 pts MRR and collapses paraphrase queries (MRR 0.66 → 0.28). Worth keeping on the shelf for the tract/no-ORT build, not for the default path. | — |
 | 5 | Re-confirmed: **don't** switch to bge-small / nomic / mxbai / fp32 MiniLM | Reproduced E2 with cleaner instrumentation. bge-small-q is 5.7× slower for no reliable gain; nomic-q is catastrophic here (MRR 0.642 at best); fp32 MiniLM is 1.31× slower and *worse* than L12-q. | — |
-| 6 | Note, not a change: **the current int8 L6 default is run-to-run nondeterministic** | Same host, same sorted inputs, three runs: MRR@10 0.875 / 0.920 / 0.920 (and 0.848 / 0.911 in earlier runs). L12-q returned 0.958 three times out of three. | Explains part of the drift between this report's minilm-q numbers and embedding-analysis.md's. |
+| 6 | **Open issue found while benchmarking: int8 embeddings are not reproducible under CPU load.** The same text through the same provider can come back with pairwise cosine **0.57** (old L6 default) / **0.71** (observed in the test suite). fp32 is bit-exact in every condition. | `examples/embed_determinism_probe.rs` (new). Not a ranking subtlety — a materially different vector for identical input, persisted at create time. | Not fixed here; see R6 for the likely cause (ORT intra-op threading) and the options. L12-q is the more robust of the two int8 models, which is an independent argument for recommendation 2. |
 
 ## Current stack (what is actually loaded, and why)
 
 | Role | Model | Size on disk | Default? | Why this one |
 |------|-------|--------------|----------|--------------|
-| Embedding | `all-MiniLM-L6-v2` **int8** (`Xenova/all-MiniLM-L6-v2`) | 22 MB | **on** | Lever-B A/B: 1.4–1.9× faster and ~4× smaller than fp32 at cosine ≈ 0.99 |
-| Embedding (tract) | `all-MiniLM-L6-v2` **fp32** | 86 MB | Intel Mac only | No native ORT; int8 has no tract build |
-| Reranker | `bge-reranker-base` fp32 (`BAAI/bge-reranker-base`) | **1060 MB** | off | Historical default; the fp32 export is the only one that loads under tract |
+| Embedding | `all-MiniLM-L6-v2` **int8** | 22 MB | was **on**, now `all-minilm-l6` | Lever-B A/B: 1.4–1.9× faster and ~4× smaller than fp32 at cosine ≈ 0.99 |
+| Embedding | **`all-MiniLM-L12-v2` int8** (`Xenova/all-MiniLM-L12-v2`) | 32 MB | **on** (new) | R1/R2 below |
+| Embedding (tract) | `all-MiniLM-L12-v2` **fp32** | 128 MB | Intel Mac only | No native ORT; int8 has no tract build. Tracks the ONNX default's depth so a shared store differs only in precision |
+| Reranker | `bge-reranker-base` fp32 | **1060 MB** | was default, still selectable | Historical default; a no-op at the shipped blend weight (R3) |
+| Reranker | **`jina-reranker-v1-turbo-en` fp32** (`jinaai/…`) | **145 MB** | **default** (new), still off unless `rerank.enabled` | R3 below |
 | NLI (challenge) | `nli-deberta-v3-xsmall` int8 (`Xenova/…`) | 83 MB | off | Lever-D A/B: ~2× faster, ~3.7× less RAM than fp32, same label order |
 | Title | `t5-small` int8 (`Xenova/t5-small`), encoder + decoder | 74 MB (33 + 41) | **on** | Abstractive titles; daemon-amortized and pooled (size 2) |
 
@@ -55,10 +60,14 @@ content chunks, 256-token budget, max aggregation):
   context-window differences can't leak into the timing. `embed_matrix`'s
   `ms_per_text` cannot do this: it averages over every variant it runs,
   including per-model `full`/no-chunk cells.
-- **Repeats** — the three shortlisted models were re-run 3× to separate real
-  deltas from int8 nondeterminism. This turned out to matter (recommendation 6).
+- **Reranker** — `examples/rerank_bench.rs` (new). Drives the real
+  `LocalReranker` over candidates from the real bi-encoder path, with
+  `rerank_document`'s composition and `apply_rerank`'s blend.
+- **Repeats** — the shortlisted embedding models were re-run **6×** to separate
+  real deltas from int8 nondeterminism. This turned out to matter, and to
+  invalidate a claim made from the first three runs (R2).
 
-Static-embedding and reranker candidates were evaluated in a Python mirror of
+Static-embedding candidates were evaluated in a Python mirror of
 the same harness (`chunk_text` incl. runt rebalance, same compositions, same
 max aggregation, same P@1 / R@5 / MRR@10 / nDCG@10 definitions). Its MiniLM
 control reproduces the Rust harness's *effect sizes* exactly — base → fieldvec
@@ -66,26 +75,34 @@ is +0.148 MRR in both — so relative comparisons carry over; absolute values si
 a few points high because pooling/normalization details differ.
 
 **Noise discipline** is inherited from the earlier study: with n=48 queries,
-overall deltas below ~5 pts R@5 / 0.05 MRR are noise. The measured run-to-run
-spread of the int8 L6 default (±0.023 MRR) is consistent with that floor.
+overall deltas below ~5 pts R@5 / 0.05 MRR are noise on a single run. The
+measured run-to-run spread of the int8 models (0.017–0.045 MRR) is consistent
+with that floor, which is why the model verdicts below rest on *non-overlapping
+ranges over 6 runs* rather than on one delta.
 
 ## Results
 
 ### R1 · Embedding models — `all-MiniLM-L12-v2-q` wins
 
-Quality at the production cell (`fieldvec_c256`, max agg). Shortlisted models
-show the median of 3 repeats and the observed spread; others are a single run.
+Quality at the production cell (`fieldvec_c256`, max agg). The three
+shortlisted models were run **6 times each**; they report the mean and the
+full observed range. Others are a single run.
 
-| Model | dim | P@1 | R@5 | MRR@10 | nDCG@10 | MRR spread over repeats |
+| Model | dim | P@1 | MRR@10 | MRR range (n=6) | R@5 | nDCG@10 |
 |---|---|---|---|---|---|---|
-| `minilm-q` (**today's default**) | 384 | 0.875 | 0.920 | 0.920 | 0.915 | 0.875 – 0.920 |
-| `minilm-fp32` | 384 | 0.896 | 0.931 | 0.930 | 0.927 | — |
-| **`minilm-l12-q`** | 384 | **0.938** | 0.920 | **0.958** | **0.942** | **0.958 / 0.958 / 0.958** |
-| `arctic-xs-q` (raw) | 384 | 0.875 | 0.920 | 0.903 | 0.899 | 0.896 – 0.913 |
-| `arctic-xs-q` (+ query prefix) | 384 | 0.896 | 0.899 | 0.918 | 0.909 | 0.911 – 0.927 |
-| `arctic-s-q` (+ query prefix) | 384 | 0.896 | 0.889 | 0.913 | 0.892 | — |
-| `bge-small-q` (+ query prefix) | 384 | 0.896 | 0.948 | 0.924 | 0.919 | — |
-| `nomic-q` (+ prefixes) | 768 | 0.625 | 0.674 | 0.642 | 0.676 | — |
+| `minilm-q` (the **previous** default) | 384 | 0.868 | 0.907 | 0.875 – 0.920 | 0.920 | 0.910 |
+| **`minilm-l12-q`** (**new default**) | 384 | **0.931** | **0.953** | **0.938 – 0.958** | 0.913 | 0.933 |
+| `arctic-xs-q` (raw) | 384 | 0.865 | 0.903 | 0.896 – 0.913 | 0.918 | 0.898 |
+| `arctic-xs-q` (+ query prefix) | 384 | 0.892 | 0.914 | 0.901 – 0.927 | 0.891 | 0.900 |
+| `minilm-fp32` | 384 | 0.896 | 0.930 | — | 0.931 | 0.927 |
+| `arctic-s-q` (+ query prefix) | 384 | 0.896 | 0.913 | — | 0.889 | 0.892 |
+| `bge-small-q` (+ query prefix) | 384 | 0.896 | 0.924 | — | 0.948 | 0.919 |
+| `nomic-q` (+ prefixes) | 768 | 0.625 | 0.642 | — | 0.674 | 0.676 |
+
+The separation is the point: **L12-q's worst run (0.938) beats L6's best run
+(0.920) and arctic-xs's best (0.927)**, and it wins all 6 paired runs on both
+P@1 and MRR. That is a much stronger statement than a mean delta against the
+corpus's ~0.05 MRR noise floor, which a single run could not have supported.
 
 Cost, measured on identical inputs (`embed_model_bench`, 4-core CPU, 60 warm
 iterations; "warm" is the query path, "batch16" the create/reindex path):
@@ -101,68 +118,93 @@ iterations; "warm" is the query path, "batch16" the create/reindex path):
 
 Reading the two tables together:
 
-- **L12-q is the only model that beats the default on quality by more than the
-  noise floor** (+0.038 MRR at the median, +0.083 against the default's worst
-  draw; +0.063 P@1; +0.027 nDCG), and it beats fp32 L6 too — so the gain is
-  depth, not precision. It costs 2.02× warm latency, but in absolute terms that
-  is **2.83 → 5.70 ms** on the query path and 11.6 → 21.9 ms/text on the create
-  path, which the async ingest already defers. Cold start actually *improves*
-  (171 → 146 ms), which matters for the daemon-less CLI.
+- **L12-q is the only model that separates from the default** (+0.046 MRR on
+  means, and no overlap between the two models' 6-run ranges; +0.063 P@1). It
+  beats fp32 L6 too — so the gain is depth, not precision. It costs 2.02× warm
+  latency, but in absolute terms that is **2.83 → 5.70 ms** on the query path
+  and 11.6 → 21.9 ms/text on the create path, which async ingest already
+  defers. Cold start actually *improves* (171 → 146 ms), which matters for the
+  daemon-less CLI.
 - **arctic-xs-q is the "free" candidate that isn't worth taking.** Same 22 MB,
-  0.94× warm latency, 1.66× faster cold start — but its quality only reaches
-  parity, and only with the instruction prefix. Prefixes are the caller's job
-  in EngramDB (fastembed adds none), so adopting it means adding query-side
-  prefix plumbing *and* the asymmetry that documents must not get it. Parity is
-  not worth new surface area.
+  0.94× warm latency, 1.66× faster cold start, and 1.35× *slower* on the
+  batch-16 create path (15.6 vs 11.6 ms/text). On quality it lands within the
+  L6 model's own run-to-run band (0.914 prefixed / 0.903 raw vs L6's 0.907;
+  ranges overlap heavily), so it is a lateral move on the axis that matters —
+  and the prefixed number is the one that needs query-side plumbing EngramDB
+  does not have, plus the asymmetry that documents must *not* get the prefix.
+  Nothing here justifies the surface area, and L12-q is 0.04 MRR ahead of it.
 - **bge-small-q's cost is now explained.** Its 5.74× warm latency on identical
   inputs confirms the earlier 6.8× was real, not a chunking artifact — and the
   cache shows why the "-Q" model is 63 MB: `Qdrant/bge-small-en-v1.5-onnx-Q`
   ships `model_optimized.onnx`, which is not an int8 export at all.
 - **nomic-q is reproducibly bad here** (best cell MRR 0.642), matching E2.
 
-### R2 · Determinism — the current default is not stable, L12-q is
+### R2 · Determinism — int8 rankings drift run-to-run; L12-q drifts less
 
-Three back-to-back runs, same host, same sorted/deduped batches (the harness
-already controls batch composition), production cell:
+Six back-to-back runs, same host, same sorted/deduped batches (the harness
+already controls batch composition), production cell, MRR@10:
 
-| Model | run 1 | run 2 | run 3 |
-|---|---|---|---|
-| `minilm-q` MRR@10 | 0.875 | 0.920 | 0.920 |
-| `arctic-xs-q` MRR@10 (raw) | 0.913 | 0.903 | 0.896 |
-| `minilm-l12-q` MRR@10 | 0.958 | 0.958 | 0.958 |
+| Model | 1 | 2 | 3 | 4 | 5 | 6 | spread |
+|---|---|---|---|---|---|---|---|
+| `minilm-q` | 0.875 | 0.920 | 0.920 | 0.908 | 0.909 | 0.909 | 0.045 |
+| `arctic-xs-q` (raw) | 0.913 | 0.903 | 0.896 | 0.903 | 0.906 | 0.898 | 0.017 |
+| `minilm-l12-q` | 0.958 | 0.958 | 0.958 | 0.955 | 0.938 | 0.948 | 0.020 |
 
-The residual nondeterminism is ONNX Runtime's multi-threaded int8 reduction
-order; it only becomes visible because near-ties in the ranking flip whole
-queries. The practical reading is that **the 6-layer int8 model produces score
-margins narrow enough for numerical noise to reorder results**, and the
-12-layer one does not. This is a quality property in its own right, and it is
-also why this report's `minilm-q` figures differ from embedding-analysis.md's
-(0.894 MRR there) by more than that document's stated ±0.02 caveat.
+The nondeterminism is ONNX Runtime's handling of the dynamically quantized
+kernels; it becomes visible here because near-ties in the ranking flip whole
+queries. **R6 shows it is larger and more consequential than "ranking noise"** —
+read that section before treating this table as a measurement caveat.
 
-### R3 · Reranker — `jina-reranker-v1-turbo-en` strictly dominates the default
+An earlier draft of this document read the first three L12 runs (identical at
+0.958) as "bit-stable". That was wrong — extending to n=6, and running the same
+model through a second harness with different batch sizes
+(`examples/rerank_bench.rs`, whose bi-encoder stage spans 0.927–0.948 MRR over
+5 runs), shows L12 drifts too. What survives is the weaker, still-useful claim:
+**L12's spread is about half L6's (0.020 vs 0.045) and the two models' ranges
+do not overlap.** Stability is a property of the harness's batching as much as
+the model, so it is not a decision criterion on its own here — the
+non-overlapping quality ranges are.
 
-Production pipeline mirrored: bi-encoder ranking → top-20 re-scored by the
-cross-encoder → blended `(1 - w)·base + w·sigmoid(logit)` at the default
-`weight = 0.5`, document text per `rerank_document`.
+This is also why this report's `minilm-q` figures differ from
+embedding-analysis.md's (0.894 MRR there) by more than that document's stated
+±0.02 caveat.
+
+### R3 · Reranker — `jina-reranker-v1-turbo-en` dominates; the old default was a no-op at the shipped weight
+
+Measured by `examples/rerank_bench.rs` through the production seams: candidates
+from the real bi-encoder path, documents composed by the same rule as
+`retrieval::engine::rerank_document`, scoring through the real `LocalReranker`,
+and the blend from `apply_rerank` — `(1 - w)·base + w·sigmoid(logit)` — at the
+shipped `top_n = 20`, `weight = 0.5`.
 
 | Reranker | disk | load ms | ms/pair | ms/query @ top-20 | P@1 | R@5 | MRR@10 | nDCG@10 |
 |---|---|---|---|---|---|---|---|---|
-| *(no rerank — bi-encoder only)* | — | — | — | — | 0.812 | 0.868 | 0.854 | 0.860 |
-| `bge-reranker-base` (**today's default**) | 1060 MB | 10023 | 494 | 9875 | 0.875 | 0.889 | 0.915 | 0.904 |
-| **`jina-reranker-v1-turbo-en`** | **145 MB** | **354** | **80** | **1604** | **0.896** | **0.906** | **0.920** | **0.910** |
+| *(no rerank — bi-encoder only)* | — | — | — | — | 0.917 | 0.951 | 0.949 | 0.936 |
+| `bge-reranker-base` (**previous default**) | 1060 MB | 6189 | 278 | 5568 | 0.917 | 0.951 | 0.949 | 0.936 |
+| **`jina-reranker-v1-turbo-en`** (**new default**) | **145 MB** | **552** | **82** | **1647** | **0.938** | 0.951 | **0.959** | **0.946** |
 
-There is no axis on which the current default wins. The size difference is the
-important part: a **1 GB** first-run download is a plausible reason reranking
-stays off in practice, and `rerank.top_n` defaults to **50**, which at 494
-ms/pair is ~25 s of cross-encoder work per query — unusable. At 80 ms/pair the
-same top-50 is ~4 s, and a top-20 is ~1.6 s. (These are 4-core sandbox
-absolutes; the ratios are the transferable part.)
+**bge-reranker-base reproduces the un-reranked ranking exactly** — all four
+metrics identical to the baseline. It is not that it fails to load: at
+`weight = 1.0` it does reorder, and helpfully (0.896 / 0.927 / 0.923 / 0.917 vs
+that run's 0.875 / 0.910 / 0.917 / 0.909 baseline). The cause is calibration:
+BGE emits large positive logits, so `sigmoid(logit) ≈ 1` for every candidate in
+a top-20 that already contains the answer, and a half-weight blend with a
+constant preserves the base order. jina-turbo's logits stay in the informative
+range and it improves at both weights.
 
-`resolve_reranker_model` already accepts the name, so this is a default change,
-not a feature. Caveat: the **tract** path hard-codes `bge-reranker-base`
-(`rerank.rs::tract_reranker`) because that fp32 export is the one verified to
-load under tract; flipping the default means either verifying the jina export
-under tract or keeping the tract branch pinned and documenting the split.
+So the old default cost ~5.6 s of cross-encoder work per query to return the
+ranking the bi-encoder had already produced. At `rerank.top_n = 50` (the
+shipped value, not the 20 used here) that is ~14 s/query for nothing; the new
+default's ~4 s at top-50 at least buys the gain. The 1 GB download is also a
+plausible reason reranking stays off in practice. (4-core sandbox absolutes;
+the ratios are what transfers.)
+
+Both the fastembed path and the **tract** path now support the new default:
+`tract_spec` in `rerank.rs` carries the two fp32 exports that load under tract
+(`jinaai/jina-reranker-v1-turbo-en` ~145 MB and the historical
+`Xenova/bge-reranker-base` ~1.1 GB), and `tract_reranker_orders_relevant_first`
+asserts the ordering property for each, so an Intel-Mac build gets the smaller
+model too rather than losing reranking.
 
 ### R4 · Static (model2vec) embeddings — real speed, real quality cost
 
@@ -209,6 +251,49 @@ recommendation.
   here; if create latency ever becomes the complaint, the decode-step count and
   the `keyword` fallback are the levers, not a different model.
 
+### R6 · int8 embeddings are not reproducible under CPU load — fp32 is
+
+R2 treated run-to-run ranking drift as a measurement nuisance. Chasing an
+intermittent failure of `embeddings::onnx::tests::test_embed_consistency`
+showed it is more than that. `examples/embed_determinism_probe.rs` embeds one
+text 30 times through a single provider and reports the spread:
+
+| Model | idle: max element spread | idle: min pairwise cosine | 8 busy threads: max spread | 8 busy threads: min cosine |
+|---|---|---|---|---|
+| `all-MiniLM-L6-v2-q` (int8, old default) | 0.000000 | 1.000000 | 0.131810 | **0.567** |
+| `all-MiniLM-L12-v2-q` (int8, new default) | 0.012851 | 0.998040 | 0.036983 | **0.969** |
+| `all-MiniLM-L6-v2` (**fp32**) | 0.000000 | **1.000000** | 0.000000 | **1.000000** |
+
+A pairwise cosine of 0.567 between two embeddings of the same string is not
+rounding — it is a different vector. The full test suite (heavier, more varied
+contention than the probe's synthetic load) has produced 0.71 across the
+`embed()` / `embed_batch()` paths on the L12 default.
+
+**Why it matters.** Vectors are computed once at create time and persisted. A
+memory written while the machine is busy — which is exactly when a coding agent
+is running builds and tests — can be indexed with a degraded vector, and no
+warning fires because nothing is comparing it to anything. This is a plausible
+contributor to the pre-existing flakes CLAUDE.md already documents around
+semantic-query tests.
+
+**Likely cause** is ONNX Runtime's multi-threaded execution of the dynamically
+quantized kernels: the Python mirror of this harness went from ±0.1 MRR
+run-to-run to bit-identical across three runs purely by setting
+`intra_op_num_threads = 1`. fp32 being exact under the same threading points
+the same way — it is the quantized path specifically.
+
+**Not fixed here**, because the plausible fixes trade against latency and
+deserve their own measurement: pinning ORT's intra-op threads for the embedding
+session (the repo already has this plumbing for T5 via `intra_threads`), or
+moving the default to fp32 (128 MB and ~1.3× slower for L12, but exact). What
+this pass did do is stop asserting a determinism that does not exist:
+`test_embed_consistency` and `test_embed_batch_single_matches_embed` now assert
+a loose cosine floor as a wiring check, and a new `fp32_embedding_is_bit_exact`
+carries the real determinism guard on the model that actually provides it.
+
+L12-q's much better worst case (0.969 vs 0.567) is an independent argument for
+recommendation 2, separate from its ranking quality.
+
 ## Caveats
 
 - Same synthetic 60-memory / 48-query corpus as the earlier study, with the
@@ -219,27 +304,52 @@ recommendation.
 - Semantic-only for the embedding numbers: composite scoring (scope, recency,
   trust) is not in the loop and will shrink end-to-end deltas.
 - All absolute latencies are from a 4-core Linux sandbox and are pessimistic;
-  the ratios are what transfers. Reranker and static-embedding numbers come
-  from the Python mirror, not the Rust harness.
+  the ratios are what transfers. Only the static-embedding numbers come from
+  the Python mirror; embedding and reranker results are from the Rust harnesses
+  against production code paths.
 - The reranker comparison is a paired test on one fixed bi-encoder candidate
-  list, so the bge-vs-jina delta is sound even though the underlying baseline
-  draw was a single run.
+  list. That makes the bge-vs-jina delta sound, but the *baseline* row is a
+  single draw from a bi-encoder stage that itself spans 0.927–0.948 MRR over
+  repeats — so read "jina beats no-rerank" as directional and "jina beats bge"
+  as solid.
+- `rerank_bench` uses `top_n = 20` against a 60-memory corpus; the shipped
+  default is 50. Per-query latency scales linearly in `top_n`, quality does
+  not.
 
 ## Reproducing
 
 ```bash
 # stage models per CLAUDE.md's web-sandbox notes, then:
-cargo run --release --example embed_matrix          # quality (all models)
-cargo run --release --example embed_model_bench     # latency / footprint
+cargo run --release --example embed_matrix              # embedding quality
+cargo run --release --example embed_model_bench         # embedding latency / footprint
+cargo run --release --example rerank_bench              # reranker quality + cost
+PROBE_LOAD_THREADS=8 \
+  cargo run --release --example embed_determinism_probe # int8 reproducibility (R6)
 
 EMBED_EVAL_MODELS=minilm-q,minilm-l12-q,arctic-xs-q cargo run --release --example embed_matrix
 EMBED_BENCH_MODELS=minilm-q,minilm-l12-q EMBED_BENCH_ITERS=200 \
   cargo run --release --example embed_model_bench
+RERANK_BENCH_WEIGHT=1.0 cargo run --release --example rerank_bench
 ```
 
-Adopting recommendation 2 is a one-line change to `DEFAULT_ONNX_EMBEDDING`
-(`crates/engram-models/src/embeddings/onnx.rs`) plus a docs pass; existing
-stores detect the `model_id()` change through the manifest fingerprint and are
-fixed by `engramdb reindex --embeddings-only`, exactly as the fp32→int8 switch
-was. Recommendation 1 is a one-line change to `RerankConfig::default().model`
-with no migration at all.
+## Upgrading an existing store
+
+The embedding default change alters `model_id()` (`onnx/all-MiniLM-L6-v2-q` →
+`onnx/all-MiniLM-L12-v2-q`), so every existing store's manifest fingerprint now
+mismatches. Under the default `reindex_on_model_change = "warn"` this surfaces
+as a warning naming the fix:
+
+```bash
+engramdb reindex --embeddings-only     # re-embed at the new default
+engramdb reindex --embeddings-only --global
+```
+
+To stay on the old model instead — no reindex, no download — pin it:
+
+```toml
+[embeddings]
+provider = "all-minilm-l6"
+```
+
+The reranker change needs nothing: rerank scores are computed per query and
+never persisted.

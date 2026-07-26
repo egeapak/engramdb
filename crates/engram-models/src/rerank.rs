@@ -12,6 +12,8 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+#[allow(unused_imports)] // used by the onnxruntime and tract paths independently
+use engram_types::DEFAULT_RERANK_MODEL;
 #[cfg(feature = "onnxruntime")]
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 #[cfg(feature = "onnxruntime")]
@@ -107,7 +109,7 @@ impl Reranker for LocalReranker {
 
 /// Map a reranker model name string to a fastembed `RerankerModel` enum variant.
 ///
-/// The recognized default name is `bge-reranker-base`; anything else
+/// The recognized default name is [`DEFAULT_RERANK_MODEL`]; anything else
 /// unrecognized falls back to it WITH a warning — a silent fallback let a
 /// typo (`bge-reranker-v2m3`) rerank with a different model than the user
 /// believes they configured.
@@ -120,26 +122,28 @@ fn resolve_reranker_model(name: &str) -> RerankerModel {
         "bge-reranker-base" => RerankerModel::BGERerankerBase,
         other => {
             tracing::warn!(
-                "unknown rerank.model '{}'; falling back to bge-reranker-base \
-                 (known: bge-reranker-base, bge-reranker-v2-m3, jina-reranker-v1-turbo-en, \
+                "unknown rerank.model '{}'; falling back to {} \
+                 (known: jina-reranker-v1-turbo-en, bge-reranker-base, bge-reranker-v2-m3, \
                  jina-reranker-v2-base-multilingual)",
-                other
+                other,
+                DEFAULT_RERANK_MODEL
             );
-            RerankerModel::BGERerankerBase
+            RerankerModel::JINARerankerV1TurboEn
         }
     }
 }
 
-/// Pure-Rust cross-encoder reranker backed by tract (fp32 BGE), for the
-/// Intel-Mac / `--features tract` build where `fastembed` is unavailable.
+/// Pure-Rust cross-encoder reranker backed by tract, for the Intel-Mac /
+/// `--features tract` build where `fastembed` is unavailable.
 ///
-/// Only the default `bge-reranker-base` is supported: its fp32 ONNX export
-/// (`Xenova/bge-reranker-base`, `onnx/model.onnx`) loads cleanly under tract
-/// (verified: relevant pairs score high, irrelevant low). The int8 exports and
-/// the other reranker models are not offered on the tract path. The model is a
-/// large fp32 download (~1.1 GB) and runs ~3× slower than ONNX, so reranking
-/// stays **off by default**; this only builds when `[rerank].enabled = true` on
-/// a tract build.
+/// Two fp32 exports are supported, both BERT-style (`input_ids` +
+/// `attention_mask`, single relevance logit, 512-token pairs) and both verified
+/// to load under tract and order relevant pairs first:
+/// [`DEFAULT_RERANK_MODEL`] (`jinaai/jina-reranker-v1-turbo-en`, ~145 MB) and
+/// the historical `bge-reranker-base` (`Xenova/bge-reranker-base`, ~1.1 GB).
+/// The int8 exports and the remaining reranker models are not offered here.
+/// tract runs ~3× slower than ONNX Runtime and reranking stays **off by
+/// default**; this only matters when `[rerank].enabled = true` on a tract build.
 #[cfg(feature = "tract")]
 mod tract_reranker {
     use super::{RerankScore, Reranker};
@@ -151,12 +155,38 @@ mod tract_reranker {
 
     type RunnableTractModel = Arc<RunnableModel<TypedFact, Box<dyn TypedOp>>>;
 
-    /// fp32 BGE reranker files (BERT-style: `input_ids` + `attention_mask`,
-    /// single relevance logit output). 512-token pairs.
-    const BGE_REPO: &str = "Xenova/bge-reranker-base";
-    const BGE_MODEL_FILE: &str = "onnx/model.onnx";
-    const BGE_TOKENIZER_FILE: &str = "tokenizer.json";
+    /// An fp32 cross-encoder export that loads under tract.
+    struct TractRerankSpec {
+        repo: &'static str,
+        model_file: &'static str,
+        tokenizer_file: &'static str,
+    }
+
     const MAX_TOKENS: usize = 512;
+
+    /// The tract-loadable exports, by `[rerank].model` name. Anything else is
+    /// an error rather than a silent substitution, so a typo can't rerank with
+    /// a model the user didn't configure.
+    fn tract_spec(model_name: &str) -> Option<TractRerankSpec> {
+        let name = if model_name.is_empty() {
+            super::DEFAULT_RERANK_MODEL
+        } else {
+            model_name
+        };
+        match name {
+            "jina-reranker-v1-turbo-en" => Some(TractRerankSpec {
+                repo: "jinaai/jina-reranker-v1-turbo-en",
+                model_file: "onnx/model.onnx",
+                tokenizer_file: "tokenizer.json",
+            }),
+            "bge-reranker-base" => Some(TractRerankSpec {
+                repo: "Xenova/bge-reranker-base",
+                model_file: "onnx/model.onnx",
+                tokenizer_file: "tokenizer.json",
+            }),
+            _ => None,
+        }
+    }
 
     pub struct TractReranker {
         model: RunnableTractModel,
@@ -166,34 +196,40 @@ mod tract_reranker {
     }
 
     impl TractReranker {
-        /// Load the tract reranker for `model_name`. Only `bge-reranker-base`
-        /// (the default) is supported on tract; anything else errors so the
-        /// caller can continue without a reranker.
+        /// Load the tract reranker for `model_name` (empty = the default).
+        /// Only the exports in [`tract_spec`] are supported; anything else
+        /// errors so the caller can continue without a reranker.
         pub fn load(model_name: &str) -> Result<Arc<dyn Reranker>> {
-            if !matches!(model_name, "bge-reranker-base" | "") {
+            let Some(spec) = tract_spec(model_name) else {
                 anyhow::bail!(
-                    "tract reranker only supports 'bge-reranker-base' (got '{model_name}'); \
-                     reranking disabled on this pure-Rust build"
+                    "tract reranker supports only '{}' and 'bge-reranker-base' \
+                     (got '{model_name}'); reranking disabled on this pure-Rust build",
+                    super::DEFAULT_RERANK_MODEL
                 );
-            }
+            };
 
             let cache_dir =
                 engram_storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
             if engram_storage::paths::offline_enabled()
-                && !engram_storage::paths::hf_repo_cached(BGE_REPO)
+                && !engram_storage::paths::hf_repo_cached(spec.repo)
             {
-                anyhow::bail!("offline mode and tract reranker '{BGE_REPO}' is not cached");
+                anyhow::bail!(
+                    "offline mode and tract reranker '{}' is not cached",
+                    spec.repo
+                );
             }
 
             let api = hf_hub::api::sync::ApiBuilder::new()
                 .with_cache_dir(cache_dir)
                 .build()
                 .context("init HuggingFace API")?;
-            let repo = api.model(BGE_REPO.to_string());
-            let model_path = repo.get(BGE_MODEL_FILE).context("fetch BGE model")?;
+            let repo = api.model(spec.repo.to_string());
+            let model_path = repo
+                .get(spec.model_file)
+                .with_context(|| format!("fetch {} model", spec.repo))?;
             let tokenizer_path = repo
-                .get(BGE_TOKENIZER_FILE)
-                .context("fetch BGE tokenizer")?;
+                .get(spec.tokenizer_file)
+                .with_context(|| format!("fetch {} tokenizer", spec.repo))?;
 
             let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
                 .map_err(|e| anyhow::anyhow!("load tokenizer: {e}"))?;
@@ -302,14 +338,29 @@ pub use tract_reranker::TractReranker;
 mod tract_tests {
     use super::*;
 
-    /// The tract fp32 BGE reranker must rank a relevant document above an
-    /// irrelevant one. Self-skips if the ~1.1 GB model isn't cached (CI/offline).
+    /// Every tract-supported fp32 export must rank a relevant document above an
+    /// irrelevant one — including the default, which is what a tract build now
+    /// loads when `[rerank].enabled = true` without an explicit model. Each
+    /// case self-skips if its model isn't cached (CI/offline).
     #[tokio::test]
     async fn tract_reranker_orders_relevant_first() {
-        let Ok(reranker) = TractReranker::load("bge-reranker-base") else {
-            eprintln!("Skipping: tract BGE reranker model not available");
-            return;
-        };
+        for name in ["", DEFAULT_RERANK_MODEL, "bge-reranker-base"] {
+            let Ok(reranker) = TractReranker::load(name) else {
+                eprintln!("Skipping '{name}': tract reranker model not available");
+                continue;
+            };
+            assert_relevant_first(reranker.as_ref(), name).await;
+        }
+    }
+
+    /// An unsupported name must fail loudly rather than substitute a model the
+    /// user did not configure.
+    #[test]
+    fn tract_reranker_rejects_unsupported_model() {
+        assert!(TractReranker::load("jina-reranker-v2-base-multilingual").is_err());
+    }
+
+    async fn assert_relevant_first(reranker: &dyn Reranker, name: &str) {
         let query = "what is the capital of France?";
         let docs = vec![
             "Bananas are a yellow tropical fruit.".to_string(),
@@ -321,7 +372,7 @@ mod tract_tests {
         let banana = scores.iter().find(|s| s.index == 0).unwrap().score;
         assert!(
             paris > banana,
-            "relevant doc must outscore irrelevant: paris={paris} banana={banana}"
+            "[{name}] relevant doc must outscore irrelevant: paris={paris} banana={banana}"
         );
     }
 }
