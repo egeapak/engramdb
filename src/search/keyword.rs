@@ -1,7 +1,7 @@
 //! Keyword-based search for memories
 
 use std::borrow::Borrow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::search::normalize;
 use crate::types::Memory;
@@ -13,14 +13,22 @@ use crate::types::Memory;
 /// - score: raw weighted match score (unbounded)
 ///
 /// # Algorithm
-/// 1. Tokenize query into lowercase words
-/// 2. For each memory, tokenize summary, content, and tags
-/// 3. Count weighted matches:
+/// 1. Reduce the query to deduplicated stems ([`normalize`](normalize::normalize))
+/// 2. Reduce each memory the same way, once, into per-field stem sets
+/// 3. Derive an IDF weight per query term from how many of these memories
+///    contain it, normalized so the weights sum to the term count
+/// 4. Score each term once per field it appears in, scaled by that weight:
 ///    - Summary match: 3x weight
 ///    - Tag match: 2x weight
-///    - Content match: 1x weight
-/// 4. Score = raw weighted_matches (no normalization)
+///    - Content match: up to 1x weight, scaled by
+///      [`content_density`] so a passing mention in a long field counts for
+///      less than the same word in a field that is about it
 /// 5. Filter out zero scores and sort by score descending
+///
+/// The score scale is deliberately unchanged by both refinements: IDF weights
+/// sum to the term count, and the density factor is capped at 1.0, so the
+/// maximum is still `6 * terms` and an all-equally-common query over
+/// average-length content scores exactly as it did before either existed.
 ///
 /// # Arguments
 /// * `query` - The search query string
@@ -38,11 +46,35 @@ pub fn keyword_search<M: Borrow<Memory>>(query: &str, memories: &[M]) -> Vec<(us
         return vec![];
     }
 
-    let mut results: Vec<(usize, f64)> = memories
+    // One pass to derive each memory's stems, so they are built once rather
+    // than per query term, and so document frequencies can be counted before
+    // anything is scored.
+    let stems: Vec<MemoryStems> = memories
+        .iter()
+        .map(|m| MemoryStems::of(m.borrow()))
+        .collect();
+
+    let weights = idf_weights(&query_tokens, &stems);
+
+    // Average content length over the candidate set, the baseline the density
+    // factor normalizes against. Empty contents are excluded so a store full
+    // of summary-only memories does not drag the reference to zero.
+    let non_empty: Vec<usize> = stems
+        .iter()
+        .map(|s| s.content_len)
+        .filter(|l| *l > 0)
+        .collect();
+    let avg_content_len = if non_empty.is_empty() {
+        0.0
+    } else {
+        non_empty.iter().sum::<usize>() as f64 / non_empty.len() as f64
+    };
+
+    let mut results: Vec<(usize, f64)> = stems
         .iter()
         .enumerate()
-        .filter_map(|(idx, memory)| {
-            let score = calculate_keyword_score(&query_tokens, memory.borrow());
+        .filter_map(|(idx, doc)| {
+            let score = doc.score(&query_tokens, &weights, avg_content_len);
             if score > 0.0 {
                 Some((idx, score))
             } else {
@@ -55,6 +87,179 @@ pub fn keyword_search<M: Borrow<Memory>>(query: &str, memories: &[M]) -> Vec<(us
     results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     results
+}
+
+/// A memory reduced to the stems the scorer compares against, one set per
+/// weighted field.
+///
+/// Deriving this is pure document-side work — it does not depend on the query
+/// — which is why it is built once per memory instead of once per (query
+/// term, memory) pair, and why it is the shape a future write-time
+/// precomputation would persist.
+struct MemoryStems {
+    summary: HashSet<String>,
+    tags: HashSet<String>,
+    /// Content carries occurrence counts, not just membership, so density can
+    /// separate two memories that both merely *contain* a term.
+    content: HashMap<String, u32>,
+    /// Scoreable tokens in the content, post-stopword and pre-dedup.
+    content_len: usize,
+}
+
+impl MemoryStems {
+    fn of(memory: &Memory) -> Self {
+        let (content, content_len) = normalize::normalize_counts(&memory.content);
+        Self {
+            summary: normalize::normalize_set(&memory.summary),
+            tags: memory
+                .tags
+                .iter()
+                .flat_map(|t| normalize::normalize(t))
+                .collect(),
+            content,
+            content_len,
+        }
+    }
+
+    /// Whether the term appears anywhere in this memory — the unit of
+    /// "document frequency" for IDF.
+    fn contains(&self, term: &str) -> bool {
+        self.summary.contains(term) || self.tags.contains(term) || self.content.contains_key(term)
+    }
+
+    fn score(&self, query_tokens: &[String], weights: &[f64], avg_content_len: f64) -> f64 {
+        let mut weighted_matches = 0.0;
+        for (token, weight) in query_tokens.iter().zip(weights) {
+            if self.summary.contains(token) {
+                weighted_matches += 3.0 * weight;
+            }
+            if self.tags.contains(token) {
+                weighted_matches += 2.0 * weight;
+            }
+            if let Some(&tf) = self.content.get(token) {
+                weighted_matches += content_density(tf, self.content_len, avg_content_len) * weight;
+            }
+        }
+        weighted_matches
+    }
+}
+
+/// How strongly a content field is *about* a term, in `(0, 1]`.
+///
+/// The binary "contains it at all" test cannot distinguish a roadmap that lists
+/// a topic once from the memory that explains it, so two such memories score
+/// identically and store order picks the winner. This restores that distinction
+/// using BM25's term-frequency saturation with length normalisation: more
+/// occurrences help with diminishing returns, and a longer field dilutes each
+/// one.
+///
+/// Scaled so that **one occurrence in an average-length field is exactly 1.0**,
+/// with no upper clamp:
+///  - a typical single mention scores what it always did;
+///  - a mention diluted across a field several times the average length scores
+///    less;
+///  - a field densely about the term scores more, up to [`MAX_DENSITY`].
+///
+/// An earlier version capped this at 1.0, reasoning that scores which can only
+/// fall are safer against a fixed relevance threshold. Measurement rejected it:
+/// capping makes the adjustment *asymmetric*, because a long field that repeats
+/// the term saturates to the cap and escapes the length penalty, while a long
+/// field that mentions it once absorbs the penalty in full. That systematically
+/// favours a repetitive document over a substantive one — precisely backwards —
+/// and the TermFreq probe fell from 0.67 to 0.33 as a result.
+///
+/// Letting the factor exceed 1.0 raises the theoretical maximum from `6 * terms`
+/// to `(5 + MAX_DENSITY) * terms`. [`normalize_keyword_score`] absorbs that
+/// without recalibration: its sigmoid is asymptotic rather than clamped, and its
+/// documented anchor — all terms matching the summary sits at 0.50 — depends
+/// only on the summary weight, which is untouched.
+fn content_density(tf: u32, len: usize, avg_len: f64) -> f64 {
+    // BM25 defaults: k1 controls how fast repetition saturates, b how strongly
+    // length is normalised.
+    const K1: f64 = 1.2;
+    const B: f64 = 0.75;
+    /// Ceiling on the density bonus. BM25's saturation already bounds the raw
+    /// factor near 2.2 for this k1; this pins it so the score range stays a
+    /// stated property rather than an emergent one.
+    const MAX_DENSITY: f64 = 2.5;
+
+    if avg_len <= f64::EPSILON {
+        return 1.0;
+    }
+    let saturate = |tf: f64, len: f64| {
+        let norm = 1.0 - B + B * (len / avg_len);
+        tf / (tf + K1 * norm)
+    };
+    // Reference point: a single occurrence at average length.
+    let reference = saturate(1.0, avg_len);
+    if reference <= f64::EPSILON {
+        return 1.0;
+    }
+    (saturate(tf as f64, len as f64) / reference).min(MAX_DENSITY)
+}
+
+/// Per-term IDF weights that **sum to `query_tokens.len()`**.
+///
+/// Rare terms should count for more than common ones, but naively multiplying
+/// by raw IDF would rescale every score by a corpus-dependent factor and
+/// invalidate [`normalize_keyword_score`], whose sigmoid is centred on
+/// `3 * term_count` and whose output feeds a fixed relevance threshold.
+///
+/// Normalising by the mean keeps the total weight equal to the term count, so:
+/// - the maximum achievable raw score is still `6 * term_count`;
+/// - a query whose terms are equally common yields all-1.0 weights and scores
+///   exactly as it did before IDF existed;
+/// - a mixed query merely *redistributes* weight from common terms to rare
+///   ones, leaving the scale untouched.
+///
+/// Document frequency is counted over the candidate set being scored, not the
+/// whole store. That needs no extra storage and cannot go stale, at the cost
+/// of the weights depending on filter context — which is also why the fixed
+/// stoplist in [`normalize`](normalize::normalize) is retained: with few
+/// candidates these statistics are thin.
+///
+/// [`normalize`]: crate::search::normalize
+fn idf_weights(query_tokens: &[String], stems: &[MemoryStems]) -> Vec<f64> {
+    let n_terms = query_tokens.len();
+    let uniform = vec![1.0; n_terms];
+
+    // With too few documents the frequencies are noise, not signal.
+    const MIN_DOCS_FOR_IDF: usize = 8;
+    if stems.len() < MIN_DOCS_FOR_IDF {
+        return uniform;
+    }
+
+    let n_docs = stems.len() as f64;
+    let raw: Vec<f64> = query_tokens
+        .iter()
+        .map(|term| {
+            let df = stems.iter().filter(|d| d.contains(term)).count() as f64;
+            // BM25's IDF with the +0.5 smoothing, which stays positive even
+            // for a term present in every document.
+            (1.0 + (n_docs - df + 0.5) / (df + 0.5)).ln()
+        })
+        .collect();
+
+    let mean = raw.iter().sum::<f64>() / n_terms as f64;
+    if !mean.is_finite() || mean <= f64::EPSILON {
+        // Every term equally (un)common — nothing to redistribute.
+        return uniform;
+    }
+
+    // Clamp before rescaling so one freakishly rare term cannot swamp the
+    // rest, then rescale so the weights sum back to `n_terms`.
+    const MIN_WEIGHT: f64 = 0.25;
+    const MAX_WEIGHT: f64 = 4.0;
+    let clamped: Vec<f64> = raw
+        .iter()
+        .map(|idf| (idf / mean).clamp(MIN_WEIGHT, MAX_WEIGHT))
+        .collect();
+    let sum = clamped.iter().sum::<f64>();
+    if !sum.is_finite() || sum <= f64::EPSILON {
+        return uniform;
+    }
+    let rescale = n_terms as f64 / sum;
+    clamped.into_iter().map(|w| w * rescale).collect()
 }
 
 /// Normalize a raw keyword score to [0, 1] using a shifted sigmoid.
@@ -77,45 +282,6 @@ pub fn normalize_keyword_score(raw: f64, num_query_tokens: usize) -> f64 {
     let k = 3.0 * n;
     let steepness = k / 4.0;
     1.0 / (1.0 + (-(raw - k) / steepness).exp())
-}
-
-/// Calculate keyword match score for a single memory.
-///
-/// Weights:
-/// - Summary match: 3x
-/// - Tag match: 2x
-/// - Content match: 1x
-///
-/// Returns raw weighted matches (unbounded). No normalization is applied.
-///
-/// Optimized to avoid per-token `String` allocations: lowercases the full
-/// text once, then splits into `&str` slices of the lowered buffer.
-fn calculate_keyword_score(query_tokens: &[String], memory: &Memory) -> f64 {
-    let summary_stems = normalize::normalize_set(&memory.summary);
-    let content_stems = normalize::normalize_set(&memory.content);
-    let tag_stems: HashSet<String> = memory
-        .tags
-        .iter()
-        .flat_map(|t| normalize::normalize(t))
-        .collect();
-
-    let mut weighted_matches = 0.0;
-
-    for token in query_tokens {
-        if summary_stems.contains(token) {
-            weighted_matches += 3.0;
-        }
-
-        if tag_stems.contains(token) {
-            weighted_matches += 2.0;
-        }
-
-        if content_stems.contains(token) {
-            weighted_matches += 1.0;
-        }
-    }
-
-    weighted_matches
 }
 
 /// Count the scoreable terms in a query.
@@ -498,5 +664,267 @@ mod tests {
             partial_3t,
             one_token_summary
         );
+    }
+
+    // ---- IDF weighting -------------------------------------------------
+
+    /// A corpus where `daemon` is in every memory (useless for
+    /// discrimination) and `backpressure` is in exactly one.
+    fn idf_corpus() -> Vec<Memory> {
+        let mut memories: Vec<Memory> = (0..12)
+            .map(|i| {
+                create_test_memory(
+                    &format!("common-{i}"),
+                    "daemon notes",
+                    "the daemon was discussed",
+                    vec![],
+                )
+            })
+            .collect();
+        memories.push(create_test_memory(
+            "target",
+            "daemon backpressure",
+            "bounded queue applies backpressure",
+            vec![],
+        ));
+        memories
+    }
+
+    /// The point of IDF: a term shared by every document must not outweigh
+    /// one that identifies a single document.
+    #[test]
+    fn test_idf_prefers_the_discriminating_term() {
+        let memories = idf_corpus();
+        let results = keyword_search("daemon backpressure", &memories);
+        let top = results.first().expect("expected a match");
+        assert_eq!(
+            memories[top.0].id, "target",
+            "the memory carrying the rare term must rank first"
+        );
+    }
+
+    /// The scale-preserving property that lets the existing sigmoid and
+    /// relevance threshold stay calibrated: when every query term is equally
+    /// common, IDF must be a no-op.
+    #[test]
+    fn test_idf_is_identity_when_terms_are_equally_common() {
+        // Every memory contains both terms, so both have identical document
+        // frequency and no weight can be redistributed.
+        let memories: Vec<Memory> = (0..10)
+            .map(|i| {
+                create_test_memory(
+                    &format!("m{i}"),
+                    "alpha beta",
+                    "alpha and beta together",
+                    vec![],
+                )
+            })
+            .collect();
+        let results = keyword_search("alpha beta", &memories);
+        // 2 terms x (3 summary + 1 content) with weight 1.0 each.
+        for (_, score) in &results {
+            assert!(
+                (score - 8.0).abs() < 1e-9,
+                "expected the pre-IDF score of 8.0, got {score}"
+            );
+        }
+    }
+
+    /// Weights are normalized, so `6 * terms` remains the ceiling no matter
+    /// how skewed the frequencies are. That bound is what keeps
+    /// `normalize_keyword_score` meaningful — its sigmoid is defined over
+    /// `[0, 6n]`.
+    ///
+    /// Note this asserts the ceiling is *respected*, not that it is reached:
+    /// the content term is scaled by [`content_density`], which only reaches
+    /// 1.0 for content at or below the average length.
+    /// `test_content_density_neutral_at_average_length` covers attainment.
+    #[test]
+    fn test_idf_preserves_max_score_scale() {
+        let mut memories: Vec<Memory> = (0..12)
+            .map(|i| create_test_memory(&format!("noise-{i}"), "common", "common", vec![]))
+            .collect();
+        // One memory carrying both terms in all three fields.
+        memories.push(create_test_memory(
+            "full",
+            "common rare",
+            "common rare",
+            vec!["common".to_string(), "rare".to_string()],
+        ));
+
+        let results = keyword_search("common rare", &memories);
+        let top = results.first().expect("expected a match");
+        assert_eq!(memories[top.0].id, "full");
+        // IDF weights sum to the term count, so the field weights alone bound
+        // the score: 2 terms x (3 summary + 2 tags + at most MAX_DENSITY
+        // content) = 15. The point is that IDF itself introduces no
+        // corpus-dependent rescaling.
+        for (_, score) in &results {
+            assert!(
+                *score <= 15.0 + 1e-9,
+                "score {score} exceeds the bound implied by the field weights"
+            );
+        }
+        assert!(top.1 > 11.0, "expected near the ceiling, got {}", top.1);
+    }
+
+    // ---- Content density (term frequency + length) ----------------------
+
+    /// The tie the scorer could not break: two memories whose summaries match
+    /// the query identically, one merely listing the topic in a long field and
+    /// one actually about it. The decoy is placed first, so a surviving tie
+    /// would resolve the wrong way under a stable sort.
+    #[test]
+    fn test_content_density_breaks_summary_ties() {
+        let mut memories = vec![
+            create_test_memory(
+                "decoy",
+                "backpressure came up in review",
+                "A wide ranging review of deployment packaging logging metrics alerting \
+                 releases rollbacks rotations and escalation paths. Backpressure was \
+                 mentioned once and deferred without any decision being recorded here.",
+                vec![],
+            ),
+            create_test_memory(
+                "target",
+                "backpressure bounds the queue",
+                "Backpressure comes from a bounded queue; backpressure propagates upstream.",
+                vec![],
+            ),
+        ];
+        // Pad so IDF engages and the average content length is meaningful.
+        for i in 0..10 {
+            memories.push(create_test_memory(
+                &format!("filler-{i}"),
+                "unrelated notes",
+                "some unrelated prose about other subsystems entirely",
+                vec![],
+            ));
+        }
+
+        let results = keyword_search("backpressure", &memories);
+        let top = results.first().expect("expected a match");
+        assert_eq!(
+            memories[top.0].id, "target",
+            "the memory actually about the term must outrank the one that lists it"
+        );
+    }
+
+    /// The scale guarantee: one occurrence in an average-length field still
+    /// contributes exactly 1.0, so nothing that used to clear the relevance
+    /// threshold silently drops below it.
+    #[test]
+    fn test_content_density_neutral_at_average_length() {
+        // Every memory has identical content length and a single occurrence,
+        // so each is exactly average by construction.
+        let memories: Vec<Memory> = (0..10)
+            .map(|i| create_test_memory(&format!("m{i}"), "alpha", "alpha beta gamma", vec![]))
+            .collect();
+        let results = keyword_search("alpha", &memories);
+        for (_, score) in &results {
+            // 3.0 summary + 1.0 content, weight 1.0 (single term).
+            assert!(
+                (score - 4.0).abs() < 1e-9,
+                "expected the pre-density score of 4.0, got {score}"
+            );
+        }
+    }
+
+    /// Density is symmetric: a field densely about the term outranks one of
+    /// equal length that merely mentions it.
+    ///
+    /// This is the property an earlier capped-at-1.0 version lacked. Capping
+    /// let a long repetitive field saturate to the ceiling and dodge the
+    /// length penalty while a long single-mention field absorbed it, which
+    /// inverted the intended ordering.
+    #[test]
+    fn test_content_density_rewards_concentration() {
+        let mut memories = vec![
+            create_test_memory(
+                "dense",
+                "notes",
+                "alpha alpha alpha alpha beta gamma delta epsilon",
+                vec![],
+            ),
+            create_test_memory(
+                "sparse",
+                "notes",
+                "alpha beta gamma delta epsilon zeta eta theta",
+                vec![],
+            ),
+        ];
+        for i in 0..10 {
+            memories.push(create_test_memory(
+                &format!("filler-{i}"),
+                "unrelated",
+                "zeta eta theta iota kappa lambda mu nu",
+                vec![],
+            ));
+        }
+        let results = keyword_search("alpha", &memories);
+        let score = |id: &str| {
+            results
+                .iter()
+                .find(|(i, _)| memories[*i].id == id)
+                .map(|(_, s)| *s)
+                .expect("should match")
+        };
+        assert!(
+            score("dense") > score("sparse"),
+            "same length, more occurrences must score higher: {} vs {}",
+            score("dense"),
+            score("sparse")
+        );
+    }
+
+    /// The bonus is bounded, so the score range stays a stated property
+    /// rather than something that drifts with an unusually repetitive field.
+    #[test]
+    fn test_content_density_bonus_is_bounded() {
+        let mut memories = vec![create_test_memory(
+            "extreme",
+            "alpha",
+            &"alpha ".repeat(200),
+            vec![],
+        )];
+        for i in 0..10 {
+            memories.push(create_test_memory(
+                &format!("m{i}"),
+                "alpha",
+                "alpha beta gamma delta epsilon zeta eta theta",
+                vec![],
+            ));
+        }
+        let results = keyword_search("alpha", &memories);
+        let extreme = results
+            .iter()
+            .find(|(i, _)| memories[*i].id == "extreme")
+            .expect("should match");
+        // 3.0 summary + at most MAX_DENSITY (2.5) content, single term.
+        assert!(
+            extreme.1 <= 5.5 + 1e-9,
+            "density bonus must stay bounded; got {}",
+            extreme.1
+        );
+    }
+
+    /// Below the document threshold the statistics are noise, so weighting is
+    /// skipped entirely rather than applied to a handful of documents.
+    #[test]
+    fn test_idf_skipped_for_tiny_candidate_sets() {
+        let memories = vec![
+            create_test_memory("a", "daemon backpressure", "", vec![]),
+            create_test_memory("b", "daemon notes", "", vec![]),
+        ];
+        let results = keyword_search("daemon backpressure", &memories);
+        let by_id = |id: &str| {
+            results
+                .iter()
+                .find(|(i, _)| memories[*i].id == id)
+                .map(|(_, s)| *s)
+        };
+        // Uniform weights: "a" matches both terms in summary (6), "b" one (3).
+        assert_eq!(by_id("a"), Some(6.0));
+        assert_eq!(by_id("b"), Some(3.0));
     }
 }

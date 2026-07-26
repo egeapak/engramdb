@@ -30,7 +30,7 @@
 //! weight — six points of pure noise beating the three points earned by the
 //! one word that meant anything.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use rust_stemmers::{Algorithm, Stemmer};
@@ -74,14 +74,14 @@ fn stemmer() -> &'static Stemmer {
 ///
 /// Borrows from `lowered`, so the caller keeps the lowercased buffer alive
 /// rather than allocating a `String` per token.
-pub fn split_tokens(lowered: &str) -> impl Iterator<Item = &str> {
+fn split_tokens(lowered: &str) -> impl Iterator<Item = &str> {
     lowered
         .split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
 }
 
 /// Whether a raw (already lowercased) token is a stopword.
-pub fn is_stopword(token: &str) -> bool {
+fn is_stopword(token: &str) -> bool {
     stopwords().contains(token)
 }
 
@@ -113,6 +113,32 @@ pub fn normalize(text: &str) -> Vec<String> {
 /// membership is asked.
 pub fn normalize_set(text: &str) -> HashSet<String> {
     normalize(text).into_iter().collect()
+}
+
+/// Stems with their occurrence counts, plus the total number of scoreable
+/// tokens the text produced.
+///
+/// Presence alone cannot distinguish a document that mentions a term once in
+/// passing from one that is entirely about it, which is what leaves the scorer
+/// unable to break a tie. Counts and length are the two inputs needed to tell
+/// them apart, so the content field is measured rather than merely tested.
+///
+/// The length is the token total *before* deduplication and *after* stopword
+/// removal — the count of terms that could have matched, which is the right
+/// denominator for a density comparison.
+pub fn normalize_counts(text: &str) -> (HashMap<String, u32>, usize) {
+    let lowered = text.to_lowercase();
+    let stem = stemmer();
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    let mut total = 0usize;
+    for token in split_tokens(&lowered) {
+        if is_stopword(token) {
+            continue;
+        }
+        total += 1;
+        *counts.entry(stem.stem(token).into_owned()).or_insert(0) += 1;
+    }
+    (counts, total)
 }
 
 #[cfg(test)]

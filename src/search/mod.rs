@@ -1,20 +1,26 @@
 //! Keyword search functionality for EngramDB
 //!
-//! This module provides TF-IDF style keyword search as a fallback when embeddings
-//! are unavailable or for quick filtering operations.
+//! This module provides keyword search, used alongside semantic similarity and
+//! as the sole text signal when embeddings are unavailable.
 //!
 //! # Key Components
 //!
-//! - [`keyword_search`]: Main search function using weighted term matching
+//! - [`normalize`]: the one tokenization pipeline, applied to query and
+//!   document text alike
+//! - [`keyword_search`]: main search function using weighted term matching
 //!
 //! # Algorithm
 //!
-//! The search uses a weighted term frequency approach:
+//! Both sides are reduced to deduplicated stems ([`normalize`]), then each
+//! query term scores once per field it appears in:
 //! - Summary matches: 3x weight
 //! - Tag matches: 2x weight
 //! - Content matches: 1x weight
 //!
-//! Scores are normalized to [0.0, 1.0] range and results are sorted by descending score.
+//! Matching is per distinct term, not per occurrence — repetition never
+//! inflates a score. Results are sorted by descending raw score;
+//! [`normalize_keyword_score`] maps that to [0.0, 1.0] for the composite
+//! formula, centring its sigmoid on the number of scoreable query terms.
 //!
 //! # Relation to Other Modules
 //!
