@@ -277,14 +277,55 @@ round-off — the vectors are unrelated. At idle, everything except one L12 cell
 is reproducible, so this is specifically a **contention-triggered, int8-only**
 failure that gets worse with sequence length.
 
-**Thread pinning does not fix it.** That was the leading hypothesis (the Python
-mirror of this harness became bit-identical at `intra_op_num_threads = 1`), and
-`fastembed`'s `InitOptions::with_intra_threads` makes it a one-line change — but
-measured across 1, 2 and 4 intra-op threads the int8 models are broken at every
-setting, and 1 thread is not even the best of them. fp32 is exact at all three.
-The pattern (int8 only, load-triggered, worse with longer sequences, indifferent
-to thread count) points at the quantized kernels' buffer handling rather than
-reduction order, but this pass did not isolate it further.
+**Thread pinning does not fix it, and the fault is below EngramDB.**
+`crates/engram-models/examples/int8_determinism_bisect.rs` bisects the stack —
+same text, 40 repeats, 8 background load threads:
+
+| Layer | L12-q (int8) | L6-q (int8) | L6 (fp32) |
+|---|---|---|---|
+| L1 `OnnxProvider` (tokio + mutex) | 24/40 distinct | 25/40 | **1/40** |
+| L2 `fastembed` (one thread, no tokio) | 36/40 | 8/40 | **1/40** |
+| L3 raw `ort::Session`, **input tensor tokenized once and reused verbatim** | 38/40 | 15/40 | **1/40** |
+
+L3 removes EngramDB's wrapper, `fastembed`, tokenization and pooling from the
+picture: byte-identical input tensors go into `session.run`, different results
+come out. So neither our code nor `fastembed` is implicated — it is ONNX
+Runtime.
+
+Inside ORT, no session option helps. Sweeping `intra_threads`,
+`GraphOptimizationLevel::Disable`, `memory_pattern=false` and ORT's own
+`deterministic_compute` leaves every int8 cell broken (8–34/40 distinct) and
+every fp32 cell exact (1/40). It reproduces identically against **two different
+ONNX Runtime builds** — the linked pyke 1.24.2 static lib and the official
+1.28.0 shared lib — so it is not a regression in one build.
+
+What *does* predict it is **how often the inference thread is preempted**.
+Holding everything fixed at one ORT thread and varying only the number of
+competing threads on this 4-core host:
+
+| Background load threads | 0 | 1 | 4 (= cores) | 16 (4× oversubscribed) |
+|---|---|---|---|---|
+| L12-q (int8) distinct / 20 | **1** | **1** | 2 | **13** |
+| L6-q (int8) distinct / 20 | **1** | **1** | 4 | **10** |
+| L6 fp32 distinct / 20 | 1 | 1 | 1 | 1 |
+
+Pinning the process to a single core *together with* the load threads makes it
+worse (11–14/20); giving ORT a core to itself while other processes saturate
+the rest of the machine makes it nearly clean (2–4/20). Corruption tracks
+context switches — not parallelism, and not machine load as such.
+
+The most likely mechanism — inferred from this evidence, not directly proven —
+is **corruption of extended CPU register state across context switches**. This
+host is an Intel Xeon advertising `amx_tile` / `amx_int8` and `avx512_vnni`;
+ONNX Runtime's MLAS uses those int8 paths for quantized GEMMs, and AMX in
+particular holds 8 KB of TILEDATA in registers whose preservation depends on
+XSAVE/XRSTOR plus kernel and hypervisor support (`XFD` lazy state allocation).
+fp32 GEMMs use ordinary AVX-512 vector registers, which save and restore
+correctly here. That fits every observation: int8-only, proportional to
+preemption, indifferent to every knob *above* the kernel, worse for longer
+sequences (a longer GEMM spans more preemption windows), and identical across
+ORT versions. Confirming it would require forcing MLAS off the AMX path, which
+ORT does not expose.
 
 **Why it matters.** Vectors are computed once at create time and persisted. A
 memory written while the machine is busy — exactly when a coding agent is
@@ -310,11 +351,26 @@ and nothing warns, because nothing compares it to anything afterwards.
   real determinism guard lives in `fp32_embedding_is_bit_exact`, on the model
   that provides it.
 
-**Not resolved:** whether to move the default to fp32. That trades 96 MB and
-~30% embed latency for correctness under load, and these numbers come from one
-platform (x86_64 Linux, ORT 1.24.2 from the pyke prebuilt) — the int8 kernels
-differ on Apple silicon, so the finding should be reproduced there before a
-default changes. Run the probe on the target platform to decide.
+**Not resolved:** whether to move the default to fp32. On the evidence here
+that is the only thing that actually fixes it — fp32 was exact in 100% of cells,
+across both ORT builds, every session option, and every preemption level — but
+it costs 96 MB of download and ~30% embed latency.
+
+The blocker on deciding is **scope**: every number above comes from one host
+(x86_64 Linux, Intel Xeon with AMX, inside a VM). Apple silicon has no
+AMX-INT8 and takes a different MLAS path, and that is where most EngramDB
+instances run. If the probe is clean there, int8 stays the right default and
+this is a Linux/AMX caveat to document; if it reproduces, fp32 (or a non-AMX
+build of ORT) becomes the correct default. Run:
+
+```bash
+PROBE_LOAD_THREADS=8 cargo run --release --example embed_determinism_probe
+cargo run --release -p engram-models --example int8_determinism_bisect
+```
+
+Worth reporting upstream to `onnxruntime` either way — a byte-identical input
+tensor returning different results is a runtime bug, not a quantization
+trade-off.
 
 ## Caveats
 
