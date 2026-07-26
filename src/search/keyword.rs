@@ -20,15 +20,19 @@ use crate::types::Memory;
 /// 4. Score each term once per field it appears in, scaled by that weight:
 ///    - Summary match: 3x weight
 ///    - Tag match: 2x weight
-///    - Content match: up to 1x weight, scaled by
-///      [`content_density`] so a passing mention in a long field counts for
-///      less than the same word in a field that is about it
+///    - Content match: 1x weight scaled by [`content_density`], so a passing
+///      mention in a long field counts for less than the same word in a field
+///      that is about it
 /// 5. Filter out zero scores and sort by score descending
 ///
-/// The score scale is deliberately unchanged by both refinements: IDF weights
-/// sum to the term count, and the density factor is capped at 1.0, so the
-/// maximum is still `6 * terms` and an all-equally-common query over
-/// average-length content scores exactly as it did before either existed.
+/// Both refinements are anchored so the familiar case is unchanged: IDF
+/// weights sum to the term count, and the density factor is exactly 1.0 for a
+/// single occurrence at average content length. A query whose terms are
+/// equally common, over average-length content, therefore scores precisely as
+/// it did before either existed. Density may exceed 1.0 for a field densely
+/// about a term, which raises the ceiling from `6 * terms` to
+/// `(5 + MAX_DENSITY) * terms` — see [`content_density`] for why that is safe
+/// for [`normalize_keyword_score`].
 ///
 /// # Arguments
 /// * `query` - The search query string
