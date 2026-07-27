@@ -84,7 +84,7 @@ jobs:
         # issue so a crash found on a Monday run isn't silently forgotten.
         # One open issue per target: repeat failures append a comment.
         if: failure() && github.event_name == 'schedule'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const target = '${{ matrix.target }}';
