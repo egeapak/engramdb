@@ -34,6 +34,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use rust_stemmers::{Algorithm, Stemmer};
+use serde::{Deserialize, Serialize};
 
 /// Identifier for the exact normalization behaviour, persisted so stored
 /// stems can be invalidated when it changes.
@@ -139,6 +140,76 @@ pub fn normalize_counts(text: &str) -> (HashMap<String, u32>, usize) {
         *counts.entry(stem.stem(token).into_owned()).or_insert(0) += 1;
     }
     (counts, total)
+}
+
+/// A memory reduced to the stems the keyword scorer compares against, one
+/// entry per weighted field.
+///
+/// Deriving this is pure document-side work: it depends only on the memory,
+/// never on the query. That is what makes it precomputable — it is built once
+/// on the write path and persisted, rather than recomputed for every memory on
+/// every query.
+///
+/// Content carries occurrence *counts* rather than mere membership, plus the
+/// field's token length, because presence alone cannot distinguish a document
+/// that mentions a term once in passing from one that is about it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct KeywordStems {
+    /// Distinct stems in the summary.
+    #[serde(default, rename = "s")]
+    pub summary: Vec<String>,
+    /// Distinct stems across all tags.
+    #[serde(default, rename = "t")]
+    pub tags: Vec<String>,
+    /// Content stems with occurrence counts.
+    #[serde(default, rename = "c")]
+    pub content: HashMap<String, u32>,
+    /// Scoreable content tokens, post-stopword and pre-deduplication.
+    #[serde(default, rename = "n")]
+    pub content_len: usize,
+}
+
+impl KeywordStems {
+    /// Derive the stems for a memory's three weighted fields.
+    pub fn compute(summary: &str, tags: &[String], content: &str) -> Self {
+        let (content_counts, content_len) = normalize_counts(content);
+        let mut tag_stems: Vec<String> = Vec::new();
+        let mut seen = HashSet::new();
+        for tag in tags {
+            for stem in normalize(tag) {
+                if seen.insert(stem.clone()) {
+                    tag_stems.push(stem);
+                }
+            }
+        }
+        Self {
+            summary: normalize(summary),
+            tags: tag_stems,
+            content: content_counts,
+            content_len,
+        }
+    }
+
+    /// Whether the term appears in any field — the unit of "document
+    /// frequency" for IDF.
+    pub fn contains(&self, term: &str) -> bool {
+        self.summary.iter().any(|s| s == term)
+            || self.tags.iter().any(|s| s == term)
+            || self.content.contains_key(term)
+    }
+
+    pub fn in_summary(&self, term: &str) -> bool {
+        self.summary.iter().any(|s| s == term)
+    }
+
+    pub fn in_tags(&self, term: &str) -> bool {
+        self.tags.iter().any(|s| s == term)
+    }
+
+    /// Occurrences of `term` in the content, zero when absent.
+    pub fn content_freq(&self, term: &str) -> u32 {
+        self.content.get(term).copied().unwrap_or(0)
+    }
 }
 
 #[cfg(test)]

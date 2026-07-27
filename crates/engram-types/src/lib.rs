@@ -36,7 +36,7 @@ pub use decay::{Decay, DecayStrategy};
 pub use env::in_process_override;
 pub use epistemic::{Epistemic, Generality, Situation, Validity};
 pub use memory::{default_decay, Memory, MemoryType, MemoryUpdate, Status, Visibility};
-pub use normalize::{normalize, normalize_counts, normalize_set, NORMALIZER_STAMP};
+pub use normalize::{normalize, normalize_counts, normalize_set, KeywordStems, NORMALIZER_STAMP};
 pub use project_list_grouping::ProjectListGrouping;
 pub use provenance::{Provenance, ProvenanceSource};
 pub use title_strategy::TitleStrategy;

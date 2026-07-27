@@ -1009,24 +1009,33 @@ impl MemoryStore {
     /// rather than silently half-migrated.
     async fn migrate_schema_if_needed(&self) -> Result<()> {
         let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
-        let stored = manifest::load_manifest(&manifest_path)
-            .await
-            .ok()
-            .map(|m| m.schema_version);
+        let loaded = manifest::load_manifest(&manifest_path).await.ok();
+        let stored = loaded.as_ref().map(|m| m.schema_version.clone());
+        let stored_normalizer = loaded.as_ref().and_then(|m| m.normalizer.clone());
         // Migrate only when the store is genuinely behind: a version at or ahead
         // of current (a newer binary's store) is left untouched, and a
         // manifest-less store is treated as pre-migration.
-        let needs_migration = stored
+        let schema_stale = stored
             .as_deref()
             .is_none_or(|v| !manifest::schema_version_is_current(v));
-        if !needs_migration {
+        // Second, independent axis: the `keyword_stems` column can be present
+        // and well-formed while its contents were produced by a different
+        // stemmer or stoplist. Those stems no longer match query terms, so the
+        // keyword signal silently degrades — regenerate them. Unlike the schema
+        // version this is an equality check, not an ordering one: any
+        // difference, older or newer, means the stored stems were not produced
+        // by this binary's normalizer.
+        let normalizer_stale = stored_normalizer.as_deref() != Some(engram_types::NORMALIZER_STAMP);
+        if !schema_stale && !normalizer_stale {
             return Ok(());
         }
         tracing::info!(
-            "Migrating EngramDB store schema ({} -> {}): rebuilding index from memory files \
-             (vectors preserved, no re-embed)",
+            "Migrating EngramDB store (schema {} -> {}, normalizer {} -> {}): rebuilding index \
+             from memory files (vectors preserved, no re-embed)",
             stored.as_deref().unwrap_or("<none>"),
-            manifest::CURRENT_SCHEMA_VERSION
+            manifest::CURRENT_SCHEMA_VERSION,
+            stored_normalizer.as_deref().unwrap_or("<none>"),
+            engram_types::NORMALIZER_STAMP
         );
         // `force_schema_reset`: a schema migration must recreate the memories
         // table with the current columns. The default (upsert-only) reindex path
@@ -1049,6 +1058,10 @@ impl MemoryStore {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
         let mut manifest = manifest::load_manifest(&manifest_path).await?;
         manifest.schema_version = manifest::CURRENT_SCHEMA_VERSION.to_string();
+        // Stamped together and only on success: the rebuild that refreshed the
+        // columns is the same one that regenerated the stems, so recording one
+        // without the other would leave the store claiming a state it is not in.
+        manifest.normalizer = Some(engram_types::NORMALIZER_STAMP.to_string());
         manifest::save_manifest(&manifest_path, &manifest).await?;
         Ok(())
     }
@@ -2205,6 +2218,127 @@ mod tests {
 
         store.delete_chunks("he-1").await.unwrap();
         assert!(!has_embedding_flag(&store, "he-1").await, "chunks deleted");
+    }
+
+    /// A store predating `keyword_stems` must gain populated stems on open,
+    /// and they must equal what computing from the `.md` file would produce.
+    /// Equality is the whole point: the stored value is only useful because
+    /// the query path can trust it matches what it would have derived.
+    #[tokio::test]
+    async fn schema_migration_to_0_5_0_backfills_keyword_stems() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+
+        let mut mem = create_test_memory("mig5-stems", Visibility::Shared);
+        mem.summary = "Compression merges near duplicate memories".to_string();
+        mem.content = "Candidates surface by similarity; compression is deferred.".to_string();
+        mem.tags = vec!["maintenance".to_string()];
+        store.create(&mem).await.unwrap();
+
+        // Downgrade both stamps to reproduce a genuine pre-0.5.0 store.
+        let manifest_path = paths::project_dir(tmp.path()).join("manifest.toml");
+        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
+        m.schema_version = "0.4.0".to_string();
+        m.normalizer = None;
+        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+
+        let store2 = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        let after = manifest::load_manifest(&manifest_path).await.unwrap();
+        assert_eq!(after.schema_version, manifest::CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            after.normalizer.as_deref(),
+            Some(engram_types::NORMALIZER_STAMP),
+            "the normalizer stamp is recorded alongside the schema version"
+        );
+
+        let entries = store2.lance_index.list_for_filtering().await.unwrap();
+        let row = entries.iter().find(|e| e.id == "mig5-stems").unwrap();
+        let stored = row
+            .keyword_stems
+            .as_ref()
+            .expect("migration must populate keyword_stems");
+        assert_eq!(
+            *stored,
+            engram_types::KeywordStems::compute(&mem.summary, &mem.tags, &mem.content),
+            "stored stems must be identical to freshly computed ones"
+        );
+        // Sanity that stemming actually happened: "merges" -> "merg".
+        assert!(
+            stored.in_summary("merg"),
+            "expected a stemmed summary term, got {:?}",
+            stored.summary
+        );
+    }
+
+    /// The second invalidation axis. A store already at the current schema but
+    /// carrying stems from a different normalizer must still be rebuilt —
+    /// the column is well-formed, its contents are simply not comparable.
+    #[tokio::test]
+    async fn stale_normalizer_stamp_triggers_reindex() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        store
+            .create(&create_test_memory("stamp-mem", Visibility::Shared))
+            .await
+            .unwrap();
+
+        // Schema stays current; only the normalizer stamp is foreign.
+        let manifest_path = paths::project_dir(tmp.path()).join("manifest.toml");
+        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
+        assert_eq!(m.schema_version, manifest::CURRENT_SCHEMA_VERSION);
+        m.normalizer = Some("some-other-stemmer-v9".to_string());
+        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+
+        let store2 = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        assert_eq!(
+            manifest::load_manifest(&manifest_path)
+                .await
+                .unwrap()
+                .normalizer
+                .as_deref(),
+            Some(engram_types::NORMALIZER_STAMP),
+            "a foreign normalizer stamp must be regenerated, not left in place"
+        );
+        let entries = store2.lance_index.list_for_filtering().await.unwrap();
+        assert!(
+            entries
+                .iter()
+                .find(|e| e.id == "stamp-mem")
+                .unwrap()
+                .keyword_stems
+                .is_some(),
+            "stems must be present after the normalizer-triggered rebuild"
+        );
+    }
+
+    /// A store already current on both axes must NOT reindex — migration is
+    /// meant to be a one-time cost, not a per-open one.
+    #[tokio::test]
+    async fn current_store_does_not_remigrate() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        {
+            let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+            store
+                .create(&create_test_memory("noop-mem", Visibility::Shared))
+                .await
+                .unwrap();
+        }
+        let manifest_path = paths::project_dir(tmp.path()).join("manifest.toml");
+        let before = manifest::load_manifest(&manifest_path).await.unwrap();
+        assert_eq!(
+            before.normalizer.as_deref(),
+            Some(engram_types::NORMALIZER_STAMP),
+            "a store created by this binary is born current"
+        );
+
+        let store2 = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        let after = manifest::load_manifest(&manifest_path).await.unwrap();
+        assert_eq!(after.schema_version, before.schema_version);
+        assert_eq!(after.normalizer, before.normalizer);
+        assert_eq!(store2.count().await.unwrap(), 1);
     }
 
     /// Migration must also run on the plain `open` path — the hot path for every

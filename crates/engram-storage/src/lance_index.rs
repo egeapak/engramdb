@@ -22,6 +22,7 @@ use lancedb::table::OptimizeAction;
 use lancedb::{connect, Connection, Table};
 
 use chrono::{DateTime, Utc};
+use engram_types::KeywordStems;
 use engram_types::{
     Decay, Epistemic, Generality, Memory, MemoryType, ProvenanceSource, Status, Visibility,
 };
@@ -117,6 +118,11 @@ pub struct IndexEntry {
     pub valid_from: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub invalidated_at: Option<DateTime<Utc>>,
+    /// Stemmed keyword index (schema v0.5.0), computed once here rather than
+    /// per query. `#[serde(skip)]` because this is derived data: the `.md`
+    /// file stays the source of truth, and a reindex regenerates it.
+    #[serde(skip)]
+    pub keyword_stems: KeywordStems,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub watch_paths: Vec<String>,
     // Added in schema v0.4.0 (multi-project memories). JSON of
@@ -179,6 +185,11 @@ pub struct IndexForFiltering {
     /// is in the list. Read here so the multi-store fan-in can filter group- and
     /// everyone-store candidates in Rust without loading the `.md` file.
     pub audience: Option<Vec<String>>,
+    /// Precomputed keyword stems (schema v0.5.0). `None` when the row predates
+    /// the column or the value failed to parse, in which case the caller
+    /// recomputes from the loaded memory — correctness never depends on the
+    /// cache being present.
+    pub keyword_stems: Option<KeywordStems>,
 }
 
 /// Filterable/displayable entry (15 columns).
@@ -245,6 +256,11 @@ impl From<&Memory> for IndexEntry {
             // check, `upsert_chunks`/`delete_chunks` via a targeted update, and
             // reindex from the chunk-id set. Defaults to false (no chunks yet).
             has_embedding: false,
+            // Precomputed on the write path so the query path never re-derives
+            // it. Correctness depends on this being byte-identical to what the
+            // scorer would compute, which is why the normalizer lives in
+            // `engram-types` — one implementation, shared by both layers.
+            keyword_stems: KeywordStems::compute(&memory.summary, &memory.tags, &memory.content),
             epistemic: memory.epistemic,
             verified_at: memory.verified_at,
             generality: memory
@@ -363,6 +379,9 @@ impl LanceIndex {
             // presence so a semantic query needn't scan the chunks table.
             Field::new("decay", DataType::Utf8, true),
             Field::new("has_embedding", DataType::Boolean, false),
+            // Schema v0.5.0: JSON-encoded `KeywordStems`. Nullable so a row
+            // written before the column reads as absent rather than failing.
+            Field::new("keyword_stems", DataType::Utf8, true),
             // Added in schema v0.3.0 (epistemic memory classes). Enum-valued
             // columns store the lowercase serde names; `watch_paths` follows
             // the existing multi-value convention (`physical`/`tags`):
@@ -1372,6 +1391,7 @@ impl LanceIndex {
         "provenance_source",
         "status",
         "has_embedding",
+        "keyword_stems",
         "epistemic",
         "verified_at",
         "generality",
@@ -1549,6 +1569,7 @@ impl LanceIndex {
         let mut expires_ats: Vec<Option<String>> = Vec::with_capacity(n);
         let mut decays: Vec<Option<String>> = Vec::with_capacity(n);
         let mut has_embeddings = Vec::with_capacity(n);
+        let mut keyword_stems = Vec::with_capacity(n);
         let mut epistemics = Vec::with_capacity(n);
         let mut verified_ats: Vec<Option<String>> = Vec::with_capacity(n);
         let mut generalities = Vec::with_capacity(n);
@@ -1582,6 +1603,10 @@ impl LanceIndex {
                 None => None,
             });
             has_embeddings.push(entry.has_embedding);
+            keyword_stems.push(
+                serde_json::to_string(&entry.keyword_stems)
+                    .context("Failed to serialize keyword stems")?,
+            );
             epistemics.push(entry.epistemic.as_str().to_string());
             verified_ats.push(entry.verified_at.map(|dt| dt.to_rfc3339()));
             generalities.push(entry.generality.as_str().to_string());
@@ -1617,6 +1642,7 @@ impl LanceIndex {
                 Arc::new(StringArray::from(expires_ats)) as ArrayRef,
                 Arc::new(StringArray::from(decays)) as ArrayRef,
                 Arc::new(BooleanArray::from(has_embeddings)) as ArrayRef,
+                Arc::new(StringArray::from(keyword_stems)) as ArrayRef,
                 Arc::new(StringArray::from(epistemics)) as ArrayRef,
                 Arc::new(StringArray::from(verified_ats)) as ArrayRef,
                 Arc::new(StringArray::from(generalities)) as ArrayRef,
@@ -1938,6 +1964,12 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
         .as_any()
         .downcast_ref::<BooleanArray>()
         .context("Failed to cast 'has_embedding'")?;
+    // Absent on a store that has not yet migrated to v0.5.0. Treated as "no
+    // cache" rather than an error: the scorer recomputes, so the only cost is
+    // the speed this column exists to buy.
+    let keyword_stems = batch
+        .column_by_name("keyword_stems")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
     let epistemics = batch
         .column_by_name("epistemic")
         .context("Missing 'epistemic' column")?
@@ -2089,6 +2121,16 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
             invalidated_at,
             watch_paths,
             audience,
+            // A malformed value is treated the same as an absent one: the
+            // scorer recomputes. Failing the whole query because a derived
+            // cache did not parse would trade a speed loss for an outage.
+            keyword_stems: keyword_stems.and_then(|col| {
+                if col.is_null(i) {
+                    None
+                } else {
+                    serde_json::from_str(col.value(i)).ok()
+                }
+            }),
         });
     }
     Ok(entries)

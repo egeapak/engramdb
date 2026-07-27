@@ -40,5 +40,7 @@ pub mod keyword;
 pub use engram_types::normalize;
 
 // Re-export main functions
-pub use keyword::{keyword_search, normalize_keyword_score, query_token_count};
+pub use keyword::{
+    keyword_search, keyword_search_stems, normalize_keyword_score, query_token_count,
+};
 pub use normalize::{normalize_counts, normalize_set, NORMALIZER_STAMP};
