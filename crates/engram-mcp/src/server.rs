@@ -2979,20 +2979,11 @@ impl ServerHandler for EngramDbServer {
         std::future::ready(Ok(ListResourcesResult {
             meta: None,
             next_cursor: None,
-            resources: vec![RawResource {
-                uri: "memory://index".to_string(),
-                name: "EngramDB Store Index".to_string(),
-                title: None,
-                description: Some(
-                    "Lightweight index of all memories with summaries, scopes, tags, and scores."
-                        .to_string(),
-                ),
-                mime_type: Some("application/json".to_string()),
-                size: None,
-                icons: None,
-                meta: None,
-            }
-            .no_annotation()],
+            resources: vec![Resource::new("memory://index", "EngramDB Store Index")
+                .with_description(
+                    "Lightweight index of all memories with summaries, scopes, tags, and scores.",
+                )
+                .with_mime_type("application/json")],
         }))
     }
 
@@ -3006,17 +2997,12 @@ impl ServerHandler for EngramDbServer {
         std::future::ready(Ok(ListResourceTemplatesResult {
             meta: None,
             next_cursor: None,
-            resource_templates: vec![RawResourceTemplate {
-                uri_template: "memory://context/{path}".to_string(),
-                name: "Contextual Memories".to_string(),
-                title: None,
-                description: Some(
-                    "Memories relevant to the given file path, scored and sorted.".to_string(),
-                ),
-                mime_type: Some("application/json".to_string()),
-                icons: None,
-            }
-            .no_annotation()],
+            resource_templates: vec![ResourceTemplate::new(
+                "memory://context/{path}",
+                "Contextual Memories",
+            )
+            .with_description("Memories relevant to the given file path, scored and sorted.")
+            .with_mime_type("application/json")],
         }))
     }
 
@@ -3189,10 +3175,8 @@ impl ServerHandler for EngramDbServer {
                     memory_text
                 );
 
-                let mut result = GetPromptResult::new(vec![PromptMessage::new_text(
-                    PromptMessageRole::User,
-                    prompt,
-                )]);
+                let mut result =
+                    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, prompt)]);
                 result.description = Some("Session start briefing".to_string());
                 Ok(result)
             }
@@ -3268,10 +3252,8 @@ impl ServerHandler for EngramDbServer {
                     stats_text, recency_hint
                 );
 
-                let mut result = GetPromptResult::new(vec![PromptMessage::new_text(
-                    PromptMessageRole::User,
-                    prompt,
-                )]);
+                let mut result =
+                    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, prompt)]);
                 result.description = Some("Session end review".to_string());
                 Ok(result)
             }

@@ -181,7 +181,7 @@ mod unix {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let mut locked = false;
         loop {
-            match fs4::fs_std::FileExt::try_lock_exclusive(&lock_file) {
+            match lock_file.try_lock() {
                 Ok(()) => {
                     locked = true;
                     break;
@@ -217,7 +217,7 @@ mod unix {
             Ok(Some(Listener(listener)))
         })();
         if locked {
-            let _ = fs4::fs_std::FileExt::unlock(&lock_file);
+            let _ = lock_file.unlock();
         }
         result
     }

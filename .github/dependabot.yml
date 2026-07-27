@@ -1,0 +1,52 @@
+version: 2
+
+# Keeps the committed Cargo.lock moving on its own. CI builds with `--locked`
+# and the only supply-chain gate (.github/workflows/audit.yml) runs cargo-deny
+# weekly with `continue-on-error: true`, so without this a published advisory
+# is *reported* but never *fixed* until someone runs `cargo update` by hand.
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    # After the fuzz (04:00) and audit (05:00) Monday runs, so a PR opened here
+    # lands against a tree whose advisory status was just refreshed.
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # One PR for the routine lockfile churn. These are semver-compatible by
+      # construction, so they pass or fail as a unit and reviewing them
+      # individually is noise.
+      patch-and-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      # Pinned to `=2.0.0-rc.12` by fastembed, and rc.12 is what targets ONNX
+      # Runtime 1.24.x (API 24). A bump here that fastembed hasn't made would
+      # fail to resolve; one it *has* made arrives via fastembed anyway.
+      - dependency-name: "ort"
+      # The arrow major must match what lancedb requires (`^58` as of 0.31).
+      # Moving it independently forks the arrow types at the lancedb boundary
+      # and does not compile — see docs/contributors/architecture.md.
+      - dependency-name: "arrow*"
+        update-types: ["version-update:semver-major"]
+      # Tracks fastembed's `^0.22.2`; a major bump here silently doubles the
+      # tokenizers + onig build instead of unifying. See the note in
+      # crates/engram-models/Cargo.toml.
+      - dependency-name: "tokenizers"
+        update-types: ["version-update:semver-major"]
+      # Same story: fastembed requires `^0.5`, so hf-hub 1.x would resolve
+      # alongside it rather than replacing it.
+      - dependency-name: "hf-hub"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(ci)"

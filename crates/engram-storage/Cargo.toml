@@ -19,7 +19,7 @@ test-support = []
 [dependencies]
 engram-types = { path = "../engram-types" }
 
-lancedb = { version = "0.30", default-features = false }
+lancedb = { version = "0.31", default-features = false }
 arrow-array = "58"
 arrow-schema = "58"
 
@@ -33,7 +33,6 @@ chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.11"
 dirs = "6"
 jwalk = "0.8"
-fs4 = { version = "0.12", features = ["sync"] }
 shell-words = "1"
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net", "process"] }

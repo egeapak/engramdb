@@ -20,7 +20,6 @@
 
 use crate::error::Result;
 use chrono::{DateTime, Duration, Utc};
-use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -62,7 +61,7 @@ fn lock_mapping(project_dir: &Path) -> Option<std::fs::File> {
         .write(true)
         .open(&lock_path)
         .ok()?;
-    file.lock_exclusive().ok()?;
+    file.lock().ok()?;
     Some(file)
 }
 

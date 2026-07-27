@@ -8,6 +8,7 @@ use crate::scope::physical;
 use crate::storage::{IndexFilterable, IndexForFiltering};
 use crate::types::{Epistemic, MemoryType};
 use chrono::{DateTime, Utc};
+use lancedb::expr::{col, is_in, lit, DfExpr};
 
 /// Trait for index entries that can be filtered by `apply_index_filters`.
 ///
@@ -231,6 +232,67 @@ pub fn build_filter_predicate(
     } else {
         Some(clauses.join(" AND "))
     }
+}
+
+/// Type-safe twin of [`build_filter_predicate`].
+///
+/// Builds the identical logical predicate as a Datafusion expression instead of
+/// a SQL string. Literals travel as typed values, so there is no `'`-escaping
+/// step to get wrong — the reason this exists. Feed it to
+/// [`MemoryStore::list_for_filtering_where_expr`].
+///
+/// [`MemoryStore::list_for_filtering_where_expr`]: crate::storage::MemoryStore::list_for_filtering_where_expr
+pub fn build_filter_expr(
+    types: Option<&[MemoryType]>,
+    epistemic: Option<&[Epistemic]>,
+    min_criticality: Option<f64>,
+    exclude_expired_before: Option<DateTime<Utc>>,
+    exclude_invalidated_before: Option<DateTime<Utc>>,
+) -> Option<DfExpr> {
+    let mut clauses: Vec<DfExpr> = Vec::new();
+
+    if let Some(types) = types {
+        if !types.is_empty() {
+            let list = types
+                .iter()
+                .map(|t| lit(format!("{:?}", t).to_lowercase()))
+                .collect::<Vec<_>>();
+            clauses.push(is_in(col("type"), list));
+        }
+    }
+
+    if let Some(classes) = epistemic {
+        if !classes.is_empty() {
+            let list = classes.iter().map(|e| lit(e.as_str())).collect::<Vec<_>>();
+            clauses.push(is_in(col("epistemic"), list));
+        }
+    }
+
+    if let Some(min_crit) = min_criticality {
+        if min_crit.is_finite() {
+            clauses.push(col("criticality").gt_eq(lit(min_crit)));
+        }
+    }
+
+    // `NULL OR > now` mirrors the string builder exactly: a row with no expiry
+    // never expires, and a future-dated stamp is still live.
+    if let Some(now) = exclude_expired_before {
+        clauses.push(
+            col("expires_at")
+                .is_null()
+                .or(col("expires_at").gt(lit(now.to_rfc3339()))),
+        );
+    }
+
+    if let Some(now) = exclude_invalidated_before {
+        clauses.push(
+            col("invalidated_at")
+                .is_null()
+                .or(col("invalidated_at").gt(lit(now.to_rfc3339()))),
+        );
+    }
+
+    clauses.into_iter().reduce(|acc, c| acc.and(c))
 }
 
 #[cfg(test)]
@@ -542,5 +604,81 @@ mod tests {
         let filtered = apply_index_filters(entries, &filters);
         assert_eq!(filtered.len(), 1); // Only entry 1 matches all criteria
         assert_eq!(filtered[0].id, "1");
+    }
+
+    // ---- build_filter_expr: the typed twin of build_filter_predicate ------
+
+    /// Both builders must agree on *whether* there is a predicate at all —
+    /// `None` means "scan everything", so a disagreement here would silently
+    /// change the row set.
+    #[test]
+    fn test_filter_expr_and_predicate_agree_on_emptiness() {
+        assert!(build_filter_predicate(None, None, None, None, None).is_none());
+        assert!(build_filter_expr(None, None, None, None, None).is_none());
+
+        // Empty slices carry no signal either.
+        assert!(build_filter_predicate(Some(&[]), Some(&[]), None, None, None).is_none());
+        assert!(build_filter_expr(Some(&[]), Some(&[]), None, None, None).is_none());
+
+        // A NaN criticality is dropped by both (it can't be a useful bound).
+        assert!(build_filter_predicate(None, None, Some(f64::NAN), None, None).is_none());
+        assert!(build_filter_expr(None, None, Some(f64::NAN), None, None).is_none());
+    }
+
+    /// Each individual clause appears in both encodings. The expression is
+    /// compared via its SQL rendering, which is what LanceDB ultimately plans.
+    #[test]
+    fn test_filter_expr_renders_equivalent_sql() {
+        let now = Utc::now();
+        let types = [MemoryType::Decision, MemoryType::Convention];
+
+        let sql = build_filter_predicate(Some(&types), None, Some(0.5), Some(now), Some(now))
+            .expect("predicate");
+        let expr =
+            build_filter_expr(Some(&types), None, Some(0.5), Some(now), Some(now)).expect("expr");
+        let rendered = lancedb::expr::expr_to_sql_string(&expr).expect("renderable");
+
+        // Same columns and same literals, whichever encoding built them.
+        for needle in [
+            "type",
+            "decision",
+            "convention",
+            "criticality",
+            "expires_at",
+            "invalidated_at",
+        ] {
+            assert!(
+                sql.contains(needle),
+                "string builder lost `{needle}`: {sql}"
+            );
+            assert!(
+                rendered.contains(needle),
+                "expr builder lost `{needle}`: {rendered}"
+            );
+        }
+        // The criticality bound survives as a bound, not as text.
+        assert!(sql.contains("criticality >= 0.5"));
+        assert!(rendered.contains("0.5"));
+    }
+
+    /// The expression builder emits one clause per active filter, ANDed —
+    /// matching the string builder's `join(" AND ")`.
+    #[test]
+    fn test_filter_expr_clause_count_matches() {
+        let now = Utc::now();
+        let types = [MemoryType::Decision];
+
+        let sql =
+            build_filter_predicate(Some(&types), None, Some(0.5), Some(now), None).expect("sql");
+        let expr = build_filter_expr(Some(&types), None, Some(0.5), Some(now), None).expect("expr");
+        let rendered = lancedb::expr::expr_to_sql_string(&expr).expect("renderable");
+
+        // 3 clauses => 2 top-level ANDs in the string form.
+        assert_eq!(sql.matches(" AND ").count(), 2, "{sql}");
+        assert_eq!(
+            rendered.to_uppercase().matches(" AND ").count(),
+            2,
+            "{rendered}"
+        );
     }
 }

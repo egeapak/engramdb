@@ -1619,13 +1619,12 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
     }
 
     // Try to acquire an exclusive lock (non-blocking)
-    use fs4::fs_std::FileExt;
     match std::fs::File::options()
         .read(true)
         .write(true)
         .open(&lock_path)
     {
-        Ok(file) => match file.try_lock_exclusive() {
+        Ok(file) => match file.try_lock() {
             Ok(()) => {
                 let _ = file.unlock();
                 EnvironmentCheck {
@@ -1637,7 +1636,7 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
                     status: None,
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => EnvironmentCheck {
+            Err(std::fs::TryLockError::WouldBlock) => EnvironmentCheck {
                 name: "Write lock".to_string(),
                 passed: true,
                 message: "write lock held by active process".to_string(),
@@ -3348,7 +3347,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dir_stats_counts_and_sizes_with_extension_filter() {
-        use rand::Rng;
+        use rand::RngExt;
 
         let temp_dir = TempDir::new().unwrap();
         let mut rng = rand::rng();
@@ -3384,7 +3383,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dir_stats_nested_directories() {
-        use rand::Rng;
+        use rand::RngExt;
 
         let temp_dir = TempDir::new().unwrap();
         let mut rng = rand::rng();
@@ -3418,7 +3417,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_subdir_sizes_reports_per_directory() {
-        use rand::Rng;
+        use rand::RngExt;
 
         let temp_dir = TempDir::new().unwrap();
         let mut rng = rand::rng();
@@ -3531,8 +3530,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_write_lock_held_warns() {
-        use fs4::fs_std::FileExt;
-
         let project_id = "lock-test-project";
         let lock_dir = crate::storage::paths::global_data_dir()
             .unwrap()
@@ -3549,7 +3546,7 @@ mod tests {
             .truncate(false)
             .open(&lock_path)
             .unwrap();
-        lock_file.lock_exclusive().unwrap();
+        lock_file.lock().unwrap();
 
         let result = check_write_lock(project_id).await;
         assert_eq!(result.name, "Write lock");

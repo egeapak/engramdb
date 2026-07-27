@@ -18,3 +18,9 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 anyhow = "1"
 tracing = "0.1"
+# Snowball stemmer for keyword normalization. Only dependencies are serde and
+# serde_derive, both already here, so this keeps the crate light. It lives at
+# this layer because BOTH the storage write path (which precomputes stems) and
+# the core query path must produce byte-identical output — see
+# `src/normalize.rs`.
+rust-stemmers = "1"

@@ -21,10 +21,12 @@ use std::path::Path;
 /// (R2/R3); `0.3.0` added the seven epistemic columns (`epistemic`,
 /// `verified_at`, `generality`, `origin_task`, `valid_from`,
 /// `invalidated_at`, `watch_paths`); `0.4.0` added the `audience` column
-/// (multi-project memories). A store whose manifest records an older
+/// (multi-project memories); `0.5.0` added `keyword_stems`, the precomputed
+/// stem index the keyword scorer reads instead of re-deriving it from every
+/// memory on every query. A store whose manifest records an older
 /// version is transparently re-indexed once on open (seconds, no re-embed)
 /// and stamped up to this.
-pub const CURRENT_SCHEMA_VERSION: &str = "0.4.0";
+pub const CURRENT_SCHEMA_VERSION: &str = "0.5.0";
 
 /// The pre-migration baseline, used as the serde default so a manifest written
 /// before the field existed parses as "needs migration" rather than failing.
@@ -63,6 +65,21 @@ pub struct Manifest {
     /// [`CURRENT_SCHEMA_VERSION`]).
     #[serde(default = "default_schema_version")]
     pub schema_version: String,
+    /// Which text-normalization behaviour produced the stored `keyword_stems`
+    /// (see `engram_types::NORMALIZER_STAMP`).
+    ///
+    /// A second invalidation axis, independent of [`CURRENT_SCHEMA_VERSION`]:
+    /// the column can be present and correctly shaped while its *contents*
+    /// are stale, because a stemmer or stoplist change alters what a given
+    /// word normalizes to. Stems written under one stamp and compared against
+    /// query terms produced under another silently stop matching — the same
+    /// hazard `EmbeddingFingerprint` guards for vectors, and handled the same
+    /// way: a mismatch triggers the ordinary reindex.
+    ///
+    /// `None` on a manifest written before the field existed, which reads as
+    /// "needs regeneration".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalizer: Option<String>,
     /// Project name
     pub project: String,
     /// When this manifest was created
@@ -201,6 +218,8 @@ impl Default for Manifest {
             // New stores are born at the current schema (their empty tables
             // already have the latest columns), so they never migrate.
             schema_version: CURRENT_SCHEMA_VERSION.to_string(),
+            // Likewise born current: an empty store has no stems to be stale.
+            normalizer: Some(engram_types::NORMALIZER_STAMP.to_string()),
             project: "engramdb-project".to_string(),
             created_at: Utc::now(),
             description: "Agent memory store. See config.toml for retrieval settings.".to_string(),

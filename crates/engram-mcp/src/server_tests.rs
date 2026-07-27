@@ -4294,7 +4294,7 @@ async fn get_prompt_session_start_empty_store_returns_fallback() {
     );
     assert_eq!(result.messages.len(), 1);
     let text = match &result.messages[0].content {
-        PromptMessageContent::Text { text } => text.clone(),
+        ContentBlock::Text(TextContent { text, .. }) => text.clone(),
         other => panic!("expected text content, got {other:?}"),
     };
     assert!(text.contains("EngramDB"), "missing EngramDB header: {text}");
@@ -4324,7 +4324,7 @@ async fn get_prompt_session_end_reports_zero_memory_store() {
 
     assert_eq!(result.description.as_deref(), Some("Session end review"));
     let text = match &result.messages[0].content {
-        PromptMessageContent::Text { text } => text.clone(),
+        ContentBlock::Text(TextContent { text, .. }) => text.clone(),
         other => panic!("expected text content, got {other:?}"),
     };
     assert!(
@@ -4360,7 +4360,7 @@ async fn get_prompt_session_end_surfaces_enrichment_gaps() {
         .await
         .expect("get_prompt must succeed");
     let text = match &result.messages[0].content {
-        PromptMessageContent::Text { text } => text.clone(),
+        ContentBlock::Text(TextContent { text, .. }) => text.clone(),
         other => panic!("expected text content, got {other:?}"),
     };
     assert!(
@@ -4386,7 +4386,7 @@ async fn get_prompt_session_end_surfaces_enrichment_gaps() {
         .await
         .expect("get_prompt must succeed");
     let text = match &result.messages[0].content {
-        PromptMessageContent::Text { text } => text.clone(),
+        ContentBlock::Text(TextContent { text, .. }) => text.clone(),
         other => panic!("expected text content, got {other:?}"),
     };
     assert!(
