@@ -8,11 +8,23 @@
 # under CPU load. Homebrew's build is unaffected (verified: identical embeddings,
 # cosine 1.000000, under 16 concurrent load threads).
 #
-# `system-onnxruntime` is used rather than the default `load-dynamic` because a
-# formula builds from source with its dependencies already installed, so
-# resolving the library at build time via pkg-config is strictly better than
-# deferring it to run time — a missing or mismatched runtime becomes a build
-# error instead of a degraded install.
+# It builds with the **default** `load-dynamic` strategy, not
+# `system-onnxruntime`, even though the dependency is guaranteed present here.
+# The difference is what happens when that stops being true — `brew uninstall
+# onnxruntime`, a major-version bump that changes the dylib's install name, a
+# relocated Cellar:
+#
+#   system-onnxruntime  records libonnxruntime as a load-time dependency of the
+#                       executable. The dynamic loader resolves it before
+#                       `main()` runs, so a missing library means `engramdb`
+#                       will not start *at all* — no `--version`, and no
+#                       `doctor` to explain why.
+#   load-dynamic        records nothing. The binary always starts, probes for
+#                       the runtime itself, and degrades to keyword search with
+#                       an actionable message if it is gone.
+#
+# `depends_on` still guarantees the runtime is installed; this only decides how
+# gracefully things fail once something disturbs it.
 #
 # To publish: copy this file into a tap (`homebrew-engramdb/Formula/`), fill in
 # the release tarball `sha256`, and bump both on each release.
@@ -33,12 +45,10 @@ class Engramdb < Formula
   depends_on "onnxruntime"
 
   def install
-    # `--no-default-features` is required: `load-dynamic` sits in the default
-    # feature set, and a linking strategy has to be chosen explicitly when
-    # replacing it. `onnxruntime` and `ollama` are the other two defaults.
-    system "cargo", "install", *std_cargo_args(path: "crates/engram-cli"),
-           "--no-default-features",
-           "--features", "onnxruntime,ollama,system-onnxruntime"
+    # Default features: `load-dynamic` is already the default strategy, so no
+    # feature juggling is needed. See the note above for why this is preferred
+    # over `system-onnxruntime` even with the dependency guaranteed.
+    system "cargo", "install", *std_cargo_args(path: "crates/engram-cli")
 
     generate_completions_from_executable(bin/"engramdb", "completions")
   end

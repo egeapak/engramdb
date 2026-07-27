@@ -116,7 +116,7 @@ cargo build --release --no-default-features \
 | Flag | Default | What it does |
 |------|---------|--------------|
 | `load-dynamic` | **on** | Load ONNX Runtime at run time (`dlopen`). Nothing is required at build time, and the binary works against any installed runtime >= 1.24. |
-| `system-onnxruntime` | off | Link a system ONNX Runtime found at build time via `pkg-config`. What the Homebrew formula uses. Needs `--no-default-features`. |
+| `system-onnxruntime` | off | Link a system ONNX Runtime found at build time via `pkg-config`. Intended for distro packaging. Note this records a **load-time** dependency: if the library later goes missing the binary will not start at all, so there is no `doctor` output to explain it — unlike the default, which always starts and degrades. Needs `--no-default-features`. |
 | `bundled-onnxruntime` | off | Download and statically link a prebuilt runtime — the historical default. **Not recommended**: that prebuilt mis-executes quantized models on AVX-512/AMX hosts. Kept for platforms with no packaged runtime and for hermetic builds. Needs `--no-default-features`. |
 | `ollama` | on | Adds the Ollama embedding backend (uses `reqwest`). Turn off for a pure-ONNX, offline-only build with no extra deps: `cargo install --git ... --no-default-features`. |
 | `coreml` | off | Apple Core ML execution provider for ONNX models (Neural Engine / GPU). macOS only. |

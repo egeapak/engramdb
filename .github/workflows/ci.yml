@@ -200,6 +200,26 @@ jobs:
         # succeed on its own.
         run: cargo build --workspace --locked
 
+      - name: Binary must not record a load-time dependency on ONNX Runtime
+        # The property that makes graceful degradation possible at all. If
+        # libonnxruntime becomes a DT_NEEDED entry, the dynamic loader resolves
+        # it before `main()` runs, and a missing runtime stops the binary from
+        # starting -- no `doctor`, no fallback, and the pre-flight probe never
+        # gets a turn. Switching a strategy feature into `default` would cause
+        # exactly that, silently.
+        run: |
+          if ldd target/debug/engramdb | grep -qi onnxruntime; then
+            echo "::error::engramdb links libonnxruntime at load time; the default \
+          build must resolve it at run time so a missing runtime degrades instead \
+          of blocking startup."
+            ldd target/debug/engramdb | grep -i onnxruntime
+            exit 1
+          fi
+          echo "OK: no load-time ONNX Runtime dependency recorded."
+
+      - name: Binary must start with no runtime installed
+        run: ./target/debug/engramdb --version
+
       - name: Test with the runtime discovered from /usr/local/lib
         # No ORT_DYLIB_PATH: this asserts the built-in search path finds a
         # system-installed runtime the way a Homebrew or distro install would.
