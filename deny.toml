@@ -73,6 +73,26 @@ crate = "ring"
 expression = "MIT AND ISC AND OpenSSL"
 license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
+# `inferno` is CDDL-1.0 — the only crate in the resolved tree outside the
+# permissive allow-list above. It is a Rust port of Brendan Gregg's FlameGraph
+# and inherits that project's license. It reaches us through the same path as
+# the two quick-xml advisories ignored above:
+#
+#   lancedb 0.31 -> lance-testing 8.0.0 -> pprof 0.15 (feature "flamegraph")
+#                -> inferno 0.11
+#
+# Accepted rather than allow-listed globally: CDDL-1.0 is OSI-approved and
+# file-level reciprocal (the same shape as MPL-2.0, already allowed) — the
+# obligation is to publish the source of any CDDL-covered *file* we modify,
+# and we vendor `inferno` unmodified via crates.io. Scoping the grant to this
+# one crate keeps a *different* CDDL dependency failing the check.
+#
+# REMOVE THIS once lance-testing drops the pprof dependency (or makes it
+# optional) — it retires together with the two RUSTSEC ignores above.
+[[licenses.exceptions]]
+crate = "inferno"
+allow = ["CDDL-1.0"]
+
 [bans]
 # The arrow/datafusion/ort stack inevitably drags in duplicate crate versions;
 # report them without blocking.
