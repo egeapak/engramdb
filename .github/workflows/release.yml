@@ -8,18 +8,25 @@ on:
 permissions:
   contents: write
 
-# ONNX Runtime is no longer compiled into the binary. Each archive ships the
-# official Microsoft build of the shared library next to `engramdb`, and the
-# binary `dlopen`s it at run time (`engram_onnx::runtime` searches the
-# executable's own directory first). Two reasons:
+# No archive contains an ONNX Runtime — not statically linked, not shipped
+# alongside. Every binary resolves one at startup from the user's system, and
+# EngramDB never carries its own copy. Three reasons:
 #   * the prebuilt `ort` downloads and statically links executes quantized
-#     models incorrectly on AVX-512/AMX hosts — see
-#     docs/contributors/embedding-model-alternatives.md (R6/R9);
-#   * package installs (Homebrew, Scoop) supply their own runtime, so the
-#     binary must not carry a second copy welded into it.
-# Must satisfy the C API version `ort` 2.0.0-rc.12 requires (24), i.e. >= 1.24.
-env:
-  ONNXRUNTIME_VERSION: "1.24.2"
+#     models incorrectly on AVX-512/AMX hosts, so the copy we would ship is the
+#     one we cannot trust — see docs/contributors/embedding-model-alternatives.md
+#     (R6/R9);
+#   * a bundled runtime cannot be patched by whoever maintains the rest of the
+#     machine, and silently wins over the package manager's copy because the
+#     search checks the executable's directory first;
+#   * shipping it for some targets and not others is worse than not shipping it
+#     at all — there is no official x86_64 macOS build past 1.23.x, so Intel Mac
+#     could never have had one, and Homebrew's is not redistributable standalone
+#     (it links abseil / onnx / protobuf / re2).
+#
+# Users install it once (`brew install onnxruntime`, `scoop install onnxruntime`,
+# a distro package, or `ORT_DYLIB_PATH`). Any version providing C API 24 works,
+# i.e. ONNX Runtime >= 1.24. Until one is present EngramDB still runs: `doctor`
+# reports what is missing and search falls back to keyword matching.
 
 jobs:
   # Gate the whole release on version consistency: the pushed tag (v0.7.0), the
@@ -109,23 +116,14 @@ jobs:
         # `default-members` (the binary is not in the root core-lib package).
         # `--locked` ensures the shipped binary uses exactly the committed
         # Cargo.lock instead of silently re-resolving newer dependency versions.
-        # Default features select `load-dynamic`, so no ONNX Runtime is needed
-        # to build — it is fetched below and shipped alongside.
+        # Default features select `load-dynamic`: no ONNX Runtime is needed to
+        # build, and none is shipped. The user supplies one at run time.
         run: cargo build --release --bin engramdb --locked
-
-      - name: Fetch ONNX Runtime
-        run: |
-          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-osx-arm64-${ONNXRUNTIME_VERSION}.tgz"
-          tar -xzf "onnxruntime-osx-arm64-${ONNXRUNTIME_VERSION}.tgz"
-          # Copy the real file, not the version symlink: `tar` would otherwise
-          # archive a dangling link.
-          cp "onnxruntime-osx-arm64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.${ONNXRUNTIME_VERSION}.dylib" \
-             target/release/libonnxruntime.dylib
 
       - name: Package binary
         run: |
           cd target/release
-          tar czf ../../engramdb-aarch64-apple-darwin.tar.gz engramdb libonnxruntime.dylib
+          tar czf ../../engramdb-aarch64-apple-darwin.tar.gz engramdb
           cd ../..
           shasum -a 256 engramdb-aarch64-apple-darwin.tar.gz > engramdb-aarch64-apple-darwin.tar.gz.sha256
 
@@ -142,11 +140,10 @@ jobs:
   # had to link one. Under `load-dynamic` nothing is linked at build time, so the
   # same default-feature build cross-compiles here like everywhere else.
   #
-  # Unlike the other targets this archive carries **no** libonnxruntime — there
-  # is no official x86_64 macOS build to ship. Intel users get the runtime from
-  # Homebrew (`brew install onnxruntime`, which has an Intel bottle), and until
-  # they do, EngramDB starts normally and reports the missing runtime via
-  # `doctor` while serving keyword search. See docs/users/installation.md.
+  # Like every other target, this archive carries no runtime; Intel users install
+  # it with `brew install onnxruntime` (which has an Intel bottle). Worth noting
+  # that this target *could* not have shipped one even if we wanted to — there is
+  # no official x86_64 macOS build past 1.23.x.
   build-intel:
     needs: [version-check, test]
     runs-on: macos-15
@@ -209,20 +206,13 @@ jobs:
       - name: Build release binary
         # `--bin engramdb` resolves via workspace `default-members` (see build-arm).
         # Default features select `load-dynamic`: the runtime is `dlopen`ed at
-        # run time from the copy shipped beside the binary, not linked in.
+        # run time from the user's system, not linked in and not shipped.
         run: cargo build --release --bin engramdb --locked
-
-      - name: Fetch ONNX Runtime
-        run: |
-          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
-             target/release/libonnxruntime.so
 
       - name: Package binary
         run: |
           cd target/release
-          tar czf ../../engramdb-x86_64-unknown-linux-gnu.tar.gz engramdb libonnxruntime.so
+          tar czf ../../engramdb-x86_64-unknown-linux-gnu.tar.gz engramdb
           cd ../..
           sha256sum engramdb-x86_64-unknown-linux-gnu.tar.gz > engramdb-x86_64-unknown-linux-gnu.tar.gz.sha256
 
@@ -250,24 +240,16 @@ jobs:
       - name: Build release binary
         # The shared embedding daemon (Unix-domain-socket only) compiles out on
         # Windows via `#[cfg(unix)]`; model inference runs in-process. Default
-        # features select `load-dynamic`, so `onnxruntime.dll` ships beside the
-        # exe and is loaded at run time. The release profile keeps the main
+        # features select `load-dynamic`, so `onnxruntime.dll` is resolved from
+        # the user's system at run time. The release profile keeps the main
         # thread under Windows' 1 MiB default stack, so no `/STACK` linker flag
         # is needed.
         run: cargo build --release --bin engramdb --locked
 
-      - name: Fetch ONNX Runtime
-        shell: pwsh
-        run: |
-          $url = "https://github.com/microsoft/onnxruntime/releases/download/v$env:ONNXRUNTIME_VERSION/onnxruntime-win-x64-$env:ONNXRUNTIME_VERSION.zip"
-          Invoke-WebRequest -Uri $url -OutFile onnxruntime.zip
-          Expand-Archive -Path onnxruntime.zip -DestinationPath ort
-          Copy-Item "ort\onnxruntime-win-x64-$env:ONNXRUNTIME_VERSION\lib\onnxruntime.dll" target\release\onnxruntime.dll
-
       - name: Package binary
         shell: pwsh
         run: |
-          Compress-Archive -Path target\release\engramdb.exe,target\release\onnxruntime.dll -DestinationPath engramdb-x86_64-pc-windows-msvc.zip
+          Compress-Archive -Path target\release\engramdb.exe -DestinationPath engramdb-x86_64-pc-windows-msvc.zip
           $hash = (Get-FileHash engramdb-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash.ToLower()
           "$hash  engramdb-x86_64-pc-windows-msvc.zip" | Out-File -Encoding ascii engramdb-x86_64-pc-windows-msvc.zip.sha256
 
@@ -290,6 +272,28 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          # These archives contain the binary only. Since ONNX Runtime is no
+          # longer bundled, an unpacked tarball is not self-sufficient — say so
+          # at the top of every release rather than letting people discover it
+          # as "why is search keyword-only?".
+          body: |
+            ### Prerequisite: ONNX Runtime
+
+            EngramDB loads ONNX Runtime at startup instead of bundling it, so
+            install it once (any version >= 1.24):
+
+            ```
+            brew install onnxruntime          # macOS / Linuxbrew
+            scoop install onnxruntime         # Windows
+            sudo apt-get install -y libonnxruntime   # where packaged
+            ```
+
+            Or point `ORT_DYLIB_PATH` at a library you already have. Installing
+            via Homebrew or Scoop pulls it in automatically.
+
+            Without it EngramDB still starts and runs — semantic search falls
+            back to keyword matching, and `engramdb doctor` reports what is
+            missing and every path it searched.
           files: |
             engramdb-*.tar.gz
             engramdb-*.tar.gz.sha256

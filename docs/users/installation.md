@@ -15,12 +15,13 @@
 
 ### ONNX Runtime
 
-EngramDB does not contain a copy of ONNX Runtime. It resolves one at startup, in
-this order:
+EngramDB does not contain a copy of ONNX Runtime, and does not ship one:
+release archives hold the binary and nothing else. It resolves a runtime from
+your system at startup, in this order:
 
 1. `ORT_DYLIB_PATH`, if set — an explicit path to the library.
-2. The directory holding the `engramdb` binary (this is how the release
-   archives work — they ship the library next to the executable).
+2. The directory holding the `engramdb` binary — drop a `libonnxruntime`
+   there and it wins over everything below it.
 3. Standard package-manager locations: `/opt/homebrew/lib` and `/usr/local/lib`
    on macOS, `/usr/local/lib`, `/usr/lib`, `/usr/lib64` and the multiarch
    directories on Linux.

@@ -14,10 +14,10 @@ and the packages differ only in *how*:
 |---|---|---|
 | Homebrew (`homebrew/engramdb.rb`) | `load-dynamic` (default) | `depends_on "onnxruntime"`, loaded at run time |
 | Scoop (`scoop/*.json`) | `load-dynamic` (default) | `"depends": "onnxruntime"`, loaded at run time from `PATH` |
-| GitHub release archives | `load-dynamic` (default) | Microsoft's official build, shipped beside the binary |
+| GitHub release archives | `load-dynamic` (default) | Whatever the user installed — archives hold the binary only |
 | `cargo install` | `load-dynamic` (default) | Whatever the user has installed |
 
-Two reasons it works this way rather than statically linking one in:
+No channel ships a runtime, in any form. Three reasons:
 
 1. **Correctness.** The prebuilt ONNX Runtime that `ort`'s `download-binaries`
    feature fetches executes quantized models incorrectly on AVX-512/AMX hosts —
@@ -25,8 +25,15 @@ Two reasons it works this way rather than statically linking one in:
    get persisted. Microsoft's and Homebrew's builds of the same version are
    bit-reproducible. See `docs/contributors/embedding-model-alternatives.md`
    (R6/R9).
-2. **One runtime per machine.** A statically linked copy cannot be patched by
-   the package manager that installed everything else.
+2. **One runtime per machine.** A copy we ship cannot be patched by whoever
+   maintains the rest of the machine, and a copy sitting beside the binary
+   silently wins over the package manager's — the search checks the
+   executable's own directory first.
+3. **No partial coverage.** Shipping it for some targets and not others is
+   worse than not shipping it at all. Intel Mac could never have had one (no
+   official x86_64 macOS build past 1.23.x, and Homebrew's is not
+   redistributable standalone — it links abseil / onnx / protobuf / re2), so
+   bundling elsewhere would mean one platform quietly behaving differently.
 
 A missing runtime is never fatal: `engram_onnx::runtime` probes and validates
 the library before `ort` touches it, so EngramDB degrades to keyword search and

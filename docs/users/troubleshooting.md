@@ -30,8 +30,8 @@ Or point at a specific library with `ORT_DYLIB_PATH=/path/to/libonnxruntime.so`.
 **`ONNX Runtime <version> is too old` (needs API 24).**
 The runtime that was found predates 1.24, which is the C API version `ort 2.0.0-rc.12` requires. Homebrew ships 1.28; distro packages are often older. Upgrade it, or point `ORT_DYLIB_PATH` at a newer one. EngramDB reports the version it found instead of failing inside `ort`.
 
-**Intel Mac (`x86_64-apple-darwin`) has no runtime in its release archive.**
-Every other release archive ships `libonnxruntime` beside the binary; this one cannot, because Microsoft dropped x86_64 macOS builds after 1.23.x and no official 1.24+ exists. Install Homebrew's instead — it has an Intel bottle and is new enough:
+**Intel Mac (`x86_64-apple-darwin`).**
+Nothing special applies here — no archive ships a runtime — but note that this target could not have had one anyway: Microsoft dropped x86_64 macOS builds after 1.23.x and no official 1.24+ exists. Homebrew's has an Intel bottle and is new enough:
 
 ```bash
 brew install onnxruntime
