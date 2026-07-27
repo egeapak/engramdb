@@ -374,6 +374,8 @@ pub async fn doctor_environment(
     ];
 
     let mut embeddings_checks = Vec::new();
+    #[cfg(feature = "onnxruntime")]
+    embeddings_checks.push(check_onnx_runtime());
     embeddings_checks.push(check_embedding_backend(dir).await);
     embeddings_checks.push(check_embedding_model_identity(dir).await);
     let cache_dir = crate::storage::paths::model_cache_dir()
@@ -637,6 +639,40 @@ async fn check_config_file(dir: &Path) -> EnvironmentCheck {
             suggestion: Some("Fix the syntax in .engramdb/config.toml".to_string()),
             details: vec![],
             status: None,
+        },
+    }
+}
+
+/// Report where the ONNX Runtime came from, or why it is unavailable.
+///
+/// Under the default `load-dynamic` strategy the runtime is a separate shared
+/// library discovered at run time, so "is it installed, and is it new enough"
+/// becomes a real user-facing question — and the answer decides whether
+/// embeddings work at all. Surfacing it here makes the difference between a
+/// mystery ("why is search keyword-only?") and a one-line fix.
+#[cfg(feature = "onnxruntime")]
+fn check_onnx_runtime() -> EnvironmentCheck {
+    match crate::onnx_ep::runtime_status() {
+        Ok(description) => EnvironmentCheck {
+            name: "ONNX Runtime".to_string(),
+            passed: true,
+            message: description,
+            suggestion: None,
+            details: vec![],
+            status: None,
+        },
+        Err(reason) => EnvironmentCheck {
+            name: "ONNX Runtime".to_string(),
+            passed: false,
+            message: reason,
+            suggestion: Some(
+                "Install ONNX Runtime (`brew install onnxruntime`, \
+                 `scoop install onnxruntime`, or your distro\'s package), or set \
+                 ORT_DYLIB_PATH. Without it EngramDB falls back to keyword search."
+                    .to_string(),
+            ),
+            details: vec![],
+            status: Some(CheckStatus::Warn),
         },
     }
 }

@@ -276,6 +276,7 @@ impl OnnxProvider {
     /// Used by the benchmark suite to compare CPU vs Core ML on identical
     /// workloads; production code should use [`OnnxProvider::with_model`].
     pub fn with_model_on(spec: OnnxModelSpec, backend: engram_onnx::Backend) -> Result<Self> {
+        crate::ensure_onnx_runtime()?;
         Self::with_model_on_intra(spec, backend, engram_onnx::intra_threads_override())
     }
 
@@ -293,6 +294,7 @@ impl OnnxProvider {
         backend: engram_onnx::Backend,
         intra_threads: Option<usize>,
     ) -> Result<Self> {
+        crate::ensure_onnx_runtime()?;
         let cache_dir =
             engram_storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
 

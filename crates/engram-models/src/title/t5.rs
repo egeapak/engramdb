@@ -118,6 +118,7 @@ impl T5TitleGenerator {
     /// paths stay strict so the benchmark harness measures the backend it asks
     /// for. The warmup runs only off-CPU, so default CPU builds pay nothing.
     fn with_spec_default_intra(spec: &T5ModelSpec, intra_threads: usize) -> Result<Self> {
+        crate::ensure_onnx_runtime()?;
         let backend = engram_onnx::default_backend();
         let generator = Self::with_spec_on_intra(spec, backend, intra_threads)?;
         if backend != engram_onnx::Backend::Cpu {
@@ -166,6 +167,7 @@ impl T5TitleGenerator {
         backend: engram_onnx::Backend,
         intra_threads: usize,
     ) -> Result<Self> {
+        crate::ensure_onnx_runtime()?;
         let (encoder_path, decoder_path, tokenizer_path) = download_model_files(spec)?;
         let intra = intra_threads.max(1);
 

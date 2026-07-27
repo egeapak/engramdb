@@ -1,0 +1,38 @@
+{
+    "version": "1.24.2",
+    "description": "Cross-platform inference and training machine-learning accelerator (ONNX Runtime). Required by engramdb.",
+    "homepage": "https://onnxruntime.ai/",
+    "license": "MIT",
+    "notes": [
+        "onnxruntime.dll has been added to your PATH, so applications that load it dynamically (such as engramdb) will find it.",
+        "Scoop has no onnxruntime manifest in Main/Extras/Versions, which is why this one ships with engramdb."
+    ],
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-1.24.2.zip",
+            "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "extract_dir": "onnxruntime-win-x64-1.24.2"
+        },
+        "arm64": {
+            "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-arm64-1.24.2.zip",
+            "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "extract_dir": "onnxruntime-win-arm64-1.24.2"
+        }
+    },
+    "env_add_path": "lib",
+    "checkver": {
+        "github": "https://github.com/microsoft/onnxruntime"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/microsoft/onnxruntime/releases/download/v$version/onnxruntime-win-x64-$version.zip",
+                "extract_dir": "onnxruntime-win-x64-$version"
+            },
+            "arm64": {
+                "url": "https://github.com/microsoft/onnxruntime/releases/download/v$version/onnxruntime-win-arm64-$version.zip",
+                "extract_dir": "onnxruntime-win-arm64-$version"
+            }
+        }
+    }
+}

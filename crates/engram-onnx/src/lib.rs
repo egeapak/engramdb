@@ -24,8 +24,85 @@
 //! The explicit [`Backend`] variants exist so the benchmark suite can A/B
 //! the same workload across backends within one process.
 
+// At least one linking strategy must be selected, or `ort-sys` fails deep inside
+// a build script with an error that never names the cause.
+//
+// Several at once is *not* an error: `--all-features` (which CI runs) enables
+// all three by definition, so they resolve by precedence instead. `ort` itself
+// sets the precedence — its `setup_api()` takes the `dlopen` path under
+// `#[cfg(feature = "load-dynamic")]` regardless of what else is enabled — so
+// `load-dynamic` wins here too, and `runtime_status` reports accordingly.
+#[cfg(not(any(
+    feature = "load-dynamic",
+    feature = "system-onnxruntime",
+    feature = "bundled-onnxruntime"
+)))]
+compile_error!(
+    "engram-onnx needs an ONNX Runtime linking strategy: enable one of \
+     `load-dynamic` (default), `system-onnxruntime`, or `bundled-onnxruntime`. \
+     A build using `--no-default-features` must name one explicitly."
+);
+#[cfg(feature = "load-dynamic")]
+pub mod runtime;
+
 use ort::ep::ExecutionProviderDispatch;
 use ort::session::builder::SessionBuilder;
+
+/// Whether the ONNX Runtime this build depends on is actually usable.
+///
+/// Strategy-agnostic, so callers do not need to know how the runtime is linked:
+///
+/// - `load-dynamic` — resolves and validates the shared library (see
+///   [`runtime::ensure`]). This is the case that can genuinely fail at run time,
+///   and it must be checked *before* any `ort` call: `ort`'s own loader panics
+///   on a missing dylib, and the release profile aborts on panic.
+/// - `system-onnxruntime` / `bundled-onnxruntime` — the runtime was linked at
+///   build time, so if the process started at all, it is present.
+///
+/// Provider constructors call this first and return "unavailable" when it is
+/// false, which routes a missing runtime through the same graceful fallback as
+/// a missing model.
+pub fn runtime_available() -> bool {
+    #[cfg(feature = "load-dynamic")]
+    {
+        runtime::available()
+    }
+    #[cfg(not(feature = "load-dynamic"))]
+    {
+        true
+    }
+}
+
+/// Human-readable runtime state, for `engramdb doctor` and error messages.
+///
+/// `Ok` carries a description of the runtime in use; `Err` carries an
+/// actionable explanation of why ONNX is unavailable.
+pub fn runtime_status() -> Result<String, String> {
+    // Precedence, not exclusivity: see the note at the top of this file.
+    #[cfg(feature = "load-dynamic")]
+    {
+        match runtime::ensure() {
+            Ok(info) => Ok(format!(
+                "ONNX Runtime {} (loaded at run time from {})",
+                info.version,
+                info.path.display()
+            )),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+    #[cfg(all(not(feature = "load-dynamic"), feature = "system-onnxruntime"))]
+    {
+        Ok("ONNX Runtime (linked at build time from the system)".to_string())
+    }
+    #[cfg(all(
+        not(feature = "load-dynamic"),
+        not(feature = "system-onnxruntime"),
+        feature = "bundled-onnxruntime"
+    ))]
+    {
+        Ok("ONNX Runtime (statically bundled into this binary)".to_string())
+    }
+}
 
 /// Which ONNX Runtime execution backend to register for a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

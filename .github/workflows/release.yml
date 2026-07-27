@@ -8,6 +8,19 @@ on:
 permissions:
   contents: write
 
+# ONNX Runtime is no longer compiled into the binary. Each archive ships the
+# official Microsoft build of the shared library next to `engramdb`, and the
+# binary `dlopen`s it at run time (`engram_onnx::runtime` searches the
+# executable's own directory first). Two reasons:
+#   * the prebuilt `ort` downloads and statically links executes quantized
+#     models incorrectly on AVX-512/AMX hosts — see
+#     docs/contributors/embedding-model-alternatives.md (R6/R9);
+#   * package installs (Homebrew, Scoop) supply their own runtime, so the
+#     binary must not carry a second copy welded into it.
+# Must satisfy the C API version `ort` 2.0.0-rc.12 requires (24), i.e. >= 1.24.
+env:
+  ONNXRUNTIME_VERSION: "1.24.2"
+
 jobs:
   # Gate the whole release on version consistency: the pushed tag (v0.7.0), the
   # plugin manifest, the marketplace manifest, and the workspace version in
@@ -96,12 +109,23 @@ jobs:
         # `default-members` (the binary is not in the root core-lib package).
         # `--locked` ensures the shipped binary uses exactly the committed
         # Cargo.lock instead of silently re-resolving newer dependency versions.
+        # Default features select `load-dynamic`, so no ONNX Runtime is needed
+        # to build — it is fetched below and shipped alongside.
         run: cargo build --release --bin engramdb --locked
+
+      - name: Fetch ONNX Runtime
+        run: |
+          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-osx-arm64-${ONNXRUNTIME_VERSION}.tgz"
+          tar -xzf "onnxruntime-osx-arm64-${ONNXRUNTIME_VERSION}.tgz"
+          # Copy the real file, not the version symlink: `tar` would otherwise
+          # archive a dangling link.
+          cp "onnxruntime-osx-arm64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.${ONNXRUNTIME_VERSION}.dylib" \
+             target/release/libonnxruntime.dylib
 
       - name: Package binary
         run: |
           cd target/release
-          tar czf ../../engramdb-aarch64-apple-darwin.tar.gz engramdb
+          tar czf ../../engramdb-aarch64-apple-darwin.tar.gz engramdb libonnxruntime.dylib
           cd ../..
           shasum -a 256 engramdb-aarch64-apple-darwin.tar.gz > engramdb-aarch64-apple-darwin.tar.gz.sha256
 
@@ -182,14 +206,21 @@ jobs:
 
       - name: Build release binary
         # `--bin engramdb` resolves via workspace `default-members` (see build-arm).
-        # ONNX Runtime is statically linked via fastembed's `download-binaries`,
-        # so the binary is self-contained (no separate library to ship).
+        # Default features select `load-dynamic`: the runtime is `dlopen`ed at
+        # run time from the copy shipped beside the binary, not linked in.
         run: cargo build --release --bin engramdb --locked
+
+      - name: Fetch ONNX Runtime
+        run: |
+          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
+             target/release/libonnxruntime.so
 
       - name: Package binary
         run: |
           cd target/release
-          tar czf ../../engramdb-x86_64-unknown-linux-gnu.tar.gz engramdb
+          tar czf ../../engramdb-x86_64-unknown-linux-gnu.tar.gz engramdb libonnxruntime.so
           cd ../..
           sha256sum engramdb-x86_64-unknown-linux-gnu.tar.gz > engramdb-x86_64-unknown-linux-gnu.tar.gz.sha256
 
@@ -216,16 +247,25 @@ jobs:
 
       - name: Build release binary
         # The shared embedding daemon (Unix-domain-socket only) compiles out on
-        # Windows via `#[cfg(unix)]`; model inference runs in-process. ONNX
-        # Runtime is statically linked, so `engramdb.exe` is self-contained.
-        # The release profile keeps the main thread under Windows' 1 MiB default
-        # stack, so no `/STACK` linker flag is needed.
+        # Windows via `#[cfg(unix)]`; model inference runs in-process. Default
+        # features select `load-dynamic`, so `onnxruntime.dll` ships beside the
+        # exe and is loaded at run time. The release profile keeps the main
+        # thread under Windows' 1 MiB default stack, so no `/STACK` linker flag
+        # is needed.
         run: cargo build --release --bin engramdb --locked
+
+      - name: Fetch ONNX Runtime
+        shell: pwsh
+        run: |
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v$env:ONNXRUNTIME_VERSION/onnxruntime-win-x64-$env:ONNXRUNTIME_VERSION.zip"
+          Invoke-WebRequest -Uri $url -OutFile onnxruntime.zip
+          Expand-Archive -Path onnxruntime.zip -DestinationPath ort
+          Copy-Item "ort\onnxruntime-win-x64-$env:ONNXRUNTIME_VERSION\lib\onnxruntime.dll" target\release\onnxruntime.dll
 
       - name: Package binary
         shell: pwsh
         run: |
-          Compress-Archive -Path target\release\engramdb.exe -DestinationPath engramdb-x86_64-pc-windows-msvc.zip
+          Compress-Archive -Path target\release\engramdb.exe,target\release\onnxruntime.dll -DestinationPath engramdb-x86_64-pc-windows-msvc.zip
           $hash = (Get-FileHash engramdb-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash.ToLower()
           "$hash  engramdb-x86_64-pc-windows-msvc.zip" | Out-File -Encoding ascii engramdb-x86_64-pc-windows-msvc.zip.sha256
 

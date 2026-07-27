@@ -14,10 +14,12 @@ path = "src/lib.rs"
 # Forward the model/backend feature flags to the engramdb core. `onnxruntime`
 # (ONNX Runtime) is on by default; a pure-Rust build uses
 # `--no-default-features --features tract`.
-default = ["onnxruntime", "ollama"]
+default = ["onnxruntime", "load-dynamic", "ollama"]
 onnxruntime = ["engramdb/onnxruntime"]
-# See the workspace-level `system-onnxruntime` feature.
+# ONNX Runtime linking strategy; see the workspace root.
+load-dynamic = ["engramdb/load-dynamic"]
 system-onnxruntime = ["engramdb/system-onnxruntime"]
+bundled-onnxruntime = ["engramdb/bundled-onnxruntime"]
 tract = ["engramdb/tract"]
 ollama = ["engramdb/ollama"]
 

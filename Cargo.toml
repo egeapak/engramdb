@@ -25,7 +25,7 @@ name = "engramdb"
 path = "src/lib.rs"
 
 [features]
-default = ["onnxruntime", "ollama"]
+default = ["onnxruntime", "load-dynamic", "ollama"]
 # ONNX Runtime stack (`ort` + `fastembed` + the `engram-onnx` EP wiring). On by
 # default. A pure-Rust build for a platform with no prebuilt ORT (Intel Mac)
 # uses `--no-default-features --features tract` instead.
@@ -42,30 +42,42 @@ coreml = ["onnxruntime", "engram-onnx/coreml", "engram-models/coreml"]
 # the provider ships in the prebuilt `ort` binary so only this feature is
 # needed (no source build, same downloaded binary). For A/B benchmarking.
 xnnpack = ["onnxruntime", "engram-onnx/xnnpack", "engram-models/xnnpack"]
-# Link the ONNX Runtime already installed on the system, located via
-# `pkg-config`, instead of the prebuilt binary `ort` downloads. This is the
-# feature a distro/Homebrew package would build with:
+# --- ONNX Runtime linking strategy ---------------------------------------
+# EngramDB does not vendor an ONNX Runtime. Exactly one of the three strategies
+# below decides where `libonnxruntime` comes from; `load-dynamic` is in
+# `default`, so selecting another means `--no-default-features`.
 #
-#     brew install onnxruntime
-#     cargo build --release --features system-onnxruntime
+#   load-dynamic         (default) `ort` `dlopen`s the runtime on first use.
+#                        Nothing is required at build time and one prebuilt
+#                        binary works against any installed runtime >= 1.24, so
+#                        this is what the release archives and the Homebrew /
+#                        Scoop packages use. `engram_onnx::runtime` locates and
+#                        validates the library before `ort` touches it.
 #
-# Two reasons it exists. (1) **Correctness**: the pyke prebuilt that `ort`'s
-# `download-binaries` fetches executes quantized models incorrectly on
-# AVX-512/AMX hosts — the same text embeds to unrelated vectors under CPU load,
-# while Microsoft's and Homebrew's builds of the *same version* are
-# bit-reproducible. See `docs/contributors/embedding-model-alternatives.md`
-# (R6/R9). (2) **Intel Mac**: no ORT 1.24 prebuilt exists for
-# `x86_64-apple-darwin`, but Homebrew ships onnxruntime 1.28 for it, and 1.28
-# satisfies the API 24 `ort` requires.
+#   system-onnxruntime   Link a system runtime found at build time via
+#                        `pkg-config`. For distro packaging and source builds on
+#                        a machine that already has ONNX Runtime installed.
 #
-# `ort-sys` probes pkg-config before its download path, so this wins even
-# though `fastembed` also enables `download-binaries`. It accepts any runtime
-# whose minor version is >= 24.
-system-onnxruntime = [
-    "onnxruntime",
-    "engram-models/system-onnxruntime",
-    "engram-onnx/system-onnxruntime",
-]
+#   bundled-onnxruntime  Download and statically link a prebuilt runtime — the
+#                        historical default, kept as an escape hatch for
+#                        platforms with no packaged ONNX Runtime and for
+#                        hermetic builds. **Not recommended**: the pyke prebuilt
+#                        it fetches executes quantized models incorrectly on
+#                        AVX-512/AMX hosts (the same text embeds to unrelated
+#                        vectors under CPU load), which is why it stopped being
+#                        the default. See
+#                        `docs/contributors/embedding-model-alternatives.md`
+#                        (R6/R9).
+#
+# Examples:
+#     cargo build --release                                   # load-dynamic
+#     cargo build --release --no-default-features \
+#         --features onnxruntime,ollama,system-onnxruntime
+#     cargo build --release --no-default-features \
+#         --features onnxruntime,ollama,bundled-onnxruntime
+load-dynamic = ["engram-models/load-dynamic", "engram-onnx?/load-dynamic"]
+system-onnxruntime = ["engram-models/system-onnxruntime", "engram-onnx?/system-onnxruntime"]
+bundled-onnxruntime = ["engram-models/bundled-onnxruntime", "engram-onnx?/bundled-onnxruntime"]
 # Re-exports `engram-storage`'s `test_support` (global-store serialization lock)
 # so downstream crates (engram-mcp, engram-cli) can use it in their test builds.
 test-support = ["engram-storage/test-support"]

@@ -62,6 +62,7 @@ impl LocalReranker {
     /// ~1 GB model into whatever project the process runs in, violating the
     /// unified-model-cache invariant.
     pub fn load(model_name: &str) -> Result<Arc<dyn Reranker>> {
+        crate::ensure_onnx_runtime()?;
         let cache_dir =
             engram_storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
 

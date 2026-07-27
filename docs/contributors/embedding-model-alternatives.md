@@ -552,8 +552,20 @@ ghcr.io and linked through its own `lib/pkgconfig/libonnxruntime.pc`, with
   declared and installed); for a self-contained archive, Microsoft's official
   tarball is the better source since it has no such dependencies.
 
-A Homebrew formula would therefore carry `depends_on "onnxruntime"` and build
-with `--features system-onnxruntime`; nothing else changes.
+**This is now the shipped default.** `bundled-onnxruntime` — downloading and
+statically linking the pyke prebuilt — is opt-in and no longer used by anything;
+the default `load-dynamic` strategy `dlopen`s a runtime at startup, release
+archives ship Microsoft's official build beside the binary, and the Homebrew
+formula (`packaging/homebrew/engramdb.rb`) carries `depends_on "onnxruntime"`
+with `--features system-onnxruntime`. Scoop has no `onnxruntime` package at all,
+so `packaging/scoop/onnxruntime.json` supplies one. See `packaging/README.md`.
+
+The one real cost of moving off a statically linked runtime: `ort` panics when
+the dylib is absent, and `panic = "abort"` in the release profile makes that
+uncatchable, so a missing runtime would abort the process rather than fall back
+to keyword search. `engram_onnx::runtime` closes that hole by locating and
+validating the library (including an `OrtGetApiBase()->GetApi(24)` version
+check) before `ort` is ever called.
 
 **If a single static binary matters more than any of this**, the remaining
 option is building ONNX Runtime from source with static libs in CI

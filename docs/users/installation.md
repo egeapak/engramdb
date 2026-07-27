@@ -7,35 +7,59 @@
   - macOS: `brew install protobuf`
   - Debian/Ubuntu: `sudo apt-get install -y protobuf-compiler`
   - Fedora: `sudo dnf install protobuf-compiler`
+- **ONNX Runtime 1.24 or later** — EngramDB loads it at run time instead of
+  embedding it. The prebuilt release archives and the Homebrew / Scoop packages
+  supply it for you; only source builds need it installed separately. See
+  [ONNX Runtime](#onnx-runtime) below.
 - Outbound network access on first run to download the embedding model (~90 MB). After that, engramdb is fully offline.
+
+### ONNX Runtime
+
+EngramDB does not contain a copy of ONNX Runtime. It resolves one at startup, in
+this order:
+
+1. `ORT_DYLIB_PATH`, if set — an explicit path to the library.
+2. The directory holding the `engramdb` binary (this is how the release
+   archives work — they ship the library next to the executable).
+3. Standard package-manager locations: `/opt/homebrew/lib` and `/usr/local/lib`
+   on macOS, `/usr/local/lib`, `/usr/lib`, `/usr/lib64` and the multiarch
+   directories on Linux.
+4. The platform loader's own search path (`PATH` on Windows,
+   `LD_LIBRARY_PATH`/`ld.so.conf` on Linux).
+
+Installing it, if you need to:
+
+```bash
+brew install onnxruntime          # macOS / Linuxbrew
+scoop install onnxruntime         # Windows (manifest ships with EngramDB)
+sudo apt-get install -y libonnxruntime   # where packaged
+```
+
+This is deliberate. The prebuilt runtime that would otherwise be compiled in
+executes quantized models incorrectly on some AVX-512/AMX CPUs — under load the
+same text embeds to an unrelated vector, and those vectors are persisted.
+Packaged builds do not have the defect, and a runtime installed separately can
+be patched without rebuilding EngramDB.
+
+**A missing runtime is not fatal.** EngramDB reports it and falls back to
+keyword search rather than failing:
+
+```
+engramdb doctor      # the "ONNX Runtime" check names the library and version,
+                     # or explains what to install
+```
 
 ### Platform support
 
 The default build uses **ONNX Runtime**, fetched as a prebuilt binary for **Linux (x86_64/aarch64)**, **Windows (x86_64/aarch64)**, and **Apple Silicon macOS (aarch64)** — the platforms with official release binaries.
 
-**Intel Mac (`x86_64-apple-darwin`)** has no prebuilt ONNX Runtime 1.24 (the version required; Microsoft dropped x86_64 macOS builds after 1.23.x, and a Homebrew `onnxruntime` 1.23.x crashes at startup with `The requested API version [24] is not available`). On Intel Mac, EngramDB uses the **pure-Rust `tract` embedding backend** instead — no native runtime to install:
+**Intel Mac (`x86_64-apple-darwin`)** has no *prebuilt* ONNX Runtime 1.24 from Microsoft (they dropped x86_64 macOS builds after 1.23.x, and 1.23 fails at startup with `The requested API version [24] is not available`). Two options there:
+
+- **`brew install onnxruntime`** builds 1.28 from source and does have an Intel bottle, so a Homebrew install gets the full ONNX path. This is the recommended route on Intel Mac.
+- Otherwise EngramDB uses the **pure-Rust `tract` embedding backend** — no native runtime to install:
 
 - **Prebuilt Intel-Mac release binaries just work** — they ship with the tract backend built in.
 - **Building from source on Intel Mac:** use `cargo build --release --bin engramdb --no-default-features --features tract`. A default build there links an unusable ONNX Runtime and emits a build warning pointing you here.
-
-### Building against a system ONNX Runtime (recommended where available)
-
-By default the build downloads a prebuilt ONNX Runtime. That prebuilt executes
-quantized models incorrectly on some AVX-512/AMX CPUs — the same text can embed
-to an unrelated vector when the machine is busy, and embeddings are persisted.
-Building against the ONNX Runtime your package manager installs avoids it:
-
-```bash
-brew install onnxruntime          # or your distro's equivalent
-cargo build --release -p engram-cli --features system-onnxruntime
-```
-
-The feature makes the build locate `libonnxruntime` via `pkg-config`; any
-version 1.24 or newer works. Verified with Homebrew's onnxruntime 1.28 and with
-Microsoft's official release tarball. On **Intel Mac** this is currently the
-only way to get a working ONNX path — Homebrew has an Intel bottle, while no
-ONNX Runtime 1.24 prebuilt exists for `x86_64-apple-darwin`; without it the
-build falls back to `tract`.
 
 The tract backend uses the **fp32** MiniLM model (the int8 default does not load under tract), embeds at roughly **3× the latency** of ONNX (fine for on-demand memory writes/queries), and disables the optional NLI and T5-title features (ONNX-only); the optional cross-encoder reranker works on tract (`jina-reranker-v1-turbo-en` or `bge-reranker-base`, fp32) but stays off by default. Its vectors are numerically identical to ONNX fp32 (cosine ≈ 1.0). Because the fp32 model has a distinct fingerprint, a store first used on Intel Mac (or moved between an Intel and a non-Intel machine) will prompt a one-time `engramdb reindex --embeddings-only`. See [embeddings.md](./embeddings.md#backends).
 
@@ -48,6 +72,15 @@ cargo install --git https://github.com/egeapak/engramdb
 ```
 
 This builds with default features (`ollama` enabled). The binary lands in `~/.cargo/bin/engramdb`.
+
+### With a package manager
+
+Both packages depend on ONNX Runtime, so there is nothing else to install:
+
+```bash
+brew install egeapak/engramdb/engramdb     # macOS / Linuxbrew
+scoop install engramdb                      # Windows
+```
 
 ### Build from a local checkout
 
@@ -64,10 +97,27 @@ To install your local build onto your `PATH`:
 cargo install --path .
 ```
 
+Choosing a different ONNX Runtime strategy means replacing the default one, so
+`--no-default-features` is required and the other defaults are named explicitly:
+
+```bash
+# Link the system runtime at build time (needs pkg-config + onnxruntime).
+cargo build --release --no-default-features \
+    --features onnxruntime,ollama,system-onnxruntime
+
+# Statically link a downloaded runtime (the pre-0.9 behavior; see the caveat
+# in the feature table).
+cargo build --release --no-default-features \
+    --features onnxruntime,ollama,bundled-onnxruntime
+```
+
 ### Feature flags
 
 | Flag | Default | What it does |
 |------|---------|--------------|
+| `load-dynamic` | **on** | Load ONNX Runtime at run time (`dlopen`). Nothing is required at build time, and the binary works against any installed runtime >= 1.24. |
+| `system-onnxruntime` | off | Link a system ONNX Runtime found at build time via `pkg-config`. What the Homebrew formula uses. Needs `--no-default-features`. |
+| `bundled-onnxruntime` | off | Download and statically link a prebuilt runtime — the historical default. **Not recommended**: that prebuilt mis-executes quantized models on AVX-512/AMX hosts. Kept for platforms with no packaged runtime and for hermetic builds. Needs `--no-default-features`. |
 | `ollama` | on | Adds the Ollama embedding backend (uses `reqwest`). Turn off for a pure-ONNX, offline-only build with no extra deps: `cargo install --git ... --no-default-features`. |
 | `coreml` | off | Apple Core ML execution provider for ONNX models (Neural Engine / GPU). macOS only. |
 | `xnnpack` | off | XNNPACK CPU execution provider for ONNX. Useful for A/B benchmarking. |

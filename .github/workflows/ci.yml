@@ -159,6 +159,63 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --all-features --locked
 
+  # `--all-features` necessarily turns `bundled-onnxruntime` back on, so the job
+  # above links ONNX Runtime statically and never exercises what users actually
+  # ship: default features, where the runtime is `dlopen`ed at run time. This job
+  # covers that path — including the case that used to abort the process, a
+  # *missing* runtime, which must degrade to "embeddings unavailable" instead.
+  test-load-dynamic:
+    name: Test (default features, runtime-loaded ONNX)
+    runs-on: ubuntu-latest
+    env:
+      ONNXRUNTIME_VERSION: "1.24.2"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install protobuf compiler and lld linker
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Install ONNX Runtime
+        # The official Microsoft build. Deliberately not the one `ort` would
+        # download: that prebuilt executes quantized models incorrectly on
+        # AVX-512/AMX hosts. See docs/contributors/embedding-model-alternatives.md.
+        run: |
+          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
+                  /usr/local/lib/libonnxruntime.so
+          sudo ldconfig
+
+      - name: Build with default features
+        # No ONNX Runtime is required to build under `load-dynamic`; this must
+        # succeed on its own.
+        run: cargo build --workspace --locked
+
+      - name: Test with the runtime discovered from /usr/local/lib
+        # No ORT_DYLIB_PATH: this asserts the built-in search path finds a
+        # system-installed runtime the way a Homebrew or distro install would.
+        run: cargo nextest run --workspace --locked
+
+      - name: Missing runtime must degrade, not abort
+        # The regression guard for the whole change. `ort`'s own loader panics
+        # when the dylib is absent and the release profile is `panic = "abort"`,
+        # so without the pre-flight probe in `engram_onnx::runtime` this aborts.
+        run: |
+          sudo rm /usr/local/lib/libonnxruntime.so
+          sudo ldconfig
+          cargo nextest run --workspace --locked -E 'test(runtime::tests::)'
+          echo "Probe reports:"
+          cargo run --quiet --locked --bin engramdb -- doctor || true
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
