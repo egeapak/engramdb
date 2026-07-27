@@ -82,11 +82,6 @@ use crate::embeddings::{
     ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_L12_U8, ONNX_ALL_MINILM_L6_U8, ONNX_ALL_MINILM_Q,
     ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT,
 };
-#[cfg(feature = "tract")]
-use crate::embeddings::{
-    TractEmbeddingProvider, TractModelSpec, DEFAULT_TRACT_EMBEDDING, TRACT_ALL_MINILM,
-    TRACT_ALL_MINILM_L12,
-};
 use crate::nli::NliProvider;
 #[cfg(feature = "onnxruntime")]
 use crate::nli::OnnxNliProvider;
@@ -180,16 +175,11 @@ pub fn resolve_backend(
 struct ProviderSpecs {
     #[cfg(feature = "onnxruntime")]
     onnx: OnnxModelSpec,
-    /// The tract fp32 spec for this provider, when one exists. `None` for
-    /// providers with no fp32 tract export (nomic / mxbai) — tract only ships
-    /// the MiniLM fp32 model in the MVP.
-    #[cfg(feature = "tract")]
-    tract: Option<TractModelSpec>,
     #[cfg(feature = "ollama")]
     ollama: OllamaModelSpec,
 }
 
-/// Map a configured provider string to its ONNX / tract / Ollama model spec
+/// Map a configured provider string to its ONNX / Ollama model spec
 /// (whichever backends are compiled in). `None` ⇒ unknown provider string
 /// (embeddings disabled). The ONE place the provider→spec table lives.
 fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
@@ -200,24 +190,18 @@ fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
         "onnx" | "all-minilm" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: DEFAULT_ONNX_EMBEDDING,
-            #[cfg(feature = "tract")]
-            tract: Some(DEFAULT_TRACT_EMBEDDING),
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
         },
         "all-minilm-l6" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_ALL_MINILM_L6_U8,
-            #[cfg(feature = "tract")]
-            tract: Some(TRACT_ALL_MINILM),
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
         },
         "all-minilm-l12" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_ALL_MINILM_L12_U8,
-            #[cfg(feature = "tract")]
-            tract: Some(TRACT_ALL_MINILM_L12),
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
         },
@@ -229,16 +213,12 @@ fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
         "all-minilm-l12-int8" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_ALL_MINILM_L12_Q,
-            #[cfg(feature = "tract")]
-            tract: Some(TRACT_ALL_MINILM_L12),
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
         },
         "all-minilm-l6-int8" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_ALL_MINILM_Q,
-            #[cfg(feature = "tract")]
-            tract: Some(TRACT_ALL_MINILM),
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
         },
@@ -246,24 +226,18 @@ fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
         "all-minilm-l12-fp32" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_ALL_MINILM_L12,
-            #[cfg(feature = "tract")]
-            tract: Some(TRACT_ALL_MINILM_L12),
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
         },
         "nomic-embed-text" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_NOMIC_EMBED_TEXT,
-            #[cfg(feature = "tract")]
-            tract: None,
             #[cfg(feature = "ollama")]
             ollama: NOMIC_EMBED_TEXT,
         },
         "mxbai-embed-large" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_MXBAI_EMBED_LARGE,
-            #[cfg(feature = "tract")]
-            tract: None,
             #[cfg(feature = "ollama")]
             ollama: MXBAI_EMBED_LARGE,
         },
@@ -296,17 +270,6 @@ pub fn expected_embedding_fingerprint(config: &EngramConfig) -> Option<Embedding
         });
     }
 
-    // Explicit tract.
-    #[cfg(feature = "tract")]
-    if backend == EmbeddingBackend::Tract {
-        let spec = specs.tract?;
-        return Some(EmbeddingFingerprint {
-            model: format!("tract/{}", spec.name),
-            dimensions: spec.dimensions,
-            composition,
-        });
-    }
-
     // Auto / Onnx: prefer the ONNX identity when ONNX Runtime is compiled in
     // (Auto records the ONNX identity even if it would fall back to Ollama at
     // load, matching historical behavior).
@@ -320,22 +283,9 @@ pub fn expected_embedding_fingerprint(config: &EngramConfig) -> Option<Embedding
         });
     }
 
-    // No ONNX Runtime compiled in: Auto (the Intel-Mac default) resolves to
-    // tract when available.
-    #[cfg(all(not(feature = "onnxruntime"), feature = "tract"))]
-    {
-        let _ = backend;
-        let spec = specs.tract?;
-        return Some(EmbeddingFingerprint {
-            model: format!("tract/{}", spec.name),
-            dimensions: spec.dimensions,
-            composition,
-        });
-    }
-
-    // Neither ONNX nor tract compiled in and backend isn't Ollama → embeddings
+    // No ONNX Runtime compiled in and backend isn't Ollama → embeddings
     // disabled.
-    #[cfg(all(not(feature = "onnxruntime"), not(feature = "tract")))]
+    #[cfg(not(feature = "onnxruntime"))]
     {
         let _ = (backend, &specs, composition);
         None
@@ -499,30 +449,6 @@ fn resolve_provider(model: &str, backend: EmbeddingBackend) -> Option<Arc<dyn Em
         }
     }
 
-    // Explicit tract backend (pure-Rust fp32).
-    if backend == EmbeddingBackend::Tract {
-        #[cfg(feature = "tract")]
-        {
-            return match specs.tract.and_then(TractEmbeddingProvider::try_with_model) {
-                Some(p) => Some(Arc::new(p) as _),
-                None => {
-                    eprintln!(
-                        "Warning: tract backend selected but no fp32 tract model available for '{}'",
-                        model
-                    );
-                    None
-                }
-            };
-        }
-        #[cfg(not(feature = "tract"))]
-        {
-            eprintln!(
-                "Warning: embedding backend 'tract' selected but tract support is not compiled in"
-            );
-            return None;
-        }
-    }
-
     // Auto / Onnx: try ONNX Runtime first when it is compiled in.
     #[cfg(feature = "onnxruntime")]
     {
@@ -541,18 +467,7 @@ fn resolve_provider(model: &str, backend: EmbeddingBackend) -> Option<Arc<dyn Em
         return None;
     }
 
-    // Auto fallback (ONNX unavailable / not compiled): tract, then Ollama. On a
-    // pure-`tract` build this is how `Auto` — the Intel-Mac default — resolves.
-    #[cfg(feature = "tract")]
-    if backend != EmbeddingBackend::Onnx {
-        if let Some(p) = specs
-            .tract
-            .and_then(TractEmbeddingProvider::try_with_model)
-            .map(|p| Arc::new(p) as Arc<dyn EmbeddingProvider>)
-        {
-            return Some(p);
-        }
-    }
+    // Auto fallback (ONNX unavailable / not compiled): Ollama.
     #[cfg(feature = "ollama")]
     if backend != EmbeddingBackend::Onnx {
         return OllamaProvider::try_new(specs.ollama).map(|p| Arc::new(p) as _);
@@ -636,11 +551,9 @@ pub fn resolve_engine_providers(
         providers.embedding = Some(provider);
     }
 
-    // NLI, cross-encoder reranker, and T5 titling are all ONNX-Runtime-only.
-    // On a pure-`tract` build they are unavailable (deberta/BGE/T5 are quantized
-    // ONNX exports that either need ORT or hit tract's static-shape wall), so
-    // the whole block compiles out and those features stay off — matching the
-    // MVP's "embeddings only on tract" contract.
+    // NLI, cross-encoder reranker, and T5 titling are all ONNX-Runtime-only, so
+    // the whole block compiles out of a build without it and those features stay
+    // off.
     #[cfg(feature = "onnxruntime")]
     {
         if config.nli.enabled {
@@ -663,28 +576,13 @@ pub fn resolve_engine_providers(
     }
     #[cfg(not(feature = "onnxruntime"))]
     {
-        // NLI and T5 titling are ONNX-Runtime-only. The cross-encoder reranker,
-        // however, has a pure-Rust tract path (fp32 BGE), so honor
-        // `[rerank].enabled` when the `tract` backend is compiled in.
+        // NLI, reranking, and T5 titling all need ONNX Runtime compiled in.
         if config.nli.enabled {
             eprintln!(
-                "Warning: NLI contradiction detection is enabled but unavailable on a \
-                 pure-tract build (no ONNX Runtime); continuing without it"
+                "Warning: NLI contradiction detection is enabled but unavailable on a build \
+                 without ONNX Runtime; continuing without it"
             );
         }
-        #[cfg(feature = "tract")]
-        if config.rerank.enabled {
-            match crate::retrieval::reranker::TractReranker::load(&config.rerank.model) {
-                Ok(reranker) => providers.reranker = Some(reranker),
-                Err(e) => {
-                    eprintln!(
-                        "Warning: tract reranker init failed, continuing without: {}",
-                        e
-                    )
-                }
-            }
-        }
-        #[cfg(not(feature = "tract"))]
         if config.rerank.enabled {
             eprintln!("Warning: reranker is enabled but unavailable on this build");
         }
@@ -694,7 +592,8 @@ pub fn resolve_engine_providers(
 }
 
 /// Build the cached T5 title generator pool. Split out so the whole ORT-only
-/// path (T5 is a quantized ONNX model) compiles out of a pure-`tract` build.
+/// path (T5 is a quantized ONNX model) compiles out of a build without ONNX
+/// Runtime.
 #[cfg(feature = "onnxruntime")]
 fn resolve_t5_title_provider(
     config: &crate::types::EngramConfig,

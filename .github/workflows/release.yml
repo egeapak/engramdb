@@ -136,15 +136,17 @@ jobs:
             engramdb-aarch64-apple-darwin.tar.gz
             engramdb-aarch64-apple-darwin.tar.gz.sha256
 
-  # Intel Mac (`x86_64-apple-darwin`) ships the **pure-Rust `tract` backend**
-  # instead of ONNX Runtime. `fastembed` pins `ort = "=2.0.0-rc.12"` (needs ONNX
-  # Runtime 1.24 / API-24), and no prebuilt ORT 1.24 exists for Intel Mac
-  # anywhere — the old ORT-based Intel binary crashed on first model load. `tract`
-  # has no native library, so this cross-build from the arm64 runner needs no ORT
-  # download and produces a self-contained binary that works out of the box. It
-  # uses the fp32 MiniLM (int8 does not load under tract) at ~3× the embedding
-  # latency; NLI / reranker / T5 are compiled out (embeddings-only). See
-  # docs/users/installation.md.
+  # Intel Mac (`x86_64-apple-darwin`) is now an ordinary build. It used to ship
+  # the pure-Rust `tract` backend because no prebuilt ONNX Runtime 1.24+ exists
+  # for this target (Microsoft dropped x86_64 macOS after 1.23.x) and the build
+  # had to link one. Under `load-dynamic` nothing is linked at build time, so the
+  # same default-feature build cross-compiles here like everywhere else.
+  #
+  # Unlike the other targets this archive carries **no** libonnxruntime — there
+  # is no official x86_64 macOS build to ship. Intel users get the runtime from
+  # Homebrew (`brew install onnxruntime`, which has an Intel bottle), and until
+  # they do, EngramDB starts normally and reports the missing runtime via
+  # `doctor` while serving keyword search. See docs/users/installation.md.
   build-intel:
     needs: [version-check, test]
     runs-on: macos-15
@@ -170,11 +172,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build release binary (pure-Rust tract, no ONNX Runtime)
-        # `--no-default-features --features tract` drops the entire `ort` /
-        # `fastembed` stack (no prebuilt runtime for this target) and selects the
-        # pure-Rust tract embedding backend, which cross-compiles cleanly.
-        run: cargo build --release --bin engramdb --locked --target x86_64-apple-darwin --no-default-features --features tract
+      - name: Build release binary
+        # Default features. `load-dynamic` needs no ONNX Runtime at build time,
+        # which is exactly what makes this target buildable without the special
+        # casing it used to need.
+        run: cargo build --release --bin engramdb --locked --target x86_64-apple-darwin
 
       - name: Package binary
         run: |

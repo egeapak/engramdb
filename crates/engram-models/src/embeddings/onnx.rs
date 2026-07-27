@@ -107,9 +107,9 @@ pub const ONNX_ARCTIC_XS_Q: OnnxModelSpec = OnnxModelSpec {
 /// snowflake-arctic-embed-xs **fp32** (`snowflake/snowflake-arctic-embed-xs`,
 /// `onnx/model.onnx`, ~86 MB): the unquantized counterpart of
 /// [`ONNX_ARCTIC_XS_Q`], and the same file
-/// [`crate::embeddings::TRACT_ARCTIC_XS`] loads. Benchmarked because the
-/// tract (Intel-Mac) path is fp32-only, so the int8 arctic numbers say nothing
-/// about it. `max_tokens` matches the tract spec's 256 so the two engines are
+/// the fp32 arctic export. Benchmarked as the fp32 counterpart to the int8
+/// arctic numbers, which say nothing about fp32 behavior. `max_tokens` is 256 so
+/// the two are
 /// measured on the same shape.
 pub const ONNX_ARCTIC_XS: OnnxModelSpec = OnnxModelSpec {
     fastembed_model: EmbeddingModel::SnowflakeArcticEmbedXS,
@@ -145,8 +145,7 @@ pub const ONNX_ALL_MINILM_L12_Q: OnnxModelSpec = OnnxModelSpec {
 
 /// all-MiniLM-L12-v2 **fp32** (`Xenova/all-MiniLM-L12-v2`, `onnx/model.onnx`,
 /// ~128 MB): the unquantized counterpart of [`ONNX_ALL_MINILM_L12_Q`], and the
-/// same file [`crate::embeddings::TRACT_ALL_MINILM_L12`] loads — which is what
-/// makes the tract-vs-ONNX numerical-equivalence test a like-for-like check.
+/// the fp32 MiniLM-L12 export.
 pub const ONNX_ALL_MINILM_L12: OnnxModelSpec = OnnxModelSpec {
     fastembed_model: EmbeddingModel::AllMiniLML12V2,
     dimensions: 384,

@@ -53,15 +53,15 @@ engramdb doctor      # the "ONNX Runtime" check names the library and version,
 
 The default build uses **ONNX Runtime**, fetched as a prebuilt binary for **Linux (x86_64/aarch64)**, **Windows (x86_64/aarch64)**, and **Apple Silicon macOS (aarch64)** — the platforms with official release binaries.
 
-**Intel Mac (`x86_64-apple-darwin`)** has no *prebuilt* ONNX Runtime 1.24 from Microsoft (they dropped x86_64 macOS builds after 1.23.x, and 1.23 fails at startup with `The requested API version [24] is not available`). Two options there:
+**Intel Mac (`x86_64-apple-darwin`)** works like every other platform now, with one wrinkle: Microsoft dropped x86_64 macOS builds after 1.23.x, so the release archive for this target is the only one that does **not** carry a copy of the runtime. Install it yourself:
 
-- **`brew install onnxruntime`** builds 1.28 from source and does have an Intel bottle, so a Homebrew install gets the full ONNX path. This is the recommended route on Intel Mac.
-- Otherwise EngramDB uses the **pure-Rust `tract` embedding backend** — no native runtime to install:
+```bash
+brew install onnxruntime     # has an Intel bottle
+```
 
-- **Prebuilt Intel-Mac release binaries just work** — they ship with the tract backend built in.
-- **Building from source on Intel Mac:** use `cargo build --release --bin engramdb --no-default-features --features tract`. A default build there links an unusable ONNX Runtime and emits a build warning pointing you here.
+Until you do, `engramdb` still starts and runs — `doctor` reports the missing runtime and search falls back to keyword matching.
 
-The tract backend uses the **fp32** MiniLM model (the int8 default does not load under tract), embeds at roughly **3× the latency** of ONNX (fine for on-demand memory writes/queries), and disables the optional NLI and T5-title features (ONNX-only); the optional cross-encoder reranker works on tract (`jina-reranker-v1-turbo-en` or `bge-reranker-base`, fp32) but stays off by default. Its vectors are numerically identical to ONNX fp32 (cosine ≈ 1.0). Because the fp32 model has a distinct fingerprint, a store first used on Intel Mac (or moved between an Intel and a non-Intel machine) will prompt a one-time `engramdb reindex --embeddings-only`. See [embeddings.md](./embeddings.md#backends).
+EngramDB previously shipped a pure-Rust `tract` backend for this target, because the build had to link a runtime at build time and none existed. Loading the runtime at startup removed that constraint, so Intel Mac now uses the same ONNX path as everywhere else — the int8 model rather than tract's fp32, roughly 3× faster, with NLI and T5 titling available. A store built on the old tract backend records a different model fingerprint and will prompt a one-time `engramdb reindex --embeddings-only`.
 
 ## Install
 

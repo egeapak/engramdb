@@ -23,7 +23,6 @@ default = ["onnxruntime", "load-dynamic", "ollama"]
 # platform with no prebuilt ORT (Intel Mac) uses
 # `--no-default-features --features tract`.
 onnxruntime = ["engramdb/onnxruntime", "engram-mcp/onnxruntime"]
-tract = ["engramdb/tract", "engram-mcp/tract"]
 ollama = ["engramdb/ollama", "engram-mcp/ollama"]
 coreml = ["engramdb/coreml"]
 xnnpack = ["engramdb/xnnpack"]

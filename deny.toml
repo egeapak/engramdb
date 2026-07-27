@@ -17,9 +17,9 @@ ignore = [
   # `paste` is archived upstream with no safe upgrade (RUSTSEC's own
   # "Solution: No safe upgrade is available!"). It is a proc-macro used at
   # build time only, reaching us transitively through the datafusion, lance,
-  # tract, and tokenizers stacks — nothing we can bump or replace locally.
+  # and tokenizers stacks — nothing we can bump or replace locally.
   # Re-evaluate when those ecosystems migrate (e.g. to `pastey`).
-  { id = "RUSTSEC-2024-0436", reason = "unmaintained build-time proc-macro; unavoidable transitive dep of datafusion/lance/tract" },
+  { id = "RUSTSEC-2024-0436", reason = "unmaintained build-time proc-macro; unavoidable transitive dep of datafusion/lance" },
 
   # quick-xml 0.26 — two DoS advisories, both requiring attacker-controlled XML
   # to be fed to the parser. Nothing in EngramDB parses XML. The path is:

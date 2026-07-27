@@ -16,10 +16,8 @@ default = ["onnxruntime", "load-dynamic", "ollama"]
 # default. Turn OFF (with `--no-default-features`) on platforms with no prebuilt
 # ORT — e.g. Intel Mac — and enable `tract` instead for a pure-Rust build.
 onnxruntime = ["dep:fastembed", "dep:ort", "dep:engram-onnx"]
-# Pure-Rust `tract` embedding backend (fp32 MiniLM). No native ONNX Runtime.
 # Composable with `onnxruntime` (both engines available; backend chosen at
 # runtime) or standalone (`--no-default-features --features tract`).
-tract = ["dep:tract-onnx"]
 # Ollama embedding backend via `reqwest`. Disable for pure offline ONNX.
 ollama = ["reqwest"]
 # ORT execution-provider flags, forwarded to engram-onnx + ort. Imply the
@@ -46,9 +44,6 @@ fastembed = { version = "5", default-features = false, features = ["hf-hub-rustl
 # `tls_config(..)`, which only exists when a TLS feature is on. See the longer
 # note in `crates/engram-onnx/Cargo.toml`.
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"], optional = true }
-# Pure-Rust ONNX engine for the `tract` embedding backend. No native library,
-# builds anywhere Rust builds. Optional under the `tract` feature.
-tract-onnx = { version = "0.23", optional = true }
 # `tokenizers` and `hf-hub` are mandatory: BOTH the ONNX and tract paths
 # tokenize and fetch models through them.
 # Kept in lockstep with what `fastembed` requires (`^0.22.2`). A newer major

@@ -9,8 +9,6 @@ mod ollama;
 #[cfg(feature = "onnxruntime")]
 mod onnx;
 mod pool;
-#[cfg(feature = "tract")]
-mod tract;
 
 pub use chunking::chunk_text;
 #[cfg(feature = "ollama")]
@@ -25,11 +23,6 @@ pub use onnx::{
     ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT, ONNX_NOMIC_EMBED_TEXT_Q,
 };
 pub use pool::PooledEmbeddingProvider;
-#[cfg(feature = "tract")]
-pub use tract::{
-    TractEmbeddingProvider, TractModelSpec, DEFAULT_TRACT_EMBEDDING, TRACT_ALL_MINILM,
-    TRACT_ALL_MINILM_L12, TRACT_ARCTIC_XS,
-};
 
 use anyhow::Result;
 use async_trait::async_trait;

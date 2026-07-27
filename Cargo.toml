@@ -30,8 +30,6 @@ default = ["onnxruntime", "load-dynamic", "ollama"]
 # default. A pure-Rust build for a platform with no prebuilt ORT (Intel Mac)
 # uses `--no-default-features --features tract` instead.
 onnxruntime = ["engram-models/onnxruntime", "dep:engram-onnx"]
-# Pure-Rust `tract` embedding backend (fp32 MiniLM). No native ONNX Runtime.
-tract = ["engram-models/tract"]
 ollama = ["reqwest", "engram-models/ollama"]
 # Apple Core ML (GPU / Neural Engine) acceleration for all ONNX models.
 # Enable on macOS only: `cargo build --features coreml`. Off by default so
@@ -152,10 +150,6 @@ tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 hf-hub = { version = "0.5", default-features = false, features = ["rustls-tls", "tokio", "ureq"] }
 toml = "1"
 
-# Drives `TractEmbeddingProvider` directly, which only exists with the feature.
-[[example]]
-name = "tract_model_bench"
-required-features = ["tract"]
 
 [[bench]]
 name = "benchmarks"

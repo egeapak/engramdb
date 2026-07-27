@@ -1954,7 +1954,7 @@ mod tests {
     /// no direct `fastembed` dependency, even in tests.
     ///
     /// The `fastembed` loader (`LocalReranker`) only exists with `onnxruntime`;
-    /// on a pure-`tract` build there is no in-process reranker, so `try_reranker`
+    /// on a build without ONNX Runtime there is no in-process reranker, so `try_reranker`
     /// returns `None` and the reranker tests skip (they `return` early on `None`).
     #[cfg(feature = "onnxruntime")]
     fn try_reranker() -> Option<Arc<dyn Reranker>> {
@@ -3658,7 +3658,7 @@ mod tests {
     /// (vector_search + classify_batch + threshold filter) was at 0%
     /// coverage despite CRAP 110.
     // Loads the real ONNX embedding + NLI models, so it only exists on an
-    // `onnxruntime` build (there is no in-process ONNX on a pure-`tract` build).
+    // `onnxruntime` build.
     #[cfg(feature = "onnxruntime")]
     #[tokio::test]
     async fn test_detect_contradictions_end_to_end_finds_real_contradiction() {

@@ -46,7 +46,7 @@ pub fn create_generator(strategy: TitleStrategy) -> Result<Option<Box<dyn TitleG
             let gen = t5::T5TitleGenerator::new()?;
             Ok(Some(Box::new(gen)))
         }
-        // On a pure-`tract` build there is no ONNX Runtime, so T5 (a quantized
+        // Without ONNX Runtime compiled in, T5 (a quantized
         // ONNX export) is unavailable — fall back to keyword titling rather
         // than failing the create path.
         #[cfg(not(feature = "onnxruntime"))]
@@ -96,7 +96,7 @@ pub async fn generate_title(strategy: TitleStrategy, text: &str) -> Option<Strin
                 },
             }
         }
-        // No ONNX Runtime on this build (pure-tract): T5 is unavailable, so
+        // No ONNX Runtime on this build: T5 is unavailable, so
         // fall back to keyword titling — the same degradation
         // `create_generator` applies above.
         #[cfg(not(feature = "onnxruntime"))]

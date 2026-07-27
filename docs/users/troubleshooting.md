@@ -16,38 +16,28 @@ Install the Protocol Buffers compiler. macOS: `brew install protobuf`. Debian/Ub
 **`ort-sys` download fails with `UnknownIssuer` / certificate error.**
 You're behind a corporate proxy or in a restricted-egress sandbox that the rustls-based downloader doesn't trust. See the `CLAUDE.md` "Building & testing in Claude Code on the web" section for the curl + `ORT_STRATEGY=system` workaround.
 
-**`The requested API version [24] is not available, only API versions [1, 23]... Current ORT Version is: 1.23.x` (Intel Mac).**
-You built the default (ONNX Runtime) configuration on Intel Mac. EngramDB's ONNX build targets ONNX Runtime **1.24.x** (ABI/API 24, pinned via `fastembed`/`ort 2.0.0-rc.12`), and **no prebuilt ONNX Runtime 1.24 exists for Intel Mac (`x86_64-apple-darwin`)** — Microsoft dropped x86_64 macOS builds after 1.23.x, so the build links a system/Homebrew 1.23.x runtime that the API-24 binary rejects at startup with this error.
-
-**Fix: build the pure-Rust `tract` backend instead** — no ONNX Runtime, nothing to install:
+**`ONNX Runtime (libonnxruntime.so) not found` / embeddings unavailable.**
+EngramDB loads ONNX Runtime at startup rather than embedding it, so it has to be installed. `engramdb doctor` lists every path it searched:
 
 ```bash
-cargo install --git https://github.com/egeapak/engramdb \
-  --no-default-features --features tract
-# or, in a clone:
-cargo build --release --bin engramdb --no-default-features --features tract
+brew install onnxruntime          # macOS / Linuxbrew
+scoop install onnxruntime         # Windows
+sudo apt-get install -y libonnxruntime   # where packaged
 ```
 
-The default build on this target now also prints a `cargo:warning` pointing you here. The tract backend uses the fp32 MiniLM at ~3× ONNX latency, with numerically identical vectors; NLI / reranker / T5 titling are unavailable on it (all ONNX-only). Prebuilt Intel-Mac release binaries already ship with tract, so downloading a release avoids building entirely. See [installation.md](./installation.md#platform-support) and [embeddings.md](./embeddings.md#backends).
+Or point at a specific library with `ORT_DYLIB_PATH=/path/to/libonnxruntime.so`. Until one is found EngramDB still runs — search falls back to keyword matching.
 
-**Prefer real ONNX Runtime on Intel Mac?** You can still build it from a self-compiled ORT 1.24.x (`ort-sys` rc.12 has no automatic compile mode, so this is manual):
+**`ONNX Runtime <version> is too old` (needs API 24).**
+The runtime that was found predates 1.24, which is the C API version `ort 2.0.0-rc.12` requires. Homebrew ships 1.28; distro packages are often older. Upgrade it, or point `ORT_DYLIB_PATH` at a newer one. EngramDB reports the version it found instead of failing inside `ort`.
+
+**Intel Mac (`x86_64-apple-darwin`) has no runtime in its release archive.**
+Every other release archive ships `libonnxruntime` beside the binary; this one cannot, because Microsoft dropped x86_64 macOS builds after 1.23.x and no official 1.24+ exists. Install Homebrew's instead — it has an Intel bottle and is new enough:
 
 ```bash
-# 1. Build ONNX Runtime 1.24.x for x86_64 macOS from source (~30–60 min; needs cmake + Xcode CLT).
-git clone --depth 1 --branch v1.24.2 https://github.com/microsoft/onnxruntime
-cd onnxruntime
-./build.sh --config Release --build_shared_lib --parallel --skip_tests \
-  --osx_arch x86_64 --compile_no_warning_as_error
-# libonnxruntime.dylib lands under build/MacOS/Release/
-
-# 2. Build engramdb against it (point ORT at the lib dir; dynamic link keeps the dylib external).
-ORT_LIB_LOCATION="$PWD/build/MacOS/Release" ORT_PREFER_DYNAMIC_LINK=1 \
-  cargo install --git https://github.com/egeapak/engramdb
+brew install onnxruntime
 ```
 
-The library **must be 1.24.x** — a 1.23.x lib reproduces the same error (API 23 ≠ 24). For most users the tract build above is far simpler.
-
-**Apple Silicon (`aarch64-apple-darwin`) is unaffected** — `download-binaries` ships a prebuilt 1.24 runtime for it, and the default ONNX build is used.
+Earlier versions of EngramDB shipped a pure-Rust `tract` backend on this target to work around the same gap. It was removed once the runtime became separately installed; see [installation.md](./installation.md#platform-support). If you have a store built under tract, the model fingerprint changed and `engramdb reindex --embeddings-only` will be suggested once.
 
 **Long compile times on first build.**
 LanceDB and `ort` pull in heavy native code. Subsequent builds are cached. Use `cargo build --release` for the production binary; debug builds are slower at runtime but compile faster.

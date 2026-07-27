@@ -435,7 +435,7 @@ const MODELS: &[ModelUnderTest] = &[
         query_prefix: Some(ARCTIC_QUERY_PREFIX),
         doc_prefix: None,
     },
-    // fp32 arctic: the only form the tract (Intel-Mac) path can load.
+    // fp32 arctic: the unquantized counterpart to the int8 rows above.
     ModelUnderTest {
         key: "arctic-xs-fp32",
         spec: ONNX_ARCTIC_XS,

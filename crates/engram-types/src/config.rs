@@ -710,17 +710,16 @@ impl Default for RetrievalConfig {
 #[serde(rename_all = "lowercase")]
 pub enum EmbeddingBackend {
     /// Try ONNX first, fall back to Ollama (default).
+    ///
+    /// `"tract"` is accepted as an alias so a config written for the removed
+    /// pure-Rust backend keeps loading; it now resolves like any other `auto`.
     #[default]
+    #[serde(alias = "tract")]
     Auto,
     /// Only use local ONNX runtime via fastembed.
     Onnx,
     /// Only use an Ollama server.
     Ollama,
-    /// Only use the pure-Rust `tract` engine (fp32 MiniLM). No native ONNX
-    /// Runtime — the fallback backend for platforms with no prebuilt `ort`
-    /// (notably Intel Mac, `x86_64-apple-darwin`). ~3× slower than ONNX;
-    /// selected automatically on those targets, or explicitly here.
-    Tract,
 }
 
 impl std::fmt::Display for EmbeddingBackend {
@@ -729,7 +728,6 @@ impl std::fmt::Display for EmbeddingBackend {
             Self::Auto => write!(f, "auto"),
             Self::Onnx => write!(f, "onnx"),
             Self::Ollama => write!(f, "ollama"),
-            Self::Tract => write!(f, "tract"),
         }
     }
 }
@@ -741,9 +739,13 @@ impl std::str::FromStr for EmbeddingBackend {
             "auto" => Ok(Self::Auto),
             "onnx" => Ok(Self::Onnx),
             "ollama" => Ok(Self::Ollama),
-            "tract" => Ok(Self::Tract),
+            // Back-compat: the pure-Rust tract backend was removed once the
+            // ONNX Runtime became a separately installed shared library, which
+            // gave every platform (including Intel Mac, via Homebrew) a real
+            // ONNX path. An existing config naming it resolves to `auto`.
+            "tract" => Ok(Self::Auto),
             other => Err(format!(
-                "unknown embedding backend '{}': expected auto, onnx, ollama, or tract",
+                "unknown embedding backend '{}': expected auto, onnx, or ollama",
                 other
             )),
         }
@@ -1918,8 +1920,9 @@ mod tests {
     }
 
     /// Every `EmbeddingBackend` variant round-trips through `Display`/`FromStr`
-    /// (case-insensitively), and an unknown string errors. Locks the `tract`
-    /// variant added for the Intel-Mac pure-Rust backend.
+    /// (case-insensitively), and an unknown string errors. Also pins the
+    /// back-compat alias: a config left over from the removed pure-Rust `tract`
+    /// backend must keep loading rather than failing to parse.
     #[test]
     fn embedding_backend_roundtrips() {
         use std::str::FromStr;
@@ -1927,7 +1930,6 @@ mod tests {
             (EmbeddingBackend::Auto, "auto"),
             (EmbeddingBackend::Onnx, "onnx"),
             (EmbeddingBackend::Ollama, "ollama"),
-            (EmbeddingBackend::Tract, "tract"),
         ] {
             assert_eq!(variant.to_string(), name);
             assert_eq!(EmbeddingBackend::from_str(name).unwrap(), variant);
@@ -1937,6 +1939,20 @@ mod tests {
             );
         }
         assert!(EmbeddingBackend::from_str("nonsense").is_err());
+
+        // Removed backend: still parses and resolves to Auto, both via
+        // `FromStr` and via serde — an on-disk `backend = "tract"` must not
+        // break config loading for anyone who had set it.
+        assert_eq!(
+            EmbeddingBackend::from_str("tract").unwrap(),
+            EmbeddingBackend::Auto
+        );
+        #[derive(Deserialize)]
+        struct BackendOnly {
+            backend: EmbeddingBackend,
+        }
+        let parsed: BackendOnly = toml::from_str("backend = \"tract\"\n").unwrap();
+        assert_eq!(parsed.backend, EmbeddingBackend::Auto);
     }
 
     /// Guards the single-source-of-truth: `NliConfig::default().model` is

@@ -19,7 +19,6 @@ onnxruntime = ["engramdb/onnxruntime"]
 # ONNX Runtime linking strategy; see the workspace root.
 load-dynamic = ["engramdb/load-dynamic"]
 bundled-onnxruntime = ["engramdb/bundled-onnxruntime"]
-tract = ["engramdb/tract"]
 ollama = ["engramdb/ollama"]
 
 [dependencies]

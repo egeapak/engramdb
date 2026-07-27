@@ -172,10 +172,8 @@ pub async fn run_init(
 }
 
 /// Warm the on-disk model cache for the configured embedding `provider` by
-/// constructing it once (the first construction downloads the model). Picks the
-/// engine compiled into this build: ONNX Runtime when present, otherwise the
-/// pure-`tract` fp32 MiniLM (a pure-tract build ships no nomic/mxbai model, so
-/// those warm to a no-op there).
+/// constructing it once (the first construction downloads the model). A build
+/// without ONNX Runtime has no local engine to warm, so this is a no-op there.
 #[allow(unused_variables)]
 #[allow(clippy::needless_return)]
 fn warm_embedding(provider: &str) -> anyhow::Result<()> {
@@ -188,12 +186,7 @@ fn warm_embedding(provider: &str) -> anyhow::Result<()> {
             _ => OnnxProvider::new().map(|_| ()),
         };
     }
-    #[cfg(all(not(feature = "onnxruntime"), feature = "tract"))]
-    {
-        use engramdb::embeddings::TractEmbeddingProvider;
-        return TractEmbeddingProvider::new().map(|_| ());
-    }
-    #[cfg(all(not(feature = "onnxruntime"), not(feature = "tract")))]
+    #[cfg(not(feature = "onnxruntime"))]
     Ok(())
 }
 
