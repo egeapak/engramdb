@@ -661,9 +661,14 @@ fn check_onnx_runtime() -> EnvironmentCheck {
             details: vec![],
             status: None,
         },
+        // `passed: true` with a Warn status, not a failure. EngramDB's contract
+        // is that a missing runtime degrades to keyword search rather than
+        // breaking, so this must not fail the overall report the way a corrupt
+        // store would — same treatment as an unconfigured hook. The Warn is what
+        // surfaces it.
         Err(reason) => EnvironmentCheck {
             name: "ONNX Runtime".to_string(),
-            passed: false,
+            passed: true,
             message: reason,
             suggestion: Some(
                 "Install ONNX Runtime (`brew install onnxruntime`, \

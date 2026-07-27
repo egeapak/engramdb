@@ -76,8 +76,11 @@ jobs:
       # branches (e.g. in src/ops/mod.rs). The all-features build above never
       # exercises the pure-ONNX path, so a `--no-default-features` compile break
       # would otherwise ship unnoticed. Cheap `check` only.
+      # `--no-default-features` also strips `engram-onnx`'s own default, so a
+      # linking strategy has to be named explicitly or the build stops at the
+      # "needs an ONNX Runtime linking strategy" compile_error.
       - name: Check (no default features)
-        run: cargo check --workspace --no-default-features --locked
+        run: cargo check --workspace --no-default-features --features onnxruntime,load-dynamic --locked
 
   # Linux full tests run in the `test` job below; this matrix covers the
   # non-Linux targets that `release.yml` actually ships (macOS + Windows):
@@ -136,6 +139,8 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    env:
+      ONNXRUNTIME_VERSION: "1.24.2"
     steps:
       - uses: actions/checkout@v4
 
@@ -155,6 +160,19 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
+
+      - name: Install ONNX Runtime
+        # `--all-features` enables `load-dynamic` alongside `bundled-onnxruntime`,
+        # and `ort` takes the dlopen path whenever `load-dynamic` is on — so a
+        # real shared library has to be present even though a static one is also
+        # linked in. Before the runtime became external, the static link alone
+        # was enough here.
+        run: |
+          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
+                  /usr/local/lib/libonnxruntime.so
+          sudo ldconfig
 
       - name: Run tests
         run: cargo nextest run --workspace --all-features --locked
@@ -239,6 +257,8 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    env:
+      ONNXRUNTIME_VERSION: "1.24.2"
     steps:
       - uses: actions/checkout@v4
 
@@ -258,6 +278,19 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest,cargo-llvm-cov
+
+      - name: Install ONNX Runtime
+        # `--all-features` enables `load-dynamic` alongside `bundled-onnxruntime`,
+        # and `ort` takes the dlopen path whenever `load-dynamic` is on — so a
+        # real shared library has to be present even though a static one is also
+        # linked in. Before the runtime became external, the static link alone
+        # was enough here.
+        run: |
+          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
+                  /usr/local/lib/libonnxruntime.so
+          sudo ldconfig
 
       - name: Run tests under coverage instrumentation
         # Mirror the `test` job's invocation so coverage reflects the real
