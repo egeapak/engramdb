@@ -25,10 +25,10 @@ use criterion::{criterion_group, criterion_main, Criterion};
 
 use engramdb::retrieval::filters::{build_filter_expr, build_filter_predicate};
 use engramdb::retrieval::{apply_index_filters, SearchFilters};
-use engramdb::search::keyword_search;
+use engramdb::search::{keyword_search, keyword_search_stems};
 use engramdb::storage::lance_index::LanceIndex;
 use engramdb::storage::MemoryStore;
-use engramdb::types::{Memory, MemoryType};
+use engramdb::types::{KeywordStems, Memory, MemoryType};
 
 use chrono::Utc;
 use helpers::{generate_memory, setup_store};
@@ -259,6 +259,23 @@ fn leverage_keyword(c: &mut Criterion) {
     let narrowed: Vec<Memory> = memories.iter().take(SCALE_COUNT / 5).cloned().collect();
     group.bench_function("keyword_search_200", |b| {
         b.iter(|| std::hint::black_box(keyword_search(query, &narrowed)));
+    });
+
+    // The same work with the stems already available — what the engine does
+    // once a store has migrated to schema 0.5.0 and the write path has
+    // populated `keyword_stems`. The delta against the two arms above is
+    // exactly what precomputing buys.
+    let stems_1k: Vec<KeywordStems> = memories
+        .iter()
+        .map(|m| KeywordStems::compute(&m.summary, &m.tags, &m.content))
+        .collect();
+    let stems_200: Vec<KeywordStems> = stems_1k.iter().take(SCALE_COUNT / 5).cloned().collect();
+
+    group.bench_function("stored_stems_1k", |b| {
+        b.iter(|| std::hint::black_box(keyword_search_stems(query, &stems_1k)));
+    });
+    group.bench_function("stored_stems_200", |b| {
+        b.iter(|| std::hint::black_box(keyword_search_stems(query, &stems_200)));
     });
 
     group.finish();
