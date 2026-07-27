@@ -1,3 +1,9 @@
+// This module is `mod helpers;`-included by more than one bench binary
+// (`benchmarks.rs`, `index_leverage.rs`), and each uses a different subset.
+// Anything unused by a given binary is dead code *in that binary only*, so the
+// warning is structural rather than a real finding.
+#![allow(dead_code)]
+
 use engramdb::storage::{InMemoryRegistry, MemoryStore};
 use engramdb::types::{
     Decay, DecayStrategy, EngramConfig, Memory, MemoryType, Provenance, Visibility,

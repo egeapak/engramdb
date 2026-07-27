@@ -13,7 +13,7 @@ use crate::scoring::{
     composite_score_target_ignore_decay, ScoreBreakdown, ScoreTarget, ScoringContext,
 };
 use crate::storage::{MemoryStore, Result};
-use crate::types::{EngramConfig, Epistemic, Memory, MemoryType, Situation};
+use crate::types::{EngramConfig, Epistemic, KeywordStems, Memory, MemoryType, Situation};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -747,7 +747,7 @@ impl RetrievalEngine {
     /// similarity. Only memories with no chunks at all (created while
     /// embeddings were unavailable) take the no-semantic-evidence paths.
     pub async fn query(&self, query: &RetrievalQuery) -> Result<RetrievalResult> {
-        use crate::search::{keyword_search, normalize_keyword_score, query_token_count};
+        use crate::search::{keyword_search_stems, normalize_keyword_score, query_token_count};
 
         let query_started = std::time::Instant::now();
 
@@ -1038,14 +1038,36 @@ impl RetrievalEngine {
         // scores power both the "keyword_only" mode and the filter-mode
         // sufficiency check, so we compute them even when embeddings are live.
         let keyword_map: HashMap<String, f64> = if let Some(ref q) = query.query {
-            let memories_vec: Vec<&Memory> = memory_map.values().collect();
-            let kw_results = keyword_search(q, &memories_vec);
+            // Prefer the stems the write path already stored (schema v0.5.0).
+            // Rebuilding them here is the dominant cost of keyword scoring —
+            // ~17.7ms per 1000 memories — and it is identical on every query.
+            //
+            // `filtered_entries` and `memory_map` cover the same ids, so either
+            // can drive the scoring; iterate the entries and fall back to the
+            // loaded memory only for rows written before the column existed, so
+            // a partially-migrated store degrades in speed and never in
+            // correctness.
+            let scored: Vec<(&str, KeywordStems)> = filtered_entries
+                .iter()
+                .filter_map(|e| {
+                    let stems = match &e.keyword_stems {
+                        Some(s) => s.clone(),
+                        None => {
+                            let m = memory_map.get(&e.id)?;
+                            KeywordStems::compute(&m.summary, &m.tags, &m.content)
+                        }
+                    };
+                    Some((e.id.as_str(), stems))
+                })
+                .collect();
+            let stems: Vec<KeywordStems> = scored.iter().map(|(_, s)| s.clone()).collect();
+            let kw_results = keyword_search_stems(q, &stems);
             let num_tokens = query_token_count(q);
             kw_results
                 .into_iter()
                 .map(|(idx, raw)| {
                     let norm = normalize_keyword_score(raw, num_tokens);
-                    (memories_vec[idx].id.clone(), norm)
+                    (scored[idx].0.to_string(), norm)
                 })
                 .collect()
         } else {

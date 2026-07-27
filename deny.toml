@@ -20,6 +20,26 @@ ignore = [
   # tract, and tokenizers stacks — nothing we can bump or replace locally.
   # Re-evaluate when those ecosystems migrate (e.g. to `pastey`).
   { id = "RUSTSEC-2024-0436", reason = "unmaintained build-time proc-macro; unavoidable transitive dep of datafusion/lance/tract" },
+
+  # quick-xml 0.26 — two DoS advisories, both requiring attacker-controlled XML
+  # to be fed to the parser. Nothing in EngramDB parses XML. The path is:
+  #
+  #   lancedb 0.31 -> lance-testing 8.0.0 -> pprof 0.15 (feature "flamegraph")
+  #                -> inferno 0.11 -> quick-xml 0.26
+  #
+  # i.e. the SVG writer inside a CPU profiler inside lance's test helpers. It
+  # is linked but never called; no EngramDB code path reaches `quick-xml`.
+  #
+  # Unfixable from here. lance-testing 8.0.0 promoted `pprof` and `criterion`
+  # to NON-optional normal dependencies (7.0.0 had neither), so `lancedb`
+  # cannot be built without them and no feature flag of ours gates it. The fix
+  # landed in inferno 0.12.7 (quick-xml ^0.41), but pprof 0.15 requires
+  # inferno ^0.11, so it is unreachable until pprof or lance-testing moves.
+  #
+  # REMOVE THESE TWO once lance-testing drops the pprof dependency (or makes it
+  # optional) — re-run `cargo audit` after any lancedb bump to check.
+  { id = "RUSTSEC-2026-0194", reason = "quick-xml DoS; unreachable dead code via lance-testing -> pprof/flamegraph -> inferno; no upgrade path until pprof bumps inferno" },
+  { id = "RUSTSEC-2026-0195", reason = "quick-xml DoS; unreachable dead code via lance-testing -> pprof/flamegraph -> inferno; no upgrade path until pprof bumps inferno" },
 ]
 
 [licenses]
@@ -52,6 +72,26 @@ confidence-threshold = 0.8
 crate = "ring"
 expression = "MIT AND ISC AND OpenSSL"
 license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# `inferno` is CDDL-1.0 — the only crate in the resolved tree outside the
+# permissive allow-list above. It is a Rust port of Brendan Gregg's FlameGraph
+# and inherits that project's license. It reaches us through the same path as
+# the two quick-xml advisories ignored above:
+#
+#   lancedb 0.31 -> lance-testing 8.0.0 -> pprof 0.15 (feature "flamegraph")
+#                -> inferno 0.11
+#
+# Accepted rather than allow-listed globally: CDDL-1.0 is OSI-approved and
+# file-level reciprocal (the same shape as MPL-2.0, already allowed) — the
+# obligation is to publish the source of any CDDL-covered *file* we modify,
+# and we vendor `inferno` unmodified via crates.io. Scoping the grant to this
+# one crate keeps a *different* CDDL dependency failing the check.
+#
+# REMOVE THIS once lance-testing drops the pprof dependency (or makes it
+# optional) — it retires together with the two RUSTSEC ignores above.
+[[licenses.exceptions]]
+crate = "inferno"
+allow = ["CDDL-1.0"]
 
 [bans]
 # The arrow/datafusion/ort stack inevitably drags in duplicate crate versions;
