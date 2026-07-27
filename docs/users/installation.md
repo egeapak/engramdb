@@ -18,6 +18,25 @@ The default build uses **ONNX Runtime**, fetched as a prebuilt binary for **Linu
 - **Prebuilt Intel-Mac release binaries just work** — they ship with the tract backend built in.
 - **Building from source on Intel Mac:** use `cargo build --release --bin engramdb --no-default-features --features tract`. A default build there links an unusable ONNX Runtime and emits a build warning pointing you here.
 
+### Building against a system ONNX Runtime (recommended where available)
+
+By default the build downloads a prebuilt ONNX Runtime. That prebuilt executes
+quantized models incorrectly on some AVX-512/AMX CPUs — the same text can embed
+to an unrelated vector when the machine is busy, and embeddings are persisted.
+Building against the ONNX Runtime your package manager installs avoids it:
+
+```bash
+brew install onnxruntime          # or your distro's equivalent
+cargo build --release -p engram-cli --features system-onnxruntime
+```
+
+The feature makes the build locate `libonnxruntime` via `pkg-config`; any
+version 1.24 or newer works. Verified with Homebrew's onnxruntime 1.28 and with
+Microsoft's official release tarball. On **Intel Mac** this is currently the
+only way to get a working ONNX path — Homebrew has an Intel bottle, while no
+ONNX Runtime 1.24 prebuilt exists for `x86_64-apple-darwin`; without it the
+build falls back to `tract`.
+
 The tract backend uses the **fp32** MiniLM model (the int8 default does not load under tract), embeds at roughly **3× the latency** of ONNX (fine for on-demand memory writes/queries), and disables the optional NLI and T5-title features (ONNX-only); the optional cross-encoder reranker works on tract (`jina-reranker-v1-turbo-en` or `bge-reranker-base`, fp32) but stays off by default. Its vectors are numerically identical to ONNX fp32 (cosine ≈ 1.0). Because the fp32 model has a distinct fingerprint, a store first used on Intel Mac (or moved between an Intel and a non-Intel machine) will prompt a one-time `engramdb reindex --embeddings-only`. See [embeddings.md](./embeddings.md#backends).
 
 ## Install

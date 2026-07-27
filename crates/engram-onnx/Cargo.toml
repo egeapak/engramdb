@@ -15,6 +15,9 @@ path = "src/lib.rs"
 # so the Linux/CI build and prebuilt-binary download are unchanged.
 coreml = ["ort/coreml"]
 xnnpack = ["ort/xnnpack"]
+# Link a *system* ONNX Runtime found via `pkg-config` instead of the prebuilt
+# binary `ort` downloads. See the workspace-level `system-onnxruntime` feature.
+system-onnxruntime = ["ort/pkg-config"]
 
 [dependencies]
 # `tls-rustls` is required alongside `download-binaries`: the `ort-sys` build

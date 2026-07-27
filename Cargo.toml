@@ -42,6 +42,30 @@ coreml = ["onnxruntime", "engram-onnx/coreml", "engram-models/coreml"]
 # the provider ships in the prebuilt `ort` binary so only this feature is
 # needed (no source build, same downloaded binary). For A/B benchmarking.
 xnnpack = ["onnxruntime", "engram-onnx/xnnpack", "engram-models/xnnpack"]
+# Link the ONNX Runtime already installed on the system, located via
+# `pkg-config`, instead of the prebuilt binary `ort` downloads. This is the
+# feature a distro/Homebrew package would build with:
+#
+#     brew install onnxruntime
+#     cargo build --release --features system-onnxruntime
+#
+# Two reasons it exists. (1) **Correctness**: the pyke prebuilt that `ort`'s
+# `download-binaries` fetches executes quantized models incorrectly on
+# AVX-512/AMX hosts — the same text embeds to unrelated vectors under CPU load,
+# while Microsoft's and Homebrew's builds of the *same version* are
+# bit-reproducible. See `docs/contributors/embedding-model-alternatives.md`
+# (R6/R9). (2) **Intel Mac**: no ORT 1.24 prebuilt exists for
+# `x86_64-apple-darwin`, but Homebrew ships onnxruntime 1.28 for it, and 1.28
+# satisfies the API 24 `ort` requires.
+#
+# `ort-sys` probes pkg-config before its download path, so this wins even
+# though `fastembed` also enables `download-binaries`. It accepts any runtime
+# whose minor version is >= 24.
+system-onnxruntime = [
+    "onnxruntime",
+    "engram-models/system-onnxruntime",
+    "engram-onnx/system-onnxruntime",
+]
 # Re-exports `engram-storage`'s `test_support` (global-store serialization lock)
 # so downstream crates (engram-mcp, engram-cli) can use it in their test builds.
 test-support = ["engram-storage/test-support"]

@@ -27,7 +27,7 @@ the two default changes, not a proposal.
 | 4 | **Don't** switch to static (model2vec) embeddings as the default | 100–450× faster and ONNX-free, but costs 6.6 pts MRR and collapses paraphrase queries (MRR 0.66 → 0.28). Worth keeping on the shelf for the tract/no-ORT build, not for the default path. | — |
 | 5 | Re-confirmed: **don't** switch to bge-small / nomic / mxbai / fp32 MiniLM | Reproduced E2 with cleaner instrumentation. bge-small-q is 5.7× slower for no reliable gain; nomic-q is catastrophic here (MRR 0.642 at best); fp32 MiniLM is 1.31× slower and *worse* than L12-q. | — |
 | 6 | **Quantized embeddings were not reproducible under CPU load — root-caused to the pyke prebuilt ONNX Runtime, not the model** | Same model files, same CPU, same load: pyke 1.24.2/1.24.4 corrupt both int8 and uint8 (44/60 distinct vectors for one text); the **official 1.24.2 build — same version** — gives 1/40, cosine 1.000000 for both. | Mitigated: default moved to the uint8 export (also better quality). **Real fix is R9** — link the official runtime. |
-| 7 | **Embedding the official ONNX Runtime is feasible and is the actual fix** | `ort` links it unchanged; the real binary builds and runs. MIT-licensed. Covers linux-x64/aarch64, osx-arm64, win-x64/arm64. | Loses the single static binary: official tarballs ship shared libs only, so releases must carry a ~22 MB `.so`/`.dylib`/`.dll` + rpath. **No Intel Mac build** (dropped after 1.22), so tract stays. See R9. |
+| 7 | **Use a system ONNX Runtime — new `system-onnxruntime` feature** (`ort/pkg-config`). This is the actual fix for R6 | Verified against Microsoft's official tarball *and* the real Homebrew bottle: both give 1/40 distinct, cosine 1.000000, for int8 **and** uint8. `ort` links them unchanged; the real `engramdb` binary builds and runs. Both MIT. | Gives up the single static binary (shared libs only). Homebrew additionally ships an **Intel-Mac** bottle — the platform the repo documents as having no ORT 1.24 prebuilt at all. See R9. |
 
 ## Current stack (what is actually loaded, and why)
 
@@ -521,10 +521,44 @@ targets **except Intel Mac**. `onnxruntime-osx-universal2` was published up to
 Mac keeps the pure-Rust fp32 path (R7), which is unaffected by this bug anyway
 since tract is not ONNX Runtime.
 
-**If the static binary matters more than the shared library is worth**, the
-remaining option is building ONNX Runtime from source with static libs in CI —
-`ORT_LIB_LOCATION` accepts a directory containing `libonnxruntime.a` — or
-reporting the defect to pyke. Both are larger projects than the swap above.
+**Externalizing it to a package manager (`brew install onnxruntime`) is the
+cleaner form of the same fix**, and it is wired up: the workspace now has a
+`system-onnxruntime` feature that turns on `ort/pkg-config`, so the build links
+whatever ONNX Runtime the system already has.
+
+```bash
+brew install onnxruntime
+cargo build --release -p engram-cli --features system-onnxruntime
+```
+
+Verified end to end here against the **real Homebrew bottle** (pulled from
+ghcr.io and linked through its own `lib/pkgconfig/libonnxruntime.pc`, with
+`@@HOMEBREW_CELLAR@@` substituted the way `brew` does at install time):
+
+- `ort-sys` probes pkg-config *before* its download path, so this wins even
+  though `fastembed` also enables `download-binaries`. It accepts any runtime
+  with minor version ≥ 24; Homebrew ships **1.28.0**.
+- **Homebrew's build is not affected by the corruption.** Same probe, same
+  16-thread load: `1/40` distinct, cosine `1.000000`, for *both* int8 and uint8
+  at intra_threads 1 and 4. Only the pyke prebuilt misbehaves.
+- **Homebrew has an Intel-Mac bottle** (`amd64/darwin`), alongside
+  arm64 macOS 14/15/26, and x86_64/arm64 Linux. That is the platform
+  `crates/engram-onnx/Cargo.toml` currently documents as having *no* ORT 1.24
+  prebuilt anywhere — and 1.28 satisfies the API 24 `ort` needs. So brew is
+  also a route to a real ONNX path on Intel Mac, not just tract.
+- Caveat: Homebrew's `libonnxruntime.so` links against its own `abseil`, `onnx`,
+  `protobuf` and `re2` formulae, so it is not a standalone library you can copy
+  into a tarball release. Under `brew` that is invisible (dependencies are
+  declared and installed); for a self-contained archive, Microsoft's official
+  tarball is the better source since it has no such dependencies.
+
+A Homebrew formula would therefore carry `depends_on "onnxruntime"` and build
+with `--features system-onnxruntime`; nothing else changes.
+
+**If a single static binary matters more than any of this**, the remaining
+option is building ONNX Runtime from source with static libs in CI
+(`ORT_LIB_LOCATION` accepts a directory containing `libonnxruntime.a`), or
+reporting the defect to pyke. Both are larger projects.
 
 **Recommendation.** Adopt it for the platforms that have official builds. It
 is the only change that makes *all* quantized exports correct rather than

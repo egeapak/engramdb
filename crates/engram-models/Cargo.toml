@@ -26,6 +26,8 @@ ollama = ["reqwest"]
 # `onnxruntime` stack they configure.
 coreml = ["onnxruntime", "ort/coreml", "engram-onnx/coreml"]
 xnnpack = ["onnxruntime", "ort/xnnpack", "engram-onnx/xnnpack"]
+# See the workspace-level `system-onnxruntime` feature.
+system-onnxruntime = ["onnxruntime", "ort/pkg-config", "engram-onnx/system-onnxruntime"]
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }

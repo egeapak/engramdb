@@ -27,6 +27,10 @@ tract = ["engramdb/tract", "engram-mcp/tract"]
 ollama = ["engramdb/ollama", "engram-mcp/ollama"]
 coreml = ["engramdb/coreml"]
 xnnpack = ["engramdb/xnnpack"]
+# See the workspace-level `system-onnxruntime` feature. Forwarded here so the
+# shipped binary can be built with it: `cargo build -p engram-cli --release
+# --features system-onnxruntime`.
+system-onnxruntime = ["engramdb/system-onnxruntime", "engram-mcp/system-onnxruntime"]
 
 [dependencies]
 engramdb = { path = "../..", default-features = false }

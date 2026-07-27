@@ -16,6 +16,8 @@ path = "src/lib.rs"
 # `--no-default-features --features tract`.
 default = ["onnxruntime", "ollama"]
 onnxruntime = ["engramdb/onnxruntime"]
+# See the workspace-level `system-onnxruntime` feature.
+system-onnxruntime = ["engramdb/system-onnxruntime"]
 tract = ["engramdb/tract"]
 ollama = ["engramdb/ollama"]
 
