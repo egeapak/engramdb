@@ -1504,8 +1504,17 @@ impl LanceIndex {
     /// Paired with [`Self::create_tag_search_index`]; correct with or without
     /// the index (it only changes speed).
     pub fn tag_contains_predicate(tag: &str) -> String {
-        lancedb::expr::expr_to_sql_string(&Self::tag_contains_expr(tag))
-            .expect("contains() over string literals always renders")
+        lancedb::expr::expr_to_sql_string(&Self::tag_contains_expr(tag)).unwrap_or_else(|_| {
+            // Unreachable in practice — rendering `contains(col, <string
+            // literal>)` has nothing to fail on. It is a fallback rather than
+            // an `expect` because `tag` is user-supplied, and this crate's
+            // contract is that no user-derived input can panic a public
+            // function (the same property `fuzz/` asserts elsewhere). The
+            // escaping here is the one place it is still done by hand, which
+            // is why it lives next to the expression it mirrors.
+            let json_token = serde_json::to_string(tag).unwrap_or_else(|_| format!("\"{tag}\""));
+            format!("contains(tags, '{}')", json_token.replace('\'', "''"))
+        })
     }
 
     /// Expression form of [`Self::tag_contains_predicate`]. The needle is the
