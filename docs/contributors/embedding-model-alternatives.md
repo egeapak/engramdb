@@ -26,7 +26,8 @@ the two default changes, not a proposal.
 | 3 | **Don't** switch to snowflake-arctic-embed (xs or s), on **either** the ONNX or the tract/Intel-Mac path | ONNX: arctic-xs-q is free on cost (22 MB, 0.94× warm latency) but lands at MRR 0.914 prefixed / 0.903 raw over 6 runs — indistinguishable from the L6 model it would replace (0.907), well below L12 (0.953). tract: arctic-xs-fp32 loads and matches L6-fp32 on cost exactly (86 MB, 894 vs 906 ms) but loses on quality (MRR 0.920 prefixed / 0.889 raw vs **0.930**, nDCG 0.904 vs 0.927) and needs query-prefix plumbing EngramDB does not have. See R7. | — |
 | 4 | **Don't** switch to static (model2vec) embeddings as the default | 100–450× faster and ONNX-free, but costs 6.6 pts MRR and collapses paraphrase queries (MRR 0.66 → 0.28). Worth keeping on the shelf for the tract/no-ORT build, not for the default path. | — |
 | 5 | Re-confirmed: **don't** switch to bge-small / nomic / mxbai / fp32 MiniLM | Reproduced E2 with cleaner instrumentation. bge-small-q is 5.7× slower for no reliable gain; nomic-q is catastrophic here (MRR 0.642 at best); fp32 MiniLM is 1.31× slower and *worse* than L12-q. | — |
-| 6 | **Open issue found while benchmarking: int8 embeddings are not reproducible under CPU load.** The same text through the same provider can come back with pairwise cosine **0.57** (old L6 default) / **0.71** (observed in the test suite). fp32 is bit-exact in every condition. | `examples/embed_determinism_probe.rs` (new). Not a ranking subtlety — a materially different vector for identical input, persisted at create time. | Not fixed here; see R6 for the likely cause (ORT intra-op threading) and the options. L12-q is the more robust of the two int8 models, which is an independent argument for recommendation 2. |
+| 6 | **Quantized embeddings were not reproducible under CPU load — root-caused to the pyke prebuilt ONNX Runtime, not the model** | Same model files, same CPU, same load: pyke 1.24.2/1.24.4 corrupt both int8 and uint8 (44/60 distinct vectors for one text); the **official 1.24.2 build — same version** — gives 1/40, cosine 1.000000 for both. | Mitigated: default moved to the uint8 export (also better quality). **Real fix is R9** — link the official runtime. |
+| 7 | **Embedding the official ONNX Runtime is feasible and is the actual fix** | `ort` links it unchanged; the real binary builds and runs. MIT-licensed. Covers linux-x64/aarch64, osx-arm64, win-x64/arm64. | Loses the single static binary: official tarballs ship shared libs only, so releases must carry a ~22 MB `.so`/`.dylib`/`.dll` + rpath. **No Intel Mac build** (dropped after 1.22), so tract stays. See R9. |
 
 ## Current stack (what is actually loaded, and why)
 
@@ -292,50 +293,49 @@ competing threads on a 4-core host gives 1/20 distinct at 0–1 load threads, 2�
 at 4, and 10–13 at 16. Giving ORT a dedicated core while other processes
 saturate the machine is nearly clean; sharing a core with the load is worst.
 
-That is [onnxruntime#6004](https://github.com/microsoft/onnxruntime/issues/6004),
-open since 2020: **signed-INT8 quantized models read uninitialized memory**
-(valgrind-confirmed), while **UINT8 quantized models are unaffected**. Our
-exports were exactly the reported shape — `DynamicQuantizeLinear` +
-`MatMulInteger` over signed INT8 initializers (144 of them in L12).
-
-`Xenova/all-MiniLM-{L6,L12}-v2` already publish `onnx/model_uint8.onnx` at the
-same size, so the fix needs no self-hosted model. Measured on the same corpus
-and load:
+That looked like
+[onnxruntime#6004](https://github.com/microsoft/onnxruntime/issues/6004) —
+signed-INT8 quantized models reading uninitialized memory (valgrind-confirmed),
+with UINT8 reported unaffected — and our exports were exactly the reported
+shape: `DynamicQuantizeLinear` + `MatMulInteger` over signed INT8 initializers.
+Switching to the uint8 export (`Xenova/all-MiniLM-{L6,L12}-v2` already publish
+`onnx/model_uint8.onnx` at the same size) did fix reproducibility, and uint8
+also *ranks better*:
 
 | Export | distinct / 30 | min pairwise cosine | cosine vs fp32 | P@1 / MRR@10 / nDCG@10 |
 |---|---|---|---|---|
-| int8 `model_quantized.onnx` (was default) | 26–27 | −0.03 | **0.03–0.23** | 0.917 / 0.948 / 0.937 |
+| int8 `model_quantized.onnx` | 26–27 | −0.03 | 0.03–0.23 | 0.917 / 0.948 / 0.937 |
 | **uint8 `model_uint8.onnx`** | **1** | **1.000000** | 0.977 | **0.958 / 0.969 / 0.953** |
 | int8 + `reduce_range=True` | 24–25 | 0.05 | 0.18 | — |
 | fp32 (control) | 1 | 1.000000 | 1.000 | 0.938 / 0.958 / 0.941 |
 
-uint8 is a strict improvement: bit-reproducible, *better* retrieval than the
-int8 export (and than fp32), identical 32 MB. `DEFAULT_ONNX_EMBEDDING` is now
-`ONNX_ALL_MINILM_L12_U8`, loaded through fastembed's user-defined-model path
-(`OnnxProvider::load_user_defined`) because fastembed's registry hardcodes the
-int8 file.
-
-**The runtime matters as much as the export — and this is the open item.**
-Those uint8 numbers hold on the *official* ONNX Runtime build. On the **pyke
-prebuilt** that `ort`'s `download-binaries` feature ships, uint8 is corrupted
-too (44/60 distinct). Tested:
+**But the export was not the real cause. The linked ONNX Runtime build was.**
+Swapping only the runtime — same model files, same CPU, same 16-thread load —
+gives:
 
 | Linked ONNX Runtime | int8 | uint8 |
 |---|---|---|
-| pyke prebuilt 1.24.2 (what ships today) | broken | **broken** |
-| pyke prebuilt 1.24.4 (newest compatible with `ort` 2.0.0-rc.12) | broken | **broken** |
-| official 1.28.0 shared library | broken | **1/60 distinct, cosine 1.000000** |
+| **pyke prebuilt 1.24.2** (what `ort`'s `download-binaries` ships) | broken (44/60) | **broken (44/60)** |
+| pyke prebuilt 1.24.4 (newest compatible with `ort` 2.0.0-rc.12) | broken | broken |
+| Python wheel 1.28.0 | broken | clean |
+| **official release tarball 1.24.2** — *the same version as the broken pyke build* | **1/40, cosine 1.000000** | **1/40, cosine 1.000000** |
 
-Same model file, same CPU, same load — only the linked runtime differs. So the
-complete fix is **uint8 export + a non-pyke ONNX Runtime**, and the second half
-is a packaging decision: `ORT_STRATEGY=system ORT_PREFER_DYNAMIC_LINK=1
-ORT_LIB_LOCATION=<dir with official libonnxruntime.so>` is verified to work
-(the official 1.28 lib satisfies the 1.24 C API the `ort` crate targets).
-Upgrading the `ort` crate is *not* an alternative: 2.0.0-rc.12 is its newest
-release and pins ONNX Runtime 1.24.
+With the official build of the **identical version**, *both* quantization
+schemes are bit-reproducible at intra_threads 1 and 4, replicated across runs.
+So this is not an ONNX Runtime version bug and not fundamentally a signed-vs-
+unsigned issue — it is the **pyke prebuilt static library**, which on this
+AVX-512/AMX host executes quantized graphs incorrectly. #6004's
+uninitialized-memory defect is still the plausible underlying mechanism; the
+pyke build is what exposes it.
 
-Until the runtime moves, no quantized export is reproducible on a stock build;
-`provider = "all-minilm-l12-fp32"` is the correctness-first option there.
+Two consequences:
+
+- **The fix is the runtime, not the model.** Embedding the official ONNX
+  Runtime removes the problem for every quantized export at once. See R9 for the
+  packaging assessment.
+- **uint8 stays the default anyway**, on quality: 0.969 vs 0.948 MRR@10 at the
+  same 32 MB, measured on a correct runtime. It is no longer load-bearing for
+  correctness.
 
 **Why it matters.** Vectors are computed once at create time and persisted. A
 memory written while the machine is busy — exactly when a coding agent is
@@ -479,6 +479,59 @@ Reading it against the shipped config:
 - Quantization buys less than expected on the query path (6.1 ms uint8 vs 8.2 ms
   fp32, 1.3×) but a lot on the batch path (26.7 vs 45.8 ms/text, 1.7×), so the
   fp32 fallback is more affordable for query-heavy than for write-heavy use.
+
+### R9 · Embedding the official ONNX Runtime — feasibility
+
+R6 shows the fault is the **pyke prebuilt** that `ort`'s `download-binaries`
+feature fetches, not the ONNX Runtime version and not the export. Replacing it
+with Microsoft's own build fixes every quantized model at once. Verified here
+end to end:
+
+```bash
+curl -LO https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz
+tar -xzf onnxruntime-linux-x64-1.24.2.tgz
+export ORT_STRATEGY=system ORT_PREFER_DYNAMIC_LINK=1 \
+       ORT_LIB_LOCATION="$PWD/onnxruntime-linux-x64-1.24.2/lib"
+cargo build --release --bin engramdb
+LD_LIBRARY_PATH="$ORT_LIB_LOCATION" ./target/release/engramdb init   # add / query all work
+```
+
+**What works.** `ort` 2.0.0-rc.12 links against it unchanged — no code change,
+no crate upgrade. The real `engramdb` binary builds and `init` / `add` /
+`query` (semantic) all run. ONNX Runtime is **MIT-licensed**, so redistribution
+is fine.
+
+**What it costs.**
+
+- **No more single static binary.** The official release tarballs ship *only*
+  shared libraries (`libonnxruntime.so` / `.dylib` / `.dll`) — there is no
+  `libonnxruntime.a` to link. The binary gains a runtime dependency
+  (`ldd` → `libonnxruntime.so.1`) and refuses to start without it, so a release
+  has to ship a ~22 MB shared library beside the executable and set an rpath
+  (`$ORIGIN` on Linux, `@loader_path` on macOS) or place the DLL next to the
+  `.exe` on Windows. `ort` has a `copy-dylibs` feature that does the copying.
+- **~22 MB per platform** added to the release artifacts (vs the static build
+  folding into the binary).
+
+**Platform coverage.** Official builds exist for `linux-x64`,
+`linux-aarch64`, `osx-arm64`, `win-x64`, `win-arm64` — everything EngramDB
+targets **except Intel Mac**. `onnxruntime-osx-universal2` was published up to
+**1.22.0** and 404s from 1.24.0 onward, and 1.22 predates the API 24 that
+`ort` 2.0.0-rc.12 requires. So this does not retire the tract fallback: Intel
+Mac keeps the pure-Rust fp32 path (R7), which is unaffected by this bug anyway
+since tract is not ONNX Runtime.
+
+**If the static binary matters more than the shared library is worth**, the
+remaining option is building ONNX Runtime from source with static libs in CI —
+`ORT_LIB_LOCATION` accepts a directory containing `libonnxruntime.a` — or
+reporting the defect to pyke. Both are larger projects than the swap above.
+
+**Recommendation.** Adopt it for the platforms that have official builds. It
+is the only change that makes *all* quantized exports correct rather than
+trading model quality for reproducibility, and it costs packaging work rather
+than latency or accuracy. Until it lands, the shipped uint8 default is chosen
+for quality (R1/R6) and `provider = "all-minilm-l12-fp32"` remains the
+correctness-first option on a stock build.
 
 ## Caveats
 

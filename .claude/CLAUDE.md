@@ -163,6 +163,22 @@ The web sandbox's egress gateway uses a custom CA that rustls/webpki-based downl
    mkdir -p /tmp/ort-lib && tar -xf /tmp/ort.tar -C /tmp/ort-lib
    ```
    Export `ORT_STRATEGY=system` and `ORT_LIB_LOCATION=/tmp/ort-lib` for all `cargo build/clippy/test` commands.
+
+   ⚠️ **The pyke prebuilt executes quantized models incorrectly on AVX-512/AMX
+   hosts.** Under CPU contention the same text embeds to unrelated vectors
+   (measured: 44/60 distinct embeddings of one string; cosine below 0). It is
+   the *build*, not the version or the model — Microsoft's own 1.24.2 release is
+   bit-reproducible for the identical files. For any work that depends on
+   embedding values (quality benchmarks, reproducibility checks), link the
+   official runtime instead:
+   ```
+   curl -LO https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz
+   tar -xzf onnxruntime-linux-x64-1.24.2.tgz
+   export ORT_STRATEGY=system ORT_PREFER_DYNAMIC_LINK=1 \
+          ORT_LIB_LOCATION="$PWD/onnxruntime-linux-x64-1.24.2/lib"
+   # binaries then need LD_LIBRARY_PATH="$ORT_LIB_LOCATION" at run time
+   ```
+   See `docs/contributors/embedding-model-alternatives.md` (R6/R9).
 3. **Embedding model** (fastembed download fails the same way): the default embedding is the **int8-quantized** `DEFAULT_ONNX_EMBEDDING = ONNX_ALL_MINILM_Q` (fastembed `AllMiniLML6V2Q` → repo `Xenova/all-MiniLM-L6-v2`, file `onnx/model_quantized.onnx`), **not** the fp32 `Qdrant/all-MiniLM-L6-v2-onnx`. Stage the quantized repo into `~/.cache/engramdb/models/models--Xenova--all-MiniLM-L6-v2/` with `refs/main` containing `main` and `snapshots/main/<file>` for `onnx/model_quantized.onnx`, `tokenizer.json`, `config.json`, `special_tokens_map.json`, `tokenizer_config.json` (curl from `https://huggingface.co/<repo>/resolve/main/<file>`). If you also exercise the fp32 path, stage `Qdrant/all-MiniLM-L6-v2-onnx` (file `model.onnx`) the same way. `hf-hub` serves cached files without any network call, so embedding tests then pass offline.
 
    ⚠️ If only the fp32 `Qdrant` repo is staged, `OnnxProvider::try_new()` (the default-quantized path) returns `None`: embeddings appear unavailable, the `Auto` backend silently falls back to Ollama (unreachable in the sandbox), and ~100 tests fail with `Failed to send embed request to Ollama`. Staging the quantized repo is what fixes that.
