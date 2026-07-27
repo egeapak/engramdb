@@ -56,7 +56,7 @@ jobs:
         # instead of restarting from the curated seeds in git. Caches are
         # immutable, so key on run_id to save a fresh snapshot every run and
         # let restore-keys pick up the most recent previous one.
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}

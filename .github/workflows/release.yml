@@ -76,7 +76,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Cache Homebrew packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/Library/Caches/Homebrew
@@ -128,7 +128,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Cache Homebrew packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/Library/Caches/Homebrew
