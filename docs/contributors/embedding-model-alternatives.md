@@ -27,7 +27,7 @@ the two default changes, not a proposal.
 | 4 | **Don't** switch to static (model2vec) embeddings as the default | 100–450× faster and ONNX-free, but costs 6.6 pts MRR and collapses paraphrase queries (MRR 0.66 → 0.28). Worth keeping on the shelf for the tract/no-ORT build, not for the default path. | — |
 | 5 | Re-confirmed: **don't** switch to bge-small / nomic / mxbai / fp32 MiniLM | Reproduced E2 with cleaner instrumentation. bge-small-q is 5.7× slower for no reliable gain; nomic-q is catastrophic here (MRR 0.642 at best); fp32 MiniLM is 1.31× slower and *worse* than L12-q. | — |
 | 6 | **Quantized embeddings were not reproducible under CPU load — root-caused to the pyke prebuilt ONNX Runtime, not the model** | Same model files, same CPU, same load: pyke 1.24.2/1.24.4 corrupt both int8 and uint8 (44/60 distinct vectors for one text); the **official 1.24.2 build — same version** — gives 1/40, cosine 1.000000 for both. | Mitigated: default moved to the uint8 export (also better quality). **Real fix is R9** — link the official runtime. |
-| 7 | **Use a system ONNX Runtime — new `system-onnxruntime` feature** (`ort/pkg-config`). This is the actual fix for R6 | Verified against Microsoft's official tarball *and* the real Homebrew bottle: both give 1/40 distinct, cosine 1.000000, for int8 **and** uint8. `ort` links them unchanged; the real `engramdb` binary builds and runs. Both MIT. | Gives up the single static binary (shared libs only). Homebrew additionally ships an **Intel-Mac** bottle — the platform the repo documents as having no ORT 1.24 prebuilt at all. See R9. |
+| 7 | **Use a system ONNX Runtime** (originally via an `ort/pkg-config` build-time link; shipped instead as the run-time-loaded default, see below). This is the actual fix for R6 | Verified against Microsoft's official tarball *and* the real Homebrew bottle: both give 1/40 distinct, cosine 1.000000, for int8 **and** uint8. `ort` links them unchanged; the real `engramdb` binary builds and runs. Both MIT. | Gives up the single static binary (shared libs only). Homebrew additionally ships an **Intel-Mac** bottle — the platform the repo documents as having no ORT 1.24 prebuilt at all. See R9. |
 
 ## Current stack (what is actually loaded, and why)
 
@@ -523,12 +523,12 @@ since tract is not ONNX Runtime.
 
 **Externalizing it to a package manager (`brew install onnxruntime`) is the
 cleaner form of the same fix**, and it is wired up: the workspace now has a
-`system-onnxruntime` feature that turns on `ort/pkg-config`, so the build links
+a `pkg-config` build-time link (`ort/pkg-config`), so the build links
 whatever ONNX Runtime the system already has.
 
 ```bash
 brew install onnxruntime
-cargo build --release -p engram-cli --features system-onnxruntime
+cargo build --release -p engram-cli --features system-onnxruntime   # historical; see below
 ```
 
 Verified end to end here against the **real Homebrew bottle** (pulled from
@@ -557,8 +557,17 @@ statically linking the pyke prebuilt — is opt-in and no longer used by anythin
 the default `load-dynamic` strategy `dlopen`s a runtime at startup, release
 archives ship Microsoft's official build beside the binary, and the Homebrew
 formula (`packaging/homebrew/engramdb.rb`) carries `depends_on "onnxruntime"`
-with `--features system-onnxruntime`. Scoop has no `onnxruntime` package at all,
+and builds with default features. Scoop has no `onnxruntime` package at all,
 so `packaging/scoop/onnxruntime.json` supplies one. See `packaging/README.md`.
+
+The `pkg-config` link was prototyped as a `system-onnxruntime` feature and then
+**dropped**, because it records `libonnxruntime` as a load-time dependency: the
+dynamic loader resolves it before `main()` runs, so a missing runtime stops the
+binary from starting at all — measured as `error while loading shared libraries`
+on `engramdb --version`, with no `doctor` output and no opportunity for the
+pre-flight probe. Run-time loading gets the same correct runtime with a failure
+mode that can actually be reported. Only `load-dynamic` (default) and
+`bundled-onnxruntime` remain.
 
 The one real cost of moving off a statically linked runtime: `ort` panics when
 the dylib is absent, and `panic = "abort"` in the release profile makes that

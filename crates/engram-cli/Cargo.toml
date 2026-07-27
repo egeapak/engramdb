@@ -30,7 +30,6 @@ xnnpack = ["engramdb/xnnpack"]
 # ONNX Runtime linking strategy; see the workspace root. `load-dynamic` is in
 # `default`, so another strategy needs `--no-default-features`.
 load-dynamic = ["engramdb/load-dynamic", "engram-mcp/load-dynamic"]
-system-onnxruntime = ["engramdb/system-onnxruntime", "engram-mcp/system-onnxruntime"]
 bundled-onnxruntime = ["engramdb/bundled-onnxruntime", "engram-mcp/bundled-onnxruntime"]
 
 [dependencies]

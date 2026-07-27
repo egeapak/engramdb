@@ -33,14 +33,14 @@ the library before `ort` touches it, so EngramDB degrades to keyword search and
 `engramdb doctor` says why. That probe is load-bearing — `ort`'s own loader
 panics on a missing dylib, and the release profile sets `panic = "abort"`.
 
-### Why every package uses `load-dynamic`, even where the dependency is guaranteed
+### Why nothing links the runtime at build time
 
-`system-onnxruntime` looks like the natural choice for a package manager: the
-dependency is declared, so it is present at build time, and resolving it then is
-usually better than deferring. It is not used, because of what it records in the
-executable.
+Linking against a package manager's ONNX Runtime at build time (via
+`ort/pkg-config`) looks like the natural choice where the dependency is
+declared and therefore guaranteed present. EngramDB does not offer it, because
+of what it records in the executable.
 
-Linking at build time makes `libonnxruntime` a **load-time** dependency. The
+Build-time linking makes `libonnxruntime` a **load-time** dependency. The
 dynamic loader resolves it before `main()` runs, so if the library later goes
 away — `brew uninstall onnxruntime`, a major bump that changes the dylib's
 install name, a relocated Cellar — the binary does not start at all:
@@ -60,9 +60,13 @@ keyword search. `depends_on` / `"depends"` still guarantee the runtime is
 installed; the strategy only decides how gracefully things fail once something
 disturbs it.
 
-`system-onnxruntime` is kept for distro packaging (deb/rpm), where an
-ELF-level, package-manager-verifiable dependency is the convention and the
-package manager will not let the library disappear from under the binary.
+A distro package (deb/rpm) that wants an ELF-level, package-manager-verifiable
+dependency can still get one by declaring the runtime as a package dependency;
+it just will not be recorded in the binary. That trade is deliberate — the
+recorded dependency is precisely what removes the ability to report the problem.
+
+A CI job enforces this: the default binary must show no ONNX Runtime entry in
+`ldd` and must start with no runtime installed.
 
 ## Scoop needs an `onnxruntime` manifest, so one ships here
 

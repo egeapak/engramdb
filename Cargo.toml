@@ -54,10 +54,6 @@ xnnpack = ["onnxruntime", "engram-onnx/xnnpack", "engram-models/xnnpack"]
 #                        Scoop packages use. `engram_onnx::runtime` locates and
 #                        validates the library before `ort` touches it.
 #
-#   system-onnxruntime   Link a system runtime found at build time via
-#                        `pkg-config`. For distro packaging and source builds on
-#                        a machine that already has ONNX Runtime installed.
-#
 #   bundled-onnxruntime  Download and statically link a prebuilt runtime — the
 #                        historical default, kept as an escape hatch for
 #                        platforms with no packaged ONNX Runtime and for
@@ -72,11 +68,8 @@ xnnpack = ["onnxruntime", "engram-onnx/xnnpack", "engram-models/xnnpack"]
 # Examples:
 #     cargo build --release                                   # load-dynamic
 #     cargo build --release --no-default-features \
-#         --features onnxruntime,ollama,system-onnxruntime
-#     cargo build --release --no-default-features \
 #         --features onnxruntime,ollama,bundled-onnxruntime
 load-dynamic = ["engram-models/load-dynamic", "engram-onnx?/load-dynamic"]
-system-onnxruntime = ["engram-models/system-onnxruntime", "engram-onnx?/system-onnxruntime"]
 bundled-onnxruntime = ["engram-models/bundled-onnxruntime", "engram-onnx?/bundled-onnxruntime"]
 # Re-exports `engram-storage`'s `test_support` (global-store serialization lock)
 # so downstream crates (engram-mcp, engram-cli) can use it in their test builds.

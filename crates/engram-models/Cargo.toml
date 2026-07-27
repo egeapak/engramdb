@@ -28,7 +28,6 @@ coreml = ["onnxruntime", "ort/coreml", "engram-onnx/coreml"]
 xnnpack = ["onnxruntime", "ort/xnnpack", "engram-onnx/xnnpack"]
 # --- ONNX Runtime linking strategy; see the workspace root for the rationale. ---
 load-dynamic = ["fastembed?/ort-load-dynamic", "ort?/load-dynamic", "engram-onnx?/load-dynamic"]
-system-onnxruntime = ["fastembed?/ort-download-binaries-rustls-tls", "ort?/pkg-config", "engram-onnx?/system-onnxruntime"]
 bundled-onnxruntime = ["fastembed?/ort-download-binaries-rustls-tls", "ort?/download-binaries", "engram-onnx?/bundled-onnxruntime"]
 
 [dependencies]

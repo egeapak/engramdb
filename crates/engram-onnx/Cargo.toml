@@ -11,6 +11,11 @@ name = "engram_onnx"
 path = "src/lib.rs"
 
 [features]
+# So that `cargo check -p engram-onnx` works standalone. The workspace root
+# forwards its own `load-dynamic` here as well; this only decides what a build
+# of *this* crate alone gets, and it must match the workspace default.
+default = ["load-dynamic"]
+
 # Mirror the workspace EP feature flags; both forward to `ort`. Off by default
 # so the Linux/CI build and prebuilt-binary download are unchanged.
 coreml = ["ort/coreml"]
@@ -21,8 +26,6 @@ xnnpack = ["ort/xnnpack"]
 # build time and one binary works against any installed runtime >= 1.24.
 # `libloading` is ours, for the pre-flight probe in `runtime.rs`.
 load-dynamic = ["ort/load-dynamic", "dep:libloading"]
-# Link a system ONNX Runtime located at build time via `pkg-config`.
-system-onnxruntime = ["ort/pkg-config"]
 # Download and statically link a prebuilt ONNX Runtime (the historical default).
 bundled-onnxruntime = ["ort/download-binaries"]
 
