@@ -79,7 +79,7 @@ This builds with default features (`ollama` enabled). The binary lands in `~/.ca
 Both packages depend on ONNX Runtime, so there is nothing else to install:
 
 ```bash
-brew install egeapak/engramdb/engramdb     # macOS / Linuxbrew
+brew install egeapak/tap/engramdb     # macOS / Linuxbrew
 scoop install engramdb                      # Windows
 ```
 

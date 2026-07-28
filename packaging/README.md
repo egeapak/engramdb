@@ -3,7 +3,14 @@
 Package definitions for distributing EngramDB. They are kept in-tree so the
 runtime contract below is versioned next to the code that depends on it, but
 they are **not** consumed by any build: publishing means copying them into a
-Homebrew tap or a Scoop bucket and filling in the release hashes.
+Scoop bucket and filling in the release hashes.
+
+The **Homebrew formula lives in a separate tap repo**, not here. The runtime
+contract below still governs it — a tap formula must declare
+`depends_on "onnxruntime"` and build with default features, which is what makes
+the binary load the runtime at startup instead of recording a load-time
+dependency on it. See "Why not link at build time" below before changing how
+that formula builds.
 
 ## The runtime contract
 
@@ -12,7 +19,7 @@ and the packages differ only in *how*:
 
 | Channel | Strategy | Where the runtime comes from |
 |---|---|---|
-| Homebrew (`homebrew/engramdb.rb`) | `load-dynamic` (default) | `depends_on "onnxruntime"`, loaded at run time |
+| Homebrew (separate tap repo) | `load-dynamic` (default) | `depends_on "onnxruntime"`, loaded at run time |
 | Scoop (`scoop/*.json`) | `load-dynamic` (default) | `"depends": "onnxruntime"`, loaded at run time from `PATH` |
 | GitHub release archives | `load-dynamic` (default) | Whatever the user installed — archives hold the binary only |
 | `cargo install` | `load-dynamic` (default) | Whatever the user has installed |
@@ -89,10 +96,10 @@ the `"depends"` line as-is.
 ## Publishing checklist
 
 1. Tag a release so the archives exist.
-2. Homebrew: copy `homebrew/engramdb.rb` into the tap, update `url` and
-   `sha256` for the source tarball.
-3. Scoop: copy `scoop/*.json` into the bucket, update `version` and the `hash`
+2. Scoop: copy `scoop/*.json` into the bucket, update `version` and the `hash`
    of every architecture (`scoop hash <url>`).
+3. Homebrew: update the formula in the tap repo (`url` + `sha256` for the source
+   tarball). Keep `depends_on "onnxruntime"` and the default-feature build.
 4. Verify each one actually resolved a runtime rather than silently falling
    back to keyword search:
 

@@ -556,7 +556,7 @@ ghcr.io and linked through its own `lib/pkgconfig/libonnxruntime.pc`, with
 statically linking the pyke prebuilt — is opt-in and no longer used by anything;
 the default `load-dynamic` strategy `dlopen`s a runtime at startup, release
 archives ship no runtime at all, and the Homebrew
-formula (`packaging/homebrew/engramdb.rb`) carries `depends_on "onnxruntime"`
+formula (maintained in a separate tap repo) carries `depends_on "onnxruntime"`
 and builds with default features. Scoop has no `onnxruntime` package at all,
 so `packaging/scoop/onnxruntime.json` supplies one. See `packaging/README.md`.
 
