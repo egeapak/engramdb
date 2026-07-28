@@ -9,7 +9,7 @@
       "name": "engram",
       "source": "./",
       "version": "0.9.0",
-      "description": "Project-scoped persistent memory store for coding agents. Stores decisions, hazards, conventions, and context about the codebase. Memories carry an epistemic class — fact, observation, or decision — that shapes when they surface."
+      "description": "Project-scoped persistent memory store for coding agents. Stores decisions, hazards, conventions, and context about the codebase. Memories carry an epistemic class — fact, observation, or decision — that shapes when they surface. Memories can be scoped to one project, shared across a named group, or made machine-wide global."
     }
   ]
 }
