@@ -107,6 +107,30 @@ the `"depends"` line as-is.
    engramdb doctor          # must report an "ONNX Runtime" check that passes
    ```
 
+## Upgrades and the shared daemon
+
+The daemon caches provider bundles for its whole lifetime, so one running
+across an upgrade keeps serving the *previous* release's models. That is not
+cosmetic: the client fingerprints the embedding model it expects, so
+`reindex --embeddings-only` re-embeds via the old daemon, stamps the old model
+id, and `doctor` immediately reports a mismatch again — running the suggested
+command can never converge. This happened on 0.8.0 → 0.9.0, where the embedding
+default moved from all-MiniLM-L6 to L12.
+
+Clients handle this themselves as of protocol 4: `Ping` returns the daemon's
+crate version, and a daemon older than the client is asked to shut down so a
+current one replaces it. **No package manager post-install step is needed**,
+which is what makes it work for `cargo install` and manual downloads too —
+Homebrew has no post-install hook for binary-only formulae anyway.
+
+Bump `PROTOCOL_VERSION` when a release changes a model default, even if the
+wire format is untouched; it is the explicit lever for evicting stale daemons.
+To force it by hand:
+
+```
+engramdb daemon restart
+```
+
 ## Version pinning
 
 `ort` 2.0.0-rc.12 requires ONNX Runtime C API version **24**, so any runtime

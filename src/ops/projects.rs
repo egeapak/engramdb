@@ -93,9 +93,11 @@ pub async fn get_project_info(dir: &Path) -> Result<ProjectInfo> {
 /// lives at the parent — so treat them as alive if the worktree directory
 /// itself still exists. Root projects use the usual `.engramdb/` check. This is
 /// the single source of truth shared by [`list_projects`] (for the `exists`
-/// flag) and [`prune_stale_projects`] (to decide what to remove), so a linked
-/// worktree is never mistaken for a stale entry.
-fn registry_entry_alive(e: &RegistryEntry) -> bool {
+/// flag), [`prune_stale_projects`] (to decide what to remove), and `doctor`'s
+/// reachable-projects count, so a linked worktree is never mistaken for a stale
+/// entry — and so `doctor` can never report stale entries that `prune` then
+/// declines to remove.
+pub(crate) fn registry_entry_alive(e: &RegistryEntry) -> bool {
     if e.parent_project_id.is_some() {
         Path::new(&e.project_path).exists()
     } else {
@@ -1212,5 +1214,54 @@ mod tests {
             .find(|e| e.project_id == child.project_id)
             .unwrap();
         assert_eq!(child_entry.parent_project_id, None);
+    }
+
+    /// A linked worktree is registered as a sub-project and deliberately has no
+    /// `.engramdb/` of its own — its storage lives at the parent. A bare
+    /// `<path>/.engramdb` liveness test therefore counts it stale, which is how
+    /// `doctor` came to report "stale: 4" for entries `prune` then declined to
+    /// remove: two copies of the predicate had drifted apart.
+    ///
+    /// This pins the contract both call sites now share: a sub-project whose
+    /// directory still exists is ALIVE even with no `.engramdb/`, and a root
+    /// project without one is stale.
+    #[test]
+    fn sub_project_without_local_engramdb_dir_is_alive() {
+        let temp_dir = TempDir::new().unwrap();
+        let worktree = temp_dir.path().join("feature-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        // Deliberately no `.engramdb/` — that is the whole point of a worktree.
+
+        let entry = |id: &str, path: &std::path::Path, parent: Option<&str>| RegistryEntry {
+            project_id: id.to_string(),
+            project_path: path.to_string_lossy().to_string(),
+            parent_project_id: parent.map(str::to_string),
+            subscriptions: Vec::new(),
+        };
+
+        let sub = entry("child00000000000", &worktree, Some("parent0000000000"));
+        assert!(
+            registry_entry_alive(&sub),
+            "an existing worktree directory must be alive without its own .engramdb/"
+        );
+
+        // Same directory, but registered as a ROOT project: no `.engramdb/`
+        // means genuinely stale.
+        let root = entry("root000000000000", &worktree, None);
+        assert!(
+            !registry_entry_alive(&root),
+            "a root project with no .engramdb/ is stale"
+        );
+
+        // A sub-project whose directory is gone is stale regardless.
+        let removed = entry(
+            "gone000000000000",
+            &temp_dir.path().join("deleted-worktree"),
+            Some("parent0000000000"),
+        );
+        assert!(
+            !registry_entry_alive(&removed),
+            "a sub-project whose directory no longer exists is stale"
+        );
     }
 }

@@ -389,6 +389,7 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
             }
             return DaemonResponse::Pong {
                 version: PROTOCOL_VERSION.to_string(),
+                build: Some(env!("CARGO_PKG_VERSION").to_string()),
             };
         }
         DaemonOp::Status => {
@@ -408,17 +409,13 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                 .map(|t| t.elapsed().as_secs());
             return DaemonResponse::Status(DaemonStatus {
                 version: PROTOCOL_VERSION.to_string(),
+                build: Some(env!("CARGO_PKG_VERSION").to_string()),
+                model_ids: ctx.cache.model_ids().await,
                 pid: ctx.pid,
                 uptime_secs: ctx.start.elapsed().as_secs(),
                 idle_secs,
                 bundles_loaded: ctx.cache.loaded_count().await,
-                requests_embed: s.embed,
-                requests_classify: s.classify,
-                requests_rerank: s.rerank,
-                requests_meta: s.meta,
-                requests_status: s.status,
-                requests_title: s.title,
-                requests_total: s.total(),
+                requests: s.into(),
                 ping_count,
                 last_ping_secs_ago,
             });

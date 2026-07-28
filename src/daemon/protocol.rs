@@ -12,7 +12,18 @@ use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 /// Bumped on any incompatible wire change. A client that gets a mismatched
 /// `Pong.version` treats the daemon as unusable and falls back in-process
 /// rather than risk decoding garbage from a stale daemon binary.
-pub const PROTOCOL_VERSION: &str = "3";
+///
+/// `4` added `Pong.build` and `DaemonStatus::{build, model_ids}`.
+///
+/// **Also bump on a model-default change, not just a wire change.** The daemon
+/// caches provider bundles for its whole lifetime, so one started before an
+/// upgrade keeps serving the *old* embedding model while the upgraded client
+/// fingerprints the new one. The wire was unchanged across 0.8.0 → 0.9.0, so
+/// nothing evicted the stale daemon: `reindex` re-embedded with the old model
+/// and stamped its id, `doctor` demanded the new one, and repeating the
+/// suggested command could never converge. `Pong.build` now catches this
+/// automatically; bumping here is the explicit lever.
+pub const PROTOCOL_VERSION: &str = "4";
 
 /// A request frame: which store's config selects the model, the resolved
 /// embedding backend (sent so the daemon's provider key matches the client's
@@ -65,7 +76,15 @@ pub enum DaemonOp {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum DaemonResponse {
     /// Reply to [`DaemonOp::Ping`].
-    Pong { version: String },
+    Pong {
+        /// Wire-protocol version ([`PROTOCOL_VERSION`]).
+        version: String,
+        /// Daemon binary's crate version. Separate from `version` because a
+        /// release can change which models load without changing the wire.
+        /// `None` from a pre-protocol-4 daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        build: Option<String>,
+    },
     /// Reply to [`DaemonOp::Meta`].
     Meta {
         dimensions: usize,
@@ -93,11 +112,53 @@ pub enum DaemonResponse {
     Error { message: String },
 }
 
-/// Daemon status + cumulative request metrics. `requests*` are cumulative
+/// Cumulative per-op request counts, nested inside [`DaemonStatus`].
+///
+/// Distinct from the internal `MetricsSnapshot`, which is an in-memory counter
+/// view with `total` as a computed method: `total` is an explicit field here so
+/// consumers read it rather than re-deriving it.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct RequestCounts {
+    pub embed: u64,
+    pub classify: u64,
+    pub rerank: u64,
+    pub meta: u64,
+    pub status: u64,
+    pub title: u64,
+    pub total: u64,
+}
+
+impl From<crate::daemon::metrics::MetricsSnapshot> for RequestCounts {
+    fn from(s: crate::daemon::metrics::MetricsSnapshot) -> Self {
+        Self {
+            embed: s.embed,
+            classify: s.classify,
+            rerank: s.rerank,
+            meta: s.meta,
+            status: s.status,
+            title: s.title,
+            total: s.total(),
+        }
+    }
+}
+
+/// Daemon status + cumulative request metrics. [`RequestCounts`] is cumulative
 /// across daemon restarts (persisted to the global LanceDB store).
+///
+/// The field layout deliberately matches what the CLI prints, so
+/// `engram_cli::output` can `#[serde(flatten)]` this straight into its own
+/// shape instead of unpacking and re-nesting it. That is why `version`
+/// serializes as `protocol` (there is now also a `build` version, so the bare
+/// name is ambiguous) and why the counters are grouped rather than seven flat
+/// `requests_*` fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
+    #[serde(rename = "protocol")]
     pub version: String,
+    /// Daemon binary's crate version — tells you it is running an older build
+    /// than the CLI querying it, hence possibly stale cached models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
     pub pid: u32,
     /// Seconds since *this* daemon process started.
     pub uptime_secs: u64,
@@ -105,19 +166,17 @@ pub struct DaemonStatus {
     pub idle_secs: u64,
     /// Distinct model bundles (config signatures) currently resident.
     pub bundles_loaded: usize,
-    pub requests_embed: u64,
-    pub requests_classify: u64,
-    pub requests_rerank: u64,
-    pub requests_meta: u64,
-    pub requests_status: u64,
-    pub requests_title: u64,
-    pub requests_total: u64,
+    /// Model ids currently resident, e.g. `["embed=onnx/all-MiniLM-L12-v2-u8"]`.
+    /// Answers "which models is this daemon actually serving?".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_ids: Vec<String>,
     /// Number of `Ping` requests received since this daemon process started.
     /// In-memory only — not persisted across restarts.
     pub ping_count: u64,
     /// Seconds since the last `Ping` was received, or `None` if no ping has
     /// arrived yet in this daemon's lifetime. In-memory only.
     pub last_ping_secs_ago: Option<u64>,
+    pub requests: RequestCounts,
 }
 
 /// NLI class probabilities. The dominant label is recomputed client-side via

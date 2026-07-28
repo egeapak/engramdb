@@ -70,7 +70,7 @@ async fn daemon_answers_ping() {
     )
     .await;
     match resp {
-        DaemonResponse::Pong { version } => assert_eq!(version, super::PROTOCOL_VERSION),
+        DaemonResponse::Pong { version, .. } => assert_eq!(version, super::PROTOCOL_VERSION),
         other => panic!("expected Pong, got {other:?}"),
     }
 }
@@ -109,10 +109,15 @@ async fn remote_embedding_end_to_end() {
     std::fs::create_dir_all(&store_dir).unwrap();
     let config = crate::types::EngramConfig::default();
     let handle = super::DaemonHandle::connect_existing(socket.clone());
+    // Pin the backend: this test gates on the ONNX model being staged, so its
+    // premise is "the ONNX path works end to end through the daemon". With
+    // `None` the daemon resolves `Auto` and falls back to Ollama when ONNX
+    // session init fails — exactly the regression this test exists to catch —
+    // and every assertion below still passes.
     let providers = super::remote_providers(
         handle,
         store_dir.to_string_lossy().into_owned(),
-        None,
+        Some(crate::types::EmbeddingBackend::Onnx),
         &config,
     )
     .await
@@ -158,17 +163,21 @@ async fn status_and_shutdown_frames_roundtrip() {
     // unit ShuttingDown variant survive a response round-trip.
     let status = DaemonStatus {
         version: super::PROTOCOL_VERSION.to_string(),
+        build: Some(env!("CARGO_PKG_VERSION").to_string()),
+        model_ids: Vec::new(),
         pid: 4242,
         uptime_secs: 12,
         idle_secs: 3,
         bundles_loaded: 2,
-        requests_embed: 5,
-        requests_classify: 1,
-        requests_rerank: 0,
-        requests_meta: 7,
-        requests_status: 9,
-        requests_title: 3,
-        requests_total: 25,
+        requests: super::protocol::RequestCounts {
+            embed: 5,
+            classify: 1,
+            rerank: 0,
+            meta: 7,
+            status: 9,
+            title: 3,
+            total: 25,
+        },
         ping_count: 0,
         last_ping_secs_ago: None,
     };
@@ -182,8 +191,8 @@ async fn status_and_shutdown_frames_roundtrip() {
     {
         DaemonResponse::Status(s) => {
             assert_eq!(s.pid, 4242);
-            assert_eq!(s.requests_title, 3);
-            assert_eq!(s.requests_total, 25);
+            assert_eq!(s.requests.title, 3);
+            assert_eq!(s.requests.total, 25);
             assert_eq!(s.version, super::PROTOCOL_VERSION);
         }
         other => panic!("expected Status, got {other:?}"),
@@ -267,7 +276,7 @@ async fn daemon_status_reports_metrics() {
     };
     assert_eq!(s1.version, super::PROTOCOL_VERSION);
     assert!(s1.pid > 0);
-    assert!(s1.requests_status >= 1);
+    assert!(s1.requests.status >= 1);
 
     // A second Status shows the counter advancing.
     let s2 = match wait_request(
@@ -283,7 +292,7 @@ async fn daemon_status_reports_metrics() {
         DaemonResponse::Status(s) => s,
         other => panic!("expected Status, got {other:?}"),
     };
-    assert!(s2.requests_status > s1.requests_status);
+    assert!(s2.requests.status > s1.requests.status);
 }
 
 #[tokio::test]
@@ -700,11 +709,16 @@ async fn failed_request_does_not_increment_counter() {
     tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
 
     // NEGATIVE (red before fix): the failing Embed must not count.
+    //
+    // Pin the backend to ONNX. An empty cache plus offline only disables the
+    // ONNX provider; with `backend: None` resolution falls through to Ollama,
+    // which succeeds on any developer machine running it (CI has none), and the
+    // "embedding unavailable" premise silently evaporates.
     let resp = wait_request(
         &socket,
         DaemonRequest {
             dir: dir.clone(),
-            backend: None,
+            backend: Some(crate::types::EmbeddingBackend::Onnx),
             op: DaemonOp::Embed {
                 texts: vec!["hello".to_string()],
             },
@@ -727,7 +741,7 @@ async fn failed_request_does_not_increment_counter() {
     .await;
     match status {
         DaemonResponse::Status(s) => assert_eq!(
-            s.requests_embed, 0,
+            s.requests.embed, 0,
             "a failed embed must not increment the counter"
         ),
         other => panic!("expected Status, got {other:?}"),
@@ -804,17 +818,21 @@ async fn query_status_parses_stub_status() {
     spawn_stub(socket.clone(), |op| match op {
         DaemonOp::Status => DaemonResponse::Status(DaemonStatus {
             version: super::PROTOCOL_VERSION.to_string(),
+            build: Some(env!("CARGO_PKG_VERSION").to_string()),
+            model_ids: Vec::new(),
             pid: 77,
             uptime_secs: 1,
             idle_secs: 0,
             bundles_loaded: 3,
-            requests_embed: 4,
-            requests_classify: 0,
-            requests_rerank: 0,
-            requests_meta: 1,
-            requests_status: 2,
-            requests_title: 0,
-            requests_total: 7,
+            requests: super::protocol::RequestCounts {
+                embed: 4,
+                classify: 0,
+                rerank: 0,
+                meta: 1,
+                status: 2,
+                title: 0,
+                total: 7,
+            },
             ping_count: 0,
             last_ping_secs_ago: None,
         }),
@@ -834,7 +852,7 @@ async fn query_status_parses_stub_status() {
         .expect("status present");
     assert_eq!(s.pid, 77);
     assert_eq!(s.bundles_loaded, 3);
-    assert_eq!(s.requests_total, 7);
+    assert_eq!(s.requests.total, 7);
 }
 
 #[tokio::test]
@@ -844,10 +862,12 @@ async fn healthy_rejects_protocol_version_mismatch() {
     let good = tmp.path().join("good.sock");
     spawn_stub(good.clone(), |_| DaemonResponse::Pong {
         version: super::PROTOCOL_VERSION.to_string(),
+        build: Some(env!("CARGO_PKG_VERSION").to_string()),
     });
     let bad = tmp.path().join("bad.sock");
     spawn_stub(bad.clone(), |_| DaemonResponse::Pong {
         version: "999.bogus".to_string(),
+        build: None,
     });
     for s in [&good, &bad] {
         for _ in 0..100 {
@@ -868,6 +888,48 @@ async fn healthy_rejects_protocol_version_mismatch() {
             .check_health()
             .await,
         "a version mismatch must be treated as unhealthy"
+    );
+}
+
+/// The 0.8.0 → 0.9.0 failure: same wire protocol, older binary, so nothing
+/// evicted the daemon and it kept serving vectors from the superseded
+/// embedding model. A matching protocol is no longer sufficient — the build
+/// must match too.
+#[tokio::test]
+async fn healthy_rejects_older_build_on_matching_protocol() {
+    let tmp = TempDir::new().unwrap();
+
+    let stale = tmp.path().join("stale-build.sock");
+    spawn_stub(stale.clone(), |_| DaemonResponse::Pong {
+        version: super::PROTOCOL_VERSION.to_string(),
+        build: Some("0.0.1".to_string()),
+    });
+    // A daemon predating protocol 4 sends no build at all.
+    let legacy = tmp.path().join("legacy-build.sock");
+    spawn_stub(legacy.clone(), |_| DaemonResponse::Pong {
+        version: super::PROTOCOL_VERSION.to_string(),
+        build: None,
+    });
+    for s in [&stale, &legacy] {
+        for _ in 0..100 {
+            if super::transport::connect(s).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    assert!(
+        !super::DaemonHandle::connect_existing(stale)
+            .check_health()
+            .await,
+        "an older build must be unhealthy even when the protocol matches"
+    );
+    assert!(
+        !super::DaemonHandle::connect_existing(legacy)
+            .check_health()
+            .await,
+        "a daemon reporting no build predates protocol 4 and must be unhealthy"
     );
 }
 
@@ -1145,6 +1207,7 @@ async fn cli_connect_only_uses_daemon_and_in_process_override_does_not() {
     spawn_stub(socket.clone(), |op| match op {
         DaemonOp::Ping => DaemonResponse::Pong {
             version: super::PROTOCOL_VERSION.to_string(),
+            build: Some(env!("CARGO_PKG_VERSION").to_string()),
         },
         DaemonOp::Meta => DaemonResponse::Meta {
             dimensions: 42,
@@ -1208,6 +1271,7 @@ async fn resolve_providers_connect_only_uses_live_daemon() {
     spawn_stub(socket.clone(), |op| match op {
         DaemonOp::Ping => DaemonResponse::Pong {
             version: super::PROTOCOL_VERSION.to_string(),
+            build: Some(env!("CARGO_PKG_VERSION").to_string()),
         },
         DaemonOp::Meta => DaemonResponse::Meta {
             dimensions: 16,

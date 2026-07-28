@@ -1170,6 +1170,55 @@ pub struct Stats {
     pub runtime: Option<engramdb::telemetry::RuntimeSnapshot>,
 }
 
+/// The JSON body for a running daemon, shared by `daemon status` and
+/// `stats --daemon`.
+///
+/// Both commands report the same daemon, but each used to hand-build its own
+/// `json!` object — and they drifted: `stats --daemon` silently lacked the
+/// heartbeat fields for as long as those existed.
+///
+/// `DaemonStatus` is flattened in rather than re-listed field by field, so a
+/// field added to the wire struct reaches CLI output automatically. That works
+/// because the wire struct is laid out in the shape the CLI wants: counters
+/// grouped under `requests`, and `version` serialized as `protocol`. `running`
+/// and `socket` are the only client-side facts left to add.
+#[derive(Debug, serde::Serialize)]
+pub struct DaemonStatusJson<'a> {
+    /// Always true — this shape is only built for a daemon that answered.
+    pub running: bool,
+    pub socket: String,
+    #[serde(flatten)]
+    pub status: &'a engramdb::daemon::DaemonStatus,
+}
+
+impl<'a> DaemonStatusJson<'a> {
+    pub fn new(status: &'a engramdb::daemon::DaemonStatus, socket: &std::path::Path) -> Self {
+        Self {
+            running: true,
+            socket: socket.display().to_string(),
+            status,
+        }
+    }
+}
+
+/// The JSON body for a running daemon, shared by both commands.
+/// # Panics
+///
+/// Never in practice: [`DaemonStatusJson`] is a plain struct of strings,
+/// integers, and `Option`/`Vec` of those, with a derived `Serialize` — none of
+/// `to_value`'s failure modes (custom serializers, non-string map keys,
+/// non-finite floats) can arise. Degrading to a partial `{"running": true}`
+/// would be worse than failing loudly: scripted consumers would read `null`
+/// for every field and could not distinguish that from a daemon reporting no
+/// activity.
+pub fn daemon_status_json(
+    status: &engramdb::daemon::DaemonStatus,
+    socket: &std::path::Path,
+) -> serde_json::Value {
+    serde_json::to_value(DaemonStatusJson::new(status, socket))
+        .expect("DaemonStatusJson is plain data and cannot fail to serialize")
+}
+
 /// Format the ping statistics line for `daemon status` output.
 ///
 /// When `last_ping_secs_ago` is `Some(n)`, produces `"pings: {count} (last {n}s ago)"`.
@@ -2003,6 +2052,65 @@ mod tests {
     // ========================================
     // 9. format_ping_line formatter
     // ========================================
+
+    /// `daemon status` and `stats --daemon` must emit the same schema. They
+    /// used to build separate `json!` objects and drifted — `stats --daemon`
+    /// was missing `ping_count` / `last_ping_secs_ago`. Both now go through
+    /// [`daemon_status_json`], and this pins the keys so a future field is
+    /// added in one place or not at all.
+    #[test]
+    fn daemon_status_json_has_stable_schema() {
+        let status = engramdb::daemon::DaemonStatus {
+            version: "4".to_string(),
+            build: Some("0.9.0".to_string()),
+            model_ids: vec!["embed=onnx/all-MiniLM-L12-v2-u8".to_string()],
+            pid: 123,
+            uptime_secs: 10,
+            idle_secs: 1,
+            bundles_loaded: 1,
+            requests: engramdb::daemon::RequestCounts {
+                embed: 1,
+                classify: 2,
+                rerank: 3,
+                meta: 4,
+                status: 5,
+                title: 6,
+                total: 21,
+            },
+            ping_count: 7,
+            last_ping_secs_ago: Some(8),
+        };
+        let value = daemon_status_json(&status, std::path::Path::new("/tmp/d.sock"));
+        let obj = value.as_object().expect("object");
+
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "build",
+                "bundles_loaded",
+                "idle_secs",
+                "last_ping_secs_ago",
+                "model_ids",
+                "pid",
+                "ping_count",
+                "protocol",
+                "requests",
+                "running",
+                "socket",
+                "uptime_secs",
+            ]
+        );
+
+        // `version` is presented as `protocol`; the raw wire spelling and the
+        // flat counters must not leak through.
+        assert_eq!(obj["protocol"], "4");
+        assert!(!obj.contains_key("version"));
+        assert!(!obj.contains_key("requests_embed"));
+        assert_eq!(obj["requests"]["total"], 21);
+        assert_eq!(obj["model_ids"][0], "embed=onnx/all-MiniLM-L12-v2-u8");
+    }
 
     #[test]
     fn format_ping_line_with_last_ping_some() {

@@ -39,7 +39,7 @@ pub async fn check_daemon(dir: &Path) -> EnvironmentCheck {
         Ok(Some(s)) => {
             details.push(format!(
                 "pid {}, uptime {}s, {} model bundle(s), {} requests served (cumulative)",
-                s.pid, s.uptime_secs, s.bundles_loaded, s.requests_total
+                s.pid, s.uptime_secs, s.bundles_loaded, s.requests.total
             ));
             (format!("running (protocol v{})", s.version), None)
         }

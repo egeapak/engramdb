@@ -77,29 +77,7 @@ pub async fn run_daemon_cmd(
                     // One JSON object so scripted consumers get parseable output
                     // instead of print_success's JSON followed by raw text lines
                     // (finding #7).
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "running": true,
-                            "pid": s.pid,
-                            "socket": socket.display().to_string(),
-                            "protocol": s.version,
-                            "uptime_secs": s.uptime_secs,
-                            "idle_secs": s.idle_secs,
-                            "bundles_loaded": s.bundles_loaded,
-                            "ping_count": s.ping_count,
-                            "last_ping_secs_ago": s.last_ping_secs_ago,
-                            "requests": {
-                                "embed": s.requests_embed,
-                                "classify": s.requests_classify,
-                                "rerank": s.requests_rerank,
-                                "meta": s.requests_meta,
-                                "status": s.requests_status,
-                                "title": s.requests_title,
-                                "total": s.requests_total,
-                            },
-                        })
-                    );
+                    println!("{}", crate::output::daemon_status_json(&s, &socket));
                 }
                 Some(s) => {
                     formatter.print_success(&format!("Daemon: running (pid {})", s.pid));
@@ -110,13 +88,13 @@ pub async fn run_daemon_cmd(
                     println!("  model bundles:   {}", s.bundles_loaded);
                     println!("  {}", format_ping_line(s.ping_count, s.last_ping_secs_ago));
                     println!("  requests (cumulative across restarts):");
-                    println!("    embed:         {}", s.requests_embed);
-                    println!("    classify:      {}", s.requests_classify);
-                    println!("    rerank:        {}", s.requests_rerank);
-                    println!("    meta:          {}", s.requests_meta);
-                    println!("    status:        {}", s.requests_status);
-                    println!("    title:         {}", s.requests_title);
-                    println!("    total:         {}", s.requests_total);
+                    println!("    embed:         {}", s.requests.embed);
+                    println!("    classify:      {}", s.requests.classify);
+                    println!("    rerank:        {}", s.requests.rerank);
+                    println!("    meta:          {}", s.requests.meta);
+                    println!("    status:        {}", s.requests.status);
+                    println!("    title:         {}", s.requests.title);
+                    println!("    total:         {}", s.requests.total);
                 }
             }
             Ok(())
