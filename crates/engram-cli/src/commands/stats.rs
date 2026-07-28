@@ -147,27 +147,7 @@ async fn run_daemon_stats(dir: &Path, formatter: &OutputFormatter) -> Result<()>
         if formatter.is_json() {
             // Emit a single JSON object so scripted consumers can parse it
             // (finding #7) — raw println! lines would corrupt the stream.
-            println!(
-                "{}",
-                serde_json::json!({
-                    "running": true,
-                    "pid": s.pid,
-                    "socket": socket.display().to_string(),
-                    "protocol": s.version,
-                    "uptime_secs": s.uptime_secs,
-                    "idle_secs": s.idle_secs,
-                    "bundles_loaded": s.bundles_loaded,
-                    "requests": {
-                        "embed": s.requests_embed,
-                        "classify": s.requests_classify,
-                        "rerank": s.requests_rerank,
-                        "meta": s.requests_meta,
-                        "status": s.requests_status,
-                        "title": s.requests_title,
-                        "total": s.requests_total,
-                    },
-                })
-            );
+            println!("{}", crate::output::daemon_status_json(&s, &socket));
             return Ok(());
         }
         formatter.print_success(&format!("Embedding daemon: running (pid {})", s.pid));

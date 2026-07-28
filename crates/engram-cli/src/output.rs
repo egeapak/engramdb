@@ -1170,6 +1170,96 @@ pub struct Stats {
     pub runtime: Option<engramdb::telemetry::RuntimeSnapshot>,
 }
 
+/// Per-op request counters, nested under `requests` in the CLI's JSON.
+#[derive(Debug, serde::Serialize)]
+pub struct DaemonRequestCounts {
+    pub embed: u64,
+    pub classify: u64,
+    pub rerank: u64,
+    pub meta: u64,
+    pub status: u64,
+    pub title: u64,
+    pub total: u64,
+}
+
+/// The JSON body for a running daemon, shared by `daemon status` and
+/// `stats --daemon`.
+///
+/// Both commands report the same daemon, but each used to hand-build its own
+/// `json!` object — and they drifted: `stats --daemon` silently lacked the
+/// heartbeat fields for as long as those existed. A typed struct makes that
+/// class of drift a compile error instead of a missing key.
+///
+/// This is deliberately a re-shaping of [`DaemonStatus`] rather than a
+/// `#[serde(flatten)]` of it: the CLI presents `version` as `protocol` (there
+/// is now also a `build` version) and nests the flat `requests_*` counters,
+/// and flattening would emit both spellings of every counter. The wire struct
+/// is shared with the daemon, so it cannot carry CLI-only rename/skip
+/// attributes.
+#[derive(Debug, serde::Serialize)]
+pub struct DaemonStatusJson {
+    /// Always true — this shape is only built for a daemon that answered.
+    pub running: bool,
+    pub pid: u32,
+    pub socket: String,
+    /// Wire-protocol version (`DaemonStatus::version`).
+    pub protocol: String,
+    /// Daemon binary's crate version.
+    pub build: Option<String>,
+    pub uptime_secs: u64,
+    pub idle_secs: u64,
+    pub bundles_loaded: usize,
+    pub model_ids: Vec<String>,
+    pub ping_count: u64,
+    pub last_ping_secs_ago: Option<u64>,
+    pub requests: DaemonRequestCounts,
+}
+
+impl DaemonStatusJson {
+    pub fn new(status: &engramdb::daemon::DaemonStatus, socket: &std::path::Path) -> Self {
+        Self {
+            running: true,
+            pid: status.pid,
+            socket: socket.display().to_string(),
+            protocol: status.version.clone(),
+            build: status.build.clone(),
+            uptime_secs: status.uptime_secs,
+            idle_secs: status.idle_secs,
+            bundles_loaded: status.bundles_loaded,
+            model_ids: status.model_ids.clone(),
+            ping_count: status.ping_count,
+            last_ping_secs_ago: status.last_ping_secs_ago,
+            requests: DaemonRequestCounts {
+                embed: status.requests_embed,
+                classify: status.requests_classify,
+                rerank: status.requests_rerank,
+                meta: status.requests_meta,
+                status: status.requests_status,
+                title: status.requests_title,
+                total: status.requests_total,
+            },
+        }
+    }
+}
+
+/// The JSON body for a running daemon, shared by both commands.
+/// # Panics
+///
+/// Never in practice: [`DaemonStatusJson`] is a plain struct of strings,
+/// integers, and `Option`/`Vec` of those, with a derived `Serialize` — none of
+/// `to_value`'s failure modes (custom serializers, non-string map keys,
+/// non-finite floats) can arise. Degrading to a partial `{"running": true}`
+/// would be worse than failing loudly: scripted consumers would read `null`
+/// for every field and could not distinguish that from a daemon reporting no
+/// activity.
+pub fn daemon_status_json(
+    status: &engramdb::daemon::DaemonStatus,
+    socket: &std::path::Path,
+) -> serde_json::Value {
+    serde_json::to_value(DaemonStatusJson::new(status, socket))
+        .expect("DaemonStatusJson is plain data and cannot fail to serialize")
+}
+
 /// Format the ping statistics line for `daemon status` output.
 ///
 /// When `last_ping_secs_ago` is `Some(n)`, produces `"pings: {count} (last {n}s ago)"`.
@@ -2003,6 +2093,63 @@ mod tests {
     // ========================================
     // 9. format_ping_line formatter
     // ========================================
+
+    /// `daemon status` and `stats --daemon` must emit the same schema. They
+    /// used to build separate `json!` objects and drifted — `stats --daemon`
+    /// was missing `ping_count` / `last_ping_secs_ago`. Both now go through
+    /// [`daemon_status_json`], and this pins the keys so a future field is
+    /// added in one place or not at all.
+    #[test]
+    fn daemon_status_json_has_stable_schema() {
+        let status = engramdb::daemon::DaemonStatus {
+            version: "4".to_string(),
+            build: Some("0.9.0".to_string()),
+            model_ids: vec!["embed=onnx/all-MiniLM-L12-v2-u8".to_string()],
+            pid: 123,
+            uptime_secs: 10,
+            idle_secs: 1,
+            bundles_loaded: 1,
+            requests_embed: 1,
+            requests_classify: 2,
+            requests_rerank: 3,
+            requests_meta: 4,
+            requests_status: 5,
+            requests_title: 6,
+            requests_total: 21,
+            ping_count: 7,
+            last_ping_secs_ago: Some(8),
+        };
+        let value = daemon_status_json(&status, std::path::Path::new("/tmp/d.sock"));
+        let obj = value.as_object().expect("object");
+
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "build",
+                "bundles_loaded",
+                "idle_secs",
+                "last_ping_secs_ago",
+                "model_ids",
+                "pid",
+                "ping_count",
+                "protocol",
+                "requests",
+                "running",
+                "socket",
+                "uptime_secs",
+            ]
+        );
+
+        // `version` is presented as `protocol`; the raw wire spelling and the
+        // flat counters must not leak through.
+        assert_eq!(obj["protocol"], "4");
+        assert!(!obj.contains_key("version"));
+        assert!(!obj.contains_key("requests_embed"));
+        assert_eq!(obj["requests"]["total"], 21);
+        assert_eq!(obj["model_ids"][0], "embed=onnx/all-MiniLM-L12-v2-u8");
+    }
 
     #[test]
     fn format_ping_line_with_last_ping_some() {
