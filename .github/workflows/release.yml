@@ -36,7 +36,7 @@ jobs:
   version-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Assert tag matches manifest and workspace versions
         run: |
           tag_ver="${GITHUB_REF_NAME#v}"
@@ -72,7 +72,7 @@ jobs:
       # model-loading tests dlopen.
       ONNXRUNTIME_VERSION: "1.24.2"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         run: rustup toolchain install stable --profile minimal
@@ -114,10 +114,10 @@ jobs:
     needs: [version-check, test]
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache Homebrew packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/Library/Caches/Homebrew
@@ -148,7 +148,7 @@ jobs:
           cd ../..
           shasum -a 256 engramdb-aarch64-apple-darwin.tar.gz > engramdb-aarch64-apple-darwin.tar.gz.sha256
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: engramdb-aarch64-apple-darwin
           path: |
@@ -169,10 +169,10 @@ jobs:
     needs: [version-check, test]
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache Homebrew packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/Library/Caches/Homebrew
@@ -203,7 +203,7 @@ jobs:
           cd ../../..
           shasum -a 256 engramdb-x86_64-apple-darwin.tar.gz > engramdb-x86_64-apple-darwin.tar.gz.sha256
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: engramdb-x86_64-apple-darwin
           path: |
@@ -214,7 +214,7 @@ jobs:
     needs: [version-check, test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install protobuf compiler and lld linker
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
@@ -237,7 +237,7 @@ jobs:
           cd ../..
           sha256sum engramdb-x86_64-unknown-linux-gnu.tar.gz > engramdb-x86_64-unknown-linux-gnu.tar.gz.sha256
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: engramdb-x86_64-unknown-linux-gnu
           path: |
@@ -248,7 +248,7 @@ jobs:
     needs: [version-check, test]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install protobuf compiler
         run: choco install protoc -y
@@ -274,7 +274,7 @@ jobs:
           $hash = (Get-FileHash engramdb-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash.ToLower()
           "$hash  engramdb-x86_64-pc-windows-msvc.zip" | Out-File -Encoding ascii engramdb-x86_64-pc-windows-msvc.zip.sha256
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: engramdb-x86_64-pc-windows-msvc
           path: |
@@ -285,7 +285,7 @@ jobs:
     needs: [build-arm, build-intel, build-linux, build-windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
 
