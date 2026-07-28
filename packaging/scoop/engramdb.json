@@ -1,5 +1,5 @@
 {
-    "version": "0.8.0",
+    "version": "0.9.0",
     "description": "Project-scoped persistent memory store for coding agents",
     "homepage": "https://github.com/egeapak/engramdb",
     "license": "MIT",
@@ -11,7 +11,7 @@
     ],
     "architecture": {
         "64bit": {
-            "url": "https://github.com/egeapak/engramdb/releases/download/v0.8.0/engramdb-x86_64-pc-windows-msvc.zip",
+            "url": "https://github.com/egeapak/engramdb/releases/download/v0.9.0/engramdb-x86_64-pc-windows-msvc.zip",
             "hash": "0000000000000000000000000000000000000000000000000000000000000000"
         }
     },
