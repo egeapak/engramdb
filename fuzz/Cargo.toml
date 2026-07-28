@@ -11,6 +11,11 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 chrono = "0.4"
 serde_json = "1"
+# `derive` lets a target take a named struct instead of a long tuple. std's
+# `Debug` is only implemented up to arity 12, and `fuzz_target!` needs `Debug`
+# to print the failing input — so a target that outgrows 12 fields stops
+# building (see composite_score, #64).
+arbitrary = { version = "1", features = ["derive"] }
 
 [dependencies.engramdb]
 path = ".."

@@ -1,5 +1,6 @@
 #![no_main]
 
+use arbitrary::Arbitrary;
 use chrono::{DateTime, Utc};
 use libfuzzer_sys::fuzz_target;
 
@@ -8,6 +9,33 @@ use engramdb::types::{
     ChallengePenalty, EngramConfig, Epistemic, Memory, MemoryType, Provenance, ProvenanceSource,
     Situation, Status,
 };
+
+/// The fuzzed inputs, as a named struct rather than a tuple.
+///
+/// This deliberately is *not* a tuple: std implements `Debug` only up to arity
+/// 12, and `fuzz_target!` formats the input with `{:?}` to print failing cases.
+/// This target started at 11 fields and silently stopped building when #60
+/// added the epistemic ones (#64). A struct has no such ceiling, so new fields
+/// can be added freely.
+#[derive(Debug, Arbitrary)]
+struct ScoreInput {
+    type_sel: u8,
+    criticality: f64,
+    confidence: f64,
+    created_ts: i64,
+    physical: Vec<String>,
+    logical: Vec<String>,
+    path: Option<String>,
+    ctx_logical: Vec<String>,
+    keyword_score: Option<f64>,
+    semantic_score: Option<f64>,
+    now_ts: i64,
+    epistemic_sel: u8,
+    situation_sel: u8,
+    verified_ts: Option<i64>,
+    /// Per-class challenge penalties: (fact, observation, decision).
+    penalties: (f64, f64, f64),
+}
 
 // `composite_score` is the heart of ranking: it folds criticality, decay,
 // scope, trust, the situation multiplier and an optional semantic/keyword
@@ -20,24 +48,8 @@ use engramdb::types::{
 // non-finite `final_score` is dangerous: ranking sorts with
 // `partial_cmp(..).unwrap()`, which panics on NaN. This target asserts the
 // score is always finite no matter how hostile the memory is.
-fuzz_target!(|input: (
-    u8,
-    f64,
-    f64,
-    i64,
-    Vec<String>,
-    Vec<String>,
-    Option<String>,
-    Vec<String>,
-    Option<f64>,
-    Option<f64>,
-    i64,
-    u8,
-    u8,
-    Option<i64>,
-    (f64, f64, f64)
-)| {
-    let (
+fuzz_target!(|input: ScoreInput| {
+    let ScoreInput {
         type_sel,
         criticality,
         confidence,
@@ -53,7 +65,7 @@ fuzz_target!(|input: (
         situation_sel,
         verified_ts,
         penalties,
-    ) = input;
+    } = input;
 
     let (Some(created_at), Some(now)) = (
         DateTime::<Utc>::from_timestamp(created_ts, 0),
