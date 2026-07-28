@@ -54,6 +54,30 @@ pub const RERANK_JINA_TURBO_Q: RerankModelSpec = RerankModelSpec {
 #[cfg(feature = "onnxruntime")]
 pub const USER_DEFINED_RERANKERS: &[RerankModelSpec] = &[RERANK_JINA_TURBO_Q];
 
+/// The shipped reranker, as a spec.
+///
+/// Mirrors [`crate::nli::DEFAULT_NLI_MODEL`] and `title::DEFAULT_T5_MODEL`:
+/// the default is anchored to a **spec**, not a bare string, so the name, repo
+/// and ONNX file can never disagree. `engram_types::DEFAULT_RERANK_MODEL` is
+/// the same value flattened to a `&str` for `RerankConfig` (which lives in the
+/// `types` foundation and cannot see this crate); a test in `mod.rs` pins the
+/// two together, exactly as NLI does.
+#[cfg(feature = "onnxruntime")]
+pub const DEFAULT_RERANK_SPEC: RerankModelSpec = RERANK_JINA_TURBO_Q;
+
+/// Reranker names fastembed's built-in registry can serve (fp32 only).
+///
+/// [`LocalReranker::load`] checks this before calling
+/// [`resolve_reranker_model`], so that function only ever sees a name it
+/// recognizes — an unknown name degrades to [`DEFAULT_RERANK_SPEC`] instead.
+#[cfg(feature = "onnxruntime")]
+pub const FASTEMBED_RERANKERS: &[&str] = &[
+    "jina-reranker-v1-turbo-en",
+    "jina-reranker-v2-base-multilingual",
+    "bge-reranker-base",
+    "bge-reranker-v2-m3",
+];
+
 /// A cross-encoder score for one input document.
 #[derive(Debug, Clone, Copy)]
 pub struct RerankScore {
@@ -105,6 +129,22 @@ impl LocalReranker {
         // fastembed's registry, which can only reach `onnx/model.onnx`.
         if let Some(spec) = USER_DEFINED_RERANKERS.iter().find(|s| s.name == model_name) {
             let reranker = Self::load_user_defined(spec, cache_dir)?;
+            return Ok(Self::shared(Arc::new(Mutex::new(reranker))));
+        }
+
+        // Unrecognized name: degrade to the shipped default rather than to a
+        // separate fp32 constant. An invalid config should land on the same
+        // model a fresh config would, not on a third behaviour nobody chose.
+        if !FASTEMBED_RERANKERS.contains(&model_name) {
+            tracing::warn!(
+                "unknown rerank.model '{}'; falling back to the default '{}' \
+                 (known: {}, {})",
+                model_name,
+                DEFAULT_RERANK_MODEL,
+                DEFAULT_RERANK_SPEC.name,
+                FASTEMBED_RERANKERS.join(", ")
+            );
+            let reranker = Self::load_user_defined(&DEFAULT_RERANK_SPEC, cache_dir)?;
             return Ok(Self::shared(Arc::new(Mutex::new(reranker))));
         }
 
@@ -195,12 +235,12 @@ impl Reranker for LocalReranker {
     }
 }
 
-/// Map a reranker model name string to a fastembed `RerankerModel` enum variant.
+/// Map a reranker model name string to a fastembed `RerankerModel` variant.
 ///
-/// The recognized default name is [`DEFAULT_RERANK_MODEL`]; anything else
-/// unrecognized falls back to it WITH a warning — a silent fallback let a
-/// typo (`bge-reranker-v2m3`) rerank with a different model than the user
-/// believes they configured.
+/// [`LocalReranker::load`] gates this behind [`FASTEMBED_RERANKERS`], so every
+/// name reaching here is known. The catch-all arm is defensive only (keeping
+/// the two lists in sync is enforced by a test) and mirrors the gate's
+/// behaviour by warning rather than silently substituting.
 #[cfg(feature = "onnxruntime")]
 fn resolve_reranker_model(name: &str) -> RerankerModel {
     match name {
@@ -208,14 +248,10 @@ fn resolve_reranker_model(name: &str) -> RerankerModel {
         "jina-reranker-v1-turbo-en" => RerankerModel::JINARerankerV1TurboEn,
         "jina-reranker-v2-base-multilingual" => RerankerModel::JINARerankerV2BaseMultiligual,
         "bge-reranker-base" => RerankerModel::BGERerankerBase,
+        // Unreachable via `load` (gated by `FASTEMBED_RERANKERS`); defensive
+        // only, and pinned by `fastembed_registry_list_matches_match_arms`.
         other => {
-            tracing::warn!(
-                "unknown rerank.model '{}'; falling back to {} \
-                 (known: jina-reranker-v1-turbo-en, bge-reranker-base, bge-reranker-v2-m3, \
-                 jina-reranker-v2-base-multilingual)",
-                other,
-                DEFAULT_RERANK_MODEL
-            );
+            tracing::warn!("unrecognized fastembed reranker '{other}'; using the fp32 jina turbo");
             RerankerModel::JINARerankerV1TurboEn
         }
     }
@@ -244,6 +280,45 @@ mod tests {
             "spec must name a quantized export, got {}",
             spec.model_file
         );
+    }
+
+    /// The shipped default is anchored to a spec, and an invalid config lands
+    /// on that same default rather than a third behaviour nobody chose.
+    #[test]
+    fn default_is_spec_anchored_and_is_the_invalid_config_fallback() {
+        assert_eq!(
+            DEFAULT_RERANK_SPEC.name, DEFAULT_RERANK_MODEL,
+            "the flattened `types` string must match the spec it stands for"
+        );
+        assert!(
+            USER_DEFINED_RERANKERS
+                .iter()
+                .any(|s| s.name == DEFAULT_RERANK_SPEC.name),
+            "the default spec must be reachable through the spec table"
+        );
+        assert!(
+            !FASTEMBED_RERANKERS.contains(&DEFAULT_RERANK_MODEL),
+            "the default is a user-defined spec, so `load` must not route it \
+             through fastembed's registry"
+        );
+    }
+
+    /// `FASTEMBED_RERANKERS` gates `resolve_reranker_model`, so any name in the
+    /// list must have a real match arm — otherwise `load` would admit a name
+    /// that then silently hits the defensive catch-all.
+    #[test]
+    fn fastembed_registry_list_matches_match_arms() {
+        for name in FASTEMBED_RERANKERS {
+            let resolved = resolve_reranker_model(name);
+            let fallback = resolve_reranker_model("definitely-not-a-model");
+            if *name != "jina-reranker-v1-turbo-en" {
+                assert_ne!(
+                    format!("{resolved:?}"),
+                    format!("{fallback:?}"),
+                    "'{name}' is listed as a fastembed reranker but has no match arm"
+                );
+            }
+        }
     }
 
     /// Every user-defined name must be distinct from fastembed's registry
