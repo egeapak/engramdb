@@ -468,18 +468,27 @@ async fn check_binary_on_path() -> EnvironmentCheck {
     }
 }
 
-/// Check if the Claude Code plugin is installed.
-fn check_claude_plugin() -> EnvironmentCheck {
-    let plugin_file = dirs::home_dir().map(|h| {
-        h.join(".claude")
-            .join("plugins")
-            .join("installed_plugins.json")
-    });
-
-    let found = plugin_file
+/// Whether the Claude Code plugin is installed for the current user.
+///
+/// Shared by [`check_claude_plugin`] and the `.mcp.json` check: the plugin
+/// registers the MCP server globally, so a project with no `.mcp.json` is
+/// correctly configured when the plugin is present and warning about it is
+/// noise.
+fn claude_plugin_installed() -> bool {
+    dirs::home_dir()
+        .map(|h| {
+            h.join(".claude")
+                .join("plugins")
+                .join("installed_plugins.json")
+        })
         .and_then(|path| std::fs::read_to_string(path).ok())
         .map(|contents| contents.contains("engramdb"))
-        .unwrap_or(false);
+        .unwrap_or(false)
+}
+
+/// Check if the Claude Code plugin is installed.
+fn check_claude_plugin() -> EnvironmentCheck {
+    let found = claude_plugin_installed();
 
     EnvironmentCheck {
         name: "Claude Code plugin".to_string(),
@@ -540,14 +549,16 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
         Ok(reg) => {
             let in_registry = reg.projects.iter().any(|e| e.project_id == project_id);
             let total_projects = reg.projects.len();
+            // Share `prune`'s liveness predicate rather than re-deriving one.
+            // A plain `<path>/.engramdb` test counts every linked worktree as
+            // stale (a sub-project's storage lives at its parent, so it has no
+            // `.engramdb/` of its own), which made `doctor` report stale
+            // entries that `prune` then correctly declined to remove — an
+            // unresolvable warning.
             let reachable_projects = reg
                 .projects
                 .iter()
-                .filter(|e| {
-                    std::path::Path::new(&e.project_path)
-                        .join(".engramdb")
-                        .exists()
-                })
+                .filter(|e| crate::ops::projects::registry_entry_alive(e))
                 .count();
 
             // Count orphan data directories (on disk but not in registry)
@@ -1771,6 +1782,13 @@ async fn check_chunk_orphans(store: &MemoryStore) -> EnvironmentCheck {
 
 /// Deep validation of `.mcp.json` — parses JSON and checks structure.
 fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
+    check_mcp_config_deep_with(dir, claude_plugin_installed())
+}
+
+/// [`check_mcp_config_deep`] with plugin presence injected, so tests are not
+/// at the mercy of whether the developer running them happens to have the
+/// Claude Code plugin installed.
+fn check_mcp_config_deep_with(dir: &Path, plugin_installed: bool) -> EnvironmentCheck {
     let mcp_path = dir.join(".mcp.json");
     let content = match std::fs::read_to_string(&mcp_path) {
         Ok(c) => c,
@@ -1779,6 +1797,22 @@ fn check_mcp_config_deep(dir: &Path) -> EnvironmentCheck {
             // hasn't run `engramdb setup` for project-scoped MCP. The MCP
             // integration works fine via absolute paths / user-scoped config,
             // so this must not flip the exit code.
+            //
+            // When the Claude Code plugin is installed it registers the MCP
+            // server globally, so there is nothing left to remediate — the old
+            // suggestion literally read "or install the Claude Code plugin"
+            // while the plugin was already installed. Report it as satisfied
+            // instead of warning about a file that is not needed.
+            if plugin_installed {
+                return EnvironmentCheck {
+                    name: "MCP server configuration".to_string(),
+                    passed: true,
+                    message: "provided by the Claude Code plugin (no .mcp.json needed)".to_string(),
+                    suggestion: None,
+                    details: vec![],
+                    status: Some(CheckStatus::Info),
+                };
+            }
             return EnvironmentCheck {
                 name: "MCP server configuration".to_string(),
                 passed: true,
@@ -2991,10 +3025,31 @@ mod tests {
         assert!(result.message.contains("parse error"));
     }
 
+    /// With the plugin installed, a missing `.mcp.json` is not a finding at
+    /// all: the plugin registers the MCP server globally, so there is nothing
+    /// to remediate. Regression test — this used to warn and suggest
+    /// "install the Claude Code plugin" to users who already had it.
+    #[test]
+    fn test_check_mcp_config_deep_missing_is_info_when_plugin_installed() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = check_mcp_config_deep_with(temp_dir.path(), true);
+        assert_eq!(result.name, "MCP server configuration");
+        assert!(result.passed);
+        assert_eq!(result.status, Some(CheckStatus::Info));
+        assert!(result.message.contains("Claude Code plugin"));
+        assert!(
+            result.suggestion.is_none(),
+            "nothing to remediate when the plugin provides the server"
+        );
+    }
+
     #[test]
     fn test_check_mcp_config_deep_missing() {
         let temp_dir = TempDir::new().unwrap();
-        let result = check_mcp_config_deep(temp_dir.path());
+        // Plugin explicitly absent: without it a missing `.mcp.json` really is
+        // worth a hint. Injected so the assertion does not depend on whether
+        // the developer running the suite has the plugin installed.
+        let result = check_mcp_config_deep_with(temp_dir.path(), false);
         assert_eq!(result.name, "MCP server configuration");
         // Advisory: a missing project `.mcp.json` is a setup hint, not a
         // failure — it warns and never gates the exit code.
