@@ -33,7 +33,7 @@ jobs:
     name: Manifest version parity
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check plugin.json == marketplace.json version
         run: |
           plugin_ver=$(jq -r '.version' .claude-plugin/plugin.json)
@@ -55,7 +55,7 @@ jobs:
     name: Check & Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         run: |
@@ -100,7 +100,7 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         run: rustup toolchain install stable --profile minimal
@@ -142,7 +142,7 @@ jobs:
     env:
       ONNXRUNTIME_VERSION: "1.24.2"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         run: rustup toolchain install stable --profile minimal
@@ -188,7 +188,7 @@ jobs:
     env:
       ONNXRUNTIME_VERSION: "1.24.2"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         run: rustup toolchain install stable --profile minimal
@@ -260,7 +260,7 @@ jobs:
     env:
       ONNXRUNTIME_VERSION: "1.24.2"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         # `llvm-tools-preview` ships `llvm-profdata`/`llvm-cov`, which

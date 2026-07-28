@@ -36,7 +36,7 @@ jobs:
   version-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Assert tag matches manifest and workspace versions
         run: |
           tag_ver="${GITHUB_REF_NAME#v}"
@@ -72,7 +72,7 @@ jobs:
       # model-loading tests dlopen.
       ONNXRUNTIME_VERSION: "1.24.2"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         run: rustup toolchain install stable --profile minimal
@@ -114,7 +114,7 @@ jobs:
     needs: [version-check, test]
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache Homebrew packages
         uses: actions/cache@v4
@@ -169,7 +169,7 @@ jobs:
     needs: [version-check, test]
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache Homebrew packages
         uses: actions/cache@v4
@@ -214,7 +214,7 @@ jobs:
     needs: [version-check, test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install protobuf compiler and lld linker
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
@@ -248,7 +248,7 @@ jobs:
     needs: [version-check, test]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install protobuf compiler
         run: choco install protoc -y
