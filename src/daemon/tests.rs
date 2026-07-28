@@ -70,7 +70,7 @@ async fn daemon_answers_ping() {
     )
     .await;
     match resp {
-        DaemonResponse::Pong { version } => assert_eq!(version, super::PROTOCOL_VERSION),
+        DaemonResponse::Pong { version, .. } => assert_eq!(version, super::PROTOCOL_VERSION),
         other => panic!("expected Pong, got {other:?}"),
     }
 }
@@ -158,6 +158,8 @@ async fn status_and_shutdown_frames_roundtrip() {
     // unit ShuttingDown variant survive a response round-trip.
     let status = DaemonStatus {
         version: super::PROTOCOL_VERSION.to_string(),
+        build: Some(env!("CARGO_PKG_VERSION").to_string()),
+        model_ids: Vec::new(),
         pid: 4242,
         uptime_secs: 12,
         idle_secs: 3,
@@ -804,6 +806,8 @@ async fn query_status_parses_stub_status() {
     spawn_stub(socket.clone(), |op| match op {
         DaemonOp::Status => DaemonResponse::Status(DaemonStatus {
             version: super::PROTOCOL_VERSION.to_string(),
+            build: Some(env!("CARGO_PKG_VERSION").to_string()),
+            model_ids: Vec::new(),
             pid: 77,
             uptime_secs: 1,
             idle_secs: 0,
@@ -844,10 +848,12 @@ async fn healthy_rejects_protocol_version_mismatch() {
     let good = tmp.path().join("good.sock");
     spawn_stub(good.clone(), |_| DaemonResponse::Pong {
         version: super::PROTOCOL_VERSION.to_string(),
+        build: Some(env!("CARGO_PKG_VERSION").to_string()),
     });
     let bad = tmp.path().join("bad.sock");
     spawn_stub(bad.clone(), |_| DaemonResponse::Pong {
         version: "999.bogus".to_string(),
+        build: None,
     });
     for s in [&good, &bad] {
         for _ in 0..100 {
@@ -868,6 +874,48 @@ async fn healthy_rejects_protocol_version_mismatch() {
             .check_health()
             .await,
         "a version mismatch must be treated as unhealthy"
+    );
+}
+
+/// The 0.8.0 → 0.9.0 failure: same wire protocol, older binary, so nothing
+/// evicted the daemon and it kept serving vectors from the superseded
+/// embedding model. A matching protocol is no longer sufficient — the build
+/// must match too.
+#[tokio::test]
+async fn healthy_rejects_older_build_on_matching_protocol() {
+    let tmp = TempDir::new().unwrap();
+
+    let stale = tmp.path().join("stale-build.sock");
+    spawn_stub(stale.clone(), |_| DaemonResponse::Pong {
+        version: super::PROTOCOL_VERSION.to_string(),
+        build: Some("0.0.1".to_string()),
+    });
+    // A daemon predating protocol 4 sends no build at all.
+    let legacy = tmp.path().join("legacy-build.sock");
+    spawn_stub(legacy.clone(), |_| DaemonResponse::Pong {
+        version: super::PROTOCOL_VERSION.to_string(),
+        build: None,
+    });
+    for s in [&stale, &legacy] {
+        for _ in 0..100 {
+            if super::transport::connect(s).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    assert!(
+        !super::DaemonHandle::connect_existing(stale)
+            .check_health()
+            .await,
+        "an older build must be unhealthy even when the protocol matches"
+    );
+    assert!(
+        !super::DaemonHandle::connect_existing(legacy)
+            .check_health()
+            .await,
+        "a daemon reporting no build predates protocol 4 and must be unhealthy"
     );
 }
 
@@ -1145,6 +1193,7 @@ async fn cli_connect_only_uses_daemon_and_in_process_override_does_not() {
     spawn_stub(socket.clone(), |op| match op {
         DaemonOp::Ping => DaemonResponse::Pong {
             version: super::PROTOCOL_VERSION.to_string(),
+            build: Some(env!("CARGO_PKG_VERSION").to_string()),
         },
         DaemonOp::Meta => DaemonResponse::Meta {
             dimensions: 42,
@@ -1208,6 +1257,7 @@ async fn resolve_providers_connect_only_uses_live_daemon() {
     spawn_stub(socket.clone(), |op| match op {
         DaemonOp::Ping => DaemonResponse::Pong {
             version: super::PROTOCOL_VERSION.to_string(),
+            build: Some(env!("CARGO_PKG_VERSION").to_string()),
         },
         DaemonOp::Meta => DaemonResponse::Meta {
             dimensions: 16,

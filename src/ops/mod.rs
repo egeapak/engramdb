@@ -831,6 +831,36 @@ impl ProviderCache {
         self.inner.lock().await.len()
     }
 
+    /// Model ids of every resident provider, as `"<role>=<model_id>"`.
+    ///
+    /// Only embeddings carry a `model_id()` — it is the one whose identity is
+    /// persisted in the manifest and can silently corrupt a store when a stale
+    /// daemon serves vectors from a superseded model. The other roles are
+    /// reported by presence only.
+    ///
+    /// Sorted and deduped so `Status` output is stable across calls.
+    pub async fn model_ids(&self) -> Vec<String> {
+        let guard = self.inner.lock().await;
+        let mut ids: Vec<String> = guard
+            .values()
+            .flat_map(|cached| {
+                let p = &cached.providers;
+                [
+                    p.embedding
+                        .as_ref()
+                        .map(|e| format!("embed={}", e.model_id())),
+                    p.nli.as_ref().map(|_| "nli=loaded".to_string()),
+                    p.reranker.as_ref().map(|_| "rerank=loaded".to_string()),
+                    p.title.as_ref().map(|_| "title=loaded".to_string()),
+                ]
+            })
+            .flatten()
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
     /// Resolve providers for `config`, building them at most once per signature.
     ///
     /// The blocking model load runs on a blocking thread; the async mutex is

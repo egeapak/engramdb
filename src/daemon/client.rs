@@ -69,6 +69,28 @@ fn version_is_older(daemon: &str, client: &str) -> bool {
     }
 }
 
+/// Whether a daemon's crate version is older than this build's.
+///
+/// `None` means a pre-protocol-4 daemon, which is by definition older. Unlike
+/// the protocol version this is semver, so compare numerically per component —
+/// a lexical compare would rank `0.10.0` below `0.9.0`. An unparseable version
+/// is treated as not-older, so a daemon from an unexpected build is left alone
+/// rather than killed in a loop.
+fn build_is_older(daemon: Option<&str>, client: &str) -> bool {
+    let Some(daemon) = daemon else {
+        return true;
+    };
+    let parts = |v: &str| -> Option<(u64, u64, u64)> {
+        let mut it = v.trim().split('.').map(str::parse::<u64>);
+        let triple = (it.next()?.ok()?, it.next()?.ok()?, it.next()?.ok()?);
+        Some(triple)
+    };
+    match (parts(daemon), parts(client)) {
+        (Some(d), Some(c)) => d < c,
+        _ => false,
+    }
+}
+
 /// A connection factory for the shared daemon.
 ///
 /// Each request opens a short-lived connection (connecting to a Unix socket is
@@ -154,8 +176,29 @@ impl DaemonHandle {
             )
             .await
         {
-            Ok(DaemonResponse::Pong { version }) if version == PROTOCOL_VERSION => true,
-            Ok(DaemonResponse::Pong { version }) => {
+            Ok(DaemonResponse::Pong { version, build }) if version == PROTOCOL_VERSION => {
+                // Same wire, older binary: its cached provider bundles are from
+                // the previous release, so it can serve vectors from a model
+                // this build no longer uses — silently, because the manifest
+                // fingerprint is computed client-side. Evict it the same way an
+                // older protocol is evicted. Newer build: leave it alone, for
+                // the same reason as the protocol case below.
+                match build.as_deref() {
+                    Some(env!("CARGO_PKG_VERSION")) => true,
+                    b => {
+                        let reported = b.unwrap_or("pre-4");
+                        tracing::warn!(
+                            "engramdb daemon build {reported} differs from client {}; requesting shutdown so a current daemon can start",
+                            env!("CARGO_PKG_VERSION")
+                        );
+                        if build_is_older(b, env!("CARGO_PKG_VERSION")) {
+                            let _ = oneshot(&self.socket, DaemonOp::Shutdown).await;
+                        }
+                        false
+                    }
+                }
+            }
+            Ok(DaemonResponse::Pong { version, .. }) => {
                 // A stale daemon would otherwise live forever: every health
                 // check that rejects it is itself a served request that
                 // refreshes its idle clock, and the socket stays bound so a
@@ -267,5 +310,37 @@ impl DaemonHandle {
         })
         .await
         .unwrap_or_else(|_| Err(anyhow::anyhow!("daemon request timed out")))
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::{build_is_older, version_is_older};
+
+    #[test]
+    fn protocol_version_ordering() {
+        assert!(version_is_older("3", "4"));
+        assert!(!version_is_older("4", "4"));
+        assert!(!version_is_older("5", "4"));
+        // Unparseable: never evict something we cannot compare.
+        assert!(!version_is_older("999.bogus", "4"));
+    }
+
+    #[test]
+    fn build_version_ordering() {
+        assert!(build_is_older(Some("0.8.0"), "0.9.0"));
+        assert!(!build_is_older(Some("0.9.0"), "0.9.0"));
+        assert!(!build_is_older(Some("0.10.0"), "0.9.0"));
+        // A pre-protocol-4 daemon sends no build and is older by definition.
+        assert!(build_is_older(None, "0.9.0"));
+        assert!(!build_is_older(Some("not.a.version"), "0.9.0"));
+    }
+
+    /// Lexical comparison would rank `0.10.0` below `0.9.0` and make an
+    /// upgraded client kill the newer daemon that other sessions respawn.
+    #[test]
+    fn build_comparison_is_numeric_not_lexical() {
+        assert!(build_is_older(Some("0.9.0"), "0.10.0"));
+        assert!(!build_is_older(Some("0.10.0"), "0.9.0"));
     }
 }
