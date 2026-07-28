@@ -68,6 +68,9 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
+      # Must match ci.yml's pin: the runtime this job installs is the one the
+      # model-loading tests dlopen.
+      ONNXRUNTIME_VERSION: "1.24.2"
     steps:
       - uses: actions/checkout@v4
 
@@ -85,6 +88,24 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
+
+      - name: Install ONNX Runtime
+        # Same reason as the identical step in ci.yml's `test` job: `--all-features`
+        # enables `load-dynamic` alongside `bundled-onnxruntime`, and `ort` takes the
+        # dlopen path whenever `load-dynamic` is on — so a real shared library has to
+        # be present even though a static one is also linked in. Without it the
+        # model-loading tests (e.g. `stats_embeddings_status_all_minilm_available_via_onnx`)
+        # fail and gate the entire release.
+        #
+        # Microsoft's official build, not the `ort` download: that prebuilt executes
+        # quantized models incorrectly on AVX-512/AMX hosts. See
+        # docs/contributors/embedding-model-alternatives.md (R6/R9).
+        run: |
+          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
+                  /usr/local/lib/libonnxruntime.so
+          sudo ldconfig
 
       - name: Run tests
         run: cargo nextest run --workspace --all-features --locked
