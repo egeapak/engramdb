@@ -14,7 +14,8 @@ pub use challenge::{
 };
 #[cfg(feature = "onnxruntime")]
 pub use onnx::{
-    NliModelSpec, OnnxNliProvider, DEFAULT_NLI_MODEL, NLI_DEBERTA_XSMALL, NLI_DEBERTA_XSMALL_Q,
+    NliModelSpec, OnnxNliProvider, ALL_NLI_SPECS, DEFAULT_NLI_MODEL, NLI_DEBERTA_XSMALL,
+    NLI_DEBERTA_XSMALL_Q,
 };
 
 use anyhow::Result;
@@ -125,5 +126,21 @@ mod tests {
     #[test]
     fn default_nli_model_tracks_config_default_repo() {
         assert_eq!(DEFAULT_NLI_MODEL.repo, engram_types::DEFAULT_NLI_MODEL_REPO);
+    }
+
+    /// The enumerable list must contain the default, and every entry must be
+    /// distinct by repo — a duplicate would make repo→spec attribution
+    /// ambiguous for callers that use this list to identify a cached model.
+    #[cfg(feature = "onnxruntime")]
+    #[test]
+    fn all_nli_specs_contains_default_and_is_unique() {
+        assert!(ALL_NLI_SPECS
+            .iter()
+            .any(|s| s.repo == DEFAULT_NLI_MODEL.repo));
+        let mut repos: Vec<&str> = ALL_NLI_SPECS.iter().map(|s| s.repo).collect();
+        let before = repos.len();
+        repos.sort_unstable();
+        repos.dedup();
+        assert_eq!(before, repos.len(), "duplicate repo in ALL_NLI_SPECS");
     }
 }

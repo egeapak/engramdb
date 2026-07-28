@@ -63,6 +63,11 @@ pub const T5_XENOVA_Q: T5ModelSpec = T5ModelSpec {
 /// now gated (HTTP 401).
 pub const DEFAULT_T5_MODEL: T5ModelSpec = T5_XENOVA_Q;
 
+/// Every T5 spec this crate knows. T5 is selected by `title.strategy`, not by
+/// a model string, so this exists for repo-id attribution rather than config
+/// resolution.
+pub const ALL_T5_SPECS: &[T5ModelSpec] = &[T5_OPTIMUM, T5_XENOVA_Q];
+
 /// Maximum number of input tokens.
 const MAX_INPUT_TOKENS: usize = 128;
 

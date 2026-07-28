@@ -1287,6 +1287,76 @@ mod tests {
         assert!(engine.title_generator().is_none());
     }
 
+    /// Pins the hook-safety guarantee the reranking-on-by-default change
+    /// depends on: even with `[rerank].enabled = true` explicitly configured
+    /// (the new shipped default, not just an omitted section), the hook
+    /// construction path never wires a reranker, so `reranking_available()`
+    /// must stay false. `EngineProviders::default()` has no reranker
+    /// regardless of config — this is what keeps `PreToolUse` / `SessionStart`
+    /// / `UserPromptSubmit` (which fire on every Read/Write/Edit) free of the
+    /// ~150 ms/query cross-encoder cost.
+    #[tokio::test]
+    async fn hook_engine_never_reranks() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &crate::storage::InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let config_path = temp_dir.path().join(".engramdb").join("config.toml");
+
+        let mut config = crate::types::EngramConfig::default();
+        assert!(
+            config.rerank.enabled,
+            "test assumes the shipped default is already enabled=true; \
+             writing it explicitly below either way so the assertion holds \
+             even if that default ever changes back"
+        );
+        config.rerank.enabled = true;
+        config.to_toml_file(&config_path).unwrap();
+
+        let engine = build_engine_without_providers(store, &config_path).await;
+
+        assert!(
+            !engine.reranking_available(),
+            "hook engine must never rerank, even with rerank.enabled = true in config"
+        );
+    }
+
+    /// Every spec a config string can select must appear in
+    /// `ALL_ONNX_EMBEDDING_SPECS`.
+    ///
+    /// That list is what maps a cached model directory back to the model that
+    /// created it. A spec reachable from `provider_specs` but missing from the
+    /// list would read as an unattributable directory — which downstream
+    /// tooling is entitled to treat as unused and delete, forcing a re-download
+    /// (or, worse, a re-embed if a store is pinned to it).
+    #[cfg(feature = "onnxruntime")]
+    #[test]
+    fn every_configurable_embedding_spec_is_enumerable() {
+        use crate::embeddings::ALL_ONNX_EMBEDDING_SPECS;
+        for provider in [
+            "onnx",
+            "all-minilm",
+            "all-minilm-l6",
+            "all-minilm-l12",
+            "all-minilm-l12-int8",
+            "all-minilm-l12-fp32",
+            "nomic-embed-text",
+            "mxbai-embed-large",
+        ] {
+            let Some(specs) = provider_specs(provider) else {
+                continue;
+            };
+            assert!(
+                ALL_ONNX_EMBEDDING_SPECS
+                    .iter()
+                    .any(|s| s.name == specs.onnx.name),
+                "provider '{provider}' selects spec '{}', which is missing from \
+                 ALL_ONNX_EMBEDDING_SPECS",
+                specs.onnx.name
+            );
+        }
+    }
+
     /// The actual safety property the `provider_specs` unification
     /// protects: the cheap, model-load-free `expected_embedding_fingerprint`
     /// must equal what the *live* provider reports via `model_id()`. If they

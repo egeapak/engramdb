@@ -229,7 +229,8 @@ mod tests {
         assert_eq!(view.retrieval.default_max_results, 10);
         assert!((view.retrieval.relevance_threshold - 0.45).abs() < f64::EPSILON);
         assert!((view.retrieval.search_threshold - 0.2).abs() < f64::EPSILON);
-        assert!(!view.features.rerank_enabled);
+        assert!(view.features.rerank_enabled);
+        assert_eq!(view.features.rerank_top_n, 10);
         assert!(!view.features.contradiction_detection_enabled);
         assert_eq!(view.embedding.dimensions, 384);
     }

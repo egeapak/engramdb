@@ -244,6 +244,30 @@ pub const ONNX_ALL_MINILM_L6_U8: OnnxModelSpec = OnnxModelSpec {
 /// `[embeddings].provider = "all-minilm-l6"` / `"all-minilm-l12-int8"`.
 pub const DEFAULT_ONNX_EMBEDDING: OnnxModelSpec = ONNX_ALL_MINILM_L12_U8;
 
+/// Every ONNX embedding spec this crate knows, including benchmark-only ones
+/// not reachable from any `[embeddings].provider` string.
+///
+/// NOT a whitelist: an unknown provider string disables embeddings outright
+/// (`ops::provider_specs` returns `None`) rather than falling back, because a
+/// silently-substituted embedding model would write vectors that disagree with
+/// the store's recorded fingerprint. This list exists so a cached model
+/// directory can be attributed back to a spec.
+pub const ALL_ONNX_EMBEDDING_SPECS: &[OnnxModelSpec] = &[
+    ONNX_ALL_MINILM,
+    ONNX_ALL_MINILM_Q,
+    ONNX_ALL_MINILM_L12,
+    ONNX_ALL_MINILM_L12_Q,
+    ONNX_ALL_MINILM_L12_U8,
+    ONNX_ALL_MINILM_L6_U8,
+    ONNX_NOMIC_EMBED_TEXT,
+    ONNX_NOMIC_EMBED_TEXT_Q,
+    ONNX_BGE_SMALL_EN_Q,
+    ONNX_ARCTIC_XS,
+    ONNX_ARCTIC_XS_Q,
+    ONNX_ARCTIC_S_Q,
+    ONNX_MXBAI_EMBED_LARGE,
+];
+
 /// ONNX-based embedding provider using fastembed.
 ///
 /// This provider uses the fastembed crate to generate embeddings locally

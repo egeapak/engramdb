@@ -2982,11 +2982,25 @@ mod tests {
             "a failed model check should carry a remediation hint"
         );
 
-        // Disabled-by-default features are skipped (Info), not failed.
+        // NLI is disabled by default, so it is skipped (Info), not failed.
         let nli = checks.iter().find(|c| c.name == "NLI model").unwrap();
         assert!(nli.passed && nli.status == Some(CheckStatus::Info));
+
+        // Reranking IS enabled by default, so the reranker is probed for real
+        // rather than skipped. Its outcome is deliberately not asserted: unlike
+        // the embedding/NLI/T5 loaders, `LocalReranker::load` has no
+        // `ENGRAMDB_OFFLINE` guard, so on a developer machine that already has
+        // the cross-encoder cached it loads and passes, while on a cold CI
+        // runner it fails to download. Pinning either outcome makes this test
+        // machine-dependent; what this test covers is the *section shape*
+        // (asserted above), and the enabled-path branch is covered by
+        // `test_models_subsection_describes_embedding_model`.
         let rerank = checks.iter().find(|c| c.name == "Reranker model").unwrap();
-        assert!(rerank.passed && rerank.status == Some(CheckStatus::Info));
+        assert_ne!(
+            rerank.status,
+            Some(CheckStatus::Info),
+            "an enabled reranker must be probed, not skipped"
+        );
     }
 
     // --- Group 4: new check functions ---
@@ -3875,9 +3889,15 @@ mod tests {
             .expect("embedding model must always be described");
         assert_eq!(embed.status, Some(CheckStatus::Info));
         assert!(!embed.details.is_empty(), "model needs a description");
-        // Defaults: NLI and reranker are disabled, so no model is loaded for them.
+        // NLI is disabled by default, so no model is described for it.
         assert!(!checks.iter().any(|c| c.name == "NLI model"));
-        assert!(!checks.iter().any(|c| c.name == "Reranker model"));
+        // Reranking is enabled by default, so its model IS described.
+        let rerank = checks
+            .iter()
+            .find(|c| c.name == "Reranker model")
+            .expect("an enabled-by-default reranker must be described");
+        assert_eq!(rerank.status, Some(CheckStatus::Info));
+        assert!(!rerank.details.is_empty(), "model needs a description");
         // Default title strategy is T5.
         assert!(checks.iter().any(|c| c.name == "Title model"));
     }

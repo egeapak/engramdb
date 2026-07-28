@@ -33,17 +33,25 @@ pub const CONTENT_SOFT_TOKEN_TARGET: usize = 500;
 /// ~3.7× less RAM, identical id2label).
 pub const DEFAULT_NLI_MODEL_REPO: &str = "Xenova/nli-deberta-v3-xsmall";
 
-/// Single source of truth for the `[rerank].model` default. `crate::rerank`'s
-/// `resolve_reranker_model` must map this name to a real model and use it as
-/// the unknown-name fallback; a unit test in that module asserts no drift.
+/// Single source of truth for the `[rerank].model` default.
+///
+/// Unlike [`DEFAULT_NLI_MODEL_REPO`], this name is resolved through
+/// `crate::rerank`'s `USER_DEFINED_RERANKERS` spec table *first* — not through
+/// `resolve_reranker_model`, which only ever sees unrecognized names and maps
+/// them to the fp32 `jina-reranker-v1-turbo-en` fallback. `"jina-turbo-q"` is a
+/// user-defined (explicit HuggingFace file) spec, so the default path never
+/// reaches `resolve_reranker_model` at all; `rerank::quantized_spec_is_reachable_by_name`
+/// is the drift guard now (it asserts the name resolves via the spec table to
+/// a quantized ONNX export), not a `resolve_reranker_model` equality test.
 /// Lives here, in the `types` foundation, for the same reason as
 /// [`DEFAULT_NLI_MODEL_REPO`].
 ///
-/// `jina-reranker-v1-turbo-en` over the historical `bge-reranker-base`: 7.3×
-/// smaller (145 MB vs 1060 MB), 6.2× faster per pair, 28× faster to load, and
-/// better nDCG@10 on the retrieval corpus — dominant on every measured axis.
-/// See `docs/contributors/embedding-model-alternatives.md` (R3).
-pub const DEFAULT_RERANK_MODEL: &str = "jina-reranker-v1-turbo-en";
+/// `jina-turbo-q` (uint8-quantized `jinaai/jina-reranker-v1-turbo-en`) over the
+/// fp32 export of the same model: 1.55× faster at equal quality (nDCG 0.945 vs
+/// 0.946) and 36.5 MB instead of 144 MB. See
+/// `docs/contributors/embedding-model-alternatives.md` (R3) for why this model
+/// family was chosen over `bge-reranker-base` in the first place.
+pub const DEFAULT_RERANK_MODEL: &str = "jina-turbo-q";
 
 /// Weights for scoring components.
 ///
@@ -957,19 +965,29 @@ impl Default for NliConfig {
 /// When enabled, a cross-encoder model jointly scores query+document pairs
 /// to refine the initial bi-encoder retrieval ranking. This is slower but
 /// more accurate for nuanced relevance judgments.
+///
+/// On by default since the quantized cross-encoder never lost to the baseline
+/// on any measured corpus (only ever neutral-to-positive), at ~150 ms/query —
+/// see `docs/contributors/embedding-model-alternatives.md`. Note this only
+/// ever applies to `RetrievalEngine::query` calls with a reranker attached;
+/// the Claude Code hook handlers use `ops::build_engine_without_providers`,
+/// which never wires a reranker regardless of this config, so hook latency is
+/// unaffected.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RerankConfig {
-    /// Whether reranking is enabled (default: false)
+    /// Whether reranking is enabled (default: true)
     pub enabled: bool,
 
-    /// Reranker model name (default: [`DEFAULT_RERANK_MODEL`]).
-    /// Supported: "jina-reranker-v1-turbo-en", "bge-reranker-base",
-    /// "bge-reranker-v2-m3", "jina-reranker-v2-base-multilingual".
+    /// Reranker model name (default: [`DEFAULT_RERANK_MODEL`], the uint8
+    /// `jina-turbo-q`). Supported: "jina-turbo-q", "jina-reranker-v1-turbo-en",
+    /// "bge-reranker-base", "bge-reranker-v2-m3",
+    /// "jina-reranker-v2-base-multilingual".
     pub model: String,
 
-    /// Number of top candidates to rerank (default: 50).
+    /// Number of top candidates to rerank (default: 10).
     /// Only the top N results from initial retrieval are passed to the
-    /// cross-encoder. Higher values improve quality but are slower.
+    /// cross-encoder. This is the measured knee of the quality/cost curve —
+    /// both cheaper and better than deeper windows on the benchmarked corpora.
     pub top_n: usize,
 
     /// Blend weight for rerank score vs original score (default: 0.5).
@@ -995,12 +1013,16 @@ impl RerankConfig {
 impl Default for RerankConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             // Single source of truth, same discipline as `NliConfig::default`:
-            // never a hand-copied literal, so the default can't drift from the
-            // model `resolve_reranker_model` actually selects.
+            // never a hand-copied literal, so the default can't silently name
+            // a different model than what actually ships.
             model: DEFAULT_RERANK_MODEL.to_string(),
-            top_n: 50,
+            // The knee of the quality/cost curve: cheaper AND better than the
+            // historical default of 50 (nDCG@10 0.684 vs 0.690, at 1/5 the
+            // cross-encoder calls). See
+            // `docs/contributors/embedding-model-alternatives.md`.
+            top_n: 10,
             weight: 0.5,
         }
     }
@@ -2381,21 +2403,26 @@ similarity_threshold = 0.4
         assert_eq!(config.nli.similarity_threshold, 0.4);
     }
 
+    /// Pins all three coupled defaults so a future edit that silently
+    /// re-raises `top_n`, flips `enabled` back off, or swaps the model can't
+    /// pass CI unnoticed. See `docs/contributors/embedding-model-alternatives.md`
+    /// for the measured evidence behind each value.
     #[test]
-    fn test_rerank_config_defaults() {
+    fn rerank_defaults_are_enabled_quantized_and_top10() {
         let config = RerankConfig::default();
-        assert!(!config.enabled);
+        assert!(config.enabled);
+        assert_eq!(config.model, "jina-turbo-q");
         assert_eq!(config.model, DEFAULT_RERANK_MODEL);
-        assert_eq!(config.top_n, 50);
+        assert_eq!(config.top_n, 10);
         assert_eq!(config.weight, 0.5);
     }
 
     #[test]
-    fn test_rerank_config_disabled_by_default() {
+    fn test_rerank_config_enabled_by_default() {
         let config = EngramConfig::default();
-        assert!(!config.rerank.enabled);
+        assert!(config.rerank.enabled);
         assert_eq!(config.rerank.model, DEFAULT_RERANK_MODEL);
-        assert_eq!(config.rerank.top_n, 50);
+        assert_eq!(config.rerank.top_n, 10);
         assert_eq!(config.rerank.weight, 0.5);
     }
 
@@ -2418,9 +2445,9 @@ weight = 0.7
     #[test]
     fn test_rerank_config_defaults_when_omitted() {
         let config: EngramConfig = toml::from_str("").unwrap();
-        assert!(!config.rerank.enabled);
+        assert!(config.rerank.enabled);
         assert_eq!(config.rerank.model, DEFAULT_RERANK_MODEL);
-        assert_eq!(config.rerank.top_n, 50);
+        assert_eq!(config.rerank.top_n, 10);
         assert_eq!(config.rerank.weight, 0.5);
     }
 
