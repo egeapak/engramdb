@@ -33,6 +33,18 @@ pub const CONTENT_SOFT_TOKEN_TARGET: usize = 500;
 /// ~3.7× less RAM, identical id2label).
 pub const DEFAULT_NLI_MODEL_REPO: &str = "Xenova/nli-deberta-v3-xsmall";
 
+/// Single source of truth for the `[rerank].model` default. `crate::rerank`'s
+/// `resolve_reranker_model` must map this name to a real model and use it as
+/// the unknown-name fallback; a unit test in that module asserts no drift.
+/// Lives here, in the `types` foundation, for the same reason as
+/// [`DEFAULT_NLI_MODEL_REPO`].
+///
+/// `jina-reranker-v1-turbo-en` over the historical `bge-reranker-base`: 7.3×
+/// smaller (145 MB vs 1060 MB), 6.2× faster per pair, 28× faster to load, and
+/// better nDCG@10 on the retrieval corpus — dominant on every measured axis.
+/// See `docs/contributors/embedding-model-alternatives.md` (R3).
+pub const DEFAULT_RERANK_MODEL: &str = "jina-reranker-v1-turbo-en";
+
 /// Weights for scoring components.
 ///
 /// Trust and scope are applied as multipliers on the entire score,
@@ -698,17 +710,16 @@ impl Default for RetrievalConfig {
 #[serde(rename_all = "lowercase")]
 pub enum EmbeddingBackend {
     /// Try ONNX first, fall back to Ollama (default).
+    ///
+    /// `"tract"` is accepted as an alias so a config written for the removed
+    /// pure-Rust backend keeps loading; it now resolves like any other `auto`.
     #[default]
+    #[serde(alias = "tract")]
     Auto,
     /// Only use local ONNX runtime via fastembed.
     Onnx,
     /// Only use an Ollama server.
     Ollama,
-    /// Only use the pure-Rust `tract` engine (fp32 MiniLM). No native ONNX
-    /// Runtime — the fallback backend for platforms with no prebuilt `ort`
-    /// (notably Intel Mac, `x86_64-apple-darwin`). ~3× slower than ONNX;
-    /// selected automatically on those targets, or explicitly here.
-    Tract,
 }
 
 impl std::fmt::Display for EmbeddingBackend {
@@ -717,7 +728,6 @@ impl std::fmt::Display for EmbeddingBackend {
             Self::Auto => write!(f, "auto"),
             Self::Onnx => write!(f, "onnx"),
             Self::Ollama => write!(f, "ollama"),
-            Self::Tract => write!(f, "tract"),
         }
     }
 }
@@ -729,9 +739,13 @@ impl std::str::FromStr for EmbeddingBackend {
             "auto" => Ok(Self::Auto),
             "onnx" => Ok(Self::Onnx),
             "ollama" => Ok(Self::Ollama),
-            "tract" => Ok(Self::Tract),
+            // Back-compat: the pure-Rust tract backend was removed once the
+            // ONNX Runtime became a separately installed shared library, which
+            // gave every platform (including Intel Mac, via Homebrew) a real
+            // ONNX path. An existing config naming it resolves to `auto`.
+            "tract" => Ok(Self::Auto),
             other => Err(format!(
-                "unknown embedding backend '{}': expected auto, onnx, ollama, or tract",
+                "unknown embedding backend '{}': expected auto, onnx, or ollama",
                 other
             )),
         }
@@ -948,9 +962,9 @@ pub struct RerankConfig {
     /// Whether reranking is enabled (default: false)
     pub enabled: bool,
 
-    /// Reranker model name (default: "bge-reranker-base").
-    /// Supported: "bge-reranker-base", "bge-reranker-v2-m3",
-    /// "jina-reranker-v1-turbo-en", "jina-reranker-v2-base-multilingual".
+    /// Reranker model name (default: [`DEFAULT_RERANK_MODEL`]).
+    /// Supported: "jina-reranker-v1-turbo-en", "bge-reranker-base",
+    /// "bge-reranker-v2-m3", "jina-reranker-v2-base-multilingual".
     pub model: String,
 
     /// Number of top candidates to rerank (default: 50).
@@ -982,7 +996,10 @@ impl Default for RerankConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            model: "bge-reranker-base".to_string(),
+            // Single source of truth, same discipline as `NliConfig::default`:
+            // never a hand-copied literal, so the default can't drift from the
+            // model `resolve_reranker_model` actually selects.
+            model: DEFAULT_RERANK_MODEL.to_string(),
             top_n: 50,
             weight: 0.5,
         }
@@ -1903,8 +1920,9 @@ mod tests {
     }
 
     /// Every `EmbeddingBackend` variant round-trips through `Display`/`FromStr`
-    /// (case-insensitively), and an unknown string errors. Locks the `tract`
-    /// variant added for the Intel-Mac pure-Rust backend.
+    /// (case-insensitively), and an unknown string errors. Also pins the
+    /// back-compat alias: a config left over from the removed pure-Rust `tract`
+    /// backend must keep loading rather than failing to parse.
     #[test]
     fn embedding_backend_roundtrips() {
         use std::str::FromStr;
@@ -1912,7 +1930,6 @@ mod tests {
             (EmbeddingBackend::Auto, "auto"),
             (EmbeddingBackend::Onnx, "onnx"),
             (EmbeddingBackend::Ollama, "ollama"),
-            (EmbeddingBackend::Tract, "tract"),
         ] {
             assert_eq!(variant.to_string(), name);
             assert_eq!(EmbeddingBackend::from_str(name).unwrap(), variant);
@@ -1922,6 +1939,20 @@ mod tests {
             );
         }
         assert!(EmbeddingBackend::from_str("nonsense").is_err());
+
+        // Removed backend: still parses and resolves to Auto, both via
+        // `FromStr` and via serde — an on-disk `backend = "tract"` must not
+        // break config loading for anyone who had set it.
+        assert_eq!(
+            EmbeddingBackend::from_str("tract").unwrap(),
+            EmbeddingBackend::Auto
+        );
+        #[derive(Deserialize)]
+        struct BackendOnly {
+            backend: EmbeddingBackend,
+        }
+        let parsed: BackendOnly = toml::from_str("backend = \"tract\"\n").unwrap();
+        assert_eq!(parsed.backend, EmbeddingBackend::Auto);
     }
 
     /// Guards the single-source-of-truth: `NliConfig::default().model` is
@@ -2354,7 +2385,7 @@ similarity_threshold = 0.4
     fn test_rerank_config_defaults() {
         let config = RerankConfig::default();
         assert!(!config.enabled);
-        assert_eq!(config.model, "bge-reranker-base");
+        assert_eq!(config.model, DEFAULT_RERANK_MODEL);
         assert_eq!(config.top_n, 50);
         assert_eq!(config.weight, 0.5);
     }
@@ -2363,7 +2394,7 @@ similarity_threshold = 0.4
     fn test_rerank_config_disabled_by_default() {
         let config = EngramConfig::default();
         assert!(!config.rerank.enabled);
-        assert_eq!(config.rerank.model, "bge-reranker-base");
+        assert_eq!(config.rerank.model, DEFAULT_RERANK_MODEL);
         assert_eq!(config.rerank.top_n, 50);
         assert_eq!(config.rerank.weight, 0.5);
     }
@@ -2388,7 +2419,7 @@ weight = 0.7
     fn test_rerank_config_defaults_when_omitted() {
         let config: EngramConfig = toml::from_str("").unwrap();
         assert!(!config.rerank.enabled);
-        assert_eq!(config.rerank.model, "bge-reranker-base");
+        assert_eq!(config.rerank.model, DEFAULT_RERANK_MODEL);
         assert_eq!(config.rerank.top_n, 50);
         assert_eq!(config.rerank.weight, 0.5);
     }

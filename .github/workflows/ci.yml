@@ -76,8 +76,11 @@ jobs:
       # branches (e.g. in src/ops/mod.rs). The all-features build above never
       # exercises the pure-ONNX path, so a `--no-default-features` compile break
       # would otherwise ship unnoticed. Cheap `check` only.
+      # `--no-default-features` also strips `engram-onnx`'s own default, so a
+      # linking strategy has to be named explicitly or the build stops at the
+      # "needs an ONNX Runtime linking strategy" compile_error.
       - name: Check (no default features)
-        run: cargo check --workspace --no-default-features --locked
+        run: cargo check --workspace --no-default-features --features onnxruntime,load-dynamic --locked
 
   # Linux full tests run in the `test` job below; this matrix covers the
   # non-Linux targets that `release.yml` actually ships (macOS + Windows):
@@ -136,6 +139,8 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    env:
+      ONNXRUNTIME_VERSION: "1.24.2"
     steps:
       - uses: actions/checkout@v4
 
@@ -156,12 +161,104 @@ jobs:
         with:
           tool: nextest
 
+      - name: Install ONNX Runtime
+        # `--all-features` enables `load-dynamic` alongside `bundled-onnxruntime`,
+        # and `ort` takes the dlopen path whenever `load-dynamic` is on — so a
+        # real shared library has to be present even though a static one is also
+        # linked in. Before the runtime became external, the static link alone
+        # was enough here.
+        run: |
+          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
+                  /usr/local/lib/libonnxruntime.so
+          sudo ldconfig
+
       - name: Run tests
         run: cargo nextest run --workspace --all-features --locked
+
+  # `--all-features` necessarily turns `bundled-onnxruntime` back on, so the job
+  # above links ONNX Runtime statically and never exercises what users actually
+  # ship: default features, where the runtime is `dlopen`ed at run time. This job
+  # covers that path — including the case that used to abort the process, a
+  # *missing* runtime, which must degrade to "embeddings unavailable" instead.
+  test-load-dynamic:
+    name: Test (default features, runtime-loaded ONNX)
+    runs-on: ubuntu-latest
+    env:
+      ONNXRUNTIME_VERSION: "1.24.2"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install protobuf compiler and lld linker
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Install ONNX Runtime
+        # The official Microsoft build. Deliberately not the one `ort` would
+        # download: that prebuilt executes quantized models incorrectly on
+        # AVX-512/AMX hosts. See docs/contributors/embedding-model-alternatives.md.
+        run: |
+          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
+                  /usr/local/lib/libonnxruntime.so
+          sudo ldconfig
+
+      - name: Build with default features
+        # No ONNX Runtime is required to build under `load-dynamic`; this must
+        # succeed on its own.
+        run: cargo build --workspace --locked
+
+      - name: Binary must not record a load-time dependency on ONNX Runtime
+        # The property that makes graceful degradation possible at all. If
+        # libonnxruntime becomes a DT_NEEDED entry, the dynamic loader resolves
+        # it before `main()` runs, and a missing runtime stops the binary from
+        # starting -- no `doctor`, no fallback, and the pre-flight probe never
+        # gets a turn. Switching a strategy feature into `default` would cause
+        # exactly that, silently.
+        run: |
+          if ldd target/debug/engramdb | grep -qi onnxruntime; then
+            echo "::error::engramdb links libonnxruntime at load time; the default \
+          build must resolve it at run time so a missing runtime degrades instead \
+          of blocking startup."
+            ldd target/debug/engramdb | grep -i onnxruntime
+            exit 1
+          fi
+          echo "OK: no load-time ONNX Runtime dependency recorded."
+
+      - name: Binary must start with no runtime installed
+        run: ./target/debug/engramdb --version
+
+      - name: Test with the runtime discovered from /usr/local/lib
+        # No ORT_DYLIB_PATH: this asserts the built-in search path finds a
+        # system-installed runtime the way a Homebrew or distro install would.
+        run: cargo nextest run --workspace --locked
+
+      - name: Missing runtime must degrade, not abort
+        # The regression guard for the whole change. `ort`'s own loader panics
+        # when the dylib is absent and the release profile is `panic = "abort"`,
+        # so without the pre-flight probe in `engram_onnx::runtime` this aborts.
+        run: |
+          sudo rm /usr/local/lib/libonnxruntime.so
+          sudo ldconfig
+          cargo nextest run --workspace --locked -E 'test(runtime::tests::)'
+          echo "Probe reports:"
+          cargo run --quiet --locked --bin engramdb -- doctor || true
 
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    env:
+      ONNXRUNTIME_VERSION: "1.24.2"
     steps:
       - uses: actions/checkout@v4
 
@@ -181,6 +278,19 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest,cargo-llvm-cov
+
+      - name: Install ONNX Runtime
+        # `--all-features` enables `load-dynamic` alongside `bundled-onnxruntime`,
+        # and `ort` takes the dlopen path whenever `load-dynamic` is on — so a
+        # real shared library has to be present even though a static one is also
+        # linked in. Before the runtime became external, the static link alone
+        # was enough here.
+        run: |
+          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
+                  /usr/local/lib/libonnxruntime.so
+          sudo ldconfig
 
       - name: Run tests under coverage instrumentation
         # Mirror the `test` job's invocation so coverage reflects the real

@@ -96,6 +96,7 @@ impl OnnxNliProvider {
     /// Used by the benchmark suite to compare CPU vs Core ML on identical
     /// workloads; production code should use [`OnnxNliProvider::new`].
     pub fn new_on(model_repo: &str, backend: engram_onnx::Backend) -> Result<Self> {
+        crate::ensure_onnx_runtime()?;
         // Map known repos to the right ONNX file so the string-based
         // config API still selects the int8 model for the default repo.
         // Unknown (user-custom) repos keep the historical fp32 defaults.

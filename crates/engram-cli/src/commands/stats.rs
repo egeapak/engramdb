@@ -256,7 +256,7 @@ async fn print_embeddings_status(model: &str, backend: EmbeddingBackend) {
     // Check the local ONNX Runtime engine if this build has it and the backend
     // allows it.
     #[cfg(feature = "onnxruntime")]
-    if backend != EmbeddingBackend::Ollama && backend != EmbeddingBackend::Tract {
+    if backend != EmbeddingBackend::Ollama {
         let available = match model {
             "nomic-embed-text" => OnnxProvider::try_with_model(ONNX_NOMIC_EMBED_TEXT).is_some(),
             "mxbai-embed-large" => OnnxProvider::try_with_model(ONNX_MXBAI_EMBED_LARGE).is_some(),
@@ -267,23 +267,6 @@ async fn print_embeddings_status(model: &str, backend: EmbeddingBackend) {
             return;
         }
         if backend == EmbeddingBackend::Onnx {
-            println!("Embeddings: Not available (run 'engramdb init' to download model)");
-            return;
-        }
-    }
-
-    // Check the pure-Rust tract engine (fp32 MiniLM) when compiled in and the
-    // backend allows it (explicit `tract`, or `Auto` on a build with no ORT).
-    #[cfg(feature = "tract")]
-    if backend != EmbeddingBackend::Ollama && backend != EmbeddingBackend::Onnx {
-        // tract ships only the fp32 MiniLM in the MVP.
-        if matches!(model, "onnx" | "all-minilm")
-            && engramdb::embeddings::TractEmbeddingProvider::try_new().is_some()
-        {
-            println!("Embeddings: Available ({} via tract)", display_name);
-            return;
-        }
-        if backend == EmbeddingBackend::Tract {
             println!("Embeddings: Not available (run 'engramdb init' to download model)");
             return;
         }

@@ -25,13 +25,11 @@ name = "engramdb"
 path = "src/lib.rs"
 
 [features]
-default = ["onnxruntime", "ollama"]
+default = ["onnxruntime", "load-dynamic", "ollama"]
 # ONNX Runtime stack (`ort` + `fastembed` + the `engram-onnx` EP wiring). On by
 # default. A pure-Rust build for a platform with no prebuilt ORT (Intel Mac)
 # uses `--no-default-features --features tract` instead.
 onnxruntime = ["engram-models/onnxruntime", "dep:engram-onnx"]
-# Pure-Rust `tract` embedding backend (fp32 MiniLM). No native ONNX Runtime.
-tract = ["engram-models/tract"]
 ollama = ["reqwest", "engram-models/ollama"]
 # Apple Core ML (GPU / Neural Engine) acceleration for all ONNX models.
 # Enable on macOS only: `cargo build --features coreml`. Off by default so
@@ -42,6 +40,35 @@ coreml = ["onnxruntime", "engram-onnx/coreml", "engram-models/coreml"]
 # the provider ships in the prebuilt `ort` binary so only this feature is
 # needed (no source build, same downloaded binary). For A/B benchmarking.
 xnnpack = ["onnxruntime", "engram-onnx/xnnpack", "engram-models/xnnpack"]
+# --- ONNX Runtime linking strategy ---------------------------------------
+# EngramDB does not vendor an ONNX Runtime. Exactly one of the three strategies
+# below decides where `libonnxruntime` comes from; `load-dynamic` is in
+# `default`, so selecting another means `--no-default-features`.
+#
+#   load-dynamic         (default) `ort` `dlopen`s the runtime on first use.
+#                        Nothing is required at build time and one prebuilt
+#                        binary works against any installed runtime >= 1.24, so
+#                        this is what the release archives and the Homebrew /
+#                        Scoop packages use. `engram_onnx::runtime` locates and
+#                        validates the library before `ort` touches it.
+#
+#   bundled-onnxruntime  Download and statically link a prebuilt runtime — the
+#                        historical default, kept as an escape hatch for
+#                        platforms with no packaged ONNX Runtime and for
+#                        hermetic builds. **Not recommended**: the pyke prebuilt
+#                        it fetches executes quantized models incorrectly on
+#                        AVX-512/AMX hosts (the same text embeds to unrelated
+#                        vectors under CPU load), which is why it stopped being
+#                        the default. See
+#                        `docs/contributors/embedding-model-alternatives.md`
+#                        (R6/R9).
+#
+# Examples:
+#     cargo build --release                                   # load-dynamic
+#     cargo build --release --no-default-features \
+#         --features onnxruntime,ollama,bundled-onnxruntime
+load-dynamic = ["engram-models/load-dynamic", "engram-onnx?/load-dynamic"]
+bundled-onnxruntime = ["engram-models/bundled-onnxruntime", "engram-onnx?/bundled-onnxruntime"]
 # Re-exports `engram-storage`'s `test_support` (global-store serialization lock)
 # so downstream crates (engram-mcp, engram-cli) can use it in their test builds.
 test-support = ["engram-storage/test-support"]
@@ -122,6 +149,7 @@ ort = { version = "2.0.0-rc.12", default-features = false, features = ["download
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 hf-hub = { version = "0.5", default-features = false, features = ["rustls-tls", "tokio", "ureq"] }
 toml = "1"
+
 
 [[bench]]
 name = "benchmarks"

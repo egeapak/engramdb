@@ -77,7 +77,7 @@ threshold = 0.2                # minimum keyword-search score
 
 [embeddings]
 backend = "auto"               # "auto" | "onnx" | "ollama"
-provider = "onnx"              # "all-minilm" (384d) | "nomic-embed-text" (768d) | "mxbai-embed-large" (1024d)
+provider = "onnx"              # "all-minilm" (384d, tracks the default) | "all-minilm-l12" | "all-minilm-l6" | "all-minilm-l12-fp32" (reproducible on any runtime) | "all-minilm-{l12,l6}-int8" (legacy) | "nomic-embed-text" (768d) | "mxbai-embed-large" (1024d)
 dimensions = 384               # must match the provider
 max_tokens = 256               # truncate inputs longer than this
 reindex_on_model_change = "warn"   # "off" | "warn" | "auto" | "error"
@@ -121,7 +121,7 @@ similarity_threshold = 0.3
 
 [rerank]
 enabled = false
-model = "bge-reranker-base"    # bge-reranker-base | bge-reranker-v2-m3 | jina-reranker-v1-turbo-en | jina-reranker-v2-base-multilingual
+model = "jina-reranker-v1-turbo-en"  # jina-reranker-v1-turbo-en | bge-reranker-base | bge-reranker-v2-m3 | jina-reranker-v2-base-multilingual
 top_n = 50
 weight = 0.5                   # 0.0 = ignore reranker, 1.0 = trust it fully
 
@@ -204,5 +204,6 @@ project_list_grouping = "auto"      # projects-list layout: auto | always | none
 | `ENGRAMDB_CONFIG_DIR` | Override platform global config dir. Used by tests. |
 | `ENGRAMDB_MODEL_CACHE_DIR` | Override the model-download cache dir (used verbatim). Separate from the data dir. |
 | `ENGRAMDB_OFFLINE` | Truthy makes the embedding/NLI/T5 loaders refuse to download uncached models (fail fast instead). |
+| `ENGRAMDB_ONNX_INTRA_THREADS` | Intra-op thread count for every ONNX session (embeddings, reranker, NLI, T5). Unset leaves ONNX Runtime's default for the embedding/reranker sessions. Lowering it does **not** make int8 embeddings reproducible — see [embedding-model-alternatives.md](../contributors/embedding-model-alternatives.md) (R6). |
 | `RUST_LOG` | Standard `tracing` filter (e.g. `RUST_LOG=engramdb=debug`). |
 

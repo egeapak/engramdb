@@ -71,8 +71,13 @@ cargo +nightly fuzz run memory_file -- -max_total_time=60
 
 Feature flags from `Cargo.toml`:
 
-- `onnxruntime` (default) — the ONNX Runtime stack (`ort` + `fastembed` + `engram-onnx`). Turn OFF (with `--no-default-features`) on a platform with no prebuilt ORT and enable `tract` instead. When off, NLI and T5 titling compile out (ORT-only) and keyword titling remains; the reranker has a pure-Rust tract path (`bge-reranker-base` fp32) that stays off by default.
-- `tract` — pure-Rust `tract-onnx` embedding backend (fp32 MiniLM). No native ONNX Runtime; the Intel-Mac (`x86_64-apple-darwin`) fallback. Composable with `onnxruntime` (both engines, runtime-chosen) or standalone (`--no-default-features --features tract`). The release workflow's `build-intel` job builds this; `engram-cli/build.rs` warns on a default Intel-Mac build.
+- `onnxruntime` (default) — the ONNX Runtime stack (`ort` + `fastembed` + `engram-onnx`). With it off (`--no-default-features`), embeddings fall back to Ollama and NLI / reranking / T5 titling all compile out (ORT-only); keyword titling remains.
+- **ONNX Runtime linking strategy** — `load-dynamic` (default) / `bundled-onnxruntime`. EngramDB no longer vendors a runtime; one of these decides where `libonnxruntime` comes from, and `load-dynamic` lives in `default`, so choosing the other requires `--no-default-features --features onnxruntime,ollama,bundled-onnxruntime`. `load-dynamic` `dlopen`s the runtime at *run* time (nothing needed at build time). **No release artifact contains a runtime in any form** — archives hold the binary only, and Homebrew/Scoop declare a dependency on the package manager's copy; the release notes carry the install instructions. `bundled-onnxruntime` downloads and statically links one (the pre-0.9 default — **avoid**: that prebuilt mis-executes quantized models on AVX-512/AMX hosts, see `docs/contributors/embedding-model-alternatives.md` R6/R9).
+
+  **Build-time linking is deliberately not offered.** A `pkg-config` strategy (`ort/pkg-config`) would record `libonnxruntime` as a load-time dependency, and the dynamic loader resolves those before `main()` runs — so a missing runtime would stop the binary from starting at all, with no `doctor` output and no chance for the pre-flight probe to run. A CI step asserts the default binary has no ONNX entry in `ldd` and starts with no runtime installed; don't reintroduce one.
+
+  Two consequences worth internalizing. **(1)** `--all-features` necessarily turns `bundled-onnxruntime` back on, so `cargo clippy/nextest --all-features` still links a static ORT and does *not* exercise the default path — the `test-load-dynamic` CI job is what covers that. **(2)** Under `load-dynamic`, `ort`'s own loader **panics** when the dylib is missing, and the release profile is `panic = "abort"`, so it cannot be caught. `engram_onnx::runtime` therefore probes and validates the library with `libloading` *before* any `ort` call, and every model loader in `engram-models` calls `crate::ensure_onnx_runtime()` first. **Any new ONNX-backed loader must do the same**, or a user without the runtime gets a hard abort instead of the documented fallback to keyword search.
+
 - `ollama` (default) — Ollama embedding backend via `reqwest`. Disable for pure offline ONNX.
 - `coreml` (macOS only) — Apple Neural Engine EP for `ort` (implies `onnxruntime`).
 - `xnnpack` — portable CPU-kernel EP for A/B benchmarking (implies `onnxruntime`).
@@ -156,13 +161,34 @@ becomes a permanent regression case. CI runs these on a schedule via
 The web sandbox's egress gateway uses a custom CA that rustls/webpki-based downloaders (the `ort` build script, `hf-hub`) reject, even though `curl` works (it trusts `/etc/ssl/certs/ca-certificates.crt`). Cold builds/tests fail without these one-time workarounds:
 
 1. **protoc** (LanceDB build dep): `apt-get install -y protobuf-compiler`.
-2. **ONNX Runtime binary** (`ort-sys` download fails with `UnknownIssuer`): fetch + decode the prebuilt static lib via curl, then build with `ORT_STRATEGY=system ORT_LIB_LOCATION=/tmp/ort-lib`. The version must match what the locked `ort` crate expects (`2.0.0-rc.12` → ONNX Runtime 1.24.x / API 24); a mismatch surfaces at *runtime* as "The requested API version [N] is not available". If you swap the lib after a build, also `rm -rf target/debug/build/ort-sys-* target/debug/.fingerprint/ort-sys-* target/debug/deps/*ort_sys*` — the objects are bundled into the ort-sys rlib at its build time, so relinking alone keeps the old runtime:
+2. **ONNX Runtime binary.** Two separate needs now, because the runtime is no longer compiled in:
+
+   - *Building* `--all-features` (which CI and the commands above use) still enables `bundled-onnxruntime`, so `ort-sys` still wants a static lib to link and its download still fails with `UnknownIssuer`. The `ORT_STRATEGY=system ORT_LIB_LOCATION=/tmp/ort-lib` workaround below is unchanged.
+   - *Running* anything under the default `load-dynamic` build (the `engramdb` binary, `cargo nextest run --workspace` without `--all-features`) needs a **shared** library at run time. Export `ORT_DYLIB_PATH=/path/to/libonnxruntime.so`, or drop the `.so` next to the binary — `engram_onnx::runtime` searches the executable's directory first. `engramdb doctor` reports which one it resolved.
+
+   Fetch + decode the prebuilt static lib via curl, then build with `ORT_STRATEGY=system ORT_LIB_LOCATION=/tmp/ort-lib`. The version must match what the locked `ort` crate expects (`2.0.0-rc.12` → ONNX Runtime 1.24.x / API 24); a mismatch surfaces at *runtime* as "The requested API version [N] is not available". If you swap the lib after a build, also `rm -rf target/debug/build/ort-sys-* target/debug/.fingerprint/ort-sys-* target/debug/deps/*ort_sys*` — the objects are bundled into the ort-sys rlib at its build time, so relinking alone keeps the old runtime:
    ```
    curl -sS -o /tmp/ort.tar.lzma2 "https://cdn.pyke.io/0/pyke:ort-rs/ms@1.24.2/x86_64-unknown-linux-gnu.tar.lzma2"
    python3 -c "import lzma; open('/tmp/ort.tar','wb').write(lzma.decompress(open('/tmp/ort.tar.lzma2','rb').read(), format=lzma.FORMAT_RAW, filters=[{'id':lzma.FILTER_LZMA2,'dict_size':1<<26}]))"
    mkdir -p /tmp/ort-lib && tar -xf /tmp/ort.tar -C /tmp/ort-lib
    ```
    Export `ORT_STRATEGY=system` and `ORT_LIB_LOCATION=/tmp/ort-lib` for all `cargo build/clippy/test` commands.
+
+   ⚠️ **The pyke prebuilt executes quantized models incorrectly on AVX-512/AMX
+   hosts.** Under CPU contention the same text embeds to unrelated vectors
+   (measured: 44/60 distinct embeddings of one string; cosine below 0). It is
+   the *build*, not the version or the model — Microsoft's own 1.24.2 release is
+   bit-reproducible for the identical files. For any work that depends on
+   embedding values (quality benchmarks, reproducibility checks), link the
+   official runtime instead:
+   ```
+   curl -LO https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz
+   tar -xzf onnxruntime-linux-x64-1.24.2.tgz
+   export ORT_STRATEGY=system ORT_PREFER_DYNAMIC_LINK=1 \
+          ORT_LIB_LOCATION="$PWD/onnxruntime-linux-x64-1.24.2/lib"
+   # binaries then need LD_LIBRARY_PATH="$ORT_LIB_LOCATION" at run time
+   ```
+   See `docs/contributors/embedding-model-alternatives.md` (R6/R9).
 3. **Embedding model** (fastembed download fails the same way): the default embedding is the **int8-quantized** `DEFAULT_ONNX_EMBEDDING = ONNX_ALL_MINILM_Q` (fastembed `AllMiniLML6V2Q` → repo `Xenova/all-MiniLM-L6-v2`, file `onnx/model_quantized.onnx`), **not** the fp32 `Qdrant/all-MiniLM-L6-v2-onnx`. Stage the quantized repo into `~/.cache/engramdb/models/models--Xenova--all-MiniLM-L6-v2/` with `refs/main` containing `main` and `snapshots/main/<file>` for `onnx/model_quantized.onnx`, `tokenizer.json`, `config.json`, `special_tokens_map.json`, `tokenizer_config.json` (curl from `https://huggingface.co/<repo>/resolve/main/<file>`). If you also exercise the fp32 path, stage `Qdrant/all-MiniLM-L6-v2-onnx` (file `model.onnx`) the same way. `hf-hub` serves cached files without any network call, so embedding tests then pass offline.
 
    ⚠️ If only the fp32 `Qdrant` repo is staged, `OnnxProvider::try_new()` (the default-quantized path) returns `None`: embeddings appear unavailable, the `Auto` backend silently falls back to Ollama (unreachable in the sandbox), and ~100 tests fail with `Failed to send embed request to Ollama`. Staging the quantized repo is what fixes that.
@@ -205,7 +231,7 @@ MCP (engram-mcp)  ─┘                  └─► scoring  ─► scope
 - **`src/retrieval/engine.rs`** — the `RetrievalEngine` runs queries in two modes: `Filter` (narrow by query/path/logical/tags, query signal required) and `Rank` (rank everything by relevance to a context). Pipeline: index-level filter → optional vector search via LanceDB → composite scoring → optional cross-encoder rerank.
 - **`src/scoring/`** — composite score formula depends on mode (see `scoring/mod.rs` doc-comment). Final = `base * scope_multiplier * trust_multiplier - challenge_penalty`, clamped to `[0,1]`. Decay strategies are `None | Linear | Exponential | Step`.
 - **`src/scope/`** — physical (file path with depth-decay) + logical (dot-notation hierarchy, max bonus 0.3). Combined score is capped at 1.0.
-- **`crates/engram-models/src/embeddings/`** — `EmbeddingProvider` trait, implemented by `OnnxProvider` (fastembed; default, gated by `onnxruntime`), `OllamaProvider` (gated by `ollama`), and `TractEmbeddingProvider` (pure-Rust tract fp32 MiniLM, gated by `tract`; `embeddings/tract.rs`). The `model_id()` method is what gets persisted to the manifest — distinct fp32 vs int8 IDs are required so quantization swaps are detected, and the tract provider's `tract/all-MiniLM-L6-v2-fp32` id is what makes an ONNX↔tract backend swap trigger a `reindex`.
+- **`crates/engram-models/src/embeddings/`** — `EmbeddingProvider` trait, implemented by `OnnxProvider` (fastembed; default, gated by `onnxruntime`) and `OllamaProvider` (gated by `ollama`). The `model_id()` method is what gets persisted to the manifest — distinct fp32 vs int8 IDs are required so quantization swaps are detected. A pure-Rust `tract` backend used to sit alongside these for Intel Mac; it was removed once the runtime became separately installed, and `EmbeddingBackend` keeps a `"tract"` serde alias so old configs still load.
 - **`crates/engram-models/src/nli/onnx.rs`** + **`crates/engram-models/src/rerank.rs`** — optional ONNX NLI for contradiction detection (`challenge` flow) and a cross-encoder reranker (BGE family by default). Both are loaded only when `[nli].enabled` / `[rerank].enabled` are true in `config.toml`. The reranker's `Reranker` trait and its `fastembed` loader (`LocalReranker::load`) live in `engram-models` next to the embedding/NLI/T5 loaders (so the core `engramdb` crate carries **no** direct `fastembed` dep); `src/retrieval/reranker.rs` is a thin re-export keeping `crate::retrieval::reranker::{Reranker, RerankScore, LocalReranker}` resolving for the engine, `ops`, and the daemon's `RemoteReranker`.
 
 ### Shared embedding daemon (`src/daemon/`)

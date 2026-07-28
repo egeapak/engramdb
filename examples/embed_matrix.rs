@@ -29,7 +29,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use engramdb::embeddings::{
-    chunk_text, EmbeddingProvider, OnnxModelSpec, OnnxProvider, ONNX_ALL_MINILM, ONNX_ALL_MINILM_Q,
+    chunk_text, EmbeddingProvider, OnnxModelSpec, OnnxProvider, ONNX_ALL_MINILM,
+    ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_Q, ONNX_ARCTIC_S_Q, ONNX_ARCTIC_XS, ONNX_ARCTIC_XS_Q,
     ONNX_BGE_SMALL_EN_Q, ONNX_NOMIC_EMBED_TEXT_Q,
 };
 use engramdb::onnx_ep::Backend;
@@ -385,6 +386,10 @@ fn doc_texts(m: &Mem, v: DocVariant, budget: usize) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 const BGE_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
+/// snowflake-arctic-embed's documented query instruction — textually the same
+/// string BGE uses, kept separate so the two models' prefix choices stay
+/// independently editable.
+const ARCTIC_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
 
 struct ModelUnderTest {
     key: &'static str,
@@ -421,6 +426,35 @@ const MODELS: &[ModelUnderTest] = &[
         spec: ONNX_NOMIC_EMBED_TEXT_Q,
         query_prefix: Some("search_query: "),
         doc_prefix: Some("search_document: "),
+    },
+    // Same 384 dims and same parameter class as the MiniLM-L6 default, but
+    // retrieval-tuned — the "better at the same size" candidates.
+    ModelUnderTest {
+        key: "arctic-xs-q",
+        spec: ONNX_ARCTIC_XS_Q,
+        query_prefix: Some(ARCTIC_QUERY_PREFIX),
+        doc_prefix: None,
+    },
+    // fp32 arctic: the unquantized counterpart to the int8 rows above.
+    ModelUnderTest {
+        key: "arctic-xs-fp32",
+        spec: ONNX_ARCTIC_XS,
+        query_prefix: Some(ARCTIC_QUERY_PREFIX),
+        doc_prefix: None,
+    },
+    ModelUnderTest {
+        key: "arctic-s-q",
+        spec: ONNX_ARCTIC_S_Q,
+        query_prefix: Some(ARCTIC_QUERY_PREFIX),
+        doc_prefix: None,
+    },
+    // Same family as the default, 2x the depth: isolates "more compute in the
+    // same architecture" from "different training objective".
+    ModelUnderTest {
+        key: "minilm-l12-q",
+        spec: ONNX_ALL_MINILM_L12_Q,
+        query_prefix: None,
+        doc_prefix: None,
     },
 ];
 

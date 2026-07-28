@@ -17,16 +17,19 @@ name = "engramdb"
 path = "src/main.rs"
 
 [features]
-default = ["onnxruntime", "ollama"]
+default = ["onnxruntime", "load-dynamic", "ollama"]
 # Forward the model/backend feature flags down to the engramdb core crate.
 # `onnxruntime` (ONNX Runtime stack) is on by default; a pure-Rust build for a
 # platform with no prebuilt ORT (Intel Mac) uses
 # `--no-default-features --features tract`.
 onnxruntime = ["engramdb/onnxruntime", "engram-mcp/onnxruntime"]
-tract = ["engramdb/tract", "engram-mcp/tract"]
 ollama = ["engramdb/ollama", "engram-mcp/ollama"]
 coreml = ["engramdb/coreml"]
 xnnpack = ["engramdb/xnnpack"]
+# ONNX Runtime linking strategy; see the workspace root. `load-dynamic` is in
+# `default`, so another strategy needs `--no-default-features`.
+load-dynamic = ["engramdb/load-dynamic", "engram-mcp/load-dynamic"]
+bundled-onnxruntime = ["engramdb/bundled-onnxruntime", "engram-mcp/bundled-onnxruntime"]
 
 [dependencies]
 engramdb = { path = "../..", default-features = false }

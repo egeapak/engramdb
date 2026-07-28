@@ -374,6 +374,8 @@ pub async fn doctor_environment(
     ];
 
     let mut embeddings_checks = Vec::new();
+    #[cfg(feature = "onnxruntime")]
+    embeddings_checks.push(check_onnx_runtime());
     embeddings_checks.push(check_embedding_backend(dir).await);
     embeddings_checks.push(check_embedding_model_identity(dir).await);
     let cache_dir = crate::storage::paths::model_cache_dir()
@@ -637,6 +639,45 @@ async fn check_config_file(dir: &Path) -> EnvironmentCheck {
             suggestion: Some("Fix the syntax in .engramdb/config.toml".to_string()),
             details: vec![],
             status: None,
+        },
+    }
+}
+
+/// Report where the ONNX Runtime came from, or why it is unavailable.
+///
+/// Under the default `load-dynamic` strategy the runtime is a separate shared
+/// library discovered at run time, so "is it installed, and is it new enough"
+/// becomes a real user-facing question — and the answer decides whether
+/// embeddings work at all. Surfacing it here makes the difference between a
+/// mystery ("why is search keyword-only?") and a one-line fix.
+#[cfg(feature = "onnxruntime")]
+fn check_onnx_runtime() -> EnvironmentCheck {
+    match crate::onnx_ep::runtime_status() {
+        Ok(description) => EnvironmentCheck {
+            name: "ONNX Runtime".to_string(),
+            passed: true,
+            message: description,
+            suggestion: None,
+            details: vec![],
+            status: None,
+        },
+        // `passed: true` with a Warn status, not a failure. EngramDB's contract
+        // is that a missing runtime degrades to keyword search rather than
+        // breaking, so this must not fail the overall report the way a corrupt
+        // store would — same treatment as an unconfigured hook. The Warn is what
+        // surfaces it.
+        Err(reason) => EnvironmentCheck {
+            name: "ONNX Runtime".to_string(),
+            passed: true,
+            message: reason,
+            suggestion: Some(
+                "Install ONNX Runtime (`brew install onnxruntime`, \
+                 `scoop install onnxruntime`, or your distro\'s package), or set \
+                 ORT_DYLIB_PATH. Without it EngramDB falls back to keyword search."
+                    .to_string(),
+            ),
+            details: vec![],
+            status: Some(CheckStatus::Warn),
         },
     }
 }
@@ -1122,7 +1163,7 @@ pub async fn validate_models(config: &crate::types::EngramConfig) -> Vec<Environ
     let mut vcfg = config.clone();
     vcfg.nli.enabled =
         config.nli.enabled || crate::storage::paths::hf_repo_cached(&config.nli.model);
-    // T5 titling is ONNX-Runtime-only; on a pure-`tract` build the `t5` module
+    // T5 titling is ONNX-Runtime-only; without it the `t5` module
     // is compiled out, so only probe for it when ORT is present.
     #[cfg(feature = "onnxruntime")]
     if config.title.strategy != crate::title::TitleStrategy::T5

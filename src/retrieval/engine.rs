@@ -1949,19 +1949,19 @@ mod tests {
     }
 
     /// Shared reranker across all tests in this module to avoid loading the
-    /// ~100MB ONNX model once per test (which causes OOM when parallel).
-    /// Built through the `engram-models` loader (default BGE reranker base) so
-    /// the core crate needs no direct `fastembed` dependency, even in tests.
+    /// ONNX model once per test (which causes OOM when parallel). Built through
+    /// the `engram-models` loader at the shipped default so the core crate needs
+    /// no direct `fastembed` dependency, even in tests.
     ///
     /// The `fastembed` loader (`LocalReranker`) only exists with `onnxruntime`;
-    /// on a pure-`tract` build there is no in-process reranker, so `try_reranker`
+    /// on a build without ONNX Runtime there is no in-process reranker, so `try_reranker`
     /// returns `None` and the reranker tests skip (they `return` early on `None`).
     #[cfg(feature = "onnxruntime")]
     fn try_reranker() -> Option<Arc<dyn Reranker>> {
         use crate::retrieval::reranker::LocalReranker;
         use std::sync::LazyLock;
         static SHARED_RERANKER: LazyLock<Option<Arc<dyn Reranker>>> =
-            LazyLock::new(|| LocalReranker::load("bge-reranker-base").ok());
+            LazyLock::new(|| LocalReranker::load(crate::types::DEFAULT_RERANK_MODEL).ok());
         SHARED_RERANKER.clone()
     }
 
@@ -3658,7 +3658,7 @@ mod tests {
     /// (vector_search + classify_batch + threshold filter) was at 0%
     /// coverage despite CRAP 110.
     // Loads the real ONNX embedding + NLI models, so it only exists on an
-    // `onnxruntime` build (there is no in-process ONNX on a pure-`tract` build).
+    // `onnxruntime` build.
     #[cfg(feature = "onnxruntime")]
     #[tokio::test]
     async fn test_detect_contradictions_end_to_end_finds_real_contradiction() {

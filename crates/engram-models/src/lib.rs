@@ -18,6 +18,27 @@ pub mod nli;
 pub mod rerank;
 pub mod title;
 
+/// Fail early, and *recoverably*, when the ONNX Runtime is not usable.
+///
+/// Every ONNX-backed model loader calls this before touching `ort`. Under the
+/// default `load-dynamic` strategy the runtime is `dlopen`ed rather than linked,
+/// so it can genuinely be absent — and `ort`'s own reaction to that is a panic
+/// (`.expect("Failed to load ONNX Runtime dylib")`) that the release profile's
+/// `panic = "abort"` turns into a hard process abort, with no `catch_unwind` to
+/// save it.
+///
+/// Returning an `Err` here instead keeps a missing runtime on the same graceful
+/// path as a missing model file: `try_new()`-style constructors map it to
+/// `None`, the provider resolves to "no embeddings", and retrieval degrades to
+/// keyword search exactly as it does offline.
+#[cfg(feature = "onnxruntime")]
+pub(crate) fn ensure_onnx_runtime() -> anyhow::Result<()> {
+    match engram_onnx::runtime_status() {
+        Ok(_) => Ok(()),
+        Err(reason) => Err(anyhow::anyhow!(reason)),
+    }
+}
+
 /// Strip the `SessionBuilder` payload from an `ort` builder error.
 ///
 /// ort rc.12 changed the `SessionBuilder` configuration methods to return

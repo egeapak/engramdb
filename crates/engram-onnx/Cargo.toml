@@ -11,10 +11,23 @@ name = "engram_onnx"
 path = "src/lib.rs"
 
 [features]
+# So that `cargo check -p engram-onnx` works standalone. The workspace root
+# forwards its own `load-dynamic` here as well; this only decides what a build
+# of *this* crate alone gets, and it must match the workspace default.
+default = ["load-dynamic"]
+
 # Mirror the workspace EP feature flags; both forward to `ort`. Off by default
 # so the Linux/CI build and prebuilt-binary download are unchanged.
 coreml = ["ort/coreml"]
 xnnpack = ["ort/xnnpack"]
+
+# --- ONNX Runtime linking strategy (exactly one; see the workspace root) ---
+# Default. `ort` `dlopen`s libonnxruntime at run time, so nothing is needed at
+# build time and one binary works against any installed runtime >= 1.24.
+# `libloading` is ours, for the pre-flight probe in `runtime.rs`.
+load-dynamic = ["ort/load-dynamic", "dep:libloading"]
+# Download and statically link a prebuilt ONNX Runtime (the historical default).
+bundled-onnxruntime = ["ort/download-binaries"]
 
 [dependencies]
 # `tls-rustls` is required alongside `download-binaries`: the `ort-sys` build
@@ -40,4 +53,16 @@ xnnpack = ["ort/xnnpack"]
 # 1.23.x (API 23) → the API-24 error above. Intel-Mac users must build ORT
 # **1.24.x** from source and point `ORT_LIB_LOCATION` at it. See
 # docs/users/troubleshooting.md.
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }
+# `api-24` is declared explicitly rather than inherited: it selects the C API
+# version the generated `OrtApi` struct exposes, and it used to arrive only by
+# feature unification with `fastembed`. Building this crate on its own then
+# produced a reduced `OrtApi` and failed compiling `ort`'s own EP modules.
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["ndarray", "std", "tls-rustls", "api-24"] }
+# Used only by `runtime.rs`, to open and validate libonnxruntime *before* `ort`
+# touches it — `ort`'s own loader panics on a missing dylib and the release
+# profile is `panic = "abort"`, so that panic is not catchable.
+libloading = { version = "0.8", optional = true }
+
+[dev-dependencies]
+# `runtime.rs` tests write a bogus file and assert the probe rejects it.
+tempfile = "3"

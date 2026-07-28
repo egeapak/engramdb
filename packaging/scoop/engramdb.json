@@ -1,0 +1,29 @@
+{
+    "version": "0.8.0",
+    "description": "Project-scoped persistent memory store for coding agents",
+    "homepage": "https://github.com/egeapak/engramdb",
+    "license": "MIT",
+    "depends": "onnxruntime",
+    "notes": [
+        "EngramDB loads ONNX Runtime at run time rather than embedding it, so the runtime is installed as a separate, updatable Scoop package.",
+        "Run 'engramdb doctor' to confirm which runtime was resolved.",
+        "Run 'engramdb setup' to register the MCP server and hooks with Claude Code."
+    ],
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/egeapak/engramdb/releases/download/v0.8.0/engramdb-x86_64-pc-windows-msvc.zip",
+            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+    },
+    "bin": "engramdb.exe",
+    "checkver": {
+        "github": "https://github.com/egeapak/engramdb"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/egeapak/engramdb/releases/download/v$version/engramdb-x86_64-pc-windows-msvc.zip"
+            }
+        }
+    }
+}

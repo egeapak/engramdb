@@ -6,7 +6,11 @@ Every memory is embedded as one **metadata vector** (`"{title}. {summary}. tags:
 
 | Provider string | Backend | Dimensions | Notes |
 |-----------------|---------|------------|-------|
-| `all-minilm` (alias `onnx`) | ONNX / tract | 384 | **Default.** all-MiniLM-L6-v2. ~90 MB. Fast, decent quality for short snippets. |
+| `all-minilm` (alias `onnx`) | ONNX | 384 | **Default.** Tracks the shipped default — today all-MiniLM-**L12**-v2 **uint8**, ~32 MB. |
+| `all-minilm-l12` | ONNX | 384 | Pins the 12-layer uint8 model. Same as the default today. |
+| `all-minilm-l6` | ONNX | 384 | Pins the 6-layer uint8 model (~22 MB). ~2× faster to embed, measurably worse ranking. |
+| `all-minilm-l12-int8` / `all-minilm-l6-int8` | ONNX | 384 | The **signed-int8** exports. Kept only so an existing store can avoid a reindex — ONNX Runtime executes these non-reproducibly under CPU load ([onnxruntime#6004](https://github.com/microsoft/onnxruntime/issues/6004)), so the same text can be indexed as an unrelated vector. Don't pick these for new stores. |
+| `all-minilm-l12-fp32` | ONNX | 384 | fp32 build of the default model (~127 MB, 1.3× slower per query, 1.7× per batch). **Reproducible on any runtime** — pick this if you need guaranteed-stable vectors on a stock build. See [embedding-model-alternatives.md](../contributors/embedding-model-alternatives.md) (R6). |
 | `nomic-embed-text` | ONNX or Ollama | 768 | Better quality, longer context support, slower. |
 | `mxbai-embed-large` | ONNX or Ollama | 1024 | Best quality, biggest model, slowest. |
 
@@ -14,18 +18,17 @@ Every memory is embedded as one **metadata vector** (`"{title}. {summary}. tags:
 
 - **ONNX** (default) — local inference via ONNX Runtime. Models cache to `<cache_dir>/engramdb/models/`; first use downloads from Hugging Face.
 - **Ollama** — calls a local Ollama instance on `http://localhost:11434`.
-- **tract** — pure-Rust local inference, no native ONNX Runtime. The fallback for platforms with no prebuilt ORT (**Intel Mac**), where it is selected automatically. Uses the **fp32** MiniLM (`all-minilm` only; the int8 default and the nomic/mxbai models do not have a tract build), at ~3× ONNX latency, with numerically identical output (cosine ≈ 1.0 vs ONNX fp32). NLI and T5 titling are unavailable on a tract build. The optional cross-encoder **reranker works on tract** (`bge-reranker-base` only, fp32 ~1.1 GB) but is off by default. Only present when compiled with `--features tract`.
-- **auto** (default) — tries ONNX first, falls back to Ollama; on a build with no ONNX Runtime (the Intel-Mac / `--features tract` build) it resolves to tract.
+- **auto** (default) — tries ONNX first, falls back to Ollama.
 
-Set `[embeddings]` in `config.toml` (see [configuration.md](./configuration.md)) or override per-invocation with `--embedding-backend` / `ENGRAMDB_EMBEDDING_BACKEND` (`auto` | `onnx` | `ollama` | `tract`).
+Set `[embeddings]` in `config.toml` (see [configuration.md](./configuration.md)) or override per-invocation with `--embedding-backend` / `ENGRAMDB_EMBEDDING_BACKEND` (`auto` | `onnx` | `ollama`).
 
-> **Cross-machine note.** ONNX (int8, `onnx/all-MiniLM-L6-v2-q`) and tract (fp32, `tract/all-MiniLM-L6-v2-fp32`) record distinct model fingerprints. A store shared between an Intel Mac (tract) and a non-Intel machine (ONNX) will detect the change and prompt `engramdb reindex --embeddings-only` on each switch. To pin one backend across machines, set `[embeddings].backend` explicitly in `config.toml`.
+> **Upgrading from the tract backend.** EngramDB used to select a pure-Rust `tract` backend on Intel Mac (fp32 6-layer, `tract/all-MiniLM-L6-v2-fp32`). It was removed once the ONNX Runtime became a separately installed library, which gave Intel Mac a real ONNX path. Because the two record distinct model fingerprints, a store built under tract will detect the change and prompt `engramdb reindex --embeddings-only` once. A `backend = "tract"` line left in `config.toml` still loads and now behaves as `auto`.
 
 ## Model fingerprinting
 
 Each store records the embedding model it was built with. The fingerprint includes:
 
-- `model_id()` from the provider (e.g. `onnx/all-MiniLM-L6-v2`, `onnx/all-MiniLM-L6-v2-q` — note the `-q` suffix for quantized variants),
+- `model_id()` from the provider (e.g. `onnx/all-MiniLM-L12-v2-q`, `onnx/all-MiniLM-L6-v2-q` — note the `-q` suffix for quantized variants, and that the layer count is part of the id),
 - the dimensionality,
 
 and lives in `<project>/.engramdb/manifest.toml`.

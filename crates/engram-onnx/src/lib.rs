@@ -24,8 +24,73 @@
 //! The explicit [`Backend`] variants exist so the benchmark suite can A/B
 //! the same workload across backends within one process.
 
+// At least one linking strategy must be selected, or `ort-sys` fails deep inside
+// a build script with an error that never names the cause.
+//
+// Both at once is *not* an error: `--all-features` (which CI runs) enables
+// both by definition, so they resolve by precedence instead. `ort` itself
+// sets the precedence — its `setup_api()` takes the `dlopen` path under
+// `#[cfg(feature = "load-dynamic")]` regardless of what else is enabled — so
+// `load-dynamic` wins here too, and `runtime_status` reports accordingly.
+#[cfg(not(any(feature = "load-dynamic", feature = "bundled-onnxruntime")))]
+compile_error!(
+    "engram-onnx needs an ONNX Runtime linking strategy: enable either \
+     `load-dynamic` (default) or `bundled-onnxruntime`. A build using \
+     `--no-default-features` must name one explicitly."
+);
+#[cfg(feature = "load-dynamic")]
+pub mod runtime;
+
 use ort::ep::ExecutionProviderDispatch;
 use ort::session::builder::SessionBuilder;
+
+/// Whether the ONNX Runtime this build depends on is actually usable.
+///
+/// Strategy-agnostic, so callers do not need to know how the runtime is linked:
+///
+/// - `load-dynamic` — resolves and validates the shared library (see
+///   [`runtime::ensure`]). This is the case that can genuinely fail at run time,
+///   and it must be checked *before* any `ort` call: `ort`'s own loader panics
+///   on a missing dylib, and the release profile aborts on panic.
+/// - `bundled-onnxruntime` — the runtime is statically linked, so if the
+///   process started at all, it is present.
+///
+/// Provider constructors call this first and return "unavailable" when it is
+/// false, which routes a missing runtime through the same graceful fallback as
+/// a missing model.
+pub fn runtime_available() -> bool {
+    #[cfg(feature = "load-dynamic")]
+    {
+        runtime::available()
+    }
+    #[cfg(not(feature = "load-dynamic"))]
+    {
+        true
+    }
+}
+
+/// Human-readable runtime state, for `engramdb doctor` and error messages.
+///
+/// `Ok` carries a description of the runtime in use; `Err` carries an
+/// actionable explanation of why ONNX is unavailable.
+pub fn runtime_status() -> Result<String, String> {
+    // Precedence, not exclusivity: see the note at the top of this file.
+    #[cfg(feature = "load-dynamic")]
+    {
+        match runtime::ensure() {
+            Ok(info) => Ok(format!(
+                "ONNX Runtime {} (loaded at run time from {})",
+                info.version,
+                info.path.display()
+            )),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+    #[cfg(all(not(feature = "load-dynamic"), feature = "bundled-onnxruntime"))]
+    {
+        Ok("ONNX Runtime (statically bundled into this binary)".to_string())
+    }
+}
 
 /// Which ONNX Runtime execution backend to register for a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,11 +147,25 @@ fn default_intra_threads() -> usize {
 /// `ENGRAMDB_ONNX_INTRA_THREADS` (e.g. `=1` to restore the old serial
 /// behavior, or higher to experiment).
 pub fn intra_threads() -> usize {
+    intra_threads_override().unwrap_or_else(default_intra_threads)
+}
+
+/// The explicitly configured intra-op thread count, or `None` when
+/// `ENGRAMDB_ONNX_INTRA_THREADS` is unset.
+///
+/// For sessions we build ourselves (NLI, T5) there is no "leave it alone"
+/// option — a `SessionBuilder` needs a number — so those use
+/// [`intra_threads`]. `fastembed` sessions (embeddings, reranker) are
+/// different: not calling `with_intra_threads` leaves ONNX Runtime's own
+/// default in place, which benchmarks as ~1.7× faster on the batch path than
+/// [`default_intra_threads`] on a 4-core host. So they honor the env override
+/// when it is set and otherwise keep ORT's default, which is what this
+/// accessor expresses.
+pub fn intra_threads_override() -> Option<usize> {
     std::env::var("ENGRAMDB_ONNX_INTRA_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n != 0)
-        .unwrap_or_else(default_intra_threads)
 }
 
 #[cfg(all(feature = "coreml", target_os = "macos"))]

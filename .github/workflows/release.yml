@@ -8,6 +8,26 @@ on:
 permissions:
   contents: write
 
+# No archive contains an ONNX Runtime — not statically linked, not shipped
+# alongside. Every binary resolves one at startup from the user's system, and
+# EngramDB never carries its own copy. Three reasons:
+#   * the prebuilt `ort` downloads and statically links executes quantized
+#     models incorrectly on AVX-512/AMX hosts, so the copy we would ship is the
+#     one we cannot trust — see docs/contributors/embedding-model-alternatives.md
+#     (R6/R9);
+#   * a bundled runtime cannot be patched by whoever maintains the rest of the
+#     machine, and silently wins over the package manager's copy because the
+#     search checks the executable's directory first;
+#   * shipping it for some targets and not others is worse than not shipping it
+#     at all — there is no official x86_64 macOS build past 1.23.x, so Intel Mac
+#     could never have had one, and Homebrew's is not redistributable standalone
+#     (it links abseil / onnx / protobuf / re2).
+#
+# Users install it once (`brew install onnxruntime`, `scoop install onnxruntime`,
+# a distro package, or `ORT_DYLIB_PATH`). Any version providing C API 24 works,
+# i.e. ONNX Runtime >= 1.24. Until one is present EngramDB still runs: `doctor`
+# reports what is missing and search falls back to keyword matching.
+
 jobs:
   # Gate the whole release on version consistency: the pushed tag (v0.7.0), the
   # plugin manifest, the marketplace manifest, and the workspace version in
@@ -96,6 +116,8 @@ jobs:
         # `default-members` (the binary is not in the root core-lib package).
         # `--locked` ensures the shipped binary uses exactly the committed
         # Cargo.lock instead of silently re-resolving newer dependency versions.
+        # Default features select `load-dynamic`: no ONNX Runtime is needed to
+        # build, and none is shipped. The user supplies one at run time.
         run: cargo build --release --bin engramdb --locked
 
       - name: Package binary
@@ -112,15 +134,16 @@ jobs:
             engramdb-aarch64-apple-darwin.tar.gz
             engramdb-aarch64-apple-darwin.tar.gz.sha256
 
-  # Intel Mac (`x86_64-apple-darwin`) ships the **pure-Rust `tract` backend**
-  # instead of ONNX Runtime. `fastembed` pins `ort = "=2.0.0-rc.12"` (needs ONNX
-  # Runtime 1.24 / API-24), and no prebuilt ORT 1.24 exists for Intel Mac
-  # anywhere — the old ORT-based Intel binary crashed on first model load. `tract`
-  # has no native library, so this cross-build from the arm64 runner needs no ORT
-  # download and produces a self-contained binary that works out of the box. It
-  # uses the fp32 MiniLM (int8 does not load under tract) at ~3× the embedding
-  # latency; NLI / reranker / T5 are compiled out (embeddings-only). See
-  # docs/users/installation.md.
+  # Intel Mac (`x86_64-apple-darwin`) is now an ordinary build. It used to ship
+  # the pure-Rust `tract` backend because no prebuilt ONNX Runtime 1.24+ exists
+  # for this target (Microsoft dropped x86_64 macOS after 1.23.x) and the build
+  # had to link one. Under `load-dynamic` nothing is linked at build time, so the
+  # same default-feature build cross-compiles here like everywhere else.
+  #
+  # Like every other target, this archive carries no runtime; Intel users install
+  # it with `brew install onnxruntime` (which has an Intel bottle). Worth noting
+  # that this target *could* not have shipped one even if we wanted to — there is
+  # no official x86_64 macOS build past 1.23.x.
   build-intel:
     needs: [version-check, test]
     runs-on: macos-15
@@ -146,11 +169,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build release binary (pure-Rust tract, no ONNX Runtime)
-        # `--no-default-features --features tract` drops the entire `ort` /
-        # `fastembed` stack (no prebuilt runtime for this target) and selects the
-        # pure-Rust tract embedding backend, which cross-compiles cleanly.
-        run: cargo build --release --bin engramdb --locked --target x86_64-apple-darwin --no-default-features --features tract
+      - name: Build release binary
+        # Default features. `load-dynamic` needs no ONNX Runtime at build time,
+        # which is exactly what makes this target buildable without the special
+        # casing it used to need.
+        run: cargo build --release --bin engramdb --locked --target x86_64-apple-darwin
 
       - name: Package binary
         run: |
@@ -182,8 +205,8 @@ jobs:
 
       - name: Build release binary
         # `--bin engramdb` resolves via workspace `default-members` (see build-arm).
-        # ONNX Runtime is statically linked via fastembed's `download-binaries`,
-        # so the binary is self-contained (no separate library to ship).
+        # Default features select `load-dynamic`: the runtime is `dlopen`ed at
+        # run time from the user's system, not linked in and not shipped.
         run: cargo build --release --bin engramdb --locked
 
       - name: Package binary
@@ -216,10 +239,11 @@ jobs:
 
       - name: Build release binary
         # The shared embedding daemon (Unix-domain-socket only) compiles out on
-        # Windows via `#[cfg(unix)]`; model inference runs in-process. ONNX
-        # Runtime is statically linked, so `engramdb.exe` is self-contained.
-        # The release profile keeps the main thread under Windows' 1 MiB default
-        # stack, so no `/STACK` linker flag is needed.
+        # Windows via `#[cfg(unix)]`; model inference runs in-process. Default
+        # features select `load-dynamic`, so `onnxruntime.dll` is resolved from
+        # the user's system at run time. The release profile keeps the main
+        # thread under Windows' 1 MiB default stack, so no `/STACK` linker flag
+        # is needed.
         run: cargo build --release --bin engramdb --locked
 
       - name: Package binary
@@ -248,6 +272,28 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          # These archives contain the binary only. Since ONNX Runtime is no
+          # longer bundled, an unpacked tarball is not self-sufficient — say so
+          # at the top of every release rather than letting people discover it
+          # as "why is search keyword-only?".
+          body: |
+            ### Prerequisite: ONNX Runtime
+
+            EngramDB loads ONNX Runtime at startup instead of bundling it, so
+            install it once (any version >= 1.24):
+
+            ```
+            brew install onnxruntime          # macOS / Linuxbrew
+            scoop install onnxruntime         # Windows
+            sudo apt-get install -y libonnxruntime   # where packaged
+            ```
+
+            Or point `ORT_DYLIB_PATH` at a library you already have. Installing
+            via Homebrew or Scoop pulls it in automatically.
+
+            Without it EngramDB still starts and runs — semantic search falls
+            back to keyword matching, and `engramdb doctor` reports what is
+            missing and every path it searched.
           files: |
             engramdb-*.tar.gz
             engramdb-*.tar.gz.sha256
