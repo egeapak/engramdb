@@ -154,9 +154,12 @@ fn parse_v2(frontmatter: &str, body: &str) -> Result<Memory> {
     let sections = parse_body_sections(body);
 
     let h1 = sections.get("__h1__").cloned().unwrap_or_default();
-    // When title is set, H1 is the title and summary is in a **Summary:** line
+    // When title is set, H1 is the title and summary is in a **Summary:** line.
+    // Never fall back to the H1 here: for a titled memory the H1 *is* the
+    // title, so a memory whose summary is legitimately empty would acquire the
+    // title on re-parse and the write would stop being a fixed point (#62).
     let summary = if fm.title.is_some() {
-        extract_bold_field(body, "Summary").unwrap_or(h1)
+        extract_bold_field(body, "Summary").unwrap_or_default()
     } else {
         h1
     };
