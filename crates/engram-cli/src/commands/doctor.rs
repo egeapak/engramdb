@@ -24,13 +24,14 @@ pub async fn run_doctor(
     command: Option<DoctorCommand>,
     fix: bool,
     yes: bool,
+    backend: Option<engramdb::types::EmbeddingBackend>,
     prompter: &dyn Prompter,
     formatter: &OutputFormatter,
 ) -> Result<()> {
     match command {
         Some(DoctorCommand::Store) => run_store_check(dir, global, formatter).await,
         Some(DoctorCommand::Validate) => run_validate(dir, global, formatter).await,
-        None => run_environment_check(dir, global, fix, yes, prompter, formatter).await,
+        None => run_environment_check(dir, global, fix, yes, backend, prompter, formatter).await,
     }
 }
 
@@ -98,11 +99,13 @@ async fn run_store_check(dir: &Path, global: bool, formatter: &OutputFormatter) 
 }
 
 /// Full environment diagnostics with actionable suggestions.
+#[allow(clippy::too_many_arguments)]
 async fn run_environment_check(
     dir: &Path,
     global: bool,
     fix: bool,
     yes: bool,
+    backend: Option<engramdb::types::EmbeddingBackend>,
     prompter: &dyn Prompter,
     formatter: &OutputFormatter,
 ) -> Result<()> {
@@ -165,7 +168,10 @@ async fn run_environment_check(
     // `--fix` takes over from here: it offers to repair the fixable issues
     // instead of just exiting non-zero, so we don't `bail!` in that mode.
     if fix {
-        return apply_fixes(&check_dir, global, &result, yes, prompter, formatter).await;
+        return apply_fixes(
+            &check_dir, global, &result, yes, backend, prompter, formatter,
+        )
+        .await;
     }
 
     // `all_passed` only reflects hard failures (`passed == false`): checks
@@ -259,7 +265,13 @@ impl FixAction {
     }
 
     /// Apply the fix by delegating to the existing command/op.
-    async fn apply(&self, dir: &Path, global: bool, formatter: &OutputFormatter) -> Result<()> {
+    async fn apply(
+        &self,
+        dir: &Path,
+        global: bool,
+        backend: Option<engramdb::types::EmbeddingBackend>,
+        formatter: &OutputFormatter,
+    ) -> Result<()> {
         match self {
             FixAction::Init => {
                 let registry = engramdb::storage::FileRegistry::global()?;
@@ -287,8 +299,12 @@ impl FixAction {
                 .await
                 .unwrap_or_default();
                 // Resolving providers loads (and downloads, if missing) the
-                // embedding model into the shared cache.
-                let providers = engramdb::ops::resolve_engine_providers(&config, None, 1);
+                // embedding model into the shared cache. Pass the CLI's
+                // `--embedding-backend` through: with `None` the resolver falls
+                // back to Ollama under the default `Auto`, so this reported
+                // "ready" without ever downloading the ONNX model the user
+                // asked for.
+                let providers = engramdb::ops::resolve_engine_providers(&config, backend, 1);
                 if providers.embedding.is_some() {
                     formatter.print_success("Embedding model is ready.");
                     Ok(())
@@ -361,11 +377,13 @@ fn collect_fix_actions(result: &EnvironmentDoctorResult) -> Vec<FixAction> {
 /// terminal and output isn't JSON. In non-interactive contexts nothing is
 /// changed unless `--yes` was passed, in which case the safe fixes are applied
 /// without prompting.
+#[allow(clippy::too_many_arguments)]
 async fn apply_fixes(
     dir: &Path,
     global: bool,
     result: &EnvironmentDoctorResult,
     yes: bool,
+    backend: Option<engramdb::types::EmbeddingBackend>,
     prompter: &dyn Prompter,
     formatter: &OutputFormatter,
 ) -> Result<()> {
@@ -394,7 +412,7 @@ async fn apply_fixes(
             prompter.confirm(action.prompt(), true)?
         };
         if apply {
-            action.apply(dir, global, formatter).await?;
+            action.apply(dir, global, backend, formatter).await?;
         }
     }
     Ok(())
@@ -431,6 +449,7 @@ mod tests {
             Some(DoctorCommand::Store),
             false,
             false,
+            None,
             &noop_prompter(),
             &formatter,
         )
@@ -460,6 +479,7 @@ mod tests {
             Some(DoctorCommand::Store),
             false,
             false,
+            None,
             &noop_prompter(),
             &formatter,
         )
@@ -473,6 +493,7 @@ mod tests {
             Some(DoctorCommand::Store),
             false,
             false,
+            None,
             &noop_prompter(),
             &formatter,
         )
@@ -503,6 +524,7 @@ mod tests {
             Some(DoctorCommand::Store),
             false,
             false,
+            None,
             &noop_prompter(),
             &formatter,
         )
@@ -522,6 +544,7 @@ mod tests {
             None,
             false,
             false,
+            None,
             &noop_prompter(),
             &formatter,
         )
@@ -549,6 +572,7 @@ mod tests {
             None,
             false,
             false,
+            None,
             &noop_prompter(),
             &formatter,
         )
@@ -568,6 +592,7 @@ mod tests {
             Some(DoctorCommand::Store),
             false,
             false,
+            None,
             &noop_prompter(),
             &formatter,
         )
@@ -588,6 +613,7 @@ mod tests {
             None,
             false,
             false,
+            None,
             &noop_prompter(),
             &formatter,
         )
@@ -612,6 +638,7 @@ mod tests {
             Some(DoctorCommand::Store),
             false,
             false,
+            None,
             &noop_prompter(),
             &formatter,
         )
@@ -644,6 +671,7 @@ mod tests {
             Some(DoctorCommand::Store),
             false,
             false,
+            None,
             &noop_prompter(),
             &formatter,
         )
@@ -675,6 +703,7 @@ mod tests {
             Some(DoctorCommand::Store),
             false,
             false,
+            None,
             &noop_prompter(),
             &formatter,
         )
@@ -784,6 +813,7 @@ mod tests {
             None,
             false,
             false,
+            None,
             &noop_prompter(),
             &formatter,
         )

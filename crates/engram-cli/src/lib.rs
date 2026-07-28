@@ -516,7 +516,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             global,
             fix,
             yes,
-        } => commands::run_doctor(&dir, global, command, fix, yes, &prompter, &formatter).await,
+        } => {
+            commands::run_doctor(
+                &dir, global, command, fix, yes, backend, &prompter, &formatter,
+            )
+            .await
+        }
         Command::Challenge {
             id,
             evidence,
