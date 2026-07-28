@@ -10,6 +10,8 @@
 //! core re-exports it as `engramdb::retrieval::reranker` so callers keep their
 //! historical import path.
 
+#[cfg(feature = "onnxruntime")]
+use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
 use engram_types::DEFAULT_RERANK_MODEL;
@@ -17,6 +19,40 @@ use engram_types::DEFAULT_RERANK_MODEL;
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 #[cfg(feature = "onnxruntime")]
 use std::sync::{Arc, Mutex};
+
+/// A cross-encoder loaded from an explicit HuggingFace file rather than
+/// fastembed's built-in registry.
+///
+/// fastembed hardcodes `onnx/model.onnx` for every [`RerankerModel`], so its
+/// registry can only ever reach the fp32 export — the reranker never got the
+/// int8 treatment the embedding path has had since Lever B. The upstream repos
+/// *do* publish quantized ONNX files; this names one directly.
+#[cfg(feature = "onnxruntime")]
+#[derive(Debug, Clone, Copy)]
+pub struct RerankModelSpec {
+    /// Config name users select with `[rerank].model`.
+    pub name: &'static str,
+    /// HuggingFace repo id.
+    pub repo: &'static str,
+    /// ONNX file within the repo.
+    pub model_file: &'static str,
+}
+
+/// `jina-reranker-v1-turbo-en`, uint8-quantized (~36.5 MB vs ~144 MB fp32).
+///
+/// Same quantization scheme as the shipped uint8 embedding model. Selectable as
+/// `[rerank].model = "jina-turbo-q"`.
+#[cfg(feature = "onnxruntime")]
+pub const RERANK_JINA_TURBO_Q: RerankModelSpec = RerankModelSpec {
+    name: "jina-turbo-q",
+    repo: "jinaai/jina-reranker-v1-turbo-en",
+    model_file: "onnx/model_uint8.onnx",
+};
+
+/// Every reranker reachable through an explicit HF file. Consulted before
+/// fastembed's registry so a quantized name wins over a same-named built-in.
+#[cfg(feature = "onnxruntime")]
+pub const USER_DEFINED_RERANKERS: &[RerankModelSpec] = &[RERANK_JINA_TURBO_Q];
 
 /// A cross-encoder score for one input document.
 #[derive(Debug, Clone, Copy)]
@@ -65,6 +101,13 @@ impl LocalReranker {
         let cache_dir =
             engram_storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{}", e))?;
 
+        // An explicit-file spec (e.g. the quantized export) wins over
+        // fastembed's registry, which can only reach `onnx/model.onnx`.
+        if let Some(spec) = USER_DEFINED_RERANKERS.iter().find(|s| s.name == model_name) {
+            let reranker = Self::load_user_defined(spec, cache_dir)?;
+            return Ok(Self::shared(Arc::new(Mutex::new(reranker))));
+        }
+
         let model = resolve_reranker_model(model_name);
         let mut options = RerankInitOptions::new(model)
             .with_cache_dir(cache_dir)
@@ -76,6 +119,51 @@ impl LocalReranker {
 
         let reranker = TextRerank::try_new(options).map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(Self::shared(Arc::new(Mutex::new(reranker))))
+    }
+
+    /// Load a cross-encoder from an explicit HuggingFace file.
+    ///
+    /// Mirrors `OnnxProvider::load_user_defined`: `hf_hub` fetches (or serves
+    /// from cache) the named ONNX file plus the tokenizer set, and fastembed's
+    /// user-defined seam builds the session. Files land in the same unified
+    /// model cache as every other model.
+    fn load_user_defined(
+        spec: &RerankModelSpec,
+        cache_dir: std::path::PathBuf,
+    ) -> Result<TextRerank> {
+        use fastembed::{
+            OnnxSource, RerankInitOptionsUserDefined, TokenizerFiles, UserDefinedRerankingModel,
+        };
+
+        let api = hf_hub::api::sync::ApiBuilder::new()
+            .with_cache_dir(cache_dir)
+            .build()
+            .context("init HuggingFace API")?;
+        let repo = api.model(spec.repo.to_string());
+        let read = |file: &str| -> Result<Vec<u8>> {
+            let path = repo
+                .get(file)
+                .with_context(|| format!("fetch {}/{file}", spec.repo))?;
+            std::fs::read(&path).with_context(|| format!("read {}", path.display()))
+        };
+
+        let onnx_file = read(spec.model_file)?;
+        let tokenizer_files = TokenizerFiles {
+            tokenizer_file: read("tokenizer.json")?,
+            config_file: read("config.json")?,
+            special_tokens_map_file: read("special_tokens_map.json")?,
+            tokenizer_config_file: read("tokenizer_config.json")?,
+        };
+
+        let model = UserDefinedRerankingModel::new(OnnxSource::Memory(onnx_file), tokenizer_files);
+        let mut options = RerankInitOptionsUserDefined::default();
+        let eps = engram_onnx::execution_providers();
+        if !eps.is_empty() {
+            options = options.with_execution_providers(eps);
+        }
+        TextRerank::try_new_from_user_defined(model, options)
+            .map_err(|e| anyhow::anyhow!("{}", e))
+            .with_context(|| format!("Failed to initialize reranker '{}'", spec.name))
     }
 }
 
@@ -129,6 +217,51 @@ fn resolve_reranker_model(name: &str) -> RerankerModel {
                 DEFAULT_RERANK_MODEL
             );
             RerankerModel::JINARerankerV1TurboEn
+        }
+    }
+}
+
+#[cfg(all(test, feature = "onnxruntime"))]
+mod tests {
+    use super::*;
+
+    /// The quantized spec must be reachable by its config name.
+    ///
+    /// This is the guard against a silent downgrade: `resolve_reranker_model`
+    /// maps every *unknown* name to the fp32 default with only a warning, so if
+    /// `load` ever consulted it before the spec table, `jina-turbo-q` would
+    /// quietly load the 144 MB fp32 model instead of the 36 MB uint8 one — the
+    /// exact thing this spec exists to avoid, and invisible at runtime.
+    #[test]
+    fn quantized_spec_is_reachable_by_name() {
+        let spec = USER_DEFINED_RERANKERS
+            .iter()
+            .find(|s| s.name == "jina-turbo-q")
+            .expect("jina-turbo-q must resolve to an explicit-file spec");
+        assert_eq!(spec.repo, "jinaai/jina-reranker-v1-turbo-en");
+        assert!(
+            spec.model_file.contains("uint8"),
+            "spec must name a quantized export, got {}",
+            spec.model_file
+        );
+    }
+
+    /// Every user-defined name must be distinct from fastembed's registry
+    /// names, or `load`'s table-first lookup would shadow a built-in model.
+    #[test]
+    fn user_defined_names_do_not_shadow_builtins() {
+        const BUILTIN: &[&str] = &[
+            "jina-reranker-v1-turbo-en",
+            "jina-reranker-v2-base-multilingual",
+            "bge-reranker-base",
+            "bge-reranker-v2-m3",
+        ];
+        for spec in USER_DEFINED_RERANKERS {
+            assert!(
+                !BUILTIN.contains(&spec.name),
+                "'{}' shadows a fastembed built-in",
+                spec.name
+            );
         }
     }
 }
