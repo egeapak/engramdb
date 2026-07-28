@@ -164,13 +164,15 @@ async fn status_and_shutdown_frames_roundtrip() {
         uptime_secs: 12,
         idle_secs: 3,
         bundles_loaded: 2,
-        requests_embed: 5,
-        requests_classify: 1,
-        requests_rerank: 0,
-        requests_meta: 7,
-        requests_status: 9,
-        requests_title: 3,
-        requests_total: 25,
+        requests: super::protocol::RequestCounts {
+            embed: 5,
+            classify: 1,
+            rerank: 0,
+            meta: 7,
+            status: 9,
+            title: 3,
+            total: 25,
+        },
         ping_count: 0,
         last_ping_secs_ago: None,
     };
@@ -184,8 +186,8 @@ async fn status_and_shutdown_frames_roundtrip() {
     {
         DaemonResponse::Status(s) => {
             assert_eq!(s.pid, 4242);
-            assert_eq!(s.requests_title, 3);
-            assert_eq!(s.requests_total, 25);
+            assert_eq!(s.requests.title, 3);
+            assert_eq!(s.requests.total, 25);
             assert_eq!(s.version, super::PROTOCOL_VERSION);
         }
         other => panic!("expected Status, got {other:?}"),
@@ -269,7 +271,7 @@ async fn daemon_status_reports_metrics() {
     };
     assert_eq!(s1.version, super::PROTOCOL_VERSION);
     assert!(s1.pid > 0);
-    assert!(s1.requests_status >= 1);
+    assert!(s1.requests.status >= 1);
 
     // A second Status shows the counter advancing.
     let s2 = match wait_request(
@@ -285,7 +287,7 @@ async fn daemon_status_reports_metrics() {
         DaemonResponse::Status(s) => s,
         other => panic!("expected Status, got {other:?}"),
     };
-    assert!(s2.requests_status > s1.requests_status);
+    assert!(s2.requests.status > s1.requests.status);
 }
 
 #[tokio::test]
@@ -734,7 +736,7 @@ async fn failed_request_does_not_increment_counter() {
     .await;
     match status {
         DaemonResponse::Status(s) => assert_eq!(
-            s.requests_embed, 0,
+            s.requests.embed, 0,
             "a failed embed must not increment the counter"
         ),
         other => panic!("expected Status, got {other:?}"),
@@ -817,13 +819,15 @@ async fn query_status_parses_stub_status() {
             uptime_secs: 1,
             idle_secs: 0,
             bundles_loaded: 3,
-            requests_embed: 4,
-            requests_classify: 0,
-            requests_rerank: 0,
-            requests_meta: 1,
-            requests_status: 2,
-            requests_title: 0,
-            requests_total: 7,
+            requests: super::protocol::RequestCounts {
+                embed: 4,
+                classify: 0,
+                rerank: 0,
+                meta: 1,
+                status: 2,
+                title: 0,
+                total: 7,
+            },
             ping_count: 0,
             last_ping_secs_ago: None,
         }),
@@ -843,7 +847,7 @@ async fn query_status_parses_stub_status() {
         .expect("status present");
     assert_eq!(s.pid, 77);
     assert_eq!(s.bundles_loaded, 3);
-    assert_eq!(s.requests_total, 7);
+    assert_eq!(s.requests.total, 7);
 }
 
 #[tokio::test]

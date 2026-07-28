@@ -112,11 +112,53 @@ pub enum DaemonResponse {
     Error { message: String },
 }
 
-/// Daemon status + cumulative request metrics. `requests*` are cumulative
+/// Cumulative per-op request counts, nested inside [`DaemonStatus`].
+///
+/// Distinct from the internal `MetricsSnapshot`, which is an in-memory counter
+/// view with `total` as a computed method: `total` is an explicit field here so
+/// consumers read it rather than re-deriving it.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct RequestCounts {
+    pub embed: u64,
+    pub classify: u64,
+    pub rerank: u64,
+    pub meta: u64,
+    pub status: u64,
+    pub title: u64,
+    pub total: u64,
+}
+
+impl From<crate::daemon::metrics::MetricsSnapshot> for RequestCounts {
+    fn from(s: crate::daemon::metrics::MetricsSnapshot) -> Self {
+        Self {
+            embed: s.embed,
+            classify: s.classify,
+            rerank: s.rerank,
+            meta: s.meta,
+            status: s.status,
+            title: s.title,
+            total: s.total(),
+        }
+    }
+}
+
+/// Daemon status + cumulative request metrics. [`RequestCounts`] is cumulative
 /// across daemon restarts (persisted to the global LanceDB store).
+///
+/// The field layout deliberately matches what the CLI prints, so
+/// `engram_cli::output` can `#[serde(flatten)]` this straight into its own
+/// shape instead of unpacking and re-nesting it. That is why `version`
+/// serializes as `protocol` (there is now also a `build` version, so the bare
+/// name is ambiguous) and why the counters are grouped rather than seven flat
+/// `requests_*` fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
+    #[serde(rename = "protocol")]
     pub version: String,
+    /// Daemon binary's crate version — tells you it is running an older build
+    /// than the CLI querying it, hence possibly stale cached models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
     pub pid: u32,
     /// Seconds since *this* daemon process started.
     pub uptime_secs: u64,
@@ -124,27 +166,17 @@ pub struct DaemonStatus {
     pub idle_secs: u64,
     /// Distinct model bundles (config signatures) currently resident.
     pub bundles_loaded: usize,
-    pub requests_embed: u64,
-    pub requests_classify: u64,
-    pub requests_rerank: u64,
-    pub requests_meta: u64,
-    pub requests_status: u64,
-    pub requests_title: u64,
-    pub requests_total: u64,
+    /// Model ids currently resident, e.g. `["embed=onnx/all-MiniLM-L12-v2-u8"]`.
+    /// Answers "which models is this daemon actually serving?".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_ids: Vec<String>,
     /// Number of `Ping` requests received since this daemon process started.
     /// In-memory only — not persisted across restarts.
     pub ping_count: u64,
     /// Seconds since the last `Ping` was received, or `None` if no ping has
     /// arrived yet in this daemon's lifetime. In-memory only.
     pub last_ping_secs_ago: Option<u64>,
-    /// Daemon binary's crate version — tells you it is running an older build
-    /// than the CLI querying it, hence possibly stale cached models.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub build: Option<String>,
-    /// Model ids currently resident, e.g. `["embed=onnx/all-MiniLM-L12-v2-u8"]`.
-    /// Answers "which models is this daemon actually serving?".
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub model_ids: Vec<String>,
+    pub requests: RequestCounts,
 }
 
 /// NLI class probabilities. The dominant label is recomputed client-side via

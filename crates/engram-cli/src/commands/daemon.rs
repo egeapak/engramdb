@@ -88,13 +88,13 @@ pub async fn run_daemon_cmd(
                     println!("  model bundles:   {}", s.bundles_loaded);
                     println!("  {}", format_ping_line(s.ping_count, s.last_ping_secs_ago));
                     println!("  requests (cumulative across restarts):");
-                    println!("    embed:         {}", s.requests_embed);
-                    println!("    classify:      {}", s.requests_classify);
-                    println!("    rerank:        {}", s.requests_rerank);
-                    println!("    meta:          {}", s.requests_meta);
-                    println!("    status:        {}", s.requests_status);
-                    println!("    title:         {}", s.requests_title);
-                    println!("    total:         {}", s.requests_total);
+                    println!("    embed:         {}", s.requests.embed);
+                    println!("    classify:      {}", s.requests.classify);
+                    println!("    rerank:        {}", s.requests.rerank);
+                    println!("    meta:          {}", s.requests.meta);
+                    println!("    status:        {}", s.requests.status);
+                    println!("    title:         {}", s.requests.title);
+                    println!("    total:         {}", s.requests.total);
                 }
             }
             Ok(())

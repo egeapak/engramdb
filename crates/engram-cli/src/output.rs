@@ -1170,74 +1170,33 @@ pub struct Stats {
     pub runtime: Option<engramdb::telemetry::RuntimeSnapshot>,
 }
 
-/// Per-op request counters, nested under `requests` in the CLI's JSON.
-#[derive(Debug, serde::Serialize)]
-pub struct DaemonRequestCounts {
-    pub embed: u64,
-    pub classify: u64,
-    pub rerank: u64,
-    pub meta: u64,
-    pub status: u64,
-    pub title: u64,
-    pub total: u64,
-}
-
 /// The JSON body for a running daemon, shared by `daemon status` and
 /// `stats --daemon`.
 ///
 /// Both commands report the same daemon, but each used to hand-build its own
 /// `json!` object — and they drifted: `stats --daemon` silently lacked the
-/// heartbeat fields for as long as those existed. A typed struct makes that
-/// class of drift a compile error instead of a missing key.
+/// heartbeat fields for as long as those existed.
 ///
-/// This is deliberately a re-shaping of [`DaemonStatus`] rather than a
-/// `#[serde(flatten)]` of it: the CLI presents `version` as `protocol` (there
-/// is now also a `build` version) and nests the flat `requests_*` counters,
-/// and flattening would emit both spellings of every counter. The wire struct
-/// is shared with the daemon, so it cannot carry CLI-only rename/skip
-/// attributes.
+/// `DaemonStatus` is flattened in rather than re-listed field by field, so a
+/// field added to the wire struct reaches CLI output automatically. That works
+/// because the wire struct is laid out in the shape the CLI wants: counters
+/// grouped under `requests`, and `version` serialized as `protocol`. `running`
+/// and `socket` are the only client-side facts left to add.
 #[derive(Debug, serde::Serialize)]
-pub struct DaemonStatusJson {
+pub struct DaemonStatusJson<'a> {
     /// Always true — this shape is only built for a daemon that answered.
     pub running: bool,
-    pub pid: u32,
     pub socket: String,
-    /// Wire-protocol version (`DaemonStatus::version`).
-    pub protocol: String,
-    /// Daemon binary's crate version.
-    pub build: Option<String>,
-    pub uptime_secs: u64,
-    pub idle_secs: u64,
-    pub bundles_loaded: usize,
-    pub model_ids: Vec<String>,
-    pub ping_count: u64,
-    pub last_ping_secs_ago: Option<u64>,
-    pub requests: DaemonRequestCounts,
+    #[serde(flatten)]
+    pub status: &'a engramdb::daemon::DaemonStatus,
 }
 
-impl DaemonStatusJson {
-    pub fn new(status: &engramdb::daemon::DaemonStatus, socket: &std::path::Path) -> Self {
+impl<'a> DaemonStatusJson<'a> {
+    pub fn new(status: &'a engramdb::daemon::DaemonStatus, socket: &std::path::Path) -> Self {
         Self {
             running: true,
-            pid: status.pid,
             socket: socket.display().to_string(),
-            protocol: status.version.clone(),
-            build: status.build.clone(),
-            uptime_secs: status.uptime_secs,
-            idle_secs: status.idle_secs,
-            bundles_loaded: status.bundles_loaded,
-            model_ids: status.model_ids.clone(),
-            ping_count: status.ping_count,
-            last_ping_secs_ago: status.last_ping_secs_ago,
-            requests: DaemonRequestCounts {
-                embed: status.requests_embed,
-                classify: status.requests_classify,
-                rerank: status.requests_rerank,
-                meta: status.requests_meta,
-                status: status.requests_status,
-                title: status.requests_title,
-                total: status.requests_total,
-            },
+            status,
         }
     }
 }
@@ -2109,13 +2068,15 @@ mod tests {
             uptime_secs: 10,
             idle_secs: 1,
             bundles_loaded: 1,
-            requests_embed: 1,
-            requests_classify: 2,
-            requests_rerank: 3,
-            requests_meta: 4,
-            requests_status: 5,
-            requests_title: 6,
-            requests_total: 21,
+            requests: engramdb::daemon::RequestCounts {
+                embed: 1,
+                classify: 2,
+                rerank: 3,
+                meta: 4,
+                status: 5,
+                title: 6,
+                total: 21,
+            },
             ping_count: 7,
             last_ping_secs_ago: Some(8),
         };

@@ -34,7 +34,7 @@ mod transport;
 
 pub use client::{query_status, request_shutdown, DaemonHandle};
 pub use doctor::check_daemon;
-pub use protocol::{DaemonStatus, PROTOCOL_VERSION};
+pub use protocol::{DaemonStatus, RequestCounts, PROTOCOL_VERSION};
 pub use remote::remote_providers;
 pub use resolve::{
     resolve_providers, resolve_providers_with, DaemonCell, DaemonPolicy, InProcessFallback,

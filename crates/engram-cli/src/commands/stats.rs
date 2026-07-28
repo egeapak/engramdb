@@ -157,13 +157,13 @@ async fn run_daemon_stats(dir: &Path, formatter: &OutputFormatter) -> Result<()>
         println!("  idle:          {}s", s.idle_secs);
         println!("  model bundles: {}", s.bundles_loaded);
         println!("  requests (cumulative across restarts):");
-        println!("    embed:       {}", s.requests_embed);
-        println!("    classify:    {}", s.requests_classify);
-        println!("    rerank:      {}", s.requests_rerank);
-        println!("    meta:        {}", s.requests_meta);
-        println!("    status:      {}", s.requests_status);
-        println!("    title:       {}", s.requests_title);
-        println!("    total:       {}", s.requests_total);
+        println!("    embed:       {}", s.requests.embed);
+        println!("    classify:    {}", s.requests.classify);
+        println!("    rerank:      {}", s.requests.rerank);
+        println!("    meta:        {}", s.requests.meta);
+        println!("    status:      {}", s.requests.status);
+        println!("    title:       {}", s.requests.title);
+        println!("    total:       {}", s.requests.total);
         return Ok(());
     }
 
