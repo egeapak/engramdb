@@ -59,6 +59,14 @@ pub const NLI_DEBERTA_XSMALL_Q: NliModelSpec = NliModelSpec {
 /// must equal `DEFAULT_NLI_MODEL.repo`.
 pub const DEFAULT_NLI_MODEL: NliModelSpec = NLI_DEBERTA_XSMALL_Q;
 
+/// Every NLI spec this crate knows, for callers that need to map a repo id
+/// back to a spec (e.g. attributing a cached model directory to a model).
+///
+/// NOT a whitelist: `[nli].model` is a HuggingFace repo id and an unlisted
+/// repo is loaded as requested with generic filenames. Listing a spec here
+/// only means its ONNX/tokenizer filenames are known.
+pub const ALL_NLI_SPECS: &[NliModelSpec] = &[NLI_DEBERTA_XSMALL, NLI_DEBERTA_XSMALL_Q];
+
 /// Model output label ordering:
 /// - Index 0: contradiction
 /// - Index 1: entailment
