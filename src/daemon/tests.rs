@@ -109,10 +109,15 @@ async fn remote_embedding_end_to_end() {
     std::fs::create_dir_all(&store_dir).unwrap();
     let config = crate::types::EngramConfig::default();
     let handle = super::DaemonHandle::connect_existing(socket.clone());
+    // Pin the backend: this test gates on the ONNX model being staged, so its
+    // premise is "the ONNX path works end to end through the daemon". With
+    // `None` the daemon resolves `Auto` and falls back to Ollama when ONNX
+    // session init fails — exactly the regression this test exists to catch —
+    // and every assertion below still passes.
     let providers = super::remote_providers(
         handle,
         store_dir.to_string_lossy().into_owned(),
-        None,
+        Some(crate::types::EmbeddingBackend::Onnx),
         &config,
     )
     .await

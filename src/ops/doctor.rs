@@ -2948,7 +2948,12 @@ mod tests {
         std::env::set_var("ENGRAMDB_MODEL_CACHE_DIR", empty_cache.path());
         std::env::set_var("ENGRAMDB_OFFLINE", "1");
 
-        let config = crate::types::EngramConfig::default();
+        // Empty cache + offline only disables the ONNX provider. Under the
+        // default `Auto` backend resolution then falls through to Ollama, which
+        // succeeds on any machine running it (CI has none) — the "unavailable"
+        // premise silently evaporates. Pin the backend so there is no fallback.
+        let mut config = crate::types::EngramConfig::default();
+        config.embeddings.backend = crate::types::EmbeddingBackend::Onnx;
         let checks = validate_models(&config).await;
 
         let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
