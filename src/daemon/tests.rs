@@ -976,16 +976,15 @@ async fn remote_providers_wire_nli_and_reranker_per_config() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    // Default config: NLI + rerank disabled ⇒ not wired.
+    // Default config: NLI disabled ⇒ not wired. Reranking ships ENABLED, so
+    // the default now DOES wire a reranker — turn it off explicitly to keep
+    // testing the not-wired branch.
     let handle = super::DaemonHandle::connect_existing(socket.clone());
-    let p = super::remote_providers(
-        handle,
-        "/tmp/x".to_string(),
-        None,
-        &crate::types::EngramConfig::default(),
-    )
-    .await
-    .expect("providers");
+    let mut off = crate::types::EngramConfig::default();
+    off.rerank.enabled = false;
+    let p = super::remote_providers(handle, "/tmp/x".to_string(), None, &off)
+        .await
+        .expect("providers");
     assert!(p.embedding.is_some());
     assert!(p.nli.is_none());
     assert!(p.reranker.is_none());

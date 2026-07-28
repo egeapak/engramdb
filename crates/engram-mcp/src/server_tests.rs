@@ -1504,7 +1504,7 @@ async fn config_exposes_limits_and_defaults() {
     assert_eq!(val["limits"]["content_soft_token_target"], 500);
     assert_eq!(val["retrieval"]["default_max_results"], 10);
     assert!(val["retrieval"]["relevance_threshold"].is_number());
-    assert_eq!(val["features"]["rerank_enabled"], false);
+    assert_eq!(val["features"]["rerank_enabled"], true);
     assert_eq!(val["features"]["contradiction_detection_enabled"], false);
     assert!(val["embedding"]["dimensions"].is_number());
     assert!(val["top_tags"].is_array());
