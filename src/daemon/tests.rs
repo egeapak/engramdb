@@ -702,11 +702,16 @@ async fn failed_request_does_not_increment_counter() {
     tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
 
     // NEGATIVE (red before fix): the failing Embed must not count.
+    //
+    // Pin the backend to ONNX. An empty cache plus offline only disables the
+    // ONNX provider; with `backend: None` resolution falls through to Ollama,
+    // which succeeds on any developer machine running it (CI has none), and the
+    // "embedding unavailable" premise silently evaporates.
     let resp = wait_request(
         &socket,
         DaemonRequest {
             dir: dir.clone(),
-            backend: None,
+            backend: Some(crate::types::EmbeddingBackend::Onnx),
             op: DaemonOp::Embed {
                 texts: vec!["hello".to_string()],
             },
