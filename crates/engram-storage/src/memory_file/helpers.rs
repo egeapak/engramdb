@@ -151,13 +151,47 @@ fn unescape_body_line(line: &str) -> &str {
 ///   (parsed separately by `parse_hidden_meta`)
 ///
 /// Escaped lines (see module docs) are unescaped as they are accumulated.
+///
+/// Line splitting deliberately avoids [`str::lines`]. `lines()` strips one
+/// trailing `\r` from every line, and section text is rebuilt from those
+/// lines — so content ending in several carriage returns lost one on every
+/// parse, and the write never reached a fixed point (found by the
+/// `memory_file_roundtrip` fuzz target). Whether a trailing `\r` is a CRLF
+/// terminator or content cannot be decided per line, so it is decided once
+/// for the file: see `crlf_file` below.
 pub fn parse_body_sections(body: &str) -> HashMap<String, String> {
     let mut sections = HashMap::new();
     let mut current_section: Option<String> = None;
     let mut current_content = Vec::new();
     let mut in_hidden_block = false;
 
-    for line in body.lines() {
+    // A file is CRLF-terminated or it is not; that cannot be decided per line.
+    // If EVERY non-final line ends in `\r`, this is a CRLF file and the
+    // trailing `\r` is a line terminator to drop. Otherwise the file is
+    // LF-terminated and any `\r` is content that must survive verbatim.
+    let crlf_file = {
+        let mut lines = body.split('\n').peekable();
+        let mut saw_line = false;
+        let mut all_cr = true;
+        while let Some(l) = lines.next() {
+            if lines.peek().is_none() {
+                break; // trailing fragment after the last `\n`
+            }
+            saw_line = true;
+            if !l.ends_with('\r') {
+                all_cr = false;
+                break;
+            }
+        }
+        saw_line && all_cr
+    };
+
+    for raw_line in body.split('\n') {
+        let line = if crlf_file {
+            raw_line.strip_suffix('\r').unwrap_or(raw_line)
+        } else {
+            raw_line
+        };
         // Writer-emitted hidden-metadata block: skip it as a fenced region.
         if in_hidden_block {
             if line.trim_end() == HIDDEN_META_END {

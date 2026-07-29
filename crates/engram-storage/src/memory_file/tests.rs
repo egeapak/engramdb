@@ -1041,6 +1041,111 @@ fn test_v2_roundtrip_without_title() {
 }
 
 #[test]
+fn test_v2_empty_summary_does_not_acquire_title() {
+    // A titled memory with an empty summary must keep it empty across a
+    // round trip. The writer emits a bare `**Summary:**` line, which the
+    // reader must read back as an empty summary rather than "absent" — an
+    // absent summary falls back to the H1, and for a titled memory the H1
+    // *is* the title, so the title would silently become the summary.
+    // Found by the `memory_file_roundtrip` fuzz target (#62).
+    let mut memory = sample_memory();
+    memory.title = Some("Ingest Pipeline Decision".to_string());
+    memory.summary = String::new();
+
+    let written = V2Writer.write(&memory).unwrap();
+    let reparsed = V2Parser.parse(&written).unwrap();
+
+    assert_eq!(reparsed.summary, "", "empty summary must stay empty");
+    assert_eq!(reparsed.title, memory.title);
+
+    // ...and the write must therefore be a fixed point, which is what the
+    // fuzzer actually asserts.
+    let rewritten = V2Writer.write(&reparsed).unwrap();
+    assert_eq!(written, rewritten, "write must be idempotent");
+}
+
+#[test]
+fn test_v2_titled_memory_without_h1_keeps_summary_empty() {
+    // The reduced form of the #62 crash input: a titled file whose body has
+    // no unindented H1 (here, an indented one). The first parse finds no H1,
+    // so the summary is empty; the write then emits an H1 from the title, and
+    // a fallback-to-H1 reader would resolve the second parse to the title.
+    let input = "---\nversion: 2\nid: no-h1-1\ntype: hazard\nstatus: Active\n\
+                 title: Ingest Pipeline Decision\n---\n\n      # Indented, not a heading\n";
+
+    let parsed = parse_memory_file(input).unwrap();
+    assert_eq!(parsed.summary, "");
+
+    let written = write_memory_file(&parsed).unwrap();
+    let reparsed = parse_memory_file(&written).unwrap();
+    assert_eq!(
+        reparsed.summary, "",
+        "summary must not acquire the title on re-parse"
+    );
+
+    let rewritten = write_memory_file(&reparsed).unwrap();
+    assert_eq!(written, rewritten, "write must be idempotent");
+}
+
+#[test]
+fn test_v2_untitled_memory_still_reads_summary_from_h1() {
+    // The guard against the above must not break the untitled case, where the
+    // H1 legitimately *is* the summary (see the format doc-comment).
+    let mut memory = sample_memory();
+    memory.title = None;
+    memory.summary = "A summary that lives in the H1".to_string();
+
+    let written = V2Writer.write(&memory).unwrap();
+    assert!(written.contains("# A summary that lives in the H1"));
+
+    let reparsed = V2Parser.parse(&written).unwrap();
+    assert_eq!(reparsed.summary, "A summary that lives in the H1");
+    assert_eq!(reparsed.title, None);
+}
+
+#[test]
+fn test_v2_content_keeps_repeated_carriage_returns() {
+    // `str::lines()` strips ONE trailing `\r` per line (its CRLF handling), so
+    // rebuilding a section from `lines()` silently dropped one `\r` from any
+    // line ending in several — losing one more on every save. Found by the
+    // `memory_file_roundtrip` fuzz target after the empty-summary fix (#62)
+    // stopped masking it.
+    let mut memory = sample_memory();
+    memory.content = "row\r\r\r\r\nnext".to_string();
+
+    let written = V2Writer.write(&memory).unwrap();
+    let reparsed = V2Parser.parse(&written).unwrap();
+
+    assert_eq!(
+        reparsed.content, "row\r\r\r\r\nnext",
+        "every carriage return must survive the round trip"
+    );
+
+    // ...so the write is a fixed point, which is what the fuzzer asserts.
+    let rewritten = V2Writer.write(&reparsed).unwrap();
+    assert_eq!(written, rewritten, "write must be idempotent");
+}
+
+#[test]
+fn test_v2_crlf_line_endings_still_normalize() {
+    // The guard above must not resurrect the `\r` that CRLF files legitimately
+    // carry: a plain CRLF body still parses to LF-only content.
+    let input = "---\nversion: 2\nid: crlf-1\ntype: hazard\nstatus: Active\n---\n\r\n\
+                 # Heading\r\n\r\n## Content\r\n\r\nfirst\r\nsecond\r\n";
+
+    let parsed = parse_memory_file(input).unwrap();
+    assert!(
+        !parsed.content.contains('\r'),
+        "a normal CRLF file must normalize to LF, got {:?}",
+        parsed.content
+    );
+
+    let written = write_memory_file(&parsed).unwrap();
+    let rewritten = write_memory_file(&parse_memory_file(&written).unwrap()).unwrap();
+    assert_eq!(written, rewritten, "write must be idempotent");
+}
+
+#[test]
 fn test_v1_roundtrip_with_title() {
     let mut memory = sample_memory();
     memory.title = Some("My Title".to_string());
