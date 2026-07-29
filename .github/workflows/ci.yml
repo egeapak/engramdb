@@ -51,6 +51,59 @@ jobs:
           fi
           echo "OK: versions match ($plugin_ver)"
 
+  fuzz-lockfile-parity:
+    name: Fuzz lockfile parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # `fuzz/` is its own workspace, so nothing in a normal build reads its
+      # lockfile and nothing keeps it current — it sat untouched for months
+      # while the root's moved with every dependabot batch, until `--locked`
+      # failed inside `fuzz/` on a clean checkout and any resolution there
+      # rewrote ~3200 lines. Dependabot now watches `/fuzz` too; this is the
+      # backstop that makes the drift visible if that ever lapses.
+      #
+      # Compares only crates present in BOTH lockfiles: `fuzz/` legitimately
+      # carries libfuzzer/arbitrary that the root does not, and the root
+      # carries plenty `fuzz/` never pulls in. A shared crate resolving to two
+      # different versions is the actual defect — it means the fuzz targets
+      # exercise different code than the crate CI tests.
+      - name: Check fuzz/Cargo.lock agrees with the root workspace
+        run: |
+          python3 - <<'PY'
+          import re, sys
+
+          def versions(path):
+              found = {}
+              with open(path, encoding="utf-8") as handle:
+                  text = handle.read()
+              for block in text.split("[[package]]"):
+                  name = re.search(r'^name = "(.+?)"', block, re.M)
+                  version = re.search(r'^version = "(.+?)"', block, re.M)
+                  if name and version:
+                      found.setdefault(name.group(1), set()).add(version.group(1))
+              return found
+
+          root = versions("Cargo.lock")
+          fuzz = versions("fuzz/Cargo.lock")
+          shared = sorted(set(root) & set(fuzz))
+          drift = [(n, sorted(root[n]), sorted(fuzz[n])) for n in shared if root[n] != fuzz[n]]
+
+          print(f"shared crates: {len(shared)}")
+          print(f"version disagreements: {len(drift)}")
+          for name, root_versions, fuzz_versions in drift:
+              print(f"  {name}: root={root_versions} fuzz={fuzz_versions}")
+
+          if drift:
+              print(
+                  "::error file=fuzz/Cargo.lock::fuzz/Cargo.lock has drifted from the "
+                  "root workspace. For each crate above run, inside fuzz/: "
+                  "cargo update -p <crate> --precise <root-version>"
+              )
+              sys.exit(1)
+          print("OK: fuzz/Cargo.lock agrees with the root workspace on every shared crate")
+          PY
+
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
