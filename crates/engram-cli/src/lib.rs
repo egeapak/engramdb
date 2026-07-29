@@ -75,8 +75,28 @@ fn arm_test_isolation() {
 
 use anyhow::Result;
 use std::env;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Storage-engine targets pinned to `warn` in the default filter.
+///
+/// LanceDB logs every manifest load, scan plan and commit at `info`, and the
+/// daemon writes its metrics to LanceDB *on shutdown* — so `RUST_LOG=info`
+/// yielded a daemon log where 16 of 19 lines were storage bookkeeping and the
+/// daemon's own three were buried. That output is now persisted and capped, so
+/// crowding out a real failure is the difference between a diagnosis and a
+/// haystack. These are a baseline, not an override: a later `RUST_LOG`
+/// directive for the same target still wins.
+const LANCE_QUIET: &[&str] = &[
+    "lance=warn",
+    "lance_core=warn",
+    "lance_table=warn",
+    "lance_datafusion=warn",
+    "lance_io=warn",
+    "lance_encoding=warn",
+    "lancedb=warn",
+];
 
 use app::{Cli, Command, HookCommand, TaskCommand};
 use commands::{AddParams, ChallengeParams, QueryParams, UpdateParams};
@@ -99,11 +119,28 @@ use prompter::InquirePrompter;
 pub async fn run(cli: Cli) -> Result<()> {
     // Initialize tracing so warnings (e.g. from reindex) are visible.
     // Defaults to WARN level; override with RUST_LOG env var.
+    //
+    // [`LANCE_QUIET`] is laid down first as a baseline, so a later `RUST_LOG`
+    // directive for the same target still wins.
+    let baseline = LANCE_QUIET.iter().fold(
+        tracing_subscriber::EnvFilter::new("warn"),
+        |filter, directive| filter.add_directive(directive.parse().expect("static directive")),
+    );
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(spec) if !spec.trim().is_empty() => spec
+            .split(',')
+            .filter_map(|d| d.trim().parse().ok())
+            .fold(baseline, |filter, directive| {
+                filter.add_directive(directive)
+            }),
+        _ => baseline,
+    };
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
+        .with_env_filter(filter)
+        // Colour only when a terminal is attached. `daemon run` redirects
+        // stderr to a file when it is not, and escape sequences there defeat
+        // `grep` and show up as literal bytes in `doctor`'s log tail.
+        .with_ansi(std::io::stderr().is_terminal())
         .with_writer(std::io::stderr)
         .without_time()
         .with_target(false)
