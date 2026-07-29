@@ -2986,20 +2986,22 @@ mod tests {
         let nli = checks.iter().find(|c| c.name == "NLI model").unwrap();
         assert!(nli.passed && nli.status == Some(CheckStatus::Info));
 
-        // Reranking IS enabled by default, so the reranker is probed for real
-        // rather than skipped. Its outcome is deliberately not asserted: unlike
-        // the embedding/NLI/T5 loaders, `LocalReranker::load` has no
-        // `ENGRAMDB_OFFLINE` guard, so on a developer machine that already has
-        // the cross-encoder cached it loads and passes, while on a cold CI
-        // runner it fails to download. Pinning either outcome makes this test
-        // machine-dependent; what this test covers is the *section shape*
-        // (asserted above), and the enabled-path branch is covered by
-        // `test_models_subsection_describes_embedding_model`.
+        // Reranking IS enabled by default, so the empty cache + offline that
+        // makes the embedding model unavailable makes the reranker unavailable
+        // too: it must report a real failure, not a skip. This only became
+        // deterministic once `LocalReranker::load` gained the same
+        // `ENGRAMDB_OFFLINE` guard the embedding/NLI/T5 loaders have — before
+        // that it loaded from a developer's warm cache and passed, while a
+        // cold runner failed to download, so neither outcome could be pinned.
         let rerank = checks.iter().find(|c| c.name == "Reranker model").unwrap();
-        assert_ne!(
-            rerank.status,
-            Some(CheckStatus::Info),
-            "an enabled reranker must be probed, not skipped"
+        assert!(
+            !rerank.passed,
+            "an enabled-but-unloadable reranker must fail, got: {}",
+            rerank.message
+        );
+        assert!(
+            rerank.suggestion.is_some(),
+            "a failed model check should carry a remediation hint"
         );
     }
 
