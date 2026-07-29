@@ -210,6 +210,28 @@ pub fn global_lancedb_dir() -> Result<PathBuf> {
     Ok(global_data_dir()?.join("global").join("lancedb"))
 }
 
+/// Returns the directory for machine-wide diagnostic logs.
+///
+/// A sibling of `projects/` and `global/` rather than anything project-local:
+/// the daemon is shared across every project on the machine, so a per-project
+/// log would scatter one process's output across all of them. Nothing scans
+/// this directory level — the orphan-project sweep in `ops::doctor` and the
+/// project listings all descend into `projects/` specifically — so a new
+/// sibling here is inert.
+pub fn logs_dir() -> Result<PathBuf> {
+    Ok(global_data_dir()?.join("logs"))
+}
+
+/// Returns the path of the shared daemon's diagnostic log.
+///
+/// The daemon is spawned detached with its streams redirected here, because a
+/// process nobody is watching cannot report a failure to anyone. It inherits
+/// `ENGRAMDB_DATA_DIR` through [`global_data_dir`], so the test harness
+/// redirects it along with everything else.
+pub fn daemon_log_path() -> Result<PathBuf> {
+    Ok(logs_dir()?.join("daemon.log"))
+}
+
 /// Returns the root directory for a named group memory store.
 ///
 /// A *group store* is the generalization of the global store: an ordinary

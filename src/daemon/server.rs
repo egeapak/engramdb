@@ -143,14 +143,32 @@ impl Ctx {
 /// calling `process::exit` here keeps `run_daemon` drivable in-process by
 /// tests.
 pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Result<()> {
-    let listener: super::transport::Listener =
-        match super::transport::bind_or_yield(&socket).await? {
-            Some(l) => l,
-            None => {
-                tracing::debug!("another engramdb daemon already owns {socket:?}; exiting");
-                return Ok(());
-            }
-        };
+    let listener: super::transport::Listener = match super::transport::bind_or_yield(&socket).await
+    {
+        Ok(Some(l)) => l,
+        Ok(None) => {
+            // Benign and expected: a live daemon answered on the socket, so
+            // this process loses the race and exits. Stays at debug — several
+            // of these happen per session under normal concurrency.
+            tracing::debug!("another engramdb daemon already owns {socket:?}; exiting");
+            return Ok(());
+        }
+        Err(e) => {
+            // The path is occupied by something that will not serve and could
+            // not be reclaimed: a foreign-uid socket, a directory or regular
+            // file at the path, a permissions problem on the parent. Nothing
+            // will fix itself, every future spawn fails the same way, and
+            // without this the whole chain degrades to in-process models with
+            // no explanation anywhere. Warn with the OS error and re-raise.
+            tracing::warn!(
+                "cannot bind or reclaim the daemon socket {}: {e}. \
+                 Models will load in-process. Remove the path if it is stale, \
+                 or point [daemon].socket_path elsewhere.",
+                socket.display()
+            );
+            return Err(e.into());
+        }
+    };
     tracing::info!("engramdb daemon listening on {socket:?}");
 
     // Seed counters from the last persisted snapshot so request totals are

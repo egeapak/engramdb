@@ -17,6 +17,11 @@
 
 pub mod client;
 pub mod doctor;
+// Where a daemon's diagnostics go. An auto-spawned daemon is detached and
+// outlives its parent, so its streams used to be discarded outright; this owns
+// the log file that replaces `/dev/null` and the rule for when a hand-run
+// daemon keeps its terminal instead.
+pub mod logging;
 pub mod metrics;
 pub mod protocol;
 pub mod remote;

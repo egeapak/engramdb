@@ -105,6 +105,10 @@ impl DaemonCell {
         }
 
         if policy == DaemonPolicy::ConnectOnly {
+            tracing::debug!(
+                "no daemon listening on {} and policy is ConnectOnly; using in-process models",
+                socket.display()
+            );
             return None;
         }
 
@@ -112,6 +116,18 @@ impl DaemonCell {
         // `idle/3` window, successful ones the short crash-loop cooldown.
         if let Some((t, window)) = st.last_spawn {
             if t.elapsed() < window {
+                // Warn, not debug: the caller asked for a daemon and is being
+                // refused one. Without this the backoff is indistinguishable
+                // from "the daemon simply isn't wanted", and a user watching a
+                // crash-looping daemon sees no explanation for why nothing is
+                // even being attempted.
+                tracing::warn!(
+                    "not spawning a daemon: a previous attempt {:.0}s ago is still within its \
+                     {:.0}s backoff; using in-process models (see the daemon log for why the \
+                     last attempt failed)",
+                    t.elapsed().as_secs_f64(),
+                    window.as_secs_f64()
+                );
                 return None;
             }
         }

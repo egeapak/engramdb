@@ -8,6 +8,50 @@ use engramdb::types::DaemonConfig;
 use std::path::Path;
 use std::time::Duration;
 
+/// Point this process's stderr at the daemon log unless a terminal is
+/// attached.
+///
+/// `engramdb daemon run` reaches here two ways. Typed by a human, stderr is a
+/// terminal they are watching, and diverting to a file they would then have to
+/// `tail` is strictly worse — so leave it alone. Started any other way (a
+/// redirect, systemd, CI, or a supervisor), the output would otherwise go
+/// nowhere, which is the failure this whole change exists to fix.
+///
+/// The redirect is done at the file-descriptor level (`dup2`) rather than by
+/// reconfiguring `tracing`, because the subscriber is installed in `cli::run`
+/// before any command dispatches and already holds stderr. Moving fd 2
+/// redirects the subscriber, any library writing to stderr, and a panic
+/// message alike — which is exactly the set worth capturing.
+///
+/// Best-effort: a failure here leaves stderr as it was.
+#[cfg(unix)]
+fn redirect_stderr_to_log_unless_tty() {
+    use engramdb::daemon::logging::{daemon_log_for_spawn, stderr_target, StderrTarget};
+    use std::io::IsTerminal;
+
+    if stderr_target(std::io::stderr().is_terminal()) == StderrTarget::Inherit {
+        return;
+    }
+    let file = match daemon_log_for_spawn() {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!("cannot open the daemon log ({e}); leaving stderr as-is");
+            return;
+        }
+    };
+    // `rustix` is the safe-syscall crate already used for this project's other
+    // Unix work (the `geteuid`/`SO_PEERCRED` socket hardening).
+    if let Err(e) = rustix::stdio::dup2_stderr(&file) {
+        tracing::warn!("cannot redirect stderr to the daemon log ({e}); leaving stderr as-is");
+    }
+}
+
+/// Non-Unix: `dup2` has no direct equivalent worth the complexity here, and
+/// the auto-spawn path (which is what actually needs capture) redirects the
+/// child's stderr at spawn time on every platform.
+#[cfg(not(unix))]
+fn redirect_stderr_to_log_unless_tty() {}
+
 /// Load the `[daemon]` config from the given project directory's store (best
 /// effort; defaults when absent). Used so a configured `socket_path` /
 /// `idle_timeout_secs` apply to the `daemon` subcommands too. `dir` is the
@@ -47,6 +91,7 @@ pub async fn run_daemon_cmd(
         } => {
             let socket = daemon::resolve_socket(socket.as_deref(), &cfg);
             let idle = Duration::from_secs(idle_timeout.unwrap_or(cfg.idle_timeout_secs));
+            redirect_stderr_to_log_unless_tty();
             daemon::run_daemon(socket, idle).await
         }
 
