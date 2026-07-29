@@ -44,6 +44,42 @@ updates:
       - dependency-name: "hf-hub"
         update-types: ["version-update:semver-major"]
 
+  # `fuzz/` declares its own `[workspace]` (the cargo-fuzz layout, so libfuzzer
+  # and its nightly sanitizer flags stay out of ordinary builds), which makes it
+  # invisible to the `/` entry above — its lockfile went untouched for months
+  # while the root's kept moving, until the two had drifted far enough that any
+  # resolution inside `fuzz/` rewrote ~3200 lines and `--locked` failed on a
+  # clean checkout. Workspace dependency inheritance cannot fix this: a crate
+  # that owns a workspace cannot inherit from an outer one, and the crates that
+  # actually drift are transitive (through the `engramdb` path dep), which
+  # inheritance would not unify anyway. So give it its own schedule.
+  #
+  # The `ignore` list is duplicated deliberately rather than shared — dependabot
+  # has no include mechanism, and every reason above applies identically here.
+  # `ci.yml`'s lockfile-parity job is the backstop if this drifts again.
+  - package-ecosystem: cargo
+    directory: "/fuzz"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      patch-and-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "ort"
+      - dependency-name: "arrow*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "tokenizers"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "hf-hub"
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
