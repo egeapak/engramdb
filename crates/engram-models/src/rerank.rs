@@ -128,6 +128,7 @@ impl LocalReranker {
         // An explicit-file spec (e.g. the quantized export) wins over
         // fastembed's registry, which can only reach `onnx/model.onnx`.
         if let Some(spec) = USER_DEFINED_RERANKERS.iter().find(|s| s.name == model_name) {
+            ensure_cached_when_offline(spec.name, spec.repo)?;
             let reranker = Self::load_user_defined(spec, cache_dir)?;
             return Ok(Self::shared(Arc::new(Mutex::new(reranker))));
         }
@@ -144,11 +145,15 @@ impl LocalReranker {
                 DEFAULT_RERANK_SPEC.name,
                 FASTEMBED_RERANKERS.join(", ")
             );
+            ensure_cached_when_offline(DEFAULT_RERANK_SPEC.name, DEFAULT_RERANK_SPEC.repo)?;
             let reranker = Self::load_user_defined(&DEFAULT_RERANK_SPEC, cache_dir)?;
             return Ok(Self::shared(Arc::new(Mutex::new(reranker))));
         }
 
         let model = resolve_reranker_model(model_name);
+        // fastembed keeps the repo id in the registry rather than in a spec of
+        // ours, so resolve it there (same shape as the embedding loader).
+        ensure_cached_when_offline(model_name, &TextRerank::get_model_info(&model).model_code)?;
         let mut options = RerankInitOptions::new(model)
             .with_cache_dir(cache_dir)
             .with_show_download_progress(false);
@@ -242,6 +247,24 @@ impl Reranker for LocalReranker {
 /// the two lists in sync is enforced by a test) and mirrors the gate's
 /// behaviour by warning rather than silently substituting.
 #[cfg(feature = "onnxruntime")]
+/// Refuse to download an uncached cross-encoder in offline mode.
+///
+/// The embedding, NLI and T5 loaders all gate on
+/// [`engram_storage::paths::offline_enabled`]; the reranker did not, so the
+/// documented "empty `ENGRAMDB_MODEL_CACHE_DIR` + `ENGRAMDB_OFFLINE`" recipe
+/// for simulating a missing model silently did nothing here. A developer with
+/// the cross-encoder already in the shared cache loaded it anyway, while a
+/// cold CI runner tried to download it — so tests asserting model
+/// *unavailability* disagreed between machines.
+fn ensure_cached_when_offline(model_name: &str, repo: &str) -> Result<()> {
+    if engram_storage::paths::offline_enabled() && !engram_storage::paths::hf_repo_cached(repo) {
+        anyhow::bail!(
+            "offline mode (ENGRAMDB_OFFLINE) and reranker model '{model_name}' ({repo}) is not cached"
+        );
+    }
+    Ok(())
+}
+
 fn resolve_reranker_model(name: &str) -> RerankerModel {
     match name {
         "bge-reranker-v2-m3" => RerankerModel::BGERerankerV2M3,
@@ -260,6 +283,40 @@ fn resolve_reranker_model(name: &str) -> RerankerModel {
 #[cfg(all(test, feature = "onnxruntime"))]
 mod tests {
     use super::*;
+
+    /// Offline mode must refuse an uncached cross-encoder instead of
+    /// downloading it, matching the embedding/NLI/T5 loaders. Without this the
+    /// documented "empty cache dir + `ENGRAMDB_OFFLINE`" recipe for simulating
+    /// a missing model did nothing for the reranker, so tests asserting model
+    /// unavailability passed or failed depending on what the machine had
+    /// cached. Nextest runs each test in its own process, so setting the env
+    /// vars here cannot leak into another test.
+    #[test]
+    fn offline_mode_refuses_an_uncached_reranker() {
+        let empty_cache = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("ENGRAMDB_MODEL_CACHE_DIR", empty_cache.path());
+        std::env::set_var("ENGRAMDB_OFFLINE", "1");
+
+        let err = ensure_cached_when_offline("jina-turbo-q", "jinaai/jina-reranker-v1-turbo-en")
+            .expect_err("an uncached model must fail fast in offline mode");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ENGRAMDB_OFFLINE") && msg.contains("not cached"),
+            "error should name the offline switch and the cause, got: {msg}"
+        );
+    }
+
+    /// The guard is inert when offline mode is off — an uncached model is
+    /// still allowed to download, which is the normal path.
+    #[test]
+    fn online_mode_allows_an_uncached_reranker() {
+        let empty_cache = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("ENGRAMDB_MODEL_CACHE_DIR", empty_cache.path());
+        std::env::remove_var("ENGRAMDB_OFFLINE");
+
+        ensure_cached_when_offline("jina-turbo-q", "jinaai/jina-reranker-v1-turbo-en")
+            .expect("online mode must not block an uncached model");
+    }
 
     /// The quantized spec must be reachable by its config name.
     ///
