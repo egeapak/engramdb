@@ -1104,6 +1104,48 @@ fn test_v2_untitled_memory_still_reads_summary_from_h1() {
 }
 
 #[test]
+fn test_v2_content_keeps_repeated_carriage_returns() {
+    // `str::lines()` strips ONE trailing `\r` per line (its CRLF handling), so
+    // rebuilding a section from `lines()` silently dropped one `\r` from any
+    // line ending in several — losing one more on every save. Found by the
+    // `memory_file_roundtrip` fuzz target after the empty-summary fix (#62)
+    // stopped masking it.
+    let mut memory = sample_memory();
+    memory.content = "row\r\r\r\r\nnext".to_string();
+
+    let written = V2Writer.write(&memory).unwrap();
+    let reparsed = V2Parser.parse(&written).unwrap();
+
+    assert_eq!(
+        reparsed.content, "row\r\r\r\r\nnext",
+        "every carriage return must survive the round trip"
+    );
+
+    // ...so the write is a fixed point, which is what the fuzzer asserts.
+    let rewritten = V2Writer.write(&reparsed).unwrap();
+    assert_eq!(written, rewritten, "write must be idempotent");
+}
+
+#[test]
+fn test_v2_crlf_line_endings_still_normalize() {
+    // The guard above must not resurrect the `\r` that CRLF files legitimately
+    // carry: a plain CRLF body still parses to LF-only content.
+    let input = "---\nversion: 2\nid: crlf-1\ntype: hazard\nstatus: Active\n---\n\r\n\
+                 # Heading\r\n\r\n## Content\r\n\r\nfirst\r\nsecond\r\n";
+
+    let parsed = parse_memory_file(input).unwrap();
+    assert!(
+        !parsed.content.contains('\r'),
+        "a normal CRLF file must normalize to LF, got {:?}",
+        parsed.content
+    );
+
+    let written = write_memory_file(&parsed).unwrap();
+    let rewritten = write_memory_file(&parse_memory_file(&written).unwrap()).unwrap();
+    assert_eq!(written, rewritten, "write must be idempotent");
+}
+
+#[test]
 fn test_v1_roundtrip_with_title() {
     let mut memory = sample_memory();
     memory.title = Some("My Title".to_string());
