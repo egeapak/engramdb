@@ -252,8 +252,27 @@ impl DaemonHandle {
             .arg("--idle-timeout")
             .arg(idle_timeout_secs.to_string())
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stdout(std::process::Stdio::null());
+
+        // This child is detached and outlives us, so nobody is watching its
+        // stderr — it used to go to `/dev/null`, which meant every reason a
+        // daemon could fail to start (bind error, missing ONNX runtime, panic
+        // on first model load) was discarded. Callers still fall back to
+        // in-process models, but now the reason is recoverable. If the log
+        // can't be opened, fall back to discarding rather than inheriting:
+        // inheriting would interleave daemon output into an MCP server's
+        // stdio, which is a protocol stream.
+        match super::logging::daemon_log_for_spawn() {
+            Ok(file) => {
+                cmd.stderr(std::process::Stdio::from(file));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "cannot open the daemon log ({e}); daemon diagnostics will be discarded"
+                );
+                cmd.stderr(std::process::Stdio::null());
+            }
+        }
         match cmd.spawn() {
             Ok(mut child) => {
                 tracing::debug!("spawned engramdb daemon");

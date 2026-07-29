@@ -57,6 +57,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 
+# Unix-only: `dup2` to point a non-interactive `daemon run`'s stderr at the
+# daemon log. Same crate the core uses for its geteuid()/SO_PEERCRED
+# hardening, so this adds no new dependency to the tree.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["stdio"] }
+
 [dev-dependencies]
 engramdb = { path = "../..", default-features = false, features = ["test-support"] }
 # `arm()`s the per-process data/config-dir isolation (#[ctor] in src/lib.rs) so
