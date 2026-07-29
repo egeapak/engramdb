@@ -27,6 +27,16 @@ use globset::{Glob, GlobMatcher};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+/// Upper bound on distinct patterns retained by [`cached_matcher`].
+///
+/// A compiled matcher costs roughly 23 KB (measured), so this bounds the
+/// cache at ~90 MB — orders of magnitude above any real store's scope
+/// vocabulary, while staying finite for input that is not.
+const MAX_CACHED_MATCHERS: usize = 4096;
+
+type MatcherCache = OnceLock<Mutex<HashMap<String, Option<GlobMatcher>>>>;
+static CACHE: MatcherCache = OnceLock::new();
+
 /// Process-wide cache of compiled glob matchers, keyed by pattern string.
 ///
 /// `matches` runs for every index entry on every query — including the
@@ -34,11 +44,22 @@ use std::sync::{Mutex, OnceLock};
 /// caching each query pays O(entries × patterns) compilations even though
 /// scope patterns repeat heavily across entries and queries. Long-lived MCP
 /// processes amortize this to one compile per distinct pattern. Invalid
-/// patterns cache as `None` so they are not re-parsed either. Growth is
-/// bounded by the number of distinct physical scopes across the stores the
-/// process touches.
+/// patterns cache as `None` so they are not re-parsed either.
+///
+/// Capped at [`MAX_CACHED_MATCHERS`]. Patterns come from on-disk memory
+/// files, which are user-editable and arrive with cloned repos, and nothing
+/// validates their number or length — so "distinct scopes the process
+/// touches" is an assumption, not an invariant. Left uncapped this grew
+/// without bound until the process died; fuzzing hit the 2 GB ceiling that
+/// way (#63/#69), and a long-lived daemon would too, just slower.
+///
+/// Eviction is random rather than LRU: `HashMap` iteration order is
+/// randomized per process, so the first key is an arbitrary victim. True LRU
+/// would have to update recency on every *read*, turning the hot-path lookup
+/// below into a write under the same mutex. Real pattern vocabularies are
+/// small and stable, so the cap is only ever reached under adversarial input
+/// — where evicting the wrong entry costs a recompile, not correctness.
 fn cached_matcher(pattern: &str) -> Option<GlobMatcher> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<GlobMatcher>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let Ok(mut guard) = cache.lock() else {
         // Poisoned lock: fall back to a one-off compile.
@@ -49,10 +70,26 @@ fn cached_matcher(pattern: &str) -> Option<GlobMatcher> {
     if let Some(cached) = guard.get(pattern) {
         return cached.clone();
     }
+    // Miss: make room before inserting so the map never exceeds the cap.
+    if guard.len() >= MAX_CACHED_MATCHERS {
+        if let Some(victim) = guard.keys().next().cloned() {
+            guard.remove(&victim);
+        }
+    }
     guard
         .entry(pattern.to_string())
         .or_insert_with(|| Glob::new(pattern).ok().map(|g| g.compile_matcher()))
         .clone()
+}
+
+/// Number of entries currently held by the matcher cache. Test-only hook for
+/// asserting the cap actually binds.
+#[cfg(test)]
+fn cached_matcher_len() -> usize {
+    CACHE
+        .get()
+        .and_then(|c| c.lock().ok().map(|g| g.len()))
+        .unwrap_or(0)
 }
 
 /// Whether a physical scope pattern uses glob syntax that globset
@@ -273,6 +310,41 @@ mod tests {
 
     const BASE: f64 = 0.82;
     const FLOOR: f64 = 0.3;
+
+    #[test]
+    fn matcher_cache_stays_bounded() {
+        // Feeding distinct patterns must not grow the cache without limit.
+        // Uncapped, this is what exhausted the 2 GB fuzz ceiling (#63/#69) at
+        // ~23 KB per retained matcher.
+        for i in 0..(MAX_CACHED_MATCHERS + 1000) {
+            let pattern = format!("src/**/bound{i}/*.rs");
+            let _ = matches(std::slice::from_ref(&pattern), "src/a/bound0/x.rs");
+        }
+        let len = cached_matcher_len();
+        assert!(
+            len <= MAX_CACHED_MATCHERS,
+            "matcher cache grew to {len}, above the {MAX_CACHED_MATCHERS} cap"
+        );
+    }
+
+    #[test]
+    fn matcher_cache_still_matches_after_eviction() {
+        // Eviction must cost at most a recompile, never a wrong answer: a
+        // pattern evicted by the churn below still matches when seen again.
+        let pattern = "src/**/evicted/*.rs".to_string();
+        assert!(matches(
+            std::slice::from_ref(&pattern),
+            "src/a/evicted/x.rs"
+        ));
+        for i in 0..(MAX_CACHED_MATCHERS + 100) {
+            let churn = format!("src/**/churn{i}/*.rs");
+            let _ = matches(std::slice::from_ref(&churn), "src/a/churn0/x.rs");
+        }
+        assert!(
+            matches(std::slice::from_ref(&pattern), "src/a/evicted/x.rs"),
+            "an evicted pattern must still match once recompiled"
+        );
+    }
 
     // Helper to compare floats within tolerance
     fn assert_approx(actual: f64, expected: f64, msg: &str) {

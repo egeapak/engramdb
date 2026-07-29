@@ -25,6 +25,12 @@ const PERSIST_INTERVAL: Duration = Duration::from_secs(300);
 /// and its 60s request timeout; see the guard in `handle_conn`.
 const CONN_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Upper bound on distinct config paths retained by [`ConfigCache`].
+///
+/// Sized for "every project on this machine, generously" — the daemon is
+/// shared, so the honest working set is larger than one session's.
+const MAX_CACHED_CONFIGS: usize = 512;
+
 /// Parsed-config cache keyed by path, invalidated by file mtime + length.
 ///
 /// Every Embed/Classify/Rerank/Title/Meta request resolves the caller's
@@ -35,6 +41,16 @@ const CONN_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 /// next request. Length is folded in alongside mtime so a same-second
 /// rewrite on coarse-timestamp filesystems still invalidates unless it is
 /// also byte-length-identical (an accepted residual staleness).
+///
+/// Capped at [`MAX_CACHED_CONFIGS`]. The key is derived from `req.dir`,
+/// which arrives over the socket and is only checked for emptiness, and this
+/// is the longest-lived process in the system — the heartbeat keeps it
+/// resident while any session is connected. Every distinct directory any
+/// client ever names would otherwise be retained for the daemon's lifetime,
+/// including paths that no longer exist (they cache as a `None` stamp).
+/// Eviction is random for the same reason as the glob-matcher cache in
+/// `scope::physical`: recency tracking would make the hot-path read a write,
+/// and a wrong victim costs one config re-read, not correctness.
 #[derive(Default)]
 struct ConfigCache {
     #[allow(clippy::type_complexity)]
@@ -58,9 +74,23 @@ impl ConfigCache {
         }
         let cfg = crate::storage::config::load_config_or_default(path).await;
         if let Ok(mut guard) = self.inner.lock() {
+            // Make room before inserting so the map never exceeds the cap.
+            // A refreshed existing key is a replace, not growth, so only
+            // evict when this key is genuinely new.
+            if guard.len() >= MAX_CACHED_CONFIGS && !guard.contains_key(path) {
+                if let Some(victim) = guard.keys().next().cloned() {
+                    guard.remove(&victim);
+                }
+            }
             guard.insert(path.to_path_buf(), (stamp, cfg.clone()));
         }
         cfg
+    }
+
+    /// Number of cached entries. Test-only hook for asserting the cap binds.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.inner.lock().map(|g| g.len()).unwrap_or(0)
     }
 }
 
@@ -531,5 +561,40 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                 message: "title model unavailable".to_string(),
             },
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn config_cache_stays_bounded() {
+        // `req.dir` arrives over the socket and is only checked for
+        // emptiness, so distinct paths would otherwise accumulate for the
+        // daemon's whole lifetime. None of these exist on disk — the
+        // not-found path caches too, which is exactly the leak.
+        let cache = ConfigCache::default();
+        for i in 0..(MAX_CACHED_CONFIGS + 200) {
+            let path = PathBuf::from(format!("/nonexistent/project{i}/.engramdb/config.toml"));
+            let _ = cache.load(&path).await;
+        }
+        let len = cache.len();
+        assert!(
+            len <= MAX_CACHED_CONFIGS,
+            "config cache grew to {len}, above the {MAX_CACHED_CONFIGS} cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_cache_refresh_does_not_count_as_growth() {
+        // Re-loading the SAME path replaces its entry rather than adding
+        // one, so a single hot project can't evict the rest of the cache.
+        let cache = ConfigCache::default();
+        let path = PathBuf::from("/nonexistent/only/.engramdb/config.toml");
+        for _ in 0..50 {
+            let _ = cache.load(&path).await;
+        }
+        assert_eq!(cache.len(), 1, "repeated loads of one path must not grow");
     }
 }
