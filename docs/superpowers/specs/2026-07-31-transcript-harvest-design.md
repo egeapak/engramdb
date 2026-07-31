@@ -146,6 +146,46 @@ user sees every candidate, its supporting quote, and which session it came
 from. Sessions that yielded nothing are reported explicitly rather than
 silently omitted.
 
+## Plugin command discovery (verified against the docs)
+
+Confirmed against the [plugins reference](https://code.claude.com/docs/en/plugins-reference)
+and [skills docs](https://code.claude.com/docs/en/slash-commands):
+
+- A `commands/` directory **at the plugin root** is auto-discovered on
+  install; no `commands` key in `plugin.json` is needed. Our layout is
+  correct — the docs are explicit that these folders "must be at the plugin
+  root, not inside `.claude-plugin/`", and list "wrong directory structure"
+  as the top cause of commands not appearing.
+- Namespacing is `plugin-name:file-stem`, taken from `plugin.json`'s `name`
+  (`engram`), giving `/engram:harvest` and `/engram:reflect`.
+- Frontmatter keys used are all current: `description`, `argument-hint`,
+  and `allowed-tools`. `$ARGUMENTS` is the correct interpolation token
+  (`$0`/`$1` index individual arguments).
+- `allowed-tools: Bash(engramdb harvest:*)` pre-approves the read-only
+  harvest calls for the invoking turn only, so the flow doesn't stop for a
+  permission prompt per session. The grant expires on the next user message.
+
+⚠️ **Do not add a `commands` key to `plugin.json`.** For that field the
+manifest path *replaces* the default directory rather than extending it, so
+declaring one would stop `commands/` being scanned and silently remove both
+`/engram:harvest` and `/engram:reflect`. (`skills` behaves the opposite way —
+it always adds to the default.) The docs also note `commands/` is the legacy
+location and `skills/` is preferred for new plugins; we stay on `commands/`
+for consistency with the existing `reflect.md`.
+
+## Trust boundary
+
+A digest is foreign recorded content — it replays whatever was pasted,
+fetched, or printed into a past session — and it lands directly in an agent's
+context, where that agent proposes memories. Every digest therefore opens
+with `DIGEST_TRUST_HEADER`, marking it as data rather than instructions.
+
+This mirrors `source_marker` in the hook handler, which marks injected
+memories `shared/agent` vs `personal/human` for the same reason: unmarked,
+repo-authored text is indistinguishable from the user's own. The approval
+gate in the slash command remains the real control; the header is what lets
+the agent weigh the content before it reaches that gate.
+
 ## Why not an MCP tool
 
 The slash command runs inside Claude Code, which has Bash. A tool would add

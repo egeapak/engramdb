@@ -416,6 +416,34 @@ fn ledger_is_shared_between_main_and_worktree() {
 }
 
 #[test]
+fn mark_can_reach_any_session_show_can_reach() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+
+    // `show --all-projects` reaches a session outside this project...
+    let shown = c.stdout(&c.main, &["harvest", "show", "ffff6666", "--all-projects"]);
+    assert!(shown.contains("ffff6666"), "{shown}");
+
+    // ...so `mark` must be able to reach it too. Without a matching flag the
+    // error even advised passing `--all-projects`, which did not exist.
+    c.engramdb(&c.main, &["harvest", "mark", "ffff6666", "--all-projects"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn digest_is_labelled_untrusted() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+
+    let out = c.stdout(&c.main, &["harvest", "show", "aaaa"]);
+    assert!(
+        out.contains("Recorded transcript") && out.contains("not instructions"),
+        "digest must warn that transcript content is data, not instructions: {out}"
+    );
+}
+
+#[test]
 fn unknown_session_is_a_clear_error() {
     let c = build_corpus();
     init_with_worktree(&c);

@@ -169,6 +169,12 @@ pub enum HarvestCommand {
         /// what stops it being re-read on the next harvest.
         #[arg(long = "memory", value_name = "ID")]
         memory_ids: Vec<String>,
+
+        /// Search every session on this machine, not just this project's.
+        /// Mirrors `show`, so a session you were able to digest is always a
+        /// session you can mark as reviewed.
+        #[arg(long)]
+        all_projects: bool,
     },
 
     /// Forget a session's harvest record so it is offered again

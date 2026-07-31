@@ -103,10 +103,12 @@ pub async fn run_harvest(
         HarvestCommand::Mark {
             session_id,
             memory_ids,
+            all_projects,
         } => {
-            // Resolve against all projects: `mark` follows a `show`, and the
-            // session may legitimately belong to a sibling worktree.
-            let selected = resolve_session(dir, registry, &session_id, false).await?;
+            // `--all-projects` must mirror `show`: a session the user was able
+            // to digest has to be a session they can mark as reviewed, or the
+            // ledger silently re-offers it forever.
+            let selected = resolve_session(dir, registry, &session_id, all_projects).await?;
             let entry = harvest_state::mark_harvested(dir, &selected.session_id, &memory_ids)?;
             if formatter.is_json() {
                 println!(
