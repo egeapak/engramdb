@@ -400,7 +400,15 @@ pub fn render_digest_markdown(digest: &SessionDigest) -> String {
     }
     out.push('\n');
 
+    // Tool calls render as bare list items with no trailing blank line, so a
+    // following heading would abut the list. Track that and separate them —
+    // an unseparated `### Human` reads as part of the tool trace.
+    let mut in_tool_run = false;
     for event in &digest.events {
+        if in_tool_run && !matches!(event, Event::ToolCall { .. }) {
+            out.push('\n');
+            in_tool_run = false;
+        }
         match event {
             Event::UserPrompt { text, .. } => {
                 out.push_str(&format!("### Human\n\n{text}\n\n"));
@@ -429,6 +437,7 @@ pub fn render_digest_markdown(digest: &SessionDigest) -> String {
                     out.push_str(&format!(" — {preview}"));
                 }
                 out.push('\n');
+                in_tool_run = true;
             }
         }
     }
