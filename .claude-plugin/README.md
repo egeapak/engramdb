@@ -68,6 +68,18 @@ and it can be disabled with `enabled = false` under `[daemon]` in
 - **SessionEnd** — housekeeping: clears the session's task mapping (and optionally demotes task-scoped memories)
 - **PreCompact** — reminds the agent to store durable discoveries before context compaction
 
+### Slash commands
+
+- **`/engram:reflect`** — reflect on the session you are *in* and persist
+  durable project / environment / preference learnings.
+- **`/engram:harvest`** — mine sessions that are already *over*. Reads past
+  transcripts, proposes what is worth remembering, lists every candidate for
+  your approval, and saves only what you accept. Covers this project and its
+  worktrees by default.
+
+Use `harvest` to backfill a project whose earlier sessions were never
+captured; use `reflect` at the end of the session you are in.
+
 ### Permissions
 
 Run `engramdb setup --global` to auto-configure MCP tool permissions in your `settings.json`. If the plugin is detected, it writes the correct `mcp__plugin_engram_memory__*` permission entries.

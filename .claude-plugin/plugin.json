@@ -1,6 +1,6 @@
 {
   "name": "engram",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Project-scoped persistent memory store for coding agents. Stores decisions, hazards, conventions, and context about the codebase. Memories carry an epistemic class — fact, observation, or decision — that shapes when they surface. Query memories (query) before answering project questions or researching workflows \u2014 not only before modifying files. Store after significant discoveries. All tools accept an optional `project` parameter for cross-project memory access: an absolute path, a 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically.",
   "mcpServers": {
     "memory": {

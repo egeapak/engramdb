@@ -152,6 +152,34 @@ Injects a short static reminder to store durable discoveries — decisions with 
 
 Memories created with `generality = task` + an `origin_task` are scoped to a piece of work, not the whole project. Hooks hide them by default so one task's scratch findings don't pollute another session. To surface yours, declare what you're working on — via the MCP `task_current` tool, or `engramdb task current <NAME>` on the CLI. When the work is done, `task_complete` (MCP) or `engramdb task complete <NAME>` demotes the task's memories to fast decay so they age out on their own. The SessionStart hook tells the agent when task-scoped memories were hidden, so in practice the agent drives this flow itself.
 
+## Slash commands: `/engram:reflect` and `/engram:harvest`
+
+Both ship with the plugin (they are markdown command files, so a hooks-only
+`engramdb setup` install does not get them).
+
+`/engram:reflect` reviews the session you are **in**: it asks the agent to
+capture anything durable about the project, the environment, or your
+preferences before handing back.
+
+`/engram:harvest` reviews sessions that are already **over**. Claude Code
+keeps a transcript of every session on disk; this command reads the ones
+belonging to the current project — **including its git worktrees**, which
+file transcripts under their own paths but share the project's memory store
+— and mines them for knowledge that was never captured. Use it to backfill a
+project you have been working on since before EngramDB was installed.
+
+The flow is deliberately gated: the agent lists **every** candidate memory
+with the evidence behind it and waits for your approval before saving
+anything. Sessions that hold nothing worth keeping are reported as such —
+that is a normal outcome, not a failure — and are recorded as reviewed so
+they are not re-read next time.
+
+It is backed by the `engramdb harvest` CLI command, which does the
+transcript reading and digesting; see
+[cli-reference.md](./cli-reference.md#harvest--mine-past-claude-code-sessions)
+for the flags, including `--since`, `--all-projects`, and the `--max-chars`
+budget.
+
 ## Troubleshooting
 
 See [troubleshooting.md](./troubleshooting.md#claude-code).

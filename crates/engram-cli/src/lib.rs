@@ -710,6 +710,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Groups { command } => {
             commands::run_groups(&dir, &registry, command, &prompter, &formatter).await
         }
+        Command::Harvest { command } => {
+            commands::run_harvest(&dir, &registry, command, &formatter).await
+        }
     }
 }
 

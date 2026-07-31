@@ -1018,6 +1018,75 @@ impl OutputFormatter {
         }
     }
 
+    /// Print the list of harvestable sessions.
+    ///
+    /// `scope_paths` are the project directories that were searched; they are
+    /// echoed in the empty case because "no sessions" is ambiguous otherwise —
+    /// it could mean the project genuinely has no history, or that the scope
+    /// resolved somewhere unexpected.
+    pub fn print_harvest_sessions(
+        &self,
+        sessions: &[HarvestSessionOutput],
+        scope_paths: &[std::path::PathBuf],
+    ) {
+        if let OutputFormat::Json = self.format {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "scope": scope_paths,
+                    "sessions": sessions,
+                }))
+                .unwrap()
+            );
+            return;
+        }
+
+        if sessions.is_empty() {
+            println!("No unharvested sessions found. Searched:");
+            for path in scope_paths {
+                println!("  {}", path.display());
+            }
+            println!("\nUse --include-harvested to re-review sessions, or --all-projects to widen the search.");
+            return;
+        }
+
+        for s in sessions {
+            let when = s
+                .ended_at
+                .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let id = short_id(&s.session_id);
+            let id_display = if self.use_color {
+                id.if_supports_color(Stream::Stdout, |t| t.cyan())
+                    .to_string()
+            } else {
+                id.to_string()
+            };
+            let mut line = format!(
+                "{id_display}  {when}  {} turn{}",
+                s.user_turns,
+                if s.user_turns == 1 { "" } else { "s" }
+            );
+            if let Some(branch) = &s.git_branch {
+                line.push_str(&format!("  [{branch}]"));
+            }
+            if s.already_harvested {
+                line.push_str("  (harvested)");
+            }
+            println!("{line}");
+            if let Some(prompt) = &s.first_prompt {
+                let preview = if self.use_color {
+                    prompt
+                        .if_supports_color(Stream::Stdout, |t| t.dimmed())
+                        .to_string()
+                } else {
+                    prompt.clone()
+                };
+                println!("    {preview}");
+            }
+        }
+    }
+
     /// Print aggregate statistics across all projects.
     pub fn print_aggregate_stats(&self, stats: &AggregateStatsOutput) {
         match self.format {
@@ -1132,6 +1201,26 @@ pub struct ProjectListOutput {
     pub exists: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_project_id: Option<String>,
+}
+
+/// Output data for one harvestable Claude Code session.
+#[derive(Debug, serde::Serialize)]
+pub struct HarvestSessionOutput {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub user_turns: usize,
+    pub assistant_turns: usize,
+    pub bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_prompt: Option<String>,
+    pub already_harvested: bool,
 }
 
 /// Output data for aggregate stats across projects.

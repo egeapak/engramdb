@@ -101,6 +101,83 @@ pub enum DaemonCommand {
     },
 }
 
+/// Subcommands for `engramdb harvest`.
+#[derive(Subcommand)]
+pub enum HarvestCommand {
+    /// List past sessions in scope, newest activity first
+    List {
+        /// Only sessions active since this point: an RFC 3339 timestamp or a
+        /// relative shorthand like `7d`, `12h`, `30m`, `2w`
+        #[arg(long, value_name = "WHEN")]
+        since: Option<String>,
+
+        /// Maximum number of sessions to list
+        #[arg(long, short = 'n')]
+        limit: Option<usize>,
+
+        /// Also list sessions already recorded as harvested
+        #[arg(long)]
+        include_harvested: bool,
+
+        /// Include sessions with no human turns
+        #[arg(long)]
+        include_empty: bool,
+
+        /// Ignore project scoping and list every session on this machine
+        #[arg(long)]
+        all_projects: bool,
+
+        /// Session id to omit (typically the caller's own, still being written)
+        #[arg(long, value_name = "ID")]
+        exclude_session: Option<String>,
+    },
+
+    /// Print a budgeted digest of one session
+    Show {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+
+        /// Character budget for the digest
+        #[arg(long, default_value_t = engramdb::ops::DEFAULT_DIGEST_BUDGET)]
+        max_chars: usize,
+
+        /// Include the assistant's reasoning blocks (verbose)
+        #[arg(long)]
+        include_thinking: bool,
+
+        /// Include subagent turns (verbose; subagents report back into the
+        /// main thread, so their raw turns are largely duplicate volume)
+        #[arg(long)]
+        include_sidechains: bool,
+
+        /// Omit the tool-call trace, leaving prompts and prose only
+        #[arg(long)]
+        no_tools: bool,
+
+        /// Search every session on this machine, not just this project's
+        #[arg(long)]
+        all_projects: bool,
+    },
+
+    /// Record that a session has been reviewed, so it is not offered again
+    Mark {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+
+        /// Id of a memory created from this session (repeatable). Omit when
+        /// the session yielded nothing — recording a zero-yield review is
+        /// what stops it being re-read on the next harvest.
+        #[arg(long = "memory", value_name = "ID")]
+        memory_ids: Vec<String>,
+    },
+
+    /// Forget a session's harvest record so it is offered again
+    Reset {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+    },
+}
+
 /// Subcommands for `engramdb projects`.
 #[derive(Subcommand)]
 pub enum ProjectsCommand {
@@ -798,6 +875,19 @@ pub enum Command {
     Projects {
         #[command(subcommand)]
         command: Option<ProjectsCommand>,
+    },
+
+    /// Inspect past Claude Code sessions for knowledge worth remembering
+    ///
+    /// Provides the raw material for the `/engram:harvest` slash command:
+    /// `list` shows which sessions are in scope, `show` prints a budgeted
+    /// digest of one, and `mark` records that a session has been reviewed so
+    /// it is not offered again. Scope defaults to this project plus its
+    /// registered sub-projects (git worktrees), which file their transcripts
+    /// under their own paths.
+    Harvest {
+        #[command(subcommand)]
+        command: HarvestCommand,
     },
 
     /// Manage multi-project memory groups and this project's subscriptions

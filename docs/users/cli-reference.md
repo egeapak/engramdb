@@ -337,6 +337,47 @@ unaffected by `--group`: it stays a flat array carrying `parent_project_id`.
 
 See [projects-and-worktrees.md](./projects-and-worktrees.md).
 
+## `harvest` — mine past Claude Code sessions
+
+```bash
+engramdb harvest list [--since 7d] [-n N] [--include-harvested]
+                      [--include-empty] [--all-projects] [--exclude-session ID]
+engramdb harvest show <session_id> [--max-chars N] [--include-thinking]
+                      [--include-sidechains] [--no-tools] [--all-projects]
+engramdb harvest mark <session_id> [--memory <id>]...
+engramdb harvest reset <session_id>
+```
+
+Reads the transcripts Claude Code writes to
+`~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` and presents them for
+review. This command only *presents* sessions — it never writes a memory.
+The `/engram:harvest` slash command drives it and does the saving.
+
+**Scope.** `list` and `show` cover the current project **and its registered
+sub-projects**. A git worktree files its transcripts under its own path but
+shares the main checkout's memory store, so its sessions are harvested
+alongside the main ones. Attribution uses the `cwd` recorded inside each
+transcript, not the directory name — that name is a lossy encoding of the
+path and can collide. `--all-projects` ignores scoping entirely.
+
+**Digests, not raw transcripts.** `show` prints a budgeted digest: prompts
+and assistant prose verbatim, each tool call as a single line with its
+target and success/failure, results as a one-line preview. A raw transcript
+is ~99% tool payload, so digesting is what makes review affordable — a
+1.2 MB transcript renders to ~12 KB at the default budget. When content had
+to be dropped to fit, the header says `partial digest` and names what went;
+raise `--max-chars` to see more.
+
+Session ids accept unique prefixes. `--json` (or any non-TTY invocation)
+emits the structured event list alongside the rendered markdown.
+
+**The ledger.** `mark` records that a session was reviewed so it is not
+offered again, and *must* be used even when a session yielded nothing —
+a zero-yield session leaves no other trace, so without a mark it is re-read
+on every future harvest. `reset` clears the record. The ledger lives in
+`.engramdb/state/harvested_sessions.json` under the root project, shared by
+all its worktrees.
+
 ## `completions` — shell completions
 
 ```bash
