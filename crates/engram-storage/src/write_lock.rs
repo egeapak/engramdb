@@ -92,45 +92,63 @@ mod tests {
     }
 
     /// The core safety property: two tasks racing for the SAME lock must
-    /// serialize. We measure this by holding the lock for a known interval
-    /// in one task and starting another mid-hold — the second's acquire
-    /// must not return until the first releases. Without this guarantee
-    /// the write lock is useless as a cross-process serialization point.
+    /// serialize. The holder keeps the lock until this test tells it to let
+    /// go, so the ordering is driven by signals rather than by sleeps — an
+    /// earlier version timed a fixed hold against a fixed head start and
+    /// failed on Windows, whose ~15.6ms timer granularity stretched the head
+    /// start far enough into the hold to eat the slack.
     #[tokio::test]
     async fn concurrent_acquisitions_serialize() {
         use std::sync::Arc;
         use std::time::{Duration, Instant};
+        use tokio::sync::oneshot;
 
         let temp_dir = Arc::new(TempDir::new().unwrap());
-        let hold_ms = 150u64;
+
+        let (holder_ready_tx, holder_ready_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
 
         let dir1 = Arc::clone(&temp_dir);
         let holder = tokio::spawn(async move {
             let guard = acquire_write_lock_at(dir1.path()).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(hold_ms)).await;
+            holder_ready_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            // Stamped *before* the unlock, so a serialized waiter can only
+            // ever observe a later instant.
+            let released_at = Instant::now();
             drop(guard);
+            released_at
         });
 
-        // Give the holder a head start so it definitely owns the lock first.
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // From here the holder provably owns the lock — no head start needed.
+        holder_ready_rx.await.unwrap();
 
+        let (waiter_ready_tx, waiter_ready_rx) = oneshot::channel();
         let dir2 = Arc::clone(&temp_dir);
-        let start = Instant::now();
         let waiter = tokio::spawn(async move {
+            waiter_ready_tx.send(()).unwrap();
             let guard = acquire_write_lock_at(dir2.path()).await.unwrap();
+            let acquired_at = Instant::now();
             drop(guard);
+            acquired_at
         });
 
-        waiter.await.unwrap();
-        holder.await.unwrap();
-        let elapsed = start.elapsed();
-
-        // The waiter cannot have acquired before the holder released. Allow
-        // ample slack (CI scheduling) but assert clearly above the headstart.
+        // Let the waiter reach the blocking acquire. Oversleeping here only
+        // makes the next assertion stronger, so it carries no timing risk.
+        waiter_ready_rx.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(
-            elapsed >= Duration::from_millis(hold_ms - 30),
-            "waiter returned in {:?}; lock did not serialize",
-            elapsed
+            !waiter.is_finished(),
+            "waiter acquired the lock while the holder still held it"
+        );
+
+        release_tx.send(()).unwrap();
+        let acquired_at = waiter.await.unwrap();
+        let released_at = holder.await.unwrap();
+
+        assert!(
+            acquired_at >= released_at,
+            "waiter acquired at {acquired_at:?}, before the holder released at {released_at:?}"
         );
     }
 
@@ -145,13 +163,16 @@ mod tests {
             // guard dropped at end of this scope
         }
 
-        // Must succeed immediately — guard from previous block was released.
-        let started = std::time::Instant::now();
-        let guard = acquire_write_lock_at(temp_dir.path()).await.unwrap();
-        assert!(
-            started.elapsed() < std::time::Duration::from_millis(100),
-            "second acquire should be ~instant after drop"
-        );
+        // Must not block — the guard from the previous block was released.
+        // A timeout (rather than a latency bound) is what distinguishes a
+        // still-held lock from a merely slow CI runner.
+        let guard = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            acquire_write_lock_at(temp_dir.path()),
+        )
+        .await
+        .expect("second acquire blocked: the dropped guard did not release the lock")
+        .unwrap();
         drop(guard);
     }
 }
