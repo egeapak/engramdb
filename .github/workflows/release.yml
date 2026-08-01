@@ -85,7 +85,7 @@ jobs:
       - name: Install nextest
         # Prebuilt binary, same rationale as ci.yml: `cargo install` compiles
         # nextest from source (~7 min on a cache miss).
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.85.4
         with:
           tool: nextest
 

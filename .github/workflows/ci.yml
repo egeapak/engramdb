@@ -175,7 +175,7 @@ jobs:
 
       - name: Install nextest
         # Prebuilt binary, same rationale as the `test` job below.
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.85.4
         with:
           tool: nextest
 
@@ -210,7 +210,7 @@ jobs:
         # which compiles nextest from source (~7 min on a cache miss). This
         # downloads a prebuilt release in seconds, every run, regardless of
         # cache state.
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.85.4
         with:
           tool: nextest
 
@@ -251,7 +251,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.4
         with:
           tool: nextest
 
@@ -328,7 +328,7 @@ jobs:
       - name: Install nextest and cargo-llvm-cov
         # Prebuilt binaries (same rationale as the test job): avoids a
         # ~7 min from-source compile of each tool on a cache miss.
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.85.4
         with:
           tool: nextest,cargo-llvm-cov
 
