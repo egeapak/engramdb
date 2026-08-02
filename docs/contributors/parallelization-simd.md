@@ -1,4 +1,4 @@
-# Parallelization and instruction-level parallelism
+# Parallelization and SIMD
 
 A survey of EngramDB's CPU-bound bulk paths, what each one costs, and which
 ones were worth parallelizing. Everything here is measured;
@@ -13,18 +13,20 @@ Numbers below: 4-core Intel Xeon @ 2.80GHz (AVX-512 capable), `profile.bench`
 (`opt-level = 2`), rayon's default pool (4 threads). Treat the ratios as the
 result, not the absolute times.
 
-> **Note on the title.** An earlier draft of this document called the dot
-> product work "SIMD". Disassembly says otherwise — see
-> [What the lane trick actually does](#what-the-lane-trick-actually-does). The
-> speedups are real and reproducible; the mechanism is instruction-level
-> parallelism, and the distinction changes what you should do next.
+> **How this document evolved.** It started by measuring rayon over the bulk
+> paths, then claimed the fast dot product was SIMD, then retracted that after
+> disassembly showed it was instruction-level parallelism, then established
+> that neither survives the release profile — and finally arrived at explicit
+> intrinsics, which do. The dead ends are kept because each one is a trap
+> someone will otherwise re-enter. If you only read one section, read
+> [The release profile is the whole story](#the-release-profile-is-the-whole-story).
 
 ## Summary
 
 | Path | Where | Before | After | Speedup |
 |---|---|---|---|---|
-| Pairwise cosine, 500 observations | `ops::compress::consolidation_pass` | 62.9 ms | 4.25 ms | **14.8×** |
-| Single cosine, 384-dim | same | 496 ns | 114 ns | **4.4×** (no threads) |
+| Single cosine, 384-dim, **in a release build** | `ops::compress::consolidation_pass` | 1126 ns | 55 ns | **20×** (no threads) |
+| Pairwise cosine, 500 observations (bench profile) | same | 62.9 ms | 4.25 ms | **14.8×** |
 | Memory-file parse, 5,000 | `MemoryStore::{reindex_dir, get_batch}` | 101.8 ms | 28.4 ms | **3.6×** |
 | Keyword-stem derivation, 5,000 | `IndexEntry::from`, query fallback | 85.5 ms | 24.7 ms | **3.5×** |
 | Composite scoring, 5,000 rows | `RetrievalEngine` score loops | 3.03 ms | 866 µs | **3.5×** |
@@ -33,12 +35,13 @@ result, not the absolute times.
 
 ## Does rayon give you SIMD?
 
-No, and neither does the code below. Rayon is thread-level data parallelism: it
-splits a range across a work-stealing pool and never affects the instructions
-in the loop body. Everything in the table above except the cosine rows is
-purely rayon over an already-existing loop body.
+No. Rayon is thread-level data parallelism: it splits a range across a
+work-stealing pool and never affects the instructions in the loop body. Every
+row in the table above except the cosine rows is purely rayon over an
+already-existing loop body; the cosine rows are a separate story that took
+three attempts to get right.
 
-## What the lane trick actually does
+## What the lane trick actually does (a dead end, kept as a warning)
 
 Rust's `f32` addition is IEEE-strict, so a single running sum is a dependency
 chain the optimizer may not reassociate — each multiply-add waits on the
@@ -103,67 +106,108 @@ The same ordering holds on the full pairwise pass, which is what actually runs
 — at 500 vectors: 63.4 ms today, 39.8 ms for `f32_arr8`, 14.6 ms once the norms
 are hoisted, 4.11 ms with rayon on top.
 
-No `unsafe`, no intrinsics, no `target_feature` gating, no runtime dispatch.
-Building the probe with `-C target-cpu=native` on an AVX-512 host changed the
-numbers by under 10%, which does not justify a per-architecture intrinsic path.
-If someone later wants genuine SIMD here, `opt-level = 3` on the whole release
-profile — not explicit intrinsics — is the first thing to measure.
+**None of this is what shipped.** Everything above is measured at
+`opt-level = 2`, and the release profile is `opt-level = "z"`, where the
+unrolled form is *slower than the naive loop*. The next section is what
+actually ended up in the binary.
 
-## ⚠️ The release profile, and why the obvious fix does not work
+## The release profile is the whole story
 
-`[profile.release]` sets `opt-level = "z"`, which does neither the unrolling
-nor the vectorization. So the shipped binary gets **none** of the 4.4×. Held
-against the same profile (`lto`, `codegen-units`, `panic`, `strip` all
-identical) with only `opt-level` varied:
+`[profile.release]` sets `opt-level = "z"`, which runs neither the loop
+vectorizer nor the unroller. Every arithmetic result in the section above
+evaporates there — and the unrolled form is actively *worse* than the naive
+loop, because the optimizer that would have cleaned it up is switched off.
+Measured at `opt-level = "z"` with the real release profile (`lto = true`,
+`codegen-units = 1`), 384-dim pairs:
 
-| | `opt-level = "z"` | `opt-level = 2` | `opt-level = 3` |
-|---|---|---|---|
-| `dot_unit`, one 384-dim pair | 624 ns | 146 ns | **70 ns** |
-| pairwise scan, n=500, old code | 142.1 ms | 75.6 ms | 63.6 ms |
-| pairwise scan, n=500, new code | 80.4 ms | 19.4 ms | **9.8 ms** |
-| new vs old, same profile | 1.8× | 3.9× | 6.5× |
+| form | ns/pair | vs the unrolled version |
+|---|---|---|
+| plain scalar loop | 461 | **1.6× faster** |
+| eight unrolled accumulators | 720 | 1.0× |
+| `wide` crate (safe, portable SIMD wrapper) | 384 | 1.9× faster |
+| **SSE2 intrinsics** | **65** | **11.0× faster** |
+| **AVX2 + FMA intrinsics** | **55** | **13.1× faster** |
 
-The obvious fix is a per-package override, so only EngramDB's crates build for
-speed while the lance/datafusion/arrow/ort bulk stays at `"z"`:
+Two lessons, and the second is the one that matters.
+
+### Benchmarks lie about this repo
+
+`profile.bench` is `opt-level = 2`; `profile.release` is `opt-level = "z"`.
+**Every Criterion number in this repo is measured on a more aggressively
+optimized build than the one users run**, and for arithmetic-bound code the
+two profiles do not even rank the candidates the same way. Tuning against
+`cargo bench` alone produced a change that was 4.4× faster in the benchmark
+and 1.6× *slower* in production. Rayon results are unaffected — thread-level
+parallelism does not care about `opt-level` — but anything that depends on
+codegen must be checked at `-Oz` before it is believed.
+
+### Intrinsics work where auto-vectorization cannot
+
+Auto-vectorization is an optimizer pass, so `-Oz` disables it. Intrinsics are
+*semantic*: `_mm256_fmadd_ps` lowers to `vfmadd231ps` regardless of what the
+optimizer is doing. That makes explicit SIMD the only way to get vector
+arithmetic into a size-optimized build — the exact case where hand-written
+SIMD earns its keep, and the opposite of the usual advice.
+
+`ops::compress::dot_unit` therefore dispatches: AVX2+FMA when
+`is_x86_feature_detected!` says so, SSE2 otherwise (x86-64 baseline, no
+detection needed), NEON on aarch64 (mandatory there), single-accumulator
+scalar elsewhere. Verified in the actual stripped release binary:
+`dot_unit_avx2` contains `vfmadd231ps` and `vaddps`.
+
+**Cost: 2,968 bytes.** 57,717,584 → 57,720,552 (+0.01%).
+
+### Raising `opt-level` instead — built and rejected
+
+The alternative is to let the auto-vectorizer do it, which means raising
+`opt-level` across the whole dependency chain. Both levels were built and
+measured end to end (everything else in the profile held fixed; speed is
+`reindex --index-only` over a 1,200-memory store, 9 reps, interleaved):
+
+| `opt-level` | binary | vs `"z"` | reindex min | reindex median | build |
+|---|---|---|---|---|---|
+| `"z"` | 55.04 MiB | — | 154 ms | 160 ms | 19m12s |
+| `2` | 105.17 MiB | **+91.1%** | 119 ms | 127 ms | 35m57s |
+| `3` | 110.83 MiB | **+101.4%** | 118 ms | 123 ms | 37m43s |
+
+Roughly **double the binary for ~23% off a reindex** — and `3` over `2` buys
+~3% more speed for another 5.7 MiB, so `2` is the knee. Against that, the
+intrinsics get 11–13× on the arithmetic for 3 KB. The binary ships as a
+prebuilt artifact (release archives, Homebrew, Scoop) and is spawned per
+Claude Code hook invocation, so its size is download and cold-start cost, not
+disk.
+
+`reindex` improves far less than the microbenchmarks suggest because it is a
+*mixed* workload — LanceDB commits, file I/O, allocator traffic — in which
+arithmetic-bound code is a small slice.
+
+### Per-package `opt-level` does not survive fat LTO
+
+The tempting middle ground is to raise `opt-level` for only the hot crates:
 
 ```toml
 [profile.release.package.engramdb]
 opt-level = 2
 ```
 
-**This was built, measured, and reverted. It does not work under `lto = true`.**
+**This was built, measured, and reverted.** A minimal two-crate reproduction
+(`hotlib` at `opt-level = 2`, binary at `"z"`, fat LTO) produces a
+**byte-identical binary** — same SHA-256 — to the same build with no override.
+`cargo build -v` confirms rustc really is passed `-C opt-level=2`, so the
+override is applied and then discarded: the fat-LTO link step re-runs the
+pipeline at the top-level profile's `opt-level`. `lto = "thin"` behaves the
+same. In the real binary the override changed the size slightly (+1.46%) but
+disassembly found no trace of the `opt-level = 2` codegen shape in the hot
+function.
 
-- A minimal two-crate reproduction (`hotlib` at `opt-level = 2`, binary at
-  `"z"`, fat LTO) produces a **byte-identical binary** — same SHA-256 — to the
-  same build with no override at all. `cargo build -v` confirms rustc really is
-  passed `-C opt-level=2` for the overridden crate, so the override is applied
-  and then discarded: the fat-LTO link step re-runs the optimization pipeline
-  at the top-level profile's `opt-level`. `lto = "thin"` behaves the same.
-- In the real binary, the override did change the output slightly (57,717,584 →
-  58,559,088 bytes, +1.46%) but disassembly finds **no trace of the
-  `opt-level = 2` codegen shape** in the hot function: the unrolled eight-chain
-  pattern (a dense run of `mulss`) appears zero times in either binary.
-- Extending the override to all seven workspace crates cost **+21,494,600 bytes
-  (+37.2%, 55.04 → 75.54 MiB)** — LTO inlining monomorphized dependency
-  generics into our crates' codegen units — for no speedup that survived
-  measurement. An interleaved A/B of `reindex --index-only` over 1,200 memories
-  gave 196 ms min / 248 ms median baseline vs 192 ms min / 201 ms median
-  overridden: inside the noise on the minimum.
+Extending it to all seven workspace crates cost **+37.2%** (55.04 → 75.54 MiB)
+— LTO inlining monomorphized dependency generics into our crates' codegen
+units — for a `reindex` A/B of 196 ms min / 248 ms median baseline vs 192 ms /
+201 ms overridden: inside the noise on the minimum.
 
-Reindex would not have moved much regardless: the bulk work on that path is
-frontmatter deserialization and Snowball stemming, which happen inside `toml`,
-`serde_yaml_ng` and `rust-stemmers`, not in EngramDB's crates.
-
-**What is left:** raising `opt-level` on `[profile.release]` itself is the only
-change that would reach the hot code, and its binary-size cost has not been
-measured. That is a deliberate trade-off belonging to whoever owns the release
-size budget, so nothing here changes the profile.
-
-A second consequence worth internalizing: `profile.bench` (`opt-level = 2`)
-does not model `profile.release` (`opt-level = "z"`). **Every Criterion number
-in this repo is measured on a more aggressively optimized build than the one
-users run.** The rayon gains are unaffected — thread-level parallelism does not
-care about `opt-level` — but the single-thread arithmetic gains are.
+Reindex would not have moved much regardless: its bulk work is frontmatter
+deserialization and Snowball stemming, inside `toml`, `serde_yaml_ng` and
+`rust-stemmers`, not in EngramDB's crates.
 
 ## What was parallelized, and why those
 
@@ -175,9 +219,20 @@ and it is big enough that entering the pool pays for itself.
 
 The O(n²) heart of the consolidation pass, bounded at
 `MAX_OBSERVATIONS_PER_PASS = 500` precisely because it was expensive. Now
-normalize-once + unrolled dot + rayon over the outer index. Row `i` does
-`n − i` comparisons, so the work is triangular; rayon's work stealing absorbs
-that without manual chunking.
+normalize-once + an intrinsics dot product + rayon over the outer index. Row
+`i` does `n − i` comparisons, so the work is triangular; rayon's work stealing
+absorbs that without manual chunking.
+
+Hoisting the norms is the algorithmic half and it is worth stating on its own:
+the old code recomputed `‖a‖` and `‖b‖` inside all n(n−1)/2 comparisons even
+though each vector has exactly one norm, so **two thirds of the arithmetic was
+redundant** before any codegen question arose.
+
+`dot_unit_backends_agree` runs every backend against the scalar reference
+across lengths straddling the 4/8/16-element strides. This is not ceremony:
+any developer machine dispatches to AVX2, so without it the SSE2 path — what
+every pre-Haswell CPU and every AVX2-masking VM executes — would ship
+untested.
 
 `similar_pairs` returns pairs in the same order the nested loops did — a test
 asserts exact equality against the sequential reference, and a second test
@@ -270,20 +325,31 @@ not show up. If a future path parallelizes something long, route it through
 - **`[profile.release.package.*] opt-level`** — see above. Silently discarded
   under fat LTO; +1.46% binary for one crate, +37.2% for all seven, no
   surviving speedup.
-- **Wider accumulators.** 16 chains measured no better than 8, and 8 fits the
-  sixteen `xmm` registers with room for the loop's other live values.
-- **`-C target-cpu=native`.** Under 10%, and it makes the binary unshippable as
-  a prebuilt artifact.
-- **Explicit intrinsics / `std::simd`.** `std::simd` is nightly-only, and a
-  runtime-dispatched intrinsic path would need per-architecture maintenance.
-  Worth revisiting only if `opt-level` on the release profile is ruled out —
-  raising that is strictly less work for the same or better result.
+- **Raising `opt-level`** — see above. Roughly double the binary for ~23% off
+  a reindex; the intrinsics get 11–13× on the arithmetic for 3 KB.
+- **Hand-unrolled accumulators without intrinsics.** 1.6× *slower* than a
+  naive loop in a release build. Only wins at `opt-level >= 2`.
+- **The `wide` crate.** Safe, no `unsafe`, portable across x86 and aarch64 from
+  one source, and it does emit `mulps`/`addps` at `-Oz` — but 384 ns/pair
+  against 55 ns for intrinsics, because its abstraction layers do not get
+  inlined without an optimizer. A good default in a normal profile; not in
+  this one.
+- **`std::simd`.** Nightly-only; the repo is stable-only.
+- **`-C target-cpu=native`.** Under 10% on the auto-vectorized variants, and it
+  makes the binary unshippable as a prebuilt artifact. Runtime dispatch gets
+  the same instructions without giving that up.
 - **Parallelizing `keyword_search_stems`' scoring loop.** The stems come from
   the index now; the residual scoring is a few hundred µs at 5,000 memories and
   is dominated by the surrounding I/O.
 
-## Not yet done
+## If you add more arithmetic-bound code
 
-- **Raising `opt-level` on `[profile.release]` itself**, the only change that
-  reaches the hot arithmetic in shipped builds. Needs a binary-size measurement
-  before anyone commits to it.
+1. Write it, and measure it at `opt-level = "z"` — not just via `cargo bench`,
+   which uses `opt-level = 2` and will rank candidates differently.
+2. If it is a reduction over a slice of `f32`/`f64`, expect auto-vectorization
+   to give you nothing and reach for `std::arch` intrinsics with runtime
+   dispatch, following `ops::compress::dot_unit`.
+3. Disassemble the stripped release binary to confirm the instructions are
+   there (`objdump -d | grep vfmadd`). Do not infer it from a benchmark.
+4. Test every backend against a scalar reference, not just the one your
+   machine dispatches to.
