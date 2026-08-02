@@ -878,47 +878,104 @@ impl LanceIndex {
     /// Empty when the memory has no embeddings. Used to relocate vectors when
     /// consolidating a worktree's stray store into the main project so the
     /// migrated memories stay searchable without re-embedding.
+    ///
+    /// **One memory at a time is a trap.** Every call re-opens the chunks
+    /// dataset (re-reading a manifest whose fragment list grows with the
+    /// table), builds its own query plan, and scans. Calling it in a loop is
+    /// therefore O(n²) overall — measured at 90ms for 16 memories and 12.7s
+    /// for 256, with per-memory cost doubling on every doubling of n. Use
+    /// [`Self::chunks_for_memories`] for more than one.
     pub async fn chunks_for_memory(&self, memory_id: &str) -> Result<Vec<Vec<f32>>> {
+        Ok(self
+            .chunks_for_memories(&[memory_id])
+            .await?
+            .remove(memory_id)
+            .unwrap_or_default())
+    }
+
+    /// Return the ordered embedding chunks for many memories in **one** scan
+    /// per batch, keyed by memory id.
+    ///
+    /// This is the O(n) form of [`Self::chunks_for_memory`]. The saving is not
+    /// the row filter — it is that N table opens, N manifest reads and N query
+    /// plans collapse into one. That holds no matter how the table is indexed
+    /// or fragmented, which is why this, rather than a scalar index on
+    /// `memory_id`, is what fixes the complexity.
+    ///
+    /// Ids with no chunks are simply absent from the map (not empty entries),
+    /// so a caller can distinguish "no vectors" from "not asked for".
+    pub async fn chunks_for_memories(
+        &self,
+        memory_ids: &[&str],
+    ) -> Result<HashMap<String, Vec<Vec<f32>>>> {
+        // `IN ()` is not valid SQL, and an empty request has an empty answer.
+        if memory_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
         let table = self.open_chunks_table().await?;
+        let mut rows: HashMap<String, Vec<(u32, Vec<f32>)>> = HashMap::new();
 
-        let mut stream = table
-            .query()
-            .select(lancedb::query::Select::Columns(vec![
-                "chunk_index".into(),
-                "vector".into(),
-            ]))
-            .only_if_expr(col("memory_id").eq(lit(memory_id)))
-            .execute()
-            .await
-            .context("Failed to query chunks for memory")?;
+        // Same predicate bound as `delete_chunks_batch`: an unbounded
+        // `IN (...)` over thousands of 36-char UUIDs builds one enormous
+        // predicate for the planner. Each sub-batch is still a single scan, so
+        // this is O(ids / SCAN_ID_BATCH) scans, not O(ids).
+        const SCAN_ID_BATCH: usize = 500;
+        for id_batch in memory_ids.chunks(SCAN_ID_BATCH) {
+            let list = id_batch.iter().copied().map(lit).collect::<Vec<_>>();
+            let mut stream = table
+                .query()
+                .select(lancedb::query::Select::Columns(vec![
+                    "memory_id".into(),
+                    "chunk_index".into(),
+                    "vector".into(),
+                ]))
+                .only_if_expr(is_in(col("memory_id"), list))
+                .execute()
+                .await
+                .context("Failed to query chunks for memories")?;
 
-        let mut rows: Vec<(u32, Vec<f32>)> = Vec::new();
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.context("Failed to read chunk batch")?;
-            let idx_col = batch
-                .column_by_name("chunk_index")
-                .context("Missing 'chunk_index' column in chunks")?
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .context("Failed to cast 'chunk_index'")?;
-            let vec_col = batch
-                .column_by_name("vector")
-                .context("Missing 'vector' column in chunks")?
-                .as_any()
-                .downcast_ref::<FixedSizeListArray>()
-                .context("Failed to cast 'vector'")?;
-            for i in 0..batch.num_rows() {
-                let values = vec_col.value(i);
-                let floats = values
+            while let Some(batch_result) = stream.next().await {
+                let batch = batch_result.context("Failed to read chunk batch")?;
+                let id_col = batch
+                    .column_by_name("memory_id")
+                    .context("Missing 'memory_id' column in chunks")?
                     .as_any()
-                    .downcast_ref::<Float32Array>()
-                    .context("Failed to cast chunk vector values")?;
-                rows.push((idx_col.value(i), floats.values().to_vec()));
+                    .downcast_ref::<StringArray>()
+                    .context("Failed to cast 'memory_id'")?;
+                let idx_col = batch
+                    .column_by_name("chunk_index")
+                    .context("Missing 'chunk_index' column in chunks")?
+                    .as_any()
+                    .downcast_ref::<UInt32Array>()
+                    .context("Failed to cast 'chunk_index'")?;
+                let vec_col = batch
+                    .column_by_name("vector")
+                    .context("Missing 'vector' column in chunks")?
+                    .as_any()
+                    .downcast_ref::<FixedSizeListArray>()
+                    .context("Failed to cast 'vector'")?;
+                for i in 0..batch.num_rows() {
+                    let values = vec_col.value(i);
+                    let floats = values
+                        .as_any()
+                        .downcast_ref::<Float32Array>()
+                        .context("Failed to cast chunk vector values")?;
+                    rows.entry(id_col.value(i).to_string())
+                        .or_default()
+                        .push((idx_col.value(i), floats.values().to_vec()));
+                }
             }
         }
 
-        rows.sort_by_key(|(idx, _)| *idx);
-        Ok(rows.into_iter().map(|(_, v)| v).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(id, mut chunks)| {
+                // Scan order is not row order; `chunk_index` is the contract.
+                chunks.sort_by_key(|(idx, _)| *idx);
+                (id, chunks.into_iter().map(|(_, v)| v).collect())
+            })
+            .collect())
     }
 
     /// Delete all chunks for a given memory_id.
@@ -1272,17 +1329,39 @@ impl LanceIndex {
         // single maintenance entry point (gc / reindex / auto-maintain all call
         // it), so no new call site is needed.
         match self.open_chunks_table().await {
-            Ok(chunks) => match chunks.count_rows(None).await {
-                Ok(rows) if rows >= VECTOR_INDEX_MIN_ROWS => {
-                    if let Err(e) = self.create_vector_index().await {
-                        tracing::warn!("optimize: vector index creation failed (continuing): {e}");
+            Ok(chunks) => {
+                // Scalar index on the chunks table's `memory_id`, which every
+                // single-id lookup filters on (`chunks_for_memory`,
+                // `has_chunks`, `delete_chunks`, and `vector_search`'s
+                // `restrict_to` prefilter). Built unconditionally — unlike the
+                // IVF index below there is no training-set minimum, and a BTree
+                // over a high-cardinality string key is cheap.
+                //
+                // Note this is NOT what fixes the O(n²) in a per-memory read
+                // loop: an index removes the row filter, not the per-call table
+                // open, manifest read and query plan, and it is stale for rows
+                // written since the last `optimize`. `chunks_for_memories` is
+                // the fix for that; this helps the lookups that are genuinely
+                // single-id.
+                if let Err(e) = self.create_chunk_scalar_index().await {
+                    tracing::warn!(
+                        "optimize: chunk scalar index creation failed (continuing): {e}"
+                    );
+                }
+                match chunks.count_rows(None).await {
+                    Ok(rows) if rows >= VECTOR_INDEX_MIN_ROWS => {
+                        if let Err(e) = self.create_vector_index().await {
+                            tracing::warn!(
+                                "optimize: vector index creation failed (continuing): {e}"
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("optimize: failed to count chunk rows for indexing: {e}");
                     }
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!("optimize: failed to count chunk rows for indexing: {e}");
-                }
-            },
+            }
             Err(e) => {
                 tracing::warn!("optimize: failed to open chunks table for indexing: {e}");
             }
@@ -1467,6 +1546,43 @@ impl LanceIndex {
             tracing::debug!("create_scalar_indexes: built indexes on {built:?}");
         }
         Ok(built)
+    }
+
+    /// Build a BTree index on the **chunks** table's `memory_id`.
+    ///
+    /// BTree rather than Bitmap: `memory_id` has one distinct value per
+    /// memory, and Bitmap is documented for under ~1000 unique values. Same
+    /// idempotent, best-effort contract as the other index builders — an index
+    /// only changes how fast a predicate is evaluated, never which rows match,
+    /// so a skipped or failed build is correctness-preserving.
+    ///
+    /// Adds no column and changes no on-disk schema, so it needs no
+    /// `CURRENT_SCHEMA_VERSION` bump: existing stores pick it up on their next
+    /// `optimize()` (gc / reindex / auto-maintain all call it).
+    ///
+    /// Returns `false` when an index already covers the column.
+    pub async fn create_chunk_scalar_index(&self) -> Result<bool> {
+        let table = self.open_chunks_table().await?;
+        let existing = table
+            .list_indices()
+            .await
+            .context("Failed to list existing chunks-table indices")?;
+        if existing
+            .iter()
+            .any(|idx| idx.columns.iter().any(|c| c == "memory_id"))
+        {
+            return Ok(false);
+        }
+        table
+            .create_index(
+                &["memory_id"],
+                lancedb::index::Index::BTree(Default::default()),
+            )
+            .execute()
+            .await
+            .context("Failed to create BTree index on chunks.memory_id")?;
+        tracing::debug!("create_chunk_scalar_index: built BTree index on chunks.memory_id");
+        Ok(true)
     }
 
     /// Build an FM (Ferragina–Manzini) substring index on the `tags` column.
@@ -2694,6 +2810,71 @@ mod tests {
     /// Deterministic vectors from a fixed-seed xorshift64* PRNG (no external
     /// rng dependency). 384-dim random floats in [-1, 1); collisions are
     /// statistically impossible, so every generated vector is distinct.
+    /// The batch read must be a drop-in for the per-memory one: same vectors,
+    /// same `chunk_index` ordering, and ids with no chunks absent rather than
+    /// present-and-empty (so callers can tell "no vectors" from "not asked").
+    #[tokio::test]
+    async fn chunks_for_memories_matches_per_memory() {
+        let tmp = TempDir::new().unwrap();
+        let lance = LanceIndex::new(tmp.path(), 384).await.unwrap();
+
+        // Multi-chunk memories, written out of index order so the sort is
+        // actually doing something.
+        for (id, count) in [("mem-a", 3usize), ("mem-b", 1), ("mem-c", 5)] {
+            let mut chunks = seeded_vectors(id.len() as u64, count, 384);
+            chunks.reverse();
+            lance.upsert_chunks(id, chunks).await.unwrap();
+        }
+
+        let ids = ["mem-a", "mem-b", "mem-c", "mem-absent"];
+        let batch = lance.chunks_for_memories(&ids).await.unwrap();
+
+        assert!(
+            !batch.contains_key("mem-absent"),
+            "an id with no chunks must be absent from the map, not empty"
+        );
+        assert_eq!(batch.len(), 3);
+        for id in ["mem-a", "mem-b", "mem-c"] {
+            let one = lance.chunks_for_memory(id).await.unwrap();
+            assert_eq!(
+                batch.get(id).expect("id present"),
+                &one,
+                "batch and per-memory disagree for {id}"
+            );
+        }
+        assert_eq!(batch["mem-a"].len(), 3);
+        assert_eq!(batch["mem-c"].len(), 5);
+    }
+
+    /// Empty input is an empty answer, not an `IN ()` that LanceDB rejects.
+    #[tokio::test]
+    async fn chunks_for_memories_empty_input_is_empty_map() {
+        let tmp = TempDir::new().unwrap();
+        let lance = LanceIndex::new(tmp.path(), 384).await.unwrap();
+        assert!(lance.chunks_for_memories(&[]).await.unwrap().is_empty());
+    }
+
+    /// The chunks-table index is idempotent and best-effort, like its siblings.
+    #[tokio::test]
+    async fn chunk_scalar_index_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let lance = LanceIndex::new(tmp.path(), 384).await.unwrap();
+        seed_chunks_batch(&lance, "idx", 7, 64).await;
+
+        assert!(
+            lance.create_chunk_scalar_index().await.unwrap(),
+            "first call builds the index"
+        );
+        assert!(
+            !lance.create_chunk_scalar_index().await.unwrap(),
+            "second call finds it already covering memory_id and skips"
+        );
+        // Reads still return the same rows with the index in place — an index
+        // changes speed, never which rows match.
+        let got = lance.chunks_for_memories(&["idx-0000"]).await.unwrap();
+        assert_eq!(got["idx-0000"].len(), 1);
+    }
+
     fn seeded_vectors(seed: u64, n: usize, dim: usize) -> Vec<Vec<f32>> {
         let mut state = seed;
         let mut next = move || {

@@ -1349,6 +1349,24 @@ impl MemoryStore {
             })
     }
 
+    /// [`Self::export_chunks`] for many memories in one scan, keyed by id.
+    ///
+    /// Mirrors [`Self::get_batch`], and for the same reason: the per-item form
+    /// re-opens the dataset and re-plans the query on every call, so a loop
+    /// over it is O(n²). Ids with no stored vectors are absent from the map.
+    pub async fn export_chunks_batch<S: AsRef<str>>(
+        &self,
+        ids: &[S],
+    ) -> Result<HashMap<String, Vec<Vec<f32>>>> {
+        let refs: Vec<&str> = ids.iter().map(AsRef::as_ref).collect();
+        self.lance_index
+            .chunks_for_memories(&refs)
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB chunks_for_memories failed: {}", e))
+            })
+    }
+
     /// Perform vector similarity search.
     ///
     /// `restrict_to` optionally pushes a candidate `memory_id` set down into

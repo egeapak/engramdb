@@ -32,6 +32,7 @@ result, not the absolute times.
 | Composite scoring, 5,000 rows | `RetrievalEngine` score loops | 3.03 ms | 866 µs | **3.5×** |
 | Reindex CPU (parse + stems), 5,000 | `MemoryStore::reindex_dir` | 219 ms | 64.2 ms | **3.4×** |
 | Embedding 64 texts | `ops::compress::consolidation_pass` | 511 ms | 208 ms | **2.5×** |
+| Reading 256 memories' vectors | `MemoryStore::export_chunks` | 13.48 s | 136 ms | **98.7×** (O(n²)→O(n)) |
 
 ## Does rayon give you SIMD?
 
@@ -274,19 +275,109 @@ It is the wrong tool for `consolidation_pass` specifically:
   it is not interchangeable with the `[epistemic] consolidation_similarity`
   threshold users configure.
 
-## A bigger fish than the cosine
+## Reading stored vectors instead of re-embedding
 
 `consolidation_pass` calls `embed_text` on `summary + content` for every
 observation — re-deriving vectors for memories that were **already embedded on
-the write path and stored in the chunks table**, reachable via
-`MemoryStore::export_chunks`. Even after batching, that embedding is ~1.6 s at
-the 500-observation cap against ~6 ms for the entire similarity scan.
+the write path** and are sitting in the chunks table. Reading them back should
+obviously be cheaper than running a transformer. It was not, and finding out
+why turned up a genuine O(n²).
 
-Not a drop-in: the stored vectors are per-chunk (the query path aggregates them
-by max), while the pass embeds the whole text as one vector, so clustering
-would need a defined aggregation and the results would shift. It is a behaviour
-change, not an optimization, which is why it was not done here — but it is
-where the remaining order of magnitude is.
+### The per-memory read was quadratic
+
+`MemoryStore::export_chunks` → `LanceIndex::chunks_for_memory` filters the
+chunks table by `memory_id`. Every call re-opens the dataset (re-reading a
+manifest whose fragment list grows with the table), builds its own query plan,
+and scans. In a loop that is O(n²):
+
+| n | per-memory loop | **per memory** |
+|---|---|---|
+| 16 | 91.1 ms | 5.69 ms |
+| 32 | 298.9 ms | 9.34 ms |
+| 64 | 922.3 ms | 14.4 ms |
+| 128 | 3.477 s | 27.2 ms |
+| 256 | 13.476 s | 52.6 ms |
+
+Per-memory cost doubles on every doubling of n. Small samples are the cheap way
+to see this — the shape is unmistakable by n=256, and confirming it at n=500
+costs 65 s per sample.
+
+### An index is *not* the fix
+
+The obvious response is a scalar index on `chunks.memory_id`. It does not fix
+this, and it is worth being precise about why: an index removes the row-filter
+term only. It cannot remove the per-call table open, manifest read, or query
+plan — and in a write-then-read pass it is stale for exactly the rows just
+written, since LanceDB scans fragments added after the last `optimize` without
+it. The shape stays `N × O(N)`.
+
+### Batching is the fix
+
+`LanceIndex::chunks_for_memories` collapses N opens/plans/scans into one (per
+500-id sub-batch, matching `delete_chunks_batch`'s existing predicate bound).
+That holds regardless of index state or fragmentation:
+
+| n | per-memory | batched | speedup | per-memory cost: loop → batched |
+|---|---|---|---|---|
+| 16 | 91.1 ms | 7.73 ms | 11.8× | 5.69 ms → **0.48 ms** |
+| 32 | 298.9 ms | 12.73 ms | 23.5× | 9.34 ms → **0.40 ms** |
+| 64 | 922.3 ms | 25.81 ms | 35.7× | 14.4 ms → **0.40 ms** |
+| 128 | 3.477 s | 57.36 ms | 60.6× | 27.2 ms → **0.45 ms** |
+| 256 | 13.476 s | 136.5 ms | 98.7× | 52.6 ms → **0.53 ms** |
+
+The last column is the result: **flat**. O(n²) → O(n), so the speedup grows
+without bound rather than being a constant factor.
+
+A BTree index on `chunks.memory_id` is still worth having and is now built
+best-effort in `optimize()` — but for the lookups that are genuinely single-id
+(`has_chunks`, `delete_chunks`, `vector_search`'s `restrict_to` prefilter), not
+as the answer to the loop. BTree rather than Bitmap because `memory_id` has one
+distinct value per memory; no schema-version bump, since an index adds no
+column.
+
+### So: read, or re-embed?
+
+With the batch read in place, reading finally wins as expected — at n=64,
+25.8 ms against 212 ms to embed the same 64 texts (**8×**), and the gap widens
+with n because embedding is strictly linear while the read amortizes.
+
+It is still **not a drop-in**, for reasons that are about behaviour rather than
+speed:
+
+| | re-embed (today) | stored chunks |
+|---|---|---|
+| text | `"{summary} {content}"` as one string | metadata row + content chunks |
+| vectors per memory | 1 | 1 + N |
+| long memories | **truncated** at the model's token limit | fully covered |
+| title / tags | **absent** | included via the metadata row |
+| unembedded memories | embedded on demand | absent, would be skipped |
+
+Two of those are strict improvements (truncation, title/tag signal — the latter
+is the composition the query path already uses, E1: MRR@10 0.75 → 0.89). One is
+a real design decision: clustering needs one similarity per pair, but the
+stored form is multi-vector, so the aggregation has to be chosen (max over
+chunk pairs, matching query-path aggregation, is the obvious candidate). One is
+a regression to handle: memories with no stored vectors drop out of
+consolidation unless a fallback embeds them.
+
+Left undone deliberately — it changes which clusters are found, which is a
+product decision, not an optimization.
+
+## Other per-item store calls in a loop
+
+The same anti-pattern audited across the workspace. `export_chunks` was not the
+worst instance:
+
+| Location | N bounded by | When | Severity |
+|---|---|---|---|
+| `ops/reindex.rs:150` — `embed_memory` per memory | whole store | `reindex`, the documented fix for an embedding-fingerprint mismatch | **severe** — the `get_batch` at :145 is defeated one frame down by `store.get` inside `upsert_chunks_if_current` |
+| `ops/gc.rs:179` — `delete_if` per candidate | ≤ whole store | `gc --confirm` | **high** — ~7 scans/commits per candidate |
+| `worktree.rs:52` — `get`/`create`/`upsert_chunks` per stray file | stray `.md` files, usually 0 | first command inside a linked worktree | low — one-shot, and the cost is O(W × main store), not O(W²) |
+| `ops/task.rs:127`, `ops/mod.rs:108`, `compress.rs:174`/`:230`, `cli/gc.rs:109` | tens | various | low — `get_batch` already exists for most of these |
+
+None are fixed here. They are listed so the next person does not have to
+rediscover them, and because the top two are worth doing before any further
+micro-optimization of the arithmetic.
 
 ## What was parallelized, and why those
 

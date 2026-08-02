@@ -733,13 +733,28 @@ fn chunk_read_benchmarks(c: &mut Criterion) {
             (store, ids)
         });
 
-        group.bench_with_input(BenchmarkId::new("export_chunks", n), &ids, |b, ids| {
+        // Per-memory: N table opens, N manifest reads, N query plans, N scans.
+        group.bench_with_input(BenchmarkId::new("per_memory", n), &ids, |b, ids| {
             b.to_async(&rt).iter(|| async {
                 let mut total = 0usize;
                 for id in ids {
                     total += store.export_chunks(id).await.expect("export").len();
                 }
                 total
+            });
+        });
+
+        // Batched: one open, one plan, one scan for the whole set. If the
+        // per-memory cost of this arm stays flat as n doubles while the arm
+        // above doubles, the complexity really changed and it is not a
+        // constant-factor win.
+        group.bench_with_input(BenchmarkId::new("batched", n), &ids, |b, ids| {
+            b.to_async(&rt).iter(|| async {
+                store
+                    .export_chunks_batch(ids)
+                    .await
+                    .expect("export batch")
+                    .len()
             });
         });
     }
