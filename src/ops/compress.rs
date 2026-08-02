@@ -310,6 +310,47 @@ mod tests {
         }
     }
 
+    /// Every backend must agree, not just whichever one this host dispatches
+    /// to.
+    ///
+    /// `dot_unit` picks AVX2 on any modern x86-64 machine, so without this the
+    /// SSE2 and scalar paths would be compiled, shipped, and never executed by
+    /// the suite — and the SSE2 path is what every pre-Haswell CPU and every
+    /// VM that masks AVX2 actually runs. Lengths deliberately straddle the
+    /// 4/8/16-element strides so each backend's scalar tail is exercised.
+    #[test]
+    fn dot_unit_backends_agree() {
+        for dims in [1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 384, 385, 768] {
+            for seed in 0..4u64 {
+                let a = l2_normalized(&synth_vector(seed * 2, dims));
+                let b = l2_normalized(&synth_vector(seed * 2 + 1, dims));
+                let reference = dot_unit_scalar(&a, &b);
+                let dispatched = dot_unit(&a, &b);
+                assert!(
+                    (reference - dispatched).abs() < 1e-5,
+                    "dims={dims} seed={seed}: scalar {reference} vs dispatched {dispatched}"
+                );
+                #[cfg(target_arch = "x86_64")]
+                {
+                    let sse2 = dot_unit_sse2(&a, &b);
+                    assert!(
+                        (reference - sse2).abs() < 1e-5,
+                        "dims={dims} seed={seed}: scalar {reference} vs sse2 {sse2}"
+                    );
+                    if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
+                    {
+                        // SAFETY: guarded by the detection on this line.
+                        let avx2 = unsafe { dot_unit_avx2(&a, &b) };
+                        assert!(
+                            (reference - avx2).abs() < 1e-5,
+                            "dims={dims} seed={seed}: scalar {reference} vs avx2 {avx2}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Degenerate inputs must behave like the reference, not panic or produce
     /// a NaN that would then poison the `>= similarity` comparison.
     #[test]
@@ -945,15 +986,6 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
     }
 }
 
-/// Accumulator count for the unrolled dot product below.
-///
-/// Eight was chosen empirically, not from a vector width: at `opt-level = 2`
-/// LLVM keeps these as eight *scalar* `xmm` registers and the win is
-/// instruction-level parallelism, not SIMD (verified by disassembly — see
-/// `docs/contributors/parallelization-simd.md`). Eight fits comfortably in the
-/// sixteen available; widening to 16 measured no better.
-const DOT_LANES: usize = 8;
-
 /// A memory's embedding scaled to unit length, so that the cosine of two of
 /// them is just their dot product.
 ///
@@ -975,26 +1007,36 @@ fn l2_normalized(v: &[f32]) -> Vec<f32> {
     v.iter().map(|x| x / norm).collect()
 }
 
-/// Cosine similarity of two [`l2_normalized`] vectors.
+/// Cosine similarity of two [`l2_normalized`] vectors: their dot product.
 ///
-/// `chunks_exact` plus `try_into` hands LLVM a `&[f32; DOT_LANES]` whose
-/// length is a compile-time constant, so the bounds checks disappear. The
-/// eight separate accumulators are the actual trick: Rust's `f32` addition is
-/// IEEE-strict, so a single running sum is a dependency chain the optimizer
-/// may not reassociate, and every multiply-add waits on the previous one.
-/// Splitting it into eight chains lets the CPU issue them in parallel.
+/// Written with explicit SIMD intrinsics rather than a shape the
+/// auto-vectorizer might pick up, because **the release profile ships
+/// `opt-level = "z"`, which runs neither the loop vectorizer nor the
+/// unroller.** Any "vectorizer-friendly" formulation is therefore scalar in
+/// the binary users actually run. Intrinsics are semantic — they lower to the
+/// instruction regardless of the optimization level — so this is the only way
+/// to get vector arithmetic into a size-optimized build.
 ///
-/// **This is instruction-level parallelism, not SIMD.** Disassembly of the
-/// generated code at `opt-level = 2` shows eight scalar `mulss`/`addss` chains
-/// across `xmm0`–`xmm7` and zero packed instructions; only `opt-level = 3`
-/// emits `mulps`/`addps`, and the release profile ships `opt-level = "z"`,
-/// which does neither. See `docs/contributors/parallelization-simd.md` for the
-/// disassembly and what it means for release builds.
+/// Measured at `opt-level = "z"` with the real release profile (`lto = true`,
+/// `codegen-units = 1`), 384-dim pairs (`examples/` probe reproduced in
+/// `benches/parallel_simd.rs`):
 ///
-/// Deliberately no `unsafe`, no intrinsics and no `target_feature` gating: the
-/// portable form measured as fast as a `-C target-cpu=native` build here
-/// (`benches/parallel_simd.rs`), and a runtime-dispatched intrinsic version
-/// would have to be maintained per architecture.
+/// | form | ns/pair |
+/// |---|---|
+/// | plain scalar loop | 461 |
+/// | eight unrolled accumulators (no intrinsics) | 720 |
+/// | [`wide`]-style portable SIMD wrapper | 384 |
+/// | SSE2 intrinsics (this, baseline path) | **65** |
+/// | AVX2 + FMA intrinsics (this, detected path) | **55** |
+///
+/// Note the second row: hand-unrolling into independent accumulators is
+/// *slower than the naive loop* at `-Oz`, because the optimizer that would
+/// have cleaned it up is switched off. That shape only wins at
+/// `opt-level >= 2`, i.e. in `profile.bench` and not in production.
+///
+/// Raising `opt-level` instead was measured and rejected: `2` doubles the
+/// binary (55.0 → 105.2 MiB) for less than a fifth of the gain this gets for
+/// free. See `docs/contributors/parallelization-simd.md`.
 ///
 /// Mismatched lengths score `0.0`, as in [`cosine`] — the callers pair vectors
 /// from one provider, so this is a guard, not a code path.
@@ -1002,23 +1044,142 @@ fn dot_unit(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
-    let mut lanes = [0.0f32; DOT_LANES];
-    let mut ai = a.chunks_exact(DOT_LANES);
-    let mut bi = b.chunks_exact(DOT_LANES);
-    for (ac, bc) in ai.by_ref().zip(bi.by_ref()) {
-        let ac: &[f32; DOT_LANES] = ac
-            .try_into()
-            .expect("chunks_exact yields DOT_LANES elements");
-        let bc: &[f32; DOT_LANES] = bc
-            .try_into()
-            .expect("chunks_exact yields DOT_LANES elements");
-        for l in 0..DOT_LANES {
-            lanes[l] += ac[l] * bc[l];
-        }
+    dot_unit_dispatch(a, b)
+}
+
+/// Per-architecture backend selection, split out so each arch gets a plain
+/// function body rather than a stack of `#[cfg]` blocks with early returns.
+///
+/// AVX2+FMA is not in the x86-64 baseline, so it is detected at run time.
+/// `is_x86_feature_detected!` caches its answer in an atomic after the first
+/// call, so this is a predictable load, not a `cpuid` per comparison.
+#[cfg(target_arch = "x86_64")]
+fn dot_unit_dispatch(a: &[f32], b: &[f32]) -> f64 {
+    if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+        // SAFETY: guarded by the detection immediately above.
+        unsafe { dot_unit_avx2(a, b) }
+    } else {
+        dot_unit_sse2(a, b)
     }
-    let mut dot: f32 = lanes.iter().sum();
-    for (x, y) in ai.remainder().iter().zip(bi.remainder()) {
+}
+
+/// NEON is mandatory in the aarch64 baseline, so there is nothing to detect.
+#[cfg(target_arch = "aarch64")]
+fn dot_unit_dispatch(a: &[f32], b: &[f32]) -> f64 {
+    // SAFETY: `target_arch = "aarch64"` guarantees these instructions exist.
+    unsafe { dot_unit_neon(a, b) }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn dot_unit_dispatch(a: &[f32], b: &[f32]) -> f64 {
+    dot_unit_scalar(a, b)
+}
+
+/// Portable fallback. A single accumulator on purpose: at `-Oz` the unrolled
+/// form measured 1.6x *slower* (see [`dot_unit`]), and the architectures that
+/// reach this path are the ones we have not measured on.
+#[cfg_attr(any(target_arch = "x86_64", target_arch = "aarch64"), allow(dead_code))]
+fn dot_unit_scalar(a: &[f32], b: &[f32]) -> f64 {
+    let mut dot = 0.0f32;
+    for (x, y) in a.iter().zip(b.iter()) {
         dot += x * y;
+    }
+    dot as f64
+}
+
+/// SSE2 is part of the x86-64 baseline, so this needs no `target_feature`
+/// attribute and no detection — it is always legal on the target.
+///
+/// Two accumulators so the two multiply-add chains are independent; a single
+/// one leaves half the FP issue width idle.
+#[cfg(target_arch = "x86_64")]
+fn dot_unit_sse2(a: &[f32], b: &[f32]) -> f64 {
+    use std::arch::x86_64::*;
+    // SAFETY: every intrinsic below is SSE2, which is unconditionally present
+    // on `x86_64`. The loads are unaligned (`loadu`) and bounded by `n`, which
+    // is `len` rounded down to a multiple of 8, so all 8 lanes of each pair of
+    // loads are in bounds; the tail is handled scalar-wise.
+    unsafe {
+        let (mut acc0, mut acc1) = (_mm_setzero_ps(), _mm_setzero_ps());
+        let n = a.len() / 8 * 8;
+        let mut i = 0;
+        while i < n {
+            let a0 = _mm_loadu_ps(a.as_ptr().add(i));
+            let b0 = _mm_loadu_ps(b.as_ptr().add(i));
+            let a1 = _mm_loadu_ps(a.as_ptr().add(i + 4));
+            let b1 = _mm_loadu_ps(b.as_ptr().add(i + 4));
+            acc0 = _mm_add_ps(acc0, _mm_mul_ps(a0, b0));
+            acc1 = _mm_add_ps(acc1, _mm_mul_ps(a1, b1));
+            i += 8;
+        }
+        let mut lanes = [0.0f32; 4];
+        _mm_storeu_ps(lanes.as_mut_ptr(), _mm_add_ps(acc0, acc1));
+        let mut dot: f32 = lanes.iter().sum();
+        while i < a.len() {
+            dot += a[i] * b[i];
+            i += 1;
+        }
+        dot as f64
+    }
+}
+
+/// AVX2 + FMA: 16 elements per iteration, one instruction per multiply-add.
+///
+/// # Safety
+/// The caller must have verified `avx2` and `fma` are available.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_unit_avx2(a: &[f32], b: &[f32]) -> f64 {
+    use std::arch::x86_64::*;
+    let (mut acc0, mut acc1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+    let n = a.len() / 16 * 16;
+    let mut i = 0;
+    while i < n {
+        let a0 = _mm256_loadu_ps(a.as_ptr().add(i));
+        let b0 = _mm256_loadu_ps(b.as_ptr().add(i));
+        let a1 = _mm256_loadu_ps(a.as_ptr().add(i + 8));
+        let b1 = _mm256_loadu_ps(b.as_ptr().add(i + 8));
+        acc0 = _mm256_fmadd_ps(a0, b0, acc0);
+        acc1 = _mm256_fmadd_ps(a1, b1, acc1);
+        i += 16;
+    }
+    let mut lanes = [0.0f32; 8];
+    _mm256_storeu_ps(lanes.as_mut_ptr(), _mm256_add_ps(acc0, acc1));
+    let mut dot: f32 = lanes.iter().sum();
+    while i < a.len() {
+        dot += a[i] * b[i];
+        i += 1;
+    }
+    dot as f64
+}
+
+/// NEON, 8 elements per iteration. Mandatory on aarch64, so no detection.
+///
+/// # Safety
+/// `target_arch = "aarch64"` guarantees these instructions exist.
+#[cfg(target_arch = "aarch64")]
+unsafe fn dot_unit_neon(a: &[f32], b: &[f32]) -> f64 {
+    use std::arch::aarch64::*;
+    let (mut acc0, mut acc1) = (vdupq_n_f32(0.0), vdupq_n_f32(0.0));
+    let n = a.len() / 8 * 8;
+    let mut i = 0;
+    while i < n {
+        acc0 = vfmaq_f32(
+            acc0,
+            vld1q_f32(a.as_ptr().add(i)),
+            vld1q_f32(b.as_ptr().add(i)),
+        );
+        acc1 = vfmaq_f32(
+            acc1,
+            vld1q_f32(a.as_ptr().add(i + 4)),
+            vld1q_f32(b.as_ptr().add(i + 4)),
+        );
+        i += 8;
+    }
+    let mut dot = vaddvq_f32(vaddq_f32(acc0, acc1));
+    while i < a.len() {
+        dot += a[i] * b[i];
+        i += 1;
     }
     dot as f64
 }
