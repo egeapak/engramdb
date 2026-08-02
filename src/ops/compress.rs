@@ -351,6 +351,59 @@ mod tests {
         }
     }
 
+    /// Max-over-chunk-pairs: two memories are similar if ANY chunk of one is
+    /// similar to ANY chunk of the other.
+    ///
+    /// This is the aggregation choice, so it gets a test that would fail under
+    /// mean (which would average the strong match away) and under
+    /// first-chunk-only (which would miss it entirely).
+    #[test]
+    fn similar_pairs_aggregates_chunks_by_max() {
+        let dims = 384;
+        let shared = synth_vector(7, dims);
+        let noise_a = synth_vector(100, dims);
+        let noise_b = synth_vector(200, dims);
+        let noise_c = synth_vector(300, dims);
+
+        // Memory 0 and memory 1 share one near-identical chunk each, buried
+        // behind unrelated ones. Memory 2 shares nothing.
+        let vectors = vec![
+            vec![noise_a.clone(), shared.clone()],
+            vec![shared.clone(), noise_b.clone()],
+            vec![noise_c.clone()],
+        ];
+
+        // 0.99: only the shared pair clears it, so the assertion is about the
+        // aggregation and not about the corpus happening to be similar.
+        let pairs = similar_pairs(&vectors, 0.99);
+        assert_eq!(
+            pairs,
+            vec![(0, 1)],
+            "max over chunk pairs must find the shared chunk; mean or \
+             first-chunk-only would miss it"
+        );
+
+        // The same corpus with the shared chunks removed must find nothing —
+        // otherwise the test above proves nothing.
+        let unrelated = vec![
+            vec![noise_a.clone()],
+            vec![noise_b.clone()],
+            vec![noise_c.clone()],
+        ];
+        assert!(similar_pairs(&unrelated, 0.99).is_empty());
+    }
+
+    /// A memory with no stored vectors participates in no pair rather than
+    /// panicking or matching everything.
+    #[test]
+    fn similar_pairs_skips_memories_without_vectors() {
+        let dims = 384;
+        let v = synth_vector(1, dims);
+        let vectors = vec![vec![v.clone()], Vec::new(), vec![v.clone()]];
+        // 0 and 2 are identical; 1 has nothing.
+        assert_eq!(similar_pairs(&vectors, 0.99), vec![(0, 2)]);
+    }
+
     /// Degenerate inputs must behave like the reference, not panic or produce
     /// a NaN that would then poison the `>= similarity` comparison.
     #[test]
@@ -373,11 +426,16 @@ mod tests {
     #[test]
     fn similar_pairs_matches_sequential_reference() {
         let dims = 384;
-        let mut vectors: Vec<Option<Vec<f32>>> = (0..40u64)
-            .map(|i| Some(synth_vector(i % 12, dims)))
+        // One vector per memory here, so max-over-chunk-pairs degenerates to
+        // the plain pairwise cosine the sequential reference computes. The
+        // multi-chunk aggregation is covered by
+        // `similar_pairs_aggregates_chunks_by_max`.
+        let mut vectors: Vec<Vec<Vec<f32>>> = (0..40u64)
+            .map(|i| vec![synth_vector(i % 12, dims)])
             .collect();
-        vectors[3] = None;
-        vectors[17] = None;
+        // Memories with no stored vectors take part in no pair.
+        vectors[3] = Vec::new();
+        vectors[17] = Vec::new();
 
         // Threshold low enough that plenty of pairs qualify, so this is not
         // vacuously "both returned nothing".
@@ -385,7 +443,7 @@ mod tests {
         let mut expected: Vec<(usize, usize)> = Vec::new();
         for i in 0..vectors.len() {
             for j in (i + 1)..vectors.len() {
-                if let (Some(a), Some(b)) = (&vectors[i], &vectors[j]) {
+                if let (Some(a), Some(b)) = (vectors[i].first(), vectors[j].first()) {
                     if cosine(a, b) >= similarity {
                         expected.push((i, j));
                     }
@@ -1216,27 +1274,38 @@ unsafe fn dot_unit_neon(a: &[f32], b: &[f32]) -> f64 {
 /// identical to the sequential one — `cluster_pairs` is order-insensitive
 /// anyway, but a stable order keeps the reports reproducible.
 ///
-/// `vectors[i] == None` means that observation failed to embed; it takes part
-/// in no pair, exactly as before.
-fn similar_pairs(vectors: &[Option<Vec<f32>>], similarity: f64) -> Vec<(usize, usize)> {
+/// A memory with no vectors takes part in no pair, exactly as before.
+///
+/// **Aggregation is max over chunk pairs.** A memory is represented by several
+/// vectors (a metadata row plus one per content chunk), so "how similar are
+/// these two memories" needs a reduction. Max matches what the query path
+/// already does when it aggregates chunk hits by `memory_id`
+/// (`lance_index::vector_search`), so consolidation and search agree on what
+/// "similar" means. Mean would dilute a strong match on one chunk against
+/// unrelated chunks in a long memory — precisely the case consolidation is
+/// looking for.
+fn similar_pairs(vectors: &[Vec<Vec<f32>>], similarity: f64) -> Vec<(usize, usize)> {
     use rayon::prelude::*;
 
-    let unit: Vec<Option<Vec<f32>>> = vectors
+    // Normalize every chunk once. With `k` chunks per memory the inner loop is
+    // k_i * k_j dot products instead of one, so hoisting the norms matters
+    // more here than it did in the single-vector version, not less.
+    let unit: Vec<Vec<Vec<f32>>> = vectors
         .iter()
-        .map(|v| v.as_deref().map(l2_normalized))
+        .map(|chunks| chunks.iter().map(|v| l2_normalized(v)).collect())
         .collect();
 
     (0..unit.len())
         .into_par_iter()
         .map(|i| {
-            let Some(a) = unit[i].as_deref() else {
+            if unit[i].is_empty() {
                 return Vec::new();
-            };
+            }
             ((i + 1)..unit.len())
                 .filter(|&j| {
                     unit[j]
-                        .as_deref()
-                        .is_some_and(|b| dot_unit(a, b) >= similarity)
+                        .iter()
+                        .any(|b| unit[i].iter().any(|a| dot_unit(a, b) >= similarity))
                 })
                 .map(|j| (i, j))
                 .collect::<Vec<_>>()
@@ -1317,18 +1386,55 @@ pub async fn consolidation_pass(
         return Ok(report);
     }
 
-    // Embed each observation (summary + content). Failures drop the entry.
+    // Vectors come from the chunk table — the ones the write path already
+    // produced — rather than being re-derived here.
     //
-    // One batched call rather than one await per observation: every text is
-    // known up front, so there is nothing to interleave, and the per-call
-    // overhead was the dominant cost of this pass — larger than the O(n²)
-    // similarity scan it feeds. See `RetrievalEngine::embed_texts`.
-    let texts: Vec<String> = observations
+    // This is a correctness fix as much as a speed one. The pass used to embed
+    // `format!("{summary} {content}")` as ONE string, which the tokenizer
+    // truncates at the model's `max_length`: long observations were compared
+    // on their first ~256 tokens and nothing else, and `title`/`tags` never
+    // entered the comparison at all. The write path meanwhile chunks
+    // (`embedding_texts` -> `chunk_text`) and emits a metadata row carrying
+    // exactly those fields. Two compositions for the same store, and only one
+    // of them was the documented one. Reading the stored vectors makes this
+    // pass see what search sees.
+    //
+    // Reading is also now ~8x faster than re-embedding (`export_chunks_batch`,
+    // one scan instead of one per memory).
+    let obs_ids: Vec<&str> = observations.iter().map(|(id, _)| id.as_str()).collect();
+    let mut stored = store
+        .export_chunks_batch(&obs_ids)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("consolidation: batched chunk read failed ({e}); embedding on demand");
+            std::collections::HashMap::new()
+        });
+
+    // Fallback for memories with no stored vectors — created before embedding
+    // was available, or written while the provider was down. Embedding them
+    // here keeps them eligible instead of silently dropping them from
+    // consolidation, and uses `embedding_texts` so the composition matches
+    // what the write path would have stored.
+    let missing: Vec<&crate::types::Memory> = observations
         .iter()
-        .map(|(_, m)| format!("{} {}", m.summary, m.content))
+        .map(|(_, m)| m)
+        .filter(|m| !stored.contains_key(&m.id))
         .collect();
-    let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-    let vectors: Vec<Option<Vec<f32>>> = engine.embed_texts(&text_refs).await;
+    if !missing.is_empty() {
+        tracing::debug!(
+            count = missing.len(),
+            "consolidation: embedding memories with no stored vectors"
+        );
+        let owned: Vec<crate::types::Memory> = missing.into_iter().cloned().collect();
+        for (id, chunks) in engine.embed_memory_texts(&owned).await {
+            stored.insert(id, chunks);
+        }
+    }
+
+    let vectors: Vec<Vec<Vec<f32>>> = observations
+        .iter()
+        .map(|(id, _)| stored.remove(id).unwrap_or_default())
+        .collect();
 
     // Pairwise similarity → union-find clusters.
     let pairs = similar_pairs(&vectors, similarity);

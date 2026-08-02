@@ -433,6 +433,125 @@ impl RetrievalEngine {
         Ok(())
     }
 
+    /// [`Self::embed_memory`] for many memories: one batched inference and
+    /// one batched chunk write for the whole set.
+    ///
+    /// Per-memory `embed_memory` costs a small `embed_batch` (one memory's
+    /// chunks — far below the width where batching pays), a write lock, a full
+    /// directory scan and two LanceDB commits, *each*. Over a whole store that
+    /// is quadratic. This flattens every memory's chunk texts into one
+    /// inference stream and one `upsert_chunks_batch`.
+    ///
+    /// Composition is [`embedding_texts`] — byte-identical to the single
+    /// version, so vectors written here and by `create` are interchangeable.
+    ///
+    /// Returns `(embedded_count, per_memory_errors)`. A memory that produced
+    /// no text (entirely empty) has its chunks deleted, matching
+    /// `embed_memory`. `Ok((0, vec![]))` when no provider is configured.
+    pub async fn embed_memories(&self, memories: &[Memory]) -> (usize, Vec<(String, String)>) {
+        let Some(provider) = &self.embedding_provider else {
+            return (0, Vec::new());
+        };
+        if memories.is_empty() {
+            return (0, Vec::new());
+        }
+        let chunk_tokens =
+            effective_chunk_tokens(self.config.embeddings.max_tokens, provider.max_tokens());
+        let metadata_vector = self.config.embeddings.metadata_vector;
+
+        // Flatten every memory's chunk texts into one stream, remembering how
+        // many belong to each so the vectors can be handed back out.
+        let mut texts: Vec<String> = Vec::new();
+        let mut spans: Vec<(usize, usize)> = Vec::with_capacity(memories.len());
+        for memory in memories {
+            let start = texts.len();
+            texts.extend(embedding_texts(memory, chunk_tokens, metadata_vector));
+            spans.push((start, texts.len()));
+        }
+
+        let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let vectors = self.embed_texts(&text_refs).await;
+
+        let mut entries: Vec<(String, chrono::DateTime<chrono::Utc>, Vec<Vec<f32>>)> =
+            Vec::with_capacity(memories.len());
+        let mut errors: Vec<(String, String)> = Vec::new();
+        for (memory, (start, end)) in memories.iter().zip(spans) {
+            // A single failed text fails that memory only — its vectors would
+            // otherwise be a partial, silently-wrong representation.
+            let mut chunks = Vec::with_capacity(end - start);
+            let mut failed = false;
+            for slot in &vectors[start..end] {
+                match slot {
+                    Some(v) => chunks.push(v.clone()),
+                    None => {
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            if failed {
+                errors.push((memory.id.clone(), "embedding failed".to_string()));
+                continue;
+            }
+            entries.push((memory.id.clone(), memory.updated_at, chunks));
+        }
+
+        match self.store.upsert_chunks_batch(entries).await {
+            Ok(written) => (written.len(), errors),
+            Err(e) => {
+                errors.push(("*".to_string(), format!("batched chunk write failed: {e}")));
+                (0, errors)
+            }
+        }
+    }
+
+    /// Embed memories with the **write path's** composition and return the
+    /// vectors, without writing them.
+    ///
+    /// For callers that need a memory's vectors but found none in the chunk
+    /// table — currently `ops::compress::consolidation_pass`'s fallback. Using
+    /// [`embedding_texts`] rather than an ad-hoc string is the point: the
+    /// vectors it returns are directly comparable with the stored ones, which
+    /// a hand-rolled `"{summary} {content}"` would not be (that form is one
+    /// tokenizer-truncated vector, with no metadata row).
+    ///
+    /// Memories that fail to embed are simply absent from the result.
+    pub async fn embed_memory_texts(
+        &self,
+        memories: &[Memory],
+    ) -> std::collections::HashMap<String, Vec<Vec<f32>>> {
+        let mut out = std::collections::HashMap::new();
+        let Some(provider) = &self.embedding_provider else {
+            return out;
+        };
+        if memories.is_empty() {
+            return out;
+        }
+        let chunk_tokens =
+            effective_chunk_tokens(self.config.embeddings.max_tokens, provider.max_tokens());
+        let metadata_vector = self.config.embeddings.metadata_vector;
+
+        let mut texts: Vec<String> = Vec::new();
+        let mut spans: Vec<(usize, usize)> = Vec::with_capacity(memories.len());
+        for memory in memories {
+            let start = texts.len();
+            texts.extend(embedding_texts(memory, chunk_tokens, metadata_vector));
+            spans.push((start, texts.len()));
+        }
+        let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let vectors = self.embed_texts(&text_refs).await;
+
+        for (memory, (start, end)) in memories.iter().zip(spans) {
+            let chunks: Option<Vec<Vec<f32>>> = vectors[start..end].iter().cloned().collect();
+            if let Some(chunks) = chunks {
+                if !chunks.is_empty() {
+                    out.insert(memory.id.clone(), chunks);
+                }
+            }
+        }
+        out
+    }
+
     /// Spawn embedding + contradiction detection for a freshly-created memory
     /// in the background and return immediately.
     ///
@@ -4550,6 +4669,88 @@ mod tests {
     ///   "queryvec" → v[0]=1.0, "closevec" → v[0]=0.4 (near),
     ///   "fillvec" → v[0]=0.1 (mid), anything else → v[1]=1.0 (orthogonal).
     struct MarkerEmbeddingProvider;
+
+    /// `embed_memories` (reindex) and `embed_memory_texts` (the consolidation
+    /// fallback) must compose text exactly like the single-memory write path.
+    ///
+    /// This is the guard for the whole "one store, two compositions" class of
+    /// bug: the consolidation pass used to build its own
+    /// `format!("{summary} {content}")`, which is one tokenizer-truncated
+    /// vector carrying neither title nor tags, while `create` stored a
+    /// metadata row plus chunked content. Anything that embeds a Memory must
+    /// go through `embedding_texts`, and this test fails if a new path
+    /// re-invents the string.
+    #[test]
+    fn every_embedding_path_uses_the_same_composition() {
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Use LanceDB for the unified index",
+            "The chunks table stores vectors; the memories table stores metadata.",
+            crate::types::Provenance::human(),
+        );
+        memory.title = Some("LanceDB choice".to_string());
+        memory.tags = vec!["storage".to_string(), "index".to_string()];
+
+        let texts = embedding_texts(&memory, 256, true);
+
+        // The metadata row must carry title AND tags — the fields the old
+        // hand-rolled composition silently dropped.
+        assert!(
+            texts[0].contains("LanceDB choice"),
+            "metadata row must carry the title, got {:?}",
+            texts[0]
+        );
+        assert!(
+            texts[0].contains("storage") && texts[0].contains("index"),
+            "metadata row must carry the tags, got {:?}",
+            texts[0]
+        );
+        assert!(
+            texts.len() >= 2,
+            "content must be embedded separately from metadata, got {texts:?}"
+        );
+        assert!(
+            texts[1..].iter().any(|t| t.contains("chunks table")),
+            "content must appear in a chunk, got {texts:?}"
+        );
+
+        // The legacy composition (metadata_vector = false) is the ONLY place
+        // "{summary} {content}" is correct, and even there it is chunked
+        // rather than truncated.
+        let legacy = embedding_texts(&memory, 256, false);
+        assert!(legacy[0].starts_with("Use LanceDB for the unified index"));
+        assert!(legacy[0].contains("chunks table"));
+    }
+
+    /// Long content must be CHUNKED, not truncated — a memory longer than the
+    /// model's window has to be fully represented across several vectors.
+    #[test]
+    fn long_content_is_chunked_not_truncated() {
+        let long = (0..600)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut memory = Memory::new(
+            MemoryType::Context,
+            "A long memory",
+            &long,
+            crate::types::Provenance::human(),
+        );
+        memory.title = Some("Long".to_string());
+
+        let texts = embedding_texts(&memory, 256, true);
+        assert!(
+            texts.len() > 2,
+            "600 words at 256 tokens must produce several content chunks, got {}",
+            texts.len()
+        );
+        // The tail must survive — the failure mode being guarded against is
+        // silently dropping everything past the tokenizer's window.
+        assert!(
+            texts.iter().any(|t| t.contains("word599")),
+            "the end of a long memory must be embedded, not truncated away"
+        );
+    }
 
     fn marker_vector(text: &str) -> Vec<f32> {
         let mut v = vec![0.0f32; 384];

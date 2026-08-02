@@ -526,6 +526,26 @@ impl LanceIndex {
         Ok(())
     }
 
+    /// Delete many entries from the memories table in one commit per 500 ids.
+    ///
+    /// Same bound and rationale as [`Self::delete_chunks_batch`]: an unbounded
+    /// `IN (...)` is a single enormous predicate for the planner.
+    pub async fn delete_batch(&self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let table = self.open_table().await?;
+        const DELETE_BATCH_SIZE: usize = 500;
+        for group in ids.chunks(DELETE_BATCH_SIZE) {
+            let list = group.iter().map(lit).collect::<Vec<_>>();
+            table
+                .delete(&is_in(col("id"), list))
+                .await
+                .context("Failed to delete entry batch")?;
+        }
+        Ok(())
+    }
+
     /// Return the number of entries in the memories table.
     ///
     /// Uses `count_rows` (O(table metadata)) rather than streaming a column —
@@ -843,6 +863,136 @@ impl LanceIndex {
         // Keep the memories-table R3 flag in sync: this memory now has chunks.
         self.set_has_embedding(memory_id, true).await?;
 
+        Ok(())
+    }
+
+    /// Upsert chunks for MANY memories in one merge_insert plus one
+    /// `has_embedding` update.
+    ///
+    /// [`Self::upsert_chunks`] is two commits (the merge plus the flag
+    /// update) and one table open per memory, so re-embedding a whole store
+    /// through it is `2N` commits over a dataset whose manifest is itself
+    /// growing with `N` — the same quadratic shape `chunks_for_memories`
+    /// fixed on the read side. This collapses that to two commits total.
+    ///
+    /// Stale-chunk deletion is scoped with `is_in` over exactly the memories
+    /// being written, so a memory that is not in `entries` keeps its chunks —
+    /// matching [`Self::upsert_chunks`]'s per-memory
+    /// `when_not_matched_by_source_delete_expr`. Entries with no chunks are
+    /// routed to [`Self::delete_chunks_batch`] instead, mirroring
+    /// `upsert_chunks`'s empty-input behaviour.
+    ///
+    /// Batched at the same 500 ids as `delete_chunks_batch` for the same
+    /// reason: an unbounded `IN (...)` is one enormous predicate.
+    pub async fn upsert_chunks_batch(&self, entries: &[(String, Vec<Vec<f32>>)]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        // Same pre-validation as the single-memory path, and for the same
+        // reason: `FixedSizeListArray::new` PANICS on a width mismatch, which
+        // in a batch would take down every memory in it, not just the bad one.
+        for (memory_id, chunks) in entries {
+            for (i, chunk) in chunks.iter().enumerate() {
+                if chunk.len() != self.dimensions {
+                    anyhow::bail!(
+                        "Embedding dimension mismatch for memory '{}': chunk {} has {} \
+                         dimensions but the index expects {}. The embedding provider and the \
+                         configured [embeddings].dimensions disagree — set \
+                         [embeddings].dimensions = {} in config.toml, then run \
+                         `engramdb reindex --embeddings-only`.",
+                        memory_id,
+                        i,
+                        chunk.len(),
+                        self.dimensions,
+                        chunk.len()
+                    );
+                }
+            }
+        }
+
+        // Memories whose new chunk list is empty are deletions, not upserts.
+        let (empty, populated): (Vec<_>, Vec<_>) =
+            entries.iter().partition(|(_, chunks)| chunks.is_empty());
+        if !empty.is_empty() {
+            let ids: Vec<String> = empty.iter().map(|(id, _)| id.clone()).collect();
+            self.delete_chunks_batch(&ids).await?;
+        }
+        if populated.is_empty() {
+            return Ok(());
+        }
+
+        let table = self.open_chunks_table().await?;
+        let schema = self.chunks_schema();
+
+        const UPSERT_BATCH_SIZE: usize = 500;
+        for group in populated.chunks(UPSERT_BATCH_SIZE) {
+            let mut memory_ids: Vec<&str> = Vec::new();
+            let mut chunk_indices: Vec<u32> = Vec::new();
+            let mut all_values: Vec<f32> = Vec::new();
+            for (memory_id, chunks) in group {
+                for (i, chunk) in chunks.iter().enumerate() {
+                    memory_ids.push(memory_id.as_str());
+                    chunk_indices.push(i as u32);
+                    all_values.extend_from_slice(chunk);
+                }
+            }
+            let num_rows = memory_ids.len();
+            let vector_array = FixedSizeListArray::new(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                self.dimensions as i32,
+                Arc::new(Float32Array::from(all_values)) as ArrayRef,
+                None,
+            );
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(memory_ids)) as ArrayRef,
+                    Arc::new(UInt32Array::from(chunk_indices)) as ArrayRef,
+                    Arc::new(vector_array) as ArrayRef,
+                ],
+            )
+            .context("Failed to create batched chunks RecordBatch")?;
+            debug_assert_eq!(batch.num_rows(), num_rows);
+
+            let group_ids: Vec<_> = group.iter().map(|(id, _)| lit(id)).collect();
+            let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema.clone());
+            let mut op = table.merge_insert(&["memory_id", "chunk_index"]);
+            op.when_matched_update_all(None);
+            op.when_not_matched_insert_all();
+            // Scoped to this group: a memory outside it must keep its chunks.
+            op.when_not_matched_by_source_delete_expr(is_in(col("memory_id"), group_ids));
+            op.execute(Box::new(batches))
+                .await
+                .context("Failed to upsert chunk batch")?;
+        }
+
+        let ids: Vec<String> = populated.iter().map(|(id, _)| id.clone()).collect();
+        self.set_has_embedding_batch(&ids, true).await?;
+        Ok(())
+    }
+
+    /// [`Self::set_has_embedding`] for many memories in one update per 500.
+    pub async fn set_has_embedding_batch(&self, memory_ids: &[String], value: bool) -> Result<()> {
+        if memory_ids.is_empty() {
+            return Ok(());
+        }
+        let table = self.open_table().await?;
+        const UPDATE_BATCH_SIZE: usize = 500;
+        for group in memory_ids.chunks(UPDATE_BATCH_SIZE) {
+            let list = group.iter().map(lit).collect::<Vec<_>>();
+            // Same rationale as `set_has_embedding`: render the typed
+            // expression with lancedb's own renderer rather than hand-quoting.
+            let filter = lancedb::expr::expr_to_sql_string(&is_in(col("id"), list))
+                .context("Failed to render batched has_embedding update filter")?;
+            table
+                .update()
+                .only_if(filter)
+                .column("has_embedding", if value { "true" } else { "false" })
+                .execute()
+                .await
+                .context("Failed to batch-update has_embedding")?;
+        }
         Ok(())
     }
 

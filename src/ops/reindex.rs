@@ -147,15 +147,22 @@ pub async fn reindex(
                 .await
                 .map_err(|e| anyhow::anyhow!("batch load failed: {}", e))?;
             let mut by_id: std::collections::HashMap<String, _> = loaded.into_iter().collect();
+            let mut to_embed: Vec<crate::types::Memory> = Vec::with_capacity(ids.len());
             for id in &ids {
                 match by_id.remove(id) {
-                    Some(memory) => match engine.embed_memory(&memory).await {
-                        Ok(()) => embedded += 1,
-                        Err(e) => errors.push(format!("{}: {}", id, e)),
-                    },
+                    Some(memory) => to_embed.push(memory),
                     None => errors.push(format!("{}: memory file not found", id)),
                 }
             }
+            // One batched inference + one batched chunk write for the whole
+            // store. `embed_memory` per memory was a small `embed_batch`, a
+            // write lock, a full directory scan and two LanceDB commits EACH —
+            // quadratic over a store, and reindex by definition runs over the
+            // whole store. The batched load above (finding #5) was being
+            // undone one frame down.
+            let (ok, failures) = engine.embed_memories(&to_embed).await;
+            embedded += ok;
+            errors.extend(failures.into_iter().map(|(id, e)| format!("{}: {}", id, e)));
 
             // Stamp the store with the embedding model identity once every
             // memory re-embedded cleanly. On partial failure we leave the
