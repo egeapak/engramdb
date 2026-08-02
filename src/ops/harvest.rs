@@ -36,10 +36,9 @@ use std::path::{Path, PathBuf};
 /// loaded (a `--max-chars` default in the clap definition, which is parsed
 /// before any store is opened).
 ///
-/// The real values live in `[harvest]`: `digest_budget` for a single-session
-/// deep read and `fanout_budget` for scanning many. One number cannot serve
-/// both — at the single-session default, a dozen sessions inline would be
-/// ~600k tokens.
+/// The real value lives in `[harvest].digest_budget`. It is deliberately
+/// large — a 2.9 MB transcript digests to roughly 60 KB, so the budget is
+/// effectively "the whole session" with a ceiling against a pathological one.
 pub const DEFAULT_DIGEST_BUDGET: usize = 200_000;
 
 /// Longest a single event's text is allowed to be before it is truncated,

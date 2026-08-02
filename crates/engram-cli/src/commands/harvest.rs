@@ -303,6 +303,16 @@ async fn run_ledger(
                 );
             };
             let project_id = archive_project_id(dir, registry).await?;
+            // The ledger can outlive the file: eviction on another machine, a
+            // restored backup, or a manual cleanup all strand the reference.
+            // Say so plainly rather than surfacing a bare "no such file".
+            if !transcript_archive::archive_path(&project_id, &key)?.exists() {
+                bail!(
+                    "Session {key} has a recorded archive ({}) but the file is gone — it was \
+most likely evicted by `harvest ledger prune` or the `[harvest] archive_*` budgets.",
+                    archive.file_name
+                );
+            }
             let dest = output.unwrap_or_else(|| PathBuf::from(format!("{key}.jsonl")));
             let sha = transcript_archive::export_archive(&project_id, &key, &dest)?;
             if sha != archive.sha256 {
@@ -326,7 +336,10 @@ time — the archive is corrupt.",
             let key = resolve_ledger_key(dir, &session_id)?;
             let project_id = archive_project_id(dir, registry).await?;
             let removed_archive = transcript_archive::remove_archive(&project_id, &key)?;
-            if !archive_only {
+            if archive_only {
+                // Keep the review record, drop the now-dangling file pointer.
+                harvest_state::clear_archive_refs(dir, std::slice::from_ref(&key))?;
+            } else {
                 harvest_state::clear_harvested(dir, &key)?;
             }
             formatter.print_success(&format!(
@@ -353,6 +366,11 @@ time — the archive is corrupt.",
             let cap = max_bytes.unwrap_or(config.archive_max_bytes);
             let project_id = archive_project_id(dir, registry).await?;
             let outcome = transcript_archive::prune_archives(&project_id, retention, cap, !apply)?;
+            if apply {
+                // The files are gone; the ledger must stop pointing at them or
+                // `show` advertises an export that cannot succeed.
+                harvest_state::clear_archive_refs(dir, &outcome.removed)?;
+            }
 
             if formatter.is_json() {
                 println!(
@@ -371,11 +389,12 @@ time — the archive is corrupt.",
                 );
             } else {
                 println!(
-                    "{} {} archive(s), freeing {} ({} would remain).",
+                    "{} {} archive(s), freeing {} ({} {} remain).",
                     if apply { "Removed" } else { "Would remove" },
                     outcome.removed.len(),
                     human_bytes(outcome.bytes_freed),
-                    human_bytes(outcome.bytes_remaining)
+                    human_bytes(outcome.bytes_remaining),
+                    if apply { "now" } else { "would" }
                 );
                 if !apply {
                     println!("Re-run with --apply to delete.");

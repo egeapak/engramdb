@@ -113,6 +113,29 @@ impl Corpus {
         c
     }
 
+    /// Fire the SessionEnd hook for a session, as Claude Code would.
+    ///
+    /// This is the only path that archives a transcript, so any test about
+    /// archives has to go through it rather than calling the archive helper
+    /// directly.
+    fn session_end(&self, dir: &Path, session: &str) {
+        let transcript = self
+            .claude
+            .join("projects")
+            .join(encode(dir))
+            .join(format!("{session}.jsonl"));
+        let event = serde_json::json!({
+            "session_id": session,
+            "transcript_path": transcript.to_string_lossy(),
+            "cwd": dir.to_string_lossy(),
+        })
+        .to_string();
+        self.engramdb(dir, &["hook", "session-end"])
+            .write_stdin(event)
+            .assert()
+            .success();
+    }
+
     fn stdout(&self, dir: &Path, args: &[&str]) -> String {
         let out = self.engramdb(dir, args).output().unwrap();
         assert!(
@@ -394,6 +417,91 @@ fn ledger_hides_reviewed_sessions_and_reset_restores_them() {
         .success();
     let out = c.stdout(&c.main, &["harvest", "list"]);
     assert!(out.contains("bbbb2222"), "reset did not re-offer: {out}");
+}
+
+/// Archiving a transcript must not remove it from the review queue, and
+/// evicting the archive must not leave the ledger advertising a file that is
+/// no longer there.
+#[test]
+fn archiving_then_pruning_leaves_a_consistent_ledger() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+
+    c.session_end(&c.main, "aaaa1111-rich");
+
+    // An archived session is only *stored*, not reviewed — it must still be
+    // offered. Reading presence in the ledger as "already handled" would hide
+    // every session the SessionEnd hook ever touched.
+    let out = c.stdout(&c.main, &["harvest", "list"]);
+    assert!(
+        out.contains("aaaa1111"),
+        "archiving removed a session from the review queue: {out}"
+    );
+
+    let out = c.stdout(&c.main, &["harvest", "ledger", "show", "aaaa"]);
+    assert!(out.contains(".jsonl.zst"), "{out}");
+
+    // Evict it, then the ledger must stop claiming an archive exists...
+    c.engramdb(
+        &c.main,
+        &["harvest", "ledger", "prune", "--max-bytes", "1", "--apply"],
+    )
+    .assert()
+    .success();
+
+    let out = c.stdout(&c.main, &["harvest", "ledger", "show", "aaaa"]);
+    assert!(
+        out.contains("Archive:   none"),
+        "ledger still points at an evicted archive: {out}"
+    );
+
+    // ...and export must explain itself rather than surfacing a bare IO error.
+    let err = String::from_utf8_lossy(
+        &c.engramdb(&c.main, &["harvest", "ledger", "export", "aaaa"])
+            .assert()
+            .failure()
+            .get_output()
+            .stderr
+            .clone(),
+    )
+    .to_string();
+    assert!(
+        err.contains("no archived transcript") || err.contains("archive"),
+        "unhelpful export error: {err}"
+    );
+}
+
+/// A session that ends inside a linked worktree must archive into the *root*
+/// project's directory, or the main checkout could never export it: the
+/// ledger is shared across the worktree boundary, so the archives must be too.
+#[test]
+fn worktree_sessions_archive_into_the_root_project() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+
+    c.session_end(&c.worktree, "cccc3333-worktree");
+
+    let out = c.stdout(&c.main, &["harvest", "ledger", "show", "cccc"]);
+    assert!(
+        out.contains(".jsonl.zst"),
+        "worktree archive is invisible from the main checkout: {out}"
+    );
+
+    let dest = c.main.join("restored.jsonl");
+    c.engramdb(
+        &c.main,
+        &[
+            "harvest",
+            "ledger",
+            "export",
+            "cccc",
+            "-o",
+            dest.to_str().unwrap(),
+        ],
+    )
+    .assert()
+    .success();
+    assert!(dest.is_file(), "export produced no file");
 }
 
 #[test]

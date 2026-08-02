@@ -1190,14 +1190,6 @@ pub struct HarvestConfig {
     #[serde(default = "default_digest_budget")]
     pub digest_budget: usize,
 
-    /// Per-session budget when scanning *many* sessions — the MCP default and
-    /// what subagent fan-out should pass.
-    ///
-    /// A separate number because one value cannot serve both cases: at the
-    /// single-session default, a dozen sessions inline would be ~600k tokens.
-    #[serde(default = "default_fanout_budget")]
-    pub fanout_budget: usize,
-
     /// Include assistant reasoning blocks in digests.
     #[serde(default)]
     pub include_thinking: bool,
@@ -1230,10 +1222,6 @@ fn default_digest_budget() -> usize {
     200_000
 }
 
-fn default_fanout_budget() -> usize {
-    20_000
-}
-
 fn default_true() -> bool {
     true
 }
@@ -1253,7 +1241,6 @@ impl Default for HarvestConfig {
     fn default() -> Self {
         Self {
             digest_budget: default_digest_budget(),
-            fanout_budget: default_fanout_budget(),
             include_thinking: false,
             include_sidechains: false,
             archive: true,
@@ -1270,15 +1257,6 @@ impl HarvestConfig {
             usize::MAX
         } else {
             self.digest_budget
-        }
-    }
-
-    /// Effective budget when scanning many sessions (`0` → unlimited).
-    pub fn effective_fanout_budget(&self) -> usize {
-        if self.fanout_budget == 0 {
-            usize::MAX
-        } else {
-            self.fanout_budget
         }
     }
 

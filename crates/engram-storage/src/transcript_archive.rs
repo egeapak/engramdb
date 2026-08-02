@@ -91,29 +91,27 @@ pub fn archive_transcript(
         std::fs::create_dir_all(parent)?;
     }
 
-    let mut input = std::fs::File::open(transcript)?;
-    let original_bytes = input.metadata().map(|m| m.len()).unwrap_or(0);
+    // Process-unique temp name: a SessionEnd hook can fire twice for the same
+    // session, and two writers sharing one temp path would interleave into a
+    // corrupt archive that still renames into place looking valid.
+    let tmp = dest.with_extension(format!("tmp{}", std::process::id()));
 
-    let tmp = dest.with_extension("tmp");
-    let out = std::fs::File::create(&tmp)?;
-    let mut encoder = zstd::stream::Encoder::new(out, ZSTD_LEVEL)?;
-
-    // Hash the plaintext as it streams past, so integrity costs one pass, not
-    // a second read of the file.
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        use std::io::{Read, Write};
-        let n = input.read(&mut buf)?;
-        if n == 0 {
-            break;
+    // A partial temp file is invisible to `list_archives` (it does not end in
+    // `.jsonl.zst`), so a failure that left one behind would leak bytes the
+    // size budget can never reclaim. Clean up on every error path.
+    let written = compress_into(transcript, &tmp);
+    let (hasher, original_bytes) = match written {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
         }
-        hasher.update(&buf[..n]);
-        encoder.write_all(&buf[..n])?;
-    }
-    encoder.finish()?;
+    };
 
-    std::fs::rename(&tmp, &dest)?;
+    if let Err(e) = std::fs::rename(&tmp, &dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     let bytes = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
 
     Ok(ArchiveRef {
@@ -126,6 +124,33 @@ pub fn archive_transcript(
         sha256: hex_digest(hasher),
         archived_at: Utc::now(),
     })
+}
+
+/// Stream `src` through zstd into `tmp`, returning the plaintext hasher and
+/// the original size.
+///
+/// Hashes as the bytes stream past, so integrity costs one pass rather than a
+/// second read of a file that can be tens of megabytes.
+fn compress_into(src: &Path, tmp: &Path) -> Result<(Sha256, u64)> {
+    use std::io::{Read, Write};
+
+    let mut input = std::fs::File::open(src)?;
+    let original_bytes = input.metadata().map(|m| m.len()).unwrap_or(0);
+    let out = std::fs::File::create(tmp)?;
+    let mut encoder = zstd::stream::Encoder::new(out, ZSTD_LEVEL)?;
+
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = input.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        encoder.write_all(&buf[..n])?;
+    }
+    encoder.finish()?;
+    Ok((hasher, original_bytes))
 }
 
 /// Decompress an archive to `dest`.

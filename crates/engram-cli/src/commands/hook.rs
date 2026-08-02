@@ -936,13 +936,24 @@ async fn archive_ending_session(dir: &Path, session_id: &str, input: &str) {
             }
             // Enforce the budget here rather than on a timer: session end is
             // the only moment archiving reliably runs.
-            if let Err(e) = engramdb::storage::transcript_archive::prune_archives(
+            match engramdb::storage::transcript_archive::prune_archives(
                 &project_id,
                 config.harvest.archive_retention_days,
                 config.harvest.archive_max_bytes,
                 false,
             ) {
-                tracing::debug!("SessionEnd archive: prune failed (non-fatal): {e}");
+                // Evicted files must stop being advertised by the ledger, or
+                // `harvest ledger show` offers an export that cannot succeed.
+                Ok(outcome) => {
+                    if let Err(e) =
+                        engramdb::storage::harvest_state::clear_archive_refs(dir, &outcome.removed)
+                    {
+                        tracing::debug!(
+                            "SessionEnd archive: clearing evicted refs failed (non-fatal): {e}"
+                        );
+                    }
+                }
+                Err(e) => tracing::debug!("SessionEnd archive: prune failed (non-fatal): {e}"),
             }
         }
         Err(e) => tracing::debug!("SessionEnd archive failed (non-fatal): {e}"),

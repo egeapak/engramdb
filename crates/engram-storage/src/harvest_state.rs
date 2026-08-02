@@ -217,6 +217,34 @@ pub fn set_archive(
     write_harvested(project_dir, &map)
 }
 
+/// Forget the archive reference for one or more sessions, keeping the review
+/// record itself.
+///
+/// The inverse of [`set_archive`], and mandatory whenever an archive file is
+/// deleted: an entry pointing at a file that eviction has already removed
+/// makes `harvest ledger show` advertise a transcript that cannot be exported,
+/// and turns `export` into a bare "no such file" instead of a clear
+/// explanation. Takes a slice because the size-based prune pass evicts many
+/// archives at once and should cost one ledger write, not one per file.
+pub fn clear_archive_refs(project_dir: &Path, session_ids: &[String]) -> Result<()> {
+    if session_ids.is_empty() {
+        return Ok(());
+    }
+    let _lock = lock_ledger(project_dir);
+    let mut map = read_harvested(project_dir);
+    let mut touched = false;
+    for id in session_ids {
+        if let Some(entry) = map.get_mut(id) {
+            touched |= entry.archive.take().is_some();
+        }
+    }
+    if !touched {
+        return Ok(());
+    }
+    prune_stale(&mut map);
+    write_harvested(project_dir, &map)
+}
+
 /// Drop entries past the ledger's retention window.
 ///
 /// Archives are pruned independently, by their own age/size budget in
@@ -281,6 +309,37 @@ mod tests {
         assert!(clear_harvested(dir, "s1").unwrap());
         assert!(!is_harvested(dir, "s1"));
         assert!(!clear_harvested(dir, "s1").unwrap());
+    }
+
+    #[test]
+    fn clearing_an_archive_ref_keeps_the_review_record() {
+        // Eviction deletes files, not reviews. If the decision were dropped
+        // along with the archive, pruning old transcripts would silently
+        // re-offer every session that had already been reviewed.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        mark_harvested(dir, "s1", &["m1".into()], HarvestDecision::Harvested, None).unwrap();
+        set_archive(dir, "s1", sample_archive()).unwrap();
+        assert!(read_harvested(dir)["s1"].archive.is_some());
+
+        clear_archive_refs(dir, &["s1".to_string()]).unwrap();
+        let entry = &read_harvested(dir)["s1"];
+        assert!(entry.archive.is_none(), "file pointer must be dropped");
+        assert_eq!(entry.decision, Some(HarvestDecision::Harvested));
+        assert_eq!(entry.memory_ids, vec!["m1"]);
+        assert!(is_harvested(dir, "s1"));
+    }
+
+    #[test]
+    fn clearing_archive_refs_tolerates_unknown_and_empty_input() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        // A prune pass can evict an archive whose ledger entry already aged
+        // out; that must not be an error, and must not create an entry.
+        clear_archive_refs(dir, &["ghost".to_string()]).unwrap();
+        clear_archive_refs(dir, &[]).unwrap();
+        assert!(read_harvested(dir).is_empty());
     }
 
     #[test]
