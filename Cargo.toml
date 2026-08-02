@@ -196,6 +196,66 @@ strip = true
 panic = "abort"
 codegen-units = 1
 
+# Build the crates that do the per-memory bulk work for speed, and leave the
+# rest of the tree at the profile's "z". Chosen from what `reindex` actually
+# spends its time in: TOML frontmatter deserialization, YAML for the legacy V1
+# format, Snowball stemming for the keyword index, glob matching for scope
+# scores, and EngramDB's own three data crates.
+#
+# Measured on a 1,200-memory `reindex --index-only`, 9 reps, interleaved
+# against the other candidates:
+#
+#                            binary            reindex median
+#   "z" everywhere      57,717,584  (+0.00%)   179 ms  (+0.0%)
+#   these 14 at 3       60,573,968  (+4.95%)   161 ms (-10.1%)
+#   whole tree at 2    110,273,616 (+91.06%)   147 ms (-17.9%)
+#   whole tree at 3    116,212,976 (+101.4%)   144 ms (-19.6%)
+#
+# Half the available speedup for a twentieth of the size. The binary ships as
+# a prebuilt artifact and is spawned per Claude Code hook invocation, so its
+# size is download and cold-start cost — +91% to gain another 8% is not a
+# trade worth making; +5% is.
+#
+# lance / datafusion / arrow / ort are deliberately absent: they dominate
+# binary size and their hot loops are already inside compiled C++ or their own
+# tuned Rust.
+#
+# Caveat worth knowing before extending this: per-package `opt-level` is only
+# *mostly* effective under `lto = true`. A minimal two-crate reproduction
+# produced a byte-identical binary, and overriding only EngramDB's core crate
+# left no trace in the hot function — the fat-LTO link step re-runs the
+# pipeline at the top-level opt-level and can discard the per-crate decisions.
+# It evidently survives for large dependency crates, as the table shows. Do
+# not assume an addition here helps; measure it.
+[profile.release.package.toml]
+opt-level = 3
+[profile.release.package.toml_parser]
+opt-level = 3
+[profile.release.package.toml_datetime]
+opt-level = 3
+[profile.release.package.serde]
+opt-level = 3
+[profile.release.package.serde_yaml_ng]
+opt-level = 3
+[profile.release.package.serde_json]
+opt-level = 3
+[profile.release.package.rust-stemmers]
+opt-level = 3
+[profile.release.package.globset]
+opt-level = 3
+[profile.release.package.regex-automata]
+opt-level = 3
+[profile.release.package.aho-corasick]
+opt-level = 3
+[profile.release.package.memchr]
+opt-level = 3
+[profile.release.package.engramdb]
+opt-level = 3
+[profile.release.package.engram-storage]
+opt-level = 3
+[profile.release.package.engram-types]
+opt-level = 3
+
 # `opt-level` MUST match `[profile.release]`. It used to be 2 while release
 # shipped "z", which does not merely make benchmarks optimistic — for
 # codegen-sensitive code the two levels *rank candidates differently*. A dot
