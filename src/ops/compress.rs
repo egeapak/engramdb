@@ -1044,6 +1044,15 @@ fn l2_normalized(v: &[f32]) -> Vec<f32> {
 /// binary (55.0 → 105.2 MiB) for less than a fifth of the gain this gets for
 /// free. See `docs/contributors/parallelization-simd.md`.
 ///
+/// Why not `fastembed::similarity::cosine_similarity`, which is already in the
+/// tree? It cannot be reached from here — `fastembed` is an optional
+/// dependency of `engram-models` gated behind `onnxruntime`, and this crate
+/// must keep working under `--no-default-features --features ollama` — and it
+/// is also the shape this replaced: three `dot` calls per comparison
+/// (recomputing both norms every time) over a single non-vectorizing
+/// accumulator chain. Measured at `-Oz`, 384-dim, identical results: 1358 ns
+/// against 51 ns here.
+///
 /// Mismatched lengths score `0.0`, as in [`cosine`] — the callers pair vectors
 /// from one provider, so this is a guard, not a code path.
 fn dot_unit(a: &[f32], b: &[f32]) -> f64 {

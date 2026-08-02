@@ -209,6 +209,85 @@ Reindex would not have moved much regardless: its bulk work is frontmatter
 deserialization and Snowball stemming, inside `toml`, `serde_yaml_ng` and
 `rust-stemmers`, not in EngramDB's crates.
 
+## Why not just use `fastembed::similarity`?
+
+Reasonable question — `fastembed` is already in the tree and exports
+`similarity::{dot, cosine_similarity, top_k}`. Three reasons, in order of how
+decisive they are.
+
+**1. It would not compile in every supported configuration.** `fastembed` is an
+*optional* dependency of `engram-models`, gated behind the `onnxruntime`
+feature, and the core `engramdb` crate deliberately carries no `fastembed`
+dependency at all (see the layering rules in `.claude/CLAUDE.md`).
+`consolidation_pass` lives in the core and must keep working under
+`--no-default-features --features ollama`, where `fastembed` is not built. So a
+`#[cfg]`-gated fallback would be needed regardless — meaning we would be
+maintaining our own implementation *anyway*, plus a second code path.
+
+**2. It is the shape we started from.** Its cosine is:
+
+```rust
+pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()          // one dependency chain
+}
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let na = dot(a, a).sqrt();                          // recomputed per call
+    let nb = dot(b, b).sqrt();                          // recomputed per call
+    if na == 0.0 || nb == 0.0 { return 0.0; }
+    dot(a, b) / (na * nb)
+}
+```
+
+Three `dot` calls per comparison, with both norms recomputed every time. In an
+O(n²) loop where each vector has exactly one norm, that is the same 3×
+redundancy `ops::compress::cosine` had before this work — and the single
+accumulator chain does not vectorize at `-Oz`.
+
+**3. Measured, at `opt-level = "z"`, 384-dim, identical results:**
+
+| | ns/pair |
+|---|---|
+| `fastembed::similarity::cosine_similarity` | 1358 |
+| ours, SSE2 | 68 |
+| ours, AVX2 + FMA | **51** |
+
+Adopting it would be a **26× regression** on this path. Nothing is wrong with
+fastembed's version — it is a correct, readable convenience helper for scoring
+a handful of candidates, which is what its `top_k` doc example does. It is just
+not built for an all-pairs loop, and neither was ours until it was measured.
+
+## Why not let LanceDB do the distance math?
+
+LanceDB is already in the tree, already stores these vectors, and has tuned
+SIMD distance kernels. For the query path it *is* what does the work — nothing
+here reimplements vector search.
+
+It is the wrong tool for `consolidation_pass` specifically:
+
+- **Shape.** LanceDB answers "top-k nearest to *this* vector" over a large
+  persisted index. The pass needs the full pairwise graph over ≤ 500 in-memory
+  vectors. Getting that from LanceDB means ~500 separate searches, each paying
+  query planning and I/O, against 125k dot products at ~51 ns ≈ 6 ms in-process.
+- **Metric.** The chunks table uses LanceDB's default **L2** distance — nothing
+  configures `DistanceType::Cosine` — which is why `lance_index` converts with
+  `1.0 / (1.0 + distance)`. That is a monotone transform of L2, not cosine, so
+  it is not interchangeable with the `[epistemic] consolidation_similarity`
+  threshold users configure.
+
+## A bigger fish than the cosine
+
+`consolidation_pass` calls `embed_text` on `summary + content` for every
+observation — re-deriving vectors for memories that were **already embedded on
+the write path and stored in the chunks table**, reachable via
+`MemoryStore::export_chunks`. Even after batching, that embedding is ~1.6 s at
+the 500-observation cap against ~6 ms for the entire similarity scan.
+
+Not a drop-in: the stored vectors are per-chunk (the query path aggregates them
+by max), while the pass embeds the whole text as one vector, so clustering
+would need a defined aggregation and the results would shift. It is a behaviour
+change, not an optimization, which is why it was not done here — but it is
+where the remaining order of magnitude is.
+
 ## What was parallelized, and why those
 
 Two properties make a loop a rayon candidate here: it is a pure per-item map
