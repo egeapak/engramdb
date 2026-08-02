@@ -705,7 +705,11 @@ fn chunk_read_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("chunk_read");
     group.sample_size(10);
 
-    for &n in &[64usize, 500] {
+    // Small samples on a geometric sweep: the point is the SHAPE, not the
+    // absolute time. A per-memory cost that doubles as n doubles is O(n^2)
+    // overall; a flat one is O(n). Reading the curve off 16..256 is far
+    // cheaper than confirming it at 500 (65 s per sample).
+    for &n in &[16usize, 32, 64, 128, 256] {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let (store, ids) = rt.block_on(async {
             let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
