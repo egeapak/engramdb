@@ -68,7 +68,19 @@ pub async fn run_harvest(
             no_tools,
             all_projects,
         } => {
-            let selected = resolve_session(dir, registry, &session_id, all_projects).await?;
+            // A live transcript is preferred, but Claude Code prunes its own —
+            // and reading a *pruned* session is the entire reason archives
+            // exist. `_restored` holds the temp file alive for the digest.
+            let (transcript_path, _restored) =
+                match resolve_session(dir, registry, &session_id, all_projects).await {
+                    Ok(selected) => (selected.transcript_path, None),
+                    Err(live_err) => {
+                        match restore_archived_session(dir, registry, &session_id).await? {
+                            Some(tmp) => (tmp.path().to_path_buf(), Some(tmp)),
+                            None => return Err(live_err),
+                        }
+                    }
+                };
             let params = harvest::DigestParams {
                 parse: ParseOptions {
                     // Flags turn features *on*; config supplies the baseline,
@@ -84,7 +96,7 @@ pub async fn run_harvest(
                     None => config.effective_digest_budget(),
                 },
             };
-            let digest = harvest::digest_session(&selected.transcript_path, params)?;
+            let digest = harvest::digest_session(&transcript_path, params)?;
             let markdown = harvest::render_digest_markdown(&digest);
 
             if formatter.is_json() {
@@ -257,7 +269,12 @@ async fn run_ledger(
         LedgerCommand::Show { session_id } => {
             let key = resolve_ledger_key(dir, &session_id)?;
             let ledger = harvest_state::read_harvested(dir);
-            let entry = &ledger[&key];
+            // `resolve_ledger_key` read the ledger separately and unlocked, so
+            // a concurrent SessionEnd hook or `harvest reset` can drop the key
+            // in between. Indexing a `HashMap` would panic on that race.
+            let entry = ledger
+                .get(&key)
+                .ok_or_else(|| anyhow::anyhow!("No harvest record for session {key}"))?;
             if formatter.is_json() {
                 println!(
                     "{}",
@@ -296,7 +313,7 @@ async fn run_ledger(
         LedgerCommand::Export { session_id, output } => {
             let key = resolve_ledger_key(dir, &session_id)?;
             let ledger = harvest_state::read_harvested(dir);
-            let Some(archive) = ledger[&key].archive.clone() else {
+            let Some(archive) = ledger.get(&key).and_then(|e| e.archive.clone()) else {
                 bail!(
                     "Session {key} has no archived transcript. Archiving is controlled by \
 `[harvest] archive` and only captures sessions that ended after it was enabled."
@@ -425,9 +442,20 @@ fn parse_decision(value: &str) -> Result<HarvestDecision> {
 /// Parse a `--older-than` value like `90d` into a day count.
 fn parse_days(spec: &str) -> Result<u64> {
     let trimmed = spec.trim().trim_end_matches('d');
-    trimmed
-        .parse::<u64>()
-        .map_err(|_| anyhow::anyhow!("invalid --older-than value '{spec}' (expected e.g. `90d`)"))
+    let days = trimmed.parse::<u64>().map_err(|_| {
+        anyhow::anyhow!("invalid --older-than value '{spec}' (expected e.g. `90d`)")
+    })?;
+    // Same rejection `HarvestConfig::validate` applies to the config field.
+    // Going through the flag must not be a way around it: `0d` means "older
+    // than now", which evicts every archive — never what someone typing a
+    // retention window intends.
+    if days == 0 {
+        bail!(
+            "invalid --older-than value '{spec}': 0 is ambiguous — it would evict every \
+archive immediately. Use `--max-bytes 0 --apply` if you really mean to drop them all."
+        );
+    }
+    Ok(days)
 }
 
 /// Resolve a session-id prefix against the **ledger**, not the transcripts.
@@ -465,6 +493,42 @@ fn human_bytes(bytes: u64) -> String {
     } else {
         format!("{value:.1} {}", UNITS[unit])
     }
+}
+
+/// Decompress an archived session to a temp file so it can be digested.
+///
+/// Returns `None` when no archive is held for `prefix`, leaving the caller to
+/// report the original "no such live session" error. This is what makes the
+/// archive worth taking: once Claude Code prunes a transcript, this is the
+/// only remaining path from a session id to its conversation, and reading the
+/// raw `.jsonl` by hand is exactly what the harvest docs tell agents never to
+/// do (it is ~99% tool payload).
+async fn restore_archived_session(
+    dir: &Path,
+    registry: &dyn RegistryBackend,
+    prefix: &str,
+) -> Result<Option<tempfile::NamedTempFile>> {
+    let Ok(key) = resolve_ledger_key(dir, prefix) else {
+        return Ok(None);
+    };
+    let ledger = harvest_state::read_harvested(dir);
+    let Some(archive) = ledger.get(&key).and_then(|e| e.archive.clone()) else {
+        return Ok(None);
+    };
+    let project_id = archive_project_id(dir, registry).await?;
+    if !transcript_archive::archive_path(&project_id, &key)?.exists() {
+        return Ok(None);
+    }
+
+    let tmp = tempfile::NamedTempFile::new()?;
+    let sha = transcript_archive::export_archive(&project_id, &key, tmp.path())?;
+    if sha != archive.sha256 {
+        bail!(
+            "Archive for session {key} does not match the checksum recorded when it was \
+written — the archive is corrupt. `harvest ledger rm {key} --archive-only` will drop it."
+        );
+    }
+    Ok(Some(tmp))
 }
 
 /// Find the one in-scope session whose id starts with `prefix`.

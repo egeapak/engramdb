@@ -631,7 +631,7 @@ struct HarvestShowInput {
     session_id: String,
 
     #[schemars(
-        description = "Character budget for the digest. Defaults to the fan-out budget so several sessions fit in context; raise it (or pass 0 for unlimited) for a single deep read."
+        description = "Character budget for the digest. Defaults to [harvest] digest_budget (200000), enough to cover a typical session whole; pass a smaller value when scanning several sessions, or 0 for unlimited."
     )]
     max_chars: Option<usize>,
 

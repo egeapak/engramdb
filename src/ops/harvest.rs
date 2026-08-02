@@ -226,14 +226,21 @@ pub fn parse_since(value: &str) -> Result<DateTime<Utc>> {
     let n: i64 = num
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid --since value: {value}"))?;
+    // `Duration::days` and `DateTime - Duration` both *panic* on overflow, and
+    // the release profile is `panic = "abort"` — so an absurd `--since` (or an
+    // MCP `since` argument, which a model can produce) would abort the whole
+    // process rather than return an error. Build the delta fallibly and clamp
+    // to "everything" instead: the intent of a huge window is unambiguous.
     let delta = match unit {
-        "d" => Duration::days(n),
-        "h" => Duration::hours(n),
-        "m" => Duration::minutes(n),
-        "w" => Duration::weeks(n),
+        "d" => Duration::try_days(n),
+        "h" => Duration::try_hours(n),
+        "m" => Duration::try_minutes(n),
+        "w" => Duration::try_weeks(n),
         other => anyhow::bail!("unknown --since unit '{other}' (expected d, h, m, or w)"),
     };
-    Ok(Utc::now() - delta)
+    Ok(delta
+        .and_then(|d| Utc::now().checked_sub_signed(d))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC))
 }
 
 /// A budgeted, render-ready digest of one session.
@@ -305,10 +312,18 @@ pub fn budget_digest(parsed: ParsedSession, max_chars: usize) -> SessionDigest {
     // Still over budget on prompts and prose alone: cut from the tail, which
     // keeps the framing of the session (what was asked, what was decided
     // early) rather than a random middle slice.
+    // Track a running total instead of re-walking the vector each iteration:
+    // `total_chars` is O(n) and `event_chars` counts chars, so recomputing it
+    // per pop is O(n² · len). On a long prose-heavy session with a small
+    // budget — exactly what a caller scanning several sessions asks for —
+    // that turns a sub-second call into an effectively hung one.
     let mut truncated_events = 0;
-    while total_chars(&events) > max_chars && events.len() > 1 {
-        events.pop();
-        truncated_events += 1;
+    let mut running = total_chars(&events);
+    while running > max_chars && events.len() > 1 {
+        if let Some(dropped) = events.pop() {
+            running -= event_chars(&dropped).min(running);
+            truncated_events += 1;
+        }
     }
 
     SessionDigest {

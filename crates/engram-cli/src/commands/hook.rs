@@ -19,7 +19,7 @@ use engramdb::types::{Epistemic, Generality, MemoryType, Situation};
 // itself); the hook still pre-relativizes so the injected context shows
 // repo-relative paths.
 use engramdb::storage::paths::relativize_path;
-use engramdb::storage::MemoryStore;
+use engramdb::storage::{MemoryStore, RegistryBackend};
 use std::io::Read;
 use std::path::Path;
 
@@ -848,7 +848,7 @@ pub async fn run_hook_post_tool_use(dir: &Path) -> Result<()> {
 /// a mapping existed, runs the §11.2 demotion for that task. Best-effort:
 /// every failure is logged and swallowed. (Telemetry flushes live in the
 /// long-running MCP/daemon processes; a one-shot hook has none.)
-pub async fn run_hook_session_end(dir: &Path) -> Result<()> {
+pub async fn run_hook_session_end(dir: &Path, registry: &dyn RegistryBackend) -> Result<()> {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
 
@@ -856,7 +856,7 @@ pub async fn run_hook_session_end(dir: &Path) -> Result<()> {
         return Ok(());
     };
 
-    archive_ending_session(dir, &session_id, &input).await;
+    archive_ending_session(dir, &session_id, &input, registry).await;
     let ended_task = match engramdb::storage::task_state::clear_session_task(dir, &session_id) {
         Ok(t) => t,
         Err(e) => {
@@ -897,7 +897,12 @@ pub async fn run_hook_session_end(dir: &Path) -> Result<()> {
 /// failure is logged and swallowed, because nothing here may block session
 /// teardown. The archive is written under the **root** project so a worktree
 /// and its main checkout share one directory, matching the ledger.
-async fn archive_ending_session(dir: &Path, session_id: &str, input: &str) {
+async fn archive_ending_session(
+    dir: &Path,
+    session_id: &str,
+    input: &str,
+    registry: &dyn RegistryBackend,
+) {
     let config_path = engramdb::storage::paths::project_dir(dir).join("config.toml");
     let config = engramdb::storage::config::load_config_or_default(&config_path).await;
     if !config.harvest.archive {
@@ -923,7 +928,23 @@ async fn archive_ending_session(dir: &Path, session_id: &str, input: &str) {
         return;
     };
 
-    let project_id = engramdb::storage::project_id::compute_project_id(dir);
+    // Resolve the **root** project, exactly as every reader does
+    // (`commands::harvest::archive_project_id` → `session_scope`). Using the
+    // invoking directory's own id agrees only when `cli::run` already
+    // rewrote `dir` to the main worktree; for a project linked with
+    // `engramdb projects link` it does not, and the archive would land in a
+    // directory no `harvest ledger` command ever reads — invisible to
+    // export, and never bounded by the prune budget.
+    let own_id = engramdb::storage::project_id::compute_project_id(dir);
+    let project_id = match registry.load().await {
+        Ok(data) => engramdb::storage::resolve_root_project_id(&data, &own_id),
+        // Fail open, consistent with the rest of SessionEnd: an unreadable
+        // registry must not cost the archive entirely.
+        Err(e) => {
+            tracing::debug!("SessionEnd archive: registry unreadable, using own id: {e}");
+            own_id
+        }
+    };
     match engramdb::storage::transcript_archive::archive_transcript(
         &project_id,
         session_id,

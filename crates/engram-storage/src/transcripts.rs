@@ -86,6 +86,27 @@ pub fn encode_project_dir(path: &Path) -> String {
         .collect()
 }
 
+/// Is this string safe to use as a single filesystem path component?
+///
+/// Session ids arrive from outside the process — hook event JSON on stdin and
+/// MCP tool arguments — and are then joined into archive paths and used as
+/// ledger keys. `Path::join` resolves `..` and lets an *absolute* string
+/// replace the base entirely, so an unchecked id is an arbitrary-file
+/// read/write/delete primitive rather than a naming inconvenience.
+///
+/// Claude Code emits UUIDs, so the accepted set is deliberately narrower than
+/// "no separators": alphanumerics, `-`, `_`, and `.` — with any `..` run and
+/// a leading `.` rejected so the result can never traverse or hide.
+pub fn is_valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !id.starts_with('.')
+        && !id.contains("..")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
 /// Metadata for one session transcript, cheap enough to compute for every
 /// session in a project before deciding which ones to digest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -519,11 +540,25 @@ pub fn list_sessions_in(root: &Path, project_paths: &[PathBuf]) -> Result<Vec<Se
         }
         // Fast path: skip directories that cannot encode to any wanted path.
         // Only an optimization — the cwd check below is what decides.
+        //
+        // A **prefix** test, not equality: Claude Code names the directory
+        // after the session's cwd, which for a session started in a
+        // subdirectory is longer than the project root. Requiring equality
+        // made every such session permanently invisible to harvest, since
+        // this fast path runs before `cwd_matches` ever gets to decide.
+        // `exact_dir` records whether the directory encodes a wanted root
+        // *exactly*. A transcript with no recorded `cwd` cannot be attributed
+        // on its own, and is accepted only in that narrow case — under the
+        // prefix rule alone, `/repo-other` starts with `encode("/repo")`, so
+        // a blanket accept would feed a sibling project's conversations into
+        // this project's harvest.
+        let name = entry.file_name().to_string_lossy().to_string();
+        let mut exact_dir = true;
         if !wanted.is_empty() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !encoded.contains(&name) {
+            if !encoded.iter().any(|e| name.starts_with(e.as_str())) {
                 continue;
             }
+            exact_dir = encoded.contains(&name);
         }
 
         let Ok(files) = std::fs::read_dir(&dir) else {
@@ -537,7 +572,7 @@ pub fn list_sessions_in(root: &Path, project_paths: &[PathBuf]) -> Result<Vec<Se
             let Ok(summary) = summarize_session(&path) else {
                 continue;
             };
-            if !wanted.is_empty() && !cwd_matches(summary.cwd.as_deref(), &wanted) {
+            if !wanted.is_empty() && !cwd_matches(summary.cwd.as_deref(), &wanted, exact_dir) {
                 continue;
             }
             out.push(summary);
@@ -552,11 +587,12 @@ pub fn list_sessions_in(root: &Path, project_paths: &[PathBuf]) -> Result<Vec<Se
 ///
 /// A session started in a subdirectory of a project still belongs to it, so
 /// this is a prefix test, not equality.
-fn cwd_matches(cwd: Option<&str>, wanted: &[PathBuf]) -> bool {
+fn cwd_matches(cwd: Option<&str>, wanted: &[PathBuf], exact_dir: bool) -> bool {
     let Some(cwd) = cwd else {
-        // No recorded cwd means we cannot attribute it; the encoded-name
-        // fast path already narrowed us to a matching directory, so accept.
-        return true;
+        // No recorded cwd means we cannot attribute it from the record. Fall
+        // back to the directory name only when it encodes a wanted root
+        // *exactly*; a mere prefix match could be a sibling project.
+        return exact_dir;
     };
     let cwd = Path::new(cwd);
     let canonical = cwd.canonicalize();

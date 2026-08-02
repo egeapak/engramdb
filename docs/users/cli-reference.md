@@ -370,7 +370,9 @@ path and can collide. `--all-projects` ignores scoping entirely.
 and assistant prose verbatim, each tool call as a single line with its
 target and success/failure, results as a one-line preview. A raw transcript
 is ~99% tool payload, so digesting is what makes review affordable — a
-1.2 MB transcript renders to ~12 KB at the default budget. When content had
+1.2 MB transcript renders to ~63 KB, and a 2.9 MB one to ~60 KB — the
+default budget is a ceiling against a pathological session, not a routine
+constraint. When content had
 to be dropped to fit, the header says `partial digest` and names what went;
 raise `--max-chars` to see more.
 

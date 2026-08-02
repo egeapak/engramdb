@@ -124,6 +124,12 @@ impl Corpus {
             .join("projects")
             .join(encode(dir))
             .join(format!("{session}.jsonl"));
+        self.session_end_with(dir, session, &transcript);
+    }
+
+    /// Fire SessionEnd with an explicit `session_id` / `transcript_path` pair,
+    /// so a test can supply a hostile id alongside a perfectly valid file.
+    fn session_end_with(&self, dir: &Path, session: &str, transcript: &Path) {
         let event = serde_json::json!({
             "session_id": session,
             "transcript_path": transcript.to_string_lossy(),
@@ -422,6 +428,88 @@ fn ledger_hides_reviewed_sessions_and_reset_restores_them() {
 /// Archiving a transcript must not remove it from the review queue, and
 /// evicting the archive must not leave the ledger advertising a file that is
 /// no longer there.
+/// The premise of the whole archive: Claude Code prunes its own transcripts,
+/// and a session must stay readable afterwards. If `show` only ever reads the
+/// live `.jsonl`, archiving preserves bytes nobody can use.
+#[test]
+fn an_archived_session_is_still_readable_after_its_transcript_is_pruned() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+
+    c.session_end(&c.main, "aaaa1111-rich");
+    std::fs::remove_file(
+        c.claude
+            .join("projects")
+            .join(encode(&c.main))
+            .join("aaaa1111-rich.jsonl"),
+    )
+    .unwrap();
+
+    let out = c.stdout(&c.main, &["harvest", "show", "aaaa"]);
+    assert!(
+        out.contains("nextest"),
+        "a pruned session must still digest from its archive: {out}"
+    );
+    assert!(out.contains("CI is red"), "{out}");
+}
+
+/// A session started in a *subdirectory* of the project belongs to it. Claude
+/// Code names the transcript directory after the session's cwd, so requiring
+/// the directory to encode the project root exactly made every such session
+/// permanently invisible.
+#[test]
+fn sessions_started_in_a_subdirectory_are_found() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+
+    let sub = c.main.join("crates").join("engram-cli");
+    std::fs::create_dir_all(&sub).unwrap();
+    write_transcript(
+        &c.claude,
+        &sub,
+        "dddd4444-subdir",
+        &[user_line(
+            &sub,
+            "2026-07-24T09:00:00Z",
+            "ran the build from inside the crate directory",
+        )],
+    );
+
+    let out = c.stdout(&c.main, &["harvest", "list"]);
+    assert!(
+        out.contains("dddd4444"),
+        "a session started in a subdirectory was not offered: {out}"
+    );
+}
+
+/// Session ids reach `Path::join`, so a traversal id must be refused rather
+/// than writing an archive outside the data directory.
+#[test]
+fn a_traversing_session_id_cannot_escape_the_archive_directory() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+
+    // A hostile id paired with a real, readable transcript — the shape a
+    // forged hook event takes.
+    let real = c
+        .claude
+        .join("projects")
+        .join(encode(&c.main))
+        .join("aaaa1111-rich.jsonl");
+    let escape = c.main.join("escaped.jsonl.zst");
+    c.session_end_with(&c.main, "../../../../escaped", &real);
+    assert!(
+        !escape.exists(),
+        "a traversing session id escaped the archive directory"
+    );
+
+    // And the ledger must not accept the poisoned key either, since
+    // `ledger rm` would later aim `remove_file` at it.
+    c.engramdb(&c.main, &["harvest", "mark", "../../../../escaped"])
+        .assert()
+        .failure();
+}
+
 #[test]
 fn archiving_then_pruning_leaves_a_consistent_ledger() {
     let c = build_corpus();

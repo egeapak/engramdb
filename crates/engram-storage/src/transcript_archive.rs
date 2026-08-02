@@ -68,7 +68,18 @@ impl ArchiveRef {
 }
 
 /// Absolute path of an archive within a project's archive directory.
+///
+/// The single choke point for archiving, exporting, and removing, so the
+/// session-id check lives here: ids come from hook event JSON and MCP tool
+/// arguments, and `Path::join` would happily resolve `../..` out of the data
+/// dir or let an absolute id replace the base outright.
 pub fn archive_path(project_id: &str, session_id: &str) -> Result<PathBuf> {
+    if !crate::transcripts::is_valid_session_id(session_id) {
+        return Err(crate::error::StorageError::Validation(format!(
+            "invalid session id {session_id:?}: expected a plain identifier \
+             (letters, digits, '-', '_', '.') that is not a path"
+        )));
+    }
     Ok(paths::transcript_archive_dir(project_id)?.join(format!("{session_id}.{ARCHIVE_EXT}")))
 }
 
@@ -89,6 +100,7 @@ pub fn archive_transcript(
     let dest = archive_path(project_id, session_id)?;
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
+        restrict_to_owner(parent, 0o700);
     }
 
     // Process-unique temp name: a SessionEnd hook can fire twice for the same
@@ -112,6 +124,7 @@ pub fn archive_transcript(
         let _ = std::fs::remove_file(&tmp);
         return Err(e.into());
     }
+    restrict_to_owner(&dest, 0o600);
     let bytes = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
 
     Ok(ArchiveRef {
@@ -124,6 +137,23 @@ pub fn archive_transcript(
         sha256: hex_digest(hasher),
         archived_at: Utc::now(),
     })
+}
+
+/// Restrict a path to its owner, best-effort.
+///
+/// An archive is a verbatim conversation — shell output, pasted credentials,
+/// another client's source — kept for a year by default. Default `0644` would
+/// leave every one of them readable by any local account, so these get the
+/// same treatment `daemon::transport` already gives its socket. No-op off
+/// unix; a failure is not worth failing the archive over.
+fn restrict_to_owner(path: &Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
 }
 
 /// Stream `src` through zstd into `tmp`, returning the plaintext hasher and
@@ -276,7 +306,18 @@ pub fn prune_archives(
     let mut outcome = PruneOutcome::default();
     let mut keep: Vec<&StoredArchive> = Vec::new();
 
-    let cutoff = retention_days.map(|d| Utc::now() - Duration::days(d as i64));
+    // Fallible throughout: `Duration::days` panics past ~1e11 days and
+    // `DateTime - Duration` panics on underflow, and this runs inside the
+    // SessionEnd hook whose fail-open backstop is `Result`-based and cannot
+    // catch a panic. A `u64` past `i64::MAX` would also wrap *negative* under
+    // `as i64`, putting the cutoff in the future and silently deleting every
+    // archive — so an unrepresentable retention means "keep", never "evict".
+    let cutoff = retention_days.and_then(|d| {
+        i64::try_from(d)
+            .ok()
+            .and_then(Duration::try_days)
+            .and_then(|delta| Utc::now().checked_sub_signed(delta))
+    });
     for archive in &archives {
         let too_old = cutoff.is_some_and(|c| archive.modified < c);
         if too_old {
@@ -389,12 +430,21 @@ mod tests {
             let transcript = write_transcript(src.path(), "s1.jsonl", 10);
             archive_transcript("proj", "s1", &transcript).unwrap();
             let dir = paths::transcript_archive_dir("proj").unwrap();
-            let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            // Assert on the whole directory rather than on a temp *extension*:
+            // the temp name carries a pid suffix (`.tmp1234`), so matching
+            // `extension() == "tmp"` silently matched nothing and the test
+            // could never fail. Anything that is not the finished archive is
+            // a leak, whatever it is called.
+            let names: Vec<String> = std::fs::read_dir(&dir)
                 .unwrap()
                 .flatten()
-                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("tmp"))
+                .map(|e| e.file_name().to_string_lossy().to_string())
                 .collect();
-            assert!(leftovers.is_empty(), "temp file leaked: {leftovers:?}");
+            assert_eq!(
+                names,
+                vec![format!("s1.{ARCHIVE_EXT}")],
+                "only the finished archive may remain"
+            );
         });
     }
 

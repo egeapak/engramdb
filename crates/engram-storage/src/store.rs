@@ -398,6 +398,14 @@ impl MemoryStore {
             return Err(StorageError::NotInitialized);
         }
 
+        // Backfill on open, not just on init: every store created before the
+        // `.gitignore` existed would otherwise keep `state/` tracked forever,
+        // and nobody re-runs `init` on an existing project. `state/` now holds
+        // the harvest ledger — session ids and free-text review notes — so
+        // leaving it committable is exactly the leak the file exists to stop.
+        // Cheap and idempotent: it returns immediately when the file is there.
+        write_state_gitignore(&engramdb_dir).await;
+
         // Compute project ID
         let project_id = project_id::compute_project_id(dir);
 

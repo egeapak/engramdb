@@ -159,10 +159,16 @@ pub fn mark_harvested(
     decision: HarvestDecision,
     note: Option<String>,
 ) -> Result<HarvestEntry> {
-    if session_id.is_empty() {
-        return Err(crate::error::StorageError::Validation(
-            "cannot record a harvest for an empty session id".to_string(),
-        ));
+    // Reject anything that is not a plain identifier, not just the empty
+    // string. A ledger key is later joined into an archive path by
+    // `harvest ledger rm` / `export`, so a key like `../../x` planted here
+    // (this is reachable from the MCP `harvest_mark` tool) would aim a later,
+    // entirely innocent command at a file outside the store.
+    if !crate::transcripts::is_valid_session_id(session_id) {
+        return Err(crate::error::StorageError::Validation(format!(
+            "cannot record a harvest for session id {session_id:?}: expected a \
+             plain identifier (letters, digits, '-', '_', '.') that is not a path"
+        )));
     }
     let _lock = lock_ledger(project_dir);
     let mut map = read_harvested(project_dir);
@@ -191,7 +197,7 @@ pub fn set_archive(
     session_id: &str,
     archive: crate::transcript_archive::ArchiveRef,
 ) -> Result<()> {
-    if session_id.is_empty() {
+    if !crate::transcripts::is_valid_session_id(session_id) {
         return Ok(());
     }
     let _lock = lock_ledger(project_dir);

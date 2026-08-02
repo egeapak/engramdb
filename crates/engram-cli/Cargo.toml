@@ -36,6 +36,9 @@ engramdb = { path = "../..", default-features = false }
 engram-mcp = { path = "../engram-mcp", default-features = false }
 
 clap = { version = "4", features = ["derive"] }
+# Not test-only: `harvest show` decompresses an archived transcript to a temp
+# file so a pruned session can still be digested.
+tempfile = "3"
 clap_complete = "4"
 inquire = "0.9"
 owo-colors = { version = "4", features = ["supports-colors"] }
