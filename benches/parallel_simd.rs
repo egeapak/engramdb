@@ -1,4 +1,4 @@
-//! Parallelization / SIMD candidate measurements.
+//! Parallelization + arithmetic-throughput candidate measurements.
 //!
 //! Every group here pairs the shape the code uses today with one or more
 //! candidate rewrites, so the speedup (or lack of one) is measured rather than
@@ -14,18 +14,23 @@
 //! | `parse` | `reindex_dir` / `get_batch` parse each `.md` in sequence | `rayon` over the file contents |
 //! | `stems` | `KeywordStems::compute` per memory on the write/reindex path | `rayon` over memories |
 //! | `score` | `composite_score_target` per index row (Rank path) | `rayon` over rows |
-//! | `cosine` | `ops::compress::cosine` — scalar, widening every `f32` to `f64` | `f32` accumulators, unrolled lanes, `rayon` |
+//! | `cosine` | `ops::compress::cosine` — one `f64` chain, widening every `f32` | `f32`, independent accumulator chains, `rayon` |
 //!
-//! ## Note on SIMD
+//! ## Note on what the `cosine/*` variants measure
 //!
-//! `rayon` is *thread*-level parallelism only: it never emits vector
-//! instructions. SIMD comes from LLVM auto-vectorization, which needs (a) a
-//! loop LLVM can prove is reassociable and (b) a target that has the
-//! instructions. Rust's default `f32`/`f64` addition is IEEE-strict, so a
-//! plain accumulator loop is *not* reassociable and stays scalar no matter how
-//! wide the host is. The `cosine/*` variants below isolate that effect: the
-//! `lanes8` variants keep eight independent accumulators, which gives LLVM the
-//! reassociation for free without `-ffast-math`-style flags.
+//! `rayon` is *thread*-level parallelism only: it never changes the
+//! instructions in the loop body. The `cosine/*` variants isolate a different
+//! effect. Rust's `f32` addition is IEEE-strict, so a single running sum is a
+//! dependency chain the optimizer may not reassociate — every multiply-add
+//! waits on the previous one. Keeping eight independent accumulators lets the
+//! CPU issue them in parallel.
+//!
+//! That is instruction-level parallelism, **not** SIMD: disassembly of the
+//! generated code at `opt-level = 2` (this profile) shows eight scalar
+//! `mulss`/`addss` chains and zero packed instructions. Only `opt-level = 3`
+//! emits `mulps`/`addps`, and `[profile.release]`'s `opt-level = "z"` does
+//! neither — so none of the `cosine/*` gain reaches a release binary. See
+//! `docs/contributors/parallelization-simd.md`.
 
 mod helpers;
 
@@ -158,7 +163,7 @@ fn score_benchmarks(c: &mut Criterion) {
 }
 
 // ===========================================================================
-// Group 4: cosine similarity — the SIMD candidate
+// Group 4: cosine similarity — the arithmetic candidate
 // ===========================================================================
 
 /// Byte-for-byte the shape `ops::compress::cosine` uses today: one `f64`
@@ -200,12 +205,12 @@ fn cosine_f32_scalar(a: &[f32], b: &[f32]) -> f64 {
 }
 
 /// Eight independent accumulators per quantity, indexed through a runtime
-/// slice range. Each lane is its own dependency chain, which is the
+/// slice range. Each accumulator is its own dependency chain, which is the
 /// reassociation IEEE-strict `f32` addition otherwise forbids — but `ax[l]`
 /// on a slice of statically-unknown length keeps a bounds check in the loop
-/// body, and three 8-wide accumulator sets need 24 live vector lanes. Both
-/// block vectorization. Kept as the measured counterexample to "just unroll
-/// it".
+/// body, and three 8-wide sets need 24 live registers against sixteen `xmm`.
+/// Both defeat the unroll. Kept as the measured counterexample to "just
+/// unroll it".
 fn cosine_f32_lanes8(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
@@ -243,13 +248,13 @@ fn cosine_f32_lanes8(a: &[f32], b: &[f32]) -> f64 {
     }
 }
 
-/// The shape that actually vectorizes: `chunks_exact` + `try_into` gives LLVM
-/// a `&[f32; 8]` whose length is a compile-time constant, so the bounds checks
-/// vanish and the eight lanes fold into one vector register.
+/// The shape the optimizer can actually unroll: `chunks_exact` + `try_into`
+/// gives LLVM a `&[f32; 8]` whose length is a compile-time constant, so the
+/// bounds checks vanish.
 ///
-/// Still computes all three quantities, so it still carries 24 live lanes.
-/// Measured against [`dot_unit_f32`] this is the "vectorizable loop, too much
-/// register pressure to stay vectorized" data point.
+/// Still computes all three quantities, so it still needs 24 live
+/// accumulators. Measured against [`dot_unit_f32`] this is the "unrollable
+/// loop, too much register pressure to stay unrolled" data point.
 fn cosine_f32_arr8(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
@@ -335,7 +340,7 @@ fn synth_vector(seed: u64) -> Vec<f32> {
 }
 
 fn cosine_benchmarks(c: &mut Criterion) {
-    // --- single pair: isolates the vectorization, no threading involved ---
+    // --- single pair: isolates the arithmetic, no threading involved ---
     {
         let mut group = c.benchmark_group("cosine_pair");
         let a = synth_vector(1);
@@ -389,7 +394,7 @@ fn cosine_benchmarks(c: &mut Criterion) {
             });
         });
 
-        // The candidate: O(n) normalize prepass, then a vectorized dot in the
+        // The candidate: O(n) normalize prepass, then an unrolled dot in the
         // O(n^2) body.
         group.bench_with_input(BenchmarkId::new("norm_dot", n), &vectors, |b, v| {
             b.iter(|| {

@@ -200,21 +200,3 @@ codegen-units = 1
 lto = false
 opt-level = 2
 codegen-units = 16
-
-# The core crate builds for speed even though the profile above builds for
-# size. `opt-level = "z"` disables LLVM's loop vectorizer outright, which
-# silently un-does every vectorized hot path — `ops::compress::dot_unit` and
-# the scoring loops all live in this crate. Holding the rest of the release
-# profile fixed and varying only opt-level, the pairwise similarity scan at
-# n=500 runs in 80.4ms at "z" against 19.4ms at 2.
-#
-# ONE package on purpose, not the whole workspace. Extending this to all seven
-# workspace crates cost +21 MB of binary (+37%) — with LTO, letting our crates
-# inline aggressively pulls in monomorphized dependency generics (serde
-# derives, arrow/lance generics, async state machines) — and bought almost
-# nothing beyond this, because the bulk work on the paths those crates own
-# (frontmatter parsing, Snowball stemming) happens inside `toml` / `serde` /
-# `rust-stemmers`, which stay at "z" regardless. See
-# `docs/contributors/parallelization-simd.md` for the full A/B.
-[profile.release.package.engramdb]
-opt-level = 2

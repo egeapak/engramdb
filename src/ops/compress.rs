@@ -945,12 +945,13 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
     }
 }
 
-/// Lane count for the vectorized dot product below.
+/// Accumulator count for the unrolled dot product below.
 ///
-/// Eight `f32` lanes is one AVX register and two SSE registers, so the same
-/// source vectorizes on every x86-64 baseline and on NEON. It is not tuned to
-/// the host: widening it to 16 measured no better here, and narrowing it to 4
-/// leaves AVX registers half empty.
+/// Eight was chosen empirically, not from a vector width: at `opt-level = 2`
+/// LLVM keeps these as eight *scalar* `xmm` registers and the win is
+/// instruction-level parallelism, not SIMD (verified by disassembly — see
+/// `docs/contributors/parallelization-simd.md`). Eight fits comfortably in the
+/// sixteen available; widening to 16 measured no better.
 const DOT_LANES: usize = 8;
 
 /// A memory's embedding scaled to unit length, so that the cosine of two of
@@ -960,8 +961,8 @@ const DOT_LANES: usize = 8;
 /// and [`cosine`] recomputes `‖a‖` and `‖b‖` inside each of those n(n-1)/2
 /// comparisons even though a vector has exactly one norm. Hoisting the norms
 /// into an O(n) prepass removes two thirds of the arithmetic *and* shrinks the
-/// inner loop to a single accumulator set, which is what lets it stay in
-/// vector registers (three sets need 24 live lanes and spill).
+/// inner loop from three accumulator sets to one — 24 live accumulators exceed
+/// the sixteen `xmm` registers and spill, eight do not.
 ///
 /// Returns the vector unchanged when it has no length — matching [`cosine`],
 /// which reports `0.0` similarity for a zero vector, since `dot_unit` against
@@ -977,15 +978,21 @@ fn l2_normalized(v: &[f32]) -> Vec<f32> {
 /// Cosine similarity of two [`l2_normalized`] vectors.
 ///
 /// `chunks_exact` plus `try_into` hands LLVM a `&[f32; DOT_LANES]` whose
-/// length is a compile-time constant: the bounds checks disappear and the
-/// eight independent accumulator lanes fold into one vector register. That
-/// last part is the whole trick — Rust's `f32` addition is IEEE-strict, so a
-/// single running sum is a dependency chain the vectorizer is not allowed to
-/// reassociate, and it stays scalar however wide the host is. Separate lanes
-/// give the reassociation explicitly instead of asking for it globally.
+/// length is a compile-time constant, so the bounds checks disappear. The
+/// eight separate accumulators are the actual trick: Rust's `f32` addition is
+/// IEEE-strict, so a single running sum is a dependency chain the optimizer
+/// may not reassociate, and every multiply-add waits on the previous one.
+/// Splitting it into eight chains lets the CPU issue them in parallel.
+///
+/// **This is instruction-level parallelism, not SIMD.** Disassembly of the
+/// generated code at `opt-level = 2` shows eight scalar `mulss`/`addss` chains
+/// across `xmm0`–`xmm7` and zero packed instructions; only `opt-level = 3`
+/// emits `mulps`/`addps`, and the release profile ships `opt-level = "z"`,
+/// which does neither. See `docs/contributors/parallelization-simd.md` for the
+/// disassembly and what it means for release builds.
 ///
 /// Deliberately no `unsafe`, no intrinsics and no `target_feature` gating: the
-/// portable form measured as fast as the host-tuned build here
+/// portable form measured as fast as a `-C target-cpu=native` build here
 /// (`benches/parallel_simd.rs`), and a runtime-dispatched intrinsic version
 /// would have to be maintained per architecture.
 ///
@@ -1023,7 +1030,8 @@ fn dot_unit(a: &[f32], b: &[f32]) -> f64 {
 /// cheap enough to keep running inline in the maintenance pass:
 ///
 /// 1. norms hoisted out of the inner loop ([`l2_normalized`]),
-/// 2. a vectorized inner product ([`dot_unit`]),
+/// 2. an inner product split into independent accumulator chains
+///    ([`dot_unit`]),
 /// 3. the outer index spread across the rayon pool.
 ///
 /// Row `i` does `n - i` comparisons, so the per-index work is triangular;
