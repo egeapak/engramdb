@@ -682,6 +682,67 @@ fn embed_batching_benchmarks(c: &mut Criterion) {
 #[cfg(not(feature = "onnxruntime"))]
 fn embed_batching_benchmarks(_c: &mut Criterion) {}
 
+// ===========================================================================
+// Group 7: re-embedding vs reading the vectors already in the chunk table
+// ===========================================================================
+
+/// `consolidation_pass` calls `embed_text` on every observation, deriving
+/// vectors for memories that were **already embedded on the write path** and
+/// whose vectors are sitting in the LanceDB chunk table.
+///
+/// This measures the alternative: `MemoryStore::export_chunks` per memory.
+/// Synthetic vectors are written directly with `upsert_chunks`, so the bench
+/// needs no embedding model and isolates the storage read.
+///
+/// It is a read-vs-inference comparison, not a drop-in swap — the two produce
+/// *different vectors* (see the feature notes in
+/// `docs/contributors/parallelization-simd.md`). The point is the order of
+/// magnitude between them.
+fn chunk_read_benchmarks(c: &mut Criterion) {
+    use engramdb::storage::{InMemoryRegistry, MemoryStore};
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut group = c.benchmark_group("chunk_read");
+    group.sample_size(10);
+
+    for &n in &[64usize, 500] {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let (store, ids) = rt.block_on(async {
+            let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+                .await
+                .expect("init");
+            let mut ids = Vec::with_capacity(n);
+            for i in 0..n {
+                let m = generate_memory(i);
+                store.create(&m).await.expect("create");
+                // Two rows per memory, matching the default metadata_vector
+                // composition (one metadata row + one content chunk).
+                store
+                    .upsert_chunks(
+                        &m.id,
+                        vec![synth_vector(i as u64), synth_vector(i as u64 + 1_000_000)],
+                    )
+                    .await
+                    .expect("upsert_chunks");
+                ids.push(m.id.clone());
+            }
+            (store, ids)
+        });
+
+        group.bench_with_input(BenchmarkId::new("export_chunks", n), &ids, |b, ids| {
+            b.to_async(&rt).iter(|| async {
+                let mut total = 0usize;
+                for id in ids {
+                    total += store.export_chunks(id).await.expect("export").len();
+                }
+                total
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     parse_benchmarks,
@@ -690,5 +751,6 @@ criterion_group!(
     cosine_benchmarks,
     reindex_cpu_benchmarks,
     embed_batching_benchmarks,
+    chunk_read_benchmarks,
 );
 criterion_main!(benches);
