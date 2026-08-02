@@ -482,6 +482,77 @@ fn reindex_cpu_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
+// ===========================================================================
+// Group 6: embedding one text at a time vs. one batched call
+// ===========================================================================
+
+/// `consolidation_pass` embeds its observations in a `for` loop, one
+/// `embed_text` await per memory, even though the provider exposes
+/// `embed_batch` and every text is known up front.
+///
+/// This measures what that costs. Both arms do the same total number of
+/// embeddings — the only difference is how many times the model is invoked.
+/// A batched call amortizes the per-invocation overhead (lock acquisition,
+/// `spawn_blocking` hop, tokenizer setup, ONNX session entry, output tensor
+/// allocation) and lets ONNX Runtime schedule the batch as one padded matmul
+/// instead of N separate ones.
+///
+/// Requires the embedding model in the local cache and a resolvable ONNX
+/// Runtime; skipped with a notice otherwise, so it never fails a bench run on
+/// a machine without them.
+#[cfg(feature = "onnxruntime")]
+fn embed_batching_benchmarks(c: &mut Criterion) {
+    use engramdb::embeddings::{EmbeddingProvider, OnnxProvider};
+
+    let Some(provider) = OnnxProvider::try_new() else {
+        eprintln!("embed_batching: embedding model unavailable, skipping");
+        return;
+    };
+
+    let mut group = c.benchmark_group("embed_batching");
+    group.sample_size(10);
+    group.warm_up_time(std::time::Duration::from_secs(1));
+    group.measurement_time(std::time::Duration::from_secs(10));
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let corpus: Vec<String> = (0..64)
+        .map(|i| {
+            format!(
+                "Observation {i}: the retrieval engine filters candidates at the index \
+                 level before scoring them, so the vector search only runs over rows \
+                 that already passed the hard filters."
+            )
+        })
+        .collect();
+
+    // 8 is a small consolidation cluster; 64 is a busy maintenance pass.
+    // `MAX_OBSERVATIONS_PER_PASS` is 500, but benching that many single
+    // embeds takes minutes and the ratio is already flat by 64.
+    for &n in &[8usize, 64] {
+        let texts: Vec<&str> = corpus.iter().take(n).map(String::as_str).collect();
+
+        group.bench_with_input(BenchmarkId::new("sequential", n), &texts, |b, texts| {
+            b.to_async(&rt).iter(|| async {
+                let mut out = Vec::with_capacity(texts.len());
+                for t in texts {
+                    out.push(provider.embed(t).await.expect("embed"));
+                }
+                out
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("batched", n), &texts, |b, texts| {
+            b.to_async(&rt)
+                .iter(|| async { provider.embed_batch(texts).await.expect("embed_batch") });
+        });
+    }
+
+    group.finish();
+}
+
+#[cfg(not(feature = "onnxruntime"))]
+fn embed_batching_benchmarks(_c: &mut Criterion) {}
+
 criterion_group!(
     benches,
     parse_benchmarks,
@@ -489,5 +560,6 @@ criterion_group!(
     score_benchmarks,
     cosine_benchmarks,
     reindex_cpu_benchmarks,
+    embed_batching_benchmarks,
 );
 criterion_main!(benches);

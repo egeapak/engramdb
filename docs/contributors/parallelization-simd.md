@@ -23,6 +23,7 @@ result, not the absolute times.
 | Keyword-stem derivation, 5,000 | `IndexEntry::from`, query fallback | 85.5 ms | 24.7 ms | **3.5×** |
 | Composite scoring, 5,000 rows | `RetrievalEngine` score loops | 3.03 ms | 866 µs | **3.5×** |
 | Reindex CPU (parse + stems), 5,000 | `MemoryStore::reindex_dir` | 219 ms | 64.2 ms | **3.4×** |
+| Embedding 64 texts | `ops::compress::consolidation_pass` | 511 ms | 208 ms | **2.5×** |
 
 ## Does rayon give you SIMD?
 
@@ -205,12 +206,39 @@ not show up. If a future path parallelizes something long, route it through
   the index now; the residual scoring is a few hundred µs at 5,000 memories and
   is dominated by the surrounding I/O.
 
+### `consolidation_pass` — one batched embed instead of N
+
+Not parallelism, but it was found by the same survey and it dwarfs everything
+else in this document. The pass embedded its observations in a `for` loop, one
+`embed_text` await each, even though every text is known up front and the
+provider has always exposed `embed_batch`. Measured on the default quantized
+all-MiniLM:
+
+| texts | one at a time | batched | |
+|---|---|---|---|
+| 8 | 60.0 ms | 38.6 ms | 1.6× |
+| 64 | 511 ms | 208 ms | **2.5×** |
+
+Extrapolated to the pass's `MAX_OBSERVATIONS_PER_PASS = 500` cap, that is
+roughly 4.0 s → 1.6 s. For scale: the pairwise cosine work above took the
+similarity scan at that size from 62.9 ms to 4.25 ms. **Embedding was, and
+after batching still is, one to two orders of magnitude more wall-clock than
+the O(n²) scan it feeds** — the scan was never the bottleneck, it was just the
+part that looked like one.
+
+What batching removes is per-invocation overhead paid N times: the provider
+mutex, the `spawn_blocking` hop, tokenizer setup and ONNX session entry for the
+local backend; a full HTTP round trip for Ollama; a full socket round trip for
+the daemon. It also gives ONNX Runtime one padded batch to schedule instead of
+N single-row matmuls.
+
+`RetrievalEngine::embed_texts` chunks at `EMBED_BATCH_CHUNK = 64` — the ratio
+is flat by then, the ONNX backend pads every row in a batch to the longest one,
+and the daemon/Ollama backends put a whole batch in a single message. A failed
+chunk falls back to per-text embedding, so one unembeddable text still costs
+only itself.
+
 ## Not yet done
 
-- **`consolidation_pass` embeds one observation at a time** (`engine.embed_text`
-  in a `for` loop) rather than calling `embed_batch`. At the 500-observation
-  cap that is 500 sequential model invocations, which is almost certainly a
-  larger wall-clock cost than the entire pairwise pass this work optimized. It
-  is a batching change, not a parallelism one, so it is out of scope here.
 - **The `opt-level` question above**, which gates roughly half of the cosine
   gain in shipped builds.

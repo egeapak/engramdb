@@ -1134,11 +1134,17 @@ pub async fn consolidation_pass(
     }
 
     // Embed each observation (summary + content). Failures drop the entry.
-    let mut vectors: Vec<Option<Vec<f32>>> = Vec::with_capacity(observations.len());
-    for (_, m) in &observations {
-        let text = format!("{} {}", m.summary, m.content);
-        vectors.push(engine.embed_text(&text).await);
-    }
+    //
+    // One batched call rather than one await per observation: every text is
+    // known up front, so there is nothing to interleave, and the per-call
+    // overhead was the dominant cost of this pass — larger than the O(n²)
+    // similarity scan it feeds. See `RetrievalEngine::embed_texts`.
+    let texts: Vec<String> = observations
+        .iter()
+        .map(|(_, m)| format!("{} {}", m.summary, m.content))
+        .collect();
+    let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let vectors: Vec<Option<Vec<f32>>> = engine.embed_texts(&text_refs).await;
 
     // Pairwise similarity → union-find clusters.
     let pairs = similar_pairs(&vectors, similarity);

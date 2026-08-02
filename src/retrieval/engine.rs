@@ -53,6 +53,15 @@ const VECTOR_RESTRICT_MAX_IDS: usize = 500;
 /// (`benches/parallel_simd.rs`).
 const PARALLEL_SCORE_MIN: usize = 64;
 
+/// Texts per `embed_batch` call in [`RetrievalEngine::embed_texts`].
+///
+/// The gain from batching is flat well before this (2.5x at 64, and the ONNX
+/// backend pads every row in a batch to the longest one, so very wide batches
+/// start wasting compute on padding). The bound matters more for the other two
+/// backends: the daemon puts a whole batch in one socket message and Ollama in
+/// one HTTP body, and the consolidation pass can hand over 500 texts.
+const EMBED_BATCH_CHUNK: usize = 64;
+
 /// Detail level for retrieved memories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DetailLevel {
@@ -535,6 +544,59 @@ impl RetrievalEngine {
                 None
             }
         }
+    }
+
+    /// [`Self::embed_text`] for many texts at once, one embedding slot per
+    /// input in input order (`None` where that text could not be embedded).
+    ///
+    /// Embedding N texts through N `embed_text` awaits pays the per-invocation
+    /// overhead N times — the provider mutex, the `spawn_blocking` hop, the
+    /// tokenizer setup and the ONNX session entry for the local backend; a
+    /// whole HTTP round trip for Ollama; a whole socket round trip for the
+    /// daemon — and gives ONNX Runtime N separate single-row matmuls instead
+    /// of one padded batch. Measured on the default quantized all-MiniLM:
+    /// 511ms for 64 texts one at a time vs 208ms batched (2.5x); at 8 texts
+    /// it is 1.6x (`benches/parallel_simd.rs`, `embed_batching/*`).
+    ///
+    /// Chunked at [`EMBED_BATCH_CHUNK`] rather than handed over whole: the
+    /// daemon backend puts the entire batch in one socket message and Ollama
+    /// in one HTTP body, so an unbounded batch is an unbounded message.
+    ///
+    /// A failed chunk falls back to embedding its texts individually, so one
+    /// unembeddable text costs only itself — the same granularity the
+    /// `embed_text`-per-item loop had. Failures are logged, never fatal.
+    pub async fn embed_texts(&self, texts: &[&str]) -> Vec<Option<Vec<f32>>> {
+        let Some(provider) = self.embedding_provider.as_ref() else {
+            return vec![None; texts.len()];
+        };
+        let mut out: Vec<Option<Vec<f32>>> = Vec::with_capacity(texts.len());
+        for chunk in texts.chunks(EMBED_BATCH_CHUNK) {
+            match provider.embed_batch(chunk).await {
+                // A provider that returns the wrong count is broken in a way
+                // that would silently misalign vectors with memories, which is
+                // far worse than a slow path — fall through to per-text.
+                Ok(vectors) if vectors.len() == chunk.len() => {
+                    out.extend(vectors.into_iter().map(Some));
+                }
+                Ok(vectors) => {
+                    tracing::debug!(
+                        "embed_batch returned {} vectors for {} texts; falling back to per-text",
+                        vectors.len(),
+                        chunk.len()
+                    );
+                    for text in chunk {
+                        out.push(self.embed_text(text).await);
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("embed_batch failed (non-fatal): {e}; retrying per-text");
+                    for text in chunk {
+                        out.push(self.embed_text(text).await);
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Contradiction probabilities for text pairs via the NLI provider.
