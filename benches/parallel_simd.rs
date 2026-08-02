@@ -762,6 +762,66 @@ fn chunk_read_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
+// ===========================================================================
+// Group 8: the batched store primitives behind reindex / gc
+// ===========================================================================
+
+/// Per-memory `upsert_chunks` against its batched replacement, swept over
+/// small n so the SHAPE is visible: a per-memory cost that grows with n is
+/// quadratic, a flat one is linear.
+///
+/// The store is built once per n and reused across iterations — `merge_insert`
+/// makes a repeat upsert an update rather than an insert, and the cost of
+/// interest (table opens, commits, manifest reads, the `has_embedding` update)
+/// is the same either way.
+fn store_batch_benchmarks(c: &mut Criterion) {
+    use engramdb::storage::{InMemoryRegistry, MemoryStore};
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut group = c.benchmark_group("store_batch");
+    group.sample_size(10);
+
+    for &n in &[16usize, 32, 64, 128] {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let (store, mems) = rt.block_on(async {
+            let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+                .await
+                .expect("init");
+            let mut mems = Vec::new();
+            for i in 0..n {
+                let m = generate_memory(i);
+                store.create(&m).await.expect("create");
+                mems.push(m);
+            }
+            (store, mems)
+        });
+
+        group.bench_with_input(BenchmarkId::new("upsert_per_memory", n), &n, |b, _| {
+            b.to_async(&rt).iter(|| async {
+                for (i, m) in mems.iter().enumerate() {
+                    store
+                        .upsert_chunks(&m.id, vec![synth_vector(i as u64)])
+                        .await
+                        .expect("upsert");
+                }
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("upsert_batched", n), &n, |b, _| {
+            b.to_async(&rt).iter(|| async {
+                let entries: Vec<_> = mems
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| (m.id.clone(), m.updated_at, vec![synth_vector(i as u64)]))
+                    .collect();
+                store.upsert_chunks_batch(entries).await.expect("batch");
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     parse_benchmarks,
@@ -771,5 +831,6 @@ criterion_group!(
     reindex_cpu_benchmarks,
     embed_batching_benchmarks,
     chunk_read_benchmarks,
+    store_batch_benchmarks,
 );
 criterion_main!(benches);
