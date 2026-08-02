@@ -40,9 +40,9 @@ engramdb --version
 
 ### MCP Server
 
-A full MCP server (`engramdb serve`) starts automatically, providing 22 tools for memory and project management:
+A full MCP server (`engramdb serve`) starts automatically, providing 27 tools for memory and project management:
 
-`query`, `create`, `get`, `list`, `update`, `delete`, `challenge`, `review`, `resolve`, `verify`, `task_current`, `task_complete`, `stats`, `doctor`, `gc`, `reindex`, `compress_candidates`, `compress_apply`, `projects_list`, `projects_info`, `projects_link`, `projects_unlink`
+`query`, `create`, `get`, `list`, `update`, `delete`, `challenge`, `review`, `resolve`, `verify`, `task_current`, `task_complete`, `stats`, `config`, `doctor`, `gc`, `reindex`, `compress_candidates`, `compress_apply`, `projects_list`, `projects_info`, `projects_link`, `projects_unlink`, `harvest_list`, `harvest_show`, `harvest_mark`, `harvest_ledger`
 
 ### Shared embedding daemon
 

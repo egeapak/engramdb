@@ -1168,6 +1168,133 @@ pub struct EngramConfig {
     /// CLI-only display preferences (project-list grouping, …)
     #[serde(default)]
     pub cli: CliConfig,
+
+    /// Past-session harvesting (digest budgets, transcript archiving)
+    #[serde(default)]
+    pub harvest: HarvestConfig,
+}
+
+/// Settings for harvesting past Claude Code sessions (`[harvest]` section).
+///
+/// **Not part of [`provider_cache_key`](crate) inputs.** Harvesting loads no
+/// model, so these fields must never be folded into the provider cache key —
+/// doing so would evict cached embedding/NLI/reranker bundles every time a
+/// budget was tweaked.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HarvestConfig {
+    /// Character budget for a single-session deep read (`harvest show`).
+    ///
+    /// Deliberately large: a 2.9 MB transcript digests to roughly 60 KB, so
+    /// this is effectively "the whole session" with a ceiling against a
+    /// pathological one. `0` means unlimited.
+    #[serde(default = "default_digest_budget")]
+    pub digest_budget: usize,
+
+    /// Per-session budget when scanning *many* sessions — the MCP default and
+    /// what subagent fan-out should pass.
+    ///
+    /// A separate number because one value cannot serve both cases: at the
+    /// single-session default, a dozen sessions inline would be ~600k tokens.
+    #[serde(default = "default_fanout_budget")]
+    pub fanout_budget: usize,
+
+    /// Include assistant reasoning blocks in digests.
+    #[serde(default)]
+    pub include_thinking: bool,
+
+    /// Include subagent (`isSidechain`) turns in digests.
+    #[serde(default)]
+    pub include_sidechains: bool,
+
+    /// Archive each session's transcript when the session ends.
+    ///
+    /// On by default: Claude Code prunes its own transcripts, so without a
+    /// copy taken at session end, harvesting a conversation weeks later is
+    /// simply not possible. Archives live in the global data dir, never in
+    /// the repo-adjacent `.engramdb/` (see `storage::transcript_archive`).
+    #[serde(default = "default_true")]
+    pub archive: bool,
+
+    /// Drop archives older than this many days. `None` disables age-based
+    /// eviction (size-based eviction still applies).
+    #[serde(default = "default_archive_retention_days")]
+    pub archive_retention_days: Option<u64>,
+
+    /// Total archive budget in bytes; the oldest archives are evicted first
+    /// once it is exceeded. `0` disables size-based eviction.
+    #[serde(default = "default_archive_max_bytes")]
+    pub archive_max_bytes: u64,
+}
+
+fn default_digest_budget() -> usize {
+    200_000
+}
+
+fn default_fanout_budget() -> usize {
+    20_000
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_archive_retention_days() -> Option<u64> {
+    Some(365)
+}
+
+/// 2 GiB. Measured compression on real transcripts is ~4.5x (not the ~10x
+/// one might assume — transcript payloads are mostly high-entropy text), so
+/// this holds on the order of a few thousand typical sessions.
+fn default_archive_max_bytes() -> u64 {
+    2 * 1024 * 1024 * 1024
+}
+
+impl Default for HarvestConfig {
+    fn default() -> Self {
+        Self {
+            digest_budget: default_digest_budget(),
+            fanout_budget: default_fanout_budget(),
+            include_thinking: false,
+            include_sidechains: false,
+            archive: true,
+            archive_retention_days: default_archive_retention_days(),
+            archive_max_bytes: default_archive_max_bytes(),
+        }
+    }
+}
+
+impl HarvestConfig {
+    /// Effective budget for a single-session read (`0` → unlimited).
+    pub fn effective_digest_budget(&self) -> usize {
+        if self.digest_budget == 0 {
+            usize::MAX
+        } else {
+            self.digest_budget
+        }
+    }
+
+    /// Effective budget when scanning many sessions (`0` → unlimited).
+    pub fn effective_fanout_budget(&self) -> usize {
+        if self.fanout_budget == 0 {
+            usize::MAX
+        } else {
+            self.fanout_budget
+        }
+    }
+
+    /// Validate the archive bounds.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if let Some(days) = self.archive_retention_days {
+            if days == 0 {
+                anyhow::bail!(
+                    "harvest.archive_retention_days must be >= 1 (0 is ambiguous — it would \
+                     evict every archive immediately). Omit the field for the default (365), \
+                     or set `archive = false` to stop archiving."
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// CLI-only display preferences (`[cli]` section).
@@ -1621,6 +1748,7 @@ impl EngramConfig {
         self.daemon.validate()?;
         self.security.validate()?;
         self.review.validate()?;
+        self.harvest.validate()?;
 
         if !(0.0..=1.0).contains(&self.retrieval.scoring.scope_multiplier_floor) {
             anyhow::bail!("scoring.scope_multiplier_floor must be in [0.0, 1.0]");

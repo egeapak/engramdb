@@ -32,12 +32,15 @@ use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use std::path::{Path, PathBuf};
 
-/// Default per-session character budget for a digest.
+/// Fallback per-session character budget, used only where no config has been
+/// loaded (a `--max-chars` default in the clap definition, which is parsed
+/// before any store is opened).
 ///
-/// Sized so a handful of sessions can be reviewed in one pass without
-/// crowding out the agent's own reasoning; raise it with `--max-chars` when
-/// digesting a single session in depth.
-pub const DEFAULT_DIGEST_BUDGET: usize = 12_000;
+/// The real values live in `[harvest]`: `digest_budget` for a single-session
+/// deep read and `fanout_budget` for scanning many. One number cannot serve
+/// both — at the single-session default, a dozen sessions inline would be
+/// ~600k tokens.
+pub const DEFAULT_DIGEST_BUDGET: usize = 200_000;
 
 /// Longest a single event's text is allowed to be before it is truncated,
 /// so one enormous paste cannot consume a whole session's budget.
@@ -186,7 +189,13 @@ fn filter_sessions(
         if params.skip_empty && summary.user_turns == 0 {
             continue;
         }
-        let already_harvested = ledger.contains_key(&summary.session_id);
+        // `is_settled`, not mere presence: the SessionEnd hook writes a
+        // `Deferred` entry for every session it archives. Treating any entry
+        // as "reviewed" would make archiving a transcript hide it from the
+        // very command that exists to review it.
+        let already_harvested = ledger
+            .get(&summary.session_id)
+            .is_some_and(|e| e.is_settled());
         if already_harvested && !params.include_harvested {
             continue;
         }
@@ -629,6 +638,9 @@ mod tests {
                         harvested_at: Utc::now(),
                         memories_created: 0,
                         memory_ids: vec![],
+                        decision: Some(harvest_state::HarvestDecision::Skipped),
+                        note: None,
+                        archive: None,
                     },
                 )
             })
@@ -656,6 +668,33 @@ mod tests {
         let shown = filter_sessions(sessions, &ledger, &params);
         assert_eq!(shown.len(), 2);
         assert!(shown.iter().any(|s| s.already_harvested));
+    }
+
+    #[test]
+    fn archived_but_unreviewed_sessions_are_still_offered() {
+        // The SessionEnd hook writes a `Deferred` ledger entry for every
+        // session it archives. Selecting on mere ledger presence would make
+        // archiving hide a session from the command meant to review it —
+        // silently, and for every session on the machine.
+        let now = Utc::now();
+        let sessions = vec![summary_at("archived", Some(now), 2)];
+        let ledger: std::collections::HashMap<String, harvest_state::HarvestEntry> = [(
+            "archived".to_string(),
+            harvest_state::HarvestEntry {
+                harvested_at: now,
+                memories_created: 0,
+                memory_ids: vec![],
+                decision: Some(harvest_state::HarvestDecision::Deferred),
+                note: None,
+                archive: None,
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        let got = filter_sessions(sessions, &ledger, &SelectParams::default());
+        assert_eq!(got.len(), 1, "a deferred session must still be offered");
+        assert!(!got[0].already_harvested);
     }
 
     #[test]

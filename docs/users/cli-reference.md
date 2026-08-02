@@ -344,8 +344,14 @@ engramdb harvest list [--since 7d] [-n N] [--include-harvested]
                       [--include-empty] [--all-projects] [--exclude-session ID]
 engramdb harvest show <session_id> [--max-chars N] [--include-thinking]
                       [--include-sidechains] [--no-tools] [--all-projects]
-engramdb harvest mark <session_id> [--memory <id>]...
+engramdb harvest mark <session_id> [--memory <id>]... [--defer] [--note <text>]
+                      [--all-projects]
 engramdb harvest reset <session_id>
+engramdb harvest ledger list [--decision harvested|skipped|deferred] [--with-archive]
+engramdb harvest ledger show <session_id>
+engramdb harvest ledger export <session_id> [-o <path>]
+engramdb harvest ledger rm <session_id> [--archive-only]
+engramdb harvest ledger prune [--older-than 90d] [--max-bytes N] [--apply]
 ```
 
 Reads the transcripts Claude Code writes to
@@ -377,6 +383,30 @@ a zero-yield session leaves no other trace, so without a mark it is re-read
 on every future harvest. `reset` clears the record. The ledger lives in
 `.engramdb/state/harvested_sessions.json` under the root project, shared by
 all its worktrees.
+
+Each entry carries a **decision**: `harvested` (memories saved), `skipped`
+(reviewed and passed over), or `deferred` (postponed — deferred sessions keep
+appearing in `harvest list`). `--defer` records the last of these.
+
+**Transcript archives.** With `[harvest] archive = true` (the default), the
+SessionEnd hook compresses each ending session's transcript so it can still
+be harvested later. This matters because Claude Code prunes its own
+transcripts: archiving at *harvest* time would protect nothing, since you
+necessarily still hold the file then.
+
+Archives live at `<global_data_dir>/projects/<root_id>/transcripts/` —
+deliberately **not** under `.engramdb/`, which is repo-adjacent and gets
+committed. Transcripts routinely contain environment variables echoed by
+commands and keys pasted into chat; committing them to a shared repository
+would be a serious leak.
+
+Real transcripts compress about 4.5x (less than one might assume — most of a
+transcript is high-entropy tool output), so a typical session lands around
+650 KB. `archive_retention_days` (365) and `archive_max_bytes` (2 GiB, with
+oldest-first eviction) bound the total; `harvest ledger prune` reclaims space
+on demand and, like `gc` and `compress`, is a dry run until `--apply`.
+`harvest ledger export` restores one, verifying it against the SHA-256
+recorded when it was written.
 
 ## `completions` — shell completions
 

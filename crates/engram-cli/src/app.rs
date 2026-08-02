@@ -137,9 +137,10 @@ pub enum HarvestCommand {
         /// Session id, or a unique prefix of one
         session_id: String,
 
-        /// Character budget for the digest
-        #[arg(long, default_value_t = engramdb::ops::DEFAULT_DIGEST_BUDGET)]
-        max_chars: usize,
+        /// Character budget for the digest. Defaults to `[harvest]
+        /// digest_budget` (200000); `0` means unlimited.
+        #[arg(long)]
+        max_chars: Option<usize>,
 
         /// Include the assistant's reasoning blocks (verbose)
         #[arg(long)]
@@ -175,12 +176,83 @@ pub enum HarvestCommand {
         /// session you can mark as reviewed.
         #[arg(long)]
         all_projects: bool,
+
+        /// Record the session as deliberately postponed rather than settled.
+        /// Deferred sessions keep appearing in `harvest list`.
+        #[arg(long, conflicts_with = "memory_ids")]
+        defer: bool,
+
+        /// Why the session was skipped or deferred
+        #[arg(long)]
+        note: Option<String>,
     },
 
     /// Forget a session's harvest record so it is offered again
     Reset {
         /// Session id, or a unique prefix of one
         session_id: String,
+    },
+
+    /// Inspect and manage the harvest ledger and its transcript archives
+    Ledger {
+        #[command(subcommand)]
+        command: LedgerCommand,
+    },
+}
+
+/// Subcommands for `engramdb harvest ledger`.
+#[derive(Subcommand)]
+pub enum LedgerCommand {
+    /// List recorded sessions and their decisions
+    List {
+        /// Only entries with this decision
+        #[arg(long, value_name = "DECISION")]
+        decision: Option<String>,
+
+        /// Only entries that still have an archived transcript
+        #[arg(long)]
+        with_archive: bool,
+    },
+
+    /// Show one entry in full, including archive metadata
+    Show {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+    },
+
+    /// Decompress an archived transcript back to a file
+    Export {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+
+        /// Destination path (default: `<session-id>.jsonl` in the cwd)
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+    },
+
+    /// Delete a ledger entry and/or its archive
+    Rm {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+
+        /// Delete only the archived transcript, keeping the decision record
+        #[arg(long)]
+        archive_only: bool,
+    },
+
+    /// Evict archives past the retention limits (dry run by default)
+    Prune {
+        /// Override `[harvest] archive_retention_days` for this run
+        #[arg(long, value_name = "WHEN")]
+        older_than: Option<String>,
+
+        /// Override `[harvest] archive_max_bytes` for this run
+        #[arg(long, value_name = "BYTES")]
+        max_bytes: Option<u64>,
+
+        /// Actually delete (default is a dry run, like `gc` and `compress`)
+        #[arg(long)]
+        apply: bool,
     },
 }
 

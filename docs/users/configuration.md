@@ -172,6 +172,15 @@ summary_max_chars = 200             # max length (chars) of a memory summary on 
 
 [cli]
 project_list_grouping = "auto"      # projects-list layout: auto | always | none
+
+[harvest]
+digest_budget = 200000              # char budget for a single-session `harvest show`; 0 = unlimited
+fanout_budget = 20000               # per-session budget when scanning many (MCP default)
+include_thinking = false            # include assistant reasoning blocks in digests
+include_sidechains = false          # include subagent turns in digests
+archive = true                      # archive each session's transcript at SessionEnd
+archive_retention_days = 365        # drop archives older than this; omit to disable age eviction
+archive_max_bytes = 2147483648      # 2 GiB total, oldest-first eviction; 0 = no size limit
 ```
 
 ## Notes on selected sections
@@ -183,6 +192,7 @@ project_list_grouping = "auto"      # projects-list layout: auto | always | none
 - **`[hooks]`** — rendering knobs for the Claude Code hooks. `prompt_context_budget` (default **1000** chars) caps the UserPromptSubmit and PreToolUse injections (SessionStart has its own fixed 2000-char budget). `class_order` optionally replaces the per-situation epistemic-class ordering of injected memories (SessionStart: fact → decision → observation; file edits: decision → fact → observation) with one uniform list.
 - **`[content]`** — memory-content constraints. `summary_max_chars` (default **200**) is the maximum length, in characters, of a memory's one-line summary; it is enforced on every `create` / `update` / `resolve --update` path and bounds the auto-generated summary of a `compress`/consolidate merge. Measured in characters (not bytes), so multibyte summaries are not penalized.
 - **`[cli]`** — human-readable CLI output preferences (ignored by the MCP surface and every `--json` path). `project_list_grouping` controls how `engramdb projects list` lays out its directory tree: `auto` (default) prints a folder header only for directories holding two or more projects and renders a lone project inline on a full-path line; `always` prints a header above every project (rows show just the basename); `none` prints a flat list of full-path rows with no headers. In all three modes worktree sub-projects nest under their real parent and rows are sorted by path. A single run can override the configured default with `engramdb projects list --group auto|always|none`.
+- **`[harvest]`** — mining past Claude Code sessions. Two budgets rather than one, because a single number cannot serve both cases: `digest_budget` (default **200000** chars) is for reading *one* session deeply and is sized so a typical session digests completely, while `fanout_budget` (default **20000**) applies when scanning many — at the larger figure, a dozen sessions inline would be roughly 600k tokens. `0` means unlimited for either. `archive` (default **true**) has the SessionEnd hook compress each ending session's transcript into `<global_data_dir>/projects/<root_id>/transcripts/`, never into the repo-adjacent `.engramdb/` — transcripts routinely contain echoed environment variables and pasted keys, and `.engramdb/` gets committed. Archiving happens at session end rather than at harvest time because Claude Code prunes its own transcripts; archiving something you already hold would protect nothing. `archive_retention_days` (365) and `archive_max_bytes` (2 GiB, oldest-first) bound the total. None of these fields affect the provider cache key, since harvesting loads no model.
 - **`[embeddings]`** — changing `provider` or `dimensions` requires `engramdb reindex --embeddings-only`. See [embeddings.md](./embeddings.md) for fingerprinting and the model-change policy.
 - **`[trust_weights]`** — `Provenance` source maps to a trust weight (`human` highest, `inferred` lowest). The multiplier is `floor + (1 - floor) * weight`, so even fully `inferred` memories keep ≥50% of their raw score.
 - **`[nli]`** — off by default. Downloads ~50 MB and adds latency to `create`. When enabled, every `create` checks the top-`max_comparisons` similar memories and auto-challenges contradictions above `contradiction_threshold`.

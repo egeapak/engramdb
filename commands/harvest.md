@@ -25,6 +25,8 @@ machine-wide history.
 
 ### 1. List candidate sessions
 
+Use the `harvest_list` MCP tool if it is available; otherwise the CLI:
+
 ```bash
 engramdb harvest list
 ```
@@ -121,16 +123,25 @@ Then ask which to save — all, some by number, or none.
 Call `create` / `update` / `challenge` for the approved items only. Then mark
 each reviewed session, **including the ones that yielded nothing**:
 
+Use the `harvest_mark` MCP tool if available, or the CLI:
+
 ```bash
 # with memories saved
 engramdb harvest mark <session-id> --memory <memory-id> --memory <memory-id>
 
 # reviewed, nothing worth saving
 engramdb harvest mark <session-id>
+
+# looked at, decision postponed — stays in the list
+engramdb harvest mark <session-id> --defer --note "revisit after the refactor"
 ```
 
 Marking is what stops a session being re-read on every future harvest, so a
 zero-yield session must be marked too. `engramdb harvest reset <session-id>`
 undoes it if the user wants another look.
+
+If a session's transcript has been archived, `engramdb harvest ledger export
+<session-id>` restores the full original — useful when a memory is later
+challenged and you need the conversation it came from.
 
 Finally, report what was saved and what was skipped.

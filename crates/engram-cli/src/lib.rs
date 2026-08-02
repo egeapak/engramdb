@@ -711,7 +711,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             commands::run_groups(&dir, &registry, command, &prompter, &formatter).await
         }
         Command::Harvest { command } => {
-            commands::run_harvest(&dir, &registry, command, &formatter).await
+            commands::run_harvest(&dir, &registry, command, &config.harvest, &formatter).await
         }
     }
 }

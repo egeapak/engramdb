@@ -855,6 +855,8 @@ pub async fn run_hook_session_end(dir: &Path) -> Result<()> {
     let Some(session_id) = extract_session_id(&input) else {
         return Ok(());
     };
+
+    archive_ending_session(dir, &session_id, &input).await;
     let ended_task = match engramdb::storage::task_state::clear_session_task(dir, &session_id) {
         Ok(t) => t,
         Err(e) => {
@@ -880,6 +882,81 @@ pub async fn run_hook_session_end(dir: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Archive the ending session's transcript, if archiving is enabled.
+///
+/// This is the whole reason the archive exists. Claude Code prunes its own
+/// transcripts, and once one is gone the conversation cannot be harvested and
+/// any memory derived from it has lost its evidence. Session end is the last
+/// moment the file is reliably still there — archiving at *harvest* time
+/// would protect nothing, since you necessarily still hold the transcript
+/// then.
+///
+/// Entirely best-effort, in keeping with the rest of SessionEnd: every
+/// failure is logged and swallowed, because nothing here may block session
+/// teardown. The archive is written under the **root** project so a worktree
+/// and its main checkout share one directory, matching the ledger.
+async fn archive_ending_session(dir: &Path, session_id: &str, input: &str) {
+    let config_path = engramdb::storage::paths::project_dir(dir).join("config.toml");
+    let config = engramdb::storage::config::load_config_or_default(&config_path).await;
+    if !config.harvest.archive {
+        return;
+    }
+
+    // Prefer the path the event hands us; fall back to locating it ourselves
+    // (older Claude Code builds, or an event missing the field).
+    let transcript = extract_transcript_path(input)
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(|| {
+            engramdb::storage::transcripts::list_sessions_for(std::slice::from_ref(
+                &dir.to_path_buf(),
+            ))
+            .ok()?
+            .into_iter()
+            .find(|s| s.session_id == session_id)
+            .map(|s| s.transcript_path)
+        });
+    let Some(transcript) = transcript else {
+        tracing::debug!("SessionEnd archive: no transcript found for {session_id}");
+        return;
+    };
+
+    let project_id = engramdb::storage::project_id::compute_project_id(dir);
+    match engramdb::storage::transcript_archive::archive_transcript(
+        &project_id,
+        session_id,
+        &transcript,
+    ) {
+        Ok(archive) => {
+            if let Err(e) = engramdb::storage::harvest_state::set_archive(dir, session_id, archive)
+            {
+                tracing::debug!("SessionEnd archive: ledger update failed (non-fatal): {e}");
+            }
+            // Enforce the budget here rather than on a timer: session end is
+            // the only moment archiving reliably runs.
+            if let Err(e) = engramdb::storage::transcript_archive::prune_archives(
+                &project_id,
+                config.harvest.archive_retention_days,
+                config.harvest.archive_max_bytes,
+                false,
+            ) {
+                tracing::debug!("SessionEnd archive: prune failed (non-fatal): {e}");
+            }
+        }
+        Err(e) => tracing::debug!("SessionEnd archive failed (non-fatal): {e}"),
+    }
+}
+
+/// Extract `transcript_path`, which every hook event carries.
+fn extract_transcript_path(input: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(input).ok()?;
+    value
+        .get("transcript_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Static PreCompact reminder (§8.5.4): context loss is a memory system's

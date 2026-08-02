@@ -181,6 +181,23 @@ pub fn personal_memories_dir(project_id: &str) -> Result<PathBuf> {
     Ok(personal_dir(project_id)?.join("memories"))
 }
 
+/// Returns the transcript-archive directory for a given project ID.
+///
+/// **Deliberately in the global data dir, never under the project's
+/// `.engramdb/`.** `.engramdb/memories/` is repo-adjacent and travels with a
+/// `git clone` — `init` writes no `.gitignore` there — so anything placed
+/// inside it is liable to be committed. Session transcripts routinely contain
+/// environment variables echoed by commands, keys pasted into chat, and the
+/// contents of untracked files; committing them to a shared repository would
+/// be a serious and hard-to-reverse leak. Archives therefore live beside
+/// `personal/`, which is non-repo-adjacent for exactly the same reason.
+pub fn transcript_archive_dir(project_id: &str) -> Result<PathBuf> {
+    Ok(global_data_dir()?
+        .join("projects")
+        .join(project_id)
+        .join("transcripts"))
+}
+
 /// Returns the global LanceDB directory for a given project ID.
 pub fn lancedb_dir(project_id: &str) -> Result<PathBuf> {
     Ok(global_data_dir()?
