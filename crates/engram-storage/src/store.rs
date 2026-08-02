@@ -30,6 +30,65 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::fs as async_fs;
 
+/// How many memory-file reads may be in flight at once.
+///
+/// Read latency is what serializing these costs, so overlapping them is worth
+/// it; the bound is what keeps a 5,000-memory reindex from opening 5,000 file
+/// descriptors at once.
+const PARALLEL_READ_WIDTH: usize = 16;
+
+/// Batch size at or above which [`parse_batch`] goes through rayon.
+///
+/// Parsing is ~20µs per memory, and entering the rayon pool costs a few µs of
+/// its own, so the crossover is low — but the retrieval path calls `get_batch`
+/// with a handful of survivor IDs on every query, and paying pool latency
+/// there to save nothing would be a regression on the most common shape. 32 is
+/// comfortably past the crossover in both directions (`parse/*` in
+/// `benches/parallel_simd.rs` still shows ~2.6x at 100).
+const PARALLEL_PARSE_MIN: usize = 32;
+
+/// Parse a batch of already-read memory files, in parallel above
+/// [`PARALLEL_PARSE_MIN`].
+///
+/// Frontmatter deserialization plus the V2 section split is pure CPU and
+/// perfectly per-file — the shape rayon is for. Measured at ~20ms per 1,000
+/// memories serially and ~6ms across four cores (`benches/parallel_simd.rs`,
+/// `parse/*`).
+///
+/// Unparseable files are dropped with a warning rather than failing the batch,
+/// matching what every caller did inline before.
+///
+/// Order follows the input, so a caller that ordered `ids` still gets its
+/// order back — rayon's `collect` into a `Vec` is order-preserving.
+fn parse_batch(read: Vec<(String, PathBuf, String)>) -> Vec<(String, Memory)> {
+    use rayon::prelude::*;
+
+    fn parse_one(id: String, path: &Path, content: &str) -> Option<(String, Memory)> {
+        match memory_file::parse_memory_file(content) {
+            Ok(memory) => Some((id, memory)),
+            Err(e) => {
+                tracing::warn!(
+                    "skipping {} ({}): failed to parse: {}",
+                    id,
+                    path.display(),
+                    e
+                );
+                None
+            }
+        }
+    }
+
+    if read.len() < PARALLEL_PARSE_MIN {
+        return read
+            .into_iter()
+            .filter_map(|(id, path, content)| parse_one(id, &path, &content))
+            .collect();
+    }
+    read.into_par_iter()
+        .filter_map(|(id, path, content)| parse_one(id, &path, &content))
+        .collect()
+}
+
 /// Main storage interface for EngramDB operations.
 ///
 /// Manages memory files, a unified LanceDB index, manifest, and coordinates
@@ -539,25 +598,14 @@ impl MemoryStore {
                 Some((id_str.to_owned(), path.clone()))
             })
             .collect();
-        let results: Vec<Option<(String, Memory)>> = stream::iter(to_read)
+        let read: Vec<(String, PathBuf, String)> = stream::iter(to_read)
             .map(|(id_str, path)| async move {
                 // An indexed memory whose file is unreadable/unparseable is a
                 // data-integrity problem. Drop it (as before, so one bad file
                 // doesn't fail a whole batch) but `warn!` rather than swallow it
                 // silently, matching `reindex_dir`'s handling (finding #15).
                 match async_fs::read_to_string(&path).await {
-                    Ok(content) => match memory_file::parse_memory_file(&content) {
-                        Ok(memory) => Some((id_str, memory)),
-                        Err(e) => {
-                            tracing::warn!(
-                                "get_batch: skipping {} ({}): failed to parse: {}",
-                                id_str,
-                                path.display(),
-                                e
-                            );
-                            None
-                        }
-                    },
+                    Ok(content) => Some((id_str, path, content)),
                     Err(e) => {
                         tracing::warn!(
                             "get_batch: skipping {} ({}): failed to read: {}",
@@ -569,10 +617,14 @@ impl MemoryStore {
                     }
                 }
             })
-            .buffered(16)
-            .collect()
-            .await;
-        Ok(results.into_iter().flatten().collect())
+            .buffered(PARALLEL_READ_WIDTH)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+
+        Ok(parse_batch(read))
     }
 
     /// Check which of the given IDs have `.md` files on disk.
@@ -1383,72 +1435,125 @@ impl MemoryStore {
         chunk_ids: &std::collections::HashSet<String>,
         indexed_ids: &mut Vec<String>,
     ) -> Result<()> {
+        use rayon::prelude::*;
+
         let mut by_id: HashMap<String, (PathBuf, std::time::SystemTime, Memory)> = HashMap::new();
 
+        // Phase 1 — enumerate. Cheap, and it has to be sequential anyway.
+        let mut md_paths: Vec<PathBuf> = Vec::new();
         let mut entries = async_fs::read_dir(dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("md") {
-                let content = match async_fs::read_to_string(&path).await {
-                    Ok(c) => c,
+                md_paths.push(path);
+            }
+        }
+
+        // Phase 2 — read + stat, overlapped. Bounded at the same width as
+        // `get_batch` so a large store cannot exhaust the fd table.
+        use futures_util::{stream, StreamExt};
+        let read: Vec<(PathBuf, std::time::SystemTime, String)> = stream::iter(md_paths)
+            .map(|path| async move {
+                match async_fs::read_to_string(&path).await {
+                    Ok(content) => {
+                        let mtime = file_mtime(&path).await;
+                        Some((path, mtime, content))
+                    }
                     Err(e) => {
                         tracing::warn!("Skipping {}: failed to read: {}", path.display(), e);
-                        continue;
-                    }
-                };
-                let memory = match memory_file::parse_memory_file(&content) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        tracing::warn!("Skipping {}: failed to parse: {}", path.display(), e);
-                        continue;
-                    }
-                };
-                let mtime = file_mtime(&path).await;
-                let stale = match by_id.entry(memory.id.clone()) {
-                    std::collections::hash_map::Entry::Vacant(slot) => {
-                        slot.insert((path, mtime, memory));
                         None
                     }
-                    std::collections::hash_map::Entry::Occupied(mut slot) => {
-                        let (ref slot_path, slot_mtime, _) = *slot.get();
-                        if prefers_newer((mtime, &path), (slot_mtime, slot_path)) {
-                            let (old_path, _, _) = slot.insert((path, mtime, memory));
-                            Some(old_path)
-                        } else {
-                            Some(path)
-                        }
+                }
+            })
+            .buffered(PARALLEL_READ_WIDTH)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+
+        // Phase 3 — parse, in parallel. Frontmatter deserialization plus the
+        // V2 section split is pure CPU and pure per-file: measured at ~20ms
+        // per 1,000 memories serially, ~6ms across four cores
+        // (`benches/parallel_simd.rs`, `parse/*`). This is the single largest
+        // component of `reindex`.
+        //
+        // `reindex` already runs under the per-project write lock and is not
+        // latency-critical, so occupying the rayon pool here is free; the
+        // calling tokio worker is blocked for a *shorter* time than before,
+        // since the work used to run inline on it.
+        let parsed: Vec<(PathBuf, std::time::SystemTime, Memory)> = read
+            .into_par_iter()
+            .filter_map(
+                |(path, mtime, content)| match memory_file::parse_memory_file(&content) {
+                    Ok(memory) => Some((path, mtime, memory)),
+                    Err(e) => {
+                        tracing::warn!("Skipping {}: failed to parse: {}", path.display(), e);
+                        None
                     }
-                };
-                if let Some(stale_path) = stale {
+                },
+            )
+            .collect();
+
+        // Phase 4 — resolve duplicate IDs. Sequential by nature (it is a
+        // fold over a shared map) and cheap: no I/O, no parsing.
+        for (path, mtime, memory) in parsed {
+            let stale = match by_id.entry(memory.id.clone()) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert((path, mtime, memory));
+                    None
+                }
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    let (ref slot_path, slot_mtime, _) = *slot.get();
+                    if prefers_newer((mtime, &path), (slot_mtime, slot_path)) {
+                        let (old_path, _, _) = slot.insert((path, mtime, memory));
+                        Some(old_path)
+                    } else {
+                        Some(path)
+                    }
+                }
+            };
+            if let Some(stale_path) = stale {
+                tracing::warn!(
+                    "Removing stale duplicate file {} (same memory ID, older mtime)",
+                    stale_path.display()
+                );
+                if let Err(e) = async_fs::remove_file(&stale_path).await {
                     tracing::warn!(
-                        "Removing stale duplicate file {} (same memory ID, older mtime)",
-                        stale_path.display()
+                        "Failed to remove stale duplicate {}: {}",
+                        stale_path.display(),
+                        e
                     );
-                    if let Err(e) = async_fs::remove_file(&stale_path).await {
-                        tracing::warn!(
-                            "Failed to remove stale duplicate {}: {}",
-                            stale_path.display(),
-                            e
-                        );
-                    }
                 }
             }
         }
 
+        // Phase 5 — build the index rows, in parallel. `IndexEntry::from`
+        // derives the memory's keyword stems (tokenize → stoplist → Snowball
+        // stem → dedup for three fields), the second-largest CPU cost here at
+        // ~16ms per 1,000 memories serially, ~5.7ms across four cores
+        // (`benches/parallel_simd.rs`, `stems/*`).
+        //
         // One batched merge_insert instead of one commit (and one LanceDB
         // dataset version) per memory — reindexing a 1,000-memory store used
         // to perform 1,000 sequential commits that optimize() then compacted.
-        let mut entries_batch = Vec::with_capacity(by_id.len());
-        for (id, (_path, _mtime, memory)) in by_id {
-            let mut index_entry = IndexEntry::from(&memory);
-            index_entry.visibility = visibility;
-            // R3: stamp the embedding flag from the chunk-table snapshot so a
-            // reindex (including the on-open schema migration) leaves
-            // `has_embedding` authoritative.
-            index_entry.has_embedding = chunk_ids.contains(&id);
-            entries_batch.push(index_entry);
-            indexed_ids.push(id);
-        }
+        let owned: Vec<(String, Memory)> = by_id
+            .into_iter()
+            .map(|(id, (_path, _mtime, memory))| (id, memory))
+            .collect();
+        let entries_batch: Vec<IndexEntry> = owned
+            .par_iter()
+            .map(|(id, memory)| {
+                let mut index_entry = IndexEntry::from(memory);
+                index_entry.visibility = visibility;
+                // R3: stamp the embedding flag from the chunk-table snapshot so a
+                // reindex (including the on-open schema migration) leaves
+                // `has_embedding` authoritative.
+                index_entry.has_embedding = chunk_ids.contains(id);
+                index_entry
+            })
+            .collect();
+        indexed_ids.extend(owned.into_iter().map(|(id, _)| id));
         self.lance_index
             .upsert_batch(&entries_batch)
             .await

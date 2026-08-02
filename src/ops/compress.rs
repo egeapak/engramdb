@@ -273,6 +273,91 @@ mod tests {
         (temp_dir, store)
     }
 
+    /// Deterministic pseudo-random vector at the embedding dimension.
+    fn synth_vector(seed: u64, dims: usize) -> Vec<f32> {
+        let mut state = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        (0..dims)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                ((state >> 33) as f32 / (1u32 << 31) as f32) - 0.5
+            })
+            .collect()
+    }
+
+    /// The whole justification for the fast path: it has to compute the same
+    /// number the straightforward version does.
+    ///
+    /// Tolerance is 1e-5 because the fast path accumulates in `f32` across
+    /// eight lanes while the reference accumulates in `f64` — the results are
+    /// equal in exact arithmetic and differ only in rounding. Includes a
+    /// length that is not a multiple of `DOT_LANES` (385) so the scalar
+    /// remainder tail is covered, and the odd sizes around the lane boundary.
+    #[test]
+    fn dot_unit_agrees_with_cosine() {
+        for dims in [1, 7, 8, 9, 15, 16, 384, 385, 768] {
+            for seed in 0..8u64 {
+                let a = synth_vector(seed * 2, dims);
+                let b = synth_vector(seed * 2 + 1, dims);
+                let reference = cosine(&a, &b);
+                let fast = dot_unit(&l2_normalized(&a), &l2_normalized(&b));
+                assert!(
+                    (reference - fast).abs() < 1e-5,
+                    "dims={dims} seed={seed}: reference {reference} vs fast {fast}"
+                );
+            }
+        }
+    }
+
+    /// Degenerate inputs must behave like the reference, not panic or produce
+    /// a NaN that would then poison the `>= similarity` comparison.
+    #[test]
+    fn dot_unit_handles_degenerate_vectors() {
+        let zero = vec![0.0f32; 384];
+        let v = synth_vector(1, 384);
+        assert_eq!(dot_unit(&l2_normalized(&zero), &l2_normalized(&v)), 0.0);
+        assert_eq!(dot_unit(&l2_normalized(&zero), &l2_normalized(&zero)), 0.0);
+        // Length mismatch and empty input are guards, matching `cosine`.
+        assert_eq!(dot_unit(&v, &synth_vector(2, 128)), 0.0);
+        assert_eq!(dot_unit(&[], &[]), 0.0);
+        // A unit vector against itself is 1.0.
+        let unit = l2_normalized(&v);
+        assert!((dot_unit(&unit, &unit) - 1.0).abs() < 1e-5);
+    }
+
+    /// `similar_pairs` must return exactly what the sequential nested loop
+    /// returned, in the same order — including the `None` (failed-to-embed)
+    /// holes, which take part in no pair.
+    #[test]
+    fn similar_pairs_matches_sequential_reference() {
+        let dims = 384;
+        let mut vectors: Vec<Option<Vec<f32>>> = (0..40u64)
+            .map(|i| Some(synth_vector(i % 12, dims)))
+            .collect();
+        vectors[3] = None;
+        vectors[17] = None;
+
+        // Threshold low enough that plenty of pairs qualify, so this is not
+        // vacuously "both returned nothing".
+        let similarity = 0.5;
+        let mut expected: Vec<(usize, usize)> = Vec::new();
+        for i in 0..vectors.len() {
+            for j in (i + 1)..vectors.len() {
+                if let (Some(a), Some(b)) = (&vectors[i], &vectors[j]) {
+                    if cosine(a, b) >= similarity {
+                        expected.push((i, j));
+                    }
+                }
+            }
+        }
+        assert!(
+            !expected.is_empty(),
+            "test corpus produced no pairs; the comparison would be vacuous"
+        );
+        assert_eq!(similar_pairs(&vectors, similarity), expected);
+    }
+
     async fn add_memory(
         store: &MemoryStore,
         type_: MemoryType,
@@ -836,6 +921,13 @@ pub fn cluster_pairs(n: usize, pairs: &[(usize, usize)], min_size: usize) -> Vec
     clusters
 }
 
+/// The straightforward cosine: one `f64` accumulator chain, norms recomputed
+/// per call.
+///
+/// Superseded on the hot path by [`l2_normalized`] + [`dot_unit`], and kept as
+/// the reference the equivalence test scores against — the fast path is only
+/// worth having if it agrees with this to floating-point tolerance.
+#[cfg(test)]
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
@@ -851,6 +943,124 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
     } else {
         dot / (na.sqrt() * nb.sqrt())
     }
+}
+
+/// Lane count for the vectorized dot product below.
+///
+/// Eight `f32` lanes is one AVX register and two SSE registers, so the same
+/// source vectorizes on every x86-64 baseline and on NEON. It is not tuned to
+/// the host: widening it to 16 measured no better here, and narrowing it to 4
+/// leaves AVX registers half empty.
+const DOT_LANES: usize = 8;
+
+/// A memory's embedding scaled to unit length, so that the cosine of two of
+/// them is just their dot product.
+///
+/// `consolidation_pass` compares every observation against every other one,
+/// and [`cosine`] recomputes `‖a‖` and `‖b‖` inside each of those n(n-1)/2
+/// comparisons even though a vector has exactly one norm. Hoisting the norms
+/// into an O(n) prepass removes two thirds of the arithmetic *and* shrinks the
+/// inner loop to a single accumulator set, which is what lets it stay in
+/// vector registers (three sets need 24 live lanes and spill).
+///
+/// Returns the vector unchanged when it has no length — matching [`cosine`],
+/// which reports `0.0` similarity for a zero vector, since `dot_unit` against
+/// an unscaled zero vector is likewise `0.0`.
+fn l2_normalized(v: &[f32]) -> Vec<f32> {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm == 0.0 || !norm.is_finite() {
+        return v.to_vec();
+    }
+    v.iter().map(|x| x / norm).collect()
+}
+
+/// Cosine similarity of two [`l2_normalized`] vectors.
+///
+/// `chunks_exact` plus `try_into` hands LLVM a `&[f32; DOT_LANES]` whose
+/// length is a compile-time constant: the bounds checks disappear and the
+/// eight independent accumulator lanes fold into one vector register. That
+/// last part is the whole trick — Rust's `f32` addition is IEEE-strict, so a
+/// single running sum is a dependency chain the vectorizer is not allowed to
+/// reassociate, and it stays scalar however wide the host is. Separate lanes
+/// give the reassociation explicitly instead of asking for it globally.
+///
+/// Deliberately no `unsafe`, no intrinsics and no `target_feature` gating: the
+/// portable form measured as fast as the host-tuned build here
+/// (`benches/parallel_simd.rs`), and a runtime-dispatched intrinsic version
+/// would have to be maintained per architecture.
+///
+/// Mismatched lengths score `0.0`, as in [`cosine`] — the callers pair vectors
+/// from one provider, so this is a guard, not a code path.
+fn dot_unit(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let mut lanes = [0.0f32; DOT_LANES];
+    let mut ai = a.chunks_exact(DOT_LANES);
+    let mut bi = b.chunks_exact(DOT_LANES);
+    for (ac, bc) in ai.by_ref().zip(bi.by_ref()) {
+        let ac: &[f32; DOT_LANES] = ac
+            .try_into()
+            .expect("chunks_exact yields DOT_LANES elements");
+        let bc: &[f32; DOT_LANES] = bc
+            .try_into()
+            .expect("chunks_exact yields DOT_LANES elements");
+        for l in 0..DOT_LANES {
+            lanes[l] += ac[l] * bc[l];
+        }
+    }
+    let mut dot: f32 = lanes.iter().sum();
+    for (x, y) in ai.remainder().iter().zip(bi.remainder()) {
+        dot += x * y;
+    }
+    dot as f64
+}
+
+/// Every pair of observations whose embeddings are at least `similarity`
+/// alike, as `(i, j)` index pairs with `i < j`.
+///
+/// This is the O(n²) heart of [`consolidation_pass`]. Three things make it
+/// cheap enough to keep running inline in the maintenance pass:
+///
+/// 1. norms hoisted out of the inner loop ([`l2_normalized`]),
+/// 2. a vectorized inner product ([`dot_unit`]),
+/// 3. the outer index spread across the rayon pool.
+///
+/// Row `i` does `n - i` comparisons, so the per-index work is triangular;
+/// rayon's work stealing absorbs that without manual chunking. Results are
+/// collected per outer index and concatenated in order, so the pair list is
+/// identical to the sequential one — `cluster_pairs` is order-insensitive
+/// anyway, but a stable order keeps the reports reproducible.
+///
+/// `vectors[i] == None` means that observation failed to embed; it takes part
+/// in no pair, exactly as before.
+fn similar_pairs(vectors: &[Option<Vec<f32>>], similarity: f64) -> Vec<(usize, usize)> {
+    use rayon::prelude::*;
+
+    let unit: Vec<Option<Vec<f32>>> = vectors
+        .iter()
+        .map(|v| v.as_deref().map(l2_normalized))
+        .collect();
+
+    (0..unit.len())
+        .into_par_iter()
+        .map(|i| {
+            let Some(a) = unit[i].as_deref() else {
+                return Vec::new();
+            };
+            ((i + 1)..unit.len())
+                .filter(|&j| {
+                    unit[j]
+                        .as_deref()
+                        .is_some_and(|b| dot_unit(a, b) >= similarity)
+                })
+                .map(|j| (i, j))
+                .collect::<Vec<_>>()
+        })
+        .reduce(Vec::new, |mut acc, mut v| {
+            acc.append(&mut v);
+            acc
+        })
 }
 
 /// §11.4 consolidation pass: find clusters of ≥
@@ -931,16 +1141,7 @@ pub async fn consolidation_pass(
     }
 
     // Pairwise similarity → union-find clusters.
-    let mut pairs: Vec<(usize, usize)> = Vec::new();
-    for i in 0..observations.len() {
-        for j in (i + 1)..observations.len() {
-            if let (Some(a), Some(b)) = (&vectors[i], &vectors[j]) {
-                if cosine(a, b) >= similarity {
-                    pairs.push((i, j));
-                }
-            }
-        }
-    }
+    let pairs = similar_pairs(&vectors, similarity);
     let clusters = cluster_pairs(observations.len(), &pairs, min_sources);
 
     // Pairwise-NLI bound per cluster: k sources cost k(k-1)/2 cross-encoder

@@ -166,6 +166,15 @@ harness = false
 name = "index_leverage"
 harness = false
 
+# A/B harness for the parallelization + SIMD work: every CPU-bound bulk path
+# (memory-file parsing, keyword-stem derivation, composite scoring, pairwise
+# cosine) measured in its current serial shape against the rayon / vectorized
+# candidate. Separate target so it can be run alone and so the losing variants
+# stay checked in as the record of what was tried.
+[[bench]]
+name = "parallel_simd"
+harness = false
+
 # Dev/test disk diet: full debug info across the ~400-crate dependency tree
 # (lance, datafusion, arrow, ort, …) made a single `--all-features` debug
 # build ~25 GB — enough to exhaust CI sandboxes and small dev machines.

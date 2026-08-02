@@ -41,6 +41,18 @@ const VECTOR_SEARCH_WINDOW_CAP: usize = 1000;
 /// to the whole-store search.
 const VECTOR_RESTRICT_MAX_IDS: usize = 500;
 
+/// Candidate count at or above which the per-memory scoring and keyword-stem
+/// passes go through the rayon pool.
+///
+/// Both are pure per-row maps over shared read-only state, so they parallelize
+/// exactly; the only question is whether the work is worth entering the pool
+/// for. At ~0.5µs of scoring per row the crossover is a few dozen rows, and
+/// most queries in a small store are below it — where the sequential branch
+/// keeps the previous behaviour byte for byte and costs nothing. Measured
+/// gains start around 100 rows (~1.5x) and reach ~3.5x at 5,000
+/// (`benches/parallel_simd.rs`).
+const PARALLEL_SCORE_MIN: usize = 64;
+
 /// Detail level for retrieved memories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DetailLevel {
@@ -1047,19 +1059,39 @@ impl RetrievalEngine {
             // loaded memory only for rows written before the column existed, so
             // a partially-migrated store degrades in speed and never in
             // correctness.
-            let scored: Vec<(&str, KeywordStems)> = filtered_entries
-                .iter()
-                .filter_map(|e| {
-                    let stems = match &e.keyword_stems {
-                        Some(s) => s.clone(),
-                        None => {
-                            let m = memory_map.get(&e.id)?;
-                            KeywordStems::compute(&m.summary, &m.tags, &m.content)
-                        }
-                    };
-                    Some((e.id.as_str(), stems))
-                })
-                .collect();
+            fn stems_for<'a>(
+                e: &'a crate::storage::IndexForFiltering,
+                memory_map: &HashMap<String, Memory>,
+            ) -> Option<(&'a str, KeywordStems)> {
+                let stems = match &e.keyword_stems {
+                    Some(s) => s.clone(),
+                    None => {
+                        let m = memory_map.get(&e.id)?;
+                        KeywordStems::compute(&m.summary, &m.tags, &m.content)
+                    }
+                };
+                Some((e.id.as_str(), stems))
+            }
+            // The `None` arm is the pre-v0.5.0 fallback: deriving stems is
+            // ~16µs per memory (tokenize → stoplist → Snowball stem → dedup
+            // across three fields), so on a store that has not been reindexed
+            // since the column landed this dominates the query. Parallel above
+            // the same threshold as scoring; order-preserving either way,
+            // which matters here because `kw_results` indexes back into this
+            // vector.
+            let scored: Vec<(&str, KeywordStems)> = if filtered_entries.len() >= PARALLEL_SCORE_MIN
+            {
+                use rayon::prelude::*;
+                filtered_entries
+                    .par_iter()
+                    .filter_map(|e| stems_for(e, &memory_map))
+                    .collect()
+            } else {
+                filtered_entries
+                    .iter()
+                    .filter_map(|e| stems_for(e, &memory_map))
+                    .collect()
+            };
             let stems: Vec<KeywordStems> = scored.iter().map(|(_, s)| s.clone()).collect();
             let kw_results = keyword_search_stems(q, &stems);
             let num_tokens = query_token_count(q);
@@ -1092,16 +1124,12 @@ impl RetrievalEngine {
         // memory. Only the survivors of threshold + sort + rerank + truncate
         // are materialized (cloned) into `ScoredMemory` at the end. On a large
         // no-filter Rank query this turns N memory clones into `max_results`.
-        let mut candidates: Vec<ScoredCandidate> = Vec::new();
         let query_path = query_path.as_deref();
         let now = Utc::now();
 
         let t_score = std::time::Instant::now();
-        for entry in filtered_entries.iter() {
-            let memory = match memory_map.get(&entry.id) {
-                Some(m) => m,
-                None => continue,
-            };
+        let score_one = |entry: &crate::storage::IndexForFiltering| {
+            let memory = memory_map.get(&entry.id)?;
 
             // Gather query evidence for this memory. Semantic comes from the
             // vector top-k when present; an embedded memory that missed the
@@ -1188,16 +1216,28 @@ impl RetrievalEngine {
                 // sufficiency signal — it filtered nothing.
                 let user_scope_supplied = query_path.is_some() || !query.logical.is_empty();
                 if !(has_kw || has_tag || user_scope_supplied) {
-                    continue;
+                    return None;
                 }
             }
 
-            candidates.push(ScoredCandidate {
+            Some(ScoredCandidate {
                 id: memory.id.clone(),
                 score: breakdown.final_score,
                 breakdown,
-            });
-        }
+            })
+        };
+
+        // Same independence argument as `rank_scope_only_from_index`: every
+        // iteration reads `memory_map` / `keyword_map` / `semantic_scores_map`
+        // and writes nothing shared. `filter_map` over an indexed parallel
+        // iterator keeps input order, so the candidate list is identical to
+        // the sequential one, not merely equivalent.
+        let mut candidates: Vec<ScoredCandidate> = if filtered_entries.len() >= PARALLEL_SCORE_MIN {
+            use rayon::prelude::*;
+            filtered_entries.par_iter().filter_map(score_one).collect()
+        } else {
+            filtered_entries.iter().filter_map(score_one).collect()
+        };
 
         self.record_stage("score", t_score.elapsed().as_secs_f64() * 1000.0);
 
@@ -1315,36 +1355,48 @@ impl RetrievalEngine {
         let now = Utc::now();
 
         let t_score = std::time::Instant::now();
-        let mut candidates: Vec<ScoredCandidate> = filtered_entries
-            .iter()
-            .map(|e| {
-                let target = ScoreTarget {
-                    created_at: e.created_at,
-                    decay: &e.decay,
-                    criticality: e.criticality,
-                    physical: &e.physical,
-                    logical: &e.logical,
-                    provenance_source: e.provenance_source,
-                    status: e.status,
-                    epistemic: e.epistemic,
-                    verified_at: e.verified_at,
-                };
-                let context = ScoringContext::scope_only(ctx_path, &query.logical)
-                    .with_situation(query.situation);
-                // Mirror the main loop: expired entries (present only under
-                // include_expired) score ignoring decay.
-                let breakdown = if e.expires_at.is_some_and(|exp| now > exp) {
-                    composite_score_target_ignore_decay(target, &context, &self.config, now)
-                } else {
-                    composite_score_target(target, &context, &self.config, now)
-                };
-                ScoredCandidate {
-                    id: e.id.clone(),
-                    score: breakdown.final_score,
-                    breakdown,
-                }
-            })
-            .collect();
+        let score_entry = |e: &crate::storage::IndexForFiltering| {
+            let target = ScoreTarget {
+                created_at: e.created_at,
+                decay: &e.decay,
+                criticality: e.criticality,
+                physical: &e.physical,
+                logical: &e.logical,
+                provenance_source: e.provenance_source,
+                status: e.status,
+                epistemic: e.epistemic,
+                verified_at: e.verified_at,
+            };
+            let context = ScoringContext::scope_only(ctx_path, &query.logical)
+                .with_situation(query.situation);
+            // Mirror the main loop: expired entries (present only under
+            // include_expired) score ignoring decay.
+            let breakdown = if e.expires_at.is_some_and(|exp| now > exp) {
+                composite_score_target_ignore_decay(target, &context, &self.config, now)
+            } else {
+                composite_score_target(target, &context, &self.config, now)
+            };
+            ScoredCandidate {
+                id: e.id.clone(),
+                score: breakdown.final_score,
+                breakdown,
+            }
+        };
+        // This path scores *every* index row — it is the no-query Rank shape
+        // the SessionStart/PreToolUse hooks take, where nothing narrows the
+        // candidate set first, so scoring is the whole cost rather than a tail
+        // behind file loading. Measured at ~3.0ms per 5,000 rows serially and
+        // ~0.87ms across four cores (`benches/parallel_simd.rs`, `score/*`).
+        //
+        // Scoring is a pure function of the row plus shared read-only config,
+        // so the rows are independent; `collect` keeps input order, which the
+        // sort below then makes irrelevant anyway.
+        let mut candidates: Vec<ScoredCandidate> = if filtered_entries.len() >= PARALLEL_SCORE_MIN {
+            use rayon::prelude::*;
+            filtered_entries.par_iter().map(score_entry).collect()
+        } else {
+            filtered_entries.iter().map(score_entry).collect()
+        };
         self.record_stage("score", t_score.elapsed().as_secs_f64() * 1000.0);
 
         let threshold = self.config.retrieval.relevance_threshold;
