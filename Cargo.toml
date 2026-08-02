@@ -196,7 +196,20 @@ strip = true
 panic = "abort"
 codegen-units = 1
 
+# `opt-level` MUST match `[profile.release]`. It used to be 2 while release
+# shipped "z", which does not merely make benchmarks optimistic — for
+# codegen-sensitive code the two levels *rank candidates differently*. A dot
+# product hand-unrolled into independent accumulators measured 4.4x faster than
+# the baseline at opt-level 2 and 1.6x SLOWER than a naive loop at "z", so
+# tuning against `cargo bench` shipped a pessimization. See
+# `docs/contributors/parallelization-simd.md`.
+#
+# `lto` and `codegen-units` deliberately still differ from release: fat LTO with
+# one codegen unit takes ~20 minutes to link this dependency tree, which would
+# make the bench suite unusable for iteration. That leaves a known residual gap
+# — cross-crate inlining — so a result that hinges on codegen should still be
+# confirmed by disassembling a real release build before it is believed.
 [profile.bench]
 lto = false
-opt-level = 2
+opt-level = "z"
 codegen-units = 16

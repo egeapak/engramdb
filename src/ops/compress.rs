@@ -992,15 +992,21 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 /// `consolidation_pass` compares every observation against every other one,
 /// and [`cosine`] recomputes `‖a‖` and `‖b‖` inside each of those n(n-1)/2
 /// comparisons even though a vector has exactly one norm. Hoisting the norms
-/// into an O(n) prepass removes two thirds of the arithmetic *and* shrinks the
-/// inner loop from three accumulator sets to one — 24 live accumulators exceed
-/// the sixteen `xmm` registers and spill, eight do not.
+/// into an O(n) prepass removes two thirds of the arithmetic, and leaves the
+/// O(n²) body a bare dot product.
+///
+/// `‖v‖²` is itself a dot product, so it reuses [`dot_unit`] and gets the same
+/// vector instructions rather than a second scalar reduction. The scaling pass
+/// is left scalar deliberately: this whole function is O(n) against the O(n²)
+/// body it feeds — at the 500-observation cap it is ~0.4% of the pass — so a
+/// third set of per-architecture intrinsics would be maintenance for a
+/// rounding error.
 ///
 /// Returns the vector unchanged when it has no length — matching [`cosine`],
 /// which reports `0.0` similarity for a zero vector, since `dot_unit` against
 /// an unscaled zero vector is likewise `0.0`.
 fn l2_normalized(v: &[f32]) -> Vec<f32> {
-    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm = (dot_unit(v, v) as f32).sqrt();
     if norm == 0.0 || !norm.is_finite() {
         return v.to_vec();
     }

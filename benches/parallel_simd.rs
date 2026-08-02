@@ -326,6 +326,95 @@ fn dot_unit_f32(a: &[f32], b: &[f32]) -> f64 {
     d as f64
 }
 
+/// What `ops::compress::dot_unit` actually ships: explicit intrinsics, which
+/// lower to vector instructions at any `opt-level` because they are semantic
+/// rather than something the optimizer has to discover.
+///
+/// Duplicated here (the production one is private) so the bench can rank it
+/// against every candidate at whatever `opt-level` the harness is built with.
+/// The point of this arm is the comparison at `opt-level = "z"` — the profile
+/// that ships — where every auto-vectorization-dependent variant above
+/// collapses to scalar and this one does not.
+#[cfg(target_arch = "x86_64")]
+fn dot_unit_intrinsics(a: &[f32], b: &[f32]) -> f64 {
+    use std::arch::x86_64::*;
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+        // SAFETY: guarded by the detection immediately above.
+        return unsafe { dot_avx2(a, b) };
+    }
+    // SAFETY: SSE2 is unconditionally present on x86_64.
+    unsafe {
+        let (mut acc0, mut acc1) = (_mm_setzero_ps(), _mm_setzero_ps());
+        let n = a.len() / 8 * 8;
+        let mut i = 0;
+        while i < n {
+            acc0 = _mm_add_ps(
+                acc0,
+                _mm_mul_ps(
+                    _mm_loadu_ps(a.as_ptr().add(i)),
+                    _mm_loadu_ps(b.as_ptr().add(i)),
+                ),
+            );
+            acc1 = _mm_add_ps(
+                acc1,
+                _mm_mul_ps(
+                    _mm_loadu_ps(a.as_ptr().add(i + 4)),
+                    _mm_loadu_ps(b.as_ptr().add(i + 4)),
+                ),
+            );
+            i += 8;
+        }
+        let mut lanes = [0.0f32; 4];
+        _mm_storeu_ps(lanes.as_mut_ptr(), _mm_add_ps(acc0, acc1));
+        let mut d: f32 = lanes.iter().sum();
+        while i < a.len() {
+            d += a[i] * b[i];
+            i += 1;
+        }
+        d as f64
+    }
+}
+
+/// # Safety
+/// Caller must have verified `avx2` and `fma`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_avx2(a: &[f32], b: &[f32]) -> f64 {
+    use std::arch::x86_64::*;
+    let (mut acc0, mut acc1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+    let n = a.len() / 16 * 16;
+    let mut i = 0;
+    while i < n {
+        acc0 = _mm256_fmadd_ps(
+            _mm256_loadu_ps(a.as_ptr().add(i)),
+            _mm256_loadu_ps(b.as_ptr().add(i)),
+            acc0,
+        );
+        acc1 = _mm256_fmadd_ps(
+            _mm256_loadu_ps(a.as_ptr().add(i + 8)),
+            _mm256_loadu_ps(b.as_ptr().add(i + 8)),
+            acc1,
+        );
+        i += 16;
+    }
+    let mut lanes = [0.0f32; 8];
+    _mm256_storeu_ps(lanes.as_mut_ptr(), _mm256_add_ps(acc0, acc1));
+    let mut d: f32 = lanes.iter().sum();
+    while i < a.len() {
+        d += a[i] * b[i];
+        i += 1;
+    }
+    d as f64
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn dot_unit_intrinsics(a: &[f32], b: &[f32]) -> f64 {
+    dot_unit_f32(a, b)
+}
+
 /// A deterministic unit-ish 384-dim vector (all-MiniLM-L6-v2's dimension).
 fn synth_vector(seed: u64) -> Vec<f32> {
     let mut state = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
@@ -354,6 +443,9 @@ fn cosine_benchmarks(c: &mut Criterion) {
         group.bench_function("f32_lanes8", |b| b.iter(|| cosine_f32_lanes8(&a, &b_vec)));
         group.bench_function("f32_arr8", |b| b.iter(|| cosine_f32_arr8(&a, &b_vec)));
         group.bench_function("dot_unit", |b| b.iter(|| dot_unit_f32(&a_unit, &b_unit)));
+        group.bench_function("dot_intrinsics", |b| {
+            b.iter(|| dot_unit_intrinsics(&a_unit, &b_unit))
+        });
         group.finish();
     }
 
@@ -407,6 +499,38 @@ fn cosine_benchmarks(c: &mut Criterion) {
                         }
                     }
                 }
+                pairs.len()
+            });
+        });
+
+        // What actually ships: intrinsics in the inner product.
+        group.bench_with_input(BenchmarkId::new("intrinsics", n), &vectors, |b, v| {
+            b.iter(|| {
+                let unit: Vec<Vec<f32>> = v.iter().map(|x| l2_normalize(x)).collect();
+                let mut pairs = Vec::new();
+                for i in 0..unit.len() {
+                    for j in (i + 1)..unit.len() {
+                        if dot_unit_intrinsics(&unit[i], &unit[j]) >= threshold {
+                            pairs.push((i, j));
+                        }
+                    }
+                }
+                pairs.len()
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("intrinsics_rayon", n), &vectors, |b, v| {
+            b.iter(|| {
+                let unit: Vec<Vec<f32>> = v.par_iter().map(|x| l2_normalize(x)).collect();
+                let pairs: Vec<(usize, usize)> = (0..unit.len())
+                    .into_par_iter()
+                    .flat_map_iter(|i| {
+                        let unit = &unit;
+                        ((i + 1)..unit.len()).filter_map(move |j| {
+                            (dot_unit_intrinsics(&unit[i], &unit[j]) >= threshold).then_some((i, j))
+                        })
+                    })
+                    .collect();
                 pairs.len()
             });
         });
