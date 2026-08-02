@@ -200,3 +200,34 @@ codegen-units = 1
 lto = false
 opt-level = 2
 codegen-units = 16
+
+# EngramDB's own crates build for speed even though the profile above builds
+# for size. `opt-level = "z"` disables LLVM's loop vectorizer outright, which
+# silently un-does the vectorized hot paths (`ops::compress::dot_unit`, the
+# scoring and normalization loops) — measured at ~14x on an isolated dot
+# product and ~6x on the pairwise similarity pass. See
+# `docs/contributors/parallelization-simd.md`.
+#
+# Scoped to the workspace members on purpose: the binary's size is dominated
+# by lance / datafusion / arrow / ort, which stay at "z" and are not on any
+# hot path this repo controls.
+[profile.release.package.engramdb]
+opt-level = 2
+
+[profile.release.package.engram-storage]
+opt-level = 2
+
+[profile.release.package.engram-types]
+opt-level = 2
+
+[profile.release.package.engram-models]
+opt-level = 2
+
+[profile.release.package.engram-cli]
+opt-level = 2
+
+[profile.release.package.engram-mcp]
+opt-level = 2
+
+[profile.release.package.engram-onnx]
+opt-level = 2
