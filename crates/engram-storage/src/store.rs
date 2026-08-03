@@ -25,7 +25,7 @@ use super::registry::RegistryBackend;
 use super::{manifest, memory_file, paths, project_id, write_lock};
 use crate::config::{load_config, load_config_or_default};
 use chrono::{DateTime, Utc};
-use engram_types::{Memory, MemoryUpdate, Visibility};
+use engram_types::{Memory, MemoryType, MemoryUpdate, Visibility};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::fs as async_fs;
@@ -1202,6 +1202,18 @@ impl MemoryStore {
     }
 
     /// Return the count of memories without loading data.
+    /// Count memories grouped by type in one single-column index scan.
+    ///
+    /// See [`LanceIndex::count_by_type`]. Cheaper than deriving the histogram
+    /// from [`Self::list_summary`], which decodes six columns this does not
+    /// need.
+    pub async fn count_by_type(&self) -> Result<HashMap<MemoryType, usize>> {
+        self.lance_index
+            .count_by_type()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB count_by_type failed: {}", e)))
+    }
+
     pub async fn count(&self) -> Result<usize> {
         self.lance_index
             .count()

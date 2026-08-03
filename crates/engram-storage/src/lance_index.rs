@@ -597,6 +597,42 @@ impl LanceIndex {
         Ok((count, scopes))
     }
 
+    /// Count rows grouped by memory type in one single-column scan
+    /// (`type` only).
+    ///
+    /// Backs the cross-project `aggregate_stats` rollup, which needs exactly
+    /// a total and a per-type histogram. Deriving those from the 7-column
+    /// summary projection made every counted memory pay a `serde_json`
+    /// parse of `logical` and two RFC3339 timestamp parses whose results
+    /// were then dropped on the floor.
+    pub async fn count_by_type(&self) -> Result<HashMap<MemoryType, usize>> {
+        let table = self.open_table().await?;
+
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec!["type".into()]))
+            .execute()
+            .await
+            .context("Failed to query LanceDB table for type counts")?;
+
+        let mut counts: HashMap<MemoryType, usize> = HashMap::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read batch")?;
+            let types = batch
+                .column_by_name("type")
+                .context("Missing 'type' column")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("Failed to cast 'type'")?;
+            for i in 0..batch.num_rows() {
+                *counts
+                    .entry(parse_memory_type(types.value(i))?)
+                    .or_insert(0) += 1;
+            }
+        }
+        Ok(counts)
+    }
+
     /// List all memory IDs in the memories table.
     pub async fn list_ids(&self) -> Result<Vec<String>> {
         let table = self.open_table().await?;

@@ -175,6 +175,10 @@ harness = false
 name = "parallel_simd"
 harness = false
 
+[[bench]]
+name = "project_scan"
+harness = false
+
 # Dev/test disk diet: full debug info across the ~400-crate dependency tree
 # (lance, datafusion, arrow, ort, …) made a single `--all-features` debug
 # build ~25 GB — enough to exhaust CI sandboxes and small dev machines.
