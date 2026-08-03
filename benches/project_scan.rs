@@ -165,12 +165,19 @@ fn bench_worktree_consolidate(c: &mut Criterion) {
             BenchmarkId::new("20_stray_by_main_size", main_count),
             &main_count,
             |b, &main_count| {
-                b.to_async(&rt).iter_batched(
+                // Sync `iter_batched`, not `to_async`: the setup closure has to
+                // seed a fresh store per iteration (consolidation consumes its
+                // source files), and `block_on` inside a closure criterion is
+                // already driving from within the runtime panics with "cannot
+                // start a runtime from within a runtime". Keeping the bencher
+                // synchronous leaves the main thread outside the runtime, so
+                // both setup and routine can drive it.
+                b.iter_batched(
                     || rt.block_on(seed_worktree(main_count, 20)),
-                    |(root, wt_dir)| async move {
+                    |(root, wt_dir)| {
                         let main_dir = root.path().join("main");
-                        let n = consolidate_worktree_into_main(&wt_dir, &main_dir)
-                            .await
+                        let n = rt
+                            .block_on(consolidate_worktree_into_main(&wt_dir, &main_dir))
                             .expect("consolidate failed");
                         drop(root);
                         n
@@ -188,12 +195,12 @@ fn bench_worktree_consolidate(c: &mut Criterion) {
             BenchmarkId::new("500_main_by_stray_count", stray),
             &stray,
             |b, &stray| {
-                b.to_async(&rt).iter_batched(
+                b.iter_batched(
                     || rt.block_on(seed_worktree(500, stray)),
-                    |(root, wt_dir)| async move {
+                    |(root, wt_dir)| {
                         let main_dir = root.path().join("main");
-                        let n = consolidate_worktree_into_main(&wt_dir, &main_dir)
-                            .await
+                        let n = rt
+                            .block_on(consolidate_worktree_into_main(&wt_dir, &main_dir))
                             .expect("consolidate failed");
                         drop(root);
                         n
