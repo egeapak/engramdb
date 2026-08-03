@@ -236,7 +236,7 @@ async fn run_ledger(
                 .filter(|(_, e)| wanted.is_none_or(|w| e.decision() == w))
                 .filter(|(_, e)| !with_archive || e.archive.is_some())
                 .collect();
-            rows.sort_by(|a, b| b.1.harvested_at.cmp(&a.1.harvested_at));
+            rows.sort_by_key(|r| std::cmp::Reverse(r.1.harvested_at));
 
             if formatter.is_json() {
                 let out: Vec<_> = rows.iter().map(|(id, e)| entry_json(id, e)).collect();

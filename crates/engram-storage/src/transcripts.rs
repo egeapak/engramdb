@@ -579,7 +579,7 @@ pub fn list_sessions_in(root: &Path, project_paths: &[PathBuf]) -> Result<Vec<Se
         }
     }
 
-    out.sort_by(|a, b| b.ended_at.cmp(&a.ended_at));
+    out.sort_by_key(|s| std::cmp::Reverse(s.ended_at));
     Ok(out)
 }
 
