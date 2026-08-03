@@ -170,10 +170,37 @@ pub async fn compress_apply(
     // the whole group. No-op (None) on a project-local store, so the common path
     // pays no extra reads.
     let audience = if store.is_group() || store.is_global() {
-        let mut mems = Vec::with_capacity(source_ids.len());
-        for id in &source_ids {
-            mems.push(store.get(id).await?);
+        // One batched read: the file already uses `batch_exists` on this exact
+        // list a few lines up, so a per-id `get` loop here was gratuitous.
+        //
+        // The completeness check is NOT optional. `consolidated_audience`
+        // unions the sources' restricted audiences, so a source silently
+        // dropped from the batch (unreadable file — `get_batch` warns and
+        // skips) would contribute nothing and the summary would end up LESS
+        // restricted than its evidence. That is precisely the widening
+        // `consolidated_audience` is documented never to do, so a short batch
+        // has to fail the way the per-id `get(...)?` it replaced did.
+        let refs: Vec<&str> = source_ids.iter().map(String::as_str).collect();
+        let loaded = store.get_batch(&refs).await?;
+        if loaded.len() != source_ids.len() {
+            let missing: Vec<&str> = {
+                let got: std::collections::HashSet<&str> =
+                    loaded.iter().map(|(id, _)| id.as_str()).collect();
+                source_ids
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|id| !got.contains(id))
+                    .collect()
+            };
+            bail!(
+                "Cannot compute the consolidated audience: source memor{} {} could not be read. \
+                 Refusing to proceed — a partial read would produce a summary visible more \
+                 widely than its sources.",
+                if missing.len() == 1 { "y" } else { "ies" },
+                missing.join(", ")
+            );
         }
+        let mems: Vec<crate::types::Memory> = loaded.into_iter().map(|(_, m)| m).collect();
         consolidated_audience(store, &mems)
     } else {
         None
@@ -227,16 +254,33 @@ pub async fn compress_apply(
     //   so the user can re-run. The summary memory remains valid either way.
     let mut skipped_sources = Vec::new();
     let mut failed_sources: Vec<String> = Vec::new();
+    // One batched read rather than a `get` (full directory scan) per source.
+    //
+    // `get_batch` drops unreadable files with a warning, so "absent from the
+    // map" alone cannot distinguish a source that was concurrently deleted
+    // (benign — skip) from one whose file is corrupt or unreadable (a real
+    // failure the caller must be told about so it can re-run). The per-id loop
+    // this replaced drew that line via `Err(NotFound)` vs `Err(other)`.
+    // `batch_exists` restores it in one extra directory scan: a source with no
+    // file on disk is gone, one whose file is present but did not load is a
+    // failure.
+    let verify_refs: Vec<&str> = source_ids.iter().map(String::as_str).collect();
+    let on_disk = store
+        .batch_exists(&verify_refs)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to re-check source IDs: {}", e))?;
+    let verified: std::collections::HashMap<String, crate::types::Memory> =
+        store.get_batch(&verify_refs).await?.into_iter().collect();
     for id in &source_ids {
-        match store.get(id).await {
-            Err(crate::storage::StorageError::NotFound(_)) => {
-                skipped_sources.push(id.clone());
-            }
-            Err(e) => failed_sources.push(format!("{} ({})", id, e)),
+        match verified.get(id) {
+            None if !on_disk.contains(id.as_str()) => skipped_sources.push(id.clone()),
+            // File present but did not load — corrupt, unreadable, or replaced
+            // by something that is not a memory file.
+            None => failed_sources.push(format!("{} (unreadable)", id)),
             // Invalidated — by this compress or an earlier writer; either
             // way the window is closed.
-            Ok(m) if m.is_invalidated() => {}
-            Ok(_) => failed_sources.push(format!("{} (still active)", id)),
+            Some(m) if m.is_invalidated() => {}
+            Some(_) => failed_sources.push(format!("{} (still active)", id)),
         }
     }
 
@@ -349,6 +393,62 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A source that exists but cannot be READ must fail the compress, not be
+    /// silently skipped.
+    ///
+    /// Regression guard for the `get` -> `get_batch` conversion. The per-id
+    /// loops propagated a read error; `get_batch` warns and omits the row, so
+    /// a naive conversion turns "this source is corrupt" into "this source is
+    /// fine". Two places cared: the post-invalidation verification (which
+    /// would report success while leaving a source active) and the audience
+    /// union (which would publish the summary wider than its evidence).
+    #[tokio::test]
+    async fn unreadable_source_fails_compress_rather_than_being_skipped() {
+        let (temp, store) = setup_store().await;
+        let broken = add_memory(&store, MemoryType::Debug, "broken", 0.1, vec![]).await;
+        let ok = add_memory(&store, MemoryType::Debug, "fine", 0.1, vec![]).await;
+
+        // A directory where the memory file should be: the id still "exists"
+        // on disk (batch_exists sees the stem) but no read can succeed.
+        let memories_dir = temp.path().join(".engramdb").join("memories");
+        for entry in std::fs::read_dir(&memories_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n.contains(&broken))
+            {
+                std::fs::remove_file(&path).unwrap();
+                std::fs::create_dir(&path).unwrap();
+            }
+        }
+
+        let err = compress_apply(
+            &store,
+            CompressApplyParams {
+                source_ids: vec![broken.clone(), ok.clone()],
+                summary: "Summary".to_string(),
+                content: "Content".to_string(),
+                scope: None,
+                tags: None,
+                embed_async: false,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&broken),
+            "the unreadable source must be named in the error, got: {msg}"
+        );
+        assert!(
+            !msg.contains(&ok),
+            "the readable source must not be reported as failed, got: {msg}"
+        );
     }
 
     /// Max-over-chunk-pairs: two memories are similar if ANY chunk of one is
@@ -1063,7 +1163,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 /// Returns the vector unchanged when it has no length — matching [`cosine`],
 /// which reports `0.0` similarity for a zero vector, since `dot_unit` against
 /// an unscaled zero vector is likewise `0.0`.
-fn l2_normalized(v: &[f32]) -> Vec<f32> {
+pub fn l2_normalized(v: &[f32]) -> Vec<f32> {
     let norm = (dot_unit(v, v) as f32).sqrt();
     if norm == 0.0 || !norm.is_finite() {
         return v.to_vec();
@@ -1072,6 +1172,11 @@ fn l2_normalized(v: &[f32]) -> Vec<f32> {
 }
 
 /// Cosine similarity of two [`l2_normalized`] vectors: their dot product.
+///
+/// `pub` so `benches/parallel_simd.rs` measures *this* function rather than a
+/// copy. A benchmark that reimplements the code it claims to measure silently
+/// stops being true the moment production changes — which had already happened
+/// here once.
 ///
 /// Written with explicit SIMD intrinsics rather than a shape the
 /// auto-vectorizer might pick up, because **the release profile ships
@@ -1113,7 +1218,7 @@ fn l2_normalized(v: &[f32]) -> Vec<f32> {
 ///
 /// Mismatched lengths score `0.0`, as in [`cosine`] — the callers pair vectors
 /// from one provider, so this is a guard, not a code path.
-fn dot_unit(a: &[f32], b: &[f32]) -> f64 {
+pub fn dot_unit(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
@@ -1284,7 +1389,7 @@ unsafe fn dot_unit_neon(a: &[f32], b: &[f32]) -> f64 {
 /// "similar" means. Mean would dilute a strong match on one chunk against
 /// unrelated chunks in a long memory — precisely the case consolidation is
 /// looking for.
-fn similar_pairs(vectors: &[Vec<Vec<f32>>], similarity: f64) -> Vec<(usize, usize)> {
+pub fn similar_pairs(vectors: &[Vec<Vec<f32>>], similarity: f64) -> Vec<(usize, usize)> {
     use rayon::prelude::*;
 
     // Normalize every chunk once. With `k` chunks per memory the inner loop is
@@ -1517,9 +1622,18 @@ pub async fn consolidate_cluster_apply(
     if source_ids.len() < 2 {
         bail!("a consolidation cluster needs at least 2 sources");
     }
+    // One batched read for the cluster's sources.
+    let src_refs: Vec<&str> = source_ids.iter().map(String::as_str).collect();
+    let by_id: std::collections::HashMap<String, crate::types::Memory> =
+        store.get_batch(&src_refs).await?.into_iter().collect();
     let mut sources = Vec::with_capacity(source_ids.len());
     for id in source_ids {
-        sources.push(store.get(id).await?);
+        sources.push(
+            by_id
+                .get(id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("source memory not found: {id}"))?,
+        );
     }
 
     let all_same_type = sources.windows(2).all(|w| w[0].type_ == w[1].type_);
@@ -1595,18 +1709,15 @@ pub async fn consolidate_cluster_apply(
 
     // Demote sources: 30d exponential, floor 0.1 — evidence fades, never
     // vanishes.
-    for id in source_ids {
-        let demoted = store
-            .update_with(id, |m| {
-                m.decay = Some(
-                    crate::types::Decay::exponential(chrono::Duration::days(30)).with_floor(0.1),
-                );
-                Ok(())
-            })
-            .await;
-        if let Err(e) = demoted {
-            tracing::warn!(memory_id = %id, "consolidation source demotion failed: {e}");
-        }
+    let (_, demote_failures) = store
+        .update_batch_with(source_ids, |m| {
+            m.decay =
+                Some(crate::types::Decay::exponential(chrono::Duration::days(30)).with_floor(0.1));
+            Ok(())
+        })
+        .await?;
+    for (id, e) in demote_failures {
+        tracing::warn!(memory_id = %id, "consolidation source demotion failed: {e}");
     }
     Ok(new_id)
 }

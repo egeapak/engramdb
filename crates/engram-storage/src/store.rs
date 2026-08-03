@@ -733,6 +733,85 @@ impl MemoryStore {
         Ok(memory)
     }
 
+    /// [`Self::update_with`] for many memories under **one** lock, one batched
+    /// read, one index upsert and one manifest-stats refresh.
+    ///
+    /// The per-memory version costs a lock, a directory scan, a `has_chunks`
+    /// scan, an index commit and a full manifest-stats scan *each* — measured
+    /// at 28 ms/memory at n=16 rising to 60 ms/memory at n=128, i.e.
+    /// quadratic. Callers that mutate a set of memories (task completion,
+    /// closing superseded validity windows) should use this.
+    ///
+    /// Semantics match `update_with` per entry: each memory is re-read inside
+    /// the lock so `f` sees the latest persisted state, `updated_at` is bumped,
+    /// and a failing closure fails only its own memory. Ids that do not resolve
+    /// are reported rather than aborting the batch.
+    ///
+    /// Returns `(updated_ids, per_id_errors)`.
+    pub async fn update_batch_with<F>(
+        &self,
+        ids: &[String],
+        mut f: F,
+    ) -> Result<(Vec<String>, Vec<(String, String)>)>
+    where
+        F: FnMut(&mut Memory) -> anyhow::Result<()>,
+    {
+        if ids.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let mut current: HashMap<String, Memory> =
+            self.get_batch(&id_refs).await?.into_iter().collect();
+
+        let mut updated: Vec<String> = Vec::new();
+        let mut errors: Vec<(String, String)> = Vec::new();
+        let mut entries: Vec<IndexEntry> = Vec::new();
+
+        for id in ids {
+            let Some(mut memory) = current.remove(id) else {
+                errors.push((id.clone(), "memory not found".to_string()));
+                continue;
+            };
+            let old_visibility = memory.visibility;
+            if let Err(e) = f(&mut memory) {
+                errors.push((id.clone(), format!("{:#}", e)));
+                continue;
+            }
+            memory.mark_updated();
+
+            // File writes stay per-memory: each is an atomic rename to its own
+            // path, and the rename-on-title-change cleanup is inherently
+            // per-file. It is the LanceDB commits and the manifest scan that
+            // were quadratic, not this.
+            if let Err(e) = self
+                .write_updated_file_locked(id, &memory, old_visibility)
+                .await
+            {
+                errors.push((id.clone(), format!("{:#}", e)));
+                continue;
+            }
+
+            let mut entry = IndexEntry::from(&memory);
+            entry.has_embedding = self.lance_index.has_chunks(&memory.id).await.map_err(|e| {
+                StorageError::Validation(format!("LanceDB has_chunks failed: {}", e))
+            })?;
+            entries.push(entry);
+            updated.push(id.clone());
+        }
+
+        if !entries.is_empty() {
+            self.lance_index.upsert_batch(&entries).await.map_err(|e| {
+                StorageError::Validation(format!("LanceDB upsert_batch failed: {}", e))
+            })?;
+            // One refresh for the whole batch instead of one per memory.
+            self.update_manifest_stats().await?;
+        }
+
+        Ok((updated, errors))
+    }
+
     /// Close a memory's validity window (§2.4): set `invalidated_at = now`
     /// and, when the closure was caused by supersession, the ADR-style
     /// reverse link `superseded_by`. The memory is retained on disk and
@@ -764,6 +843,23 @@ impl MemoryStore {
     /// one acquisition must span the entire read-modify-write critical
     /// section.
     async fn write_updated_locked(
+        &self,
+        id: &str,
+        memory: &Memory,
+        old_visibility: Visibility,
+    ) -> Result<()> {
+        self.write_updated_file_locked(id, memory, old_visibility)
+            .await?;
+        self.sync_index_row_locked(memory).await
+    }
+
+    /// The file half of [`Self::write_updated_locked`]: locate the old
+    /// file(s), atomically write the new one, remove any stale path.
+    ///
+    /// Split out so [`Self::update_batch_with`] reuses this exact code rather
+    /// than reimplementing the durability ordering below — the ordering is
+    /// subtle enough that a second copy would be a latent data-loss bug.
+    async fn write_updated_file_locked(
         &self,
         id: &str,
         memory: &Memory,
@@ -803,6 +899,11 @@ impl MemoryStore {
             }
         }
 
+        Ok(())
+    }
+
+    /// The index half of [`Self::write_updated_locked`].
+    async fn sync_index_row_locked(&self, memory: &Memory) -> Result<()> {
         // Upsert metadata to LanceDB (chunks are managed separately). An update
         // must not reset `has_embedding`: the memory may already have chunks
         // that this update isn't touching. Carry the current chunk-presence

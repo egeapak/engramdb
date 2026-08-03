@@ -290,23 +290,9 @@ fn cosine_f32_arr8(a: &[f32], b: &[f32]) -> f64 {
     }
 }
 
-/// L2-normalize once, so the O(n²) inner loop is a bare dot product.
-///
-/// The current pairwise pass recomputes `‖a‖` and `‖b‖` inside every one of
-/// the n(n-1)/2 comparisons even though each vector has exactly one norm —
-/// two thirds of the arithmetic is redundant. Hoisting it to an O(n) prepass
-/// is the algorithmic half of the win; it is also what drops the inner loop
-/// to a single 8-lane accumulator set, which is what lets it stay in vector
-/// registers.
-fn l2_normalize(v: &[f32]) -> Vec<f32> {
-    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm == 0.0 {
-        return v.to_vec();
-    }
-    v.iter().map(|x| x / norm).collect()
-}
-
-/// Dot product of two already-normalized vectors == their cosine similarity.
+/// A **rejected candidate**, kept for the comparison: eight accumulators, no
+/// intrinsics, relying on the optimizer to unroll. Deliberately not in
+/// production — at `opt-level = "z"` it is slower than a naive loop.
 fn dot_unit_f32(a: &[f32], b: &[f32]) -> f64 {
     const L: usize = 8;
     let mut dot = [0.0f32; L];
@@ -326,94 +312,15 @@ fn dot_unit_f32(a: &[f32], b: &[f32]) -> f64 {
     d as f64
 }
 
-/// What `ops::compress::dot_unit` actually ships: explicit intrinsics, which
-/// lower to vector instructions at any `opt-level` because they are semantic
-/// rather than something the optimizer has to discover.
+/// The production normalize and dot product, called directly.
 ///
-/// Duplicated here (the production one is private) so the bench can rank it
-/// against every candidate at whatever `opt-level` the harness is built with.
-/// The point of this arm is the comparison at `opt-level = "z"` — the profile
-/// that ships — where every auto-vectorization-dependent variant above
-/// collapses to scalar and this one does not.
-#[cfg(target_arch = "x86_64")]
-fn dot_unit_intrinsics(a: &[f32], b: &[f32]) -> f64 {
-    use std::arch::x86_64::*;
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
-        // SAFETY: guarded by the detection immediately above.
-        return unsafe { dot_avx2(a, b) };
-    }
-    // SAFETY: SSE2 is unconditionally present on x86_64.
-    unsafe {
-        let (mut acc0, mut acc1) = (_mm_setzero_ps(), _mm_setzero_ps());
-        let n = a.len() / 8 * 8;
-        let mut i = 0;
-        while i < n {
-            acc0 = _mm_add_ps(
-                acc0,
-                _mm_mul_ps(
-                    _mm_loadu_ps(a.as_ptr().add(i)),
-                    _mm_loadu_ps(b.as_ptr().add(i)),
-                ),
-            );
-            acc1 = _mm_add_ps(
-                acc1,
-                _mm_mul_ps(
-                    _mm_loadu_ps(a.as_ptr().add(i + 4)),
-                    _mm_loadu_ps(b.as_ptr().add(i + 4)),
-                ),
-            );
-            i += 8;
-        }
-        let mut lanes = [0.0f32; 4];
-        _mm_storeu_ps(lanes.as_mut_ptr(), _mm_add_ps(acc0, acc1));
-        let mut d: f32 = lanes.iter().sum();
-        while i < a.len() {
-            d += a[i] * b[i];
-            i += 1;
-        }
-        d as f64
-    }
-}
-
-/// # Safety
-/// Caller must have verified `avx2` and `fma`.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-unsafe fn dot_avx2(a: &[f32], b: &[f32]) -> f64 {
-    use std::arch::x86_64::*;
-    let (mut acc0, mut acc1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
-    let n = a.len() / 16 * 16;
-    let mut i = 0;
-    while i < n {
-        acc0 = _mm256_fmadd_ps(
-            _mm256_loadu_ps(a.as_ptr().add(i)),
-            _mm256_loadu_ps(b.as_ptr().add(i)),
-            acc0,
-        );
-        acc1 = _mm256_fmadd_ps(
-            _mm256_loadu_ps(a.as_ptr().add(i + 8)),
-            _mm256_loadu_ps(b.as_ptr().add(i + 8)),
-            acc1,
-        );
-        i += 16;
-    }
-    let mut lanes = [0.0f32; 8];
-    _mm256_storeu_ps(lanes.as_mut_ptr(), _mm256_add_ps(acc0, acc1));
-    let mut d: f32 = lanes.iter().sum();
-    while i < a.len() {
-        d += a[i] * b[i];
-        i += 1;
-    }
-    d as f64
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn dot_unit_intrinsics(a: &[f32], b: &[f32]) -> f64 {
-    dot_unit_f32(a, b)
-}
+/// These used to be copies. Production replaced the scalar norm with a SIMD
+/// one and added an `is_finite` guard, and the copy did not follow — so every
+/// "candidate" arm below was charged a prepass cost production no longer pays,
+/// which flattered the rejected variants and penalised the shipped one. The
+/// copies are gone; `cosine_pair/dot_unit` and every `intrinsics` arm now
+/// measure exactly what `consolidation_pass` runs.
+use engramdb::ops::compress::{dot_unit as dot_unit_prod, l2_normalized, similar_pairs};
 
 /// A deterministic unit-ish 384-dim vector (all-MiniLM-L6-v2's dimension).
 fn synth_vector(seed: u64) -> Vec<f32> {
@@ -435,16 +342,18 @@ fn cosine_benchmarks(c: &mut Criterion) {
         let a = synth_vector(1);
         let b_vec = synth_vector(2);
 
-        let a_unit = l2_normalize(&a);
-        let b_unit = l2_normalize(&b_vec);
+        let a_unit = l2_normalized(&a);
+        let b_unit = l2_normalized(&b_vec);
 
         group.bench_function("f64_scalar", |b| b.iter(|| cosine_f64_scalar(&a, &b_vec)));
         group.bench_function("f32_scalar", |b| b.iter(|| cosine_f32_scalar(&a, &b_vec)));
         group.bench_function("f32_lanes8", |b| b.iter(|| cosine_f32_lanes8(&a, &b_vec)));
         group.bench_function("f32_arr8", |b| b.iter(|| cosine_f32_arr8(&a, &b_vec)));
-        group.bench_function("dot_unit", |b| b.iter(|| dot_unit_f32(&a_unit, &b_unit)));
-        group.bench_function("dot_intrinsics", |b| {
-            b.iter(|| dot_unit_intrinsics(&a_unit, &b_unit))
+        group.bench_function("dot_unit_candidate", |b| {
+            b.iter(|| dot_unit_f32(&a_unit, &b_unit))
+        });
+        group.bench_function("dot_unit_SHIPPED", |b| {
+            b.iter(|| dot_unit_prod(&a_unit, &b_unit))
         });
         group.finish();
     }
@@ -490,7 +399,7 @@ fn cosine_benchmarks(c: &mut Criterion) {
         // O(n^2) body.
         group.bench_with_input(BenchmarkId::new("norm_dot", n), &vectors, |b, v| {
             b.iter(|| {
-                let unit: Vec<Vec<f32>> = v.iter().map(|x| l2_normalize(x)).collect();
+                let unit: Vec<Vec<f32>> = v.iter().map(|x| l2_normalized(x)).collect();
                 let mut pairs = Vec::new();
                 for i in 0..unit.len() {
                     for j in (i + 1)..unit.len() {
@@ -503,56 +412,33 @@ fn cosine_benchmarks(c: &mut Criterion) {
             });
         });
 
-        // What actually ships: intrinsics in the inner product.
-        group.bench_with_input(BenchmarkId::new("intrinsics", n), &vectors, |b, v| {
-            b.iter(|| {
-                let unit: Vec<Vec<f32>> = v.iter().map(|x| l2_normalize(x)).collect();
-                let mut pairs = Vec::new();
-                for i in 0..unit.len() {
-                    for j in (i + 1)..unit.len() {
-                        if dot_unit_intrinsics(&unit[i], &unit[j]) >= threshold {
-                            pairs.push((i, j));
-                        }
-                    }
-                }
-                pairs.len()
-            });
-        });
+        // What actually ships — the real function, not a model of it.
+        //
+        // `similar_pairs` takes one Vec of chunks PER MEMORY and aggregates by
+        // max over chunk pairs. The old bench arm modelled one vector per
+        // memory, which understated the O(n²) body by the chunk factor and
+        // measured a shape production had stopped using.
+        let as_chunks: Vec<Vec<Vec<f32>>> = vectors.iter().map(|v| vec![v.clone()]).collect();
+        group.bench_with_input(
+            BenchmarkId::new("similar_pairs_SHIPPED_1chunk", n),
+            &as_chunks,
+            |b, v| b.iter(|| similar_pairs(v, threshold)),
+        );
 
-        group.bench_with_input(BenchmarkId::new("intrinsics_rayon", n), &vectors, |b, v| {
-            b.iter(|| {
-                let unit: Vec<Vec<f32>> = v.par_iter().map(|x| l2_normalize(x)).collect();
-                let pairs: Vec<(usize, usize)> = (0..unit.len())
-                    .into_par_iter()
-                    .flat_map_iter(|i| {
-                        let unit = &unit;
-                        ((i + 1)..unit.len()).filter_map(move |j| {
-                            (dot_unit_intrinsics(&unit[i], &unit[j]) >= threshold).then_some((i, j))
-                        })
-                    })
-                    .collect();
-                pairs.len()
-            });
-        });
-
-        // …and the same with the outer loop spread over the pool. Row `i`
-        // does `n - i` comparisons, so the work per index is triangular:
-        // rayon's work-stealing handles the imbalance without manual chunking.
-        group.bench_with_input(BenchmarkId::new("norm_dot_rayon", n), &vectors, |b, v| {
-            b.iter(|| {
-                let unit: Vec<Vec<f32>> = v.par_iter().map(|x| l2_normalize(x)).collect();
-                let pairs: Vec<(usize, usize)> = (0..unit.len())
-                    .into_par_iter()
-                    .flat_map_iter(|i| {
-                        let unit = &unit;
-                        ((i + 1)..unit.len()).filter_map(move |j| {
-                            (dot_unit_f32(&unit[i], &unit[j]) >= threshold).then_some((i, j))
-                        })
-                    })
-                    .collect();
-                pairs.len()
-            });
-        });
+        // The realistic shape: a metadata row plus a content chunk, which is
+        // what `metadata_vector = true` (the default) stores. k=2 means k_i*k_j
+        // = 4 dot products per pair, so this is the number the maintenance
+        // pass actually pays.
+        let as_chunks2: Vec<Vec<Vec<f32>>> = vectors
+            .iter()
+            .enumerate()
+            .map(|(i, v)| vec![v.clone(), synth_vector(i as u64 + 900_000)])
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::new("similar_pairs_SHIPPED_2chunk", n),
+            &as_chunks2,
+            |b, v| b.iter(|| similar_pairs(v, threshold)),
+        );
     }
 
     group.finish();
@@ -562,11 +448,17 @@ fn cosine_benchmarks(c: &mut Criterion) {
 // Group 5: end-to-end shape of a reindex batch (parse + stems together)
 // ===========================================================================
 
-/// `reindex_dir` does both of the CPU-bound steps above back to back: parse
-/// every file, then derive stems for every parsed memory inside
-/// `IndexEntry::from`. This measures them fused, which is what the real path
-/// would parallelize as one pass.
+/// The two CPU-bound phases of `reindex_dir`, in the shape production uses.
+///
+/// Corrected twice over. It used to fuse parse and stems into one `par_iter`,
+/// but `reindex_dir` runs them as two separate parallel passes with a
+/// sequential duplicate-ID fold in between (it cannot fuse them — the fold
+/// needs every parsed memory before any index row is built). And phase 5 is
+/// `IndexEntry::from`, which is `KeywordStems::compute` *plus* ~25 field
+/// clones; measuring only the stems under-reported it.
 fn reindex_cpu_benchmarks(c: &mut Criterion) {
+    use engramdb::storage::lance_index::IndexEntry;
+
     let mut group = c.benchmark_group("reindex_cpu");
     group.sample_size(10);
 
@@ -578,32 +470,33 @@ fn reindex_cpu_benchmarks(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("serial", n), &files, |b, files| {
             b.iter(|| {
-                let mut out: HashMap<String, KeywordStems> = HashMap::new();
-                for content in files {
-                    if let Ok(m) = parse_memory_file(content) {
-                        out.insert(
-                            m.id.clone(),
-                            KeywordStems::compute(&m.summary, &m.tags, &m.content),
-                        );
-                    }
-                }
-                out.len()
+                // Phase 3 equivalent: parse.
+                let parsed: Vec<Memory> = files
+                    .iter()
+                    .filter_map(|c| parse_memory_file(c).ok())
+                    .collect();
+                // Phase 4: sequential dedup fold (cheap, but it is the barrier
+                // that stops phases 3 and 5 being fused).
+                let by_id: HashMap<String, Memory> =
+                    parsed.into_iter().map(|m| (m.id.clone(), m)).collect();
+                // Phase 5 equivalent: build the index rows.
+                let entries: Vec<IndexEntry> = by_id.values().map(IndexEntry::from).collect();
+                entries.len()
             });
         });
 
         group.bench_with_input(BenchmarkId::new("rayon", n), &files, |b, files| {
             b.iter(|| {
-                let out: HashMap<String, KeywordStems> = files
+                let parsed: Vec<Memory> = files
                     .par_iter()
-                    .filter_map(|content| {
-                        let m = parse_memory_file(content).ok()?;
-                        Some((
-                            m.id.clone(),
-                            KeywordStems::compute(&m.summary, &m.tags, &m.content),
-                        ))
-                    })
+                    .filter_map(|c| parse_memory_file(c).ok())
                     .collect();
-                out.len()
+                let by_id: HashMap<String, Memory> =
+                    parsed.into_iter().map(|m| (m.id.clone(), m)).collect();
+                let owned: Vec<&Memory> = by_id.values().collect();
+                let entries: Vec<IndexEntry> =
+                    owned.par_iter().map(|m| IndexEntry::from(*m)).collect();
+                entries.len()
             });
         });
     }
@@ -822,6 +715,72 @@ fn store_batch_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
+// ===========================================================================
+// Group 9: the per-memory update loop (task complete / supersedes close)
+// ===========================================================================
+
+/// `MemoryStore::update_with` in a loop, swept over small n.
+///
+/// Sizing the remaining batching candidates before changing them:
+/// `ops::task::complete_task` and `ops::mod::close_superseded_windows` both
+/// call a per-memory mutating primitive in a loop, and each one is a write
+/// lock + a directory scan + an index upsert + a full manifest-stats scan. If
+/// the per-memory cost grows with n here, batching is a complexity change and
+/// worth doing; if it is flat, it is a constant factor and probably is not.
+fn store_update_benchmarks(c: &mut Criterion) {
+    use engramdb::storage::{InMemoryRegistry, MemoryStore};
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut group = c.benchmark_group("store_update");
+    group.sample_size(10);
+
+    for &n in &[16usize, 32, 64, 128] {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let (store, ids) = rt.block_on(async {
+            let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+                .await
+                .expect("init");
+            let mut ids = Vec::new();
+            for i in 0..n {
+                let m = generate_memory(i);
+                store.create(&m).await.expect("create");
+                ids.push(m.id.clone());
+            }
+            (store, ids)
+        });
+
+        group.bench_with_input(BenchmarkId::new("update_per_memory", n), &n, |b, _| {
+            b.to_async(&rt).iter(|| async {
+                for id in &ids {
+                    store
+                        .update_with(id, |m| {
+                            m.criticality = 0.5;
+                            Ok(())
+                        })
+                        .await
+                        .expect("update");
+                }
+            });
+        });
+
+        // N single reads vs one batched read — the shape behind the
+        // `supersedes` / `compress` / pretty-`gc` loops.
+        group.bench_with_input(BenchmarkId::new("get_per_memory", n), &n, |b, _| {
+            b.to_async(&rt).iter(|| async {
+                for id in &ids {
+                    store.get(id).await.expect("get");
+                }
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("get_batched", n), &n, |b, _| {
+            b.to_async(&rt)
+                .iter(|| async { store.get_batch(&ids).await.expect("get_batch") });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     parse_benchmarks,
@@ -832,5 +791,6 @@ criterion_group!(
     embed_batching_benchmarks,
     chunk_read_benchmarks,
     store_batch_benchmarks,
+    store_update_benchmarks,
 );
 criterion_main!(benches);
