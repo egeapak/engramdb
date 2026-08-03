@@ -2979,6 +2979,8 @@ impl EngramDbServer {
     ) -> Result<String, String> {
         let _scope = self.scope("harvest_list", input.project.as_deref());
         let dir = self.resolve_dir(input.project.as_deref()).await?;
+        let config_path = engramdb::storage::paths::project_dir(&dir).join("config.toml");
+        let config = load_config_or_default(&config_path).await;
         let scope = ops::harvest::session_scope(&dir, self.registry.as_ref())
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
@@ -2994,7 +2996,7 @@ impl EngramDbServer {
             // is `/engram:reflect`'s job, not this one's.
             exclude_session: Some(self.session_id().to_string()),
             include_harvested: input.include_harvested.unwrap_or(false),
-            all_projects: input.all_projects.unwrap_or(false),
+            all_projects: check_all_projects(&config, input.all_projects)?,
             skip_empty: true,
         };
         let sessions = ops::harvest::select_sessions(&scope, &dir, &params)
@@ -3046,7 +3048,7 @@ impl EngramDbServer {
                 &scope,
                 &dir,
                 &input.session_id,
-                input.all_projects.unwrap_or(false),
+                check_all_projects(&config, input.all_projects)?,
             )
             .await?;
 
@@ -3195,6 +3197,33 @@ impl EngramDbServer {
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
         Ok(r)
+    }
+}
+
+/// Resolve an agent-supplied `all_projects` against the security policy.
+///
+/// Scoped is the default and stays the default; this only decides whether an
+/// agent may *widen* to every conversation on the machine. That read returns
+/// raw transcripts rather than curated memories, and the harvest tools are
+/// auto-approved by `engramdb setup`, so unwidened-by-default is not enough on
+/// its own — without this the model both makes and grants the request, while
+/// reading content an attacker may have influenced.
+///
+/// The CLI's `--all-projects` is intentionally ungated: a human typing it is
+/// the request.
+fn check_all_projects(
+    config: &engramdb::types::EngramConfig,
+    requested: Option<bool>,
+) -> Result<bool, String> {
+    match requested {
+        Some(true) if !config.security.allow_all_projects_harvest => Err(error_response(
+            ErrorCode::ValidationError,
+            "all_projects is disabled for MCP tools by [security] \
+             allow_all_projects_harvest = false (the default). It reads every Claude Code \
+             conversation on this machine, not just this project's. Ask the user to run \
+             `engramdb harvest ... --all-projects` themselves, or to set that key to true.",
+        )),
+        other => Ok(other.unwrap_or(false)),
     }
 }
 

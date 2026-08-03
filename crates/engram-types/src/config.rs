@@ -1575,6 +1575,24 @@ pub struct SecurityConfig {
     /// (`project = "global"`) are always allowed.
     #[serde(default = "default_allow_cross_project_writes")]
     pub allow_cross_project_writes: bool,
+
+    /// Whether the **MCP** harvest tools may set `all_projects`, which reads
+    /// every Claude Code conversation on the machine rather than this
+    /// project's. Default `false`.
+    ///
+    /// A read, so the write gate above does not cover it — and unlike every
+    /// other cross-project read, what comes back is raw conversation rather
+    /// than curated memories: shell output, pasted credentials, source from
+    /// an unrelated repo that happens to share the laptop. The harvest tools
+    /// are auto-approved by `engramdb setup`, so without this the *model*
+    /// decides to widen the scope, with no prompt, while reading content an
+    /// attacker may have influenced.
+    ///
+    /// The CLI's `--all-projects` is deliberately **not** gated: a human
+    /// typing the flag is the request. This only governs an agent asking on
+    /// its own behalf.
+    #[serde(default)]
+    pub allow_all_projects_harvest: bool,
 }
 
 fn default_allow_cross_project_writes() -> bool {
@@ -1585,6 +1603,7 @@ impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             allow_cross_project_writes: default_allow_cross_project_writes(),
+            allow_all_projects_harvest: false,
         }
     }
 }
@@ -2350,6 +2369,20 @@ interval_secs = 60
         // A config.toml with NO [security] section parses to the default true.
         let from_empty: EngramConfig = toml::from_str("").unwrap();
         assert!(from_empty.security.allow_cross_project_writes);
+
+        // The machine-wide harvest read is opt-in, and stays opt-in when the
+        // section is present but silent about it. A default of `true` here
+        // would let an auto-approved MCP tool pull every conversation on the
+        // machine into context without anyone asking.
+        assert!(!config.security.allow_all_projects_harvest);
+        assert!(!SecurityConfig::default().allow_all_projects_harvest);
+        assert!(!from_empty.security.allow_all_projects_harvest);
+        let partial: EngramConfig =
+            toml::from_str("[security]\nallow_cross_project_writes = false\n").unwrap();
+        assert!(!partial.security.allow_all_projects_harvest);
+        let enabled: EngramConfig =
+            toml::from_str("[security]\nallow_all_projects_harvest = true\n").unwrap();
+        assert!(enabled.security.allow_all_projects_harvest);
     }
 
     #[test]
