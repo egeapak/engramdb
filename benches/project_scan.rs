@@ -179,8 +179,12 @@ fn bench_worktree_consolidate(c: &mut Criterion) {
                         let n = rt
                             .block_on(consolidate_worktree_into_main(&wt_dir, &main_dir))
                             .expect("consolidate failed");
-                        drop(root);
-                        n
+                        // Handed back rather than dropped here: criterion
+                        // drops routine outputs after stopping the timer, and
+                        // deleting the seeded store(s) costs more than the
+                        // operation being measured — and scales with the very
+                        // axis these groups sweep.
+                        (root, n)
                     },
                     BatchSize::PerIteration,
                 );
@@ -202,8 +206,12 @@ fn bench_worktree_consolidate(c: &mut Criterion) {
                         let n = rt
                             .block_on(consolidate_worktree_into_main(&wt_dir, &main_dir))
                             .expect("consolidate failed");
-                        drop(root);
-                        n
+                        // Handed back rather than dropped here: criterion
+                        // drops routine outputs after stopping the timer, and
+                        // deleting the seeded store(s) costs more than the
+                        // operation being measured — and scales with the very
+                        // axis these groups sweep.
+                        (root, n)
                     },
                     BatchSize::PerIteration,
                 );
@@ -214,5 +222,84 @@ fn bench_worktree_consolidate(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_aggregate_stats, bench_worktree_consolidate);
+/// Decompose the two `aggregate_stats` changes so each is attributable.
+///
+/// The end-to-end group above measures the column narrowing and the bounded
+/// concurrency together, and on a 4-core box with everything in page cache
+/// the concurrency term dominates — which would let a narrowing that did
+/// nothing hide behind it. These two arms run against a single store with no
+/// concurrency involved, so the narrowing stands on its own.
+fn bench_scan_projection(c: &mut Criterion) {
+    let rt = runtime();
+    let mut group = c.benchmark_group("scan_projection");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(20);
+
+    for count in [100usize, 1_000] {
+        let (temp, store) = rt.block_on(helpers::setup_store(count));
+
+        // What `aggregate_stats` used to call: 7 columns, of which it read one.
+        group.bench_with_input(BenchmarkId::new("list_summary", count), &count, |b, _| {
+            b.to_async(&rt)
+                .iter(|| async { store.list_summary().await.expect("list_summary failed") });
+        });
+
+        // What it calls now: the single `type` column.
+        group.bench_with_input(BenchmarkId::new("count_by_type", count), &count, |b, _| {
+            b.to_async(&rt)
+                .iter(|| async { store.count_by_type().await.expect("count_by_type failed") });
+        });
+
+        drop(temp);
+    }
+
+    group.finish();
+}
+
+/// `MemoryStore::create` as a function of existing store size.
+///
+/// Worktree consolidation calls this once per migrated memory and the batched
+/// pass deliberately left it per-memory. If its cost grows with the table it
+/// is writing into, that — not the lookups that were batched — is what sets
+/// the consolidation floor, and the end-to-end numbers should be read in that
+/// light.
+fn bench_create_vs_store_size(c: &mut Criterion) {
+    let rt = runtime();
+    let mut group = c.benchmark_group("create_vs_store_size");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(10);
+
+    for existing in [0usize, 250, 500, 1_000] {
+        group.bench_with_input(
+            BenchmarkId::new("single_create", existing),
+            &existing,
+            |b, &existing| {
+                b.iter_batched(
+                    || rt.block_on(helpers::setup_store(existing)),
+                    |(temp, store)| {
+                        rt.block_on(store.create(&generate_memory(999_999)))
+                            .expect("create failed");
+                        // Handed back rather than dropped here: criterion
+                        // drops routine outputs after stopping the timer, and
+                        // deleting the seeded store(s) costs more than the
+                        // operation being measured — and scales with the very
+                        // axis these groups sweep.
+                        (temp, store)
+                    },
+                    BatchSize::PerIteration,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_aggregate_stats,
+    bench_worktree_consolidate,
+    bench_scan_projection,
+    bench_create_vs_store_size
+);
 criterion_main!(benches);
