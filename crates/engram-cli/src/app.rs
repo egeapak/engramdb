@@ -238,6 +238,10 @@ pub enum LedgerCommand {
         /// Delete only the archived transcript, keeping the decision record
         #[arg(long)]
         archive_only: bool,
+
+        /// Skip confirmation prompt
+        #[arg(long, short = 'f')]
+        force: bool,
     },
 
     /// Evict archives past the retention limits (dry run by default)

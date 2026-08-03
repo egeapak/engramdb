@@ -856,7 +856,20 @@ pub async fn run_hook_session_end(dir: &Path, registry: &dyn RegistryBackend) ->
         return Ok(());
     };
 
-    archive_ending_session(dir, &session_id, &input, registry).await;
+    // Every other hook handler bails when the project was never `init`ed (see
+    // `run_hook_pre_tool_use`); SessionEnd must too, and more so, because it
+    // *writes*. Key off `manifest.toml` rather than `.engramdb/`: the latter
+    // is created by this very hook's own state writes, so it would
+    // self-satisfy on the second run. The plugin registers SessionEnd
+    // machine-wide, so without this every directory Claude Code is ever
+    // started in collects a `state/` tree and a permanent transcript archive.
+    if !engramdb::storage::paths::project_dir(dir)
+        .join("manifest.toml")
+        .exists()
+    {
+        return Ok(());
+    }
+
     let ended_task = match engramdb::storage::task_state::clear_session_task(dir, &session_id) {
         Ok(t) => t,
         Err(e) => {
@@ -881,6 +894,12 @@ pub async fn run_hook_session_end(dir: &Path, registry: &dyn RegistryBackend) ->
             }
         }
     }
+
+    // Last, deliberately: archiving is the slowest thing on this path
+    // (compression is proportional to transcript size), and if the hook is
+    // killed by a timeout the task-mapping clear above must already have
+    // happened. Bounded by `archive_max_transcript_bytes` as well.
+    archive_ending_session(dir, &session_id, &input, registry).await;
     Ok(())
 }
 
@@ -927,6 +946,20 @@ async fn archive_ending_session(
         tracing::debug!("SessionEnd archive: no transcript found for {session_id}");
         return;
     };
+
+    // Bail before `set_archive`, so the ledger never advertises an archive
+    // that was deliberately not written.
+    let limit = config.harvest.archive_max_transcript_bytes;
+    if limit > 0 {
+        let size = std::fs::metadata(&transcript).map(|m| m.len()).unwrap_or(0);
+        if size > limit {
+            tracing::debug!(
+                "SessionEnd archive: skipping {session_id} ({size} bytes exceeds \
+                 [harvest] archive_max_transcript_bytes = {limit})"
+            );
+            return;
+        }
+    }
 
     // Resolve the **root** project, exactly as every reader does
     // (`commands::harvest::archive_project_id` → `session_scope`). Using the

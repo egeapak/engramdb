@@ -15,7 +15,7 @@
 //! - `sibling` — a project whose path shares a textual prefix with the target;
 //!   must never be offered.
 
-use super::helpers::cmd;
+use super::helpers::{cmd, data_dir};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -93,6 +93,23 @@ fn make_linked_worktree(main: &Path, worktree: &Path, name: &str) {
         format!("gitdir: {}\n", gitdir.display()),
     )
     .unwrap();
+}
+
+/// Locate the archive written for `session`, if any.
+///
+/// Searches `<data>/projects/*/transcripts/` rather than recomputing the
+/// project id, which is a hash of a per-test temp path. Every test fixture
+/// gets a fresh project, so a hit is unambiguous.
+fn find_archive(session: &str) -> Option<PathBuf> {
+    let projects = data_dir().join("projects");
+    let wanted = format!("{session}.jsonl.zst");
+    for project in std::fs::read_dir(projects).ok()?.flatten() {
+        let candidate = project.path().join("transcripts").join(&wanted);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// A built corpus: the temp dirs must stay alive for the duration of a test.
@@ -428,6 +445,120 @@ fn ledger_hides_reviewed_sessions_and_reset_restores_them() {
 /// Archiving a transcript must not remove it from the review queue, and
 /// evicting the archive must not leave the ledger advertising a file that is
 /// no longer there.
+/// `ledger rm` destroys the only remaining copy of a conversation, so it must
+/// confirm first — and non-interactively (no TTY) that means it aborts.
+#[test]
+fn ledger_rm_without_force_aborts_non_interactively() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+    c.session_end(&c.main, "aaaa1111-rich");
+
+    let out = c.stdout(&c.main, &["harvest", "ledger", "rm", "aaaa"]);
+    assert!(out.contains("Aborted"), "expected an abort: {out}");
+    assert!(
+        find_archive("aaaa1111-rich").is_some(),
+        "the archive was deleted without confirmation"
+    );
+    // The record must survive too.
+    let show = c.stdout(&c.main, &["harvest", "ledger", "show", "aaaa"]);
+    assert!(show.contains(".jsonl.zst"), "{show}");
+}
+
+#[test]
+fn ledger_rm_force_removes_entry_and_archive() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+    c.session_end(&c.main, "aaaa1111-rich");
+
+    let out = c.stdout(&c.main, &["harvest", "ledger", "rm", "aaaa", "--force"]);
+    assert!(out.contains("ledger entry and archive"), "{out}");
+    assert!(find_archive("aaaa1111-rich").is_none());
+    // Dropping the record re-offers the session — the opposite of
+    // `--archive-only`, which keeps it settled.
+    let list = c.stdout(&c.main, &["harvest", "list"]);
+    assert!(list.contains("aaaa1111"), "rm did not re-offer: {list}");
+}
+
+#[test]
+fn ledger_rm_archive_only_reports_nothing_when_there_is_no_archive() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+    // Reviewed but never archived.
+    c.engramdb(&c.main, &["harvest", "mark", "bbbb"])
+        .assert()
+        .success();
+
+    let out = c.stdout(
+        &c.main,
+        &[
+            "harvest",
+            "ledger",
+            "rm",
+            "bbbb",
+            "--archive-only",
+            "--force",
+        ],
+    );
+    assert!(
+        !out.contains("Removed archive"),
+        "reported removing an archive that never existed: {out}"
+    );
+    // ...and the decision record is untouched, so it stays settled.
+    let list = c.stdout(&c.main, &["harvest", "list"]);
+    assert!(!list.contains("bbbb2222"), "{list}");
+}
+
+#[test]
+fn ledger_rm_in_json_mode_requires_force() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+    c.session_end(&c.main, "aaaa1111-rich");
+
+    let out = cmd()
+        .env("CLAUDE_CONFIG_DIR", &c.claude)
+        .arg("--dir")
+        .arg(&c.main)
+        .args(["--format", "json", "harvest", "ledger", "rm", "aaaa"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "JSON mode must not prompt");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--force"), "{err}");
+    assert!(find_archive("aaaa1111-rich").is_some());
+}
+
+/// The SessionEnd hook is registered machine-wide by the plugin, so it fires
+/// in directories that are not EngramDB projects at all. It must write
+/// nothing there — no `state/` tree, no archive.
+#[test]
+fn session_end_writes_nothing_in_an_uninitialized_directory() {
+    let c = build_corpus();
+    // Deliberately NOT `init_with_worktree` — this is a bare directory.
+    let bare = c.main.join("not-a-project");
+    std::fs::create_dir_all(&bare).unwrap();
+    write_transcript(
+        &c.claude,
+        &bare,
+        "eeee5555-bare",
+        &[user_line(
+            &bare,
+            "2026-07-25T09:00:00Z",
+            "just passing through",
+        )],
+    );
+
+    c.session_end(&bare, "eeee5555-bare");
+
+    assert!(
+        !bare.join(".engramdb").exists(),
+        "SessionEnd created state in a directory that was never `engramdb init`ed"
+    );
+    assert!(
+        find_archive("eeee5555-bare").is_none(),
+        "SessionEnd archived a transcript for an uninitialized project"
+    );
+}
+
 /// The premise of the whole archive: Claude Code prunes its own transcripts,
 /// and a session must stay readable afterwards. If `show` only ever reads the
 /// live `.jsonl`, archiving preserves bytes nobody can use.

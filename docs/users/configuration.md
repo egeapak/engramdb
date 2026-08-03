@@ -181,6 +181,7 @@ include_sidechains = false          # include subagent turns in digests
 archive = true                      # archive each session's transcript at SessionEnd
 archive_retention_days = 365        # drop archives older than this; omit to disable age eviction
 archive_max_bytes = 2147483648      # 2 GiB total, oldest-first eviction; 0 = no size limit
+archive_max_transcript_bytes = 16777216  # skip archiving a transcript larger than this; 0 = no limit
 ```
 
 ## Notes on selected sections

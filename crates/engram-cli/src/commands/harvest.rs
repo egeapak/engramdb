@@ -6,6 +6,7 @@
 
 use crate::app::{HarvestCommand, LedgerCommand};
 use crate::output::{HarvestSessionOutput, OutputFormatter};
+use crate::prompter::Prompter;
 use anyhow::{bail, Result};
 use engramdb::ops::harvest;
 use engramdb::storage::harvest_state::{self, HarvestDecision, HarvestEntry};
@@ -21,6 +22,7 @@ pub async fn run_harvest(
     command: HarvestCommand,
     config: &HarvestConfig,
     formatter: &OutputFormatter,
+    prompter: &dyn Prompter,
 ) -> Result<()> {
     match command {
         HarvestCommand::List {
@@ -170,7 +172,7 @@ pub async fn run_harvest(
         }
 
         HarvestCommand::Ledger { command } => {
-            run_ledger(dir, registry, command, config, formatter).await?;
+            run_ledger(dir, registry, command, config, formatter, prompter).await?;
         }
     }
     Ok(())
@@ -223,6 +225,7 @@ async fn run_ledger(
     command: LedgerCommand,
     config: &HarvestConfig,
     formatter: &OutputFormatter,
+    prompter: &dyn Prompter,
 ) -> Result<()> {
     match command {
         LedgerCommand::List {
@@ -349,26 +352,76 @@ time — the archive is corrupt.",
         LedgerCommand::Rm {
             session_id,
             archive_only,
+            force,
         } => {
             let key = resolve_ledger_key(dir, &session_id)?;
             let project_id = archive_project_id(dir, registry).await?;
+            // Read the archive metadata *before* deleting, so the prompt can
+            // say how much conversation is about to go.
+            let archive = harvest_state::read_harvested(dir)
+                .get(&key)
+                .and_then(|e| e.archive.clone());
+
+            if !force {
+                // Follows `delete` / `projects delete` rather than the
+                // `--apply` sweeps: this names one target, so a confirmation
+                // is the right guard and the preview *is* the dry run. What
+                // it destroys is unrecoverable — once Claude Code prunes its
+                // own transcript, the archive is the only remaining copy.
+                if formatter.is_json() {
+                    bail!(
+                        "removing a ledger entry requires confirmation; re-run with --force \
+in JSON mode"
+                    );
+                }
+                formatter.print_warning(&match (archive_only, &archive) {
+                    (true, Some(a)) => format!(
+                        "This deletes the archived transcript for session {key} ({}) — the \
+only remaining copy, since Claude Code prunes its own.",
+                        human_bytes(a.original_bytes)
+                    ),
+                    (true, None) => {
+                        format!("Session {key} has no archived transcript; nothing to delete.")
+                    }
+                    (false, Some(a)) => format!(
+                        "This deletes the harvest record for session {key} AND its archived \
+transcript ({}), the only remaining copy. The session will be offered again.",
+                        human_bytes(a.original_bytes)
+                    ),
+                    (false, None) => format!(
+                        "This deletes the harvest record for session {key}. The session will \
+be offered again by `harvest list`."
+                    ),
+                });
+                if !prompter.confirm("Continue?", false).unwrap_or(false) {
+                    formatter.print_message("Aborted.");
+                    return Ok(());
+                }
+            }
+
             let removed_archive = transcript_archive::remove_archive(&project_id, &key)?;
             if archive_only {
                 // Keep the review record, drop the now-dangling file pointer.
                 harvest_state::clear_archive_refs(dir, std::slice::from_ref(&key))?;
+                // Honor the bool: without this, a second run reports success
+                // over a file that was already gone.
+                if removed_archive {
+                    formatter.print_success(&format!("Removed archive for session {key}."));
+                } else {
+                    formatter
+                        .print_message(&format!("Session {key} had no archive; nothing removed."));
+                }
             } else {
                 harvest_state::clear_harvested(dir, &key)?;
+                formatter.print_success(&format!(
+                    "Removed {} for session {key}.",
+                    if removed_archive {
+                        "ledger entry and archive"
+                    } else {
+                        "ledger entry"
+                    }
+                ));
             }
-            formatter.print_success(&format!(
-                "Removed {} for session {key}.",
-                if archive_only {
-                    "archive"
-                } else if removed_archive {
-                    "ledger entry and archive"
-                } else {
-                    "ledger entry"
-                }
-            ));
         }
 
         LedgerCommand::Prune {

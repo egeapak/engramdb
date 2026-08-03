@@ -1216,6 +1216,17 @@ pub struct HarvestConfig {
     /// once it is exceeded. `0` disables size-based eviction.
     #[serde(default = "default_archive_max_bytes")]
     pub archive_max_bytes: u64,
+
+    /// Skip archiving a transcript larger than this. `0` disables the limit.
+    ///
+    /// The compress runs synchronously inside the SessionEnd hook, so an
+    /// unbounded one delays session teardown in proportion to file size —
+    /// measured ~2s for 20 MB, and note `[profile.release] opt-level = "z"`
+    /// propagates through `cc` to `zstd-sys`, so a release build is not
+    /// meaningfully faster. A session that large is also the least worth
+    /// keeping: its digest would be budget-truncated anyway.
+    #[serde(default = "default_archive_max_transcript_bytes")]
+    pub archive_max_transcript_bytes: u64,
 }
 
 fn default_digest_budget() -> usize {
@@ -1237,6 +1248,12 @@ fn default_archive_max_bytes() -> u64 {
     2 * 1024 * 1024 * 1024
 }
 
+/// 16 MiB — roughly 5x the largest real session the archive docs cite, which
+/// holds the worst-case teardown cost near a second.
+fn default_archive_max_transcript_bytes() -> u64 {
+    16 * 1024 * 1024
+}
+
 impl Default for HarvestConfig {
     fn default() -> Self {
         Self {
@@ -1246,6 +1263,7 @@ impl Default for HarvestConfig {
             archive: true,
             archive_retention_days: default_archive_retention_days(),
             archive_max_bytes: default_archive_max_bytes(),
+            archive_max_transcript_bytes: default_archive_max_transcript_bytes(),
         }
     }
 }

@@ -42,7 +42,7 @@ use crate::error::{Result, StorageError};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
 /// Preview length for the first user prompt shown in a session listing.
@@ -51,6 +51,15 @@ const PROMPT_PREVIEW_CHARS: usize = 160;
 /// Preview length kept from a tool result. Enough for a one-line error or a
 /// short success line; anything longer is noise for harvesting purposes.
 const RESULT_PREVIEW_CHARS: usize = 200;
+
+/// Largest single JSONL record this parser will hold in memory.
+///
+/// Measured over the real transcripts on a development machine (3,036
+/// records): p50 1.5 KB, p99 33 KB, largest 95 KB. 1 MiB is ~11x the largest
+/// observed, so no realistic record is lost, while bounding the cost of one
+/// hostile or pathological line — a huge pasted attachment is the only record
+/// class Claude Code does not itself truncate.
+const MAX_RECORD_BYTES: usize = 1_048_576;
 
 /// Root of Claude Code's own state directory.
 ///
@@ -284,7 +293,7 @@ fn tool_result_text(block: &serde_json::Value) -> Option<String> {
 pub fn parse_session(transcript_path: &Path, opts: ParseOptions) -> Result<ParsedSession> {
     let file = std::fs::File::open(transcript_path)?;
     let bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let reader = std::io::BufReader::new(file);
+    let mut reader = std::io::BufReader::new(file);
 
     let session_id = transcript_path
         .file_stem()
@@ -308,12 +317,50 @@ pub fn parse_session(transcript_path: &Path, opts: ParseOptions) -> Result<Parse
     // the call it belongs to in a single forward pass.
     let mut pending: HashMap<String, usize> = HashMap::new();
 
-    for line in reader.lines() {
-        let Ok(line) = line else { continue };
+    // Read record-by-record with a per-record ceiling rather than
+    // `reader.lines()`, which would grow one `String` to whatever a single
+    // line happens to be. One pasted attachment could otherwise OOM every
+    // caller — including `list_sessions_in`, which summarizes *every*
+    // transcript in scope, and the SessionEnd hook that falls back to it.
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        buf.clear();
+        // `take` is rebuilt each iteration, so the limit is per record. The
+        // `+ 1` is what distinguishes "hit the cap" from "hit EOF mid-record"
+        // (a transcript being appended to as we read it).
+        let read = reader
+            .by_ref()
+            .take(MAX_RECORD_BYTES as u64 + 1)
+            .read_until(b'\n', &mut buf);
+        // A read error must BREAK: it makes no progress, so `continue` here
+        // would spin forever.
+        let Ok(n) = read else { break };
+        if n == 0 {
+            break;
+        }
+        if buf.last() != Some(&b'\n') && n > MAX_RECORD_BYTES {
+            // Over-long record: discard the rest of it without allocating,
+            // so the next `read_until` starts on a record boundary rather
+            // than mid-JSON. Skipping matches this parser's existing
+            // leniency — a truncated object would not deserialize anyway.
+            tracing::debug!(
+                "transcript {}: skipping a record larger than {MAX_RECORD_BYTES} bytes",
+                transcript_path.display()
+            );
+            match reader.skip_until(b'\n') {
+                // No newline left: the over-long record ran to EOF.
+                Ok(0) | Err(_) => break,
+                Ok(_) => continue,
+            }
+        }
+        let Ok(line) = std::str::from_utf8(&buf) else {
+            continue;
+        };
+        let line = line.trim_end_matches('\n').trim_end_matches('\r');
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
 
@@ -605,6 +652,107 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::TempDir;
+
+    /// A valid user-prompt record whose text is padded to make the whole
+    /// serialized line at least `target_bytes` long.
+    fn padded_prompt(marker: &str, target_bytes: usize) -> String {
+        let skeleton = serde_json::json!({
+            "type": "user",
+            "cwd": "/repo",
+            "message": { "role": "user", "content": marker }
+        })
+        .to_string();
+        let pad = target_bytes.saturating_sub(skeleton.len());
+        serde_json::json!({
+            "type": "user",
+            "cwd": "/repo",
+            "message": { "role": "user", "content": format!("{marker}{}", "x".repeat(pad)) }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn oversized_record_is_skipped_without_losing_the_rest() {
+        // The anti-desync assertion: the record *after* the oversized one must
+        // still parse, which only holds if the remainder of the long line was
+        // discarded to its newline rather than left mid-JSON.
+        let tmp = TempDir::new().unwrap();
+        let huge = padded_prompt("HUGE", MAX_RECORD_BYTES + 4096);
+        let path = write_transcript(
+            tmp.path(),
+            "s",
+            &[
+                &padded_prompt("FIRST", 0),
+                &huge,
+                &padded_prompt("THIRD", 0),
+            ],
+        );
+
+        let parsed = parse_session(&path, ParseOptions::default()).unwrap();
+        assert_eq!(parsed.summary.user_turns, 2, "oversized record must be cut");
+        let texts: Vec<&str> = parsed
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                Event::UserPrompt { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts[0].starts_with("FIRST"));
+        assert!(
+            texts[1].starts_with("THIRD"),
+            "the record after an oversized one was lost: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn oversized_final_record_terminates_the_scan() {
+        // Over-long record with no trailing newline: `skip_until` finds no
+        // delimiter, so the loop must break rather than spin.
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path()).unwrap();
+        let path = tmp.path().join("s.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "{}", padded_prompt("FIRST", 0)).unwrap();
+        write!(f, "{}", padded_prompt("HUGE", MAX_RECORD_BYTES + 4096)).unwrap();
+        drop(f);
+
+        let parsed = parse_session(&path, ParseOptions::default()).unwrap();
+        assert_eq!(parsed.summary.user_turns, 1);
+    }
+
+    #[test]
+    fn record_at_exactly_the_cap_is_kept() {
+        // Pins the off-by-one: a record of exactly MAX_RECORD_BYTES (plus its
+        // newline) is under the limit, not over it.
+        let tmp = TempDir::new().unwrap();
+        let exact = padded_prompt("EXACT", MAX_RECORD_BYTES);
+        assert_eq!(exact.len(), MAX_RECORD_BYTES, "fixture must sit on the cap");
+        let path = write_transcript(tmp.path(), "s", &[&exact]);
+
+        let parsed = parse_session(&path, ParseOptions::default()).unwrap();
+        assert_eq!(parsed.summary.user_turns, 1);
+    }
+
+    #[test]
+    fn crlf_and_invalid_utf8_lines_behave_as_before() {
+        // Regression guard for replacing `reader.lines()`, which stripped a
+        // trailing `\r` and skipped undecodable lines.
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path()).unwrap();
+        let path = tmp.path().join("s.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(f, "{}\r\n", padded_prompt("CRLF", 0)).unwrap();
+        f.write_all(&[0xff, 0xfe, b'\n']).unwrap();
+        writeln!(f, "{}", padded_prompt("AFTER", 0)).unwrap();
+        drop(f);
+
+        let parsed = parse_session(&path, ParseOptions::default()).unwrap();
+        assert_eq!(
+            parsed.summary.user_turns, 2,
+            "CRLF record and the one after invalid UTF-8 must both parse"
+        );
+    }
 
     fn write_transcript(dir: &Path, name: &str, lines: &[&str]) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
