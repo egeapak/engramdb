@@ -129,17 +129,40 @@ pub fn is_valid_session_id(id: &str) -> bool {
 /// Invisible-format test shared with [`sanitize_for_terminal`], for callers
 /// that must match against raw (un-sanitized) record text.
 pub fn is_invisible_format(c: char) -> bool {
+    // Unicode's `Default_Ignorable_Code_Point` set, *minus* the bidi controls
+    // (which `is_unsafe` marks with U+FFFD instead, because reordered text is
+    // a forgery worth showing), *plus* a few characters that are not formally
+    // ignorable but still render as blank.
+    //
+    // Defined by the Unicode property rather than by hand-picking characters
+    // seen in an attack: the first version of this list was assembled from
+    // observed payloads, and a review promptly found sixteen more. A
+    // property-defined set has an end; "characters someone tried" does not.
     matches!(c,
-        '\u{00ad}'
-        | '\u{180e}'
-        | '\u{200b}'..='\u{200d}'
-        | '\u{2060}'..='\u{2064}'
-        | '\u{206a}'..='\u{206f}'
-        | '\u{fe00}'..='\u{fe0f}'
-        | '\u{feff}'
-        | '\u{fff9}'..='\u{fffb}'
-        | '\u{1d173}'..='\u{1d17a}'
-        | '\u{e0000}'..='\u{e0fff}'
+        '\u{00ad}'                  // soft hyphen
+        | '\u{034f}'                // combining grapheme joiner
+        | '\u{115f}'..='\u{1160}'   // Hangul choseong/jungseong fillers
+        | '\u{17b4}'..='\u{17b5}'   // Khmer inherent vowels
+        | '\u{180b}'..='\u{180f}'   // Mongolian FVS 1-4 + vowel separator
+        | '\u{200b}'..='\u{200d}'   // ZWSP, ZWNJ, ZWJ
+        | '\u{2060}'..='\u{206f}'   // word joiner, invisible ops, deprecated
+        | '\u{2800}'                // braille pattern blank
+        | '\u{3164}'                // Hangul filler
+        | '\u{fe00}'..='\u{fe0f}'   // variation selectors
+        | '\u{feff}'                // BOM / ZWNBSP
+        | '\u{ffa0}'                // halfwidth Hangul filler
+        | '\u{fff0}'..='\u{fff8}'   // unassigned, formally ignorable
+        | '\u{0600}'..='\u{0605}'   // Arabic number signs
+        | '\u{06dd}'                // Arabic end of ayah
+        | '\u{070f}'                // Syriac abbreviation mark
+        | '\u{08e2}'                // Arabic disputed end of ayah
+        | '\u{0890}'..='\u{0891}'   // Arabic pound/piastre mark above
+        | '\u{110bd}'               // Kaithi number sign
+        | '\u{110cd}'               // Kaithi number sign above
+        | '\u{13430}'..='\u{1343f}' // Egyptian format controls
+        | '\u{1bca0}'..='\u{1bca3}' // shorthand format controls
+        | '\u{1d173}'..='\u{1d17a}' // musical formatting
+        | '\u{e0000}'..='\u{e0fff}' // tags + variation selectors supplement
     )
 }
 

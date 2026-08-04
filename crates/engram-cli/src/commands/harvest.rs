@@ -317,7 +317,14 @@ most likely evicted by `harvest ledger prune` or the `[harvest] archive_*` budge
                 );
             }
             let dest = output.unwrap_or_else(|| PathBuf::from(format!("{key}.jsonl")));
-            let sha = transcript_archive::export_archive(&project_id, &key, &dest)?;
+            // The ledger recorded the plaintext size at archive time, so the
+            // decompression bound here is exact rather than a backstop.
+            let sha = transcript_archive::export_archive_bounded(
+                &project_id,
+                &key,
+                &dest,
+                Some(archive.original_bytes),
+            )?;
             if sha != archive.sha256 {
                 bail!(
                     "Exported {} but its checksum does not match the one recorded at archive \
@@ -565,7 +572,12 @@ async fn restore_archived_session(
     // agent a session id that does not exist.
     let tmp = tempfile::TempDir::new()?;
     let restored = tmp.path().join(format!("{key}.jsonl"));
-    let sha = transcript_archive::export_archive(&project_id, &key, &restored)?;
+    let sha = transcript_archive::export_archive_bounded(
+        &project_id,
+        &key,
+        &restored,
+        Some(archive.original_bytes),
+    )?;
     if sha != archive.sha256 {
         bail!(
             "Archive for session {key} does not match the checksum recorded when it was \

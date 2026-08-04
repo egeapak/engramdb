@@ -74,6 +74,27 @@ impl ArchiveRef {
 /// arguments, and `Path::join` would happily resolve `../..` out of the data
 /// dir or let an absolute id replace the base outright.
 pub fn archive_path(project_id: &str, session_id: &str) -> Result<PathBuf> {
+    // The project id is the *other* half of the same join, and it is no more
+    // trustworthy than the session id: it reaches here from
+    // `resolve_root_project_id`, which returns `parent_project_id` verbatim
+    // out of the user-writable `registry.json`. Unchecked, it is an
+    // arbitrary-path write, read **and delete** primitive — `remove_archive`
+    // and `prune_archives` both unlink through this function.
+    //
+    // Ids are 16 hex characters from `compute_project_id`, plus the
+    // underscore-prefixed well-known global id, so the accepted set can be
+    // narrow without excluding anything legitimate.
+    if project_id.is_empty()
+        || project_id.len() > 64
+        || !project_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(crate::error::StorageError::Validation(format!(
+            "invalid project id {project_id:?}: expected a plain identifier \
+             (letters, digits, '_', '-') that is not a path"
+        )));
+    }
     if !crate::transcripts::is_valid_session_id(session_id) {
         return Err(crate::error::StorageError::Validation(format!(
             "invalid session id {session_id:?}: expected a plain identifier \
@@ -166,6 +187,21 @@ fn compress_into(src: &Path, tmp: &Path) -> Result<(Sha256, u64)> {
 
     let mut input = std::fs::File::open(src)?;
     let original_bytes = input.metadata().map(|m| m.len()).unwrap_or(0);
+    // Mode at *creation*: the archive is a verbatim conversation, and
+    // `restrict_to_owner` after the rename leaves it 0644 for the whole
+    // compression window. Contained today only because the parent directory
+    // is 0700 — which a future change could quietly undo.
+    #[cfg(unix)]
+    let out = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(tmp)?
+    };
+    #[cfg(not(unix))]
     let out = std::fs::File::create(tmp)?;
     let mut encoder = zstd::stream::Encoder::new(out, ZSTD_LEVEL)?;
 
@@ -188,9 +224,41 @@ fn compress_into(src: &Path, tmp: &Path) -> Result<(Sha256, u64)> {
 /// Returns the SHA-256 of the restored bytes so the caller can compare it
 /// against the [`ArchiveRef`] recorded at archive time.
 pub fn export_archive(project_id: &str, session_id: &str, dest: &Path) -> Result<String> {
+    export_archive_bounded(project_id, session_id, dest, None)
+}
+
+/// Absolute ceiling on a restored transcript, for callers with no recorded
+/// original size to check against.
+///
+/// zstd is a compression bomb like any other codec — a hand-crafted 8 KB
+/// archive expands to 268 MB, measured. Without a ceiling, `export` and the
+/// `harvest show` archive fallback fill the disk before the checksum that
+/// would have caught the tampering is ever computed. This bound is generous
+/// against `archive_max_transcript_bytes` (16 MiB) so it only ever fires on
+/// something pathological.
+pub const MAX_RESTORED_BYTES: u64 = 256 * 1024 * 1024;
+
+/// [`export_archive`], with the expected plaintext size when the caller knows
+/// it.
+///
+/// Every caller that reached here through the ledger *does* know it —
+/// `ArchiveRef::original_bytes` was recorded at archive time — so passing it
+/// turns a generous backstop into an exact check.
+pub fn export_archive_bounded(
+    project_id: &str,
+    session_id: &str,
+    dest: &Path,
+    expected_bytes: Option<u64>,
+) -> Result<String> {
     let src = archive_path(project_id, session_id)?;
     let input = std::fs::File::open(&src)?;
     let mut decoder = zstd::stream::Decoder::new(input)?;
+
+    // Allow a little slack over the recorded size so a legitimate archive can
+    // never trip the check, while still bounding a bomb to ~the real size.
+    let limit = expected_bytes
+        .map(|n| n.saturating_add(64 * 1024).min(MAX_RESTORED_BYTES))
+        .unwrap_or(MAX_RESTORED_BYTES);
 
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
@@ -199,11 +267,23 @@ pub fn export_archive(project_id: &str, session_id: &str, dest: &Path) -> Result
 
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
+    let mut total: u64 = 0;
     loop {
         use std::io::{Read, Write};
         let n = decoder.read(&mut buf)?;
         if n == 0 {
             break;
+        }
+        total = total.saturating_add(n as u64);
+        if total > limit {
+            // Remove the partial file: leaving it would hand the caller a
+            // truncated transcript that parses as a valid-but-short session.
+            drop(out);
+            let _ = std::fs::remove_file(dest);
+            return Err(crate::error::StorageError::Validation(format!(
+                "archive for session {session_id} expands past {limit} bytes; \
+                 refusing to continue (the stored archive may be corrupt or crafted)"
+            )));
         }
         hasher.update(&buf[..n]);
         out.write_all(&buf[..n])?;
@@ -521,5 +601,73 @@ mod tests {
             assert_eq!(total_bytes("never-used").unwrap(), 0);
             assert!(!remove_archive("never-used", "nope").unwrap());
         });
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    #[test]
+    fn archive_path_rejects_a_traversing_project_id() {
+        // The project id reaches here verbatim from the user-writable
+        // registry.json, so it is exactly as untrusted as the session id.
+        for hostile in ["../../../../tmp/pwn", "/etc", "a/b", "..", "", "x\u{0}y"] {
+            assert!(
+                archive_path(hostile, "s1").is_err(),
+                "project id {hostile:?} was accepted"
+            );
+        }
+        // Real ids still work: 16-hex, and the underscore-prefixed global id.
+        assert!(archive_path("0123456789abcdef", "s1").is_ok());
+        assert!(archive_path("__global__store", "s1").is_ok());
+    }
+
+    #[test]
+    fn export_refuses_a_compression_bomb() {
+        use std::io::Write;
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("ENGRAMDB_DATA_DIR", tmp.path());
+        let project = "0123456789abcdef";
+
+        // 64 MiB of zeros compresses to a few KB.
+        let dest = archive_path(project, "bomb").unwrap();
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let mut enc =
+            zstd::stream::Encoder::new(std::fs::File::create(&dest).unwrap(), ZSTD_LEVEL).unwrap();
+        let zeros = vec![0u8; 1024 * 1024];
+        for _ in 0..64 {
+            enc.write_all(&zeros).unwrap();
+        }
+        enc.finish().unwrap();
+        let compressed = std::fs::metadata(&dest).unwrap().len();
+        assert!(compressed < 1024 * 1024, "fixture should be small");
+
+        // The ledger says it was a 1 KB transcript; the archive says 64 MiB.
+        let out = tmp.path().join("restored.jsonl");
+        let err = export_archive_bounded(project, "bomb", &out, Some(1024)).unwrap_err();
+        assert!(format!("{err}").contains("expands past"), "{err}");
+        assert!(
+            !out.exists(),
+            "a partial restore was left behind for the caller to parse"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_temp_archive_is_owner_only_while_it_is_being_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("ENGRAMDB_DATA_DIR", tmp.path());
+        let src = tmp.path().join("t.jsonl");
+        std::fs::write(&src, b"{}\n").unwrap();
+
+        archive_transcript("0123456789abcdef", "s1", &src).unwrap();
+        let mode = std::fs::metadata(archive_path("0123456789abcdef", "s1").unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "archive is world-readable");
     }
 }
