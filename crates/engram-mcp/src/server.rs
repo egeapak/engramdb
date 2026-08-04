@@ -3020,7 +3020,11 @@ impl EngramDbServer {
                     "ended_at": s.summary.ended_at,
                     "user_turns": s.summary.user_turns,
                     "assistant_turns": s.summary.assistant_turns,
-                    "first_prompt": s.summary.first_prompt,
+                    // Transcript-derived, and unlike the digest payload this
+                    // listing carries no trust marker at all — so it is
+                    // sanitized rather than passed through raw.
+                    "first_prompt": s.summary.first_prompt.as_deref()
+                        .map(engramdb::storage::transcripts::sanitize_one_line),
                     "already_harvested": s.already_harvested,
                 })
             })

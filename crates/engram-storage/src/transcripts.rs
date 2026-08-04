@@ -150,6 +150,16 @@ pub fn sanitize_for_terminal(text: &str) -> std::borrow::Cow<'_, str> {
             // Bidi overrides and isolates — Trojan Source: a preview can be
             // made to render in an order that inverts what it says.
             '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => true,
+            // Directional marks: weaker than the overrides above, but they
+            // still reorder a rendered line.
+            '\u{200e}' | '\u{200f}' | '\u{061c}' => true,
+            // Unicode line/paragraph separators. Callers split on `\n`, so a
+            // segment after one of these is never probed by the structural
+            // escape — it would be an unexamined line by construction.
+            '\u{2028}' | '\u{2029}' => true,
+            // Zero-width space: splits literal-string matching (a tag can be
+            // written `<system\u{200b}-reminder>`) while rendering invisibly.
+            '\u{200b}' | '\u{feff}' => true,
             _ => false,
         }
     }
