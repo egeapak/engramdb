@@ -126,7 +126,24 @@ pub fn is_valid_session_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
-/// Replace bytes a terminal would *execute* rather than display.
+/// Invisible-format test shared with [`sanitize_for_terminal`], for callers
+/// that must match against raw (un-sanitized) record text.
+pub fn is_invisible_format(c: char) -> bool {
+    matches!(c,
+        '\u{00ad}'
+        | '\u{180e}'
+        | '\u{200b}'..='\u{200d}'
+        | '\u{2060}'..='\u{2064}'
+        | '\u{206a}'..='\u{206f}'
+        | '\u{fe00}'..='\u{fe0f}'
+        | '\u{feff}'
+        | '\u{fff9}'..='\u{fffb}'
+        | '\u{1d173}'..='\u{1d17a}'
+        | '\u{e0000}'..='\u{e0fff}'
+    )
+}
+
+/// Neutralize bytes a terminal would *execute*, or a matcher would miss.
 ///
 /// Transcript text was written by another program and fed by arbitrary third
 /// parties — web pages, PR comments, dependency source. Rendering it to a
@@ -134,11 +151,35 @@ pub fn is_valid_session_id(id: &str) -> bool {
 /// than a model's context, and an escape sequence there can repaint the line,
 /// hide a command, emit a clickable hyperlink, or write the clipboard.
 ///
-/// Replaces rather than deletes: a silently-stripped escape makes hostile
-/// content indistinguishable from clean content, whereas `U+FFFD` says the
-/// bytes were tampered with. Returns `Cow::Borrowed` for clean input, which
-/// is nearly all of it, so calling this per row costs no allocation.
+/// Two dispositions, for two different problems: characters that *do*
+/// something become `U+FFFD` (a visible mark — silently stripping them would
+/// make tampered content look clean), while characters that render as
+/// *nothing* are deleted outright, so the matchers downstream see the string a
+/// reader sees. Returns `Cow::Borrowed` for clean input, which is nearly all
+/// of it, so calling this per row costs no allocation.
 pub fn sanitize_for_terminal(text: &str) -> std::borrow::Cow<'_, str> {
+    /// Characters that render as nothing at all.
+    ///
+    /// These are *deleted*, not replaced. Replacing would be the safer-looking
+    /// choice but is exactly wrong here: the whole attack is that
+    /// `<system\u{200d}-reminder>` and `\u{200d}### Human` defeat a literal
+    /// matcher while looking identical to the real thing on screen. Deleting
+    /// reassembles the string the matchers downstream actually need to see,
+    /// and nothing visible is lost — that is what "invisible" means.
+    ///
+    /// The cost is that a ZWJ emoji sequence decomposes (a family emoji
+    /// renders as its component people) and ZWNJ-dependent shaping in Persian
+    /// and some Indic scripts is lost. For a transcript digest mined for
+    /// facts, that is a fair trade against an undetectable forgery.
+    fn is_invisible(c: char) -> bool {
+        // Same set as the free function above; kept as a local alias so the
+        // hot loop does not pay a call through a pub boundary.
+        is_invisible_format(c)
+    }
+
+    /// Characters replaced with U+FFFD: they do something a reader would not
+    /// sanction, and leaving a visible mark is the point — silently stripping
+    /// them would make tampered content indistinguishable from clean content.
     fn is_unsafe(c: char) -> bool {
         match c {
             // Newline and tab are legitimate structure in a digest body.
@@ -148,28 +189,27 @@ pub fn sanitize_for_terminal(text: &str) -> std::borrow::Cow<'_, str> {
             // C1: U+009B is CSI and U+009D is OSC on many terminals.
             c if ('\u{80}'..='\u{9f}').contains(&c) => true,
             // Bidi overrides and isolates — Trojan Source: a preview can be
-            // made to render in an order that inverts what it says.
+            // made to render in an order that inverts what it says. Marked
+            // rather than deleted, because reordered text *is* a forgery.
             '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => true,
-            // Directional marks: weaker than the overrides above, but they
-            // still reorder a rendered line.
             '\u{200e}' | '\u{200f}' | '\u{061c}' => true,
             // Unicode line/paragraph separators. Callers split on `\n`, so a
             // segment after one of these is never probed by the structural
             // escape — it would be an unexamined line by construction.
             '\u{2028}' | '\u{2029}' => true,
-            // Zero-width space: splits literal-string matching (a tag can be
-            // written `<system\u{200b}-reminder>`) while rendering invisibly.
-            '\u{200b}' | '\u{feff}' => true,
             _ => false,
         }
     }
 
-    if !text.chars().any(is_unsafe) && !text.contains('\r') {
+    if !text.chars().any(|c| is_unsafe(c) || is_invisible(c)) && !text.contains('\r') {
         return std::borrow::Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
+        if is_invisible(c) {
+            continue;
+        }
         if c == '\r' {
             // CRLF is an ordinary line ending; a lone CR rewrites the line
             // that was already printed.
@@ -638,7 +678,10 @@ fn is_synthetic_prompt(text: &str) -> bool {
     // while still reporting the digest complete. Tags embedded mid-prompt are
     // handled where they actually matter, by `ops::harvest`'s defang, which
     // neutralizes them without discarding the human's words.
-    let lowered = text.trim_start().to_lowercase();
+    // Strip invisibles first: this runs on *raw* record text, so without it
+    // `<system\u{200d}-reminder>` reads as an ordinary human turn.
+    let cleaned: String = text.chars().filter(|c| !is_invisible_format(*c)).collect();
+    let lowered = cleaned.trim_start().to_lowercase();
     TAG_MARKERS
         .iter()
         .any(|m| lowered.starts_with(&format!("<{m}")) || lowered.starts_with(&format!("</{m}")))
@@ -824,6 +867,33 @@ mod tests {
             "why does the log say [Request interrupted by user]?"
         ));
         assert!(is_synthetic_prompt("[Request interrupted by user]"));
+    }
+
+    #[test]
+    fn invisible_characters_do_not_hide_scaffolding_from_the_filter() {
+        // This runs on *raw* record text, before any sanitizing, so it needs
+        // its own invisible-stripping pass or a ZWJ turns harness scaffolding
+        // into what reads as a genuine human turn.
+        for c in ['\u{200c}', '\u{200d}', '\u{2060}', '\u{00ad}', '\u{feff}'] {
+            assert!(
+                is_synthetic_prompt(&format!("<system{c}-reminder>x</system-reminder>")),
+                "U+{:04X} hid scaffolding from the filter",
+                c as u32
+            );
+        }
+        // A real question mentioning one still survives.
+        assert!(!is_synthetic_prompt(
+            "why does hook.rs emit <system-reminder> twice?"
+        ));
+    }
+
+    #[test]
+    fn sanitize_deletes_invisibles_but_marks_active_characters() {
+        // Deleted, so downstream literal matchers see the real string...
+        assert_eq!(sanitize_for_terminal("a\u{200d}b\u{00ad}c"), "abc");
+        // ...but anything that *does* something stays visibly marked.
+        assert!(sanitize_for_terminal("a\u{202e}b").contains('\u{fffd}'));
+        assert!(sanitize_for_terminal("a\u{2028}b").contains('\u{fffd}'));
     }
 
     #[test]

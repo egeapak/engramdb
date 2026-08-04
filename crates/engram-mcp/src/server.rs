@@ -3014,8 +3014,12 @@ impl EngramDbServer {
             .map(|s| {
                 serde_json::json!({
                     "session_id": s.summary.session_id,
-                    "cwd": s.summary.cwd,
-                    "git_branch": s.summary.git_branch,
+                    // Same reasoning as `first_prompt` below: transcript-derived,
+                    // in a payload with no trust marker of its own.
+                    "cwd": s.summary.cwd.as_deref()
+                        .map(engramdb::storage::transcripts::sanitize_one_line),
+                    "git_branch": s.summary.git_branch.as_deref()
+                        .map(engramdb::storage::transcripts::sanitize_one_line),
                     "started_at": s.summary.started_at,
                     "ended_at": s.summary.ended_at,
                     "user_turns": s.summary.user_turns,
