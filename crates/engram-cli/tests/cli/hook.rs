@@ -296,3 +296,95 @@ fn hook_session_end_clears_mapping_and_demotes_when_configured() {
         "expected demotion curve, got: {decay}"
     );
 }
+
+/// A `hook` subcommand this binary does not have must exit 0, not clap's
+/// exit 2.
+///
+/// The hook wiring (`.claude-plugin/plugin.json`, `settings.json`) is
+/// installed independently of the binary, so a plugin update alone can name
+/// an event an older `engramdb` never shipped. Claude Code treats a non-zero
+/// hook exit as *blocking* — that skew used to reject every prompt with
+/// `error: unrecognized subcommand`. This is the same §14.15 contract
+/// `hook_all_subcommands_malformed_stdin_exit_zero` pins for bad stdin,
+/// extended to the argv that clap rejects before dispatch is ever reached.
+#[test]
+fn hook_unknown_subcommand_fails_open() {
+    let project = seed_project();
+    let empty_cache = TempDir::new().unwrap();
+
+    for sub in ["future-hook-event", "pre-tool-usee"] {
+        let output = hook_cmd(project.path(), &[sub], &empty_cache)
+            .write_stdin("{}")
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run hook {sub}: {e}"));
+
+        assert!(
+            output.status.success(),
+            "hook {sub} must exit 0; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // On UserPromptSubmit and SessionStart, exit-0 stdout is injected into
+        // the model's context — a diagnostic written there would poison every
+        // prompt. It has to go to stderr.
+        assert!(
+            output.stdout.is_empty(),
+            "hook {sub} must write nothing to stdout, got: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(sub) && stderr.contains(env!("CARGO_PKG_VERSION")),
+            "stderr should name the hook and this binary's version, got: {stderr}"
+        );
+    }
+}
+
+/// A bare `engramdb hook` is the same class of failure as an unknown
+/// subcommand — clap's exit 2 would block the session just as hard.
+#[test]
+fn hook_with_no_subcommand_fails_open() {
+    let project = seed_project();
+    let empty_cache = TempDir::new().unwrap();
+
+    let output = hook_cmd(project.path(), &[], &empty_cache)
+        .write_stdin("{}")
+        .output()
+        .expect("failed to run bare hook");
+
+    assert!(
+        output.status.success(),
+        "bare `hook` must exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no hook event"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The list the doctor validates against must be the real clap subcommand
+/// set — if these drift, doctor starts reporting working hooks as broken.
+#[test]
+fn supported_hook_subcommands_matches_cli() {
+    let names = engram_cli::supported_hook_subcommands();
+    for expected in [
+        "pre-tool-use",
+        "session-start",
+        "user-prompt-submit",
+        "post-tool-use",
+        "session-end",
+        "pre-compact",
+    ] {
+        assert!(
+            names.iter().any(|n| n == expected),
+            "{expected} missing from {names:?}"
+        );
+    }
+    // The `external_subcommand` catch-all has no name of its own and must not
+    // leak into the list.
+    assert_eq!(names.len(), 6, "unexpected hook subcommands: {names:?}");
+}

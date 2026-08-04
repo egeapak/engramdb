@@ -1816,10 +1816,10 @@ mod tests {
             match cli.command {
                 Command::Hook { command } => {
                     let name = match command {
-                        HookCommand::UserPromptSubmit => "UserPromptSubmit",
-                        HookCommand::PostToolUse => "PostToolUse",
-                        HookCommand::SessionEnd => "SessionEnd",
-                        HookCommand::PreCompact => "PreCompact",
+                        Some(HookCommand::UserPromptSubmit) => "UserPromptSubmit",
+                        Some(HookCommand::PostToolUse) => "PostToolUse",
+                        Some(HookCommand::SessionEnd) => "SessionEnd",
+                        Some(HookCommand::PreCompact) => "PreCompact",
                         _ => "other",
                     };
                     assert_eq!(name, expect);
@@ -1993,7 +1993,7 @@ mod tests {
         let cli = Cli::try_parse_from(["engramdb", "hook", "pre-tool-use"]).unwrap();
         match cli.command {
             Command::Hook { command } => match command {
-                HookCommand::PreToolUse => {} // expected
+                Some(HookCommand::PreToolUse) => {} // expected
                 _ => panic!("Expected PreToolUse"),
             },
             _ => panic!("Expected Hook command"),
@@ -2010,7 +2010,7 @@ mod tests {
         assert_eq!(cli.dir, Some(std::path::PathBuf::from("/tmp")));
         match cli.command {
             Command::Hook { command } => match command {
-                HookCommand::PreToolUse => {}
+                Some(HookCommand::PreToolUse) => {}
                 _ => panic!("Expected PreToolUse"),
             },
             _ => panic!("Expected Hook command"),
@@ -2025,7 +2025,7 @@ mod tests {
         let cli = Cli::try_parse_from(["engramdb", "hook", "session-start"]).unwrap();
         match cli.command {
             Command::Hook { command } => match command {
-                HookCommand::SessionStart { min_criticality } => {
+                Some(HookCommand::SessionStart { min_criticality }) => {
                     assert!((min_criticality - 0.6).abs() < f64::EPSILON);
                 }
                 _ => panic!("Expected SessionStart"),
@@ -2049,7 +2049,7 @@ mod tests {
         .unwrap();
         match cli.command {
             Command::Hook { command } => match command {
-                HookCommand::SessionStart { min_criticality } => {
+                Some(HookCommand::SessionStart { min_criticality }) => {
                     assert!((min_criticality - 0.8).abs() < f64::EPSILON);
                 }
                 _ => panic!("Expected SessionStart"),

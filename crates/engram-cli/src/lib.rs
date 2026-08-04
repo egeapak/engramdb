@@ -106,6 +106,48 @@ use engramdb::daemon::DaemonCell;
 use engramdb::storage::FileRegistry;
 use prompter::InquirePrompter;
 
+/// The `hook` subcommand names this binary understands, derived from
+/// [`HookCommand`] rather than hardcoded so the list can never drift.
+///
+/// Used by the doctor's hook-configuration check to tell a supported hook
+/// wiring from one this binary predates. The `external_subcommand` catch-all
+/// carries no name of its own, so clap does not report it here.
+pub fn supported_hook_subcommands() -> Vec<String> {
+    use clap::Subcommand;
+    HookCommand::augment_subcommands(clap::Command::new("hook"))
+        .get_subcommands()
+        .map(|sub| sub.get_name().to_string())
+        .collect()
+}
+
+/// Report a `hook` invocation this binary cannot serve, then let the caller
+/// exit 0.
+///
+/// A hook that exits non-zero is a *blocking* error in Claude Code: a broken
+/// `UserPromptSubmit` rejects every prompt, a broken `PreToolUse` every
+/// Read/Write/Edit. Because the hook wiring is installed independently of the
+/// binary, a plugin update alone can name an event this build never shipped —
+/// so the only safe response is to degrade to "no context" the way every other
+/// hook failure already does.
+///
+/// The message goes to **stderr on purpose**: on `UserPromptSubmit` (and
+/// `SessionStart`) Claude Code injects a hook's stdout into the model's
+/// context on exit 0, so writing there would quietly poison every prompt with
+/// a diagnostic.
+fn warn_unknown_hook(name: Option<&str>) {
+    let supported = supported_hook_subcommands().join(", ");
+    match name {
+        Some(name) => eprintln!(
+            "engramdb {} does not support `hook {name}`. Your Claude Code hook \
+             configuration is newer than this binary — reinstall with \
+             `cargo install --git https://github.com/egeapak/engramdb --force`. \
+             Supported here: {supported}. (Continuing without context; this hook is a no-op.)",
+            env!("CARGO_PKG_VERSION"),
+        ),
+        None => eprintln!("engramdb hook: no hook event given. Expected one of: {supported}."),
+    }
+}
+
 /// Run the CLI application with parsed arguments.
 ///
 /// This is the main entry point for the CLI. It determines the working directory,
@@ -677,14 +719,27 @@ pub async fn run(cli: Cli) -> Result<()> {
             // and never create memories — they deliberately skip provider
             // resolution (no `backend`), see `build_engine_without_providers`.
             let result = match command {
-                HookCommand::PreToolUse => commands::run_hook_pre_tool_use(&dir).await,
-                HookCommand::SessionStart { min_criticality } => {
+                Some(HookCommand::PreToolUse) => commands::run_hook_pre_tool_use(&dir).await,
+                Some(HookCommand::SessionStart { min_criticality }) => {
                     commands::run_hook_session_start(&dir, min_criticality).await
                 }
-                HookCommand::UserPromptSubmit => commands::run_hook_user_prompt_submit(&dir).await,
-                HookCommand::PostToolUse => commands::run_hook_post_tool_use(&dir).await,
-                HookCommand::SessionEnd => commands::run_hook_session_end(&dir).await,
-                HookCommand::PreCompact => commands::run_hook_pre_compact(&dir).await,
+                Some(HookCommand::UserPromptSubmit) => {
+                    commands::run_hook_user_prompt_submit(&dir).await
+                }
+                Some(HookCommand::PostToolUse) => commands::run_hook_post_tool_use(&dir).await,
+                Some(HookCommand::SessionEnd) => commands::run_hook_session_end(&dir).await,
+                Some(HookCommand::PreCompact) => commands::run_hook_pre_compact(&dir).await,
+                // Version skew: the Claude Code hook config names an event this
+                // binary predates (or is a bare `engramdb hook`). Report on
+                // stderr and exit 0 — see `warn_unknown_hook`.
+                Some(HookCommand::Unknown(args)) => {
+                    warn_unknown_hook(args.first().map(String::as_str));
+                    Ok(())
+                }
+                None => {
+                    warn_unknown_hook(None);
+                    Ok(())
+                }
             };
             // Fail-open backstop: a hook that exits non-zero surfaces as an
             // error on EVERY Read/Write/Edit in Claude Code. The handlers
