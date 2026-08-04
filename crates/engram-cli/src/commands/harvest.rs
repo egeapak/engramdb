@@ -78,7 +78,7 @@ pub async fn run_harvest(
                     Ok(selected) => (selected.transcript_path, None),
                     Err(live_err) => {
                         match restore_archived_session(dir, registry, &session_id).await? {
-                            Some(tmp) => (tmp.path().to_path_buf(), Some(tmp)),
+                            Some((guard, path)) => (path, Some(guard)),
                             None => return Err(live_err),
                         }
                     }
@@ -120,10 +120,14 @@ pub async fn run_harvest(
             defer,
             note,
         } => {
-            // `--all-projects` must mirror `show`: a session the user was able
-            // to digest has to be a session they can mark as reviewed, or the
-            // ledger silently re-offers it forever.
-            let selected = resolve_session(dir, registry, &session_id, all_projects).await?;
+            // `mark` must reach every session `show` can, or the ledger
+            // silently re-offers one forever. That now includes sessions whose
+            // live transcript is gone and which `show` reads from an archive,
+            // so fall back to the ledger exactly as `reset` does.
+            let resolved = match resolve_session(dir, registry, &session_id, all_projects).await {
+                Ok(selected) => selected.session_id,
+                Err(live_err) => resolve_ledger_key(dir, &session_id).map_err(|_| live_err)?,
+            };
             let decision = if defer {
                 HarvestDecision::Deferred
             } else if memory_ids.is_empty() {
@@ -131,20 +135,14 @@ pub async fn run_harvest(
             } else {
                 HarvestDecision::Harvested
             };
-            let entry = harvest_state::mark_harvested(
-                dir,
-                &selected.session_id,
-                &memory_ids,
-                decision,
-                note,
-            )?;
+            let entry = harvest_state::mark_harvested(dir, &resolved, &memory_ids, decision, note)?;
             if formatter.is_json() {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&entry_json(&selected.session_id, &entry))?
+                    serde_json::to_string_pretty(&entry_json(&resolved, &entry))?
                 );
             } else {
-                formatter.print_success(&describe_mark(&selected.session_id, &entry));
+                formatter.print_success(&describe_mark(&resolved, &entry));
             }
         }
 
@@ -548,7 +546,7 @@ async fn restore_archived_session(
     dir: &Path,
     registry: &dyn RegistryBackend,
     prefix: &str,
-) -> Result<Option<tempfile::NamedTempFile>> {
+) -> Result<Option<(tempfile::TempDir, PathBuf)>> {
     let Ok(key) = resolve_ledger_key(dir, prefix) else {
         return Ok(None);
     };
@@ -561,15 +559,20 @@ async fn restore_archived_session(
         return Ok(None);
     }
 
-    let tmp = tempfile::NamedTempFile::new()?;
-    let sha = transcript_archive::export_archive(&project_id, &key, tmp.path())?;
+    // Restore under the session's real name, not a random temp name:
+    // `parse_session` derives `session_id` from the file stem, so a
+    // `NamedTempFile` would head the digest with `.tmpAbC123` and hand an
+    // agent a session id that does not exist.
+    let tmp = tempfile::TempDir::new()?;
+    let restored = tmp.path().join(format!("{key}.jsonl"));
+    let sha = transcript_archive::export_archive(&project_id, &key, &restored)?;
     if sha != archive.sha256 {
         bail!(
             "Archive for session {key} does not match the checksum recorded when it was \
 written — the archive is corrupt. `harvest ledger rm {key} --archive-only` will drop it."
         );
     }
-    Ok(Some(tmp))
+    Ok(Some((tmp, restored)))
 }
 
 /// Find the one in-scope session whose id starts with `prefix`.

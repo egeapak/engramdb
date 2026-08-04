@@ -140,8 +140,12 @@ Marking is what stops a session being re-read on every future harvest, so a
 zero-yield session must be marked too. `engramdb harvest reset <session-id>`
 undoes it if the user wants another look.
 
-If a session's transcript has been archived, `engramdb harvest ledger export
-<session-id>` restores the full original — useful when a memory is later
-challenged and you need the conversation it came from.
+**Recovering a pruned session.** Claude Code deletes its own transcripts
+after a while. Such a session stops appearing in `harvest list`, but if it was
+archived it is still readable: `engramdb harvest ledger list` shows what is
+held, and `engramdb harvest show <session-id>` digests it straight from the
+archive. `engramdb harvest ledger export <session-id>` writes the full
+original to a file — useful when a memory is later challenged and you need the
+conversation it came from.
 
 Finally, report what was saved and what was skipped.

@@ -675,6 +675,38 @@ fn an_archived_session_is_still_readable_after_its_transcript_is_pruned() {
     assert!(out.contains("CI is red"), "{out}");
 }
 
+/// After Claude Code prunes a transcript, `show` reads the archive — and
+/// whatever `show` can display, `mark` must be able to settle, or the ledger
+/// re-offers it forever. The restored digest must also report the session's
+/// real id, not the temp file it was restored into.
+#[test]
+fn a_pruned_session_reports_its_real_id_and_can_still_be_marked() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+    c.session_end(&c.main, "aaaa1111-rich");
+    std::fs::remove_file(
+        c.claude
+            .join("projects")
+            .join(encode(&c.main))
+            .join("aaaa1111-rich.jsonl"),
+    )
+    .unwrap();
+
+    let out = c.stdout(&c.main, &["harvest", "show", "aaaa"]);
+    assert!(
+        out.contains("## Session aaaa1111-rich"),
+        "restored digest must carry the real session id: {out}"
+    );
+
+    let marked = c.stdout(&c.main, &["harvest", "mark", "aaaa"]);
+    assert!(marked.contains("aaaa1111-rich"), "{marked}");
+    let show = c.stdout(&c.main, &["harvest", "ledger", "show", "aaaa"]);
+    assert!(
+        show.contains("Skipped"),
+        "the mark was not recorded: {show}"
+    );
+}
+
 /// A session started in a *subdirectory* of the project belongs to it. Claude
 /// Code names the transcript directory after the session's cwd, so requiring
 /// the directory to encode the project root exactly made every such session

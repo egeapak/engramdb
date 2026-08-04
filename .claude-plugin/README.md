@@ -65,7 +65,7 @@ and it can be disabled with `enabled = false` under `[daemon]` in
 - **PreToolUse (Read/Write/Edit)** — surfaces relevant memories as context when the agent touches files
 - **UserPromptSubmit** — surfaces prompt-relevant memories, inferring your situation (debugging vs. design) to reweight what appears
 - **PostToolUse (Write/Edit/MultiEdit)** — warns when an edit touches a path some memory declared as its invalidation trigger
-- **SessionEnd** — housekeeping: clears the session's task mapping (and optionally demotes task-scoped memories), and archives a compressed copy of the session transcript so `/engram:harvest` can still mine it later
+- **SessionEnd** — housekeeping: clears the session's task mapping (and optionally demotes task-scoped memories), and archives a compressed copy of the session transcript so it can still be read after Claude Code prunes its own
 
 > **What the transcript archive stores.** Claude Code prunes its own
 > transcripts, so a session becomes unharvestable once its file is gone.

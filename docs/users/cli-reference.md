@@ -392,7 +392,10 @@ appearing in `harvest list`). `--defer` records the last of these.
 
 **Transcript archives.** With `[harvest] archive = true` (the default), the
 SessionEnd hook compresses each ending session's transcript so it can still
-be harvested later. This matters because Claude Code prunes its own
+be read later. `harvest show <id>` falls back to the archive automatically
+once the live transcript is gone — but a pruned session no longer appears in
+`harvest list`, which reads live transcripts only, so find it with
+`harvest ledger list` first. This matters because Claude Code prunes its own
 transcripts: archiving at *harvest* time would protect nothing, since you
 necessarily still hold the file then.
 
