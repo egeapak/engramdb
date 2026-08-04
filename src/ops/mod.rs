@@ -12,6 +12,7 @@ pub mod delete;
 pub mod doctor;
 pub mod gc;
 pub mod get;
+pub mod harvest;
 pub mod list;
 pub mod maintenance;
 pub mod parsing;
@@ -46,6 +47,11 @@ pub use gc::{
     execute_gc_plan, gc_memories, plan_gc, GcCandidate, GcMaintenance, GcPlan, GcReason, GcResult,
 };
 pub use get::get_memory;
+pub use harvest::{
+    budget_digest, digest_session, parse_since, render_digest_markdown, select_sessions,
+    session_scope, DigestParams, SelectParams, SelectedSession, SessionDigest, SessionScope,
+    DEFAULT_DIGEST_BUDGET,
+};
 pub use list::{list_memories, parse_sort_field, ListParams, SortField};
 pub use maintenance::{
     auto_maintain, auto_maintain_with_engine, maintenance_status, maintenance_would_run,

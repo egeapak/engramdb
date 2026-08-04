@@ -53,6 +53,30 @@ pub struct MemoryStore {
     lance_index: LanceIndex,
 }
 
+/// Keep `.engramdb/state/` out of version control.
+///
+/// `.engramdb/memories/` is meant to be committed — shared memories travel
+/// with a `git clone`. `.engramdb/state/` is not: it holds per-machine session
+/// bookkeeping (session→task mappings, the harvest ledger) whose contents are
+/// session ids, task names, and local decisions. Committing those leaks local
+/// working context into a shared repository and produces pointless diffs on
+/// every checkout.
+///
+/// Written on `init` and best-effort: an existing file is never overwritten
+/// (a user may have customized it), and a failure must not fail `init`.
+async fn write_state_gitignore(engramdb_dir: &Path) {
+    let path = engramdb_dir.join(".gitignore");
+    if path.exists() {
+        return;
+    }
+    let body = "# Per-machine session bookkeeping — not shared state.\n\
+                # `memories/` is deliberately NOT ignored: it is meant to be committed.\n\
+                state/\n";
+    if let Err(e) = async_fs::write(&path, body).await {
+        tracing::debug!("could not write .engramdb/.gitignore (non-fatal): {e}");
+    }
+}
+
 impl MemoryStore {
     /// Initialize a new EngramDB store in the given directory.
     ///
@@ -94,6 +118,8 @@ impl MemoryStore {
             };
             manifest::save_manifest(&manifest_path, &manifest).await?;
         }
+
+        write_state_gitignore(&engramdb_dir).await;
 
         // Create the placeholder config.toml only if missing — never clobber
         // a user-customized config (a dimensions change alone would make the
@@ -371,6 +397,14 @@ impl MemoryStore {
         if !engramdb_dir.exists() {
             return Err(StorageError::NotInitialized);
         }
+
+        // Backfill on open, not just on init: every store created before the
+        // `.gitignore` existed would otherwise keep `state/` tracked forever,
+        // and nobody re-runs `init` on an existing project. `state/` now holds
+        // the harvest ledger — session ids and free-text review notes — so
+        // leaving it committable is exactly the leak the file exists to stop.
+        // Cheap and idempotent: it returns immediately when the file is there.
+        write_state_gitignore(&engramdb_dir).await;
 
         // Compute project ID
         let project_id = project_id::compute_project_id(dir);

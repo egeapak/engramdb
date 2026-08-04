@@ -40,9 +40,9 @@ engramdb --version
 
 ### MCP Server
 
-A full MCP server (`engramdb serve`) starts automatically, providing 22 tools for memory and project management:
+A full MCP server (`engramdb serve`) starts automatically, providing 27 tools for memory and project management:
 
-`query`, `create`, `get`, `list`, `update`, `delete`, `challenge`, `review`, `resolve`, `verify`, `task_current`, `task_complete`, `stats`, `doctor`, `gc`, `reindex`, `compress_candidates`, `compress_apply`, `projects_list`, `projects_info`, `projects_link`, `projects_unlink`
+`query`, `create`, `get`, `list`, `update`, `delete`, `challenge`, `review`, `resolve`, `verify`, `task_current`, `task_complete`, `stats`, `config`, `doctor`, `gc`, `reindex`, `compress_candidates`, `compress_apply`, `projects_list`, `projects_info`, `projects_link`, `projects_unlink`, `harvest_list`, `harvest_show`, `harvest_mark`, `harvest_ledger`
 
 ### Shared embedding daemon
 
@@ -65,8 +65,38 @@ and it can be disabled with `enabled = false` under `[daemon]` in
 - **PreToolUse (Read/Write/Edit)** — surfaces relevant memories as context when the agent touches files
 - **UserPromptSubmit** — surfaces prompt-relevant memories, inferring your situation (debugging vs. design) to reweight what appears
 - **PostToolUse (Write/Edit/MultiEdit)** — warns when an edit touches a path some memory declared as its invalidation trigger
-- **SessionEnd** — housekeeping: clears the session's task mapping (and optionally demotes task-scoped memories)
+- **SessionEnd** — housekeeping: clears the session's task mapping (and optionally demotes task-scoped memories), and archives a compressed copy of the session transcript so it can still be read after Claude Code prunes its own
+
+> **What the transcript archive stores.** Claude Code prunes its own
+> transcripts, so a session becomes unharvestable once its file is gone.
+> SessionEnd therefore keeps a zstd-compressed copy at
+> `<engramdb data dir>/projects/<project-id>/transcripts/` — deliberately
+> **outside** your repository, never under `.engramdb/`, which gets committed.
+>
+> It is a verbatim copy of the whole conversation: your prompts, the
+> assistant's replies, and full tool output — in practice that includes
+> command output, file contents, and anything pasted into the chat. It stays
+> on your machine, owner-readable only; nothing is transmitted. Bounded by
+> age (365 days), total size (2 GiB, oldest evicted first), and per-file size
+> (16 MiB).
+>
+> Turn it off with `archive = false` under `[harvest]` in
+> `.engramdb/config.toml`. `engramdb harvest ledger prune --apply` deletes
+> what has accumulated; `engramdb harvest ledger export <session-id>`
+> restores one.
 - **PreCompact** — reminds the agent to store durable discoveries before context compaction
+
+### Slash commands
+
+- **`/engram:reflect`** — reflect on the session you are *in* and persist
+  durable project / environment / preference learnings.
+- **`/engram:harvest`** — mine sessions that are already *over*. Reads past
+  transcripts, proposes what is worth remembering, lists every candidate for
+  your approval, and saves only what you accept. Covers this project and its
+  worktrees by default.
+
+Use `harvest` to backfill a project whose earlier sessions were never
+captured; use `reflect` at the end of the session you are in.
 
 ### Permissions
 

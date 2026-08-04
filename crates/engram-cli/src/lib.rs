@@ -683,7 +683,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 }
                 HookCommand::UserPromptSubmit => commands::run_hook_user_prompt_submit(&dir).await,
                 HookCommand::PostToolUse => commands::run_hook_post_tool_use(&dir).await,
-                HookCommand::SessionEnd => commands::run_hook_session_end(&dir).await,
+                HookCommand::SessionEnd => commands::run_hook_session_end(&dir, &registry).await,
                 HookCommand::PreCompact => commands::run_hook_pre_compact(&dir).await,
             };
             // Fail-open backstop: a hook that exits non-zero surfaces as an
@@ -709,6 +709,17 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Groups { command } => {
             commands::run_groups(&dir, &registry, command, &prompter, &formatter).await
+        }
+        Command::Harvest { command } => {
+            commands::run_harvest(
+                &dir,
+                &registry,
+                command,
+                &config.harvest,
+                &formatter,
+                &prompter,
+            )
+            .await
         }
     }
 }

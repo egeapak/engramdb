@@ -35,6 +35,15 @@ pub fn cmd() -> assert_cmd::Command {
     c
 }
 
+/// The shared `ENGRAMDB_DATA_DIR` these tests run against.
+///
+/// Transcript archives land under `projects/<root-project-id>/transcripts/`,
+/// and that id is a hash of a temp path, so tests locate an archive by
+/// searching rather than recomputing it.
+pub fn data_dir() -> &'static Path {
+    test_dirs().data_dir.path()
+}
+
 /// Initialize a store at the given directory with `--no-embeddings`.
 pub fn init_store(dir: &Path) {
     cmd()

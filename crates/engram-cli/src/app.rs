@@ -101,6 +101,165 @@ pub enum DaemonCommand {
     },
 }
 
+/// Subcommands for `engramdb harvest`.
+#[derive(Subcommand)]
+pub enum HarvestCommand {
+    /// List past sessions in scope, newest activity first
+    List {
+        /// Only sessions active since this point: an RFC 3339 timestamp or a
+        /// relative shorthand like `7d`, `12h`, `30m`, `2w`
+        #[arg(long, value_name = "WHEN")]
+        since: Option<String>,
+
+        /// Maximum number of sessions to list
+        #[arg(long, short = 'n')]
+        limit: Option<usize>,
+
+        /// Also list sessions already recorded as harvested
+        #[arg(long)]
+        include_harvested: bool,
+
+        /// Include sessions with no human turns
+        #[arg(long)]
+        include_empty: bool,
+
+        /// Ignore project scoping and list every session on this machine
+        #[arg(long)]
+        all_projects: bool,
+
+        /// Session id to omit (typically the caller's own, still being written)
+        #[arg(long, value_name = "ID")]
+        exclude_session: Option<String>,
+    },
+
+    /// Print a budgeted digest of one session
+    Show {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+
+        /// Character budget for the digest. Defaults to `[harvest]
+        /// digest_budget` (200000); `0` means unlimited.
+        #[arg(long)]
+        max_chars: Option<usize>,
+
+        /// Include the assistant's reasoning blocks (verbose)
+        #[arg(long)]
+        include_thinking: bool,
+
+        /// Include subagent turns (verbose; subagents report back into the
+        /// main thread, so their raw turns are largely duplicate volume)
+        #[arg(long)]
+        include_sidechains: bool,
+
+        /// Omit the tool-call trace, leaving prompts and prose only
+        #[arg(long)]
+        no_tools: bool,
+
+        /// Search every session on this machine, not just this project's
+        #[arg(long)]
+        all_projects: bool,
+    },
+
+    /// Record that a session has been reviewed, so it is not offered again
+    Mark {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+
+        /// Id of a memory created from this session (repeatable). Omit when
+        /// the session yielded nothing — recording a zero-yield review is
+        /// what stops it being re-read on the next harvest.
+        #[arg(long = "memory", value_name = "ID")]
+        memory_ids: Vec<String>,
+
+        /// Search every session on this machine, not just this project's.
+        /// Mirrors `show`, so a session you were able to digest is always a
+        /// session you can mark as reviewed.
+        #[arg(long)]
+        all_projects: bool,
+
+        /// Record the session as deliberately postponed rather than settled.
+        /// Deferred sessions keep appearing in `harvest list`.
+        #[arg(long, conflicts_with = "memory_ids")]
+        defer: bool,
+
+        /// Why the session was skipped or deferred
+        #[arg(long)]
+        note: Option<String>,
+    },
+
+    /// Forget a session's harvest record so it is offered again
+    Reset {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+    },
+
+    /// Inspect and manage the harvest ledger and its transcript archives
+    Ledger {
+        #[command(subcommand)]
+        command: LedgerCommand,
+    },
+}
+
+/// Subcommands for `engramdb harvest ledger`.
+#[derive(Subcommand)]
+pub enum LedgerCommand {
+    /// List recorded sessions and their decisions
+    List {
+        /// Only entries with this decision
+        #[arg(long, value_name = "DECISION")]
+        decision: Option<String>,
+
+        /// Only entries that still have an archived transcript
+        #[arg(long)]
+        with_archive: bool,
+    },
+
+    /// Show one entry in full, including archive metadata
+    Show {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+    },
+
+    /// Decompress an archived transcript back to a file
+    Export {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+
+        /// Destination path (default: `<session-id>.jsonl` in the cwd)
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+    },
+
+    /// Delete a ledger entry and/or its archive
+    Rm {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+
+        /// Delete only the archived transcript, keeping the decision record
+        #[arg(long)]
+        archive_only: bool,
+
+        /// Skip confirmation prompt
+        #[arg(long, short = 'f')]
+        force: bool,
+    },
+
+    /// Evict archives past the retention limits (dry run by default)
+    Prune {
+        /// Override `[harvest] archive_retention_days` for this run
+        #[arg(long, value_name = "WHEN")]
+        older_than: Option<String>,
+
+        /// Override `[harvest] archive_max_bytes` for this run
+        #[arg(long, value_name = "BYTES")]
+        max_bytes: Option<u64>,
+
+        /// Actually delete (default is a dry run, like `gc` and `compress`)
+        #[arg(long)]
+        apply: bool,
+    },
+}
+
 /// Subcommands for `engramdb projects`.
 #[derive(Subcommand)]
 pub enum ProjectsCommand {
@@ -798,6 +957,19 @@ pub enum Command {
     Projects {
         #[command(subcommand)]
         command: Option<ProjectsCommand>,
+    },
+
+    /// Inspect past Claude Code sessions for knowledge worth remembering
+    ///
+    /// Provides the raw material for the `/engram:harvest` slash command:
+    /// `list` shows which sessions are in scope, `show` prints a budgeted
+    /// digest of one, and `mark` records that a session has been reviewed so
+    /// it is not offered again. Scope defaults to this project plus its
+    /// registered sub-projects (git worktrees), which file their transcripts
+    /// under their own paths.
+    Harvest {
+        #[command(subcommand)]
+        command: HarvestCommand,
     },
 
     /// Manage multi-project memory groups and this project's subscriptions

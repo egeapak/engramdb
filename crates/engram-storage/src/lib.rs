@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod error;
+pub mod harvest_state;
 pub mod lance_index;
 pub mod manifest;
 pub mod memory_file;
@@ -21,6 +22,8 @@ pub mod task_state;
 pub mod telemetry;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+pub mod transcript_archive;
+pub mod transcripts;
 pub mod worktree;
 pub mod write_lock;
 
