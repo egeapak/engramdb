@@ -10,7 +10,7 @@ use crate::prompter::Prompter;
 use anyhow::{bail, Result};
 use engramdb::ops::harvest;
 use engramdb::storage::harvest_state::{self, HarvestDecision, HarvestEntry};
-use engramdb::storage::transcripts::ParseOptions;
+use engramdb::storage::transcripts::{self, ParseOptions};
 use engramdb::storage::{transcript_archive, RegistryBackend};
 use engramdb::types::HarvestConfig;
 use std::path::{Path, PathBuf};
@@ -104,24 +104,7 @@ pub async fn run_harvest(
             if formatter.is_json() {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "session_id": digest.summary.session_id,
-                        "cwd": digest.summary.cwd,
-                        "git_branch": digest.summary.git_branch,
-                        "started_at": digest.summary.started_at,
-                        "ended_at": digest.summary.ended_at,
-                        "user_turns": digest.summary.user_turns,
-                        "assistant_turns": digest.summary.assistant_turns,
-                        "complete": digest.is_complete(),
-                        "dropped_classes": digest.dropped_classes,
-                        "truncated_events": digest.truncated_events,
-                        // A dedicated field, not only inside `markdown`: a
-                        // client that reads `events` directly must still see
-                        // that this is foreign, recorded content.
-                        "trust": harvest::DIGEST_TRUST_HEADER,
-                        "events": digest.events,
-                        "markdown": markdown,
-                    }))?
+                    serde_json::to_string_pretty(&harvest::DigestJson::new(&digest, "", markdown))?
                 );
             } else {
                 println!("{markdown}");
@@ -263,7 +246,7 @@ async fn run_ledger(
                         archive
                     );
                     if let Some(note) = &e.note {
-                        println!("    {note}");
+                        println!("    {}", transcripts::sanitize_one_line(note));
                     }
                 }
             }
@@ -295,7 +278,7 @@ async fn run_ledger(
                     println!("           {}", entry.memory_ids.join(", "));
                 }
                 if let Some(note) = &entry.note {
-                    println!("Note:      {note}");
+                    println!("Note:      {}", transcripts::sanitize_one_line(note));
                 }
                 match &entry.archive {
                     Some(a) => {

@@ -863,10 +863,12 @@ pub async fn run_hook_session_end(dir: &Path, registry: &dyn RegistryBackend) ->
     // self-satisfy on the second run. The plugin registers SessionEnd
     // machine-wide, so without this every directory Claude Code is ever
     // started in collects a `state/` tree and a permanent transcript archive.
-    if !engramdb::storage::paths::project_dir(dir)
-        .join("manifest.toml")
-        .exists()
-    {
+    // `manifest.toml` OR `memories/`: `MemoryStore` self-heals a missing
+    // manifest (it recreates one on open), so keying on the manifest alone
+    // would be stricter than every other handler and would silently disable
+    // SessionEnd for a store that is live everywhere else.
+    let project_dir = engramdb::storage::paths::project_dir(dir);
+    if !project_dir.join("manifest.toml").exists() && !project_dir.join("memories").is_dir() {
         return Ok(());
     }
 
@@ -947,19 +949,21 @@ async fn archive_ending_session(
         return;
     };
 
-    // Bail before `set_archive`, so the ledger never advertises an archive
-    // that was deliberately not written.
+    // Skip *writing* an oversized archive, but keep going: returning here
+    // would also skip the retention sweep below, so the very user this
+    // ceiling exists for — one whose sessions routinely exceed it — would
+    // stop having their existing archives aged out at all.
     let limit = config.harvest.archive_max_transcript_bytes;
-    if limit > 0 {
+    let too_big = limit > 0 && {
         let size = std::fs::metadata(&transcript).map(|m| m.len()).unwrap_or(0);
         if size > limit {
             tracing::debug!(
                 "SessionEnd archive: skipping {session_id} ({size} bytes exceeds \
                  [harvest] archive_max_transcript_bytes = {limit})"
             );
-            return;
         }
-    }
+        size > limit
+    };
 
     // Resolve the **root** project, exactly as every reader does
     // (`commands::harvest::archive_project_id` → `session_scope`). Using the
@@ -978,39 +982,43 @@ async fn archive_ending_session(
             own_id
         }
     };
-    match engramdb::storage::transcript_archive::archive_transcript(
-        &project_id,
-        session_id,
-        &transcript,
-    ) {
-        Ok(archive) => {
-            if let Err(e) = engramdb::storage::harvest_state::set_archive(dir, session_id, archive)
-            {
-                tracing::debug!("SessionEnd archive: ledger update failed (non-fatal): {e}");
-            }
-            // Enforce the budget here rather than on a timer: session end is
-            // the only moment archiving reliably runs.
-            match engramdb::storage::transcript_archive::prune_archives(
-                &project_id,
-                config.harvest.archive_retention_days,
-                config.harvest.archive_max_bytes,
-                false,
-            ) {
-                // Evicted files must stop being advertised by the ledger, or
-                // `harvest ledger show` offers an export that cannot succeed.
-                Ok(outcome) => {
-                    if let Err(e) =
-                        engramdb::storage::harvest_state::clear_archive_refs(dir, &outcome.removed)
-                    {
-                        tracing::debug!(
-                            "SessionEnd archive: clearing evicted refs failed (non-fatal): {e}"
-                        );
-                    }
+    if !too_big {
+        match engramdb::storage::transcript_archive::archive_transcript(
+            &project_id,
+            session_id,
+            &transcript,
+        ) {
+            Ok(archive) => {
+                if let Err(e) =
+                    engramdb::storage::harvest_state::set_archive(dir, session_id, archive)
+                {
+                    tracing::debug!("SessionEnd archive: ledger update failed (non-fatal): {e}");
                 }
-                Err(e) => tracing::debug!("SessionEnd archive: prune failed (non-fatal): {e}"),
+            }
+            Err(e) => tracing::debug!("SessionEnd archive failed (non-fatal): {e}"),
+        }
+    }
+
+    // Always: session end is the only moment this reliably runs, so an
+    // oversized transcript must not also cost the retention sweep.
+    match engramdb::storage::transcript_archive::prune_archives(
+        &project_id,
+        config.harvest.archive_retention_days,
+        config.harvest.archive_max_bytes,
+        false,
+    ) {
+        // Evicted files must stop being advertised by the ledger, or
+        // `harvest ledger show` offers an export that cannot succeed.
+        Ok(outcome) => {
+            if let Err(e) =
+                engramdb::storage::harvest_state::clear_archive_refs(dir, &outcome.removed)
+            {
+                tracing::debug!(
+                    "SessionEnd archive: clearing evicted refs failed (non-fatal): {e}"
+                );
             }
         }
-        Err(e) => tracing::debug!("SessionEnd archive failed (non-fatal): {e}"),
+        Err(e) => tracing::debug!("SessionEnd archive: prune failed (non-fatal): {e}"),
     }
 }
 

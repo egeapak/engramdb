@@ -350,7 +350,7 @@ engramdb harvest reset <session_id>
 engramdb harvest ledger list [--decision harvested|skipped|deferred] [--with-archive]
 engramdb harvest ledger show <session_id>
 engramdb harvest ledger export <session_id> [-o <path>]
-engramdb harvest ledger rm <session_id> [--archive-only]
+engramdb harvest ledger rm <session_id> [--archive-only] [--force]
 engramdb harvest ledger prune [--older-than 90d] [--max-bytes N] [--apply]
 ```
 
@@ -407,7 +407,7 @@ transcript is high-entropy tool output), so a typical session lands around
 650 KB. `archive_retention_days` (365) and `archive_max_bytes` (2 GiB, with
 oldest-first eviction) bound the total; `harvest ledger prune` reclaims space
 on demand and, like `gc` and `compress`, is a dry run until `--apply`.
-`harvest ledger export` restores one, verifying it against the SHA-256
+`harvest ledger rm` deletes one — it confirms first, since once Claude Code has pruned its own transcript the archive is the only remaining copy; `--force` skips the prompt and is **required** under `--format json`, which never prompts. `harvest ledger export` restores one, verifying it against the SHA-256
 recorded when it was written.
 
 ## `completions` — shell completions

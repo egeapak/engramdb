@@ -3073,21 +3073,13 @@ impl EngramDbServer {
         let digest = ops::harvest::digest_session(&summary.transcript_path, params)
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
-        let r = serde_json::to_string(&serde_json::json!({
-            "session_id": digest.summary.session_id,
-            "cwd": digest.summary.cwd,
-            "git_branch": digest.summary.git_branch,
-            "started_at": digest.summary.started_at,
-            "ended_at": digest.summary.ended_at,
-            "complete": digest.is_complete(),
-            "dropped_classes": digest.dropped_classes,
-            "truncated_events": digest.truncated_events,
-            // Its own field, not just inside `markdown`: a client reading the
-            // rendered text must see the marking even if it never parses it.
-            "trust": ops::harvest::DIGEST_TRUST_HEADER,
-            "markdown": ops::harvest::render_digest_markdown(&digest),
-        }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        // A declaration-ordered struct, not `json!{}`: serde_json is built
+        // without `preserve_order`, so a `json!{}` object sorts its keys and
+        // would emit `markdown` before `trust` — burying the marking the
+        // field exists to surface.
+        let markdown = ops::harvest::render_digest_markdown(&digest);
+        let r = serde_json::to_string(&ops::harvest::DigestJson::new(&digest, "", markdown))
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
         Ok(r)
     }

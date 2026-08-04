@@ -10,6 +10,7 @@
 
 use crate::project_tree::{build_render_model, RenderLine};
 use engramdb::retrieval::engine::{RetrievalResult, ScoredMemory};
+use engramdb::storage::transcripts::sanitize_one_line;
 use engramdb::storage::IndexFilterable;
 use engramdb::types::{Memory, MemoryType, ProjectListGrouping, Status};
 use owo_colors::{OwoColorize, Stream};
@@ -1055,7 +1056,11 @@ impl OutputFormatter {
                 .ended_at
                 .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            let id = short_id(&s.session_id);
+            // Every one of these is transcript-derived: bytes another
+            // program wrote and third parties fed. This is the only path
+            // where they reach a terminal rather than a model.
+            let safe_id = sanitize_one_line(&s.session_id);
+            let id = short_id(&safe_id);
             let id_display = if self.use_color {
                 id.if_supports_color(Stream::Stdout, |t| t.cyan())
                     .to_string()
@@ -1068,6 +1073,7 @@ impl OutputFormatter {
                 if s.user_turns == 1 { "" } else { "s" }
             );
             if let Some(branch) = &s.git_branch {
+                let branch = sanitize_one_line(branch);
                 line.push_str(&format!("  [{branch}]"));
             }
             if s.already_harvested {
@@ -1075,12 +1081,16 @@ impl OutputFormatter {
             }
             println!("{line}");
             if let Some(prompt) = &s.first_prompt {
+                // Sanitize *before* the dim wrapper, so our own escapes are
+                // the last thing added and an embedded reset cannot escape
+                // the styling and run unconstrained.
+                let prompt = sanitize_one_line(prompt);
                 let preview = if self.use_color {
                     prompt
                         .if_supports_color(Stream::Stdout, |t| t.dimmed())
                         .to_string()
                 } else {
-                    prompt.clone()
+                    prompt.to_string()
                 };
                 println!("    {preview}");
             }
