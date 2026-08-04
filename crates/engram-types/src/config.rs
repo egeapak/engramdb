@@ -1207,8 +1207,17 @@ pub struct HarvestConfig {
     #[serde(default = "default_true")]
     pub archive: bool,
 
-    /// Drop archives older than this many days. `None` disables age-based
-    /// eviction (size-based eviction still applies).
+    /// Drop archives older than this many days. Defaults to 365 so the
+    /// archive cannot grow by age without bound.
+    ///
+    /// `None` disables age-based eviction but is reachable only
+    /// programmatically — TOML has no null literal, so omitting the key
+    /// yields the default rather than `None`. From config, set the maximum
+    /// of 3650 (10 years) to effectively keep everything and let
+    /// `archive_max_bytes` be the only bound. `0` is rejected by validation:
+    /// it would evict every archive immediately. Mirrors how
+    /// `[stats].retention_days` and `[review].recency_days` handle the same
+    /// shape — a fourth idiom here would be the confusing one.
     #[serde(default = "default_archive_retention_days")]
     pub archive_retention_days: Option<u64>,
 
@@ -1285,8 +1294,15 @@ impl HarvestConfig {
                 anyhow::bail!(
                     "harvest.archive_retention_days must be >= 1 (0 is ambiguous — it would \
                      evict every archive immediately). Omit the field for the default (365), \
-                     or set `archive = false` to stop archiving."
+                     or set `archive = false` to stop archiving, or 3650 (the maximum) to \
+                     keep archives until the size budget evicts them."
                 );
+            }
+            if days > 3650 {
+                // Matches `[stats].retention_days`: an upper bound is what
+                // keeps the day arithmetic representable, and 10 years is
+                // already "forever" for a transcript archive.
+                anyhow::bail!("harvest.archive_retention_days ({days}) must be <= 3650");
             }
         }
         Ok(())

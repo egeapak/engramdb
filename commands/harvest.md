@@ -1,7 +1,6 @@
 ---
 description: Mine past Claude Code sessions for durable knowledge and save the worthwhile ones to EngramDB
 argument-hint: "[session-id | --since 7d | --limit N | --all-projects]"
-allowed-tools: Bash(engramdb harvest:*)
 ---
 
 Harvest past conversations for knowledge worth remembering.

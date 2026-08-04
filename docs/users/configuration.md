@@ -8,7 +8,7 @@ EngramDB reads per-project config from `<project>/.engramdb/config.toml`. Each s
 |-------|--------|
 | Built-in defaults | `crates/engram-types/src/config.rs` |
 | `config.toml` | `<project>/.engramdb/config.toml` |
-| Environment | `ENGRAMDB_DAEMON_SOCKET`, `ENGRAMDB_EMBEDDING_BACKEND`, `ENGRAMDB_DATA_DIR`, `ENGRAMDB_CONFIG_DIR` |
+| Environment | `ENGRAMDB_DAEMON_SOCKET`, `ENGRAMDB_EMBEDDING_BACKEND`, `ENGRAMDB_DATA_DIR`, `ENGRAMDB_CONFIG_DIR`, `CLAUDE_CONFIG_DIR` |
 | CLI flag | `--embedding-backend`, `--socket`, etc. |
 
 Higher rows lose to lower rows.
@@ -179,7 +179,7 @@ digest_budget = 200000              # char budget for one `harvest show`; 0 = un
 include_thinking = false            # include assistant reasoning blocks in digests
 include_sidechains = false          # include subagent turns in digests
 archive = true                      # archive each session's transcript at SessionEnd
-archive_retention_days = 365        # drop archives older than this; omit to disable age eviction
+archive_retention_days = 365        # drop archives older than this (1–3650); 3650 ≈ keep until the size cap
 archive_max_bytes = 2147483648      # 2 GiB total, oldest-first eviction; 0 = no size limit
 archive_max_transcript_bytes = 16777216  # skip archiving a transcript larger than this; 0 = no limit
 ```

@@ -493,6 +493,9 @@ fn parse_days(spec: &str) -> Result<u64> {
 archive immediately. Use `--max-bytes 0 --apply` if you really mean to drop them all."
         );
     }
+    if days > 3650 {
+        bail!("invalid --older-than value '{spec}': must be <= 3650 days");
+    }
     Ok(days)
 }
 

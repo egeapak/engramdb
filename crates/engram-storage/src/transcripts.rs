@@ -87,7 +87,14 @@ pub fn projects_root() -> Result<PathBuf> {
 }
 
 /// Encode a working directory the way Claude Code names its transcript
-/// directory: every byte outside `[A-Za-z0-9]` becomes `-`.
+/// directory: every character outside `[A-Za-z0-9]` becomes `-`.
+///
+/// One dash per Unicode scalar, not per UTF-8 byte. Claude Code does this in
+/// JS (`replace(/[^a-zA-Z0-9]/g, '-')`, which iterates UTF-16 code units),
+/// so the two agree for every BMP character and disagree for astral ones —
+/// it would emit two dashes for an emoji where this emits one. That is not
+/// observable from here, so `list_sessions_in` stands the encoded-name fast
+/// path down entirely for non-ASCII paths rather than trusting a guess.
 ///
 /// Lossy by construction — see the module docs. Callers must treat a match
 /// as a candidate to verify, not as proof.
@@ -671,6 +678,12 @@ pub fn list_sessions_in(root: &Path, project_paths: &[PathBuf]) -> Result<Vec<Se
         .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
         .collect();
     let encoded: Vec<String> = wanted.iter().map(|p| encode_project_dir(p)).collect();
+    // The encoded name is only trustworthy while the path is ASCII (see
+    // `encode_project_dir`). A disagreement is not a near miss: the prefix
+    // test below `continue`s, and the directory's sessions become invisible
+    // for good. So for a non-ASCII path the fast path stands down and the
+    // recorded `cwd` — authoritative regardless — does all the work.
+    let fast_path_ok = wanted.iter().all(|p| p.to_string_lossy().is_ascii());
 
     let mut out = Vec::new();
     for entry in std::fs::read_dir(root)? {
@@ -696,10 +709,16 @@ pub fn list_sessions_in(root: &Path, project_paths: &[PathBuf]) -> Result<Vec<Se
         let name = entry.file_name().to_string_lossy().to_string();
         let mut exact_dir = true;
         if !wanted.is_empty() {
-            if !encoded.iter().any(|e| name.starts_with(e.as_str())) {
-                continue;
+            if fast_path_ok {
+                if !encoded.iter().any(|e| name.starts_with(e.as_str())) {
+                    continue;
+                }
+                exact_dir = encoded.contains(&name);
+            } else {
+                // No trustworthy name evidence, so a transcript carrying no
+                // `cwd` must not be attributed on a name we cannot reproduce.
+                exact_dir = false;
             }
-            exact_dir = encoded.contains(&name);
         }
 
         let Ok(files) = std::fs::read_dir(&dir) else {
