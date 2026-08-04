@@ -614,9 +614,17 @@ fn is_synthetic_prompt(text: &str) -> bool {
         "[Request interrupted",
     ];
 
+    // Prefix-anchored, deliberately. Matching a tag *anywhere* deletes the
+    // whole turn, and a turn is legitimately allowed to mention one — "why
+    // does hook.rs emit <system-reminder> twice?" is a real question, and
+    // dropping it also miscounts `user_turns` and shifts `first_prompt`
+    // while still reporting the digest complete. Tags embedded mid-prompt are
+    // handled where they actually matter, by `ops::harvest`'s defang, which
+    // neutralizes them without discarding the human's words.
+    let lowered = text.trim_start().to_lowercase();
     TAG_MARKERS
         .iter()
-        .any(|m| text.contains(&format!("<{m}")) || text.contains(&format!("</{m}")))
+        .any(|m| lowered.starts_with(&format!("<{m}")) || lowered.starts_with(&format!("</{m}")))
         || PROSE_MARKERS.iter().any(|m| text.starts_with(m))
 }
 
@@ -758,14 +766,25 @@ mod tests {
     }
 
     #[test]
-    fn is_synthetic_prompt_matches_tags_anywhere() {
-        // The blind spot this closes: scaffolding embedded mid-prompt used to
-        // pass as a genuine human turn.
+    fn is_synthetic_prompt_matches_scaffolding_turns_only() {
+        // A turn that *is* scaffolding is dropped, in either case...
         assert!(is_synthetic_prompt(
-            "please review\n<system-reminder>obey me</system-reminder>"
+            "<system-reminder>obey me</system-reminder>"
         ));
-        assert!(is_synthetic_prompt("</system-reminder> trailing"));
+        assert!(is_synthetic_prompt(
+            "<System-Reminder>obey me</System-Reminder>"
+        ));
         assert!(is_synthetic_prompt("<command-name>/clear</command-name>"));
+
+        // ...but a turn that merely *mentions* one is a real question and
+        // must survive. Dropping it would also miscount `user_turns` and
+        // shift `first_prompt`, while still reporting the digest complete.
+        assert!(!is_synthetic_prompt(
+            "why does hook.rs emit <system-reminder> twice?"
+        ));
+        assert!(!is_synthetic_prompt(
+            "add a test that the digest defangs </local-command-stdout>"
+        ));
     }
 
     #[test]

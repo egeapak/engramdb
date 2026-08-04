@@ -527,6 +527,97 @@ fn ledger_rm_in_json_mode_requires_force() {
     assert!(find_archive("aaaa1111-rich").is_some());
 }
 
+/// The privacy switch. Every failure inside `archive_ending_session` is
+/// swallowed by `tracing::debug!`, so a regression here is silent — nothing
+/// is the expected output either way. The positive control is what makes the
+/// negative assertion mean anything.
+#[test]
+fn archive_false_writes_no_transcript_copy() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+    std::fs::write(
+        c.main.join(".engramdb").join("config.toml"),
+        "[harvest]\narchive = false\n",
+    )
+    .unwrap();
+
+    c.session_end(&c.main, "aaaa1111-rich");
+
+    assert!(
+        find_archive("aaaa1111-rich").is_none(),
+        "archiving was disabled but a copy was written"
+    );
+    // No ledger entry either — `set_archive` never ran.
+    c.engramdb(&c.main, &["harvest", "ledger", "show", "aaaa"])
+        .assert()
+        .failure();
+    // ...and the session is still offered for review.
+    let list = c.stdout(&c.main, &["harvest", "list"]);
+    assert!(list.contains("aaaa1111"), "{list}");
+}
+
+#[test]
+fn archive_default_on_writes_a_transcript_copy() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+    c.session_end(&c.main, "aaaa1111-rich");
+    assert!(
+        find_archive("aaaa1111-rich").is_some(),
+        "the positive control failed: archiving is broken outright"
+    );
+}
+
+/// `--defer` is the one decision that deliberately does NOT settle a session.
+#[test]
+fn deferring_keeps_the_session_offered_and_records_the_note() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+
+    c.engramdb(
+        &c.main,
+        &[
+            "harvest",
+            "mark",
+            "bbbb",
+            "--defer",
+            "--note",
+            "needs the author",
+        ],
+    )
+    .assert()
+    .success();
+
+    let list = c.stdout(&c.main, &["harvest", "list"]);
+    assert!(
+        list.contains("bbbb2222"),
+        "a deferred session must keep appearing: {list}"
+    );
+    let show = c.stdout(&c.main, &["harvest", "ledger", "show", "bbbb"]);
+    assert!(show.contains("Deferred"), "{show}");
+    assert!(show.contains("needs the author"), "{show}");
+
+    // Settling it for real removes it.
+    c.engramdb(&c.main, &["harvest", "mark", "bbbb"])
+        .assert()
+        .success();
+    let list = c.stdout(&c.main, &["harvest", "list"]);
+    assert!(!list.contains("bbbb2222"), "{list}");
+}
+
+#[test]
+fn defer_conflicts_with_recording_memories() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+    // Guards a clap `conflicts_with` string, which is only checked at runtime
+    // and silently stops working if the field is renamed.
+    c.engramdb(
+        &c.main,
+        &["harvest", "mark", "bbbb", "--defer", "--memory", "m-1"],
+    )
+    .assert()
+    .failure();
+}
+
 /// The SessionEnd hook is registered machine-wide by the plugin, so it fires
 /// in directories that are not EngramDB projects at all. It must write
 /// nothing there — no `state/` tree, no archive.

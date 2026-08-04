@@ -620,7 +620,7 @@ struct HarvestListInput {
     all_projects: Option<bool>,
 
     #[schemars(
-        description = "Target project: absolute path, 16-char project ID, \"global\", or \"group:<name>\". Omit for the current project."
+        description = "Target project: absolute path or 16-char project ID. Omit for the current project. Unlike other tools, \"global\" and \"group:<name>\" are NOT valid here — transcripts belong to a filesystem project, not to a memory store."
     )]
     project: Option<String>,
 }
@@ -641,7 +641,9 @@ struct HarvestShowInput {
     #[schemars(description = "Search every session on this machine, not just this project's")]
     all_projects: Option<bool>,
 
-    #[schemars(description = "Target project (see harvest_list)")]
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here."
+    )]
     project: Option<String>,
 }
 
@@ -664,7 +666,9 @@ struct HarvestMarkInput {
     #[schemars(description = "Forget the existing record so the session is offered again")]
     clear: Option<bool>,
 
-    #[schemars(description = "Target project (see harvest_list)")]
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here."
+    )]
     project: Option<String>,
 }
 
@@ -673,7 +677,9 @@ struct HarvestLedgerInput {
     #[schemars(description = "Filter by decision: harvested, skipped, or deferred")]
     decision: Option<String>,
 
-    #[schemars(description = "Target project (see harvest_list)")]
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here."
+    )]
     project: Option<String>,
 }
 
@@ -2978,6 +2984,7 @@ impl EngramDbServer {
         Parameters(input): Parameters<HarvestListInput>,
     ) -> Result<String, String> {
         let _scope = self.scope("harvest_list", input.project.as_deref());
+        reject_store_target(input.project.as_deref())?;
         let dir = self.resolve_dir(input.project.as_deref()).await?;
         let config_path = engramdb::storage::paths::project_dir(&dir).join("config.toml");
         let config = load_config_or_default(&config_path).await;
@@ -3036,6 +3043,7 @@ impl EngramDbServer {
         Parameters(input): Parameters<HarvestShowInput>,
     ) -> Result<String, String> {
         let _scope = self.scope("harvest_show", input.project.as_deref());
+        reject_store_target(input.project.as_deref())?;
         let dir = self.resolve_dir(input.project.as_deref()).await?;
         let config_path = engramdb::storage::paths::project_dir(&dir).join("config.toml");
         let config = load_config_or_default(&config_path).await;
@@ -3077,8 +3085,8 @@ impl EngramDbServer {
         // without `preserve_order`, so a `json!{}` object sorts its keys and
         // would emit `markdown` before `trust` — burying the marking the
         // field exists to surface.
-        let markdown = ops::harvest::render_digest_markdown(&digest);
-        let r = serde_json::to_string(&ops::harvest::DigestJson::new(&digest, "", markdown))
+        let (markdown, fence) = ops::harvest::render_digest_markdown_traced(&digest);
+        let r = serde_json::to_string(&ops::harvest::DigestJson::new(&digest, &fence, markdown))
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
         Ok(r)
@@ -3094,6 +3102,7 @@ impl EngramDbServer {
     ) -> Result<String, String> {
         use engramdb::storage::harvest_state::{self, HarvestDecision};
         let _scope = self.scope("harvest_mark", input.project.as_deref());
+        reject_store_target(input.project.as_deref())?;
         // Mutating: it writes (or clears) an entry in the target project's
         // ledger, and a `project` override resolves to any registered project.
         // Marking another project's sessions reviewed would silently suppress
@@ -3160,6 +3169,7 @@ impl EngramDbServer {
     ) -> Result<String, String> {
         use engramdb::storage::harvest_state;
         let _scope = self.scope("harvest_ledger", input.project.as_deref());
+        reject_store_target(input.project.as_deref())?;
         let dir = self.resolve_dir(input.project.as_deref()).await?;
         let ledger = harvest_state::read_harvested(&dir);
 
@@ -3190,6 +3200,32 @@ impl EngramDbServer {
         _scope.mark_success();
         Ok(r)
     }
+}
+
+/// Refuse a memory-**store** target on a tool that reads the filesystem.
+///
+/// Harvest works off Claude Code transcripts, which are filed by working
+/// directory. `global` and `group:<name>` name stores, not checkouts:
+/// `resolve_dir` maps them to a directory holding no transcripts, so
+/// `harvest_list` returns empty with no explanation and `harvest_mark` writes
+/// a ledger nothing will ever read — the model believes a session is settled
+/// while the project's own ledger is untouched. Silent wrong answers, so they
+/// are refused by name rather than left to fail quietly.
+///
+/// Deliberately *not* aliased to `all_projects`: that is gated by
+/// `[security] allow_all_projects_harvest`, and aliasing would route around
+/// the gate.
+fn reject_store_target(project: Option<&str>) -> Result<(), String> {
+    if EngramDbServer::is_global(project) || EngramDbServer::is_group_target(project) {
+        return Err(error_response(
+            ErrorCode::ValidationError,
+            "The harvest tools operate on a filesystem project, not a memory store: \
+             `global` and `group:<name>` hold no Claude Code transcripts, so there is nothing \
+             there to list, digest, or mark. Pass an absolute project path or a 16-char project \
+             ID, or omit `project` to use the current one.",
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve an agent-supplied `all_projects` against the security policy.

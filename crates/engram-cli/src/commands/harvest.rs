@@ -99,12 +99,14 @@ pub async fn run_harvest(
                 },
             };
             let digest = harvest::digest_session(&transcript_path, params)?;
-            let markdown = harvest::render_digest_markdown(&digest);
+            let (markdown, fence) = harvest::render_digest_markdown_traced(&digest);
 
             if formatter.is_json() {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&harvest::DigestJson::new(&digest, "", markdown))?
+                    serde_json::to_string_pretty(&harvest::DigestJson::new(
+                        &digest, &fence, markdown
+                    ))?
                 );
             } else {
                 println!("{markdown}");

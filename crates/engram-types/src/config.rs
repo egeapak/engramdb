@@ -2378,6 +2378,55 @@ interval_secs = 60
     }
 
     #[test]
+    fn test_harvest_config_defaults() {
+        // Pins every value `docs/users/configuration.md` publishes. The whole
+        // section had no tests, which is how the docs drifted from the code.
+        let c = HarvestConfig::default();
+        assert_eq!(c.digest_budget, 200_000);
+        assert!(!c.include_thinking);
+        assert!(!c.include_sidechains);
+        assert!(c.archive, "archiving is on by default");
+        assert_eq!(c.archive_retention_days, Some(365));
+        assert_eq!(c.archive_max_bytes, 2 * 1024 * 1024 * 1024);
+        assert_eq!(c.archive_max_transcript_bytes, 16 * 1024 * 1024);
+        assert_eq!(EngramConfig::default().harvest, c);
+    }
+
+    #[test]
+    fn test_harvest_config_partial_toml() {
+        // The trap: a section-level-only default would zero every field the
+        // user did not name.
+        let empty: EngramConfig = toml::from_str("").unwrap();
+        assert_eq!(empty.harvest, HarvestConfig::default());
+        let bare: EngramConfig = toml::from_str("[harvest]\n").unwrap();
+        assert_eq!(bare.harvest, HarvestConfig::default());
+
+        let partial: EngramConfig = toml::from_str("[harvest]\ninclude_thinking = true\n").unwrap();
+        assert!(partial.harvest.include_thinking);
+        assert!(partial.harvest.archive, "unnamed fields kept their default");
+        assert_eq!(partial.harvest.archive_max_bytes, 2 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_harvest_config_validate_rejects_zero_retention() {
+        let mut c = EngramConfig::default();
+        c.harvest.archive_retention_days = Some(0);
+        assert!(c.validate().is_err(), "0 would evict every archive");
+        c.harvest.archive_retention_days = Some(1);
+        assert!(c.validate().is_ok());
+        c.harvest.archive_retention_days = None;
+        assert!(c.validate().is_ok(), "None is a legitimate disable");
+    }
+
+    #[test]
+    fn test_effective_digest_budget() {
+        let mut c = HarvestConfig::default();
+        assert_eq!(c.effective_digest_budget(), 200_000);
+        c.digest_budget = 0;
+        assert_eq!(c.effective_digest_budget(), usize::MAX, "0 means unlimited");
+    }
+
+    #[test]
     fn test_security_config_defaults() {
         // Default: cross-project writes allowed (preserves historical behavior).
         let config = EngramConfig::default();

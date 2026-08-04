@@ -4862,3 +4862,349 @@ async fn task_current_and_complete_roundtrip() {
         .unwrap()
         .contains("must not be empty"));
 }
+
+// ---------------------------------------------------------------------------
+// Harvest tools
+//
+// These wrap tested `ops` code, so the value here is in the *gates* and the
+// contracts that would otherwise break silently: a security check that can be
+// deleted with every test still green, and a filter built on `Debug`
+// formatting that a variant rename would quietly empty.
+// ---------------------------------------------------------------------------
+
+/// Write an arbitrary `config.toml` for a project.
+async fn write_config_toml(dir: &std::path::Path, toml: &str) {
+    let engramdb_dir = dir.join(".engramdb");
+    tokio::fs::create_dir_all(&engramdb_dir).await.unwrap();
+    tokio::fs::write(engramdb_dir.join("config.toml"), toml)
+        .await
+        .unwrap();
+}
+
+fn mark_input(session_id: &str, project: Option<String>) -> HarvestMarkInput {
+    HarvestMarkInput {
+        session_id: session_id.to_string(),
+        memory_ids: None,
+        decision: None,
+        note: None,
+        clear: None,
+        project,
+    }
+}
+
+/// Point `CLAUDE_CONFIG_DIR` somewhere empty for the duration of a test.
+///
+/// Any harvest call that actually *scans* would otherwise walk the developer's
+/// real transcript corpus — slow, and non-deterministic. Safe under nextest's
+/// process-per-test model, which is why this crate requires nextest.
+struct ScopedClaudeHome(#[allow(dead_code)] TempDir);
+
+impl ScopedClaudeHome {
+    fn new() -> Self {
+        let dir = TempDir::new().unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", dir.path());
+        Self(dir)
+    }
+}
+
+impl Drop for ScopedClaudeHome {
+    fn drop(&mut self) {
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+}
+
+#[tokio::test]
+async fn harvest_mark_is_blocked_by_the_cross_project_write_gate() {
+    // The docs promise `harvest_mark` honors this gate. Without a test, the
+    // call can be deleted and every other test stays green.
+    let (dir_a, dir_b, server) = setup_cross_project().await;
+    write_security_config(dir_a.path(), false).await;
+
+    let target = Some(dir_b.path().to_string_lossy().to_string());
+    let err = parse_err(
+        &server
+            .harvest_mark(Parameters(mark_input("sess-1111", target.clone())))
+            .await,
+    );
+    assert_eq!(err["error"]["code"], "VALIDATION_ERROR", "{err}");
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("allow_cross_project_writes"),
+        "{err}"
+    );
+
+    // The `clear` branch sits after the gate and would otherwise be an
+    // untested way to wipe another project's ledger.
+    let mut clearing = mark_input("sess-1111", target);
+    clearing.clear = Some(true);
+    assert!(server.harvest_mark(Parameters(clearing)).await.is_err());
+
+    // The assertion that survives any rewording of the message.
+    assert!(
+        !dir_b
+            .path()
+            .join(".engramdb/state/harvested_sessions.json")
+            .exists(),
+        "a blocked mark still wrote to the target project's ledger"
+    );
+}
+
+#[tokio::test]
+async fn harvest_mark_cross_project_is_allowed_by_default() {
+    // Negative control: without this, test above could be "fixed" by hard
+    // blocking every cross-project mark, which is not the documented policy.
+    let (_dir_a, dir_b, server) = setup_cross_project().await;
+    let target = Some(dir_b.path().to_string_lossy().to_string());
+
+    let out = parse_ok(
+        &server
+            .harvest_mark(Parameters(mark_input("sess-2222", target)))
+            .await,
+    );
+    assert_eq!(out["decision"], "skipped", "{out}");
+    assert!(dir_b
+        .path()
+        .join(".engramdb/state/harvested_sessions.json")
+        .exists());
+}
+
+#[tokio::test]
+async fn harvest_all_projects_requires_opt_in() {
+    let _home = ScopedClaudeHome::new();
+    let (dir, server) = setup().await;
+
+    let err = parse_err(
+        &server
+            .harvest_list(Parameters(HarvestListInput {
+                since: None,
+                limit: None,
+                include_harvested: None,
+                all_projects: Some(true),
+                project: None,
+            }))
+            .await,
+    );
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("allow_all_projects_harvest"),
+        "{err}"
+    );
+
+    // `harvest_show` must reject *before* resolving, so the error names the
+    // gate rather than "no session matching".
+    let show_err = parse_err(
+        &server
+            .harvest_show(Parameters(HarvestShowInput {
+                session_id: "anything".into(),
+                max_chars: None,
+                include_thinking: None,
+                all_projects: Some(true),
+                project: None,
+            }))
+            .await,
+    );
+    assert!(
+        show_err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("allow_all_projects_harvest"),
+        "{show_err}"
+    );
+
+    // With the opt-in written, the scan runs (and finds nothing here).
+    write_config_toml(
+        dir.path(),
+        "[security]\nallow_all_projects_harvest = true\n",
+    )
+    .await;
+    let out = parse_ok(
+        &server
+            .harvest_list(Parameters(HarvestListInput {
+                since: None,
+                limit: None,
+                include_harvested: None,
+                all_projects: Some(true),
+                project: None,
+            }))
+            .await,
+    );
+    assert!(out["sessions"].as_array().unwrap().is_empty(), "{out}");
+}
+
+#[tokio::test]
+async fn harvest_default_scope_is_not_gated() {
+    let _home = ScopedClaudeHome::new();
+    let (_dir, server) = setup().await;
+    let out = parse_ok(
+        &server
+            .harvest_list(Parameters(HarvestListInput {
+                since: None,
+                limit: None,
+                include_harvested: None,
+                all_projects: None,
+                project: None,
+            }))
+            .await,
+    );
+    assert!(out["sessions"].as_array().unwrap().is_empty(), "{out}");
+}
+
+#[tokio::test]
+async fn harvest_tools_reject_memory_store_targets() {
+    let (_dir, server) = setup().await;
+    for target in ["global", "group:platform"] {
+        let p = Some(target.to_string());
+        let err = parse_err(
+            &server
+                .harvest_mark(Parameters(mark_input("s-1", p.clone())))
+                .await,
+        );
+        assert!(
+            err["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("hold no Claude Code transcripts"),
+            "{target}: {err}"
+        );
+        assert!(server
+            .harvest_ledger(Parameters(HarvestLedgerInput {
+                decision: None,
+                project: p,
+            }))
+            .await
+            .is_err());
+    }
+    // The orphan ledger a store target would otherwise create.
+    assert!(!engramdb::storage::paths::global_store_dir()
+        .unwrap()
+        .join(".engramdb/state/harvested_sessions.json")
+        .exists());
+}
+
+#[tokio::test]
+async fn harvest_ledger_filters_by_decision() {
+    let (_dir, server) = setup().await;
+    let plant = |id: &'static str, decision: Option<&'static str>, mems: Option<Vec<String>>| {
+        let mut input = mark_input(id, None);
+        input.decision = decision.map(|d| d.to_string());
+        input.memory_ids = mems;
+        input
+    };
+    server
+        .harvest_mark(Parameters(plant("s-harv", None, Some(vec!["m1".into()]))))
+        .await
+        .unwrap();
+    server
+        .harvest_mark(Parameters(plant("s-skip", Some("skipped"), None)))
+        .await
+        .unwrap();
+    server
+        .harvest_mark(Parameters(plant("s-defer", Some("deferred"), None)))
+        .await
+        .unwrap();
+
+    let ids_for = |rows: &serde_json::Value| {
+        let mut v: Vec<String> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["session_id"].as_str().unwrap().to_string())
+            .collect();
+        v.sort();
+        v
+    };
+    for (want, expect) in [
+        ("harvested", vec!["s-harv"]),
+        ("skipped", vec!["s-skip"]),
+        ("deferred", vec!["s-defer"]),
+    ] {
+        let rows = parse_ok(
+            &server
+                .harvest_ledger(Parameters(HarvestLedgerInput {
+                    decision: Some(want.to_string()),
+                    project: None,
+                }))
+                .await,
+        );
+        // Pins the `format!("{:?}", ..)` comparison: renaming a
+        // `HarvestDecision` variant silently empties this filter today.
+        assert_eq!(ids_for(&rows), expect, "filtering by {want}");
+    }
+
+    let all = parse_ok(
+        &server
+            .harvest_ledger(Parameters(HarvestLedgerInput {
+                decision: None,
+                project: None,
+            }))
+            .await,
+    );
+    // A set, not an order: three marks can land in the same millisecond.
+    assert_eq!(ids_for(&all), vec!["s-defer", "s-harv", "s-skip"]);
+}
+
+#[tokio::test]
+async fn harvest_mark_decisions_and_clear() {
+    let (_dir, server) = setup().await;
+
+    let bare = parse_ok(
+        &server
+            .harvest_mark(Parameters(mark_input("s-a", None)))
+            .await,
+    );
+    assert_eq!(bare["decision"], "skipped");
+    assert_eq!(bare["memories_created"], 0);
+
+    let mut with_mems = mark_input("s-b", None);
+    with_mems.memory_ids = Some(vec!["m1".into(), "m2".into()]);
+    let harvested = parse_ok(&server.harvest_mark(Parameters(with_mems)).await);
+    assert_eq!(harvested["decision"], "harvested");
+    assert_eq!(harvested["memories_created"], 2);
+
+    let mut bogus = mark_input("s-c", None);
+    bogus.decision = Some("bogus".into());
+    let err = parse_err(&server.harvest_mark(Parameters(bogus)).await);
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown decision"),
+        "{err}"
+    );
+
+    let clearing = || {
+        let mut input = mark_input("s-a", None);
+        input.clear = Some(true);
+        input
+    };
+    assert_eq!(
+        parse_ok(&server.harvest_mark(Parameters(clearing())).await)["cleared"],
+        true
+    );
+    // Clearing again reports false — the only signal the tool gives.
+    assert_eq!(
+        parse_ok(&server.harvest_mark(Parameters(clearing())).await)["cleared"],
+        false
+    );
+}
+
+#[tokio::test]
+async fn harvest_mark_rejects_a_traversing_session_id() {
+    let (_dir, server) = setup().await;
+    let err = parse_err(
+        &server
+            .harvest_mark(Parameters(mark_input("../../../../escaped", None)))
+            .await,
+    );
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("plain identifier"),
+        "{err}"
+    );
+}
