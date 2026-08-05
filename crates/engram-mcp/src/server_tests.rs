@@ -5311,3 +5311,83 @@ async fn the_sessions_own_project_is_always_readable() {
     );
     assert!(out["sessions"].as_array().unwrap().is_empty(), "{out}");
 }
+
+#[tokio::test]
+async fn naming_your_own_project_explicitly_is_allowed() {
+    // The control that was missing: `project: None` never enters the
+    // cross-project branch, so it could not catch a guard that rejects the
+    // caller's own project under a different spelling. In the shipped setup
+    // `serve --dir .` makes the server's own dir non-canonical, so this is
+    // the ordinary case, not a corner.
+    let _home = ScopedClaudeHome::new();
+    let temp = TempDir::new().unwrap();
+    let canonical = temp.path().canonicalize().unwrap();
+    // `canonicalize` requires the path to exist, so the `sub/..` spelling
+    // below needs a real `sub`.
+    std::fs::create_dir_all(canonical.join("sub")).unwrap();
+    let reg = InMemoryRegistry::new();
+    // `resolve_dir` requires registry membership before the gate runs.
+    reg.update(
+        &canonical,
+        &engramdb::storage::project_id::compute_project_id(&canonical),
+    )
+    .await
+    .unwrap();
+    let registry: Arc<dyn RegistryBackend> = Arc::new(reg);
+
+    // A server whose own dir is spelled non-canonically, as `--dir .` does.
+    let server = EngramDbServer::new_with_registry(
+        canonical.join("."),
+        Some(EmbeddingBackend::Onnx),
+        registry,
+    );
+
+    for spelling in [
+        canonical.to_string_lossy().to_string(),
+        canonical
+            .join("sub")
+            .join("..")
+            .to_string_lossy()
+            .to_string(),
+    ] {
+        let out = server
+            .harvest_list(Parameters(HarvestListInput {
+                since: None,
+                limit: None,
+                include_harvested: None,
+                all_projects: None,
+                project: Some(spelling.clone()),
+            }))
+            .await;
+        assert!(
+            out.is_ok(),
+            "the guard refused the caller's own project as {spelling:?}: {:?}",
+            out.unwrap_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_ledger_is_not_a_way_around_the_read_gate() {
+    // It carries session ids, notes, memory ids and archive sizes for exactly
+    // the sessions `harvest_list` refuses to show.
+    let _home = ScopedClaudeHome::new();
+    let (_dir_a, dir_b, server) = setup_cross_project().await;
+    let target = Some(dir_b.path().to_string_lossy().to_string());
+
+    let err = parse_err(
+        &server
+            .harvest_ledger(Parameters(HarvestLedgerInput {
+                decision: None,
+                project: target,
+            }))
+            .await,
+    );
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("another project's transcripts"),
+        "{err}"
+    );
+}

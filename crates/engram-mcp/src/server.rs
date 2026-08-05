@@ -1246,8 +1246,16 @@ impl EngramDbServer {
 
         if project.is_some() {
             let target = self.resolve_dir(project).await?;
-            let mine = self.resolve_dir(None).await?;
-            if target != mine && !allowed {
+            // Compare *project ids*, not paths. `resolve_dir(Some(..))`
+            // canonicalizes but `resolve_dir(None)` returns `effective_dir`
+            // verbatim, and `engramdb setup` writes `serve --dir .` — so a
+            // raw path comparison rejects the caller's own project whenever
+            // it names itself by absolute path, id, or through a symlink.
+            // `compute_project_id` canonicalizes both sides, which is what
+            // `check_cross_project_write` already does.
+            let target_id = engramdb::storage::project_id::compute_project_id(&target);
+            let own_id = engramdb::storage::project_id::compute_project_id(&self.effective_dir);
+            if target_id != own_id && !allowed {
                 return Err(error_response(
                     ErrorCode::ValidationError,
                     "Reading another project's transcripts is disabled by [security] \
@@ -3232,6 +3240,11 @@ impl EngramDbServer {
         use engramdb::storage::harvest_state;
         let _scope = self.scope("harvest_ledger", input.project.as_deref());
         reject_store_target(input.project.as_deref())?;
+        // The ledger is metadata about exactly the sessions `harvest_list`
+        // gates — ids, free-text notes, memory ids, archive sizes — so it
+        // rides the same guard rather than being a way around it.
+        self.check_harvest_scope(input.project.as_deref(), None)
+            .await?;
         let dir = self.resolve_dir(input.project.as_deref()).await?;
         let ledger = harvest_state::read_harvested(&dir);
 
