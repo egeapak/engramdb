@@ -6,7 +6,7 @@ use engramdb::storage::memory_file::{
     detect_format_version, latest_writer, parser_for_version, CURRENT_FORMAT_VERSION,
 };
 use engramdb::storage::paths;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Run the migrate command.
 ///
@@ -147,16 +147,18 @@ async fn migrate_dir(
         }
     };
 
+    // Sorted for the same reason as in `rollback`: `read_dir` order is
+    // unspecified, and `--dry-run` output is meant to be read and compared.
+    let mut paths: Vec<PathBuf> = Vec::new();
     for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                errors.push(format!("Failed to read entry in {}: {e}", dir.display()));
-                continue;
-            }
-        };
+        match entry {
+            Ok(e) => paths.push(e.path()),
+            Err(e) => errors.push(format!("Failed to read entry in {}: {e}", dir.display())),
+        }
+    }
+    paths.sort();
 
-        let path = entry.path();
+    for path in paths {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }

@@ -6,7 +6,7 @@ use engramdb::storage::memory_file::{
     detect_format_version, parser_for_version, writer_for_version, CURRENT_FORMAT_VERSION,
 };
 use engramdb::storage::paths;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Resolve a user-supplied `--target-version` to the internal representation
 /// (`1` ⇒ `None`, the legacy no-version format), rejecting versions outside the
@@ -171,16 +171,20 @@ async fn rollback_dir(
         }
     };
 
+    // `read_dir` yields entries in filesystem order, which is unspecified and
+    // varies between runs on the same directory. That leaked into `--dry-run`,
+    // whose whole job is to be read and compared before committing to the
+    // real thing.
+    let mut paths: Vec<PathBuf> = Vec::new();
     for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                errors.push(format!("Failed to read entry in {}: {e}", dir.display()));
-                continue;
-            }
-        };
+        match entry {
+            Ok(e) => paths.push(e.path()),
+            Err(e) => errors.push(format!("Failed to read entry in {}: {e}", dir.display())),
+        }
+    }
+    paths.sort();
 
-        let path = entry.path();
+    for path in paths {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
