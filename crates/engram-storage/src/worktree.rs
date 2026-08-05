@@ -121,22 +121,33 @@ async fn migrate_dir(
         .await
         .unwrap_or_default();
 
-    // Phase 4 — write into main. `create` stays per-memory: it owns the
-    // cross-visibility file sweep and the `has_embedding` carry-forward, and
-    // its own index probe already keeps a bulk create off the O(n^2) dirent
-    // path. Its writes must also land before the vectors are attached.
-    let mut migrated = 0;
+    // Phase 4 — write into main with a single batched create.
+    //
+    // This is the term that actually dominates consolidation. A per-memory
+    // `create` pays four separate O(main store size) operations (ID probe,
+    // chunk-presence probe, index commit, manifest stats scan), so migrating
+    // W memories into a store of M was quadratic — measured at 24 ms per
+    // create into an empty store rising to 582 ms into a 1000-memory one.
+    // Batching the *lookups* around it, as an earlier pass did, changed
+    // nothing measurable precisely because this was the floor.
+    let batch: Vec<engram_types::Memory> = to_migrate.iter().map(|(_, m)| m.clone()).collect();
+    main_store.create_batch(&batch).await?;
+    let migrated = batch.len();
+
+    // Source files are consumed only once the whole batch is durable. The
+    // per-file version deleted each source immediately after its own create,
+    // so a crash mid-loop left the remainder for the next run; with one
+    // batched commit there is no mid-loop to crash in — either every memory
+    // is in main or none is, and in the latter case every source file is
+    // still present for a re-run.
     let mut relocate: Vec<(String, chrono::DateTime<chrono::Utc>, Vec<Vec<f32>>)> = Vec::new();
     for (path, memory) in &to_migrate {
-        main_store.create(memory).await?;
         if let Some(chunks) = chunks_by_id.remove(&memory.id) {
             if !chunks.is_empty() {
                 relocate.push((memory.id.clone(), memory.updated_at, chunks));
             }
         }
-        // Source file is consumed the moment its migration is durable.
         let _ = async_fs::remove_file(path).await;
-        migrated += 1;
     }
 
     // Phase 5 — one batched vector upsert. Ordering is unchanged from the

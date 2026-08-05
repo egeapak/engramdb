@@ -1206,6 +1206,56 @@ impl LanceIndex {
     /// Used by the `create`/`update` write path to set the memories-table
     /// `has_embedding` flag correctly (an update to a memory that already has
     /// chunks must not reset the flag to false).
+    /// [`Self::has_chunks`] for many memories in one scan.
+    ///
+    /// Returns the subset of `memory_ids` that have at least one chunk row.
+    /// Only the `memory_id` column is read — the vectors themselves are not
+    /// needed to answer a presence question, and they are by far the widest
+    /// column in the table.
+    ///
+    /// Backs [`MemoryStore::create_batch`]'s `has_embedding` carry-forward,
+    /// which otherwise costs one chunks-table query per memory created.
+    pub async fn memory_ids_with_chunks(
+        &self,
+        memory_ids: &[&str],
+    ) -> Result<std::collections::HashSet<String>> {
+        // `IN ()` is not valid SQL, and an empty request has an empty answer.
+        if memory_ids.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+
+        let table = self.open_chunks_table().await?;
+        let mut found = std::collections::HashSet::new();
+
+        // Same predicate bound as `chunks_for_memories`: an unbounded
+        // `IN (...)` over thousands of UUIDs builds one enormous predicate.
+        const SCAN_ID_BATCH: usize = 500;
+        for id_batch in memory_ids.chunks(SCAN_ID_BATCH) {
+            let list = id_batch.iter().copied().map(lit).collect::<Vec<_>>();
+            let mut stream = table
+                .query()
+                .select(lancedb::query::Select::Columns(vec!["memory_id".into()]))
+                .only_if_expr(is_in(col("memory_id"), list))
+                .execute()
+                .await
+                .context("Failed to query chunk presence for memories")?;
+
+            while let Some(batch_result) = stream.next().await {
+                let batch = batch_result.context("Failed to read chunk presence batch")?;
+                let id_col = batch
+                    .column_by_name("memory_id")
+                    .context("Missing 'memory_id' column in chunks")?
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .context("Failed to cast 'memory_id'")?;
+                for i in 0..batch.num_rows() {
+                    found.insert(id_col.value(i).to_string());
+                }
+            }
+        }
+        Ok(found)
+    }
+
     pub async fn has_chunks(&self, memory_id: &str) -> Result<bool> {
         let table = self.open_chunks_table().await?;
         let mut stream = table

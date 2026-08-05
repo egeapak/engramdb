@@ -545,6 +545,115 @@ impl MemoryStore {
         Ok(memory.id.clone())
     }
 
+    /// [`Self::create`] for many memories at once.
+    ///
+    /// Takes the per-project write lock **once**, writes every file, then
+    /// performs a single ID probe, a single chunk-presence probe, a single
+    /// index upsert and a single manifest refresh for the whole set.
+    ///
+    /// The per-memory version costs *four* separate O(store size) operations
+    /// each — the `find_ids_by_prefix` LIKE scan, the `has_chunks` query, the
+    /// `merge_insert` commit, and the full-column scan behind
+    /// `update_manifest_stats` — so creating W memories into a store of M is
+    /// quadratic. Measured: one `create` costs 24 ms into an empty store and
+    /// 582 ms into a 1000-memory one.
+    ///
+    /// Semantics are identical to calling [`Self::create`] in a loop, with two
+    /// deliberate differences that both follow from batching:
+    ///
+    /// - The manifest is refreshed once at the end rather than after each
+    ///   memory. Intermediate states were never observable anyway: the whole
+    ///   loop ran under one lock in the caller's eyes, and the refresh is a
+    ///   derived cache that `update_manifest_stats` recomputes from scratch.
+    /// - The ID pre-existence probe reads the *filesystem* (one scan of both
+    ///   visibility dirs) rather than the index. `create` gates its sweep on
+    ///   an index probe reasoning that every store-managed file has an index
+    ///   row; asking the filesystem answers the same question more directly,
+    ///   and is what the sweep actually acts on. It is taken **before** any
+    ///   file is written, so a memory in this batch cannot see its own new
+    ///   file and mistake it for a pre-existing one.
+    ///
+    /// Ordering within the batch is preserved in the returned ids. Duplicate
+    /// IDs within one call are not deduplicated — the later write wins, the
+    /// same as consecutive `create` calls.
+    pub async fn create_batch(&self, memories: &[Memory]) -> Result<Vec<String>> {
+        if memories.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
+        // Probe BEFORE writing anything: after the writes every ID in the
+        // batch would trivially "exist".
+        let ids: Vec<&str> = memories.iter().map(|m| m.id.as_str()).collect();
+        let preexisting = self.batch_exists(&ids).await?;
+
+        for memory in memories {
+            let memories_dir = self.get_memories_dir(&memory.visibility)?;
+            async_fs::create_dir_all(&memories_dir).await?;
+
+            let filename = memory_file::memory_filename(memory);
+            let file_path = memories_dir.join(&filename);
+            let content = memory_file::write_memory_file(memory)?;
+            atomic_write(&file_path, &content).await?;
+
+            // Same cross-visibility sweep as `create`, on the same condition:
+            // an ID that already had a file may have it under the *other*
+            // visibility, or under a different title slug. New-file-first
+            // ordering (the `atomic_write` above) means a concurrent reader
+            // never sees a spurious NotFound. See `create` for the full
+            // rationale; skipping this for fresh IDs is what keeps bulk
+            // creates off the O(n^2) dirent path.
+            if preexisting.contains(&memory.id) {
+                for dir in [
+                    self.get_memories_dir(&Visibility::Shared)?,
+                    self.get_memories_dir(&Visibility::Personal)?,
+                ] {
+                    for old in find_memory_files(&dir, &memory.id).await? {
+                        if old != file_path {
+                            match async_fs::remove_file(&old).await {
+                                Ok(()) => {}
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                                Err(e) => return Err(e.into()),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // One chunk-presence probe for the whole batch. As in `create`, a
+        // re-create must not reset `has_embedding`: the chunks table is
+        // untouched here, so carry the current presence forward or an
+        // already-embedded memory silently drops out of semantic ranking
+        // (R3). Fresh IDs are absent from this set, giving `false`.
+        let with_chunks = self
+            .lance_index
+            .memory_ids_with_chunks(&ids)
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB memory_ids_with_chunks failed: {}", e))
+            })?;
+
+        let entries: Vec<IndexEntry> = memories
+            .iter()
+            .map(|m| {
+                let mut entry = IndexEntry::from(m);
+                entry.has_embedding = with_chunks.contains(&m.id);
+                entry
+            })
+            .collect();
+
+        self.lance_index
+            .upsert_batch(&entries)
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB upsert_batch failed: {}", e)))?;
+
+        self.update_manifest_stats().await?;
+
+        Ok(memories.iter().map(|m| m.id.clone()).collect())
+    }
+
     /// Get a memory by ID (supports prefix matching).
     pub async fn get(&self, id: &str) -> Result<Memory> {
         // Try shared memories first
@@ -2940,6 +3049,152 @@ mod tests {
         assert!(
             has_embedding_flag(&store, "recreate-1").await,
             "re-create must preserve has_embedding while chunks still exist"
+        );
+    }
+
+    // ===================================================================
+    // `create_batch` must be indistinguishable from `create` in a loop.
+    // Each test below pins one guarantee the batched path could plausibly
+    // drop, since it reimplements the probe/sweep/upsert sequence rather
+    // than calling `create` internally.
+    // ===================================================================
+
+    #[tokio::test]
+    async fn create_batch_writes_every_memory_and_indexes_them() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let batch: Vec<Memory> = (0..25)
+            .map(|i| {
+                create_test_memory(
+                    &format!("0190aaaa-bbbb-7ccc-8ddd-{:012}", i),
+                    Visibility::Shared,
+                )
+            })
+            .collect();
+        let ids = store.create_batch(&batch).await.unwrap();
+
+        assert_eq!(ids.len(), 25, "one id returned per input, in order");
+        assert_eq!(ids, batch.iter().map(|m| m.id.clone()).collect::<Vec<_>>());
+        assert_eq!(store.count().await.unwrap(), 25, "every row indexed");
+        for m in &batch {
+            assert_eq!(store.get(&m.id).await.unwrap().id, m.id);
+        }
+    }
+
+    #[tokio::test]
+    async fn create_batch_empty_is_a_noop() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        assert!(store.create_batch(&[]).await.unwrap().is_empty());
+        assert_eq!(store.count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn create_batch_preserves_has_embedding_for_recreated_memories() {
+        // The batched `has_embedding` carry-forward is a single probe over the
+        // whole set, so a mistake here would silently drop already-embedded
+        // memories out of semantic ranking (R3) — and only for re-creates,
+        // which is exactly the worktree consolidation re-run case.
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let embedded =
+            create_test_memory("0190aaaa-bbbb-7ccc-8ddd-00000000000a", Visibility::Shared);
+        let bare = create_test_memory("0190aaaa-bbbb-7ccc-8ddd-00000000000b", Visibility::Shared);
+        store.create(&embedded).await.unwrap();
+        store
+            .upsert_chunks(&embedded.id, vec![vec![0.4f32; 384]])
+            .await
+            .unwrap();
+        assert!(has_embedding_flag(&store, &embedded.id).await);
+
+        // Re-create BOTH in one batch, without touching chunks.
+        store
+            .create_batch(&[embedded.clone(), bare.clone()])
+            .await
+            .unwrap();
+
+        assert!(
+            has_embedding_flag(&store, &embedded.id).await,
+            "re-create in a batch must preserve has_embedding while chunks exist"
+        );
+        assert!(
+            !has_embedding_flag(&store, &bare.id).await,
+            "a memory with no chunks must not be marked embedded"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_batch_sweeps_old_visibility_file() {
+        // Mirrors `create_same_id_different_visibility_does_not_orphan`. The
+        // batched path takes its pre-existence probe once, before any write,
+        // so this also pins that the probe is not accidentally reading the
+        // batch's own freshly-written files.
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "0190aaaa-bbbb-7ccc-8ddd-00000000000c";
+
+        store
+            .create(&create_test_memory(id, Visibility::Shared))
+            .await
+            .unwrap();
+
+        // Re-create the same id as Personal, in a batch alongside a fresh one.
+        let fresh = create_test_memory("0190aaaa-bbbb-7ccc-8ddd-00000000000d", Visibility::Shared);
+        store
+            .create_batch(&[create_test_memory(id, Visibility::Personal), fresh.clone()])
+            .await
+            .unwrap();
+
+        let shared = paths::memories_dir(&store.project_dir);
+        let personal = paths::personal_memories_dir(&store.project_id).unwrap();
+
+        assert_eq!(
+            count_files(&shared).await,
+            1,
+            "only the fresh Shared memory remains; the old Shared file is swept"
+        );
+        assert_eq!(count_files(&personal).await, 1);
+        assert_eq!(store.count().await.unwrap(), 2);
+        assert_eq!(
+            store.get(id).await.unwrap().visibility,
+            Visibility::Personal
+        );
+    }
+
+    #[tokio::test]
+    async fn create_batch_refreshes_manifest_stats() {
+        // The manifest refresh moved from once-per-memory to once-per-batch;
+        // the end state must still be correct.
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let batch: Vec<Memory> = (0..7)
+            .map(|i| {
+                create_test_memory(
+                    &format!("0190aaaa-bbbb-7ccc-8ddd-{:012}", 100 + i),
+                    Visibility::Shared,
+                )
+            })
+            .collect();
+        store.create_batch(&batch).await.unwrap();
+
+        let manifest_path = paths::project_dir(&store.project_dir).join("manifest.toml");
+        let manifest = manifest::load_manifest(&manifest_path).await.unwrap();
+        assert_eq!(
+            manifest.stats.memory_count, 7,
+            "manifest stats must reflect the whole batch"
         );
     }
 
