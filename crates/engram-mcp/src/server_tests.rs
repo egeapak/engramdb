@@ -5208,3 +5208,106 @@ async fn harvest_mark_rejects_a_traversing_session_id() {
         "{err}"
     );
 }
+
+#[tokio::test]
+async fn a_permissive_target_project_cannot_open_the_all_projects_gate() {
+    // The confused deputy: the gate used to be read from the *target*
+    // project's config, and the agent picks the target — so one permissive
+    // repo anywhere on the machine unlocked machine-wide transcript reads for
+    // every session. The permission must come from the caller's own project.
+    let _home = ScopedClaudeHome::new();
+    let (dir_a, dir_b, server) = setup_cross_project().await;
+
+    // Project B opts in; the session (project A) does not.
+    write_config_toml(
+        dir_b.path(),
+        "[security]\nallow_all_projects_harvest = true\n",
+    )
+    .await;
+    let _ = dir_a;
+
+    let err = parse_err(
+        &server
+            .harvest_list(Parameters(HarvestListInput {
+                since: None,
+                limit: None,
+                include_harvested: None,
+                all_projects: Some(true),
+                project: Some(dir_b.path().to_string_lossy().to_string()),
+            }))
+            .await,
+    );
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("allow_all_projects_harvest"),
+        "a permissive target opened the gate: {err}"
+    );
+}
+
+#[tokio::test]
+async fn reading_another_projects_transcripts_needs_the_opt_in() {
+    // Cross-project *memory* reads are ordinarily fine — memories are
+    // curated. A transcript is the raw conversation, so it rides the same
+    // opt-in rather than being free.
+    let _home = ScopedClaudeHome::new();
+    let (dir_a, dir_b, server) = setup_cross_project().await;
+
+    let err = parse_err(
+        &server
+            .harvest_list(Parameters(HarvestListInput {
+                since: None,
+                limit: None,
+                include_harvested: None,
+                all_projects: None,
+                project: Some(dir_b.path().to_string_lossy().to_string()),
+            }))
+            .await,
+    );
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("another project's transcripts"),
+        "{err}"
+    );
+
+    // With the caller's own project opted in, it is allowed.
+    write_config_toml(
+        dir_a.path(),
+        "[security]\nallow_all_projects_harvest = true\n",
+    )
+    .await;
+    let out = parse_ok(
+        &server
+            .harvest_list(Parameters(HarvestListInput {
+                since: None,
+                limit: None,
+                include_harvested: None,
+                all_projects: None,
+                project: Some(dir_b.path().to_string_lossy().to_string()),
+            }))
+            .await,
+    );
+    assert!(out["sessions"].as_array().unwrap().is_empty(), "{out}");
+}
+
+#[tokio::test]
+async fn the_sessions_own_project_is_always_readable() {
+    // Negative control: the gate must not block the ordinary case.
+    let _home = ScopedClaudeHome::new();
+    let (_dir, server) = setup().await;
+    let out = parse_ok(
+        &server
+            .harvest_list(Parameters(HarvestListInput {
+                since: None,
+                limit: None,
+                include_harvested: None,
+                all_projects: None,
+                project: None,
+            }))
+            .await,
+    );
+    assert!(out["sessions"].as_array().unwrap().is_empty(), "{out}");
+}

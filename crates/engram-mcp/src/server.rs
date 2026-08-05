@@ -1210,6 +1210,56 @@ impl EngramDbServer {
         Ok(load_config_or_default(&config_path).await)
     }
 
+    /// Confused-deputy guard for the harvest tools' *read* scope.
+    ///
+    /// Two things, both keyed off the **session's own** config rather than the
+    /// target's — the same choice `check_cross_project_write` makes, and for
+    /// the same reason: a permission a caller grants itself is not a
+    /// permission. Reading the target's config made any single repo on the
+    /// machine with `allow_all_projects_harvest = true` a universal opener,
+    /// since the agent picks the target.
+    ///
+    /// 1. `all_projects` needs the opt-in.
+    /// 2. So does naming a *different* project. Cross-project reads are
+    ///    ordinarily fine for memories — those are curated. Transcripts are
+    ///    the raw conversation, a materially more sensitive class, and
+    ///    `allow_all_projects_harvest` is already exactly the flag that means
+    ///    "this agent may read transcripts beyond its own project", so this
+    ///    reuses it rather than inventing a second knob.
+    async fn check_harvest_scope(
+        &self,
+        project: Option<&str>,
+        all_projects: Option<bool>,
+    ) -> Result<bool, String> {
+        let own = self.load_config_for(None).await?;
+        let allowed = own.security.allow_all_projects_harvest;
+
+        if all_projects == Some(true) && !allowed {
+            return Err(error_response(
+                ErrorCode::ValidationError,
+                "Machine-wide harvest is disabled by [security] \
+                 allow_all_projects_harvest = false (the default). It reads every Claude Code \
+                 transcript on this machine, including other projects' conversations. Enable it \
+                 in this project's .engramdb/config.toml if that is intended.",
+            ));
+        }
+
+        if project.is_some() {
+            let target = self.resolve_dir(project).await?;
+            let mine = self.resolve_dir(None).await?;
+            if target != mine && !allowed {
+                return Err(error_response(
+                    ErrorCode::ValidationError,
+                    "Reading another project's transcripts is disabled by [security] \
+                     allow_all_projects_harvest = false (the default). Unlike memories, a \
+                     transcript is the raw conversation. Enable it in *this* project's \
+                     .engramdb/config.toml if that is intended.",
+                ));
+            }
+        }
+        Ok(all_projects.unwrap_or(false))
+    }
+
     /// Confused-deputy guard for MCP mutating tools.
     ///
     /// Nearly every tool accepts an optional `project` override that
@@ -2986,8 +3036,9 @@ impl EngramDbServer {
         let _scope = self.scope("harvest_list", input.project.as_deref());
         reject_store_target(input.project.as_deref())?;
         let dir = self.resolve_dir(input.project.as_deref()).await?;
-        let config_path = engramdb::storage::paths::project_dir(&dir).join("config.toml");
-        let config = load_config_or_default(&config_path).await;
+        // No target config is read here: the only setting this tool consulted
+        // was the security gate, and that now comes from the session's own
+        // config inside `check_harvest_scope`.
         let scope = ops::harvest::session_scope(&dir, self.registry.as_ref())
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
@@ -3003,7 +3054,9 @@ impl EngramDbServer {
             // is `/engram:reflect`'s job, not this one's.
             exclude_session: Some(self.session_id().to_string()),
             include_harvested: input.include_harvested.unwrap_or(false),
-            all_projects: check_all_projects(&config, input.all_projects)?,
+            all_projects: self
+                .check_harvest_scope(input.project.as_deref(), input.all_projects)
+                .await?,
             skip_empty: true,
         };
         let sessions = ops::harvest::select_sessions(&scope, &dir, &params)
@@ -3064,7 +3117,8 @@ impl EngramDbServer {
                 &scope,
                 &dir,
                 &input.session_id,
-                check_all_projects(&config, input.all_projects)?,
+                self.check_harvest_scope(input.project.as_deref(), input.all_projects)
+                    .await?,
             )
             .await?;
 
@@ -3234,33 +3288,6 @@ fn reject_store_target(project: Option<&str>) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-/// Resolve an agent-supplied `all_projects` against the security policy.
-///
-/// Scoped is the default and stays the default; this only decides whether an
-/// agent may *widen* to every conversation on the machine. That read returns
-/// raw transcripts rather than curated memories, and the harvest tools are
-/// auto-approved by `engramdb setup`, so unwidened-by-default is not enough on
-/// its own — without this the model both makes and grants the request, while
-/// reading content an attacker may have influenced.
-///
-/// The CLI's `--all-projects` is intentionally ungated: a human typing it is
-/// the request.
-fn check_all_projects(
-    config: &engramdb::types::EngramConfig,
-    requested: Option<bool>,
-) -> Result<bool, String> {
-    match requested {
-        Some(true) if !config.security.allow_all_projects_harvest => Err(error_response(
-            ErrorCode::ValidationError,
-            "all_projects is disabled for MCP tools by [security] \
-             allow_all_projects_harvest = false (the default). It reads every Claude Code \
-             conversation on this machine, not just this project's. Ask the user to run \
-             `engramdb harvest ... --all-projects` themselves, or to set that key to true.",
-        )),
-        other => Ok(other.unwrap_or(false)),
-    }
 }
 
 impl EngramDbServer {
