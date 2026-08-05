@@ -46,8 +46,7 @@ Global settings & models
       socket: [RUNTIME]/d.sock
       config: enabled=false, idle_timeout_secs=900
   Embeddings
-    ⚠ ONNX Runtime: ONNX Runtime (libonnxruntime.so) not found. Install it (`brew install onnxruntime`, `scoop install onnxruntime`, or your distro's package) or set ORT_DYLIB_PATH to the library path. Searched: [ORT_SEARCH_PATHS]
-  ℹ Install ONNX Runtime (`brew install onnxruntime`, `scoop install onnxruntime`, or your distro's package), or set ORT_DYLIB_PATH. Without it EngramDB falls back to keyword search.
+[ONNX_RUNTIME_CHECK]
     ✓ Embedding backend: auto (model: onnx)
     ⚠ Embedding model identity: untracked (legacy store); current model onnx/all-MiniLM-L12-v2-u8
   ℹ run `engramdb reindex --embeddings-only` to re-embed and stamp the store

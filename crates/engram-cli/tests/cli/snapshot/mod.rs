@@ -232,7 +232,7 @@ impl Fixture {
             "$ engramdb {}\nexit: {}\n--- stdout ---\n{}--- stderr ---\n{}",
             args.join(" "),
             exit,
-            pretty_json(&String::from_utf8_lossy(&out.stdout)),
+            render_stdout(&String::from_utf8_lossy(&out.stdout)),
             String::from_utf8_lossy(&out.stderr),
         );
         self.normalize(&transcript)
@@ -244,14 +244,14 @@ impl Fixture {
     /// uninitialized-store path, but with model configuration pinned so the
     /// snapshot does not depend on whether this machine has an ONNX runtime.
     pub fn write_config_only(&self) {
-        let dir = self.project.path().join(".engramdb");
+        let dir = self.root.join(".engramdb");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("config.toml"), fixture_config()).unwrap();
     }
 
     /// Initialize the store with the pinned config template.
     pub fn init(&self) {
-        let template = self.project.path().join("fixture-config.toml");
+        let template = self.root.join("fixture-config.toml");
         std::fs::write(&template, fixture_config()).unwrap();
         let out = self
             .base()
@@ -354,6 +354,8 @@ impl Fixture {
             s = s.replace(&path, placeholder);
         }
 
+        s = redact_onnx_runtime_check(&s);
+
         for (re, placeholder) in FILTERS.iter() {
             s = re.replace_all(&s, *placeholder).into_owned();
         }
@@ -378,17 +380,73 @@ fn path_without_engramdb() -> String {
         .into_owned()
 }
 
-/// Re-render a JSON document so snapshots diff line by line.
+/// Collapse `doctor`'s ONNX Runtime check to a single stable marker.
 ///
-/// The CLI is inconsistent on purpose-built output: some handlers emit compact
-/// `serde_json::json!(…)` and others `to_string_pretty`. A compact document
-/// would otherwise be one enormous snapshot line.
-fn pretty_json(stdout: &str) -> String {
+/// This one check is a *report about the machine* — whether `libonnxruntime`
+/// is installed and where it was loaded from — so it necessarily differs
+/// between a laptop without one and CI's `test` job, which installs one. It is
+/// not just the message that changes: the passing form has no `status` and no
+/// `suggestion`, so a line-level substitution cannot square the two shapes.
+///
+/// Everything else `doctor` reports stays under test; only this row is
+/// replaced. (Model *availability* needs no such treatment — `ENGRAMDB_OFFLINE`
+/// plus an empty cache pins it either way.)
+/// Pretty/plain form: the status line, plus the hint line that only the
+/// failing form emits. (The JSON form is handled in [`render_stdout`], where
+/// the document is still parseable — by the time a transcript is assembled it
+/// is no longer valid JSON.)
+fn redact_onnx_runtime_check(text: &str) -> String {
+    ONNX_CHECK_LINES
+        .replace_all(text, "[ONNX_RUNTIME_CHECK]\n")
+        .into_owned()
+}
+
+/// Replace the `message`/`status`/`suggestion` of any check named
+/// "ONNX Runtime", anywhere in the tree. Returns whether anything changed.
+fn redact_onnx_in_json(value: &mut serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.get("name").and_then(|n| n.as_str()) == Some("ONNX Runtime") {
+                map.insert(
+                    "message".into(),
+                    serde_json::Value::String("[ONNX_RUNTIME_CHECK]".into()),
+                );
+                map.remove("status");
+                map.remove("suggestion");
+                return true;
+            }
+            map.values_mut().any(redact_onnx_in_json)
+        }
+        serde_json::Value::Array(items) => items.iter_mut().any(redact_onnx_in_json),
+        _ => false,
+    }
+}
+
+/// The check row, plus the suggestion line that only the failing form emits.
+///
+/// `print_hint` prefixes that suggestion differently per format — `ℹ` in
+/// pretty, `Hint:` in plain — so both spellings have to be matched or the
+/// plain snapshot alone stays runtime-dependent.
+static ONNX_CHECK_LINES: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^[ \t]*[○⚠✓✗] ONNX Runtime: .*\n(^[ \t]*(ℹ|Hint:) Install ONNX Runtime.*\n)?")
+        .unwrap()
+});
+
+/// Prepare stdout for the transcript.
+///
+/// Re-renders a JSON document so snapshots diff line by line — the CLI is
+/// deliberately inconsistent here, with some handlers emitting compact
+/// `serde_json::json!(…)` and others `to_string_pretty`, and a compact
+/// document would be one enormous snapshot line. While the value is parsed,
+/// the ONNX Runtime check is redacted too; that has to happen here, because
+/// once the transcript is assembled the text is no longer valid JSON.
+fn render_stdout(stdout: &str) -> String {
     let trimmed = stdout.trim();
     if trimmed.is_empty() {
         return stdout.to_string();
     }
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        redact_onnx_in_json(&mut value);
         if let Ok(rendered) = serde_json::to_string_pretty(&value) {
             return format!("{rendered}\n");
         }

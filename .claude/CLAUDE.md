@@ -82,6 +82,19 @@ Feature flags from `Cargo.toml`:
 - `coreml` (macOS only) — Apple Neural Engine EP for `ort` (implies `onnxruntime`).
 - `xnnpack` — portable CPU-kernel EP for A/B benchmarking (implies `onnxruntime`).
 
+### CLI snapshot tests (insta)
+
+CLI output is pinned by `insta` snapshots in two tiers. Full guidance is in `docs/contributors/testing.md`; the parts worth knowing before you touch CLI output:
+
+- **Tier 1 — renderers** (`crates/engram-cli/src/output.rs::tests`, snapshots in `crates/engram-cli/tests/snapshots/renderer/`). Every `OutputFormatter::print_*` × `pretty`/`json`/`plain`, driven in-process from fixtures with pinned ids and pinned clocks, so the snapshots hold the **real bytes with no redaction**. Layout changes belong here.
+- **Tier 2 — the binary** (`crates/engram-cli/tests/cli/snapshot/`). Spawns `engramdb` and snapshots command line + exit code + stdout + stderr. Exit codes, stream routing, and clap's exit-2 errors are only reachable here.
+
+`OutputFormatter` writes through a `Sink` (`Stdout`/`Stderr` in production, `Capture` under `#[cfg(test)]`) rather than calling `println!` directly — that seam is what makes tier 1 possible. **New renderer code must use the `outln!`/`errln!`/`outraw!` macros, not `println!`**, or its output is invisible to tier 1 and cannot be asserted.
+
+Regenerate with `cargo insta test --accept --test-runner nextest`, review with `cargo insta review`; never hand-edit a `.snap`. Under CI insta refuses to write, so a drifted snapshot fails rather than passing silently. **Always re-run a snapshot suite twice** — non-determinism only shows on the second run.
+
+Two hazards the harness already handles, worth not reintroducing: id-redaction regexes must not use `\b` (ids sit inside filenames, and `_` is a word character), and model-backed subsystems are disabled in `fixture_config()` rather than assumed absent (CI installs an ONNX runtime; a developer box may not).
+
 ### Nextest test groups
 
 `.config/nextest.toml` puts ONNX-model-loading tests (`nli::onnx::tests::*`, `embeddings::onnx::tests::*`, `retrieval::engine::tests::test_rerank`, `test_search_with_real`) in the `ml-models` group with `max-threads = 1`. Don't parallelize these — they share heavyweight model state.

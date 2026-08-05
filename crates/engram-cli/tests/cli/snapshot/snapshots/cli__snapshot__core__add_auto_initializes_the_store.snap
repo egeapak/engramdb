@@ -10,5 +10,3 @@ exit: 0
   "success": true
 }
 --- stderr ---
-Warning: reranker init failed, continuing without: ONNX Runtime (libonnxruntime.so) not found. Install it (`brew install onnxruntime`, `scoop install onnxruntime`, or your distro's package) or set ORT_DYLIB_PATH to the library path. Searched: [ORT_SEARCH_PATHS]
-Warning: title strategy 't5' configured but the T5 model is unavailable
