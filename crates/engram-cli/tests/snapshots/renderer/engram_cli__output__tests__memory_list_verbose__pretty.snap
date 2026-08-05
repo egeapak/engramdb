@@ -1,0 +1,11 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+550e8400-e29b Decision Test index entry
+    Criticality: 0.80  Status: Active  Visibility: Shared
+018f2a1b-3c4d Hazard [observation] [invalidated 2020-06-15] Blocking calls deadlock the daemon
+    Criticality: 0.95  Status: Active  Visibility: Shared
+    Tags: async
+--- stderr ---

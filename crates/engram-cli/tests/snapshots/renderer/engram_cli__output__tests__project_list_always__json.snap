@@ -1,0 +1,24 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+[
+  {
+    "project_id": "0123456789abcdef",
+    "project_path": "/w/engramdb",
+    "exists": true
+  },
+  {
+    "project_id": "fedcba9876543210",
+    "project_path": "/w/engramdb-wt",
+    "exists": true,
+    "parent_project_id": "0123456789abcdef"
+  },
+  {
+    "project_id": "aaaabbbbccccdddd",
+    "project_path": "/w/deleted",
+    "exists": false
+  }
+]
+--- stderr ---

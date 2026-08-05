@@ -1,0 +1,21 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "total_projects": 3,
+  "reachable_projects": 2,
+  "total_memories": 128,
+  "by_type": [
+    [
+      "decision",
+      80
+    ],
+    [
+      "hazard",
+      48
+    ]
+  ]
+}
+--- stderr ---

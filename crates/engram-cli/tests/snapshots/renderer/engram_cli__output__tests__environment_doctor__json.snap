@@ -1,0 +1,101 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "sections": [
+    {
+      "name": "System",
+      "checks": [
+        {
+          "name": "pass-check",
+          "passed": true,
+          "message": "ok",
+          "status": "pass"
+        },
+        {
+          "name": "fail-check",
+          "passed": false,
+          "message": "broken",
+          "suggestion": "try the fix",
+          "details": [
+            "line 1",
+            "line 2"
+          ],
+          "status": "fail"
+        },
+        {
+          "name": "warn-check",
+          "passed": false,
+          "message": "soft warning",
+          "status": "warn"
+        },
+        {
+          "name": "info-check",
+          "passed": true,
+          "message": "informational",
+          "status": "info"
+        },
+        {
+          "name": "implicit-pass",
+          "passed": true,
+          "message": "implicit"
+        },
+        {
+          "name": "implicit-fail",
+          "passed": false,
+          "message": "implicit fail"
+        }
+      ],
+      "subsections": [
+        {
+          "name": "Sub group",
+          "checks": [
+            {
+              "name": "sub-pass",
+              "passed": true,
+              "message": "fine",
+              "status": "pass"
+            },
+            {
+              "name": "sub-warn",
+              "passed": false,
+              "message": "watch out",
+              "suggestion": "look here",
+              "details": [
+                "dim line"
+              ],
+              "status": "warn"
+            },
+            {
+              "name": "sub-info",
+              "passed": true,
+              "message": "fyi",
+              "status": "info"
+            },
+            {
+              "name": "sub-fail",
+              "passed": false,
+              "message": "down",
+              "status": "fail"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Other",
+      "checks": [
+        {
+          "name": "trivial",
+          "passed": true,
+          "message": "trivial ok"
+        }
+      ]
+    }
+  ],
+  "all_passed": false,
+  "store_check": null
+}
+--- stderr ---

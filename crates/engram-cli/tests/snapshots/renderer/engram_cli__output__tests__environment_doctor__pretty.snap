@@ -1,0 +1,29 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+
+EngramDB Environment Check
+
+System
+  ✓ pass-check: ok
+  ✗ fail-check: broken
+      line 1
+      line 2
+  ℹ try the fix
+  ⚠ warn-check: soft warning
+  ○ info-check: informational
+  ✓ implicit-pass: implicit
+  ✗ implicit-fail: implicit fail
+  Sub group
+    ✓ sub-pass: fine
+    ⚠ sub-warn: watch out
+        dim line
+  ℹ look here
+    ○ sub-info: fyi
+    ✗ sub-fail: down
+
+Other
+  ✓ trivial: trivial ok
+--- stderr ---

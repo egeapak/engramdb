@@ -1,0 +1,107 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "memories": [
+    {
+      "memory": {
+        "accessed_at": "2026-01-02T03:04:05Z",
+        "challenges": [],
+        "confidence": 0.9,
+        "content": "Test content",
+        "created_at": "2026-01-02T03:04:05Z",
+        "criticality": 0.8,
+        "epistemic": "decision",
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "logical": [],
+        "physical": [],
+        "provenance": {
+          "source": "human"
+        },
+        "status": "Active",
+        "summary": "Test summary",
+        "supersedes": [],
+        "tags": [],
+        "type": "decision",
+        "updated_at": "2026-01-02T03:04:05Z",
+        "visibility": "Shared"
+      },
+      "score": 0.85
+    },
+    {
+      "memory": {
+        "accessed_at": "2026-01-04T05:06:07Z",
+        "audience": [
+          "__g_abcdef012345"
+        ],
+        "challenges": [],
+        "confidence": 0.65,
+        "content": "A blocking call on the async runtime stalls every session.",
+        "created_at": "2026-01-02T03:04:05Z",
+        "criticality": 0.95,
+        "decay": {
+          "floor": 0.1,
+          "half_life": [
+            86400,
+            0
+          ],
+          "strategy": "exponential",
+          "ttl": [
+            604800,
+            0
+          ]
+        },
+        "details": "Reproduced twice under load.",
+        "epistemic": "observation",
+        "expires_at": "2027-01-01T00:00:00Z",
+        "id": "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+        "invalidated_at": "2020-06-15T12:00:00Z",
+        "logical": [
+          "daemon.runtime",
+          "perf"
+        ],
+        "physical": [
+          "src/daemon/server.rs",
+          "src/daemon/*.rs"
+        ],
+        "provenance": {
+          "agent_id": "claude",
+          "source": "agent"
+        },
+        "status": "Active",
+        "summary": "Blocking calls deadlock the daemon",
+        "superseded_by": "018f2a1b-3c4d-7e5f-8a9b-000000000099",
+        "supersedes": [
+          "018f2a1b-3c4d-7e5f-8a9b-000000000011"
+        ],
+        "tags": [
+          "async",
+          "deadlock"
+        ],
+        "title": "daemon-deadlock",
+        "type": "hazard",
+        "updated_at": "2026-01-03T04:05:06Z",
+        "valid_from": "2025-12-01T00:00:00Z",
+        "valid_while": {
+          "derived_from": [
+            "550e8400-e29b-41d4-a716-446655440000"
+          ],
+          "generality": "task",
+          "invalidated_by": [
+            "Cargo.lock",
+            "build.rs"
+          ],
+          "origin_task": "daemon-perf",
+          "premise": "while ort is pinned to rc.12"
+        },
+        "verified_at": "2026-02-03T04:05:06Z",
+        "visibility": "Personal"
+      },
+      "score": 0.42
+    }
+  ],
+  "total": 7
+}
+--- stderr ---

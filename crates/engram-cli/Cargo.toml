@@ -73,3 +73,4 @@ assert_cmd = "2"
 predicates = "3"
 regex = "1"
 tempfile = "3"
+insta = { version = "1.48.0", features = ["filters"] }

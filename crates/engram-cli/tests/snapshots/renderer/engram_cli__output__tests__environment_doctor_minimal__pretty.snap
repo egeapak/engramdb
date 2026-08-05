@@ -1,0 +1,11 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+
+EngramDB Environment Check
+
+System
+  ✓ binary: ok
+--- stderr ---

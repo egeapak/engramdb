@@ -1,0 +1,10 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "memories": [],
+  "total": 0
+}
+--- stderr ---

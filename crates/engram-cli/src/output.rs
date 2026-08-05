@@ -1474,9 +1474,44 @@ pub fn format_ping_line(ping_count: u64, last_ping_secs_ago: Option<u64>) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone as _;
     use engramdb::retrieval::engine::{RetrievalResult, ScoredMemory};
     use engramdb::scoring::ScoreBreakdown;
     use engramdb::types::{Memory, MemoryType, Provenance, Status, Visibility};
+
+    /// A fixed instant for every fixture, so rendered timestamps are a
+    /// constant rather than "whenever the suite ran".
+    fn fixed(y: i32, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc.with_ymd_and_hms(y, m, d, hh, mm, ss).unwrap()
+    }
+
+    /// Snapshot `rendered` under `name`.
+    ///
+    /// `snapshot_path` points out of `src/`: these assertions live next to the
+    /// code they cover, but `.snap` files are test data and belong under
+    /// `tests/`.
+    ///
+    /// No redaction is set up, and none is needed — every fixture here carries
+    /// a pinned id and a pinned clock, which is the whole reason the format
+    /// matrix is tested at this layer rather than through the binary.
+    fn snap(name: &str, rendered: String) {
+        insta::with_settings!({snapshot_path => "../tests/snapshots/renderer"}, {
+            insta::assert_snapshot!(name, rendered);
+        });
+    }
+
+    /// Render `body` in all three formats and snapshot each.
+    fn snap_formats(case: &str, body: impl Fn(&OutputFormatter)) {
+        for (format, suffix) in [
+            (OutputFormat::Pretty, "pretty"),
+            (OutputFormat::Json, "json"),
+            (OutputFormat::Plain, "plain"),
+        ] {
+            let (formatter, cap) = OutputFormatter::capturing(format);
+            body(&formatter);
+            snap(&format!("{case}__{suffix}"), cap.transcript());
+        }
+    }
 
     fn test_memory() -> Memory {
         Memory {
@@ -1504,9 +1539,9 @@ mod tests {
             audience: None,
             challenges: vec![],
             verified_at: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            accessed_at: chrono::Utc::now(),
+            created_at: fixed(2026, 1, 2, 3, 4, 5),
+            updated_at: fixed(2026, 1, 2, 3, 4, 5),
+            accessed_at: fixed(2026, 1, 2, 3, 4, 5),
             expires_at: None,
         }
     }
@@ -1540,8 +1575,8 @@ mod tests {
             criticality: 0.8,
             status: Status::Active,
             visibility: Visibility::Shared,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: fixed(2026, 1, 2, 3, 4, 5),
+            updated_at: fixed(2026, 1, 2, 3, 4, 5),
             expires_at: None,
             valid_from: None,
             invalidated_at: None,
@@ -1910,7 +1945,7 @@ mod tests {
             project_path: "/tmp/demo".to_string(),
             memory_count: 7,
             logical_scopes: vec!["db".to_string(), "ui".to_string()],
-            created_at: chrono::Utc::now(),
+            created_at: fixed(2026, 1, 2, 3, 4, 5),
             parent_project_id: None,
         };
         let v = serde_json::to_value(&info).unwrap();
@@ -1930,7 +1965,7 @@ mod tests {
             project_path: "/tmp/demo".to_string(),
             memory_count: 0,
             logical_scopes: vec![],
-            created_at: chrono::Utc::now(),
+            created_at: fixed(2026, 1, 2, 3, 4, 5),
             parent_project_id: Some("parent-pid".to_string()),
         };
         let v = serde_json::to_value(&info).unwrap();
@@ -2283,7 +2318,7 @@ mod tests {
         by_project.insert("project-b".to_string(), ProjectView::default());
 
         RuntimeSnapshot {
-            since: chrono::Utc::now(),
+            since: fixed(2026, 1, 1, 0, 0, 0),
             project_id: "project-a".to_string(),
             persistence_failures: 0,
             view,
@@ -2293,7 +2328,7 @@ mod tests {
 
     fn empty_runtime_snapshot() -> engramdb::telemetry::RuntimeSnapshot {
         engramdb::telemetry::RuntimeSnapshot {
-            since: chrono::Utc::now(),
+            since: fixed(2026, 1, 1, 0, 0, 0),
             project_id: "project-empty".to_string(),
             persistence_failures: 0,
             view: engramdb::telemetry::ProjectView::default(),
@@ -2455,5 +2490,367 @@ mod tests {
         // 0), but the formatter must not panic.
         let line = format_ping_line(5, None);
         assert_eq!(line, "pings: 5");
+    }
+
+    // =====================================================================
+    // 10. The format matrix — every public renderer × pretty/json/plain
+    //
+    // These are the snapshots that make a layout change visible. They are
+    // taken here rather than through the binary because every input is a
+    // literal: pinned ids, pinned clocks, no store, no models, no temp paths.
+    // That means the snapshots hold the real rendered bytes with nothing
+    // redacted, so a reviewer reads the actual output instead of a field of
+    // placeholders.
+    //
+    // The binary-level counterparts live in `tests/cli/snapshot/`, which
+    // covers what this layer structurally cannot: exit codes, stream routing
+    // through a real pipe, and clap's own errors.
+    // =====================================================================
+
+    /// A memory with every optional field populated.
+    ///
+    /// The plain/pretty renderers skip absent fields, so [`test_memory`]
+    /// alone exercises only the "everything is None" layout — this is the
+    /// other end of that.
+    fn rich_memory() -> Memory {
+        use engramdb::types::{Decay, DecayStrategy, Epistemic, Generality, Validity};
+
+        Memory {
+            id: "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string(),
+            type_: MemoryType::Hazard,
+            // Off-diagonal from the type default, so `epistemic_tags` renders
+            // a class tag.
+            epistemic: Epistemic::Observation,
+            valid_while: Some(Validity {
+                premise: Some("while ort is pinned to rc.12".to_string()),
+                invalidated_by: vec!["Cargo.lock".to_string(), "build.rs".to_string()],
+                origin_task: Some("daemon-perf".to_string()),
+                generality: Generality::Task,
+                derived_from: vec!["550e8400-e29b-41d4-a716-446655440000".to_string()],
+            }),
+            valid_from: Some(fixed(2025, 12, 1, 0, 0, 0)),
+            // Well in the past, so the tag is a tombstone (`invalidated`)
+            // rather than a schedule, no matter when the suite runs.
+            invalidated_at: Some(fixed(2020, 6, 15, 12, 0, 0)),
+            superseded_by: Some("018f2a1b-3c4d-7e5f-8a9b-000000000099".to_string()),
+            summary: "Blocking calls deadlock the daemon".to_string(),
+            title: Some("daemon-deadlock".to_string()),
+            content: "A blocking call on the async runtime stalls every session.".to_string(),
+            details: Some("Reproduced twice under load.".to_string()),
+            physical: vec![
+                "src/daemon/server.rs".to_string(),
+                "src/daemon/*.rs".to_string(),
+            ],
+            logical: vec!["daemon.runtime".to_string(), "perf".to_string()],
+            tags: vec!["async".to_string(), "deadlock".to_string()],
+            criticality: 0.95,
+            decay: Some(Decay {
+                strategy: DecayStrategy::Exponential,
+                half_life: Some(chrono::TimeDelta::seconds(86_400)),
+                ttl: Some(chrono::TimeDelta::seconds(604_800)),
+                floor: 0.1,
+            }),
+            provenance: Provenance::agent("claude"),
+            confidence: 0.65,
+            supersedes: vec!["018f2a1b-3c4d-7e5f-8a9b-000000000011".to_string()],
+            status: Status::Active,
+            visibility: Visibility::Personal,
+            audience: Some(vec!["__g_abcdef012345".to_string()]),
+            challenges: vec![],
+            verified_at: Some(fixed(2026, 2, 3, 4, 5, 6)),
+            created_at: fixed(2026, 1, 2, 3, 4, 5),
+            updated_at: fixed(2026, 1, 3, 4, 5, 6),
+            accessed_at: fixed(2026, 1, 4, 5, 6, 7),
+            expires_at: Some(fixed(2027, 1, 1, 0, 0, 0)),
+        }
+    }
+
+    fn project_info() -> ProjectInfoOutput {
+        ProjectInfoOutput {
+            project_id: "0123456789abcdef".to_string(),
+            project_name: "engramdb".to_string(),
+            project_path: "/w/engramdb".to_string(),
+            memory_count: 42,
+            logical_scopes: vec!["daemon".to_string(), "retrieval".to_string()],
+            created_at: fixed(2026, 1, 2, 3, 4, 5),
+            parent_project_id: None,
+        }
+    }
+
+    // ---- messages -------------------------------------------------------
+
+    #[test]
+    fn snap_print_message() {
+        snap_formats("message", |f| f.print_message("a plain message"));
+    }
+
+    #[test]
+    fn snap_print_success() {
+        snap_formats("success", |f| f.print_success("it worked"));
+    }
+
+    #[test]
+    fn snap_print_error() {
+        snap_formats("error", |f| f.print_error("it did not work"));
+    }
+
+    #[test]
+    fn snap_print_warning() {
+        snap_formats("warning", |f| f.print_warning("proceed with care"));
+    }
+
+    /// Hints are suppressed in JSON (they would corrupt the single document),
+    /// which is exactly the kind of per-format divergence worth pinning.
+    #[test]
+    fn snap_print_hint() {
+        snap_formats("hint", |f| f.print_hint("try --force"));
+    }
+
+    // ---- a single memory ------------------------------------------------
+
+    #[test]
+    fn snap_memory_minimal() {
+        snap_formats("memory_minimal", |f| f.print_memory(&test_memory()));
+    }
+
+    #[test]
+    fn snap_memory_rich() {
+        snap_formats("memory_rich", |f| f.print_memory(&rich_memory()));
+    }
+
+    #[test]
+    fn snap_memory_full() {
+        snap_formats("memory_full", |f| f.print_memory_full(&rich_memory()));
+    }
+
+    // ---- search / retrieval ---------------------------------------------
+
+    #[test]
+    fn snap_search_results() {
+        let results = vec![
+            ScoredMemory {
+                memory: test_memory(),
+                score: 0.85,
+                score_breakdown: test_score_breakdown(),
+            },
+            ScoredMemory {
+                memory: rich_memory(),
+                score: 0.42,
+                score_breakdown: test_score_breakdown(),
+            },
+        ];
+        snap_formats("search_results", |f| f.print_search_results(&results));
+    }
+
+    #[test]
+    fn snap_search_results_empty() {
+        snap_formats("search_results_empty", |f| f.print_search_results(&[]));
+    }
+
+    fn retrieval_result() -> RetrievalResult {
+        RetrievalResult {
+            memories: vec![
+                ScoredMemory {
+                    memory: test_memory(),
+                    score: 0.85,
+                    score_breakdown: test_score_breakdown(),
+                },
+                ScoredMemory {
+                    memory: rich_memory(),
+                    score: 0.42,
+                    score_breakdown: test_score_breakdown(),
+                },
+            ],
+            total: 7,
+            retrieval_quality: "full".to_string(),
+        }
+    }
+
+    #[test]
+    fn snap_retrieval_result_with_scores() {
+        snap_formats("retrieval_with_scores", |f| {
+            f.print_retrieval_result(&retrieval_result(), true)
+        });
+    }
+
+    #[test]
+    fn snap_retrieval_result_without_scores() {
+        snap_formats("retrieval_without_scores", |f| {
+            f.print_retrieval_result(&retrieval_result(), false)
+        });
+    }
+
+    #[test]
+    fn snap_retrieval_result_empty() {
+        let empty = RetrievalResult {
+            memories: vec![],
+            total: 0,
+            retrieval_quality: "scope_only".to_string(),
+        };
+        snap_formats("retrieval_empty", |f| {
+            f.print_retrieval_result(&empty, true)
+        });
+    }
+
+    // ---- list -----------------------------------------------------------
+
+    fn index_entries() -> Vec<IndexFilterable> {
+        let mut second = test_index_entry();
+        second.id = "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string();
+        second.type_ = MemoryType::Hazard;
+        second.epistemic = engramdb::types::Epistemic::Observation;
+        second.summary = "Blocking calls deadlock the daemon".to_string();
+        second.tags = vec!["async".to_string()];
+        second.criticality = 0.95;
+        second.invalidated_at = Some(fixed(2020, 6, 15, 12, 0, 0));
+        vec![test_index_entry(), second]
+    }
+
+    #[test]
+    fn snap_memory_list() {
+        snap_formats("memory_list", |f| {
+            f.print_memory_list(&index_entries(), false)
+        });
+    }
+
+    #[test]
+    fn snap_memory_list_verbose() {
+        snap_formats("memory_list_verbose", |f| {
+            f.print_memory_list(&index_entries(), true)
+        });
+    }
+
+    #[test]
+    fn snap_memory_list_empty() {
+        snap_formats("memory_list_empty", |f| f.print_memory_list(&[], true));
+    }
+
+    // ---- stats ----------------------------------------------------------
+
+    #[test]
+    fn snap_stats_without_runtime() {
+        let stats = Stats {
+            total: 3,
+            by_type: vec![(MemoryType::Decision, 2), (MemoryType::Convention, 1)],
+            by_status: vec![(Status::Active, 3)],
+            by_scope: vec![("services/api".to_string(), 2)],
+            expired: 1,
+            oldest: Some(fixed(2025, 1, 1, 0, 0, 0)),
+            newest: Some(fixed(2026, 1, 1, 0, 0, 0)),
+            avg_criticality: 0.75,
+            runtime: None,
+        };
+        snap_formats("stats_plain_counts", |f| f.print_stats(&stats));
+    }
+
+    #[test]
+    fn snap_stats_with_full_runtime() {
+        snap_formats("stats_with_runtime", |f| {
+            f.print_stats(&stats_with_runtime(fully_populated_runtime_snapshot()))
+        });
+    }
+
+    #[test]
+    fn snap_stats_with_empty_runtime() {
+        snap_formats("stats_with_empty_runtime", |f| {
+            f.print_stats(&stats_with_runtime(empty_runtime_snapshot()))
+        });
+    }
+
+    // ---- projects -------------------------------------------------------
+
+    #[test]
+    fn snap_project_info() {
+        snap_formats("project_info", |f| f.print_project_info(&project_info()));
+    }
+
+    #[test]
+    fn snap_project_info_with_parent() {
+        let mut info = project_info();
+        info.parent_project_id = Some("fedcba9876543210".to_string());
+        snap_formats("project_info_with_parent", |f| f.print_project_info(&info));
+    }
+
+    fn project_entries() -> Vec<ProjectListOutput> {
+        vec![
+            ProjectListOutput {
+                project_id: "0123456789abcdef".to_string(),
+                project_path: "/w/engramdb".to_string(),
+                exists: true,
+                parent_project_id: None,
+            },
+            // A worktree child: nests under its parent with a `↳` marker.
+            ProjectListOutput {
+                project_id: "fedcba9876543210".to_string(),
+                project_path: "/w/engramdb-wt".to_string(),
+                exists: true,
+                parent_project_id: Some("0123456789abcdef".to_string()),
+            },
+            // A registered path that is gone: renders the `missing` status.
+            ProjectListOutput {
+                project_id: "aaaabbbbccccdddd".to_string(),
+                project_path: "/w/deleted".to_string(),
+                exists: false,
+                parent_project_id: None,
+            },
+        ]
+    }
+
+    /// Grouping is a layout decision with three distinct shapes — a header
+    /// above every directory, headers only where a directory holds more than
+    /// one project, and no headers at all — so each gets its own snapshot.
+    #[test]
+    fn snap_project_list_grouping_always() {
+        snap_formats("project_list_always", |f| {
+            f.print_project_list(&project_entries(), ProjectListGrouping::Always)
+        });
+    }
+
+    #[test]
+    fn snap_project_list_grouping_auto() {
+        snap_formats("project_list_auto", |f| {
+            f.print_project_list(&project_entries(), ProjectListGrouping::Auto)
+        });
+    }
+
+    #[test]
+    fn snap_project_list_grouping_none() {
+        snap_formats("project_list_none", |f| {
+            f.print_project_list(&project_entries(), ProjectListGrouping::None)
+        });
+    }
+
+    #[test]
+    fn snap_project_list_empty() {
+        snap_formats("project_list_empty", |f| {
+            f.print_project_list(&[], ProjectListGrouping::Auto)
+        });
+    }
+
+    #[test]
+    fn snap_aggregate_stats() {
+        let stats = AggregateStatsOutput {
+            total_projects: 3,
+            reachable_projects: 2,
+            total_memories: 128,
+            by_type: vec![(MemoryType::Decision, 80), (MemoryType::Hazard, 48)],
+        };
+        snap_formats("aggregate_stats", |f| f.print_aggregate_stats(&stats));
+    }
+
+    // ---- doctor ---------------------------------------------------------
+
+    #[test]
+    fn snap_environment_doctor() {
+        snap_formats("environment_doctor", |f| {
+            f.print_environment_doctor(&doctor_result_with_all_statuses())
+        });
+    }
+
+    #[test]
+    fn snap_environment_doctor_minimal() {
+        snap_formats("environment_doctor_minimal", |f| {
+            f.print_environment_doctor(&test_environment_doctor_result())
+        });
     }
 }
