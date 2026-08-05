@@ -14,9 +14,81 @@ use engramdb::storage::IndexFilterable;
 use engramdb::types::{Memory, MemoryType, ProjectListGrouping, Status};
 use owo_colors::{OwoColorize, Stream};
 use serde_json;
+use std::fmt::Write as _;
 use std::io::{self, IsTerminal};
+use std::sync::{Arc, Mutex};
 
 use super::app::OutputFormat;
+
+/// Where a rendered line goes.
+///
+/// Production always uses [`Sink::Stdout`] / [`Sink::Stderr`], which forward to
+/// the same `println!` / `eprintln!` this module used to call directly, so
+/// buffering, locking and interleaving with the rest of the CLI are unchanged.
+///
+/// [`Sink::Capture`] exists so tests can read back what a renderer produced.
+/// Without it the only observable effect of a `print_*` method is on the
+/// process's real stdout, which a unit test cannot inspect — which is why the
+/// renderer tests in this file could historically assert nothing stronger than
+/// "it did not panic".
+///
+/// `Arc<Mutex<_>>` rather than `RefCell`: `&OutputFormatter` is held across
+/// `.await` points by every async command handler, so the formatter has to
+/// stay `Send + Sync`.
+enum Sink {
+    Stdout,
+    Stderr,
+    /// Only ever constructed by [`OutputFormatter::capturing`], which is
+    /// test-only. The variant stays compiled in either way so that `line` and
+    /// `raw` are the same code in a test build and a release build.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Capture(Arc<Mutex<String>>),
+}
+
+impl Sink {
+    /// Write `args` followed by a newline.
+    fn line(&self, args: std::fmt::Arguments<'_>) {
+        match self {
+            Sink::Stdout => println!("{}", args),
+            Sink::Stderr => eprintln!("{}", args),
+            Sink::Capture(buf) => {
+                let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = writeln!(buf, "{}", args);
+            }
+        }
+    }
+
+    /// Write `args` with no trailing newline.
+    fn raw(&self, args: std::fmt::Arguments<'_>) {
+        match self {
+            Sink::Stdout => print!("{}", args),
+            Sink::Stderr => eprint!("{}", args),
+            Sink::Capture(buf) => {
+                let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = write!(buf, "{}", args);
+            }
+        }
+    }
+}
+
+/// `println!` routed through a formatter's stdout sink.
+///
+/// `outln!(f)` writes a blank line, matching bare `println!()`.
+macro_rules! outln {
+    ($f:expr) => { $f.out.line(format_args!("")) };
+    ($f:expr, $($arg:tt)*) => { $f.out.line(format_args!($($arg)*)) };
+}
+
+/// `eprintln!` routed through a formatter's stderr sink.
+macro_rules! errln {
+    ($f:expr) => { $f.err.line(format_args!("")) };
+    ($f:expr, $($arg:tt)*) => { $f.err.line(format_args!($($arg)*)) };
+}
+
+/// `print!` (no trailing newline) routed through a formatter's stdout sink.
+macro_rules! outraw {
+    ($f:expr, $($arg:tt)*) => { $f.out.raw(format_args!($($arg)*)) };
+}
 
 /// Helper function to truncate IDs to 13 characters.
 ///
@@ -59,23 +131,25 @@ fn epistemic_tags(
 /// §5.4: the validity metadata the feature teaches users to record must be
 /// visible outside `--format json` — premise ("holds because"), watch globs,
 /// task binding, window bounds, supersessor, and verification stamp.
-fn print_validity_lines(memory: &Memory) {
+fn print_validity_lines(f: &OutputFormatter, memory: &Memory) {
     if let Some(v) = &memory.valid_while {
         if let Some(premise) = &v.premise {
-            println!("Premise: {}", premise);
+            outln!(f, "Premise: {}", premise);
         }
         if !v.invalidated_by.is_empty() {
-            println!("Invalidated by: {}", v.invalidated_by.join(", "));
+            outln!(f, "Invalidated by: {}", v.invalidated_by.join(", "));
         }
         if let Some(task) = &v.origin_task {
-            println!(
+            outln!(
+                f,
                 "Origin task: {} (generality: {})",
                 task,
                 v.generality.as_str()
             );
         }
         if !v.derived_from.is_empty() {
-            println!(
+            outln!(
+                f,
                 "Derived from: {}",
                 v.derived_from
                     .iter()
@@ -86,16 +160,16 @@ fn print_validity_lines(memory: &Memory) {
         }
     }
     if let Some(t) = memory.valid_from {
-        println!("Valid from: {}", t.format("%Y-%m-%d %H:%M:%S"));
+        outln!(f, "Valid from: {}", t.format("%Y-%m-%d %H:%M:%S"));
     }
     if let Some(t) = memory.invalidated_at {
-        println!("Invalidated at: {}", t.format("%Y-%m-%d %H:%M:%S"));
+        outln!(f, "Invalidated at: {}", t.format("%Y-%m-%d %H:%M:%S"));
     }
     if let Some(sup) = &memory.superseded_by {
-        println!("Superseded by: {}", sup);
+        outln!(f, "Superseded by: {}", sup);
     }
     if let Some(t) = memory.verified_at {
-        println!("Verified: {}", t.format("%Y-%m-%d %H:%M:%S"));
+        outln!(f, "Verified: {}", t.format("%Y-%m-%d %H:%M:%S"));
     }
 }
 
@@ -106,6 +180,8 @@ fn print_validity_lines(memory: &Memory) {
 pub struct OutputFormatter {
     format: OutputFormat,
     use_color: bool,
+    out: Sink,
+    err: Sink,
 }
 
 impl OutputFormatter {
@@ -132,7 +208,30 @@ impl OutputFormatter {
 
         let use_color = is_tty && !no_color && !matches!(format, OutputFormat::Json);
 
-        Self { format, use_color }
+        Self {
+            format,
+            use_color,
+            out: Sink::Stdout,
+            err: Sink::Stderr,
+        }
+    }
+
+    /// A formatter that buffers instead of printing, plus the handle to read
+    /// the buffers back.
+    ///
+    /// `use_color` is false: colour requires a TTY (see [`OutputFormatter::new`]),
+    /// so every redirected invocation — and every test — renders uncoloured.
+    #[cfg(test)]
+    pub(crate) fn capturing(format: OutputFormat) -> (Self, Capture) {
+        let out = Arc::new(Mutex::new(String::new()));
+        let err = Arc::new(Mutex::new(String::new()));
+        let formatter = Self {
+            format,
+            use_color: false,
+            out: Sink::Capture(Arc::clone(&out)),
+            err: Sink::Capture(Arc::clone(&err)),
+        };
+        (formatter, Capture { out, err })
     }
 
     /// Whether output is JSON (machine-consumed; never prompt interactively).
@@ -149,10 +248,10 @@ impl OutputFormatter {
     pub fn print_message(&self, message: &str) {
         match self.format {
             OutputFormat::Json => {
-                println!("{}", serde_json::json!({ "message": message }));
+                outln!(self, "{}", serde_json::json!({ "message": message }));
             }
             OutputFormat::Pretty | OutputFormat::Plain => {
-                println!("{}", message);
+                outln!(self, "{}", message);
             }
         }
     }
@@ -161,24 +260,26 @@ impl OutputFormatter {
     pub fn print_success(&self, message: &str) {
         match self.format {
             OutputFormat::Json => {
-                println!(
+                outln!(
+                    self,
                     "{}",
                     serde_json::json!({ "success": true, "message": message })
                 );
             }
             OutputFormat::Pretty => {
                 if self.use_color {
-                    println!(
+                    outln!(
+                        self,
                         "{} {}",
                         "✓".if_supports_color(Stream::Stdout, |text| text.green()),
                         message.if_supports_color(Stream::Stdout, |text| text.green())
                     );
                 } else {
-                    println!("✓ {}", message);
+                    outln!(self, "✓ {}", message);
                 }
             }
             OutputFormat::Plain => {
-                println!("{}", message);
+                outln!(self, "{}", message);
             }
         }
     }
@@ -187,21 +288,22 @@ impl OutputFormatter {
     pub fn print_error(&self, message: &str) {
         match self.format {
             OutputFormat::Json => {
-                eprintln!("{}", serde_json::json!({ "error": message }));
+                errln!(self, "{}", serde_json::json!({ "error": message }));
             }
             OutputFormat::Pretty => {
                 if self.use_color {
-                    eprintln!(
+                    errln!(
+                        self,
                         "{} {}",
                         "✗".if_supports_color(Stream::Stderr, |text| text.red()),
                         message.if_supports_color(Stream::Stderr, |text| text.red())
                     );
                 } else {
-                    eprintln!("✗ {}", message);
+                    errln!(self, "✗ {}", message);
                 }
             }
             OutputFormat::Plain => {
-                eprintln!("Error: {}", message);
+                errln!(self, "Error: {}", message);
             }
         }
     }
@@ -211,17 +313,18 @@ impl OutputFormatter {
         match self.format {
             OutputFormat::Pretty => {
                 if self.use_color {
-                    println!(
+                    outln!(
+                        self,
                         "  {} {}",
                         "ℹ".if_supports_color(Stream::Stdout, |text| text.blue()),
                         message.if_supports_color(Stream::Stdout, |text| text.blue())
                     );
                 } else {
-                    println!("  ℹ {}", message);
+                    outln!(self, "  ℹ {}", message);
                 }
             }
             OutputFormat::Plain => {
-                println!("  Hint: {}", message);
+                outln!(self, "  Hint: {}", message);
             }
             OutputFormat::Json => {} // hints are embedded in structured output
         }
@@ -231,30 +334,32 @@ impl OutputFormatter {
     pub fn print_environment_doctor(&self, result: &engramdb::ops::EnvironmentDoctorResult) {
         match self.format {
             OutputFormat::Json => {
-                println!("{}", serde_json::to_string_pretty(result).unwrap());
+                outln!(self, "{}", serde_json::to_string_pretty(result).unwrap());
             }
             OutputFormat::Pretty | OutputFormat::Plain => {
                 let header = "EngramDB Environment Check";
                 if self.use_color && matches!(self.format, OutputFormat::Pretty) {
-                    println!(
+                    outln!(
+                        self,
                         "\n{}",
                         header.if_supports_color(Stream::Stdout, |text| text.bold())
                     );
                 } else {
-                    println!("\n{}", header);
+                    outln!(self, "\n{}", header);
                 }
 
                 for section in &result.sections {
-                    println!();
+                    outln!(self);
                     if self.use_color && matches!(self.format, OutputFormat::Pretty) {
-                        println!(
+                        outln!(
+                            self,
                             "{}",
                             section
                                 .name
                                 .if_supports_color(Stream::Stdout, |text| text.bold())
                         );
                     } else {
-                        println!("{}", section.name);
+                        outln!(self, "{}", section.name);
                     }
 
                     for check in &section.checks {
@@ -285,7 +390,8 @@ impl OutputFormatter {
                                     .to_string(),
                             };
                             if style == "info" {
-                                println!(
+                                outln!(
+                                    self,
                                     "  {} {}: {}",
                                     colored_icon,
                                     check.name.if_supports_color(Stream::Stdout, |t| t.dimmed()),
@@ -294,26 +400,34 @@ impl OutputFormatter {
                                         .if_supports_color(Stream::Stdout, |t| t.dimmed()),
                                 );
                             } else if style == "warn" {
-                                println!(
+                                outln!(
+                                    self,
                                     "  {} {}: {}",
                                     colored_icon,
                                     check.name.if_supports_color(Stream::Stdout, |t| t.yellow()),
                                     check.message,
                                 );
                             } else {
-                                println!("  {} {}: {}", colored_icon, check.name, check.message);
+                                outln!(
+                                    self,
+                                    "  {} {}: {}",
+                                    colored_icon,
+                                    check.name,
+                                    check.message
+                                );
                             }
                         } else {
-                            println!("  {} {}: {}", icon, check.name, check.message);
+                            outln!(self, "  {} {}: {}", icon, check.name, check.message);
                         }
                         for detail in &check.details {
                             if self.use_color && matches!(self.format, OutputFormat::Pretty) {
-                                println!(
+                                outln!(
+                                    self,
                                     "      {}",
                                     detail.if_supports_color(Stream::Stdout, |text| text.dimmed())
                                 );
                             } else {
-                                println!("      {}", detail);
+                                outln!(self, "      {}", detail);
                             }
                         }
                         if let Some(ref suggestion) = check.suggestion {
@@ -323,14 +437,15 @@ impl OutputFormatter {
 
                     for subsection in &section.subsections {
                         if self.use_color && matches!(self.format, OutputFormat::Pretty) {
-                            println!(
+                            outln!(
+                                self,
                                 "  {}",
                                 subsection
                                     .name
                                     .if_supports_color(Stream::Stdout, |text| text.dimmed())
                             );
                         } else {
-                            println!("  {}", subsection.name);
+                            outln!(self, "  {}", subsection.name);
                         }
                         for check in &subsection.checks {
                             use engramdb::ops::CheckStatus;
@@ -360,7 +475,8 @@ impl OutputFormatter {
                                         .to_string(),
                                 };
                                 if style == "info" {
-                                    println!(
+                                    outln!(
+                                        self,
                                         "    {} {}: {}",
                                         colored_icon,
                                         check
@@ -371,7 +487,8 @@ impl OutputFormatter {
                                             .if_supports_color(Stream::Stdout, |t| t.dimmed()),
                                     );
                                 } else if style == "warn" {
-                                    println!(
+                                    outln!(
+                                        self,
                                         "    {} {}: {}",
                                         colored_icon,
                                         check
@@ -380,24 +497,28 @@ impl OutputFormatter {
                                         check.message,
                                     );
                                 } else {
-                                    println!(
+                                    outln!(
+                                        self,
                                         "    {} {}: {}",
-                                        colored_icon, check.name, check.message
+                                        colored_icon,
+                                        check.name,
+                                        check.message
                                     );
                                 }
                             } else {
-                                println!("    {} {}: {}", icon, check.name, check.message);
+                                outln!(self, "    {} {}: {}", icon, check.name, check.message);
                             }
                             for detail in &check.details {
                                 if self.use_color && matches!(self.format, OutputFormat::Pretty) {
-                                    println!(
+                                    outln!(
+                                        self,
                                         "        {}",
                                         detail.if_supports_color(Stream::Stdout, |text| {
                                             text.dimmed()
                                         })
                                     );
                                 } else {
-                                    println!("        {}", detail);
+                                    outln!(self, "        {}", detail);
                                 }
                             }
                             if let Some(ref suggestion) = check.suggestion {
@@ -414,21 +535,22 @@ impl OutputFormatter {
     pub fn print_warning(&self, message: &str) {
         match self.format {
             OutputFormat::Json => {
-                eprintln!("{}", serde_json::json!({ "warning": message }));
+                errln!(self, "{}", serde_json::json!({ "warning": message }));
             }
             OutputFormat::Pretty => {
                 if self.use_color {
-                    eprintln!(
+                    errln!(
+                        self,
                         "{} {}",
                         "⚠".if_supports_color(Stream::Stderr, |text| text.yellow()),
                         message.if_supports_color(Stream::Stderr, |text| text.yellow())
                     );
                 } else {
-                    eprintln!("Warning: {}", message);
+                    errln!(self, "Warning: {}", message);
                 }
             }
             OutputFormat::Plain => {
-                eprintln!("Warning: {}", message);
+                errln!(self, "Warning: {}", message);
             }
         }
     }
@@ -437,7 +559,7 @@ impl OutputFormatter {
     pub fn print_memory(&self, memory: &Memory) {
         match self.format {
             OutputFormat::Json => {
-                println!("{}", serde_json::to_string_pretty(memory).unwrap());
+                outln!(self, "{}", serde_json::to_string_pretty(memory).unwrap());
             }
             OutputFormat::Pretty => {
                 self.print_memory_pretty(memory);
@@ -473,8 +595,9 @@ impl OutputFormatter {
             format!("{:?}", memory.type_)
         };
 
-        println!("ID: {}", id_display);
-        println!(
+        outln!(self, "ID: {}", id_display);
+        outln!(
+            self,
             "Type: {}{}",
             type_display,
             epistemic_tags(
@@ -484,37 +607,46 @@ impl OutputFormatter {
                 chrono::Utc::now()
             )
         );
-        println!("Summary: {}", memory.summary);
-        println!("Content: {}", memory.content);
+        outln!(self, "Summary: {}", memory.summary);
+        outln!(self, "Content: {}", memory.content);
 
         if let Some(ref details) = memory.details {
-            println!("Details: {}", details);
+            outln!(self, "Details: {}", details);
         }
 
         if !memory.physical.is_empty() {
-            println!("Physical: {}", memory.physical.join(", "));
+            outln!(self, "Physical: {}", memory.physical.join(", "));
         }
 
         if !memory.logical.is_empty() {
-            println!("Logical: {}", memory.logical.join(", "));
+            outln!(self, "Logical: {}", memory.logical.join(", "));
         }
 
         if !memory.tags.is_empty() {
-            println!("Tags: {}", memory.tags.join(", "));
+            outln!(self, "Tags: {}", memory.tags.join(", "));
         }
 
-        println!("Criticality: {:.2}", memory.criticality);
-        println!("Confidence: {:.2}", memory.confidence);
-        println!("Status: {:?}", memory.status);
-        println!("Visibility: {:?}", memory.visibility);
-        print_validity_lines(memory);
-        println!("Created: {}", memory.created_at.format("%Y-%m-%d %H:%M:%S"));
-        println!("Updated: {}", memory.updated_at.format("%Y-%m-%d %H:%M:%S"));
+        outln!(self, "Criticality: {:.2}", memory.criticality);
+        outln!(self, "Confidence: {:.2}", memory.confidence);
+        outln!(self, "Status: {:?}", memory.status);
+        outln!(self, "Visibility: {:?}", memory.visibility);
+        print_validity_lines(self, memory);
+        outln!(
+            self,
+            "Created: {}",
+            memory.created_at.format("%Y-%m-%d %H:%M:%S")
+        );
+        outln!(
+            self,
+            "Updated: {}",
+            memory.updated_at.format("%Y-%m-%d %H:%M:%S")
+        );
     }
 
     fn print_memory_plain(&self, memory: &Memory) {
-        println!("ID: {}", memory.id);
-        println!(
+        outln!(self, "ID: {}", memory.id);
+        outln!(
+            self,
             "Type: {:?}{}",
             memory.type_,
             epistemic_tags(
@@ -524,30 +656,30 @@ impl OutputFormatter {
                 chrono::Utc::now()
             )
         );
-        println!("Summary: {}", memory.summary);
-        println!("Content: {}", memory.content);
+        outln!(self, "Summary: {}", memory.summary);
+        outln!(self, "Content: {}", memory.content);
 
         if let Some(ref details) = memory.details {
-            println!("Details: {}", details);
+            outln!(self, "Details: {}", details);
         }
 
         if !memory.physical.is_empty() {
-            println!("Physical: {}", memory.physical.join(", "));
+            outln!(self, "Physical: {}", memory.physical.join(", "));
         }
 
         if !memory.logical.is_empty() {
-            println!("Logical: {}", memory.logical.join(", "));
+            outln!(self, "Logical: {}", memory.logical.join(", "));
         }
 
         if !memory.tags.is_empty() {
-            println!("Tags: {}", memory.tags.join(", "));
+            outln!(self, "Tags: {}", memory.tags.join(", "));
         }
 
-        println!("Criticality: {:.2}", memory.criticality);
-        println!("Confidence: {:.2}", memory.confidence);
-        println!("Status: {:?}", memory.status);
-        println!("Visibility: {:?}", memory.visibility);
-        print_validity_lines(memory);
+        outln!(self, "Criticality: {:.2}", memory.criticality);
+        outln!(self, "Confidence: {:.2}", memory.confidence);
+        outln!(self, "Status: {:?}", memory.status);
+        outln!(self, "Visibility: {:?}", memory.visibility);
+        print_validity_lines(self, memory);
     }
 
     /// Print search results in the configured format.
@@ -563,7 +695,11 @@ impl OutputFormatter {
                         })
                     })
                     .collect::<Vec<_>>();
-                println!("{}", serde_json::to_string_pretty(&json_output).unwrap());
+                outln!(
+                    self,
+                    "{}",
+                    serde_json::to_string_pretty(&json_output).unwrap()
+                );
             }
             OutputFormat::Pretty => {
                 self.print_search_results_pretty(results);
@@ -576,11 +712,11 @@ impl OutputFormatter {
 
     fn print_search_results_pretty(&self, results: &[ScoredMemory]) {
         if results.is_empty() {
-            println!("No memories found.");
+            outln!(self, "No memories found.");
             return;
         }
 
-        println!("Found {} memories:\n", results.len());
+        outln!(self, "Found {} memories:\n", results.len());
 
         for sm in results {
             let id_short = short_id(&sm.memory.id);
@@ -588,7 +724,8 @@ impl OutputFormatter {
             let type_str = format!("{:?}", sm.memory.type_);
 
             if self.use_color {
-                println!(
+                outln!(
+                    self,
                     "  {} {} {}  {}",
                     score_str.if_supports_color(Stream::Stdout, |text| text.green()),
                     id_short.if_supports_color(Stream::Stdout, |text| text.cyan()),
@@ -596,9 +733,13 @@ impl OutputFormatter {
                     sm.memory.summary
                 );
             } else {
-                println!(
+                outln!(
+                    self,
                     "  {} {} {}  {}",
-                    score_str, id_short, type_str, sm.memory.summary
+                    score_str,
+                    id_short,
+                    type_str,
+                    sm.memory.summary
                 );
             }
         }
@@ -606,19 +747,23 @@ impl OutputFormatter {
 
     fn print_search_results_plain(&self, results: &[ScoredMemory]) {
         if results.is_empty() {
-            println!("No memories found.");
+            outln!(self, "No memories found.");
             return;
         }
 
-        println!("Found {} memories:\n", results.len());
+        outln!(self, "Found {} memories:\n", results.len());
 
         for sm in results {
             let id_short = short_id(&sm.memory.id);
             let score_str = format!("[{:.2}]", sm.score);
             let type_str = format!("{:?}", sm.memory.type_);
-            println!(
+            outln!(
+                self,
                 "  {} {} {}  {}",
-                score_str, id_short, type_str, sm.memory.summary
+                score_str,
+                id_short,
+                type_str,
+                sm.memory.summary
             );
         }
     }
@@ -644,7 +789,11 @@ impl OutputFormatter {
                     }).collect::<Vec<_>>(),
                     "total": result.total,
                 });
-                println!("{}", serde_json::to_string_pretty(&json_output).unwrap());
+                outln!(
+                    self,
+                    "{}",
+                    serde_json::to_string_pretty(&json_output).unwrap()
+                );
             }
             OutputFormat::Pretty => {
                 self.print_retrieval_result_pretty(result, show_scores);
@@ -657,11 +806,12 @@ impl OutputFormatter {
 
     fn print_retrieval_result_pretty(&self, result: &RetrievalResult, show_scores: bool) {
         if result.memories.is_empty() {
-            println!("No memories found.");
+            outln!(self, "No memories found.");
             return;
         }
 
-        println!(
+        outln!(
+            self,
             "Found {} memories (out of {} total):\n",
             result.memories.len(),
             result.total
@@ -681,7 +831,8 @@ impl OutputFormatter {
             if show_scores {
                 let score_str = format!("[{:.2}]", sm.score);
                 if self.use_color {
-                    println!(
+                    outln!(
+                        self,
                         "  {} {} {}{}  {}",
                         score_str.if_supports_color(Stream::Stdout, |text| text.green()),
                         id_short.if_supports_color(Stream::Stdout, |text| text.cyan()),
@@ -690,13 +841,19 @@ impl OutputFormatter {
                         sm.memory.summary
                     );
                 } else {
-                    println!(
+                    outln!(
+                        self,
                         "  {} {} {}{}  {}",
-                        score_str, id_short, type_str, tags, sm.memory.summary
+                        score_str,
+                        id_short,
+                        type_str,
+                        tags,
+                        sm.memory.summary
                     );
                 }
             } else if self.use_color {
-                println!(
+                outln!(
+                    self,
                     "  {} {}{}  {}",
                     id_short.if_supports_color(Stream::Stdout, |text| text.cyan()),
                     type_str.if_supports_color(Stream::Stdout, |text| text.yellow()),
@@ -704,18 +861,26 @@ impl OutputFormatter {
                     sm.memory.summary
                 );
             } else {
-                println!("  {} {}{}  {}", id_short, type_str, tags, sm.memory.summary);
+                outln!(
+                    self,
+                    "  {} {}{}  {}",
+                    id_short,
+                    type_str,
+                    tags,
+                    sm.memory.summary
+                );
             }
         }
     }
 
     fn print_retrieval_result_plain(&self, result: &RetrievalResult, show_scores: bool) {
         if result.memories.is_empty() {
-            println!("No memories found.");
+            outln!(self, "No memories found.");
             return;
         }
 
-        println!(
+        outln!(
+            self,
             "Found {} memories (out of {} total):\n",
             result.memories.len(),
             result.total
@@ -734,12 +899,24 @@ impl OutputFormatter {
 
             if show_scores {
                 let score_str = format!("[{:.2}]", sm.score);
-                println!(
+                outln!(
+                    self,
                     "  {} {} {}{}  {}",
-                    score_str, id_short, type_str, tags, sm.memory.summary
+                    score_str,
+                    id_short,
+                    type_str,
+                    tags,
+                    sm.memory.summary
                 );
             } else {
-                println!("  {} {}{}  {}", id_short, type_str, tags, sm.memory.summary);
+                outln!(
+                    self,
+                    "  {} {}{}  {}",
+                    id_short,
+                    type_str,
+                    tags,
+                    sm.memory.summary
+                );
             }
         }
     }
@@ -748,7 +925,7 @@ impl OutputFormatter {
     pub fn print_memory_list(&self, entries: &[IndexFilterable], verbose: bool) {
         match self.format {
             OutputFormat::Json => {
-                println!("{}", serde_json::to_string_pretty(entries).unwrap());
+                outln!(self, "{}", serde_json::to_string_pretty(entries).unwrap());
             }
             OutputFormat::Pretty => {
                 self.print_list_pretty(entries, verbose);
@@ -761,7 +938,7 @@ impl OutputFormatter {
 
     fn print_list_pretty(&self, entries: &[IndexFilterable], verbose: bool) {
         if entries.is_empty() {
-            println!("No memories found.");
+            outln!(self, "No memories found.");
             return;
         }
 
@@ -783,7 +960,8 @@ impl OutputFormatter {
                 format!("{:?}", entry.type_)
             };
 
-            println!(
+            outln!(
+                self,
                 "{} {}{} {}",
                 id_display,
                 type_display,
@@ -797,12 +975,15 @@ impl OutputFormatter {
             );
 
             if verbose {
-                println!(
+                outln!(
+                    self,
                     "    Criticality: {:.2}  Status: {:?}  Visibility: {:?}",
-                    entry.criticality, entry.status, entry.visibility
+                    entry.criticality,
+                    entry.status,
+                    entry.visibility
                 );
                 if !entry.tags.is_empty() {
-                    println!("    Tags: {}", entry.tags.join(", "));
+                    outln!(self, "    Tags: {}", entry.tags.join(", "));
                 }
             }
         }
@@ -810,13 +991,14 @@ impl OutputFormatter {
 
     fn print_list_plain(&self, entries: &[IndexFilterable], verbose: bool) {
         if entries.is_empty() {
-            println!("No memories found.");
+            outln!(self, "No memories found.");
             return;
         }
 
         for entry in entries {
             let id_short = short_id(&entry.id);
-            println!(
+            outln!(
+                self,
                 "{} {:?}{} {}",
                 id_short,
                 entry.type_,
@@ -830,12 +1012,15 @@ impl OutputFormatter {
             );
 
             if verbose {
-                println!(
+                outln!(
+                    self,
                     "    Criticality: {:.2}  Status: {:?}  Visibility: {:?}",
-                    entry.criticality, entry.status, entry.visibility
+                    entry.criticality,
+                    entry.status,
+                    entry.visibility
                 );
                 if !entry.tags.is_empty() {
-                    println!("    Tags: {}", entry.tags.join(", "));
+                    outln!(self, "    Tags: {}", entry.tags.join(", "));
                 }
             }
         }
@@ -845,7 +1030,7 @@ impl OutputFormatter {
     pub fn print_stats(&self, stats: &Stats) {
         match self.format {
             OutputFormat::Json => {
-                println!("{}", serde_json::to_string_pretty(stats).unwrap());
+                outln!(self, "{}", serde_json::to_string_pretty(stats).unwrap());
             }
             OutputFormat::Pretty => {
                 self.print_stats_pretty(stats);
@@ -857,44 +1042,44 @@ impl OutputFormatter {
     }
 
     fn print_stats_pretty(&self, stats: &Stats) {
-        println!("Total Memories: {}", stats.total);
-        println!("\nBy Type:");
+        outln!(self, "Total Memories: {}", stats.total);
+        outln!(self, "\nBy Type:");
         for (type_, count) in &stats.by_type {
-            println!("  {:?}: {}", type_, count);
+            outln!(self, "  {:?}: {}", type_, count);
         }
-        println!("\nBy Status:");
+        outln!(self, "\nBy Status:");
         for (status, count) in &stats.by_status {
-            println!("  {:?}: {}", status, count);
+            outln!(self, "  {:?}: {}", status, count);
         }
         if !stats.by_scope.is_empty() {
-            println!("\nBy Scope:");
+            outln!(self, "\nBy Scope:");
             for (scope, count) in &stats.by_scope {
-                println!("  {}: {}", scope, count);
+                outln!(self, "  {}: {}", scope, count);
             }
         }
-        println!("\nExpired: {}", stats.expired);
+        outln!(self, "\nExpired: {}", stats.expired);
         if let Some(oldest) = stats.oldest {
-            println!("Oldest: {}", oldest.format("%Y-%m-%d"));
+            outln!(self, "Oldest: {}", oldest.format("%Y-%m-%d"));
         }
         if let Some(newest) = stats.newest {
-            println!("Newest: {}", newest.format("%Y-%m-%d"));
+            outln!(self, "Newest: {}", newest.format("%Y-%m-%d"));
         }
-        println!("\nAverage Criticality: {:.2}", stats.avg_criticality);
+        outln!(self, "\nAverage Criticality: {:.2}", stats.avg_criticality);
 
         if let Some(rt) = &stats.runtime {
-            print_runtime_pretty(rt);
+            print_runtime_pretty(self, rt);
         }
     }
 
     fn print_stats_plain(&self, stats: &Stats) {
-        println!("Total: {}", stats.total);
+        outln!(self, "Total: {}", stats.total);
         for (type_, count) in &stats.by_type {
-            println!("{:?}: {}", type_, count);
+            outln!(self, "{:?}: {}", type_, count);
         }
         if let Some(rt) = &stats.runtime {
-            println!("Calls: {}", rt.view.usage.total_calls);
+            outln!(self, "Calls: {}", rt.view.usage.total_calls);
             if rt.view.queries.total > 0 {
-                println!("Hit rate: {:.3}", rt.view.queries.hit_rate);
+                outln!(self, "Hit rate: {:.3}", rt.view.queries.hit_rate);
             }
         }
     }
@@ -903,7 +1088,7 @@ impl OutputFormatter {
     pub fn print_project_info(&self, info: &ProjectInfoOutput) {
         match self.format {
             OutputFormat::Json => {
-                println!("{}", serde_json::to_string_pretty(info).unwrap());
+                outln!(self, "{}", serde_json::to_string_pretty(info).unwrap());
             }
             OutputFormat::Pretty => {
                 let id_display = if self.use_color {
@@ -914,8 +1099,8 @@ impl OutputFormatter {
                 } else {
                     info.project_id.clone()
                 };
-                println!("Project: {}", info.project_name);
-                println!("ID: {}", id_display);
+                outln!(self, "Project: {}", info.project_name);
+                outln!(self, "ID: {}", id_display);
                 if let Some(parent) = info.parent_project_id.as_deref() {
                     let parent_display = if self.use_color {
                         parent
@@ -924,27 +1109,35 @@ impl OutputFormatter {
                     } else {
                         parent.to_string()
                     };
-                    println!("Parent: {}", parent_display);
+                    outln!(self, "Parent: {}", parent_display);
                 }
-                println!("Path: {}", info.project_path);
-                println!("Memories: {}", info.memory_count);
+                outln!(self, "Path: {}", info.project_path);
+                outln!(self, "Memories: {}", info.memory_count);
                 if !info.logical_scopes.is_empty() {
-                    println!("Scopes: {}", info.logical_scopes.join(", "));
+                    outln!(self, "Scopes: {}", info.logical_scopes.join(", "));
                 }
-                println!("Created: {}", info.created_at.format("%Y-%m-%d %H:%M:%S"));
+                outln!(
+                    self,
+                    "Created: {}",
+                    info.created_at.format("%Y-%m-%d %H:%M:%S")
+                );
             }
             OutputFormat::Plain => {
-                println!("Project: {}", info.project_name);
-                println!("ID: {}", info.project_id);
+                outln!(self, "Project: {}", info.project_name);
+                outln!(self, "ID: {}", info.project_id);
                 if let Some(parent) = info.parent_project_id.as_deref() {
-                    println!("Parent: {}", parent);
+                    outln!(self, "Parent: {}", parent);
                 }
-                println!("Path: {}", info.project_path);
-                println!("Memories: {}", info.memory_count);
+                outln!(self, "Path: {}", info.project_path);
+                outln!(self, "Memories: {}", info.memory_count);
                 if !info.logical_scopes.is_empty() {
-                    println!("Scopes: {}", info.logical_scopes.join(", "));
+                    outln!(self, "Scopes: {}", info.logical_scopes.join(", "));
                 }
-                println!("Created: {}", info.created_at.format("%Y-%m-%d %H:%M:%S"));
+                outln!(
+                    self,
+                    "Created: {}",
+                    info.created_at.format("%Y-%m-%d %H:%M:%S")
+                );
             }
         }
     }
@@ -957,17 +1150,17 @@ impl OutputFormatter {
     /// scripts and the MCP surface keep a stable shape regardless of grouping.
     pub fn print_project_list(&self, entries: &[ProjectListOutput], grouping: ProjectListGrouping) {
         if let OutputFormat::Json = self.format {
-            println!("{}", serde_json::to_string_pretty(entries).unwrap());
+            outln!(self, "{}", serde_json::to_string_pretty(entries).unwrap());
             return;
         }
 
         if entries.is_empty() {
-            println!("No registered projects.");
+            outln!(self, "No registered projects.");
             return;
         }
 
         for line in build_render_model(entries, grouping) {
-            println!("{}", self.render_project_line(&line));
+            outln!(self, "{}", self.render_project_line(&line));
         }
     }
 
@@ -1022,25 +1215,25 @@ impl OutputFormatter {
     pub fn print_aggregate_stats(&self, stats: &AggregateStatsOutput) {
         match self.format {
             OutputFormat::Json => {
-                println!("{}", serde_json::to_string_pretty(stats).unwrap());
+                outln!(self, "{}", serde_json::to_string_pretty(stats).unwrap());
             }
             OutputFormat::Pretty => {
-                println!("Total Projects: {}", stats.total_projects);
-                println!("Reachable: {}", stats.reachable_projects);
-                println!("Total Memories: {}", stats.total_memories);
+                outln!(self, "Total Projects: {}", stats.total_projects);
+                outln!(self, "Reachable: {}", stats.reachable_projects);
+                outln!(self, "Total Memories: {}", stats.total_memories);
                 if !stats.by_type.is_empty() {
-                    println!("\nBy Type:");
+                    outln!(self, "\nBy Type:");
                     for (type_, count) in &stats.by_type {
-                        println!("  {:?}: {}", type_, count);
+                        outln!(self, "  {:?}: {}", type_, count);
                     }
                 }
             }
             OutputFormat::Plain => {
-                println!("Projects: {}", stats.total_projects);
-                println!("Reachable: {}", stats.reachable_projects);
-                println!("Memories: {}", stats.total_memories);
+                outln!(self, "Projects: {}", stats.total_projects);
+                outln!(self, "Reachable: {}", stats.reachable_projects);
+                outln!(self, "Memories: {}", stats.total_memories);
                 for (type_, count) in &stats.by_type {
-                    println!("{:?}: {}", type_, count);
+                    outln!(self, "{:?}: {}", type_, count);
                 }
             }
         }
@@ -1048,26 +1241,28 @@ impl OutputFormatter {
 }
 
 /// Pretty-print the runtime telemetry overlay below the static stats block.
-fn print_runtime_pretty(rt: &engramdb::telemetry::RuntimeSnapshot) {
-    println!(
+fn print_runtime_pretty(f: &OutputFormatter, rt: &engramdb::telemetry::RuntimeSnapshot) {
+    outln!(
+        f,
         "\nRuntime telemetry (since {}, project {}):",
         rt.since.format("%Y-%m-%d %H:%M:%S UTC"),
         rt.project_id
     );
-    println!("  Total calls: {}", rt.view.usage.total_calls);
+    outln!(f, "  Total calls: {}", rt.view.usage.total_calls);
     if !rt.view.usage.by_tool.is_empty() {
-        println!("  By tool:");
+        outln!(f, "  By tool:");
         for (tool, count) in &rt.view.usage.by_tool {
             let errors = rt.view.usage.errors_by_tool.get(tool).copied().unwrap_or(0);
             if errors > 0 {
-                println!("    {}: {} ({} errors)", tool, count, errors);
+                outln!(f, "    {}: {} ({} errors)", tool, count, errors);
             } else {
-                println!("    {}: {}", tool, count);
+                outln!(f, "    {}: {}", tool, count);
             }
         }
     }
     if rt.view.queries.total > 0 {
-        println!(
+        outln!(
+            f,
             "  Queries: {} (hits: {}, zero-result: {}, hit rate: {:.3})",
             rt.view.queries.total,
             rt.view.queries.hits,
@@ -1075,39 +1270,85 @@ fn print_runtime_pretty(rt: &engramdb::telemetry::RuntimeSnapshot) {
             rt.view.queries.hit_rate
         );
         if !rt.view.queries.by_quality.is_empty() {
-            print!("    Quality:");
+            outraw!(f, "    Quality:");
             for (label, count) in &rt.view.queries.by_quality {
-                print!(" {}={}", label, count);
+                outraw!(f, " {}={}", label, count);
             }
-            println!();
+            outln!(f);
         }
     }
     if !rt.view.timings_ms.tool.is_empty() {
-        println!("  Tool timings (ms):");
+        outln!(f, "  Tool timings (ms):");
         for (tool, t) in &rt.view.timings_ms.tool {
-            println!(
+            outln!(
+                f,
                 "    {}: avg {:.1}, p50 {:.1}, p95 {:.1} (n={})",
-                tool, t.avg, t.p50, t.p95, t.count
+                tool,
+                t.avg,
+                t.p50,
+                t.p95,
+                t.count
             );
         }
     }
     if !rt.view.timings_ms.stages.is_empty() {
-        println!("  Stage timings (ms):");
+        outln!(f, "  Stage timings (ms):");
         for (stage, t) in &rt.view.timings_ms.stages {
-            println!(
+            outln!(
+                f,
                 "    {}: avg {:.1}, p50 {:.1}, p95 {:.1} (n={})",
-                stage, t.avg, t.p50, t.p95, t.count
+                stage,
+                t.avg,
+                t.p50,
+                t.p95,
+                t.count
             );
         }
     }
     if let Some(by_project) = &rt.by_project {
-        println!("  By project ({} project(s)):", by_project.len());
+        outln!(f, "  By project ({} project(s)):", by_project.len());
         for (pid, view) in by_project {
-            println!(
+            outln!(
+                f,
                 "    {}: {} calls, {} queries (hit rate {:.3})",
-                pid, view.usage.total_calls, view.queries.total, view.queries.hit_rate
+                pid,
+                view.usage.total_calls,
+                view.queries.total,
+                view.queries.hit_rate
             );
         }
+    }
+}
+
+/// Read access to what a [`OutputFormatter::capturing`] formatter buffered.
+#[cfg(test)]
+pub(crate) struct Capture {
+    out: Arc<Mutex<String>>,
+    err: Arc<Mutex<String>>,
+}
+
+#[cfg(test)]
+impl Capture {
+    /// Everything written to the stdout sink so far.
+    pub(crate) fn stdout(&self) -> String {
+        self.out.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Everything written to the stderr sink so far.
+    pub(crate) fn stderr(&self) -> String {
+        self.err.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Both streams in the shape the snapshot files store.
+    ///
+    /// Stderr is included rather than dropped because *which* stream a message
+    /// lands on is itself part of the contract: `print_error` writes to stderr
+    /// in all three formats so that JSON mode leaves exactly one document on
+    /// stdout.
+    pub(crate) fn transcript(&self) -> String {
+        let out = self.out.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let err = self.err.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        format!("--- stdout ---\n{out}--- stderr ---\n{err}")
     }
 }
 
@@ -1392,6 +1633,31 @@ mod tests {
     // 2. Constructor tests
     // ========================================
 
+    /// Errors go to stderr in *every* format, so that JSON mode leaves exactly
+    /// one document on stdout for a script to parse. Only a capturing sink can
+    /// tell the two streams apart, which is why this was untestable before.
+    #[test]
+    fn errors_go_to_stderr_in_every_format() {
+        for (format, expected) in [
+            (OutputFormat::Json, "{\"error\":\"boom\"}\n"),
+            (OutputFormat::Pretty, "✗ boom\n"),
+            (OutputFormat::Plain, "Error: boom\n"),
+        ] {
+            let (formatter, cap) = OutputFormatter::capturing(format);
+            formatter.print_error("boom");
+
+            assert_eq!(cap.stderr(), expected, "stderr text for {format:?}");
+            assert!(
+                cap.stdout().is_empty(),
+                "{format:?} put error text on stdout"
+            );
+            assert_eq!(
+                cap.transcript(),
+                format!("--- stdout ---\n--- stderr ---\n{expected}")
+            );
+        }
+    }
+
     #[test]
     fn test_formatter_json_flag_overrides() {
         let formatter = OutputFormatter::new(Some(OutputFormat::Pretty), true, false);
@@ -1413,73 +1679,105 @@ mod tests {
 
     #[test]
     fn test_search_results_json_format() {
-        let formatter = OutputFormatter::new(Some(OutputFormat::Json), false, false);
-        let memory = test_memory();
-        let scored = ScoredMemory {
-            memory,
+        let (formatter, cap) = OutputFormatter::capturing(OutputFormat::Json);
+        let results = vec![ScoredMemory {
+            memory: test_memory(),
             score: 0.85,
             score_breakdown: test_score_breakdown(),
-        };
-        let results = vec![scored];
+        }];
 
-        // Verify it doesn't panic
         formatter.print_search_results(&results);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&cap.stdout()).expect("stdout must be one JSON document");
+        assert_eq!(parsed[0]["score"], 0.85);
+        assert_eq!(parsed[0]["memory"]["summary"], "Test summary");
+        assert!(
+            cap.stderr().is_empty(),
+            "JSON mode must not write to stderr"
+        );
     }
 
     #[test]
     fn test_search_results_empty() {
-        let formatter_json = OutputFormatter::new(Some(OutputFormat::Json), false, false);
-        let formatter_pretty = OutputFormatter::new(Some(OutputFormat::Pretty), false, false);
-        let formatter_plain = OutputFormatter::new(Some(OutputFormat::Plain), false, false);
+        for format in [
+            OutputFormat::Json,
+            OutputFormat::Pretty,
+            OutputFormat::Plain,
+        ] {
+            let (formatter, cap) = OutputFormatter::capturing(format);
+            formatter.print_search_results(&[]);
 
-        let empty: Vec<ScoredMemory> = vec![];
-
-        // Verify none panic with empty results
-        formatter_json.print_search_results(&empty);
-        formatter_pretty.print_search_results(&empty);
-        formatter_plain.print_search_results(&empty);
+            let stdout = cap.stdout();
+            match format {
+                // An empty result set is still a valid document, not silence:
+                // a script parsing stdout must get `[]`, not a parse error.
+                OutputFormat::Json => assert_eq!(stdout.trim(), "[]"),
+                _ => assert_eq!(stdout, "No memories found.\n"),
+            }
+        }
     }
 
     // ========================================
     // 4. print_retrieval_result format routing
     // ========================================
 
+    /// `show_scores` is the only thing that gates the `breakdown` key, and it
+    /// is the CLI's parity with the MCP `query` surface — so assert it both
+    /// ways rather than just calling the method twice.
     #[test]
     fn test_retrieval_result_json_format() {
-        let formatter = OutputFormatter::new(Some(OutputFormat::Json), false, false);
-        let memory = test_memory();
-        let scored = ScoredMemory {
-            memory,
-            score: 0.85,
-            score_breakdown: test_score_breakdown(),
-        };
         let result = RetrievalResult {
-            memories: vec![scored],
+            memories: vec![ScoredMemory {
+                memory: test_memory(),
+                score: 0.85,
+                score_breakdown: test_score_breakdown(),
+            }],
             total: 1,
             retrieval_quality: "full".to_string(),
         };
 
-        // Verify it doesn't panic
+        let (formatter, cap) = OutputFormatter::capturing(OutputFormat::Json);
         formatter.print_retrieval_result(&result, true);
+        let with: serde_json::Value = serde_json::from_str(&cap.stdout()).unwrap();
+        assert_eq!(with["total"], 1);
+        assert_eq!(with["memories"][0]["breakdown"]["final_score"], 0.75);
+
+        let (formatter, cap) = OutputFormatter::capturing(OutputFormat::Json);
         formatter.print_retrieval_result(&result, false);
+        let without: serde_json::Value = serde_json::from_str(&cap.stdout()).unwrap();
+        assert!(
+            without["memories"][0].get("breakdown").is_none(),
+            "breakdown must be absent without --show-scores"
+        );
     }
 
     #[test]
     fn test_retrieval_result_empty() {
-        let formatter_json = OutputFormatter::new(Some(OutputFormat::Json), false, false);
-        let formatter_pretty = OutputFormatter::new(Some(OutputFormat::Pretty), false, false);
-        let formatter_plain = OutputFormatter::new(Some(OutputFormat::Plain), false, false);
-
         let empty_result = RetrievalResult {
             memories: vec![],
             total: 0,
             retrieval_quality: "scope_only".to_string(),
         };
 
-        // Verify none panic with empty results
-        formatter_json.print_retrieval_result(&empty_result, true);
-        formatter_pretty.print_retrieval_result(&empty_result, false);
-        formatter_plain.print_retrieval_result(&empty_result, true);
+        for format in [
+            OutputFormat::Json,
+            OutputFormat::Pretty,
+            OutputFormat::Plain,
+        ] {
+            let (formatter, cap) = OutputFormatter::capturing(format);
+            formatter.print_retrieval_result(&empty_result, true);
+
+            let stdout = cap.stdout();
+            match format {
+                OutputFormat::Json => {
+                    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+                    assert_eq!(parsed["total"], 0);
+                    assert_eq!(parsed["memories"].as_array().unwrap().len(), 0);
+                }
+                _ => assert_eq!(stdout, "No memories found.\n"),
+            }
+        }
     }
 
     // ========================================
@@ -1488,27 +1786,48 @@ mod tests {
 
     #[test]
     fn test_print_memory_list_json_ignores_verbose() {
-        let formatter = OutputFormatter::new(Some(OutputFormat::Json), false, false);
         let entries = vec![test_index_entry()];
 
-        // Both verbose=true and verbose=false should produce same output
-        // We verify neither panics
+        let (formatter, verbose) = OutputFormatter::capturing(OutputFormat::Json);
         formatter.print_memory_list(&entries, true);
+        let (formatter, terse) = OutputFormatter::capturing(OutputFormat::Json);
         formatter.print_memory_list(&entries, false);
+
+        // The claim this test has always made, now actually checked: `verbose`
+        // is a pretty/plain layout knob and must not reshape the JSON.
+        assert_eq!(verbose.stdout(), terse.stdout());
+    }
+
+    #[test]
+    fn test_print_memory_list_verbose_adds_detail_lines() {
+        let entries = vec![test_index_entry()];
+
+        let (formatter, terse) = OutputFormatter::capturing(OutputFormat::Pretty);
+        formatter.print_memory_list(&entries, false);
+        let (formatter, verbose) = OutputFormatter::capturing(OutputFormat::Pretty);
+        formatter.print_memory_list(&entries, true);
+
+        assert!(!terse.stdout().contains("Criticality"));
+        assert!(verbose.stdout().contains("Criticality: 0.80"));
+        assert!(verbose.stdout().starts_with(&terse.stdout()));
     }
 
     #[test]
     fn test_print_memory_list_empty() {
-        let formatter_json = OutputFormatter::new(Some(OutputFormat::Json), false, false);
-        let formatter_pretty = OutputFormatter::new(Some(OutputFormat::Pretty), false, false);
-        let formatter_plain = OutputFormatter::new(Some(OutputFormat::Plain), false, false);
+        for format in [
+            OutputFormat::Json,
+            OutputFormat::Pretty,
+            OutputFormat::Plain,
+        ] {
+            let (formatter, cap) = OutputFormatter::capturing(format);
+            formatter.print_memory_list(&[], true);
 
-        let empty: Vec<IndexFilterable> = vec![];
-
-        // Verify none panic with empty entries
-        formatter_json.print_memory_list(&empty, false);
-        formatter_pretty.print_memory_list(&empty, true);
-        formatter_plain.print_memory_list(&empty, false);
+            let stdout = cap.stdout();
+            match format {
+                OutputFormat::Json => assert_eq!(stdout.trim(), "[]"),
+                _ => assert_eq!(stdout, "No memories found.\n"),
+            }
+        }
     }
 
     // ========================================
