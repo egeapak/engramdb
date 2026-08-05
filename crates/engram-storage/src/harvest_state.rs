@@ -113,21 +113,75 @@ fn lock_ledger(project_dir: &Path) -> Option<std::fs::File> {
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent).ok()?;
     }
-    let file = std::fs::File::options()
+    let file = match std::fs::File::options()
         .create(true)
         .truncate(false)
         .write(true)
         .open(&lock_path)
-        .ok()?;
-    file.lock().ok()?;
+    {
+        Ok(f) => f,
+        Err(e) => {
+            // Proceeding unlocked is the documented fallback, but it must not
+            // be silent: two concurrent read-modify-writes then drop an entry
+            // with no trace, which reads exactly like a session that was
+            // never marked.
+            tracing::warn!(
+                "could not open harvest ledger lock at {} ({e}); proceeding without it — \
+                 a concurrent harvest could lose an entry",
+                lock_path.display()
+            );
+            return None;
+        }
+    };
+    if let Err(e) = file.lock() {
+        tracing::warn!(
+            "could not lock harvest ledger at {} ({e}); proceeding without it — \
+             a concurrent harvest could lose an entry",
+            lock_path.display()
+        );
+        return None;
+    }
     Some(file)
 }
 
-/// Read the whole ledger. Missing or malformed files read as empty.
+/// Read the whole ledger. A missing file reads as empty.
+///
+/// A **malformed** one also reads as empty, but not silently: the bad file is
+/// moved aside to `harvested_sessions.json.corrupt-<pid>` first. Without that
+/// step the failure is unrecoverable and invisible — an empty read is
+/// immediately written back by the next `mark_harvested`/`set_archive`,
+/// destroying every review decision, memory attribution and archive
+/// reference, and orphaning every archive on disk while it still counts
+/// against the size budget. Deserialization is all-or-nothing, so a single
+/// unparseable field from a future version would do it too.
+///
+/// Reading as empty (rather than failing) is still the right default — the
+/// ledger is advisory and must never hard-fail a harvest — but the evidence
+/// has to survive.
 pub fn read_harvested(project_dir: &Path) -> HashMap<String, HarvestEntry> {
-    match std::fs::read_to_string(ledger_path(project_dir)) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-        Err(_) => HashMap::new(),
+    let path = ledger_path(project_dir);
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    match serde_json::from_str(&raw) {
+        Ok(map) => map,
+        Err(e) => {
+            let quarantine = path.with_extension(format!("json.corrupt-{}", std::process::id()));
+            let moved = std::fs::rename(&path, &quarantine).is_ok();
+            tracing::warn!(
+                "harvest ledger at {} is unreadable ({e}); treating it as empty. {}",
+                path.display(),
+                if moved {
+                    format!(
+                        "The previous contents were kept at {}.",
+                        quarantine.display()
+                    )
+                } else {
+                    "The previous contents could NOT be preserved.".to_string()
+                }
+            );
+            HashMap::new()
+        }
     }
 }
 
@@ -479,5 +533,71 @@ mod tests {
         assert!(mark_harvested(tmp.path(), "", &[], HarvestDecision::Skipped, None).is_err());
         assert!(!is_harvested(tmp.path(), ""));
         assert!(!clear_harvested(tmp.path(), "").unwrap());
+    }
+}
+
+#[cfg(test)]
+mod corruption_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn a_corrupt_ledger_is_preserved_rather_than_overwritten() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        mark_harvested(
+            dir,
+            "keep-me",
+            &["m1".into()],
+            HarvestDecision::Harvested,
+            None,
+        )
+        .unwrap();
+        let path = ledger_path(dir);
+        let original = std::fs::read_to_string(&path).unwrap();
+        assert!(original.contains("keep-me"));
+
+        // Truncate mid-JSON, as an interrupted write or a bad disk would.
+        std::fs::write(&path, &original[..original.len() / 2]).unwrap();
+
+        // Reads as empty — the ledger is advisory and must not hard-fail...
+        assert!(read_harvested(dir).is_empty());
+
+        // ...but the evidence survives, so the loss is recoverable.
+        let quarantined: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".corrupt-"))
+            .collect();
+        assert_eq!(quarantined.len(), 1, "corrupt ledger was not preserved");
+        assert!(std::fs::read_to_string(quarantined[0].path())
+            .unwrap()
+            .contains("keep-me"));
+
+        // The next write starts clean instead of silently destroying it.
+        mark_harvested(dir, "new", &[], HarvestDecision::Skipped, None).unwrap();
+        let after = read_harvested(dir);
+        assert!(after.contains_key("new") && !after.contains_key("keep-me"));
+    }
+
+    #[test]
+    fn a_forward_incompatible_entry_does_not_destroy_the_whole_ledger() {
+        // Deserialization is all-or-nothing, so one unparseable field from a
+        // future version discards every entry — the same data-loss path.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        mark_harvested(dir, "s1", &[], HarvestDecision::Skipped, None).unwrap();
+        let path = ledger_path(dir);
+        std::fs::write(&path, r#"{"s1":{"decision":"from_the_future_v9"}}"#).unwrap();
+
+        assert!(read_harvested(dir).is_empty());
+        assert!(
+            std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().contains(".corrupt-")),
+            "a forward-incompat ledger was discarded without a copy"
+        );
     }
 }
