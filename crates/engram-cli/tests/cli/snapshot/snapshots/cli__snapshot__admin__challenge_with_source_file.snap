@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: "f.run(&[\"challenge\", &id, \"-e\", \"Contradicted by the new benchmark.\",\n\"--source-file\", \"benches/retrieval.rs\",])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] challenge [UUID] -e Contradicted by the new benchmark. --source-file benches/retrieval.rs
+exit: 0
+--- stdout ---
+{
+  "message": "Challenged memory [UUID] (status: Challenged, 1 total challenges)",
+  "success": true
+}
+--- stderr ---

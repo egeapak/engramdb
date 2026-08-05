@@ -1,0 +1,14 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/query.rs
+expression: "f.run(&[\"query\", \"--query\", \"rust\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] query --query rust
+exit: 2
+--- stdout ---
+--- stderr ---
+error: the following required arguments were not provided:
+  --mode <MODE>
+
+Usage: engramdb query --mode <MODE> --query <QUERY> [QUERY]
+
+For more information, try '--help'.

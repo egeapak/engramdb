@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"add\", \"-t\", \"decision\", \"-s\", \"S\", \"-c\", \"C\", \"--details-file\",\n\"/no/such/details.txt\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] add -t decision -s S -c C --details-file /no/such/details.txt
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Failed to read details file
+
+Caused by:
+    No such file or directory (os error 2)

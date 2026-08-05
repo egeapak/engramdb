@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/env.rs
+expression: f.run(& all)
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format plain daemon stop
+exit: 0
+--- stdout ---
+Daemon: not running
+--- stderr ---

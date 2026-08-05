@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/env.rs
+expression: f.run(& all)
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format json daemon status
+exit: 0
+--- stdout ---
+{
+  "running": false,
+  "socket": "[RUNTIME]/d.sock"
+}
+--- stderr ---

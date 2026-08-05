@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/projects_groups.rs
+expression: "f.run(&[\"projects\", \"unlink\", \"0000000000000000\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] projects unlink [PROJECT_ID]
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Validation error: Project '[PROJECT_ID]' not found in registry

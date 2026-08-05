@@ -1,0 +1,159 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"update\", \"--help\"])"
+---
+$ engramdb update --help
+exit: 0
+--- stdout ---
+Update an existing memory
+
+Usage: engramdb update [OPTIONS] <ID>
+
+Arguments:
+  <ID>
+          Memory ID (supports prefix matching)
+
+Options:
+  -t, --type <TYPE>
+          New type
+
+  -c, --content <CONTENT>
+          New content
+
+  -s, --summary <SUMMARY>
+          New summary
+
+  -T, --title <TITLE>
+          New title (short, a few words, for human-readable filenames)
+
+  -p, --physical <PHYSICAL>
+          New physical scope (replaces existing)
+
+  -l, --logical <LOGICAL>
+          New logical scope (replaces existing)
+
+      --tags <TAGS>
+          New tags (comma-separated or repeated, replaces existing)
+
+      --tags-add <TAGS_ADD>
+          Tags to add (comma-separated)
+
+      --tags-remove <TAGS_REMOVE>
+          Tags to remove (comma-separated)
+
+      --criticality <CRITICALITY>
+          New criticality
+
+      --confidence <CONFIDENCE>
+          New confidence
+
+      --details <DETAILS>
+          New details
+
+      --details-file <DETAILS_FILE>
+          Read details from file
+
+      --visibility <VISIBILITY>
+          New visibility
+
+      --status <STATUS>
+          New status
+
+      --supersedes <SUPERSEDES>
+          IDs of memories this one supersedes (comma-separated)
+
+      --audience <AUDIENCE>
+          Set the per-memory audience (project/group ids) for a group/global share (comma-separated). Only meaningful on a group/global memory
+
+      --clear-audience
+          Clear the audience (whole-group visibility). Wins over --audience
+
+      --epistemic <EPISTEMIC>
+          Epistemic class: fact, observation, or decision (defaults from type)
+
+      --premise <PREMISE>
+          Premise this memory depends on (e.g. "while we pin ort rc.12")
+
+      --invalidated-by <INVALIDATED_BY>
+          Paths/globs whose change invalidates this memory (repeatable)
+
+      --origin-task <ORIGIN_TASK>
+          Task/feature this memory was created for
+
+      --generality <GENERALITY>
+          Generality: project (default) or task
+
+      --valid-from <VALID_FROM>
+          Valid-time start (RFC3339) — backdate when the claim became true
+
+      --clear-validity
+          Clear the whole validity condition (premise/invalidated-by/origin-task/generality)
+
+      --clear-invalidated
+          Reopen a closed validity window (clears invalidated_at + superseded_by)
+
+      --format <FORMAT>
+          Output format
+
+          Possible values:
+          - pretty: Human-friendly colored output with formatting
+          - json:   JSON output for programmatic parsing
+          - plain:  Plain text output without colors
+
+      --invalidate
+          Close the validity window now: the memory WAS true but no longer is. Preferred over delete — history stays queryable via --include-invalidated
+
+      --json
+          Output as JSON
+
+      --superseded-by <SUPERSEDED_BY>
+          Id of the memory that supersedes this one (only with --invalidate)
+
+      --decay-strategy <DECAY_STRATEGY>
+          Decay strategy: none, linear, exponential, or step
+
+  -q, --quiet
+          Suppress non-essential output
+
+      --decay-half-life <DECAY_HALF_LIFE>
+          Half-life in seconds for decay
+
+  -v, --verbose
+          Verbose output
+
+      --decay-ttl <DECAY_TTL>
+          TTL in seconds for decay
+
+      --no-color
+          No colored output
+
+      --decay-floor <DECAY_FLOOR>
+          Minimum decay factor (0.0-1.0)
+
+      --dir <DIR>
+          Working directory (default: current directory)
+
+  -e, --editor
+          Open memory file in $EDITOR
+
+      --embedding-backend <EMBEDDING_BACKEND>
+          Embedding backend: auto, onnx, or ollama
+
+      --global
+          Operate on the global (cross-project) memory store instead of the current project
+
+      --in-process
+          Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1
+
+      --group <GROUP>
+          Update a memory in a named group store (instead of the current project)
+
+      --spawn-daemon
+          Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)
+
+      --no-maintenance
+          Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1
+
+  -h, --help
+          Print help (see a summary with '-h')
+--- stderr ---

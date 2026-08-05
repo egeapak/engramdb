@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/projects_groups.rs
+expression: "f.run(&[\"groups\", \"subscribe\", \"no-such-group\", \"--yes\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] groups subscribe no-such-group --yes
+exit: 0
+--- stdout ---
+{
+  "message": "Subscribed project '[PROJECT_ID]' to group 'no-such-group' (id: __g_8622e56e0d2a).",
+  "success": true
+}
+--- stderr ---

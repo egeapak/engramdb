@@ -1,0 +1,24 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"list\", \"-t\", \"hazard\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] list -t hazard
+exit: 0
+--- stdout ---
+[
+  {
+    "created_at": "[TIMESTAMP]",
+    "criticality": 0.3,
+    "epistemic": "fact",
+    "id": "[UUID]",
+    "physical": [
+      "/"
+    ],
+    "status": "Active",
+    "summary": "Never unwrap in production paths",
+    "type": "hazard",
+    "updated_at": "[TIMESTAMP]",
+    "visibility": "Shared"
+  }
+]
+--- stderr ---

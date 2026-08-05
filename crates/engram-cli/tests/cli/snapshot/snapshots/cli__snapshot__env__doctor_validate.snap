@@ -1,0 +1,44 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/env.rs
+expression: "f.run(&[\"doctor\", \"validate\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] doctor validate
+exit: 1
+--- stdout ---
+{
+  "all_passed": false,
+  "sections": [
+    {
+      "checks": [
+        {
+          "message": "inference failed: Failed to send embed request to Ollama",
+          "name": "Embedding model",
+          "passed": false,
+          "suggestion": "Re-download the embedding model with `engramdb init`"
+        },
+        {
+          "message": "not enabled and not downloaded (skipped)",
+          "name": "NLI model",
+          "passed": true,
+          "status": "info"
+        },
+        {
+          "message": "disabled in config (skipped)",
+          "name": "Reranker model",
+          "passed": true,
+          "status": "info"
+        },
+        {
+          "message": "keyword titling (no model) — skipped",
+          "name": "Title model",
+          "passed": true,
+          "status": "info"
+        }
+      ],
+      "name": "Model validation"
+    }
+  ],
+  "store_check": null
+}
+--- stderr ---
+Error: model validation found failing models

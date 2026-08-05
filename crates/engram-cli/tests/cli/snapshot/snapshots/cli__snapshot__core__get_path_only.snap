@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"get\", &id, \"--path\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] get [UUID] --path
+exit: 0
+--- stdout ---
+[PROJECT]/.engramdb/memories/one-memory_[UUID].md
+--- stderr ---

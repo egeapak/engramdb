@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/projects_groups.rs
+expression: "f.run(&[\"groups\", \"create\", \"backend\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] groups create backend
+exit: 0
+--- stdout ---
+{
+  "message": "Group 'backend' ready (id: __g_10e08a419e85).",
+  "success": true
+}
+--- stderr ---

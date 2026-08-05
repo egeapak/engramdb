@@ -1,0 +1,15 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/projects_groups.rs
+expression: "f.run(&[\"projects\", \"list\", \"--group\", mode])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] projects list --group always
+exit: 0
+--- stdout ---
+[
+  {
+    "exists": true,
+    "project_id": "[PROJECT_ID]",
+    "project_path": "[PROJECT]"
+  }
+]
+--- stderr ---

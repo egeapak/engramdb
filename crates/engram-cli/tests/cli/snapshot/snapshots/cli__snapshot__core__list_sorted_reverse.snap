@@ -1,0 +1,52 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"list\", \"--sort\", \"criticality\", \"--reverse\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] list --sort criticality --reverse
+exit: 0
+--- stdout ---
+[
+  {
+    "created_at": "[TIMESTAMP]",
+    "criticality": 0.3,
+    "epistemic": "fact",
+    "id": "[UUID]",
+    "physical": [
+      "/"
+    ],
+    "status": "Active",
+    "summary": "Never unwrap in production paths",
+    "type": "hazard",
+    "updated_at": "[TIMESTAMP]",
+    "visibility": "Shared"
+  },
+  {
+    "created_at": "[TIMESTAMP]",
+    "criticality": 0.6,
+    "epistemic": "fact",
+    "id": "[UUID]",
+    "physical": [
+      "/"
+    ],
+    "status": "Active",
+    "summary": "Name variables in snake_case",
+    "type": "convention",
+    "updated_at": "[TIMESTAMP]",
+    "visibility": "Shared"
+  },
+  {
+    "created_at": "[TIMESTAMP]",
+    "criticality": 0.9,
+    "epistemic": "decision",
+    "id": "[UUID]",
+    "physical": [
+      "/"
+    ],
+    "status": "Active",
+    "summary": "Use Rust for the backend",
+    "type": "decision",
+    "updated_at": "[TIMESTAMP]",
+    "visibility": "Shared"
+  }
+]
+--- stderr ---

@@ -1,0 +1,26 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/env.rs
+expression: "f.run(&[\"doctor\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] doctor
+exit: 1
+--- stdout ---
+{
+  "all_passed": false,
+  "sections": [
+    {
+      "checks": [
+        {
+          "message": "not found",
+          "name": "Store initialized",
+          "passed": false,
+          "suggestion": "Run `engramdb init` to set up this project"
+        }
+      ],
+      "name": "Project"
+    }
+  ],
+  "store_check": null
+}
+--- stderr ---
+Error: environment check found failing checks

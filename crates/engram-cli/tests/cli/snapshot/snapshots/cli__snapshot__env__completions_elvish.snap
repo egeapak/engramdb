@@ -1,0 +1,1392 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/env.rs
+expression: "f.run_bare(&[\"completions\", shell])"
+---
+$ engramdb completions elvish
+exit: 0
+--- stdout ---
+
+use builtin;
+use str;
+
+set edit:completion:arg-completer[engramdb] = {|@words|
+    fn spaces {|n|
+        builtin:repeat $n ' ' | str:join ''
+    }
+    fn cand {|text desc|
+        edit:complex-candidate $text &display=$text' '(spaces (- 14 (wcswidth $text)))$desc
+    }
+    var command = 'engramdb'
+    for word $words[1..-1] {
+        if (str:has-prefix $word '-') {
+            break
+        }
+        set command = $command';'$word
+    }
+    var completions = [
+        &'engramdb'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+            cand -V 'Print version'
+            cand --version 'Print version'
+            cand init 'Initialize a new EngramDB store'
+            cand add 'Add a new memory'
+            cand get 'Get a memory by ID'
+            cand query 'Query memories (unified ranked / filtered retrieval)'
+            cand list 'List all memories'
+            cand update 'Update an existing memory'
+            cand delete 'Delete a memory'
+            cand task 'Task lifecycle: declare or complete the task this session works on'
+            cand verify 'Confirm a memory is still accurate (stamps verified_at; clears doctor-flagged needs_review)'
+            cand config 'Show effective config values, thresholds, and the store''s top tags'
+            cand stats 'Show statistics'
+            cand doctor 'Check environment and store health'
+            cand projects 'Manage registered EngramDB projects'
+            cand groups 'Manage multi-project memory groups and this project''s subscriptions'
+            cand challenge 'Challenge a memory''s validity'
+            cand gc 'Run garbage collection on low-relevance memories'
+            cand compress 'List compression candidates (actual compression requires MCP mode)'
+            cand serve 'Start the MCP server'
+            cand daemon 'Run the shared embedding daemon (normally auto-spawned by MCP)'
+            cand completions 'Generate shell completions'
+            cand migrate 'Migrate memory files to the latest format version'
+            cand rollback 'Roll back memory files to a previous format version'
+            cand reindex 'Rebuild index and re-embed memories'
+            cand hook 'Claude Code plugin hook handler'
+            cand setup 'Set up Claude Code integration (hooks, MCP, ENGRAM.md, CLAUDE.md)'
+            cand review 'Interactive review of challenged/stale memories'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;init'= {
+            cand --template 'Path to a config template file'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --no-embeddings 'Skip embedding model initialization'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;add'= {
+            cand -t 'Type of memory'
+            cand --type 'Type of memory'
+            cand -c 'Memory content'
+            cand --content 'Memory content'
+            cand -s 'Brief summary (required; prompted for in an interactive terminal)'
+            cand --summary 'Brief summary (required; prompted for in an interactive terminal)'
+            cand -T 'Short title (a few words) for human-readable filenames'
+            cand --title 'Short title (a few words) for human-readable filenames'
+            cand -p 'Physical scope (file paths or globs, can be repeated)'
+            cand --physical 'Physical scope (file paths or globs, can be repeated)'
+            cand -l 'Logical scope (dot-notation domains, can be repeated)'
+            cand --logical 'Logical scope (dot-notation domains, can be repeated)'
+            cand --tags 'Tags (comma-separated or repeated)'
+            cand --criticality 'Criticality score (0.0 to 1.0)'
+            cand --confidence 'Confidence score (0.0 to 1.0)'
+            cand --details 'Extended details'
+            cand --visibility 'Visibility (shared or personal)'
+            cand --audience 'Audience for a group/global share: project and/or group ids that may see this memory (comma-separated). Omit for whole-group visibility. Only meaningful with --group or --global'
+            cand --supersedes 'IDs of memories this one supersedes (comma-separated)'
+            cand --epistemic 'Epistemic class: fact, observation, or decision (defaults from type)'
+            cand --premise 'Premise this memory depends on (e.g. "while we pin ort rc.12")'
+            cand --invalidated-by 'Paths/globs whose change invalidates this memory (repeatable)'
+            cand --origin-task 'Task/feature this memory was created for'
+            cand --generality 'Generality: project (default) or task'
+            cand --valid-from 'Valid-time start (RFC3339) — backdate when the claim became true'
+            cand --decay-strategy 'Decay strategy: none, linear, exponential, or step'
+            cand --decay-half-life 'Half-life in seconds for decay'
+            cand --decay-ttl 'TTL in seconds for decay'
+            cand --decay-floor 'Minimum decay factor (0.0-1.0)'
+            cand --details-file 'Read details from file'
+            cand --group 'Write the memory into the named group store instead of the current project. Repo-relative physical scope is stripped on group writes (see the multi-project-memories design). Mutually exclusive with `--global`'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand -i 'Launch interactive TUI prompts'
+            cand --interactive 'Launch interactive TUI prompts'
+            cand -e 'Open $EDITOR for content entry'
+            cand --editor 'Open $EDITOR for content entry'
+            cand --global 'Operate on the global (cross-project) memory store instead of the current project'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;get'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand -f 'Show complete details without truncation'
+            cand --full 'Show complete details without truncation'
+            cand --raw 'Output the raw markdown file contents'
+            cand --path 'Print the memory''s file path instead of content'
+            cand --global 'Operate on the global (cross-project) memory store instead of the current project'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;query'= {
+            cand --mode 'Retrieval mode. Required'
+            cand --query 'Search query text (explicit flag; overrides positional when both set)'
+            cand -p 'Physical path context (scoring signal)'
+            cand --path 'Physical path context (scoring signal)'
+            cand -l 'Logical scope context — dot-notation; scoring signal, not a filter. Repeatable'
+            cand --logical 'Logical scope context — dot-notation; scoring signal, not a filter. Repeatable'
+            cand -t 'Filter by type (repeatable)'
+            cand --type 'Filter by type (repeatable)'
+            cand --tags 'Filter by tags (comma-separated or repeated)'
+            cand --min-criticality 'Minimum criticality threshold'
+            cand -n 'Maximum number of results'
+            cand --max-results 'Maximum number of results'
+            cand --detail-level 'Detail level: summary, content, full'
+            cand --epistemic 'Filter by epistemic class: fact, observation, decision (repeatable)'
+            cand --situation 'Your situation, to reweight classes: session_start, file_edit, debugging, design_choice'
+            cand --group 'Query a named group store directly (instead of the current project). Subscribed groups already fan into a normal project query; use this to inspect one group''s memories in isolation'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --include-expired 'Include expired memories'
+            cand --include-invalidated 'Include invalidated memories (closed validity windows)'
+            cand --show-scores 'Show relevance scores alongside results'
+            cand --include-global 'Also merge global (cross-project) memories into the results'
+            cand --global 'Query the global (cross-project) memory store instead of the current project'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;list'= {
+            cand -t 'Filter by type (can be repeated)'
+            cand --type 'Filter by type (can be repeated)'
+            cand --epistemic 'Filter by epistemic class: fact, observation, decision (repeatable)'
+            cand --tags 'Filter by tags (comma-separated or repeated)'
+            cand -s 'Filter by status'
+            cand --status 'Filter by status'
+            cand --scope 'Filter by scope (matches physical or logical scopes)'
+            cand --sort 'Sort field: criticality (default), created, updated, type'
+            cand -n 'Maximum number of results to display'
+            cand --limit 'Maximum number of results to display'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand -r 'Reverse sort order'
+            cand --reverse 'Reverse sort order'
+            cand --include-invalidated 'Include invalidated memories (closed validity windows)'
+            cand --global 'List the global (cross-project) memory store instead of the current project'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;update'= {
+            cand -t 'New type'
+            cand --type 'New type'
+            cand -c 'New content'
+            cand --content 'New content'
+            cand -s 'New summary'
+            cand --summary 'New summary'
+            cand -T 'New title (short, a few words, for human-readable filenames)'
+            cand --title 'New title (short, a few words, for human-readable filenames)'
+            cand -p 'New physical scope (replaces existing)'
+            cand --physical 'New physical scope (replaces existing)'
+            cand -l 'New logical scope (replaces existing)'
+            cand --logical 'New logical scope (replaces existing)'
+            cand --tags 'New tags (comma-separated or repeated, replaces existing)'
+            cand --tags-add 'Tags to add (comma-separated)'
+            cand --tags-remove 'Tags to remove (comma-separated)'
+            cand --criticality 'New criticality'
+            cand --confidence 'New confidence'
+            cand --details 'New details'
+            cand --details-file 'Read details from file'
+            cand --visibility 'New visibility'
+            cand --status 'New status'
+            cand --supersedes 'IDs of memories this one supersedes (comma-separated)'
+            cand --audience 'Set the per-memory audience (project/group ids) for a group/global share (comma-separated). Only meaningful on a group/global memory'
+            cand --epistemic 'Epistemic class: fact, observation, or decision (defaults from type)'
+            cand --premise 'Premise this memory depends on (e.g. "while we pin ort rc.12")'
+            cand --invalidated-by 'Paths/globs whose change invalidates this memory (repeatable)'
+            cand --origin-task 'Task/feature this memory was created for'
+            cand --generality 'Generality: project (default) or task'
+            cand --valid-from 'Valid-time start (RFC3339) — backdate when the claim became true'
+            cand --superseded-by 'Id of the memory that supersedes this one (only with --invalidate)'
+            cand --decay-strategy 'Decay strategy: none, linear, exponential, or step'
+            cand --decay-half-life 'Half-life in seconds for decay'
+            cand --decay-ttl 'TTL in seconds for decay'
+            cand --decay-floor 'Minimum decay factor (0.0-1.0)'
+            cand --group 'Update a memory in a named group store (instead of the current project)'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --clear-audience 'Clear the audience (whole-group visibility). Wins over --audience'
+            cand --clear-validity 'Clear the whole validity condition (premise/invalidated-by/origin-task/generality)'
+            cand --clear-invalidated 'Reopen a closed validity window (clears invalidated_at + superseded_by)'
+            cand --invalidate 'Close the validity window now: the memory WAS true but no longer is. Preferred over delete — history stays queryable via --include-invalidated'
+            cand -e 'Open memory file in $EDITOR'
+            cand --editor 'Open memory file in $EDITOR'
+            cand --global 'Operate on the global (cross-project) memory store instead of the current project'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;delete'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand -f 'Skip confirmation prompt'
+            cand --force 'Skip confirmation prompt'
+            cand --global 'Operate on the global (cross-project) memory store instead of the current project'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;task'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+            cand current 'Declare (or read, with no NAME) the task this session is working on'
+            cand complete 'Mark a task finished: demote its task-scoped memories'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;task;current'= {
+            cand --session-id 'Session id (defaults to $CLAUDE_SESSION_ID / $MCP_SESSION_ID)'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --global 'Operate on the global (cross-project) memory store instead of the current project'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;task;complete'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --global 'Operate on the global (cross-project) memory store instead of the current project'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;task;help'= {
+            cand current 'Declare (or read, with no NAME) the task this session is working on'
+            cand complete 'Mark a task finished: demote its task-scoped memories'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;task;help;current'= {
+        }
+        &'engramdb;task;help;complete'= {
+        }
+        &'engramdb;task;help;help'= {
+        }
+        &'engramdb;verify'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --global 'Operate on the global (cross-project) memory store instead of the current project'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;config'= {
+            cand --top-tags 'Number of top tags to show (most-used first)'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --global 'Show config for the global (cross-project) memory store instead of the current project'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;stats'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --all-projects 'Include the cross-project telemetry breakdown'
+            cand --global 'Show statistics for the global (cross-project) memory store instead of the current project'
+            cand --daemon 'Show the shared embedding daemon''s metrics instead of memory-store stats'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;doctor'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --global 'Check the global (cross-project) memory store instead of the current project'
+            cand --fix 'Offer to fix detected issues (reindex, download model, prune registry, init). Prompts on a terminal; in non-interactive contexts pair with --yes'
+            cand --yes 'Apply fixes without prompting (use with --fix; required to fix in non-TTY contexts)'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+            cand store 'Fast store health check (index consistency only)'
+            cand validate 'Load each downloaded model and run a test inference to confirm it works'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;doctor;store'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;doctor;validate'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;doctor;help'= {
+            cand store 'Fast store health check (index consistency only)'
+            cand validate 'Load each downloaded model and run a test inference to confirm it works'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;doctor;help;store'= {
+        }
+        &'engramdb;doctor;help;validate'= {
+        }
+        &'engramdb;doctor;help;help'= {
+        }
+        &'engramdb;projects'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+            cand info 'Show info about the current project (default)'
+            cand list 'List all registered projects'
+            cand delete 'Remove a project from the registry and delete its global data'
+            cand stats 'Show aggregate statistics across all projects'
+            cand prune 'Remove stale registry entries and orphan data directories'
+            cand link 'Link a project as a sub-project of another project'
+            cand unlink 'Remove the parent link on a project, promoting it back to a root project'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;projects;info'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;projects;list'= {
+            cand --group 'Directory-header grouping for this listing, overriding the `[cli].project_list_grouping` config: `auto` (header only for folders with 2+ projects), `always` (header per folder), or `none` (flat, full-path rows). Worktrees nest in every mode'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;projects;delete'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand -f 'Skip confirmation prompt'
+            cand --force 'Skip confirmation prompt'
+            cand --cascade 'Also delete all descendants (children and their children)'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;projects;stats'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;projects;prune'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand -f 'Skip confirmation prompt'
+            cand --force 'Skip confirmation prompt'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;projects;link'= {
+            cand --parent 'Project ID of the parent'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;projects;unlink'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;projects;help'= {
+            cand info 'Show info about the current project (default)'
+            cand list 'List all registered projects'
+            cand delete 'Remove a project from the registry and delete its global data'
+            cand stats 'Show aggregate statistics across all projects'
+            cand prune 'Remove stale registry entries and orphan data directories'
+            cand link 'Link a project as a sub-project of another project'
+            cand unlink 'Remove the parent link on a project, promoting it back to a root project'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;projects;help;info'= {
+        }
+        &'engramdb;projects;help;list'= {
+        }
+        &'engramdb;projects;help;delete'= {
+        }
+        &'engramdb;projects;help;stats'= {
+        }
+        &'engramdb;projects;help;prune'= {
+        }
+        &'engramdb;projects;help;link'= {
+        }
+        &'engramdb;projects;help;unlink'= {
+        }
+        &'engramdb;projects;help;help'= {
+        }
+        &'engramdb;groups'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+            cand create 'Create a named group store (idempotent; prints its group id)'
+            cand subscribe 'Subscribe the current project to a group (creating the group if needed)'
+            cand unsubscribe 'Unsubscribe the current project from a group (forgiving if not subscribed)'
+            cand list 'List all known groups and the current project''s subscriptions'
+            cand members 'List the projects subscribed to a group (its blast radius) and how many memories the group holds'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;groups;create'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;groups;subscribe'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand -y 'Skip the blast-radius confirmation prompt (required in JSON mode)'
+            cand --yes 'Skip the blast-radius confirmation prompt (required in JSON mode)'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;groups;unsubscribe'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand -y 'Skip the blast-radius confirmation prompt (required in JSON mode)'
+            cand --yes 'Skip the blast-radius confirmation prompt (required in JSON mode)'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;groups;list'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;groups;members'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;groups;help'= {
+            cand create 'Create a named group store (idempotent; prints its group id)'
+            cand subscribe 'Subscribe the current project to a group (creating the group if needed)'
+            cand unsubscribe 'Unsubscribe the current project from a group (forgiving if not subscribed)'
+            cand list 'List all known groups and the current project''s subscriptions'
+            cand members 'List the projects subscribed to a group (its blast radius) and how many memories the group holds'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;groups;help;create'= {
+        }
+        &'engramdb;groups;help;subscribe'= {
+        }
+        &'engramdb;groups;help;unsubscribe'= {
+        }
+        &'engramdb;groups;help;list'= {
+        }
+        &'engramdb;groups;help;members'= {
+        }
+        &'engramdb;groups;help;help'= {
+        }
+        &'engramdb;challenge'= {
+            cand -e 'Evidence or reason for the challenge'
+            cand --evidence 'Evidence or reason for the challenge'
+            cand --source-file 'Source file that contradicts this memory'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --global 'Operate on the global (cross-project) memory store instead of the current project'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;gc'= {
+            cand --threshold 'Score threshold for GC (default from config)'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --confirm 'Actually delete (default is dry-run)'
+            cand --global 'Operate on the global (cross-project) memory store instead of the current project'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;compress'= {
+            cand --scope 'Filter by logical scope'
+            cand --threshold 'Criticality threshold for candidates (default 0.4)'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --global 'Operate on the global (cross-project) memory store instead of the current project'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;serve'= {
+            cand --transport 'Transport type (stdio or sse)'
+            cand --port 'Port for SSE transport'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;daemon'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+            cand run 'Run the daemon event loop (this is what MCP auto-spawns)'
+            cand status 'Show whether a daemon is running and its request metrics'
+            cand stop 'Ask a running daemon to exit gracefully'
+            cand restart 'Stop a running daemon (if any) and start a fresh one'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;daemon;run'= {
+            cand --socket 'Unix socket to bind. Defaults to the shared per-user path (also overridable via ENGRAMDB_DAEMON_SOCKET)'
+            cand --idle-timeout 'Seconds to stay alive with no active connections before exiting'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;daemon;status'= {
+            cand --socket 'Socket to target. Overrides ENGRAMDB_DAEMON_SOCKET and config'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;daemon;stop'= {
+            cand --socket 'Socket to target. Overrides ENGRAMDB_DAEMON_SOCKET and config'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;daemon;restart'= {
+            cand --socket 'Socket to target. Overrides ENGRAMDB_DAEMON_SOCKET and config'
+            cand --idle-timeout 'Idle timeout for the newly started daemon'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;daemon;help'= {
+            cand run 'Run the daemon event loop (this is what MCP auto-spawns)'
+            cand status 'Show whether a daemon is running and its request metrics'
+            cand stop 'Ask a running daemon to exit gracefully'
+            cand restart 'Stop a running daemon (if any) and start a fresh one'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;daemon;help;run'= {
+        }
+        &'engramdb;daemon;help;status'= {
+        }
+        &'engramdb;daemon;help;stop'= {
+        }
+        &'engramdb;daemon;help;restart'= {
+        }
+        &'engramdb;daemon;help;help'= {
+        }
+        &'engramdb;completions'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;migrate'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --dry-run 'Only report what would be migrated, don''t change files'
+            cand --global 'Migrate the global (cross-project) memory store instead of the current project'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;rollback'= {
+            cand --target-version 'Target format version (e.g., 1 for legacy YAML format). Defaults to 1'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --dry-run 'Only report what would be rolled back, don''t change files'
+            cand --global 'Roll back the global (cross-project) memory store instead of the current project'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;reindex'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --embeddings-only 'Only re-embed, don''t rebuild index'
+            cand --index-only 'Only rebuild index, don''t re-embed'
+            cand --global 'Reindex the global (cross-project) memory store instead of the current project'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;hook'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+            cand pre-tool-use 'Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)'
+            cand session-start 'Handle SessionStart hook events (outputs high-criticality memories)'
+            cand user-prompt-submit 'Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)'
+            cand post-tool-use 'Handle PostToolUse hook events (warn when an edit touches a memory''s watch paths)'
+            cand session-end 'Handle SessionEnd hook events (housekeeping; no context output)'
+            cand pre-compact 'Handle PreCompact hook events (store-your-memories reminder before compaction)'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;hook;pre-tool-use'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;hook;session-start'= {
+            cand --min-criticality 'Minimum criticality threshold for surfaced memories (0.0-1.0)'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;hook;user-prompt-submit'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;hook;post-tool-use'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;hook;session-end'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;hook;pre-compact'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;hook;help'= {
+            cand pre-tool-use 'Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)'
+            cand session-start 'Handle SessionStart hook events (outputs high-criticality memories)'
+            cand user-prompt-submit 'Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)'
+            cand post-tool-use 'Handle PostToolUse hook events (warn when an edit touches a memory''s watch paths)'
+            cand session-end 'Handle SessionEnd hook events (housekeeping; no context output)'
+            cand pre-compact 'Handle PreCompact hook events (store-your-memories reminder before compaction)'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;hook;help;pre-tool-use'= {
+        }
+        &'engramdb;hook;help;session-start'= {
+        }
+        &'engramdb;hook;help;user-prompt-submit'= {
+        }
+        &'engramdb;hook;help;post-tool-use'= {
+        }
+        &'engramdb;hook;help;session-end'= {
+        }
+        &'engramdb;hook;help;pre-compact'= {
+        }
+        &'engramdb;hook;help;help'= {
+        }
+        &'engramdb;setup'= {
+            cand --claude-dir 'Override .claude directory path (for testing)'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --no-plugin 'Skip plugin install in global mode, write hooks and MCP directly to settings.json'
+            cand --global 'Install to ~/.claude/ instead of project-local .claude/'
+            cand --dry-run 'Show what would be changed without writing'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;review'= {
+            cand --scope 'Filter by logical scope'
+            cand -t 'Filter by memory type'
+            cand --type 'Filter by memory type'
+            cand --stale-after-days 'Recency trigger: also surface active memories not updated in more than N days. Bare `--stale-after-days` uses the 90-day default; omit the flag entirely to review only flagged memories'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --challenged-only 'Only show Status::Challenged memories'
+            cand --stale-only 'Only show Status::NeedsReview memories'
+            cand --global 'Review the global (cross-project) memory store instead of the current project'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;help'= {
+            cand init 'Initialize a new EngramDB store'
+            cand add 'Add a new memory'
+            cand get 'Get a memory by ID'
+            cand query 'Query memories (unified ranked / filtered retrieval)'
+            cand list 'List all memories'
+            cand update 'Update an existing memory'
+            cand delete 'Delete a memory'
+            cand task 'Task lifecycle: declare or complete the task this session works on'
+            cand verify 'Confirm a memory is still accurate (stamps verified_at; clears doctor-flagged needs_review)'
+            cand config 'Show effective config values, thresholds, and the store''s top tags'
+            cand stats 'Show statistics'
+            cand doctor 'Check environment and store health'
+            cand projects 'Manage registered EngramDB projects'
+            cand groups 'Manage multi-project memory groups and this project''s subscriptions'
+            cand challenge 'Challenge a memory''s validity'
+            cand gc 'Run garbage collection on low-relevance memories'
+            cand compress 'List compression candidates (actual compression requires MCP mode)'
+            cand serve 'Start the MCP server'
+            cand daemon 'Run the shared embedding daemon (normally auto-spawned by MCP)'
+            cand completions 'Generate shell completions'
+            cand migrate 'Migrate memory files to the latest format version'
+            cand rollback 'Roll back memory files to a previous format version'
+            cand reindex 'Rebuild index and re-embed memories'
+            cand hook 'Claude Code plugin hook handler'
+            cand setup 'Set up Claude Code integration (hooks, MCP, ENGRAM.md, CLAUDE.md)'
+            cand review 'Interactive review of challenged/stale memories'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;help;init'= {
+        }
+        &'engramdb;help;add'= {
+        }
+        &'engramdb;help;get'= {
+        }
+        &'engramdb;help;query'= {
+        }
+        &'engramdb;help;list'= {
+        }
+        &'engramdb;help;update'= {
+        }
+        &'engramdb;help;delete'= {
+        }
+        &'engramdb;help;task'= {
+            cand current 'Declare (or read, with no NAME) the task this session is working on'
+            cand complete 'Mark a task finished: demote its task-scoped memories'
+        }
+        &'engramdb;help;task;current'= {
+        }
+        &'engramdb;help;task;complete'= {
+        }
+        &'engramdb;help;verify'= {
+        }
+        &'engramdb;help;config'= {
+        }
+        &'engramdb;help;stats'= {
+        }
+        &'engramdb;help;doctor'= {
+            cand store 'Fast store health check (index consistency only)'
+            cand validate 'Load each downloaded model and run a test inference to confirm it works'
+        }
+        &'engramdb;help;doctor;store'= {
+        }
+        &'engramdb;help;doctor;validate'= {
+        }
+        &'engramdb;help;projects'= {
+            cand info 'Show info about the current project (default)'
+            cand list 'List all registered projects'
+            cand delete 'Remove a project from the registry and delete its global data'
+            cand stats 'Show aggregate statistics across all projects'
+            cand prune 'Remove stale registry entries and orphan data directories'
+            cand link 'Link a project as a sub-project of another project'
+            cand unlink 'Remove the parent link on a project, promoting it back to a root project'
+        }
+        &'engramdb;help;projects;info'= {
+        }
+        &'engramdb;help;projects;list'= {
+        }
+        &'engramdb;help;projects;delete'= {
+        }
+        &'engramdb;help;projects;stats'= {
+        }
+        &'engramdb;help;projects;prune'= {
+        }
+        &'engramdb;help;projects;link'= {
+        }
+        &'engramdb;help;projects;unlink'= {
+        }
+        &'engramdb;help;groups'= {
+            cand create 'Create a named group store (idempotent; prints its group id)'
+            cand subscribe 'Subscribe the current project to a group (creating the group if needed)'
+            cand unsubscribe 'Unsubscribe the current project from a group (forgiving if not subscribed)'
+            cand list 'List all known groups and the current project''s subscriptions'
+            cand members 'List the projects subscribed to a group (its blast radius) and how many memories the group holds'
+        }
+        &'engramdb;help;groups;create'= {
+        }
+        &'engramdb;help;groups;subscribe'= {
+        }
+        &'engramdb;help;groups;unsubscribe'= {
+        }
+        &'engramdb;help;groups;list'= {
+        }
+        &'engramdb;help;groups;members'= {
+        }
+        &'engramdb;help;challenge'= {
+        }
+        &'engramdb;help;gc'= {
+        }
+        &'engramdb;help;compress'= {
+        }
+        &'engramdb;help;serve'= {
+        }
+        &'engramdb;help;daemon'= {
+            cand run 'Run the daemon event loop (this is what MCP auto-spawns)'
+            cand status 'Show whether a daemon is running and its request metrics'
+            cand stop 'Ask a running daemon to exit gracefully'
+            cand restart 'Stop a running daemon (if any) and start a fresh one'
+        }
+        &'engramdb;help;daemon;run'= {
+        }
+        &'engramdb;help;daemon;status'= {
+        }
+        &'engramdb;help;daemon;stop'= {
+        }
+        &'engramdb;help;daemon;restart'= {
+        }
+        &'engramdb;help;completions'= {
+        }
+        &'engramdb;help;migrate'= {
+        }
+        &'engramdb;help;rollback'= {
+        }
+        &'engramdb;help;reindex'= {
+        }
+        &'engramdb;help;hook'= {
+            cand pre-tool-use 'Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)'
+            cand session-start 'Handle SessionStart hook events (outputs high-criticality memories)'
+            cand user-prompt-submit 'Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)'
+            cand post-tool-use 'Handle PostToolUse hook events (warn when an edit touches a memory''s watch paths)'
+            cand session-end 'Handle SessionEnd hook events (housekeeping; no context output)'
+            cand pre-compact 'Handle PreCompact hook events (store-your-memories reminder before compaction)'
+        }
+        &'engramdb;help;hook;pre-tool-use'= {
+        }
+        &'engramdb;help;hook;session-start'= {
+        }
+        &'engramdb;help;hook;user-prompt-submit'= {
+        }
+        &'engramdb;help;hook;post-tool-use'= {
+        }
+        &'engramdb;help;hook;session-end'= {
+        }
+        &'engramdb;help;hook;pre-compact'= {
+        }
+        &'engramdb;help;setup'= {
+        }
+        &'engramdb;help;review'= {
+        }
+        &'engramdb;help;help'= {
+        }
+    ]
+    $completions[$command]
+}
+--- stderr ---

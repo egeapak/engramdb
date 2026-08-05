@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: f.run(& all)
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format json stats --daemon
+exit: 0
+--- stdout ---
+{
+  "requests": null,
+  "running": false
+}
+--- stderr ---

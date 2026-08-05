@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"list\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] list
+exit: 0
+--- stdout ---
+[]
+--- stderr ---

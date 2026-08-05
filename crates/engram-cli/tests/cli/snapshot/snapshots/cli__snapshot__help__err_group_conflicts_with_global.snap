@@ -1,0 +1,13 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(&\n[\"add\", \"-t\", \"decision\", \"-s\", \"s\", \"-c\", \"c\", \"--global\", \"--group\", \"g\"])"
+---
+$ engramdb add -t decision -s s -c c --global --group g
+exit: 2
+--- stdout ---
+--- stderr ---
+error: the argument '--global' cannot be used with '--group <GROUP>'
+
+Usage: engramdb add --type <TYPE> --summary <SUMMARY> --content <CONTENT> --global [CONTENT]
+
+For more information, try '--help'.

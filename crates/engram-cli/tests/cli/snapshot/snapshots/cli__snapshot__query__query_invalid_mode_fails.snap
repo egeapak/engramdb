@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/query.rs
+expression: "f.run(&[\"query\", \"--mode\", \"sideways\", \"--query\", \"rust\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] query --mode sideways --query rust
+exit: 2
+--- stdout ---
+--- stderr ---
+error: invalid value 'sideways' for '--mode <MODE>'
+  [possible values: rank, filter]
+
+For more information, try '--help'.

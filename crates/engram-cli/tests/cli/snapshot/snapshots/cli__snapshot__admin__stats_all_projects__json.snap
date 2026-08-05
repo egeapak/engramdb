@@ -1,0 +1,36 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: f.run(& all)
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format json stats --all-projects
+exit: 0
+--- stdout ---
+{
+  "avg_criticality": 0.6,
+  "by_scope": [],
+  "by_status": [
+    [
+      "Active",
+      3
+    ]
+  ],
+  "by_type": [
+    [
+      "convention",
+      1
+    ],
+    [
+      "decision",
+      1
+    ],
+    [
+      "hazard",
+      1
+    ]
+  ],
+  "expired": 0,
+  "newest": "[TIMESTAMP]",
+  "oldest": "[TIMESTAMP]",
+  "total": 3
+}
+--- stderr ---

@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"list\", \"--sort\", \"nonsense\"])"
+---
+$ engramdb list --sort nonsense
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Project not initialized

@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: "f.run(&[\"reindex\", \"--index-only\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] reindex --index-only
+exit: 0
+--- stdout ---
+{
+  "message": "Done. Rebuilt index with 3 entries.",
+  "success": true
+}
+--- stderr ---

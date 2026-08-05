@@ -1,0 +1,13 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: "f.run(&[\"compress\", \"--threshold\", \"0.1\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] compress --threshold 0.1
+exit: 0
+--- stdout ---
+{
+  "candidates": [],
+  "threshold": 0.1,
+  "total": 0
+}
+--- stderr ---

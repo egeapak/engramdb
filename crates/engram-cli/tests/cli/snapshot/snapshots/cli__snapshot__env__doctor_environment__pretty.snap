@@ -1,0 +1,67 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/env.rs
+expression: f.run(& all)
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format pretty doctor
+exit: 0
+--- stdout ---
+
+EngramDB Environment Check
+
+Project
+  ✓ Store initialized: .engramdb/ exists
+      path: [PROJECT]/.engramdb
+  ✓ Store health: healthy
+      indexed: 0
+      on disk: 0
+  ✓ Manifest stats: memory_count 0 matches index
+  ✓ Chunk index integrity: 0 chunk memory_ids, no orphans
+  ✓ Config file: .engramdb/config.toml valid
+  ⚠ MCP server configuration: .mcp.json not found
+  ℹ Add engramdb to .mcp.json, or install the Claude Code plugin
+  ✓ Write lock: no active writer
+  ○ Project .gitignore: no .gitignore file
+  ✓ Project disk usage: [SIZE]
+      shared: [SIZE] (0 memories)
+      personal: [SIZE] (0 memories)
+      index: [SIZE]
+
+Projects
+  ✓ Registered projects: 1 registered
+      registered: 1
+      reachable: 1
+  ✓ Project hierarchy: healthy
+
+Global settings & models
+  ⚠ Binary on PATH: not found
+  ℹ Install with `brew install engramdb`
+  ○ Global gitignore: .engramdb not in global excludes
+  ℹ Add .engramdb to [HOME]/config/git/ignore to ignore it in all repositories
+  ⚠ Claude Code plugin: not found
+  ℹ Install with `claude plugin add https://github.com/egeapak/engramdb`
+  ⚠ Hook configuration: not configured
+  ℹ Install the Claude Code plugin to configure hooks automatically
+  ○ Auto-maintenance: disabled
+  ○ Embedding daemon: disabled in config (models load in-process per MCP)
+      socket: [RUNTIME]/d.sock
+      config: enabled=false, idle_timeout_secs=900
+  Embeddings
+    ⚠ ONNX Runtime: ONNX Runtime (libonnxruntime.so) not found. Install it (`brew install onnxruntime`, `scoop install onnxruntime`, or your distro's package) or set ORT_DYLIB_PATH to the library path. Searched: [ORT_SEARCH_PATHS]
+  ℹ Install ONNX Runtime (`brew install onnxruntime`, `scoop install onnxruntime`, or your distro's package), or set ORT_DYLIB_PATH. Without it EngramDB falls back to keyword search.
+    ✓ Embedding backend: auto (model: onnx)
+    ⚠ Embedding model identity: untracked (legacy store); current model onnx/all-MiniLM-L12-v2-u8
+  ℹ run `engramdb reindex --embeddings-only` to re-embed and stamp the store
+    ⚠ Embedding model cache: not cached
+  ℹ Run `engramdb init` to download the embedding model
+    ✓ Ollama connectivity: unreachable (not configured as backend)
+  Models
+    ○ Embedding model: onnx/all-MiniLM-L12-v2-u8 (384d)
+        Local ONNX bi-encoder; embeds memories and queries into vectors so search can rank by semantic similarity.
+    ○ Title generation: keyword (RAKE)
+        In-process RAKE keyword extraction; no model is loaded.
+
+Stats
+  ✓ Global disk usage: [SIZE]
+      projects: [SIZE] (1 registered)
+      models: no cached models
+--- stderr ---

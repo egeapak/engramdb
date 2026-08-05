@@ -1,0 +1,27 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/projects_groups.rs
+expression: f.run(& all)
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format json projects stats
+exit: 0
+--- stdout ---
+{
+  "by_type": [
+    [
+      "convention",
+      1
+    ],
+    [
+      "decision",
+      1
+    ],
+    [
+      "hazard",
+      1
+    ]
+  ],
+  "reachable_projects": 1,
+  "total_memories": 3,
+  "total_projects": 1
+}
+--- stderr ---

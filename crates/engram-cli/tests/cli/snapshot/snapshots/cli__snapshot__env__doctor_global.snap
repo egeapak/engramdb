@@ -1,0 +1,218 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/env.rs
+expression: "f.run(&[\"doctor\", \"--global\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] doctor --global
+exit: 0
+--- stdout ---
+{
+  "all_passed": true,
+  "sections": [
+    {
+      "checks": [
+        {
+          "details": [
+            "path: [DATA]/global/.engramdb"
+          ],
+          "message": ".engramdb/ exists",
+          "name": "Store initialized",
+          "passed": true
+        },
+        {
+          "details": [
+            "indexed: 0",
+            "on disk: 0"
+          ],
+          "message": "healthy",
+          "name": "Store health",
+          "passed": true
+        },
+        {
+          "message": "memory_count 0 matches index",
+          "name": "Manifest stats",
+          "passed": true
+        },
+        {
+          "message": "0 chunk memory_ids, no orphans",
+          "name": "Chunk index integrity",
+          "passed": true
+        },
+        {
+          "message": "not registered",
+          "name": "Registry",
+          "passed": true,
+          "status": "warn",
+          "suggestion": "Run `engramdb init` to register this project"
+        }
+      ],
+      "name": "Project"
+    },
+    {
+      "checks": [
+        {
+          "details": [
+            "registered: 1",
+            "reachable: 1",
+            "orphan data dirs: 1"
+          ],
+          "message": "1 registered",
+          "name": "Registered projects",
+          "passed": true,
+          "status": "warn",
+          "suggestion": "Run `engramdb projects prune` to clean up"
+        },
+        {
+          "message": "healthy",
+          "name": "Project hierarchy",
+          "passed": true
+        }
+      ],
+      "name": "Projects"
+    },
+    {
+      "checks": [
+        {
+          "message": "not found",
+          "name": "Binary on PATH",
+          "passed": true,
+          "status": "warn",
+          "suggestion": "Install with `brew install engramdb`"
+        },
+        {
+          "message": ".engramdb not in global excludes",
+          "name": "Global gitignore",
+          "passed": true,
+          "status": "info",
+          "suggestion": "Add .engramdb to [HOME]/config/git/ignore to ignore it in all repositories"
+        },
+        {
+          "message": "not found",
+          "name": "Claude Code plugin",
+          "passed": true,
+          "status": "warn",
+          "suggestion": "Install with `claude plugin add https://github.com/egeapak/engramdb`"
+        },
+        {
+          "message": "not configured",
+          "name": "Hook configuration",
+          "passed": true,
+          "status": "warn",
+          "suggestion": "Install the Claude Code plugin to configure hooks automatically"
+        },
+        {
+          "details": [
+            "last run: never"
+          ],
+          "message": "enabled (every 6 hours)",
+          "name": "Auto-maintenance",
+          "passed": true,
+          "status": "info"
+        },
+        {
+          "details": [
+            "socket: [RUNTIME]/d.sock",
+            "config: enabled=true, idle_timeout_secs=900"
+          ],
+          "message": "not running (auto-spawned on the next MCP run)",
+          "name": "Embedding daemon",
+          "passed": true,
+          "status": "info",
+          "suggestion": "Run `engramdb daemon status` or `engramdb daemon restart`."
+        }
+      ],
+      "name": "Global settings & models",
+      "subsections": [
+        {
+          "checks": [
+            {
+              "message": "ONNX Runtime (libonnxruntime.so) not found. Install it (`brew install onnxruntime`, `scoop install onnxruntime`, or your distro's package) or set ORT_DYLIB_PATH to the library path. Searched: [ORT_SEARCH_PATHS]",
+              "name": "ONNX Runtime",
+              "passed": true,
+              "status": "warn",
+              "suggestion": "Install ONNX Runtime (`brew install onnxruntime`, `scoop install onnxruntime`, or your distro's package), or set ORT_DYLIB_PATH. Without it EngramDB falls back to keyword search."
+            },
+            {
+              "message": "auto (model: onnx)",
+              "name": "Embedding backend",
+              "passed": true
+            },
+            {
+              "message": "untracked (legacy store); current model onnx/all-MiniLM-L12-v2-u8",
+              "name": "Embedding model identity",
+              "passed": true,
+              "status": "warn",
+              "suggestion": "run `engramdb reindex --embeddings-only` to re-embed and stamp the store"
+            },
+            {
+              "message": "not cached",
+              "name": "Embedding model cache",
+              "passed": true,
+              "status": "warn",
+              "suggestion": "Run `engramdb init` to download the embedding model"
+            },
+            {
+              "message": "unreachable (not configured as backend)",
+              "name": "Ollama connectivity",
+              "passed": true
+            }
+          ],
+          "name": "Embeddings"
+        },
+        {
+          "checks": [
+            {
+              "details": [
+                "Local ONNX bi-encoder; embeds memories and queries into vectors so search can rank by semantic similarity."
+              ],
+              "message": "onnx/all-MiniLM-L12-v2-u8 (384d)",
+              "name": "Embedding model",
+              "passed": true,
+              "status": "info"
+            },
+            {
+              "details": [
+                "Cross-encoder that re-scores the top candidates by jointly reading query and document — slower but sharper relevance than the bi-encoder."
+              ],
+              "message": "jina-turbo-q",
+              "name": "Reranker model",
+              "passed": true,
+              "status": "info"
+            },
+            {
+              "details": [
+                "T5-small abstractive summarizer; generates a memory title when the caller doesn't supply one."
+              ],
+              "message": "Xenova/t5-small (int8)",
+              "name": "Title model",
+              "passed": true,
+              "status": "info"
+            }
+          ],
+          "name": "Models"
+        }
+      ]
+    },
+    {
+      "checks": [
+        {
+          "details": [
+            "projects: [SIZE] (2 registered)",
+            "models: no cached models"
+          ],
+          "message": "[SIZE]",
+          "name": "Global disk usage",
+          "passed": true
+        }
+      ],
+      "name": "Stats"
+    }
+  ],
+  "store_check": {
+    "healthy": true,
+    "indexed": 0,
+    "on_disk": 0,
+    "orphaned_files": [],
+    "stale_entries": []
+  }
+}
+--- stderr ---

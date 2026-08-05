@@ -1,0 +1,60 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"projects\", \"--help\"])"
+---
+$ engramdb projects --help
+exit: 0
+--- stdout ---
+Manage registered EngramDB projects
+
+Usage: engramdb projects [OPTIONS] [COMMAND]
+
+Commands:
+  info    Show info about the current project (default)
+  list    List all registered projects
+  delete  Remove a project from the registry and delete its global data
+  stats   Show aggregate statistics across all projects
+  prune   Remove stale registry entries and orphan data directories
+  link    Link a project as a sub-project of another project
+  unlink  Remove the parent link on a project, promoting it back to a root project
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <FORMAT>
+          Output format
+
+          Possible values:
+          - pretty: Human-friendly colored output with formatting
+          - json:   JSON output for programmatic parsing
+          - plain:  Plain text output without colors
+
+      --json
+          Output as JSON
+
+  -q, --quiet
+          Suppress non-essential output
+
+  -v, --verbose
+          Verbose output
+
+      --no-color
+          No colored output
+
+      --dir <DIR>
+          Working directory (default: current directory)
+
+      --embedding-backend <EMBEDDING_BACKEND>
+          Embedding backend: auto, onnx, or ollama
+
+      --in-process
+          Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1
+
+      --spawn-daemon
+          Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)
+
+      --no-maintenance
+          Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1
+
+  -h, --help
+          Print help (see a summary with '-h')
+--- stderr ---

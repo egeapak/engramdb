@@ -1,0 +1,13 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"reindex\", \"--embeddings-only\", \"--index-only\"])"
+---
+$ engramdb reindex --embeddings-only --index-only
+exit: 2
+--- stdout ---
+--- stderr ---
+error: the argument '--embeddings-only' cannot be used with '--index-only'
+
+Usage: engramdb reindex --embeddings-only
+
+For more information, try '--help'.

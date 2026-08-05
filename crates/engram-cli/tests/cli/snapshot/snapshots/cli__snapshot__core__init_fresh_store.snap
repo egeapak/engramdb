@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"init\", \"--no-embeddings\", \"--template\", template.to_str().unwrap()])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] init --no-embeddings --template [PROJECT]/cfg.toml
+exit: 0
+--- stdout ---
+{"message":"Applied config template","success":true}
+{"message":"Initialized EngramDB store at [PROJECT]/.engramdb","success":true}
+{"message":"Project ID: [PROJECT_ID]"}
+{"message":"Try: engramdb add --type convention --summary 'Your first memory' --content '...'"}
+--- stderr ---

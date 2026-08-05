@@ -1,0 +1,16 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: "f.run(&[\"reindex\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] reindex
+exit: 0
+--- stdout ---
+{
+  "message": "Done. Rebuilt index with 3 entries.",
+  "success": true
+}
+--- stderr ---
+{"error":"3 errors during reindex:"}
+  [UUID]: Failed to send embed request to Ollama
+  [UUID]: Failed to send embed request to Ollama
+  [UUID]: Failed to send embed request to Ollama

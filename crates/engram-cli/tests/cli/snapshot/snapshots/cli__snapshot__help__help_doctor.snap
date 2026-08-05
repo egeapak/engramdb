@@ -1,0 +1,64 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"doctor\", \"--help\"])"
+---
+$ engramdb doctor --help
+exit: 0
+--- stdout ---
+Check environment and store health
+
+Usage: engramdb doctor [OPTIONS] [COMMAND]
+
+Commands:
+  store     Fast store health check (index consistency only)
+  validate  Load each downloaded model and run a test inference to confirm it works
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --global
+          Check the global (cross-project) memory store instead of the current project
+
+      --fix
+          Offer to fix detected issues (reindex, download model, prune registry, init). Prompts on a terminal; in non-interactive contexts pair with --yes
+
+      --yes
+          Apply fixes without prompting (use with --fix; required to fix in non-TTY contexts)
+
+      --format <FORMAT>
+          Output format
+
+          Possible values:
+          - pretty: Human-friendly colored output with formatting
+          - json:   JSON output for programmatic parsing
+          - plain:  Plain text output without colors
+
+      --json
+          Output as JSON
+
+  -q, --quiet
+          Suppress non-essential output
+
+  -v, --verbose
+          Verbose output
+
+      --no-color
+          No colored output
+
+      --dir <DIR>
+          Working directory (default: current directory)
+
+      --embedding-backend <EMBEDDING_BACKEND>
+          Embedding backend: auto, onnx, or ollama
+
+      --in-process
+          Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1
+
+      --spawn-daemon
+          Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)
+
+      --no-maintenance
+          Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1
+
+  -h, --help
+          Print help (see a summary with '-h')
+--- stderr ---
