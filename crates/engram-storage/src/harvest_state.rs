@@ -53,6 +53,16 @@ pub enum HarvestDecision {
     Skipped,
     /// Looked at, decision postponed — still offered by `list`.
     Deferred,
+    /// Nobody has looked at it yet. Written by [`set_archive`] for a session
+    /// the SessionEnd hook archived, which is every session that ever ended.
+    ///
+    /// Separate from [`Self::Deferred`] because the two carry opposite
+    /// information and only one of them is a statement about the content: a
+    /// deferral means a human read the session and postponed the call, while
+    /// this means the machine noticed the session stop. Sharing a variant made
+    /// `harvest ledger list` report `Deferred` for the entire history of the
+    /// machine, drowning the handful of real deferrals in it.
+    Unreviewed,
 }
 
 /// The outcome of harvesting one session.
@@ -96,9 +106,12 @@ impl HarvestEntry {
     }
 
     /// Whether this entry settles the session, i.e. `list` should stop
-    /// offering it. `Deferred` deliberately does not.
+    /// offering it. Neither `Deferred` nor `Unreviewed` does.
     pub fn is_settled(&self) -> bool {
-        self.decision() != HarvestDecision::Deferred
+        !matches!(
+            self.decision(),
+            HarvestDecision::Deferred | HarvestDecision::Unreviewed
+        )
     }
 }
 
@@ -164,15 +177,20 @@ fn lock_ledger(project_dir: &Path) -> Option<std::fs::File> {
 /// ledger is advisory and must never hard-fail a harvest — but the evidence
 /// has to survive.
 pub fn read_harvested(project_dir: &Path) -> HashMap<String, HarvestEntry> {
-    let path = ledger_path(project_dir);
-    let Ok(raw) = std::fs::read_to_string(&path) else {
+    read_ledger_at(&ledger_path(project_dir))
+}
+
+/// [`read_harvested`] against an explicit file, so [`adopt_ledger`] can read a
+/// ledger it has already moved aside.
+fn read_ledger_at(path: &Path) -> HashMap<String, HarvestEntry> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
         return HashMap::new();
     };
     match serde_json::from_str(&raw) {
         Ok(map) => map,
         Err(e) => {
             let quarantine = path.with_extension(format!("json.corrupt-{}", std::process::id()));
-            let moved = std::fs::rename(&path, &quarantine).is_ok();
+            let moved = std::fs::rename(path, &quarantine).is_ok();
             tracing::warn!(
                 "harvest ledger at {} is unreadable ({e}); treating it as empty. {}",
                 path.display(),
@@ -193,7 +211,7 @@ pub fn read_harvested(project_dir: &Path) -> HashMap<String, HarvestEntry> {
 /// Is this session settled — i.e. should `list` stop offering it?
 ///
 /// An entry that only records an archive (written by the SessionEnd hook for
-/// a session nobody has reviewed yet) is `Deferred` and deliberately does
+/// a session nobody has reviewed yet) is `Unreviewed` and deliberately does
 /// **not** count: archiving a transcript must never make it invisible to the
 /// very command that exists to review it.
 pub fn is_harvested(project_dir: &Path, session_id: &str) -> bool {
@@ -271,7 +289,7 @@ pub fn set_archive(
                     memories_created: 0,
                     memory_ids: Vec::new(),
                     // Not a review — the session is still waiting for one.
-                    decision: Some(HarvestDecision::Deferred),
+                    decision: Some(HarvestDecision::Unreviewed),
                     note: None,
                     archive: Some(archive),
                 },
@@ -322,13 +340,56 @@ pub fn clear_archive_refs(project_dir: &Path, session_ids: &[String]) -> Result<
 /// holds only when that window is the shorter of the two — which is exactly
 /// the configuration the docs steer people away from.
 ///
-/// Exempting them does not unbound the file: `clear_archive_refs` runs on
-/// every eviction, so an entry loses its exemption the moment its archive
-/// goes, and the number of archives is itself bounded by
-/// `archive_max_bytes` / `archive_retention_days`.
+/// The exemption is written against the entry's *claim*, which is all this
+/// function can see: it takes the ledger directory, and locating the file
+/// needs the root project id. What keeps the claim honest — and the file
+/// bounded — is [`reconcile_archive_refs`], which every harvest entry point
+/// runs against the archive directory before touching the ledger.
 fn prune_stale(map: &mut HashMap<String, HarvestEntry>) {
     let cutoff = Utc::now() - Duration::days(PRUNE_AFTER_DAYS);
     map.retain(|_, e| e.archive.is_some() || e.harvested_at > cutoff);
+}
+
+/// Drop archive references whose file is no longer on disk, returning the
+/// session ids that lost one.
+///
+/// [`prune_stale`] exempts an entry that names an archive, and `prune_archives`
+/// — the only other thing that calls [`clear_archive_refs`] — reports what a
+/// *directory scan* found, so it can never report a file that is already gone.
+/// A reference the file never caught up with therefore made its entry immortal:
+/// exempt from the age window forever, advertising an export that cannot
+/// succeed. `projects delete --cascade` removes the archive directory without
+/// touching the ledger, archives written before a `projects link` sit under the
+/// child's old id where the root's prune never looks, and eviction on another
+/// machine, a restored backup or a manual cleanup do the same.
+///
+/// Reconciling against the directory rather than stat-ing each file keeps this
+/// one `read_dir`, and makes an unreadable-but-present directory an error
+/// (nothing is cleared) instead of a mass deletion of references. A file that
+/// exists under some *other* project's id is still cleared: every route from a
+/// session id to a transcript resolves through the root project id, so such a
+/// file is already unreachable, and pretending otherwise is what the entry's
+/// immortality was built on.
+pub fn reconcile_archive_refs(project_dir: &Path, project_id: &str) -> Result<Vec<String>> {
+    let claimed: Vec<String> = read_harvested(project_dir)
+        .into_iter()
+        .filter(|(_, e)| e.archive.is_some())
+        .map(|(id, _)| id)
+        .collect();
+    if claimed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let present: std::collections::HashSet<String> =
+        crate::transcript_archive::list_archives(project_id)?
+            .into_iter()
+            .map(|a| a.session_id)
+            .collect();
+    let dangling: Vec<String> = claimed
+        .into_iter()
+        .filter(|id| !present.contains(id))
+        .collect();
+    clear_archive_refs(project_dir, &dangling)?;
+    Ok(dangling)
 }
 
 /// Fold a ledger left at `sub_dir` into the root project's ledger at
@@ -347,6 +408,16 @@ fn prune_stale(map: &mut HashMap<String, HarvestEntry>) {
 /// sub-project's. The old file is renamed rather than deleted — this runs
 /// unattended from the SessionEnd hook, and nothing here is worth destroying
 /// evidence over.
+///
+/// **Adoption is all-or-nothing, and the move aside is the step that commits
+/// it.** Merging first and moving after meant a failed rename was swallowed
+/// with the root already written: every later resolve re-merged the same
+/// sub-ledger, so a `harvest reset` was undone the moment the next harvest
+/// command ran and no amount of clearing could settle the session. Renaming
+/// first inverts that — a rename that fails adopts nothing, which the caller
+/// already treats as advisory ("the old decisions, not the harvest"), and a
+/// process that dies between the two steps leaves the data intact under the
+/// `.adopted` name rather than losing it.
 pub fn adopt_ledger(sub_dir: &Path, root_dir: &Path) -> Result<()> {
     if sub_dir == root_dir {
         return Ok(());
@@ -355,32 +426,40 @@ pub fn adopt_ledger(sub_dir: &Path, root_dir: &Path) -> Result<()> {
     if !legacy_path.exists() {
         return Ok(());
     }
-    // Reads as empty (and quarantines the file) if it is corrupt, in which
-    // case there is nothing to adopt and the rename below finds nothing.
-    let legacy = read_harvested(sub_dir);
+    // Lock the *source* too, and hold it across the rename. Locking only the
+    // destination left the read and the move aside unguarded, so a concurrent
+    // `mark_harvested(sub_dir, …)` landing between them was renamed away
+    // without ever being merged — a review decision lost with no trace. A
+    // writer blocked here instead resumes against a missing file and recreates
+    // it holding just its own entry, which the next adoption picks up.
+    let _sub_lock = lock_ledger(sub_dir);
+    let adopted_path = legacy_path.with_extension("json.adopted");
+    std::fs::rename(&legacy_path, &adopted_path)?;
 
-    if !legacy.is_empty() {
-        let _lock = lock_ledger(root_dir);
-        let mut map = read_harvested(root_dir);
-        for (id, entry) in legacy {
-            let merged = match map.get(&id) {
-                Some(existing) => merge_entries(existing, &entry),
-                None => entry,
-            };
-            map.insert(id, merged);
-        }
-        prune_stale(&mut map);
-        write_harvested(root_dir, &map)?;
+    // Reads as empty (and quarantines the file) if it is corrupt, in which
+    // case there is nothing to adopt.
+    let legacy = read_ledger_at(&adopted_path);
+    if legacy.is_empty() {
+        return Ok(());
     }
-    let _ = std::fs::rename(&legacy_path, legacy_path.with_extension("json.adopted"));
-    Ok(())
+    let _lock = lock_ledger(root_dir);
+    let mut map = read_harvested(root_dir);
+    for (id, entry) in legacy {
+        let merged = match map.get(&id) {
+            Some(existing) => merge_entries(existing, &entry),
+            None => entry,
+        };
+        map.insert(id, merged);
+    }
+    prune_stale(&mut map);
+    write_harvested(root_dir, &map)
 }
 
 /// Reconcile two records of the same session found in two ledgers.
 ///
-/// A settled decision outranks a `Deferred` one regardless of timestamps: the
-/// SessionEnd hook writes a `Deferred` entry for every session it archives, so
-/// the root's copy is routinely *younger* than the review it must not
+/// A settled decision outranks an unsettled one regardless of timestamps: the
+/// SessionEnd hook writes an `Unreviewed` entry for every session it archives,
+/// so the root's copy is routinely *younger* than the review it must not
 /// overwrite. Beyond that the newer record wins, and an archive reference is
 /// kept from whichever side has one — the file it names is the same either
 /// way, since archives have always been keyed by the root project.
@@ -559,7 +638,7 @@ mod tests {
         set_archive(tmp.path(), "s1", sample_archive()).unwrap();
 
         let map = read_harvested(tmp.path());
-        assert_eq!(map["s1"].decision(), HarvestDecision::Deferred);
+        assert_eq!(map["s1"].decision(), HarvestDecision::Unreviewed);
         assert!(!map["s1"].is_settled());
         assert!(
             !is_harvested(tmp.path(), "s1"),
@@ -715,6 +794,156 @@ mod tests {
             entry.archive.is_some(),
             "the archive reference must survive the merge"
         );
+    }
+
+    #[test]
+    fn a_dangling_archive_reference_stops_exempting_its_entry() {
+        // The age exemption was written against the entry's *claim*, and
+        // nothing ever reconciled the claim with the disk: `prune_archives`
+        // reports only files a directory scan found, so a reference whose file
+        // went another way — `projects delete --cascade`, an archive written
+        // under the pre-`projects link` id, eviction on another machine —
+        // never reached `clear_archive_refs` and made its entry immortal.
+        let tmp = TempDir::new().unwrap();
+        let data = TempDir::new().unwrap();
+        let prev = std::env::var("ENGRAMDB_DATA_DIR").ok();
+        std::env::set_var("ENGRAMDB_DATA_DIR", data.path());
+
+        let dir = tmp.path();
+        let long_ago = Utc::now() - Duration::days(PRUNE_AFTER_DAYS + 35);
+        let mut seeded = HashMap::new();
+        seeded.insert(
+            "ghost".to_string(),
+            HarvestEntry {
+                harvested_at: long_ago,
+                memories_created: 0,
+                memory_ids: vec![],
+                decision: Some(HarvestDecision::Skipped),
+                note: None,
+                archive: Some(sample_archive()),
+            },
+        );
+        write_harvested(dir, &seeded).unwrap();
+
+        // No archive directory at all: every claim is dangling.
+        let cleared = reconcile_archive_refs(dir, "proj").unwrap();
+        assert_eq!(cleared, vec!["ghost"], "the dangling ref was not noticed");
+        assert!(
+            !read_harvested(dir).contains_key("ghost"),
+            "an entry naming a file that does not exist outlived the age window"
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("ENGRAMDB_DATA_DIR", v),
+            None => std::env::remove_var("ENGRAMDB_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    fn reconciling_keeps_references_whose_file_is_really_there() {
+        // Negative control: the whole point of the exemption is that a live
+        // archive keeps its only index into itself.
+        let tmp = TempDir::new().unwrap();
+        let data = TempDir::new().unwrap();
+        let prev = std::env::var("ENGRAMDB_DATA_DIR").ok();
+        std::env::set_var("ENGRAMDB_DATA_DIR", data.path());
+
+        let src = TempDir::new().unwrap();
+        let transcript = src.path().join("live.jsonl");
+        std::fs::write(&transcript, "{\"type\":\"user\"}\n").unwrap();
+        let archive = crate::transcript_archive::archive_transcript("proj", "live", &transcript)
+            .expect("archive written");
+        set_archive(tmp.path(), "live", archive).unwrap();
+
+        assert!(reconcile_archive_refs(tmp.path(), "proj")
+            .unwrap()
+            .is_empty());
+        assert!(read_harvested(tmp.path())["live"].archive.is_some());
+
+        match prev {
+            Some(v) => std::env::set_var("ENGRAMDB_DATA_DIR", v),
+            None => std::env::remove_var("ENGRAMDB_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    fn a_failed_move_aside_adopts_nothing() {
+        // The rename used to run after the merge had been committed, and its
+        // failure was swallowed — so the sub-ledger stayed put and every later
+        // resolve re-merged it, resurrecting whatever `harvest reset` had just
+        // cleared. Adoption has to be all-or-nothing.
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("child");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+
+        mark_harvested(&sub, "s1", &[], HarvestDecision::Skipped, None).unwrap();
+        // Block the rename by occupying its target with a directory — the
+        // stand-in for the real case, a sub-project the user cannot write to.
+        std::fs::create_dir_all(ledger_path(&sub).with_extension("json.adopted")).unwrap();
+
+        assert!(
+            adopt_ledger(&sub, &root).is_err(),
+            "a failed move aside must be reported, not swallowed"
+        );
+        assert!(
+            !read_harvested(&root).contains_key("s1"),
+            "the merge was committed even though the sub-ledger could not be retired"
+        );
+
+        // The consequence that made it permanent: clearing the entry must stick.
+        mark_harvested(&root, "s1", &[], HarvestDecision::Skipped, None).unwrap();
+        assert!(clear_harvested(&root, "s1").unwrap());
+        let _ = adopt_ledger(&sub, &root);
+        assert!(
+            !is_harvested(&root, "s1"),
+            "a reset session came back from the un-retired sub-ledger"
+        );
+    }
+
+    #[test]
+    fn adoption_holds_the_sub_ledger_lock_while_it_moves_it() {
+        // The snapshot and the rename were unguarded, so a concurrent
+        // `mark_harvested(sub_dir, …)` between them was moved aside unmerged.
+        // Holding the source lock is what closes that window; assert the lock
+        // is actually taken, since the race itself is not reproducible.
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("child");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        mark_harvested(&sub, "s1", &[], HarvestDecision::Skipped, None).unwrap();
+
+        // Hold the source lock, then adopt from another thread: it must block
+        // rather than sail past the unguarded read-and-rename.
+        let held = lock_ledger(&sub).expect("lock the sub-ledger");
+        let (sub_c, root_c) = (sub.clone(), root.clone());
+        let handle = std::thread::spawn(move || adopt_ledger(&sub_c, &root_c));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !handle.is_finished(),
+            "adoption ran through while the sub-ledger was locked"
+        );
+        drop(held);
+        handle.join().unwrap().unwrap();
+        assert!(read_harvested(&root).contains_key("s1"));
+    }
+
+    #[test]
+    fn an_unreviewed_archive_entry_is_not_a_deliberate_deferral() {
+        // The hook archives every session that ever ends, so sharing the
+        // `Deferred` variant made `harvest ledger list` report a deliberate
+        // postponement for the machine's entire history.
+        let tmp = TempDir::new().unwrap();
+        set_archive(tmp.path(), "auto", sample_archive()).unwrap();
+        mark_harvested(tmp.path(), "chosen", &[], HarvestDecision::Deferred, None).unwrap();
+
+        let map = read_harvested(tmp.path());
+        assert_eq!(map["auto"].decision(), HarvestDecision::Unreviewed);
+        assert_eq!(map["chosen"].decision(), HarvestDecision::Deferred);
+        // Both still keep being offered — that part must not change.
+        assert!(!map["auto"].is_settled() && !map["chosen"].is_settled());
     }
 
     fn sample_archive() -> crate::transcript_archive::ArchiveRef {

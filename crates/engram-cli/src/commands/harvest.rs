@@ -8,7 +8,7 @@ use crate::app::{HarvestCommand, LedgerCommand};
 use crate::output::{HarvestSessionOutput, OutputFormatter};
 use crate::prompter::Prompter;
 use anyhow::{bail, Result};
-use engramdb::ops::harvest;
+use engramdb::ops::harvest::{self, resolve_ledger_key};
 use engramdb::storage::harvest_state::{self, HarvestDecision, HarvestEntry};
 use engramdb::storage::transcripts::{self, ParseOptions};
 use engramdb::storage::{transcript_archive, RegistryBackend};
@@ -82,10 +82,12 @@ pub async fn run_harvest(
             let (transcript_path, _restored) =
                 match resolve_session(&scope, &session_id, all_projects) {
                     Ok(selected) => (selected.transcript_path, None),
-                    Err(live_err) => match restore_archived_session(&scope, &session_id)? {
-                        Some((guard, path)) => (path, Some(guard)),
-                        None => return Err(live_err),
-                    },
+                    Err(live_err) => {
+                        match harvest::restore_archived_session(&scope, &session_id)? {
+                            Some((guard, path)) => (path, Some(guard)),
+                            None => return Err(live_err),
+                        }
+                    }
                 };
             let params = harvest::DigestParams {
                 parse: ParseOptions {
@@ -173,6 +175,11 @@ fn describe_mark(session_id: &str, entry: &HarvestEntry) -> String {
     match entry.decision() {
         HarvestDecision::Deferred => {
             format!("Deferred session {session_id}; it will keep appearing in `harvest list`.")
+        }
+        // Not reachable from `mark`, which always records a review — the hook
+        // is the only writer of this decision.
+        HarvestDecision::Unreviewed => {
+            format!("Session {session_id} is recorded but not yet reviewed.")
         }
         HarvestDecision::Skipped => {
             format!("Marked session {session_id} as reviewed (no memories saved).")
@@ -481,7 +488,10 @@ fn parse_decision(value: &str) -> Result<HarvestDecision> {
         "harvested" => Ok(HarvestDecision::Harvested),
         "skipped" => Ok(HarvestDecision::Skipped),
         "deferred" => Ok(HarvestDecision::Deferred),
-        other => bail!("unknown decision '{other}' (expected harvested, skipped, or deferred)"),
+        "unreviewed" => Ok(HarvestDecision::Unreviewed),
+        other => bail!(
+            "unknown decision '{other}' (expected harvested, skipped, deferred, or unreviewed)"
+        ),
     }
 }
 
@@ -507,28 +517,6 @@ archive immediately. Use `--max-bytes 0 --apply` if you really mean to drop them
     Ok(days)
 }
 
-/// Resolve a session-id prefix against the **ledger**, not the transcripts.
-///
-/// A session whose transcript has since been pruned by Claude Code must still
-/// be manageable — that is the whole reason its archive exists.
-fn resolve_ledger_key(dir: &Path, prefix: &str) -> Result<String> {
-    let ledger = harvest_state::read_harvested(dir);
-    let matches: Vec<&String> = ledger.keys().filter(|id| id.starts_with(prefix)).collect();
-    match matches.as_slice() {
-        [] => bail!("No harvest record matching '{prefix}'"),
-        [one] => Ok((*one).clone()),
-        many => bail!(
-            "Ambiguous session id '{}' — matches {} records: {}",
-            prefix,
-            many.len(),
-            many.iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
-}
-
 fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let mut value = bytes as f64;
@@ -542,52 +530,6 @@ fn human_bytes(bytes: u64) -> String {
     } else {
         format!("{value:.1} {}", UNITS[unit])
     }
-}
-
-/// Decompress an archived session to a temp file so it can be digested.
-///
-/// Returns `None` when no archive is held for `prefix`, leaving the caller to
-/// report the original "no such live session" error. This is what makes the
-/// archive worth taking: once Claude Code prunes a transcript, this is the
-/// only remaining path from a session id to its conversation, and reading the
-/// raw `.jsonl` by hand is exactly what the harvest docs tell agents never to
-/// do (it is ~99% tool payload).
-fn restore_archived_session(
-    scope: &harvest::SessionScope,
-    prefix: &str,
-) -> Result<Option<(tempfile::TempDir, PathBuf)>> {
-    let dir = scope.root_dir.as_path();
-    let project_id = scope.root_project_id.as_str();
-    let Ok(key) = resolve_ledger_key(dir, prefix) else {
-        return Ok(None);
-    };
-    let ledger = harvest_state::read_harvested(dir);
-    let Some(archive) = ledger.get(&key).and_then(|e| e.archive.clone()) else {
-        return Ok(None);
-    };
-    if !transcript_archive::archive_path(project_id, &key)?.exists() {
-        return Ok(None);
-    }
-
-    // Restore under the session's real name, not a random temp name:
-    // `parse_session` derives `session_id` from the file stem, so a
-    // `NamedTempFile` would head the digest with `.tmpAbC123` and hand an
-    // agent a session id that does not exist.
-    let tmp = tempfile::TempDir::new()?;
-    let restored = tmp.path().join(format!("{key}.jsonl"));
-    let sha = transcript_archive::export_archive_bounded(
-        project_id,
-        &key,
-        &restored,
-        Some(archive.original_bytes),
-    )?;
-    if sha != archive.sha256 {
-        bail!(
-            "Archive for session {key} does not match the checksum recorded when it was \
-written — the archive is corrupt. `harvest ledger rm {key} --archive-only` will drop it."
-        );
-    }
-    Ok(Some((tmp, restored)))
 }
 
 /// Find the one in-scope session whose id starts with `prefix`.

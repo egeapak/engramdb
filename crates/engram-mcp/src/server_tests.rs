@@ -4897,13 +4897,34 @@ fn mark_input(session_id: &str, project: Option<String>) -> HarvestMarkInput {
 /// Any harvest call that actually *scans* would otherwise walk the developer's
 /// real transcript corpus — slow, and non-deterministic. Safe under nextest's
 /// process-per-test model, which is why this crate requires nextest.
-struct ScopedClaudeHome(#[allow(dead_code)] TempDir);
+struct ScopedClaudeHome(TempDir);
 
 impl ScopedClaudeHome {
     fn new() -> Self {
         let dir = TempDir::new().unwrap();
         std::env::set_var("CLAUDE_CONFIG_DIR", dir.path());
         Self(dir)
+    }
+
+    /// Write a one-turn transcript for `session_id`, filed under `cwd` the way
+    /// Claude Code files its own.
+    ///
+    /// The harvest tools resolve a session id against *live transcripts*, so a
+    /// test that only plants ledger rows cannot exercise resolution at all —
+    /// which is precisely the gap the prefix bug lived in.
+    fn plant_session(&self, cwd: &std::path::Path, session_id: &str) -> std::path::PathBuf {
+        let dir = self.0.path().join("projects").join(
+            engramdb::storage::transcripts::encode_project_dir(&cwd.canonicalize().unwrap()),
+        );
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{session_id}.jsonl"));
+        let line = json!({
+            "type": "user",
+            "cwd": cwd.canonicalize().unwrap().to_string_lossy(),
+            "message": { "role": "user", "content": "why is the build failing" },
+        });
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        path
     }
 }
 
@@ -4955,7 +4976,9 @@ async fn harvest_mark_is_blocked_by_the_cross_project_write_gate() {
 async fn harvest_mark_cross_project_is_allowed_by_default() {
     // Negative control: without this, test above could be "fixed" by hard
     // blocking every cross-project mark, which is not the documented policy.
+    let home = ScopedClaudeHome::new();
     let (_dir_a, dir_b, server) = setup_cross_project().await;
+    home.plant_session(dir_b.path(), "sess-2222");
     let target = Some(dir_b.path().to_string_lossy().to_string());
 
     let out = parse_ok(
@@ -5087,7 +5110,11 @@ async fn harvest_tools_reject_memory_store_targets() {
 
 #[tokio::test]
 async fn harvest_ledger_filters_by_decision() {
-    let (_dir, server) = setup().await;
+    let home = ScopedClaudeHome::new();
+    let (dir, server) = setup().await;
+    for id in ["s-harv", "s-skip", "s-defer"] {
+        home.plant_session(dir.path(), id);
+    }
     let plant = |id: &'static str, decision: Option<&'static str>, mems: Option<Vec<String>>| {
         let mut input = mark_input(id, None);
         input.decision = decision.map(|d| d.to_string());
@@ -5149,7 +5176,10 @@ async fn harvest_ledger_filters_by_decision() {
 
 #[tokio::test]
 async fn harvest_mark_decisions_and_clear() {
-    let (_dir, server) = setup().await;
+    let home = ScopedClaudeHome::new();
+    let (dir, server) = setup().await;
+    home.plant_session(dir.path(), "s-a");
+    home.plant_session(dir.path(), "s-b");
 
     let bare = parse_ok(
         &server
@@ -5206,6 +5236,236 @@ async fn harvest_mark_rejects_a_traversing_session_id() {
             .unwrap()
             .contains("plain identifier"),
         "{err}"
+    );
+}
+
+/// A parent project and a sub-project linked to it with `projects link`,
+/// with the server sitting in the **child** — the shape every harvest ledger
+/// bug in this file lived in, and the one no MCP test covered.
+async fn setup_linked_child() -> (ScopedClaudeHome, TempDir, TempDir, EngramDbServer) {
+    let home = ScopedClaudeHome::new();
+    let parent = TempDir::new().unwrap();
+    let child = TempDir::new().unwrap();
+    let parent_id = engramdb::storage::project_id::compute_project_id(parent.path());
+    let child_id = engramdb::storage::project_id::compute_project_id(child.path());
+
+    let reg = InMemoryRegistry::new();
+    reg.update(parent.path(), &parent_id).await.unwrap();
+    reg.update_with_parent(child.path(), &child_id, Some(&parent_id))
+        .await
+        .unwrap();
+
+    let registry: Arc<dyn RegistryBackend> = Arc::new(reg);
+    let server = EngramDbServer::new_with_registry(
+        child.path().to_path_buf(),
+        Some(EmbeddingBackend::Onnx),
+        registry,
+    );
+    (home, parent, child, server)
+}
+
+fn ledger_file(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join(".engramdb/state/harvested_sessions.json")
+}
+
+#[tokio::test]
+async fn every_mcp_ledger_call_routes_through_the_root_project() {
+    // The CLI resolves `scope.root_dir` for all five ledger touch points; MCP
+    // kept passing the invoking directory, and `harvest_mark`/`harvest_ledger`
+    // never resolved a scope at all. Adoption made it self-defeating: a mark
+    // landed in the child's ledger, the next call adopted that ledger into the
+    // parent and renamed it `.adopted`, and the read then found the file
+    // adoption had just emptied — so a session marked harvested came back
+    // `already_harvested: false` and the ledger read empty, while the CLI in
+    // the same checkout showed both entries.
+    let (home, parent, child, server) = setup_linked_child().await;
+    home.plant_session(child.path(), "aaaa1111");
+
+    let marked = parse_ok(
+        &server
+            .harvest_mark(Parameters(mark_input("aaaa1111", None)))
+            .await,
+    );
+    assert_eq!(marked["decision"], "skipped", "{marked}");
+
+    assert!(
+        ledger_file(&parent.path().canonicalize().unwrap()).exists(),
+        "the decision was not recorded under the root project"
+    );
+    assert!(
+        !ledger_file(child.path()).exists(),
+        "a sub-project ledger was created for adoption to strand"
+    );
+
+    let listed = parse_ok(
+        &server
+            .harvest_list(Parameters(HarvestListInput {
+                since: None,
+                limit: None,
+                include_harvested: Some(true),
+                all_projects: None,
+                project: None,
+            }))
+            .await,
+    );
+    let session = &listed["sessions"][0];
+    assert_eq!(session["session_id"], "aaaa1111", "{listed}");
+    assert_eq!(
+        session["already_harvested"], true,
+        "harvest_list read a ledger the mark never reached: {listed}"
+    );
+
+    let rows = parse_ok(
+        &server
+            .harvest_ledger(Parameters(HarvestLedgerInput {
+                decision: None,
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(rows.as_array().unwrap().len(), 1, "{rows}");
+    assert_eq!(rows[0]["session_id"], "aaaa1111", "{rows}");
+}
+
+#[tokio::test]
+async fn a_ledger_adopted_from_the_child_is_visible_to_every_mcp_tool() {
+    // The other half of the same seam: a ledger an older version left at the
+    // sub-project's own path. Adoption folds it into the root, so every tool
+    // has to read the root or the merge looks like data loss.
+    let (home, parent, child, server) = setup_linked_child().await;
+    home.plant_session(child.path(), "bbbb2222");
+    engramdb::storage::harvest_state::mark_harvested(
+        child.path(),
+        "bbbb2222",
+        &["m1".into()],
+        engramdb::storage::harvest_state::HarvestDecision::Harvested,
+        None,
+    )
+    .unwrap();
+
+    let rows = parse_ok(
+        &server
+            .harvest_ledger(Parameters(HarvestLedgerInput {
+                decision: None,
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(rows[0]["session_id"], "bbbb2222", "{rows}");
+    assert_eq!(rows[0]["memories_created"], 1, "{rows}");
+    assert!(
+        ledger_file(&parent.path().canonicalize().unwrap()).exists()
+            && !ledger_file(child.path()).exists(),
+        "adoption did not move the ledger to the root"
+    );
+}
+
+#[tokio::test]
+async fn harvest_mark_expands_a_prefix_the_way_harvest_show_does() {
+    // `harvest_show` advertises "or a unique prefix of one" and resolves by
+    // `starts_with`; `harvest_mark` recorded whatever it was handed. So the
+    // natural pairing — show a prefix, then mark it — wrote a ledger key no
+    // session can ever match: the tool answered `harvested` while the real
+    // session stayed on offer forever.
+    let home = ScopedClaudeHome::new();
+    let (dir, server) = setup().await;
+    home.plant_session(dir.path(), "cccc3333dddd");
+
+    let marked = parse_ok(
+        &server
+            .harvest_mark(Parameters(mark_input("cccc", None)))
+            .await,
+    );
+    assert_eq!(
+        marked["session_id"], "cccc3333dddd",
+        "the prefix was recorded verbatim: {marked}"
+    );
+
+    let listed = parse_ok(
+        &server
+            .harvest_list(Parameters(HarvestListInput {
+                since: None,
+                limit: None,
+                include_harvested: None,
+                all_projects: None,
+                project: None,
+            }))
+            .await,
+    );
+    assert!(
+        listed["sessions"].as_array().unwrap().is_empty(),
+        "a marked session was re-offered: {listed}"
+    );
+
+    // `clear` had the mirror-image asymmetry: it reported `cleared: false`
+    // over a record that was sitting right there under the full id.
+    let mut clearing = mark_input("cccc", None);
+    clearing.clear = Some(true);
+    let cleared = parse_ok(&server.harvest_mark(Parameters(clearing)).await);
+    assert_eq!(cleared["cleared"], true, "{cleared}");
+    assert_eq!(cleared["session_id"], "cccc3333dddd", "{cleared}");
+}
+
+#[tokio::test]
+async fn harvest_mark_refuses_a_session_it_cannot_find() {
+    // The other half of resolution: an id matching nothing must not become a
+    // ledger key. Silently accepting one is how a `{"decision":"harvested"}`
+    // reply coexists with a session that keeps being offered.
+    let _home = ScopedClaudeHome::new();
+    let (_dir, server) = setup().await;
+    let err = parse_err(
+        &server
+            .harvest_mark(Parameters(mark_input("no-such-session", None)))
+            .await,
+    );
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("No session matching"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn harvest_show_falls_back_to_the_archived_transcript() {
+    // The archive is this branch's headline feature and exists precisely
+    // because Claude Code prunes its own transcripts — yet the fallback was
+    // CLI-only, so `harvest_ledger` truthfully reported `has_archive: true`
+    // for sessions the agent driving MCP could never open.
+    let home = ScopedClaudeHome::new();
+    let (dir, server) = setup().await;
+    let transcript = home.plant_session(dir.path(), "eeee4444");
+
+    let project_id = engramdb::storage::project_id::compute_project_id(dir.path());
+    let archive = engramdb::storage::transcript_archive::archive_transcript(
+        &project_id,
+        "eeee4444",
+        &transcript,
+    )
+    .unwrap();
+    engramdb::storage::harvest_state::set_archive(dir.path(), "eeee4444", archive).unwrap();
+    // Claude Code prunes the live file; the archive is now the only copy.
+    std::fs::remove_file(&transcript).unwrap();
+
+    let out = parse_ok(
+        &server
+            .harvest_show(Parameters(HarvestShowInput {
+                session_id: "eeee4444".into(),
+                max_chars: None,
+                include_thinking: None,
+                all_projects: None,
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(out["session_id"], "eeee4444", "{out}");
+    assert!(
+        out["markdown"]
+            .as_str()
+            .unwrap()
+            .contains("why is the build failing"),
+        "the archived conversation was not restored: {out}"
     );
 }
 

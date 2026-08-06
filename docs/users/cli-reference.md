@@ -347,7 +347,8 @@ engramdb harvest show <session_id> [--max-chars N] [--include-thinking]
 engramdb harvest mark <session_id> [--memory <id>]... [--defer] [--note <text>]
                       [--all-projects]
 engramdb harvest reset <session_id>
-engramdb harvest ledger list [--decision harvested|skipped|deferred] [--with-archive]
+engramdb harvest ledger list [--decision harvested|skipped|deferred|unreviewed]
+                             [--with-archive]
 engramdb harvest ledger show <session_id>
 engramdb harvest ledger export <session_id> [-o <path>]
 engramdb harvest ledger rm <session_id> [--archive-only] [--force]
@@ -374,7 +375,12 @@ is ~99% tool payload, so digesting is what makes review affordable — a
 default budget is a ceiling against a pathological session, not a routine
 constraint. When content had
 to be dropped to fit, the header says `partial digest` and names what went;
-raise `--max-chars` to see more.
+raise `--max-chars` to see more. One entry there does *not* respond to a larger
+budget: a single event is capped at 1,500 characters before the budget is even
+consulted, so one pasted stack trace cannot cost a whole session its slot. The
+digest reports those separately as `N long events each cut to 1500 chars`
+(`capped_events` in `--json`); `harvest ledger export` is the route to the full
+text.
 
 Session ids accept unique prefixes. `--json` (or any non-TTY invocation)
 emits the structured event list alongside the rendered markdown.
@@ -389,11 +395,21 @@ all its worktrees and by any sub-project linked to it with
 those projects are offered each other's sessions and prune each other's
 archives. A ledger found at a sub-project's own path (written before it was
 linked) is merged into the root's the next time a harvest command runs there,
-and the old file is kept alongside as `harvested_sessions.json.adopted`.
+and the old file is kept alongside as `harvested_sessions.json.adopted`. Moving
+it aside is what commits the merge, so a sub-project directory that cannot be
+written to adopts nothing (with a warning naming the path) rather than
+re-merging the same entries on every command — which would undo a
+`harvest reset` each time.
 
 Each entry carries a **decision**: `harvested` (memories saved), `skipped`
-(reviewed and passed over), or `deferred` (postponed — deferred sessions keep
-appearing in `harvest list`). `--defer` records the last of these.
+(reviewed and passed over), `deferred` (a human looked at it and postponed the
+call — `--defer` records this), or `unreviewed` (nobody has looked at it yet).
+The last is written by the SessionEnd hook for every session it archives, so it
+is by far the most common; keeping it out of `deferred` is what makes a real
+deferral findable. Neither settles a session, so both keep appearing in
+`harvest list`. Ledgers written before this distinction existed record the
+hook's entries as `deferred` and are left as they are — this is a plain JSON
+file, not the versioned Lance table.
 
 **Transcript archives.** With `[harvest] archive = true` (the default), the
 SessionEnd hook compresses each ending session's transcript so it can still
@@ -417,7 +433,11 @@ oldest-first eviction) bound the total; `harvest ledger prune` reclaims space
 on demand and, like `gc` and `compress`, is a dry run until `--apply`. These
 budgets are what expire an archive: the ledger's own entry-retention window
 never does, because an entry is the only route to the file it names, so a
-session whose archive is still held keeps its record however old it is.
+session whose archive is still held keeps its record however old it is. That
+exemption is checked against the archive directory rather than against what the
+entry claims — an entry naming a file that `projects delete --cascade`, a
+restored backup, or an eviction on another machine took away loses the
+reference, and with it the exemption, on the next harvest command.
 `harvest ledger rm` deletes one — it confirms first, since once Claude Code has pruned its own transcript the archive is the only remaining copy; `--force` skips the prompt and is **required** under `--format json`, which never prompts. `harvest ledger export` restores one, verifying it against the SHA-256
 recorded when it was written.
 

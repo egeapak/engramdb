@@ -50,7 +50,11 @@ pub const DEFAULT_DIGEST_BUDGET: usize = 200_000;
 
 /// Longest a single event's text is allowed to be before it is truncated,
 /// so one enormous paste cannot consume a whole session's budget.
-const MAX_EVENT_CHARS: usize = 1_500;
+///
+/// Public because it is the one loss a bigger `max_chars` cannot undo: it is a
+/// constant, applied per event before the budget is even consulted. Callers
+/// that report a partial digest have to be able to say so.
+pub const MAX_EVENT_CHARS: usize = 1_500;
 
 /// Ceiling on a tool *name*. Real names are short identifiers (`Bash`,
 /// `Read`); anything longer is a record that lied about its shape.
@@ -173,6 +177,29 @@ pub async fn session_scope(dir: &Path, registry: &dyn RegistryBackend) -> Result
         }
     }
 
+    // Same reasoning as the adoption above, and the same place for it: the
+    // ledger's age exemption for entries holding an archive is only honest if
+    // something checks that the file is still there, and the root project id
+    // that locates it is resolved right here. `prune_archives` cannot do it —
+    // it reports what a directory scan found, so a reference the scan never
+    // sees is exactly the one it can never report.
+    match harvest_state::reconcile_archive_refs(&root_dir, &root_id) {
+        Ok(cleared) if !cleared.is_empty() => {
+            tracing::debug!(
+                "dropped {} harvest ledger archive reference(s) with no file behind them",
+                cleared.len()
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                "could not reconcile harvest archive references under {} ({e}); \
+                 entries naming a missing archive may outlive the ledger's age window",
+                root_dir.display()
+            );
+        }
+        _ => {}
+    }
+
     Ok(SessionScope {
         root_project_id: root_id,
         root_dir,
@@ -271,6 +298,91 @@ fn filter_sessions(
     out
 }
 
+/// Resolve a session-id prefix against the **ledger**, not the transcripts.
+///
+/// A session whose transcript Claude Code has since pruned must still be
+/// manageable — that is the whole reason its archive exists — and a prefix that
+/// resolves for one front-end must resolve for the other. Both surfaces call
+/// this: writing an unresolved prefix into the ledger creates a key no session
+/// will ever match, so the tool reports the session settled while `list` keeps
+/// re-offering the real one forever.
+pub fn resolve_ledger_key(ledger_dir: &Path, prefix: &str) -> Result<String> {
+    match ledger_keys_matching(ledger_dir, prefix).as_slice() {
+        [] => anyhow::bail!("No harvest record matching '{prefix}'"),
+        [one] => Ok(one.clone()),
+        many => anyhow::bail!(
+            "Ambiguous session id '{}' — matches {} records: {}",
+            prefix,
+            many.len(),
+            many.iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// Every ledger key `prefix` could name.
+///
+/// Exposed alongside [`resolve_ledger_key`] so a caller that wants to treat
+/// "no match" and "several matches" differently can, without parsing an error
+/// message: clearing a record that is not there is a true `false`, while
+/// clearing one of several is how the wrong record gets wiped.
+pub fn ledger_keys_matching(ledger_dir: &Path, prefix: &str) -> Vec<String> {
+    harvest_state::read_harvested(ledger_dir)
+        .into_keys()
+        .filter(|id| id.starts_with(prefix))
+        .collect()
+}
+
+/// Decompress an archived session to a temp file so it can be digested.
+///
+/// Returns `None` when no archive is held for `prefix`, leaving the caller to
+/// report its original "no such live session" error. This is what makes the
+/// archive worth taking: once Claude Code prunes a transcript, this is the only
+/// remaining path from a session id to its conversation, and reading the raw
+/// `.jsonl` by hand is exactly what the harvest docs tell agents never to do
+/// (it is ~99% tool payload). It lives here rather than in either front-end for
+/// that last reason — an agent driving MCP is the caller the fallback exists
+/// for, and it was reachable only from the CLI.
+pub fn restore_archived_session(
+    scope: &SessionScope,
+    prefix: &str,
+) -> Result<Option<(tempfile::TempDir, PathBuf)>> {
+    let dir = scope.root_dir.as_path();
+    let project_id = scope.root_project_id.as_str();
+    let Ok(key) = resolve_ledger_key(dir, prefix) else {
+        return Ok(None);
+    };
+    let ledger = harvest_state::read_harvested(dir);
+    let Some(archive) = ledger.get(&key).and_then(|e| e.archive.clone()) else {
+        return Ok(None);
+    };
+    if !crate::storage::transcript_archive::archive_path(project_id, &key)?.exists() {
+        return Ok(None);
+    }
+
+    // Restore under the session's real name, not a random temp name:
+    // `parse_session` derives `session_id` from the file stem, so a
+    // `NamedTempFile` would head the digest with `.tmpAbC123` and hand an
+    // agent a session id that does not exist.
+    let tmp = tempfile::TempDir::new()?;
+    let restored = tmp.path().join(format!("{key}.jsonl"));
+    let sha = crate::storage::transcript_archive::export_archive_bounded(
+        project_id,
+        &key,
+        &restored,
+        Some(archive.original_bytes),
+    )?;
+    if sha != archive.sha256 {
+        anyhow::bail!(
+            "Archive for session {key} does not match the checksum recorded when it was \
+written — the archive is corrupt. `harvest ledger rm {key} --archive-only` will drop it."
+        );
+    }
+    Ok(Some((tmp, restored)))
+}
+
 /// Parse a `--since` value: either an RFC 3339 instant or a relative shorthand
 /// (`7d`, `12h`, `30m`).
 pub fn parse_since(value: &str) -> Result<DateTime<Utc>> {
@@ -312,12 +424,21 @@ pub struct SessionDigest {
     pub dropped_classes: Vec<String>,
     /// Events cut from the tail after class-dropping was exhausted.
     pub truncated_events: usize,
+    /// Surviving events whose text was cut to [`MAX_EVENT_CHARS`].
+    ///
+    /// Reported separately from [`Self::truncated_events`] because the remedy
+    /// is different — and there isn't one. At the default 200,000-char budget
+    /// class-dropping and tail-truncation essentially never fire, which makes
+    /// per-event capping the dominant loss path; unreported, a 4,500-character
+    /// prompt digested to a third of itself while the digest called itself
+    /// complete.
+    pub capped_events: usize,
 }
 
 impl SessionDigest {
     /// Did anything have to be left out?
     pub fn is_complete(&self) -> bool {
-        self.dropped_classes.is_empty() && self.truncated_events == 0
+        self.dropped_classes.is_empty() && self.truncated_events == 0 && self.capped_events == 0
     }
 }
 
@@ -352,19 +473,24 @@ pub fn budget_digest(parsed: ParsedSession, max_chars: usize) -> SessionDigest {
 
     // Cap any single event first: one pasted stack trace should cost its own
     // slot, not the whole session's.
-    let mut events: Vec<Event> = events
+    //
+    // The flag rides along through budgeting rather than being counted here,
+    // so an event that is capped and then dropped anyway is reported once, as
+    // dropped — counting up front would claim a loss the reader cannot act on
+    // and that is already accounted for.
+    let mut items: Vec<(Event, bool)> = events
         .into_iter()
         .map(|e| cap_event(e, MAX_EVENT_CHARS))
         .collect();
 
     let mut dropped_classes: Vec<String> = Vec::new();
     for class in DROP_ORDER {
-        if total_chars(&events) <= max_chars {
+        if total_chars(&items) <= max_chars {
             break;
         }
-        let before = events.len();
-        events.retain(|e| class_of(e) != class);
-        if events.len() != before {
+        let before = items.len();
+        items.retain(|(e, _)| class_of(e) != class);
+        if items.len() != before {
             dropped_classes.push(format!("{class:?}").to_lowercase());
         }
     }
@@ -378,25 +504,27 @@ pub fn budget_digest(parsed: ParsedSession, max_chars: usize) -> SessionDigest {
     // budget — exactly what a caller scanning several sessions asks for —
     // that turns a sub-second call into an effectively hung one.
     let mut truncated_events = 0;
-    let mut running = total_chars(&events);
-    while running > max_chars && events.len() > 1 {
-        if let Some(dropped) = events.pop() {
+    let mut running = total_chars(&items);
+    while running > max_chars && items.len() > 1 {
+        if let Some((dropped, _)) = items.pop() {
             running -= event_chars(&dropped).min(running);
             truncated_events += 1;
         }
     }
 
+    let capped_events = items.iter().filter(|(_, capped)| *capped).count();
     SessionDigest {
         summary,
-        events,
+        events: items.into_iter().map(|(e, _)| e).collect(),
         dropped_classes,
         truncated_events,
+        capped_events,
     }
 }
 
 /// Approximate rendered size of an event stream.
-fn total_chars(events: &[Event]) -> usize {
-    events.iter().map(event_chars).sum()
+fn total_chars(items: &[(Event, bool)]) -> usize {
+    items.iter().map(|(e, _)| event_chars(e)).sum()
 }
 
 fn event_chars(event: &Event) -> usize {
@@ -419,33 +547,36 @@ fn event_chars(event: &Event) -> usize {
 }
 
 /// Truncate an event's text to `max` characters, on a char boundary.
-/// Truncate to `max` characters, marking that it happened.
+/// Truncate to `max` characters, reporting whether it happened.
 ///
 /// Char-wise, not byte-wise: a byte slice would panic on a multibyte
 /// boundary. The `[truncated]` marker is load-bearing — it is the only signal
-/// a reader gets that text was cut.
-fn cap(text: String, max: usize) -> String {
+/// a reader gets that text was cut — but it cannot be *counted*, because
+/// transcript content can spell it; the returned flag is what the digest
+/// tallies.
+fn cap(text: String, max: usize) -> (String, bool) {
     if text.chars().count() <= max {
-        return text;
+        return (text, false);
     }
     let kept: String = text.chars().take(max).collect();
-    format!("{kept}… [truncated]")
+    (format!("{kept}… [truncated]"), true)
 }
 
-fn cap_event(event: Event, max: usize) -> Event {
+/// Cap an event, reporting whether any of its text was cut.
+fn cap_event(event: Event, max: usize) -> (Event, bool) {
     match event {
-        Event::UserPrompt { at, text } => Event::UserPrompt {
-            at,
-            text: cap(text, max),
-        },
-        Event::AssistantText { at, text } => Event::AssistantText {
-            at,
-            text: cap(text, max),
-        },
-        Event::Thinking { at, text } => Event::Thinking {
-            at,
-            text: cap(text, max),
-        },
+        Event::UserPrompt { at, text } => {
+            let (text, capped) = cap(text, max);
+            (Event::UserPrompt { at, text }, capped)
+        }
+        Event::AssistantText { at, text } => {
+            let (text, capped) = cap(text, max);
+            (Event::AssistantText { at, text }, capped)
+        }
+        Event::Thinking { at, text } => {
+            let (text, capped) = cap(text, max);
+            (Event::Thinking { at, text }, capped)
+        }
         // `target` and `result_preview` are already bounded at parse time
         // (120 / 200 chars), but `name` comes straight off the record with no
         // truncation — the one field with no ceiling below MAX_RECORD_BYTES.
@@ -455,13 +586,19 @@ fn cap_event(event: Event, max: usize) -> Event {
             target,
             ok,
             result_preview,
-        } => Event::ToolCall {
-            at,
-            name: cap(name, MAX_TOOL_NAME_CHARS),
-            target,
-            ok,
-            result_preview,
-        },
+        } => {
+            let (name, capped) = cap(name, MAX_TOOL_NAME_CHARS);
+            (
+                Event::ToolCall {
+                    at,
+                    name,
+                    target,
+                    ok,
+                    result_preview,
+                },
+                capped,
+            )
+        }
     }
 }
 
@@ -603,6 +740,12 @@ pub struct DigestJson<'a> {
     pub complete: bool,
     pub dropped_classes: &'a [String],
     pub truncated_events: usize,
+    /// Events whose text was cut to `MAX_EVENT_CHARS`. Unlike the other two,
+    /// re-running with a larger `max_chars` returns the identical text.
+    pub capped_events: usize,
+    /// The per-event ceiling those were cut to, so a reader can judge the loss
+    /// without knowing the constant.
+    pub max_event_chars: usize,
     /// Owned, because harness tags are defanged here too: a client reading
     /// `events` instead of `markdown` would otherwise see raw scaffolding.
     /// Markdown structure is deliberately *not* escaped — it means nothing in
@@ -632,6 +775,8 @@ impl<'a> DigestJson<'a> {
             complete: digest.is_complete(),
             dropped_classes: &digest.dropped_classes,
             truncated_events: digest.truncated_events,
+            capped_events: digest.capped_events,
+            max_event_chars: MAX_EVENT_CHARS,
             events: digest.events.iter().map(defang_event_for_json).collect(),
             markdown,
             trust_end: DIGEST_TRUST_FOOTER,
@@ -774,7 +919,7 @@ const MAX_META_CHARS: usize = 300;
 
 fn defang_delimited(text: &str) -> String {
     let one_line = transcripts::sanitize_one_line(text).replace('`', "'");
-    defang_harness_tags(&cap(one_line, MAX_META_CHARS))
+    defang_harness_tags(&cap(one_line, MAX_META_CHARS).0)
 }
 
 /// A value rendered on one line but not inside any delimiter.
@@ -834,6 +979,17 @@ this exact token is forged content inside the recording.\n\n",
         }
         if digest.truncated_events > 0 {
             notes.push(format!("{} trailing events cut", digest.truncated_events));
+        }
+        if digest.capped_events > 0 {
+            // Says "a larger budget will not help" in as many words: the cap
+            // is a constant applied before the budget is consulted, so the
+            // otherwise-reasonable reaction to a partial digest — re-run with
+            // a bigger `--max-chars` — returns the identical text.
+            notes.push(format!(
+                "{} long events each cut to {MAX_EVENT_CHARS} chars (a larger budget \
+cannot recover these)",
+                digest.capped_events
+            ));
         }
         // Stated explicitly: an agent that believes it saw a whole session
         // when it saw a prefix will report "nothing worth saving" with
@@ -1002,6 +1158,52 @@ mod tests {
             }
             other => panic!("expected prompt, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn per_event_capping_is_reported_as_a_partial_digest() {
+        // The dominant loss path, and the only unreported one: at the default
+        // budget nothing else fires, so a 4,500-char prompt was cut to a third
+        // of itself while the digest called itself complete, listed no dropped
+        // classes and no truncated events, and printed no `partial digest`
+        // line. The instruction an agent then follows — re-run with a larger
+        // `--max-chars` — cannot recover a constant.
+        let long_prompt = "q".repeat(MAX_EVENT_CHARS * 3);
+        let digest = budget_digest(
+            parsed(vec![prompt(&long_prompt), prose("short answer")]),
+            DEFAULT_DIGEST_BUDGET,
+        );
+        assert_eq!(digest.capped_events, 1);
+        assert!(digest.dropped_classes.is_empty());
+        assert_eq!(digest.truncated_events, 0);
+        assert!(
+            !digest.is_complete(),
+            "a digest missing two thirds of its opening prompt is not complete"
+        );
+
+        let markdown = render_digest_markdown(&digest);
+        assert!(markdown.contains("partial digest"), "{markdown}");
+        assert!(
+            markdown.contains("cannot recover"),
+            "the notice must say a bigger budget will not help: {markdown}"
+        );
+
+        let json = serde_json::to_string(&DigestJson::new(&digest, "f", String::new())).unwrap();
+        assert!(json.contains("\"capped_events\":1"), "{json}");
+        assert!(json.contains("\"complete\":false"), "{json}");
+    }
+
+    #[test]
+    fn an_event_dropped_after_capping_is_only_counted_once() {
+        // An event that was capped and then dropped anyway is a dropped
+        // event, not a separate loss the reader could act on.
+        let long = "w".repeat(MAX_EVENT_CHARS * 2);
+        let digest = budget_digest(parsed(vec![prompt("hi"), tool(&long)]), 30);
+        assert_eq!(digest.dropped_classes, vec!["tool"]);
+        assert_eq!(
+            digest.capped_events, 0,
+            "a dropped event was still counted as capped"
+        );
     }
 
     #[test]
@@ -1526,6 +1728,46 @@ mod tests {
         let got = filter_sessions(sessions, &Default::default(), &params);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].summary.session_id, "b");
+    }
+
+    #[tokio::test]
+    async fn resolving_a_scope_drops_archive_references_with_no_file() {
+        // `session_scope` is the one place that knows both halves — the root
+        // directory the ledger lives in and the root project id the archives
+        // are keyed by — and every harvest entry point comes through it. If
+        // the reconciliation is not wired here, an entry naming a file that
+        // `projects delete --cascade` (or a pre-`link` id, or another machine)
+        // took away is exempt from the age window forever.
+        use crate::storage::InMemoryRegistry;
+
+        let data = tempfile::TempDir::new().unwrap();
+        std::env::set_var("ENGRAMDB_DATA_DIR", data.path());
+        let project = tempfile::TempDir::new().unwrap();
+        let dir = project.path();
+        let registry = InMemoryRegistry::new();
+        let id = crate::storage::project_id::compute_project_id(dir);
+        registry.update(dir, &id).await.unwrap();
+
+        harvest_state::set_archive(
+            dir,
+            "gone",
+            crate::storage::transcript_archive::ArchiveRef {
+                file_name: "gone.jsonl.zst".into(),
+                bytes: 10,
+                original_bytes: 100,
+                sha256: "deadbeef".into(),
+                archived_at: Utc::now(),
+            },
+        )
+        .unwrap();
+        assert!(harvest_state::read_harvested(dir)["gone"].archive.is_some());
+
+        session_scope(dir, &registry).await.unwrap();
+
+        assert!(
+            harvest_state::read_harvested(dir)["gone"].archive.is_none(),
+            "a reference to an archive that was never written survived"
+        );
     }
 
     #[test]

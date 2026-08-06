@@ -62,9 +62,16 @@ Useful flags: `--max-chars N` (default 200000, the `[harvest] digest_budget`; pa
 smaller value when scanning several sessions),
 `--include-thinking` for reasoning blocks, `--no-tools` for prose only.
 
-**Watch for `partial digest` in the header.** It means content was dropped to
-fit the budget. If a session looks rich and was truncated, re-run it with a
-larger `--max-chars` before concluding anything about it.
+**Watch for `partial digest` in the header.** It names what was left out, and
+what you can do about it differs by cause:
+
+- `omitted tool, thinking` or `N trailing events cut` — budget pressure.
+  Re-run with a larger `--max-chars` before concluding anything about the
+  session.
+- `N long events each cut to 1500 chars` — a per-event ceiling, applied before
+  the budget is consulted. **A larger `--max-chars` returns the identical
+  text.** Treat those turns as excerpts: if what you need is inside one,
+  `harvest ledger export <id>` writes the full transcript to a file.
 
 **When there are more than 3 sessions**, dispatch one subagent per session
 rather than reading them all yourself — the digests are large and would crowd
