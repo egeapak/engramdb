@@ -437,8 +437,16 @@ pub struct SessionDigest {
 
 impl SessionDigest {
     /// Did anything have to be left out?
+    ///
+    /// Includes losses the *parser* took, not just the budget's: a record over
+    /// `MAX_RECORD_BYTES` never became an event at all, so nothing downstream
+    /// can see it, and a digest that omits a whole turn is not complete no
+    /// matter how generous the budget was.
     pub fn is_complete(&self) -> bool {
-        self.dropped_classes.is_empty() && self.truncated_events == 0 && self.capped_events == 0
+        self.dropped_classes.is_empty()
+            && self.truncated_events == 0
+            && self.capped_events == 0
+            && self.summary.skipped_records == 0
     }
 }
 
@@ -746,6 +754,10 @@ pub struct DigestJson<'a> {
     /// The per-event ceiling those were cut to, so a reader can judge the loss
     /// without knowing the constant.
     pub max_event_chars: usize,
+    /// Records the parser dropped whole for exceeding `MAX_RECORD_BYTES`.
+    /// `user_turns` / `assistant_turns` above are lower bounds when non-zero,
+    /// and a larger `max_chars` recovers nothing: these were never parsed.
+    pub skipped_records: usize,
     /// Owned, because harness tags are defanged here too: a client reading
     /// `events` instead of `markdown` would otherwise see raw scaffolding.
     /// Markdown structure is deliberately *not* escaped — it means nothing in
@@ -777,6 +789,7 @@ impl<'a> DigestJson<'a> {
             truncated_events: digest.truncated_events,
             capped_events: digest.capped_events,
             max_event_chars: MAX_EVENT_CHARS,
+            skipped_records: s.skipped_records,
             events: digest.events.iter().map(defang_event_for_json).collect(),
             markdown,
             trust_end: DIGEST_TRUST_FOOTER,
@@ -991,6 +1004,21 @@ cannot recover these)",
                 digest.capped_events
             ));
         }
+        if s.skipped_records > 0 {
+            // The turn counts printed two lines above are derived from the
+            // records that parsed, so this note has to sit next to them: a
+            // reader who takes "3 human turns" at face value is reading a
+            // lower bound. Like the per-event cap, no budget helps — but for a
+            // stronger reason, since these bytes never reached the digest.
+            notes.push(format!(
+                "{} record{} over {} MiB dropped by the parser, so the turn counts above \
+are lower bounds (a larger budget cannot recover these — they were never parsed; \
+`harvest ledger export` writes the original transcript)",
+                s.skipped_records,
+                if s.skipped_records == 1 { "" } else { "s" },
+                transcripts::MAX_RECORD_BYTES / 1_048_576
+            ));
+        }
         // Stated explicitly: an agent that believes it saw a whole session
         // when it saw a prefix will report "nothing worth saving" with
         // unearned confidence.
@@ -1103,9 +1131,17 @@ mod tests {
                 assistant_turns: 1,
                 bytes: 0,
                 first_prompt: None,
+                skipped_records: 0,
             },
             events,
         }
+    }
+
+    /// [`parsed`] with `n` records the transcript parser had to drop whole.
+    fn parsed_with_skips(events: Vec<Event>, n: usize) -> ParsedSession {
+        let mut p = parsed(events);
+        p.summary.skipped_records = n;
+        p
     }
 
     #[test]
@@ -1191,6 +1227,49 @@ mod tests {
         let json = serde_json::to_string(&DigestJson::new(&digest, "f", String::new())).unwrap();
         assert!(json.contains("\"capped_events\":1"), "{json}");
         assert!(json.contains("\"complete\":false"), "{json}");
+    }
+
+    #[test]
+    fn a_record_the_parser_dropped_is_reported_as_a_partial_digest() {
+        // The budget never saw these bytes: a record over MAX_RECORD_BYTES is
+        // discarded in the parser, which used to only `debug!` it. The digest
+        // then reported complete=true over an under-counted `user_turns` and
+        // possibly someone else's `first_prompt` — the exact failure the
+        // per-event cap fix addressed one layer up.
+        let digest = budget_digest(
+            parsed_with_skips(vec![prompt("what changed?"), prose("this and that")], 1),
+            DEFAULT_DIGEST_BUDGET,
+        );
+        assert!(digest.dropped_classes.is_empty());
+        assert_eq!(digest.truncated_events, 0);
+        assert_eq!(digest.capped_events, 0);
+        assert!(
+            !digest.is_complete(),
+            "a digest missing a whole record is not complete"
+        );
+
+        let markdown = render_digest_markdown(&digest);
+        assert!(markdown.contains("partial digest"), "{markdown}");
+        assert!(
+            markdown.contains("1 record over"),
+            "the notice must be singular for one record: {markdown}"
+        );
+        assert!(
+            markdown.contains("never parsed"),
+            "the notice must say a bigger budget will not help: {markdown}"
+        );
+
+        let json = serde_json::to_string(&DigestJson::new(&digest, "f", String::new())).unwrap();
+        assert!(json.contains("\"skipped_records\":1"), "{json}");
+        assert!(json.contains("\"complete\":false"), "{json}");
+    }
+
+    #[test]
+    fn a_digest_with_no_skipped_records_says_nothing_about_them() {
+        // Negative control: the note must not fire on every ordinary digest.
+        let digest = budget_digest(parsed(vec![prompt("hi")]), DEFAULT_DIGEST_BUDGET);
+        assert!(digest.is_complete());
+        assert!(!render_digest_markdown(&digest).contains("never parsed"));
     }
 
     #[test]
@@ -1608,6 +1687,7 @@ mod tests {
             assistant_turns: 1,
             bytes: 0,
             first_prompt: None,
+            skipped_records: 0,
         }
     }
 

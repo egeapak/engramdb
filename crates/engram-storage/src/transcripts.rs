@@ -62,7 +62,10 @@ const RESULT_PREVIEW_CHARS: usize = 200;
 /// dropping it would silently lose the human turn attached to it (and shift
 /// `first_prompt` to a different turn). 4 MiB clears a realistic screenshot
 /// while still bounding what one hostile line can cost.
-const MAX_RECORD_BYTES: usize = 4 * 1_048_576;
+///
+/// Public because a dropped record is a loss the digest has to declare, and
+/// declaring it means naming the ceiling it hit.
+pub const MAX_RECORD_BYTES: usize = 4 * 1_048_576;
 
 /// Root of Claude Code's own state directory.
 ///
@@ -293,6 +296,16 @@ pub struct SessionSummary {
     /// Truncated preview of the first human prompt — the single most useful
     /// field for deciding whether a session is worth digesting.
     pub first_prompt: Option<String>,
+    /// Records dropped whole for exceeding [`MAX_RECORD_BYTES`].
+    ///
+    /// Every other count here is then a *lower bound*, and `first_prompt` may
+    /// belong to a later turn than the one the human actually opened with. The
+    /// loss is unrecoverable at this layer — the bytes were never parsed — so
+    /// it has to travel with the summary rather than being logged and
+    /// forgotten. `serde(default)` because summaries serialized before this
+    /// field existed are still read back.
+    #[serde(default)]
+    pub skipped_records: usize,
 }
 
 /// One normalized, harvest-relevant event from a transcript.
@@ -463,6 +476,7 @@ pub fn parse_session(transcript_path: &Path, opts: ParseOptions) -> Result<Parse
         assistant_turns: 0,
         bytes,
         first_prompt: None,
+        skipped_records: 0,
     };
     let mut events: Vec<Event> = Vec::new();
     // tool_use id -> index into `events`, so a later tool_result can patch
@@ -495,8 +509,16 @@ pub fn parse_session(transcript_path: &Path, opts: ParseOptions) -> Result<Parse
             // so the next `read_until` starts on a record boundary rather
             // than mid-JSON. Skipping matches this parser's existing
             // leniency — a truncated object would not deserialize anyway.
-            tracing::debug!(
-                "transcript {}: skipping a record larger than {MAX_RECORD_BYTES} bytes",
+            //
+            // Counted, not merely logged: `debug!` sits below the CLI's
+            // default level, so the turn counts silently became lower bounds
+            // and the digest still called itself complete. `warn!` too, since
+            // the one ordinary record class that reaches this size is a pasted
+            // screenshot — i.e. a human turn going missing.
+            summary.skipped_records += 1;
+            tracing::warn!(
+                "transcript {}: skipping a record larger than {MAX_RECORD_BYTES} bytes; \
+                 its turn is missing from the digest",
                 transcript_path.display()
             );
             match reader.skip_until(b'\n') {
@@ -996,6 +1018,10 @@ mod tests {
 
         let parsed = parse_session(&path, ParseOptions::default()).unwrap();
         assert_eq!(parsed.summary.user_turns, 2, "oversized record must be cut");
+        assert_eq!(
+            parsed.summary.skipped_records, 1,
+            "a dropped record must be counted, or `user_turns` is a silent lower bound"
+        );
         let texts: Vec<&str> = parsed
             .events
             .iter()
@@ -1025,6 +1051,10 @@ mod tests {
 
         let parsed = parse_session(&path, ParseOptions::default()).unwrap();
         assert_eq!(parsed.summary.user_turns, 1);
+        assert_eq!(
+            parsed.summary.skipped_records, 1,
+            "a record that ran to EOF over the cap is still a dropped record"
+        );
     }
 
     #[test]

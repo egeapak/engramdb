@@ -157,10 +157,8 @@ pub async fn run_harvest(
 
         HarvestCommand::Reset { session_id } => {
             let resolved = resolve_ledger_key(ledger_dir, &session_id)?;
-            harvest_state::clear_harvested(ledger_dir, &resolved)?;
-            formatter.print_success(&format!(
-                "Cleared harvest record for session {resolved}; it will be offered again."
-            ));
+            let outcome = harvest_state::clear_harvested(ledger_dir, &resolved)?;
+            formatter.print_success(&describe_reset(&resolved, outcome));
         }
 
         HarvestCommand::Ledger { command } => {
@@ -194,6 +192,27 @@ fn describe_mark(session_id: &str, entry: &HarvestEntry) -> String {
                 "ies"
             }
         ),
+    }
+}
+
+/// Human-readable one-liner for `harvest reset`.
+///
+/// Two outcomes, so two messages. The old single line said the session "will
+/// be offered again" either way, and `harvest list` reads *live* transcripts
+/// only: for a session Claude Code has already pruned, nothing offers it. The
+/// archived case now says where the transcript actually is, since resetting no
+/// longer discards the entry that points at it.
+fn describe_reset(session_id: &str, outcome: harvest_state::ClearOutcome) -> String {
+    if outcome.kept_archive() {
+        format!(
+            "Cleared the review of session {session_id}; it is unreviewed again. Its archived \
+transcript is kept — `harvest ledger list` finds it and `harvest show` digests it."
+        )
+    } else {
+        format!(
+            "Cleared the harvest record for session {session_id}. No archived transcript is held \
+for it, so `harvest list` offers it again only while Claude Code still has the live one."
+        )
     }
 }
 
@@ -421,6 +440,10 @@ be offered again by `harvest list`."
                         .print_message(&format!("Session {key} had no archive; nothing removed."));
                 }
             } else {
+                // Drop the reference first: `clear_harvested` keeps an entry
+                // that still names an archive, and here the file has just been
+                // deleted — nothing to strand, so the entry must go too.
+                harvest_state::clear_archive_refs(dir, std::slice::from_ref(&key))?;
                 harvest_state::clear_harvested(dir, &key)?;
                 formatter.print_success(&format!(
                     "Removed {} for session {key}.",
@@ -571,5 +594,29 @@ Run `engramdb harvest list` to see what is available, or pass --all-projects."
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engramdb::storage::harvest_state::ClearOutcome;
+
+    /// Control for the behavioral fix in `harvest_state::clear_harvested`:
+    /// the two outcomes must not share one message, because the promise that
+    /// used to be made unconditionally is only true in one of them.
+    #[test]
+    fn reset_reports_what_it_actually_did() {
+        let kept = describe_reset("s1", ClearOutcome::ResetToUnreviewed);
+        assert!(kept.contains("archived transcript is kept"), "{kept}");
+        assert!(kept.contains("harvest show"), "{kept}");
+
+        let removed = describe_reset("s1", ClearOutcome::Removed);
+        assert!(removed.contains("No archived transcript"), "{removed}");
+        assert!(
+            removed.contains("only while Claude Code still has the live one"),
+            "the unconditional promise is false for a pruned session: {removed}"
+        );
+        assert_ne!(kept, removed);
     }
 }

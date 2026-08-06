@@ -150,7 +150,9 @@ engramdb harvest mark <session-id> --defer --note "revisit after the refactor"
 
 Marking is what stops a session being re-read on every future harvest, so a
 zero-yield session must be marked too. `engramdb harvest reset <session-id>`
-undoes it if the user wants another look.
+(or `harvest_mark` with `clear: true`) undoes it if the user wants another
+look. An archived session stays in the ledger as `unreviewed` rather than
+disappearing — that entry is the only route to its archived transcript.
 
 **Recovering a pruned session.** Claude Code deletes its own transcripts
 after a while. Such a session stops appearing in `harvest list`, but if it was

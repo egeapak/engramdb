@@ -382,13 +382,30 @@ digest reports those separately as `N long events each cut to 1500 chars`
 (`capped_events` in `--json`); `harvest ledger export` is the route to the full
 text.
 
+A second entry is beyond any budget's reach: a single JSONL record larger than
+4 MiB — in practice a pasted screenshot, which Claude Code embeds as base64 —
+is dropped by the parser before the digest is assembled. The header reports
+`N records over 4 MiB dropped by the parser` (`skipped_records` in `--json`)
+and the turn counts printed above it are then lower bounds, since the dropped
+records never became turns. Re-running with a larger `--max-chars` returns the
+identical text; `harvest ledger export` is again the only route to the
+original.
+
 Session ids accept unique prefixes. `--json` (or any non-TTY invocation)
 emits the structured event list alongside the rendered markdown.
 
 **The ledger.** `mark` records that a session was reviewed so it is not
 offered again, and *must* be used even when a session yielded nothing —
 a zero-yield session leaves no other trace, so without a mark it is re-read
-on every future harvest. `reset` clears the record. The ledger lives in
+on every future harvest. `reset` clears the review. When the session has an
+archived transcript the entry is **kept** and set back to `unreviewed` rather
+than deleted: that entry is the only route to the archive, so removing it would
+strand the file — unreachable by `harvest show`, `ledger export` and
+`ledger list` alike, while still counting against the archive budget. With no
+archive behind it the entry is removed outright, and the session is offered
+again only while Claude Code still holds the live transcript; the success
+message says which of the two happened. To delete an entry *and* its archive,
+use `harvest ledger rm`. The ledger lives in
 `.engramdb/state/harvested_sessions.json` under the root project, shared by
 all its worktrees and by any sub-project linked to it with
 `engramdb projects link` — the same root the archives are keyed by, since

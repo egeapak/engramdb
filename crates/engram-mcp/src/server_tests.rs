@@ -4888,6 +4888,7 @@ fn mark_input(session_id: &str, project: Option<String>) -> HarvestMarkInput {
         decision: None,
         note: None,
         clear: None,
+        all_projects: None,
         project,
     }
 }
@@ -5136,6 +5137,93 @@ async fn harvest_all_projects_requires_opt_in() {
             .await,
     );
     assert!(out["sessions"].as_array().unwrap().is_empty(), "{out}");
+}
+
+#[tokio::test]
+async fn harvest_mark_can_settle_what_harvest_show_was_allowed_to_read() {
+    // `harvest_show` took `all_projects` and `harvest_mark` did not, so a
+    // session an agent was permitted to digest could not be recorded as
+    // reviewed — `harvest_list` kept offering it, forever. The gate is
+    // unchanged: the flag is refused without the opt-in, exactly as it is on
+    // the read tools.
+    let home = ScopedClaudeHome::new();
+    let (dir, server) = setup().await;
+    // Filed under a directory that is not this project's, so only an
+    // `all_projects` scan reaches it.
+    let elsewhere = TempDir::new().unwrap();
+    home.plant_session(elsewhere.path(), "far-9999");
+
+    let mut wide = mark_input("far-", None);
+    wide.all_projects = Some(true);
+    let err = parse_err(&server.harvest_mark(Parameters(wide)).await);
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("allow_all_projects_harvest"),
+        "the flag must be gated, not silently honored: {err}"
+    );
+
+    write_config_toml(
+        dir.path(),
+        "[security]\nallow_all_projects_harvest = true\n",
+    )
+    .await;
+    let mut wide = mark_input("far-", None);
+    wide.all_projects = Some(true);
+    let out = parse_ok(&server.harvest_mark(Parameters(wide)).await);
+    assert_eq!(
+        out["session_id"], "far-9999",
+        "a session harvest_show can digest must be markable: {out}"
+    );
+}
+
+#[tokio::test]
+async fn harvest_mark_clear_keeps_an_archived_session_reachable() {
+    // The entry is the only route to the archive, so dropping it stranded the
+    // `.zst` — while the tool answered `cleared: true` and the session, whose
+    // live transcript Claude Code had pruned, was offered by nothing.
+    let _home = ScopedClaudeHome::new();
+    let (dir, server) = setup().await;
+
+    let src = TempDir::new().unwrap();
+    let transcript = src.path().join("t.jsonl");
+    std::fs::write(&transcript, "{\"type\":\"user\"}\n").unwrap();
+    let project_id = engramdb::storage::project_id::compute_project_id(dir.path());
+    let archive = engramdb::storage::transcript_archive::archive_transcript(
+        &project_id,
+        "arch-1234",
+        &transcript,
+    )
+    .unwrap();
+    engramdb::storage::harvest_state::set_archive(dir.path(), "arch-1234", archive).unwrap();
+    engramdb::storage::harvest_state::mark_harvested(
+        dir.path(),
+        "arch-1234",
+        &["m1".into()],
+        engramdb::storage::harvest_state::HarvestDecision::Harvested,
+        None,
+    )
+    .unwrap();
+
+    let mut clearing = mark_input("arch-", None);
+    clearing.clear = Some(true);
+    let out = parse_ok(&server.harvest_mark(Parameters(clearing)).await);
+    assert_eq!(out["cleared"], true, "{out}");
+    assert_eq!(
+        out["archive_retained"], true,
+        "the response must say the entry was kept: {out}"
+    );
+
+    let entry = engramdb::storage::harvest_state::read_harvested(dir.path())
+        .get("arch-1234")
+        .cloned()
+        .expect("the archive lost its only index");
+    assert!(entry.archive.is_some());
+    assert_eq!(
+        entry.decision(),
+        engramdb::storage::harvest_state::HarvestDecision::Unreviewed
+    );
 }
 
 #[tokio::test]

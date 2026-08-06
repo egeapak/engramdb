@@ -663,8 +663,15 @@ struct HarvestMarkInput {
     #[schemars(description = "Why the session was skipped or deferred")]
     note: Option<String>,
 
-    #[schemars(description = "Forget the existing record so the session is offered again")]
+    #[schemars(
+        description = "Forget the existing review so the session is unreviewed again. An archived transcript is kept (the ledger entry is the only route to it), so the entry becomes `unreviewed` rather than disappearing; with no archive the entry is removed."
+    )]
     clear: Option<bool>,
+
+    #[schemars(
+        description = "Resolve session_id against every session on this machine, not just this project's — the same scope harvest_show accepts. Off by default, and refused unless [security] allow_all_projects_harvest = true in YOUR OWN project config (it is false by default)."
+    )]
+    all_projects: Option<bool>,
 
     #[schemars(
         description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here. Naming a project other than your own is refused unless [security] allow_all_projects_harvest = true in your own config."
@@ -3191,7 +3198,7 @@ impl EngramDbServer {
 
     #[tool(
         name = "harvest_mark",
-        description = "Record what was decided about a reviewed session so it is not offered again. Call this for EVERY session reviewed, including ones that yielded nothing — a zero-yield session leaves no other trace and would be re-read forever. session_id may be a unique prefix, exactly as in harvest_show; it is expanded to the full id, and an id matching no known session is refused rather than recorded. Set clear=true to forget a previous record instead."
+        description = "Record what was decided about a reviewed session so it is not offered again. Call this for EVERY session reviewed, including ones that yielded nothing — a zero-yield session leaves no other trace and would be re-read forever. session_id may be a unique prefix, exactly as in harvest_show; it is expanded to the full id, and an id matching no known session is refused rather than recorded. Accepts all_projects on the same terms as harvest_show, so anything you were allowed to digest you can settle. Set clear=true to forget a previous review instead; that keeps any archived transcript reachable by leaving the session `unreviewed`."
     )]
     async fn harvest_mark(
         &self,
@@ -3229,12 +3236,15 @@ impl EngramDbServer {
         // exactly what this tool's own `project` description already promised
         // it was not.
         //
-        // `None` for `all_projects`, not a plumbed-through flag: this tool
-        // deliberately has none, and passing one here would widen the gate
-        // rather than align it. `project: None` — the ordinary case — returns
-        // early, so marking in your own project is untouched, and so is the
-        // ledger fallback that keeps an archived-but-pruned session markable.
-        self.check_harvest_scope(input.project.as_deref(), None)
+        // `all_projects` goes through the same gate `harvest_show` uses, which
+        // *narrows* nothing and widens nothing: setting it without the opt-in
+        // is refused there and here alike. Without the flag this tool could not
+        // settle a session `harvest_show` was allowed to digest, so an agent
+        // permitted to read machine-wide was re-offered the same sessions
+        // forever. `project: None` with the flag unset — the ordinary case —
+        // still returns early.
+        let all_projects = self
+            .check_harvest_scope(input.project.as_deref(), input.all_projects)
             .await?;
         let dir = self.resolve_dir(input.project.as_deref()).await?;
         // The ledger belongs to the root of `dir`'s hierarchy, and only
@@ -3268,11 +3278,17 @@ impl EngramDbServer {
                 ));
             }
             let resolved = matches.pop().unwrap_or_else(|| input.session_id.clone());
-            let cleared = harvest_state::clear_harvested(ledger_dir, &resolved)
+            let outcome = harvest_state::clear_harvested(ledger_dir, &resolved)
                 .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            // `archive_retained` rather than a bare `cleared`: an entry naming
+            // an archive is the only route to that file, so clearing resets it
+            // to `unreviewed` instead of deleting it. Reporting only "cleared"
+            // would leave a caller believing the record is gone when the
+            // session is still listed — by design.
             let r = serde_json::to_string(&serde_json::json!({
                 "session_id": resolved,
-                "cleared": cleared,
+                "cleared": outcome.changed(),
+                "archive_retained": outcome.kept_archive(),
             }))
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
             _scope.mark_success();
@@ -3302,7 +3318,7 @@ impl EngramDbServer {
         // answered `{"decision":"harvested"}` while `harvest_list` kept
         // re-offering the real session, forever.
         let resolved = match self
-            .resolve_harvest_session(&scope, &input.session_id, false)
+            .resolve_harvest_session(&scope, &input.session_id, all_projects)
             .await
         {
             Ok(summary) => summary.session_id,

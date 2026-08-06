@@ -6,53 +6,6 @@ reproduction, and what "done" means. Delete this file when the list is empty.
 
 Baseline at time of writing: HEAD `60217a5`, 2035 tests passing, clippy clean.
 
-## Phase G — correctness
-
-### G1. `harvest reset` strands the archive and reports success falsely
-
-`clear_harvested` drops the whole entry, including its `archive` reference,
-while the `.zst` stays on disk. Nothing then reaches the file: `harvest show`
-says "No session matching", `ledger export` says "No harvest record matching",
-`ledger list` does not show it. The success message ("it will be offered
-again") is false for a session whose live transcript Claude Code has pruned —
-it is offered by nothing.
-
-**Done when:** `reset` either keeps the archive reachable or refuses and says
-why; success text matches what actually happens in both cases.
-
-### G2. `merge_entries` loses a deliberate human deferral
-
-"Settled beats `Deferred` regardless of timestamp" was chosen so the SessionEnd
-hook's entry cannot overwrite a review. With `Unreviewed` now distinct, that
-rule is too broad: a user's later `harvest mark --defer` on the root loses
-deterministically to an older settled entry from the sub-project.
-
-**Done when:** the six decision pairs have explicit, tested precedence, and a
-deliberate `--defer` survives adoption.
-
-### G3. MCP `harvest_mark` cannot mark what `harvest_show` can read
-
-`harvest_show` accepts `all_projects`; `harvest_mark` does not, so a session an
-agent was allowed to digest may be unmarkable and re-offered forever. The CLI
-does not have this gap.
-
-**Done when:** anything `harvest_show` can display, `harvest_mark` can settle —
-without widening the security gate.
-
-### G4. An over-ceiling record is dropped while the digest claims completeness
-
-`crates/engram-storage/src/transcripts.rs` skips any JSONL record over
-`MAX_RECORD_BYTES` (4 MiB) and only `tracing::debug!`s it, below the CLI's
-default level. `SessionSummary` carries no skipped count, so `user_turns`
-under-counts, `first_prompt` can shift to a different turn, and
-`is_complete()` still returns `true`.
-
-This is the same class as the `cap_event` fix (R10): a loss path the digest
-does not declare.
-
-**Done when:** a skipped record is surfaced the way `capped_events` is, and
-`is_complete()` is false when one occurred.
-
 ## Phase H — docs and messages
 
 Small, verified against the code at `60217a5`:

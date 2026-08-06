@@ -480,16 +480,32 @@ pub fn adopt_ledger(sub_dir: &Path, root_dir: &Path) -> Result<()> {
     write_harvested(root_dir, &map)
 }
 
+/// Did a person record this decision, or did the machine?
+///
+/// The only axis on which [`merge_entries`] overrides recency. `Deferred` sits
+/// on the human side despite being unsettled: postponing a call is a call.
+fn is_human_decision(decision: HarvestDecision) -> bool {
+    !matches!(decision, HarvestDecision::Unreviewed)
+}
 /// Reconcile two records of the same session found in two ledgers.
 ///
-/// A settled decision outranks an unsettled one regardless of timestamps: the
-/// SessionEnd hook writes an `Unreviewed` entry for every session it archives,
-/// so the root's copy is routinely *younger* than the review it must not
-/// overwrite. Beyond that the newer record wins, and an archive reference is
-/// kept from whichever side has one — the file it names is the same either
-/// way, since archives have always been keyed by the root project.
+/// A human decision outranks `Unreviewed` regardless of timestamps: the
+/// SessionEnd hook writes one for every session it archives, so the root's copy
+/// is routinely *younger* than the review it must not overwrite. Between two
+/// human decisions the newer wins — including a `Deferred` that supersedes an
+/// older `Harvested`/`Skipped`, which is the whole point of asking for another
+/// look. The rule was once "settled beats unsettled", grouping `Deferred` with
+/// the hook's entries, and that made a deliberate `--defer` on the root lose
+/// deterministically to whatever the sub-project had recorded first.
+///
+/// An archive reference is kept from whichever side has one — the file it names
+/// is the same either way, since archives have always been keyed by the root
+/// project.
 fn merge_entries(root: &HarvestEntry, legacy: &HarvestEntry) -> HarvestEntry {
-    let prefer_legacy = match (root.is_settled(), legacy.is_settled()) {
+    let prefer_legacy = match (
+        is_human_decision(root.decision()),
+        is_human_decision(legacy.decision()),
+    ) {
         (false, true) => true,
         (true, false) => false,
         _ => legacy.harvested_at > root.harvested_at,
@@ -505,18 +521,74 @@ fn merge_entries(root: &HarvestEntry, legacy: &HarvestEntry) -> HarvestEntry {
     }
 }
 
-/// Forget a session's harvest record so it is offered again.
-pub fn clear_harvested(project_dir: &Path, session_id: &str) -> Result<bool> {
+/// What [`clear_harvested`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClearOutcome {
+    /// No entry for this session; nothing changed.
+    NotFound,
+    /// The entry held no archive and was dropped whole.
+    Removed,
+    /// The review was erased but the entry kept, as `Unreviewed`, because it
+    /// is the only route to an archived transcript.
+    ResetToUnreviewed,
+}
+
+impl ClearOutcome {
+    /// Did the ledger change?
+    pub fn changed(self) -> bool {
+        !matches!(self, ClearOutcome::NotFound)
+    }
+
+    /// Is an archived transcript still reachable through this session?
+    pub fn kept_archive(self) -> bool {
+        matches!(self, ClearOutcome::ResetToUnreviewed)
+    }
+}
+
+/// Forget a session's review so it is offered again.
+///
+/// **Keeps the entry when it names an archive**, resetting it to `Unreviewed`
+/// instead of removing it. An archive is reachable only *through* its ledger
+/// entry — `harvest show`, `ledger export` and `ledger rm` all resolve a
+/// session id against this map first — so dropping the entry left the `.zst`
+/// on disk with no route to it from any command, still counting against the
+/// archive budget, while the caller was told the session "will be offered
+/// again". For a session whose live transcript Claude Code has already pruned
+/// that was false twice over: nothing offered it, and the one surviving copy
+/// had just been orphaned. This is the same reasoning [`prune_stale`] applies
+/// to the age window.
+///
+/// `Unreviewed` (not deleted, not `Deferred`) because it is exactly the state
+/// the SessionEnd hook would have left behind: archived, unsettled, and
+/// carrying no claim that a human looked at it.
+pub fn clear_harvested(project_dir: &Path, session_id: &str) -> Result<ClearOutcome> {
     if session_id.is_empty() {
-        return Ok(false);
+        return Ok(ClearOutcome::NotFound);
     }
     let _lock = lock_ledger(project_dir);
     let mut map = read_harvested(project_dir);
-    let removed = map.remove(session_id).is_some();
-    if removed {
-        write_harvested(project_dir, &map)?;
-    }
-    Ok(removed)
+    let Some(existing) = map.remove(session_id) else {
+        return Ok(ClearOutcome::NotFound);
+    };
+    let outcome = match existing.archive {
+        Some(archive) => {
+            map.insert(
+                session_id.to_string(),
+                HarvestEntry {
+                    harvested_at: Utc::now(),
+                    memories_created: 0,
+                    memory_ids: Vec::new(),
+                    decision: Some(HarvestDecision::Unreviewed),
+                    note: None,
+                    archive: Some(archive),
+                },
+            );
+            ClearOutcome::ResetToUnreviewed
+        }
+        None => ClearOutcome::Removed,
+    };
+    write_harvested(project_dir, &map)?;
+    Ok(outcome)
 }
 
 fn write_harvested(project_dir: &Path, map: &HashMap<String, HarvestEntry>) -> Result<()> {
@@ -551,9 +623,9 @@ mod tests {
         assert!(is_harvested(dir, "s1"));
         assert_eq!(read_harvested(dir)["s1"].memory_ids, vec!["m1", "m2"]);
 
-        assert!(clear_harvested(dir, "s1").unwrap());
+        assert_eq!(clear_harvested(dir, "s1").unwrap(), ClearOutcome::Removed);
         assert!(!is_harvested(dir, "s1"));
-        assert!(!clear_harvested(dir, "s1").unwrap());
+        assert_eq!(clear_harvested(dir, "s1").unwrap(), ClearOutcome::NotFound);
     }
 
     #[test]
@@ -914,7 +986,7 @@ mod tests {
 
         // The consequence that made it permanent: clearing the entry must stick.
         mark_harvested(&root, "s1", &[], HarvestDecision::Skipped, None).unwrap();
-        assert!(clear_harvested(&root, "s1").unwrap());
+        assert!(clear_harvested(&root, "s1").unwrap().changed());
         let _ = adopt_ledger(&sub, &root);
         assert!(
             !is_harvested(&root, "s1"),
@@ -966,6 +1038,145 @@ mod tests {
         assert!(!map["auto"].is_settled() && !map["chosen"].is_settled());
     }
 
+    #[test]
+    fn clearing_a_review_does_not_strand_its_archive() {
+        // Removing the entry left the `.zst` on disk with no route to it:
+        // `harvest show`, `ledger export` and `ledger list` all resolve a
+        // session id against this map, so the last surviving copy of a
+        // transcript Claude Code had already pruned became unreachable — while
+        // the caller was told the session would be offered again.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        set_archive(dir, "s1", sample_archive()).unwrap();
+        mark_harvested(dir, "s1", &["m1".into()], HarvestDecision::Harvested, None).unwrap();
+
+        let outcome = clear_harvested(dir, "s1").unwrap();
+        assert_eq!(outcome, ClearOutcome::ResetToUnreviewed);
+        assert!(outcome.kept_archive() && outcome.changed());
+
+        let entry = read_harvested(dir)
+            .get("s1")
+            .cloned()
+            .expect("the only index into the archive was deleted");
+        assert!(entry.archive.is_some(), "the archive reference was dropped");
+        assert_eq!(entry.decision(), HarvestDecision::Unreviewed);
+        assert!(entry.memory_ids.is_empty(), "the review must be erased");
+        assert_eq!(entry.memories_created, 0);
+        assert!(
+            !is_harvested(dir, "s1"),
+            "the session must still be offered"
+        );
+    }
+
+    #[test]
+    fn clearing_a_review_with_no_archive_still_removes_the_entry() {
+        // The other half of the contract the success message rests on: with no
+        // file behind it there is nothing to strand, so the entry goes.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        mark_harvested(dir, "s1", &[], HarvestDecision::Skipped, None).unwrap();
+
+        let outcome = clear_harvested(dir, "s1").unwrap();
+        assert_eq!(outcome, ClearOutcome::Removed);
+        assert!(!outcome.kept_archive());
+        assert!(!read_harvested(dir).contains_key("s1"));
+    }
+
+    #[test]
+    fn merge_precedence_covers_every_decision_pair() {
+        // Two rules, exhaustively: `Unreviewed` never beats a human decision,
+        // and between two human decisions recency wins. The second is what a
+        // later `--defer` on the root depends on — under the old
+        // "settled beats unsettled" rule it lost to any older `Harvested` or
+        // `Skipped` from the sub-project, deterministically and silently.
+        use HarvestDecision::*;
+        let older = Utc::now() - Duration::days(2);
+        let newer = Utc::now();
+        let at = |decision: HarvestDecision, when: DateTime<Utc>| HarvestEntry {
+            harvested_at: when,
+            memories_created: 0,
+            memory_ids: vec![],
+            decision: Some(decision),
+            note: None,
+            archive: None,
+        };
+
+        // (root, legacy, expected) — every ordered pair of the four decisions,
+        // with the *root* side older so recency and human-weight disagree
+        // wherever they can.
+        let cases = [
+            (Harvested, Skipped, Skipped),
+            (Harvested, Deferred, Deferred),
+            (Harvested, Unreviewed, Harvested),
+            (Skipped, Harvested, Harvested),
+            (Skipped, Deferred, Deferred),
+            (Skipped, Unreviewed, Skipped),
+            (Deferred, Harvested, Harvested),
+            (Deferred, Skipped, Skipped),
+            (Deferred, Unreviewed, Deferred),
+            (Unreviewed, Harvested, Harvested),
+            (Unreviewed, Skipped, Skipped),
+            (Unreviewed, Deferred, Deferred),
+            // Like against like: recency alone.
+            (Harvested, Harvested, Harvested),
+            (Skipped, Skipped, Skipped),
+            (Deferred, Deferred, Deferred),
+            (Unreviewed, Unreviewed, Unreviewed),
+        ];
+        for (root, legacy, expected) in cases {
+            let merged = merge_entries(&at(root, older), &at(legacy, newer));
+            assert_eq!(
+                merged.decision(),
+                expected,
+                "older root {root:?} + newer legacy {legacy:?}"
+            );
+            // Mirrored: swapping which side is newer swaps the winner unless
+            // human weight decides it.
+            let mirrored = merge_entries(&at(root, newer), &at(legacy, older));
+            let expected_mirror = match (is_human_decision(root), is_human_decision(legacy)) {
+                (false, true) => legacy,
+                _ => root,
+            };
+            assert_eq!(
+                mirrored.decision(),
+                expected_mirror,
+                "newer root {root:?} + older legacy {legacy:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn adoption_keeps_a_later_deferral_over_an_older_settled_decision() {
+        // The user reviewed the session on the sub-project, then asked for
+        // another look from the root. Adoption must not restore the decision
+        // the deferral was meant to reopen.
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("child");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+
+        mark_harvested(&sub, "s1", &["m1".into()], HarvestDecision::Harvested, None).unwrap();
+        mark_harvested(
+            &root,
+            "s1",
+            &[],
+            HarvestDecision::Deferred,
+            Some("revisit after the refactor".into()),
+        )
+        .unwrap();
+
+        adopt_ledger(&sub, &root).unwrap();
+
+        let entry = &read_harvested(&root)["s1"];
+        assert_eq!(
+            entry.decision(),
+            HarvestDecision::Deferred,
+            "a deliberate deferral was overwritten by an older settled decision"
+        );
+        assert!(!is_harvested(&root, "s1"), "the session must be re-offered");
+    }
+
     fn sample_archive() -> crate::transcript_archive::ArchiveRef {
         crate::transcript_archive::ArchiveRef {
             file_name: "s1.jsonl.zst".into(),
@@ -981,7 +1192,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         assert!(mark_harvested(tmp.path(), "", &[], HarvestDecision::Skipped, None).is_err());
         assert!(!is_harvested(tmp.path(), ""));
-        assert!(!clear_harvested(tmp.path(), "").unwrap());
+        assert!(!clear_harvested(tmp.path(), "").unwrap().changed());
     }
 
     /// A symlink committed at the ledger's temp path arrives in every clone
