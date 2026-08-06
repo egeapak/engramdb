@@ -1030,3 +1030,61 @@ mod corruption_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod scratch_race_removed {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// REPRO 4: `reconcile_archive_refs` decides which refs are dangling from
+    /// an UNLOCKED read + directory scan, then clears them under the lock. An
+    /// archive written in that window (the SessionEnd hook's
+    /// archive_transcript + set_archive) has its brand-new reference stripped,
+    /// orphaning the only remaining copy of the conversation.
+    #[test]
+    fn repro_reconcile_races_set_archive() {
+        let data = TempDir::new().unwrap();
+        std::env::set_var("ENGRAMDB_DATA_DIR", data.path());
+        let ledger = TempDir::new().unwrap();
+        let src = TempDir::new().unwrap();
+        let pid = "0123456789abcdef";
+
+        let dir = ledger.path().to_path_buf();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let s2 = stop.clone();
+        let d2 = dir.clone();
+        let reconciler = std::thread::spawn(move || {
+            while !s2.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = reconcile_archive_refs(&d2, pid);
+            }
+        });
+
+        let mut lost = Vec::new();
+        for i in 0..300 {
+            let id = format!("sess-{i}");
+            let t = src.path().join(format!("{id}.jsonl"));
+            std::fs::write(&t, b"{\"type\":\"user\"}\n").unwrap();
+            let a = crate::transcript_archive::archive_transcript(pid, &id, &t).unwrap();
+            set_archive(&dir, &id, a).unwrap();
+            // The file is definitely on disk now, so no honest reconciliation
+            // may drop its reference.
+            std::thread::sleep(std::time::Duration::from_micros(200));
+            let after = read_harvested(&dir);
+            let file_there = crate::transcript_archive::archive_path(pid, &id)
+                .unwrap()
+                .exists();
+            if file_there && after.get(&id).is_some_and(|e| e.archive.is_none()) {
+                lost.push(id);
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        reconciler.join().unwrap();
+
+        assert!(
+            lost.is_empty(),
+            "reconcile stripped the archive reference of {} session(s) whose file exists: {:?}",
+            lost.len(),
+            lost
+        );
+    }
+}

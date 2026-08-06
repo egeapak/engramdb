@@ -615,7 +615,7 @@ struct HarvestListInput {
     include_harvested: Option<bool>,
 
     #[schemars(
-        description = "Ignore project scoping and list every session on this machine. Off by default: scope is this project plus its git worktrees."
+        description = "Ignore project scoping and list every session on this machine. Off by default, and refused unless [security] allow_all_projects_harvest = true in YOUR OWN project config (it is false by default). Scope otherwise is this project's root plus its worktrees and linked sub-projects."
     )]
     all_projects: Option<bool>,
 
@@ -642,7 +642,7 @@ struct HarvestShowInput {
     all_projects: Option<bool>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here."
+        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here. Naming a project other than your own is refused unless [security] allow_all_projects_harvest = true in your own config."
     )]
     project: Option<String>,
 }
@@ -667,7 +667,7 @@ struct HarvestMarkInput {
     clear: Option<bool>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here."
+        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here. Naming a project other than your own is refused unless [security] allow_all_projects_harvest = true in your own config."
     )]
     project: Option<String>,
 }
@@ -678,7 +678,7 @@ struct HarvestLedgerInput {
     decision: Option<String>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here."
+        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here. Naming a project other than your own is refused unless [security] allow_all_projects_harvest = true in your own config."
     )]
     project: Option<String>,
 }
@@ -3047,6 +3047,13 @@ impl EngramDbServer {
         // No target config is read here: the only setting this tool consulted
         // was the security gate, and that now comes from the session's own
         // config inside `check_harvest_scope`.
+        // Gate BEFORE `session_scope`: resolving a scope is no longer a pure
+        // read — it adopts a stale sub-project ledger and reconciles archive
+        // references — so running it first let a *refused* call mutate the
+        // target project's state on its way to being denied.
+        let all_projects = self
+            .check_harvest_scope(input.project.as_deref(), input.all_projects)
+            .await?;
         let scope = ops::harvest::session_scope(&dir, self.registry.as_ref())
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
@@ -3062,9 +3069,7 @@ impl EngramDbServer {
             // is `/engram:reflect`'s job, not this one's.
             exclude_session: Some(self.session_id().to_string()),
             include_harvested: input.include_harvested.unwrap_or(false),
-            all_projects: self
-                .check_harvest_scope(input.project.as_deref(), input.all_projects)
-                .await?,
+            all_projects,
             skip_empty: true,
         };
         // `scope.root_dir`, never the invoking `dir`: the whole scope shares
@@ -3121,12 +3126,16 @@ impl EngramDbServer {
         let config_path = engramdb::storage::paths::project_dir(&dir).join("config.toml");
         let config = load_config_or_default(&config_path).await;
 
-        let scope = ops::harvest::session_scope(&dir, self.registry.as_ref())
-            .await
-            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        // Gate BEFORE `session_scope`: resolving a scope is no longer a pure
+        // read — it adopts a stale sub-project ledger and reconciles archive
+        // references — so running it first let a *refused* call mutate the
+        // target project's state on its way to being denied.
         let all_projects = self
             .check_harvest_scope(input.project.as_deref(), input.all_projects)
             .await?;
+        let scope = ops::harvest::session_scope(&dir, self.registry.as_ref())
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         // A live transcript is preferred, but Claude Code prunes its own — and
         // reading a *pruned* session is the entire reason archives exist. The
         // fallback was CLI-only, so `harvest_ledger` truthfully reported

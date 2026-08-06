@@ -246,7 +246,7 @@ pub enum LedgerCommand {
 
     /// Evict archives past the retention limits (dry run by default)
     Prune {
-        /// Override `[harvest] archive_retention_days` for this run
+        /// Override `[harvest] archive_retention_days` for this run (days, e.g. `90d`)
         #[arg(long, value_name = "WHEN")]
         older_than: Option<String>,
 

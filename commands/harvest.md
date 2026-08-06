@@ -43,8 +43,13 @@ straight to that id.
 ### 2. Read each session's digest
 
 ```bash
-engramdb harvest show <session-id>
+engramdb harvest show <session-id> --format pretty
 ```
+
+`--format pretty` is not cosmetic here: a Bash tool call is non-TTY, which
+defaults to JSON, and the JSON payload carries the events **and** the rendered
+markdown — the same content twice, roughly doubling what this costs your
+context. Prefer the `harvest_show` MCP tool where it is available.
 
 The digest is a compressed view: prompts and assistant prose verbatim, tool
 calls as one line each, results reduced to a preview. Raw transcripts are
@@ -150,7 +155,7 @@ undoes it if the user wants another look.
 **Recovering a pruned session.** Claude Code deletes its own transcripts
 after a while. Such a session stops appearing in `harvest list`, but if it was
 archived it is still readable: `engramdb harvest ledger list` shows what is
-held, and `engramdb harvest show <session-id>` digests it straight from the
+held, and `engramdb harvest show <session-id> --format pretty` digests it straight from the
 archive. `engramdb harvest ledger export <session-id>` writes the full
 original to a file — useful when a memory is later challenged and you need the
 conversation it came from.
