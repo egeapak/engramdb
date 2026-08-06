@@ -17,6 +17,7 @@ pub mod memory_file;
 pub mod paths;
 pub mod project_id;
 pub mod registry;
+mod state_file;
 pub mod store;
 pub mod task_state;
 pub mod telemetry;

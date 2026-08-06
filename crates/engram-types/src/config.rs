@@ -1622,6 +1622,12 @@ pub struct SecurityConfig {
     /// decides to widen the scope, with no prompt, while reading content an
     /// attacker may have influenced.
     ///
+    /// `harvest_mark` rides this too, even though it is a write. It resolves
+    /// a session-id *prefix* against the target's transcripts and ledger and
+    /// names every match in its ambiguity error, so under the write gate
+    /// alone (which defaults to allow) it answered the question `harvest_list`
+    /// refuses: which sessions does that project have?
+    ///
     /// The CLI's `--all-projects` is deliberately **not** gated: a human
     /// typing the flag is the request. This only governs an agent asking on
     /// its own behalf.

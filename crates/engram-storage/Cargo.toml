@@ -45,6 +45,11 @@ thiserror = "2"
 anyhow = "1"
 tempfile = "3"
 
+# `O_NOFOLLOW` for the state-file writer (`state_file.rs`). Unix-only: the
+# flag has no Windows equivalent and no delivery path there either.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 engram-test-support = { path = "../engram-test-support" }
 ctor = "1"

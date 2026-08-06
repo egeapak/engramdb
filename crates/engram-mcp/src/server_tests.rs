@@ -4973,13 +4973,19 @@ async fn harvest_mark_is_blocked_by_the_cross_project_write_gate() {
 }
 
 #[tokio::test]
-async fn harvest_mark_cross_project_is_allowed_by_default() {
-    // Negative control: without this, test above could be "fixed" by hard
-    // blocking every cross-project mark, which is not the documented policy.
+async fn harvest_mark_cross_project_is_gated_not_blocked() {
+    // Negative control: without this, the tests above could be "fixed" by
+    // hard blocking every cross-project mark, which is not the documented
+    // policy — the two gates are opt-outs, not walls.
     let home = ScopedClaudeHome::new();
-    let (_dir_a, dir_b, server) = setup_cross_project().await;
+    let (dir_a, dir_b, server) = setup_cross_project().await;
     home.plant_session(dir_b.path(), "sess-2222");
     let target = Some(dir_b.path().to_string_lossy().to_string());
+    write_config_toml(
+        dir_a.path(),
+        "[security]\nallow_all_projects_harvest = true\n",
+    )
+    .await;
 
     let out = parse_ok(
         &server
@@ -4991,6 +4997,80 @@ async fn harvest_mark_cross_project_is_allowed_by_default() {
         .path()
         .join(".engramdb/state/harvested_sessions.json")
         .exists());
+}
+
+#[tokio::test]
+async fn harvest_mark_cannot_enumerate_a_project_the_read_gate_refuses() {
+    // `harvest_mark` resolves a session-id *prefix* against the target's live
+    // transcripts and names every match in its ambiguity error. Behind only
+    // the write gate (which defaults to allow) that answered a question
+    // `harvest_list` refuses: which sessions does that project have?
+    let home = ScopedClaudeHome::new();
+    let (_dir_a, dir_b, server) = setup_cross_project().await;
+    home.plant_session(dir_b.path(), "secret-alpha");
+    home.plant_session(dir_b.path(), "secret-beta");
+    let target = Some(dir_b.path().to_string_lossy().to_string());
+
+    // Default config: cross-project *writes* allowed, harvest reads not.
+    let err = parse_err(
+        &server
+            .harvest_mark(Parameters(mark_input("secret-", target.clone())))
+            .await,
+    );
+    let message = err["error"]["message"].as_str().unwrap();
+    assert!(message.contains("allow_all_projects_harvest"), "{err}");
+    assert!(
+        !message.contains("secret-alpha") && !message.contains("secret-beta"),
+        "the refusal leaked the ids it exists to hide: {err}"
+    );
+
+    // The `clear` branch resolves against the target's *ledger* keys and
+    // names those the same way, so it needs the same gate.
+    let mut clearing = mark_input("secret-", target);
+    clearing.clear = Some(true);
+    let clear_err = parse_err(&server.harvest_mark(Parameters(clearing)).await);
+    assert!(
+        clear_err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("allow_all_projects_harvest"),
+        "{clear_err}"
+    );
+}
+
+#[tokio::test]
+async fn harvest_mark_in_your_own_project_is_never_gated_by_the_read_rule() {
+    // The read gate keys off `project.is_some()`, so the ordinary call —
+    // and with it the ledger fallback that keeps an archived-but-pruned
+    // session markable — must be untouched by it. `allow_all_projects_harvest`
+    // is left at its `false` default on purpose.
+    let home = ScopedClaudeHome::new();
+    let (dir, server) = setup().await;
+    home.plant_session(dir.path(), "own-1111");
+
+    let out = parse_ok(
+        &server
+            .harvest_mark(Parameters(mark_input("own-", None)))
+            .await,
+    );
+    assert_eq!(out["session_id"], "own-1111", "{out}");
+
+    // No live transcript at all: only the ledger fallback can resolve this,
+    // and it still does.
+    engramdb::storage::harvest_state::mark_harvested(
+        dir.path(),
+        "pruned-2222",
+        &[],
+        engramdb::storage::harvest_state::HarvestDecision::Unreviewed,
+        None,
+    )
+    .unwrap();
+    let out = parse_ok(
+        &server
+            .harvest_mark(Parameters(mark_input("pruned-", None)))
+            .await,
+    );
+    assert_eq!(out["session_id"], "pruned-2222", "{out}");
 }
 
 #[tokio::test]

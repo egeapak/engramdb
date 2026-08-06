@@ -6,60 +6,6 @@ reproduction, and what "done" means. Delete this file when the list is empty.
 
 Baseline at time of writing: HEAD `60217a5`, 2035 tests passing, clippy clean.
 
-## Phase F — security
-
-### F1. Ledger writes follow a symlink (arbitrary file overwrite)
-
-`crates/engram-storage/src/harvest_state.rs` — `let tmp = path.with_extension("json.tmp"); std::fs::write(&tmp, json)?`
-opens without `O_NOFOLLOW`, so a symlink planted at
-`.engramdb/state/harvested_sessions.json.tmp` redirects the write; the
-following `rename` moves the symlink, not the target. Reached by
-`mark_harvested`, `set_archive`, `clear_archive_refs`, `adopt_ledger`.
-
-Delivery is reliable and needs no local access: `.engramdb/` is *designed* to
-be committed (`memories/` is deliberately tracked), `write_state_gitignore`
-never overwrites an existing `.gitignore`, and a committed symlink is checked
-out on clone regardless of `.gitignore`. The unattended SessionEnd hook then
-fires it, and `[harvest] archive` defaults to `true`.
-
-```bash
-mkdir -p hostile/.engramdb/state && cd hostile && git init -q .
-printf 'state/\n' > .engramdb/.gitignore
-ln -s ../../../../victim.txt .engramdb/state/harvested_sessions.json.tmp
-git add -f .engramdb && git commit -qm x && cd .. && git clone -q hostile clone
-# symlink is present in the clone; SessionEnd then overwrites victim.txt
-```
-
-`crates/engram-storage/src/task_state.rs` has the same pattern and predates
-this branch — fix both, and check for other `with_extension("…tmp")` writers.
-
-**Done when:** a planted symlink cannot redirect a ledger or task-state write,
-with a test that plants one and asserts the victim file is untouched.
-
-### F2. `harvest_mark` is an ungated cross-project session-id oracle
-
-`crates/engram-mcp/src/server.rs` — `harvest_mark` calls only
-`check_cross_project_write` (defaults to **allow**), never
-`check_harvest_scope`, then drives `resolve_harvest_session`, which lists the
-target project's live transcripts and echoes their ids in its ambiguity error.
-
-```
-harvest_list { project: "<other>" }                  -> refused
-harvest_mark { session_id: "secret-", project: "<other>" }
-  -> "Ambiguous session id 'secret-' — matches 2 sessions: secret-beta, secret-alpha"
-```
-
-A single-match prefix is a clean existence oracle; a no-match prefix a clean
-negative. Reproduced with `allow_all_projects_harvest = false` in the caller's
-own config.
-
-Note the interaction with F6: `harvest_mark` deliberately has no
-`all_projects`, and gating its *reads* must not make an archived session
-unmarkable. The ledger fallback covers the pruned case.
-
-**Done when:** `harvest_mark` cannot enumerate a project the read gate
-refuses, and an MCP test asserts the error leaks no ids.
-
 ## Phase G — correctness
 
 ### G1. `harvest reset` strands the archive and reports success falsely

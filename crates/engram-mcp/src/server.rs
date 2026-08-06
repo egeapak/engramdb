@@ -3220,6 +3220,22 @@ impl EngramDbServer {
         // them from that project's future harvests.
         self.check_cross_project_write(input.project.as_deref())
             .await?;
+        // ...and *reading*, which the write gate does not cover: both branches
+        // below resolve a session-id prefix against the target project — the
+        // live transcripts for a mark, the ledger keys for a clear — and name
+        // every match in their ambiguity error. With only the write gate
+        // (which defaults to allow) that made `harvest_mark` a session-id
+        // oracle for a project `harvest_list` refuses to show, which is
+        // exactly what this tool's own `project` description already promised
+        // it was not.
+        //
+        // `None` for `all_projects`, not a plumbed-through flag: this tool
+        // deliberately has none, and passing one here would widen the gate
+        // rather than align it. `project: None` — the ordinary case — returns
+        // early, so marking in your own project is untouched, and so is the
+        // ledger fallback that keeps an archived-but-pruned session markable.
+        self.check_harvest_scope(input.project.as_deref(), None)
+            .await?;
         let dir = self.resolve_dir(input.project.as_deref()).await?;
         // The ledger belongs to the root of `dir`'s hierarchy, and only
         // `session_scope` knows which project that is — writing to `dir`

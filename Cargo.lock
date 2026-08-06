@@ -2335,6 +2335,7 @@ dependencies = [
  "futures-util",
  "jwalk",
  "lancedb",
+ "libc",
  "serde",
  "serde_json",
  "serde_yaml_ng",

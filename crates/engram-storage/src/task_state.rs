@@ -146,17 +146,12 @@ pub fn clear_session_task(project_dir: &Path, session_id: &str) -> Result<Option
 }
 
 fn write_session_tasks(project_dir: &Path, map: &HashMap<String, TaskEntry>) -> Result<()> {
-    let path = mapping_path(project_dir);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let json = serde_json::to_string_pretty(map)
         .map_err(|e| crate::error::StorageError::Validation(e.to_string()))?;
-    // Atomic temp-then-rename, same discipline as memory-file writes.
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    // Atomic temp-then-rename, same discipline as memory-file writes — and
+    // symlink-refusing, because the temp path is predictable and `.engramdb/`
+    // is committed. See `crate::state_file`.
+    crate::state_file::write_state_json(&mapping_path(project_dir), &json)
 }
 
 #[cfg(test)]
@@ -260,5 +255,29 @@ mod tests {
 
         clear_session_task(dir, "unrelated").unwrap();
         assert!(read_session_tasks(dir).is_empty());
+    }
+
+    /// Same committed-symlink delivery as the harvest ledger — this file
+    /// predates it and shares the state dir, so it is the same hole.
+    #[test]
+    #[cfg(unix)]
+    fn a_planted_temp_symlink_cannot_redirect_a_task_write() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, "do not touch").unwrap();
+
+        let path = mapping_path(dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&victim, path.with_extension("json.tmp")).unwrap();
+
+        let result = set_current_task(dir, "s1", "some-task");
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "do not touch",
+            "the mapping write landed on the symlink's target"
+        );
+        assert!(result.is_err(), "a redirected write reported success");
+        assert!(!path.exists(), "the symlink was renamed onto the mapping");
     }
 }

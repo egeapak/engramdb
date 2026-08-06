@@ -520,17 +520,12 @@ pub fn clear_harvested(project_dir: &Path, session_id: &str) -> Result<bool> {
 }
 
 fn write_harvested(project_dir: &Path, map: &HashMap<String, HarvestEntry>) -> Result<()> {
-    let path = ledger_path(project_dir);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let json = serde_json::to_string_pretty(map)
         .map_err(|e| crate::error::StorageError::Validation(e.to_string()))?;
-    // Atomic temp-then-rename, same discipline as memory-file writes.
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    // Atomic temp-then-rename, same discipline as memory-file writes — and
+    // symlink-refusing, because the temp path is predictable and `.engramdb/`
+    // is committed. See `crate::state_file`.
+    crate::state_file::write_state_json(&ledger_path(project_dir), &json)
 }
 
 #[cfg(test)]
@@ -987,6 +982,32 @@ mod tests {
         assert!(mark_harvested(tmp.path(), "", &[], HarvestDecision::Skipped, None).is_err());
         assert!(!is_harvested(tmp.path(), ""));
         assert!(!clear_harvested(tmp.path(), "").unwrap());
+    }
+
+    /// A symlink committed at the ledger's temp path arrives in every clone
+    /// (`.engramdb/` is tracked), and the SessionEnd hook writes here
+    /// unattended — so following one is an arbitrary-file overwrite that
+    /// needs no local access at all.
+    #[test]
+    #[cfg(unix)]
+    fn a_planted_temp_symlink_cannot_redirect_a_mark() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, "do not touch").unwrap();
+
+        let path = ledger_path(dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&victim, path.with_extension("json.tmp")).unwrap();
+
+        let result = mark_harvested(dir, "s1", &[], HarvestDecision::Skipped, None);
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "do not touch",
+            "the ledger write landed on the symlink's target"
+        );
+        assert!(result.is_err(), "a redirected write reported success");
+        assert!(!path.exists(), "the symlink was renamed onto the ledger");
     }
 }
 
