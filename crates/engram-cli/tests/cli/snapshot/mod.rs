@@ -29,8 +29,13 @@
 //! - `add -i`, `add -e`, `update -e` need a TTY prompter or `$EDITOR`. Their
 //!   non-TTY *error* paths are covered; the interactive flows are not.
 //! - The `review` interactive loop, likewise — the empty-result path is here.
-//! - Colour. `use_color` requires a TTY (`output.rs`), so no ANSI ever reaches
-//!   a captured pipe, in these tests or in any real redirected invocation.
+//! - Colour, in the positive direction — that is tier 1's, under
+//!   `snap_colored`. `OutputFormatter::new` checks `is_tty` itself, before
+//!   owo-colors is consulted, so no environment variable can make the binary
+//!   style a pipe; forcing it would take a PTY harness to re-test rendering
+//!   that lives entirely in `output.rs`. The *negative* direction is covered
+//!   here by construction: any escape leaking into redirected output would
+//!   land in these snapshots.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;

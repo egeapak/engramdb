@@ -91,6 +91,32 @@ instead of placeholders.
 string buffers. Use `snap_formats(case, |f| …)` for the three-format sweep, and
 give any new fixture a fixed timestamp via `fixed(…)` — never `Utc::now()`.
 
+**Colour is a tier-1 concern too.** `snap_colored(case, |f| …)` renders Pretty
+with styling forced on and writes a `<case>__pretty_color.snap` next to the
+uncoloured twin. Two gates have to be lifted to get an escape out under a test
+runner and the helper lifts both: `capturing_colored()` clears the formatter's
+own `use_color` flag, and `owo_colors::with_override(true, …)` short-circuits
+`if_supports_color`, which would otherwise ask `supports-color` about the real
+stdout and find a pipe. The override is a process-global `AtomicU8` — safe only
+because nextest gives each test its own process, the same property the
+`#[ctor]` env isolation relies on.
+
+Snapshots store readable tags, not raw escapes: `ansi_to_tags` rewrites
+`\x1b[32m✓\x1b[39m` as `<green>✓</green>`, because a `.snap` full of control
+bytes renders as mojibake in a web diff and as actual colour under `cargo insta
+review`. `snap_colored` asserts the render *did* produce escapes — without that
+a broken override would leave the colour tests passing on bare text. For the
+renderers that stay colourless on purpose, use
+`assert_never_styled(case, format, …)`: it takes no snapshot, and instead
+asserts the forced-colour render is byte-identical to the ordinary one, which
+pins it to bytes `snap_formats` already covers. That is what holds
+`--format plain` colourless.
+
+Tier 2 has no colour cases. `OutputFormatter::new` checks `is_tty` itself, so
+no env var can force the real binary to style a pipe, and every colour site is
+in `output.rs` anyway. The negative direction is already covered — an escape
+leaking into redirected output would show up in the tier-2 snapshots.
+
 **Tier 2 — the binary** (`crates/engram-cli/tests/cli/snapshot/`). Spawns the
 real `engramdb` and snapshots one transcript per invocation: command line, exit
 code, stdout, stderr. Put anything about *wiring* here — which flag reaches

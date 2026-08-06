@@ -223,15 +223,44 @@ impl OutputFormatter {
     /// so every redirected invocation — and every test — renders uncoloured.
     #[cfg(test)]
     pub(crate) fn capturing(format: OutputFormat) -> (Self, Capture) {
+        Self::capturing_inner(format, false)
+    }
+
+    /// [`OutputFormatter::capturing`] with colour forced on.
+    ///
+    /// Kept separate rather than parameterising `capturing` so the existing
+    /// uncoloured snapshots keep their exact call site.
+    ///
+    /// This only clears the formatter's *own* gate. `if_supports_color` then
+    /// asks `supports-color` about the real stdout, which under a test runner
+    /// is a pipe — so a caller must also wrap the render in
+    /// `owo_colors::with_override(true, …)` to get any escapes out.
+    #[cfg(test)]
+    pub(crate) fn capturing_colored(format: OutputFormat) -> (Self, Capture) {
+        Self::capturing_inner(format, true)
+    }
+
+    #[cfg(test)]
+    fn capturing_inner(format: OutputFormat, use_color: bool) -> (Self, Capture) {
         let out = Arc::new(Mutex::new(String::new()));
         let err = Arc::new(Mutex::new(String::new()));
         let formatter = Self {
             format,
-            use_color: false,
+            use_color,
             out: Sink::Capture(Arc::clone(&out)),
             err: Sink::Capture(Arc::clone(&err)),
         };
         (formatter, Capture { out, err })
+    }
+
+    /// Whether this render should be styled.
+    ///
+    /// `use_color` alone is not the answer: it is computed once in
+    /// [`OutputFormatter::new`] and excludes only Json, so a renderer that
+    /// consults it from a shared Pretty/Plain code path would style Plain
+    /// output on a terminal — which `print_project_list` did.
+    fn styled(&self) -> bool {
+        self.use_color && matches!(self.format, OutputFormat::Pretty)
     }
 
     /// Whether output is JSON (machine-consumed; never prompt interactively).
@@ -267,7 +296,7 @@ impl OutputFormatter {
                 );
             }
             OutputFormat::Pretty => {
-                if self.use_color {
+                if self.styled() {
                     outln!(
                         self,
                         "{} {}",
@@ -291,7 +320,7 @@ impl OutputFormatter {
                 errln!(self, "{}", serde_json::json!({ "error": message }));
             }
             OutputFormat::Pretty => {
-                if self.use_color {
+                if self.styled() {
                     errln!(
                         self,
                         "{} {}",
@@ -312,7 +341,7 @@ impl OutputFormatter {
     pub fn print_hint(&self, message: &str) {
         match self.format {
             OutputFormat::Pretty => {
-                if self.use_color {
+                if self.styled() {
                     outln!(
                         self,
                         "  {} {}",
@@ -338,7 +367,7 @@ impl OutputFormatter {
             }
             OutputFormat::Pretty | OutputFormat::Plain => {
                 let header = "EngramDB Environment Check";
-                if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                if self.styled() {
                     outln!(
                         self,
                         "\n{}",
@@ -350,7 +379,7 @@ impl OutputFormatter {
 
                 for section in &result.sections {
                     outln!(self);
-                    if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                    if self.styled() {
                         outln!(
                             self,
                             "{}",
@@ -374,7 +403,7 @@ impl OutputFormatter {
                             None => ("✗", "fail"),
                         };
 
-                        if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                        if self.styled() {
                             let colored_icon = match style {
                                 "info" => icon
                                     .if_supports_color(Stream::Stdout, |t| t.dimmed())
@@ -420,7 +449,7 @@ impl OutputFormatter {
                             outln!(self, "  {} {}: {}", icon, check.name, check.message);
                         }
                         for detail in &check.details {
-                            if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                            if self.styled() {
                                 outln!(
                                     self,
                                     "      {}",
@@ -436,7 +465,7 @@ impl OutputFormatter {
                     }
 
                     for subsection in &section.subsections {
-                        if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                        if self.styled() {
                             outln!(
                                 self,
                                 "  {}",
@@ -459,7 +488,7 @@ impl OutputFormatter {
                                 None => ("✗", "fail"),
                             };
 
-                            if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                            if self.styled() {
                                 let colored_icon = match style {
                                     "info" => icon
                                         .if_supports_color(Stream::Stdout, |t| t.dimmed())
@@ -509,7 +538,7 @@ impl OutputFormatter {
                                 outln!(self, "    {} {}: {}", icon, check.name, check.message);
                             }
                             for detail in &check.details {
-                                if self.use_color && matches!(self.format, OutputFormat::Pretty) {
+                                if self.styled() {
                                     outln!(
                                         self,
                                         "        {}",
@@ -538,7 +567,7 @@ impl OutputFormatter {
                 errln!(self, "{}", serde_json::json!({ "warning": message }));
             }
             OutputFormat::Pretty => {
-                if self.use_color {
+                if self.styled() {
                     errln!(
                         self,
                         "{} {}",
@@ -578,7 +607,7 @@ impl OutputFormatter {
     }
 
     fn print_memory_pretty(&self, memory: &Memory) {
-        let id_display = if self.use_color {
+        let id_display = if self.styled() {
             memory
                 .id
                 .if_supports_color(Stream::Stdout, |text| text.cyan())
@@ -587,7 +616,7 @@ impl OutputFormatter {
             memory.id.clone()
         };
 
-        let type_display = if self.use_color {
+        let type_display = if self.styled() {
             format!("{:?}", memory.type_)
                 .if_supports_color(Stream::Stdout, |text| text.yellow())
                 .to_string()
@@ -723,7 +752,7 @@ impl OutputFormatter {
             let score_str = format!("[{:.2}]", sm.score);
             let type_str = format!("{:?}", sm.memory.type_);
 
-            if self.use_color {
+            if self.styled() {
                 outln!(
                     self,
                     "  {} {} {}  {}",
@@ -830,7 +859,7 @@ impl OutputFormatter {
 
             if show_scores {
                 let score_str = format!("[{:.2}]", sm.score);
-                if self.use_color {
+                if self.styled() {
                     outln!(
                         self,
                         "  {} {} {}{}  {}",
@@ -851,7 +880,7 @@ impl OutputFormatter {
                         sm.memory.summary
                     );
                 }
-            } else if self.use_color {
+            } else if self.styled() {
                 outln!(
                     self,
                     "  {} {}{}  {}",
@@ -944,7 +973,7 @@ impl OutputFormatter {
 
         for entry in entries {
             let id_short = short_id(&entry.id);
-            let id_display = if self.use_color {
+            let id_display = if self.styled() {
                 id_short
                     .if_supports_color(Stream::Stdout, |text| text.cyan())
                     .to_string()
@@ -952,7 +981,7 @@ impl OutputFormatter {
                 id_short.to_string()
             };
 
-            let type_display = if self.use_color {
+            let type_display = if self.styled() {
                 format!("{:?}", entry.type_)
                     .if_supports_color(Stream::Stdout, |text| text.yellow())
                     .to_string()
@@ -1091,7 +1120,7 @@ impl OutputFormatter {
                 outln!(self, "{}", serde_json::to_string_pretty(info).unwrap());
             }
             OutputFormat::Pretty => {
-                let id_display = if self.use_color {
+                let id_display = if self.styled() {
                     info.project_id
                         .as_str()
                         .if_supports_color(Stream::Stdout, |text| text.cyan())
@@ -1102,7 +1131,7 @@ impl OutputFormatter {
                 outln!(self, "Project: {}", info.project_name);
                 outln!(self, "ID: {}", id_display);
                 if let Some(parent) = info.parent_project_id.as_deref() {
-                    let parent_display = if self.use_color {
+                    let parent_display = if self.styled() {
                         parent
                             .if_supports_color(Stream::Stdout, |text| text.cyan())
                             .to_string()
@@ -1148,6 +1177,10 @@ impl OutputFormatter {
     /// actual parent, grouped under filesystem-directory headers per
     /// `grouping`. JSON stays a flat array (with `parent_project_id`) so
     /// scripts and the MCP surface keep a stable shape regardless of grouping.
+    ///
+    /// Pretty and Plain deliberately share one layout — the tree is the point
+    /// of both — so the only difference is styling, which
+    /// [`OutputFormatter::styled`] withholds from Plain.
     pub fn print_project_list(&self, entries: &[ProjectListOutput], grouping: ProjectListGrouping) {
         if let OutputFormat::Json = self.format {
             outln!(self, "{}", serde_json::to_string_pretty(entries).unwrap());
@@ -1169,7 +1202,7 @@ impl OutputFormatter {
         match line {
             RenderLine::Blank => String::new(),
             RenderLine::Header(dir) => {
-                if self.use_color {
+                if self.styled() {
                     dir.if_supports_color(Stream::Stdout, |t| t.dimmed())
                         .to_string()
                 } else {
@@ -1190,7 +1223,7 @@ impl OutputFormatter {
                 let marker = if *depth > 0 { "↳ " } else { "" };
 
                 let id_short = short_id(project_id);
-                let id_display = if self.use_color {
+                let id_display = if self.styled() {
                     id_short
                         .if_supports_color(Stream::Stdout, |t| t.cyan())
                         .to_string()
@@ -1199,7 +1232,7 @@ impl OutputFormatter {
                 };
                 let status = if *exists {
                     "ok".to_string()
-                } else if self.use_color {
+                } else if self.styled() {
                     "missing"
                         .if_supports_color(Stream::Stdout, |t| t.red())
                         .to_string()
@@ -1511,6 +1544,145 @@ mod tests {
             body(&formatter);
             snap(&format!("{case}__{suffix}"), cap.transcript());
         }
+    }
+
+    /// Name the SGR parameter a colour escape carries.
+    ///
+    /// Only the codes this crate can emit are named; anything else keeps its
+    /// number so an unexpected escape shows up in the snapshot instead of
+    /// being flattened into a generic marker.
+    fn sgr_name(param: &str) -> String {
+        match param {
+            "1" => "bold",
+            "2" => "dim",
+            "3" => "italic",
+            "4" => "underline",
+            "30" => "black",
+            "31" => "red",
+            "32" => "green",
+            "33" => "yellow",
+            "34" => "blue",
+            "35" => "magenta",
+            "36" => "cyan",
+            "37" => "white",
+            other => return format!("sgr{other}"),
+        }
+        .to_string()
+    }
+
+    /// Rewrite ANSI escapes into readable tags: `\x1b[32m✓\x1b[39m` becomes
+    /// `<green>✓</green>`.
+    ///
+    /// Snapshots holding raw escape bytes are unreviewable — a diff on the web
+    /// shows mojibake, and `cargo insta review` renders them as actual colour
+    /// tangled up with insta's own diff colouring. Tags diff as text.
+    ///
+    /// This tracks the open styles rather than substituting literals, because
+    /// the reset codes are shared: `\x1b[39m` closes whichever foreground
+    /// colour is open, and `\x1b[0m` closes bold or dim. Carrying the stack is
+    /// what lets a close tag name the style it closes.
+    fn ansi_to_tags(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut open: Vec<String> = Vec::new();
+        let mut rest = s;
+
+        while let Some(start) = rest.find('\u{1b}') {
+            out.push_str(&rest[..start]);
+            let tail = &rest[start..];
+
+            // Everything owo-colors writes is `ESC [ <params> m`.
+            let parsed = tail
+                .strip_prefix("\u{1b}[")
+                .and_then(|b| b.find('m').map(|end| (&b[..end], &b[end + 1..])));
+            let Some((params, after)) = parsed else {
+                // Nothing here emits a non-SGR escape. Surface it rather than
+                // letting a raw control byte through into a snapshot.
+                out.push_str("<esc?>");
+                rest = &tail['\u{1b}'.len_utf8()..];
+                continue;
+            };
+
+            for param in params.split(';') {
+                match param {
+                    "0" | "22" | "39" | "49" => match open.pop() {
+                        Some(name) => out.push_str(&format!("</{name}>")),
+                        None => out.push_str("</?>"),
+                    },
+                    other => {
+                        let name = sgr_name(other);
+                        out.push_str(&format!("<{name}>"));
+                        open.push(name);
+                    }
+                }
+            }
+            rest = after;
+        }
+        out.push_str(rest);
+
+        assert!(
+            open.is_empty(),
+            "unclosed ANSI style(s) {open:?} — a renderer opened a style it never reset"
+        );
+        out
+    }
+
+    /// Render `body` with colour forced on and return the transcript.
+    ///
+    /// Two gates stand between a test runner and a styled render, and both
+    /// have to be lifted: [`OutputFormatter::capturing_colored`] clears the
+    /// formatter's own flag, and `owo_colors::with_override` short-circuits
+    /// `if_supports_color`, which would otherwise ask `supports-color` about
+    /// the real stdout and find a pipe.
+    ///
+    /// The override is a process-global `AtomicU8`, not thread-local. That is
+    /// safe here only because nextest runs each test in its own process — the
+    /// same property the `#[ctor]` env isolation depends on. `with_override`
+    /// is scoped and RAII-restored regardless, including on panic.
+    fn render_forcing_color(format: OutputFormat, body: impl Fn(&OutputFormatter)) -> String {
+        let (formatter, cap) = OutputFormatter::capturing_colored(format);
+        owo_colors::with_override(true, || body(&formatter));
+        cap.transcript()
+    }
+
+    /// Snapshot a Pretty render with colour forced on, escapes rewritten as
+    /// tags. Pretty is the only format [`OutputFormatter::styled`] admits, so
+    /// there is no matrix here.
+    ///
+    /// The escapes-present assertion is load-bearing: without it, a broken
+    /// override would leave every colour test passing on bare text, asserting
+    /// nothing about colour at all.
+    fn snap_colored(case: &str, body: impl Fn(&OutputFormatter)) {
+        let raw = render_forcing_color(OutputFormat::Pretty, &body);
+        assert!(
+            raw.contains('\u{1b}'),
+            "{case}: rendered no ANSI escapes with colour forced on"
+        );
+        snap(&format!("{case}__pretty_color"), ansi_to_tags(&raw));
+    }
+
+    /// The inverse claim, for the renderers that stay colourless on purpose:
+    /// forcing colour on changes nothing.
+    ///
+    /// Asserting equality with the ordinary uncoloured render is stronger than
+    /// a second snapshot would be — it pins the bytes to the ones
+    /// [`snap_formats`] already reviewed, rather than to a near-duplicate copy
+    /// of them — and it is a claim those snapshots structurally cannot make,
+    /// since they render with the colour flag off and so look identical
+    /// whether the renderer styles or not.
+    fn assert_never_styled(case: &str, format: OutputFormat, body: impl Fn(&OutputFormatter)) {
+        let forced = render_forcing_color(format, &body);
+        assert!(
+            !forced.contains('\u{1b}'),
+            "{case}: expected no styling in {format:?}, got {forced:?}"
+        );
+
+        let (formatter, cap) = OutputFormatter::capturing(format);
+        body(&formatter);
+        assert_eq!(
+            forced,
+            cap.transcript(),
+            "{case}: {format:?} output differs with colour forced on"
+        );
     }
 
     fn test_memory() -> Memory {
@@ -2851,6 +3023,196 @@ mod tests {
     fn snap_environment_doctor_minimal() {
         snap_formats("environment_doctor_minimal", |f| {
             f.print_environment_doctor(&test_environment_doctor_result())
+        });
+    }
+
+    // =====================================================================
+    // 11. The colour matrix
+    //
+    // Pretty is the only format that styles, so these are single-format
+    // rather than a three-way sweep — the json/plain bytes are already
+    // pinned above and re-taking them under a colour override would assert
+    // the same thing twice. Each case reuses the fixture its uncoloured twin
+    // uses, so `<case>__pretty.snap` and `<case>__pretty_color.snap` sit side
+    // by side and diff as "same layout, plus styling".
+    //
+    // This is a tier-1-only concern. `OutputFormatter::new` checks `is_tty`
+    // itself, before owo-colors is consulted, so no environment variable can
+    // make the real binary emit colour into a pipe — a tier-2 colour case
+    // would need a PTY harness to re-test rendering that is entirely in this
+    // file. The tier-2 direction that *is* worth having is the negative one,
+    // and its snapshots already carry it: any escape leaking to a pipe would
+    // show up there.
+    // =====================================================================
+
+    #[test]
+    fn ansi_to_tags_names_the_style_it_closes() {
+        // The two reset codes in play: `39` ends a foreground colour, `0`
+        // ends bold/dim. Both have to resolve to the style they close.
+        assert_eq!(ansi_to_tags("\u{1b}[32mx\u{1b}[39m"), "<green>x</green>");
+        assert_eq!(ansi_to_tags("\u{1b}[1mh\u{1b}[0m"), "<bold>h</bold>");
+        assert_eq!(ansi_to_tags("\u{1b}[2md\u{1b}[0m"), "<dim>d</dim>");
+        // Two independently styled spans on one line — the shape almost every
+        // renderer here produces.
+        assert_eq!(
+            ansi_to_tags("\u{1b}[36mid\u{1b}[39m \u{1b}[33mDecision\u{1b}[39m"),
+            "<cyan>id</cyan> <yellow>Decision</yellow>"
+        );
+        assert_eq!(ansi_to_tags("no escapes here"), "no escapes here");
+        // An unrecognized code keeps its number rather than vanishing.
+        assert_eq!(ansi_to_tags("\u{1b}[7mv\u{1b}[0m"), "<sgr7>v</sgr7>");
+    }
+
+    // ---- messages -------------------------------------------------------
+
+    #[test]
+    fn snap_color_success() {
+        snap_colored("success", |f| f.print_success("it worked"));
+    }
+
+    /// Errors and warnings style *stderr*, so the escapes have to show up on
+    /// the second half of the transcript.
+    #[test]
+    fn snap_color_error() {
+        snap_colored("error", |f| f.print_error("it did not work"));
+    }
+
+    #[test]
+    fn snap_color_warning() {
+        snap_colored("warning", |f| f.print_warning("proceed with care"));
+    }
+
+    #[test]
+    fn snap_color_hint() {
+        snap_colored("hint", |f| f.print_hint("try --force"));
+    }
+
+    /// `print_message` is the one message renderer with no styled branch.
+    #[test]
+    fn snap_color_message_stays_plain() {
+        assert_never_styled("message", OutputFormat::Pretty, |f| {
+            f.print_message("a plain message")
+        });
+    }
+
+    // ---- a single memory ------------------------------------------------
+
+    #[test]
+    fn snap_color_memory_rich() {
+        snap_colored("memory_rich", |f| f.print_memory(&rich_memory()));
+    }
+
+    // ---- search / retrieval ---------------------------------------------
+
+    #[test]
+    fn snap_color_search_results() {
+        let results = vec![
+            ScoredMemory {
+                memory: test_memory(),
+                score: 0.85,
+                score_breakdown: test_score_breakdown(),
+            },
+            ScoredMemory {
+                memory: rich_memory(),
+                score: 0.42,
+                score_breakdown: test_score_breakdown(),
+            },
+        ];
+        snap_colored("search_results", |f| f.print_search_results(&results));
+    }
+
+    /// `--show-scores` picks a different styled branch, not just an extra
+    /// column, so both are taken.
+    #[test]
+    fn snap_color_retrieval_with_scores() {
+        snap_colored("retrieval_with_scores", |f| {
+            f.print_retrieval_result(&retrieval_result(), true)
+        });
+    }
+
+    #[test]
+    fn snap_color_retrieval_without_scores() {
+        snap_colored("retrieval_without_scores", |f| {
+            f.print_retrieval_result(&retrieval_result(), false)
+        });
+    }
+
+    // ---- list -----------------------------------------------------------
+
+    #[test]
+    fn snap_color_memory_list() {
+        snap_colored("memory_list", |f| {
+            f.print_memory_list(&index_entries(), false)
+        });
+    }
+
+    /// The verbose detail lines are colourless even in Pretty; the entry
+    /// lines above them are not. Pinning the verbose case keeps that split
+    /// visible.
+    #[test]
+    fn snap_color_memory_list_verbose() {
+        snap_colored("memory_list_verbose", |f| {
+            f.print_memory_list(&index_entries(), true)
+        });
+    }
+
+    // ---- stats ----------------------------------------------------------
+
+    /// Stats renders no colour at all, in either the counters or the runtime
+    /// block — the densest colourless renderer, and the easiest one to start
+    /// styling by accident.
+    #[test]
+    fn snap_color_stats_stays_plain() {
+        assert_never_styled("stats_with_runtime", OutputFormat::Pretty, |f| {
+            f.print_stats(&stats_with_runtime(fully_populated_runtime_snapshot()))
+        });
+    }
+
+    // ---- projects -------------------------------------------------------
+
+    #[test]
+    fn snap_color_project_info() {
+        snap_colored("project_info", |f| f.print_project_info(&project_info()));
+    }
+
+    #[test]
+    fn snap_color_project_info_with_parent() {
+        let mut info = project_info();
+        info.parent_project_id = Some("fedcba9876543210".to_string());
+        snap_colored("project_info_with_parent", |f| f.print_project_info(&info));
+    }
+
+    /// `Always` grouping is the case that renders every styled element the
+    /// project tree has: a dimmed directory header, cyan ids, and the red
+    /// `missing` status on the entry whose path is gone.
+    #[test]
+    fn snap_color_project_list() {
+        snap_colored("project_list_always", |f| {
+            f.print_project_list(&project_entries(), ProjectListGrouping::Always)
+        });
+    }
+
+    /// The regression this pair exists for: `print_project_list` runs Pretty
+    /// and Plain through one `render_project_line`, which used to consult
+    /// `use_color` alone — so `--format plain` on a terminal came out
+    /// coloured, against the contract at the top of this module. Plain must
+    /// produce the same tree with no styling.
+    #[test]
+    fn snap_color_project_list_plain_is_never_styled() {
+        assert_never_styled("project_list_always", OutputFormat::Plain, |f| {
+            f.print_project_list(&project_entries(), ProjectListGrouping::Always)
+        });
+    }
+
+    // ---- doctor ---------------------------------------------------------
+
+    /// The richest styled renderer: bold section headers, a per-status icon
+    /// colour, dimmed info rows and detail lines, and blue hints — in both
+    /// the section and subsection loops, which style independently.
+    #[test]
+    fn snap_color_environment_doctor() {
+        snap_colored("environment_doctor", |f| {
+            f.print_environment_doctor(&doctor_result_with_all_statuses())
         });
     }
 }

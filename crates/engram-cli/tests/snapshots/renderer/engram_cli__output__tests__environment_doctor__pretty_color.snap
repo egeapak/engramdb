@@ -1,0 +1,29 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+
+<bold>EngramDB Environment Check</bold>
+
+<bold>System</bold>
+  <green>✓</green> pass-check: ok
+  <red>✗</red> fail-check: broken
+      <dim>line 1</dim>
+      <dim>line 2</dim>
+  <blue>ℹ</blue> <blue>try the fix</blue>
+  <yellow>⚠</yellow> <yellow>warn-check</yellow>: soft warning
+  <dim>○</dim> <dim>info-check</dim>: <dim>informational</dim>
+  <green>✓</green> implicit-pass: implicit
+  <red>✗</red> implicit-fail: implicit fail
+  <dim>Sub group</dim>
+    <green>✓</green> sub-pass: fine
+    <yellow>⚠</yellow> <yellow>sub-warn</yellow>: watch out
+        <dim>dim line</dim>
+  <blue>ℹ</blue> <blue>look here</blue>
+    <dim>○</dim> <dim>sub-info</dim>: <dim>fyi</dim>
+    <red>✗</red> sub-fail: down
+
+<bold>Other</bold>
+  <green>✓</green> trivial: trivial ok
+--- stderr ---
