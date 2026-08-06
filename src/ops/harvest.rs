@@ -16,6 +16,12 @@
 //! conversation held in a worktree is invisible to the harvest even though
 //! its memories would land in the very same store.
 //!
+//! The same walk decides where the ledger and the archives live
+//! ([`SessionScope::root_dir`] / [`SessionScope::root_project_id`]). Both have
+//! to name the same root: sharing the *scope* while splitting the *record* of
+//! what was reviewed means each project re-offers what the other settled, and
+//! a prune run from one deletes archives the other still advertises.
+//!
 //! ## Budgeting
 //!
 //! Transcripts routinely exceed what fits in a context window, and the
@@ -82,6 +88,15 @@ fn class_of(event: &Event) -> EventClass {
 pub struct SessionScope {
     /// The root project id the memory store belongs to.
     pub root_project_id: String,
+    /// Directory whose `.engramdb/state/` holds the harvest ledger for every
+    /// project in this scope.
+    ///
+    /// The ledger has to sit at the same root the archives are keyed by
+    /// ([`Self::root_project_id`]) or the two disagree: a sub-project would
+    /// re-offer sessions its parent already settled, and a prune run from
+    /// either side would delete files the other side's ledger still
+    /// advertises.
+    pub root_dir: PathBuf,
     /// Filesystem paths whose sessions are in scope: the root checkout plus
     /// every registered descendant (worktrees and linked sub-projects).
     pub paths: Vec<PathBuf>,
@@ -96,11 +111,27 @@ pub struct SessionScope {
 ///
 /// Registered paths that no longer exist on disk are kept: a deleted worktree
 /// still has transcripts worth mining, and its recorded `cwd` still matches.
+///
+/// Resolving the root is also what decides where the ledger lives, so this is
+/// where a ledger left at a non-root path by an older version is adopted. It
+/// happens here rather than in each caller because *every* harvest entry
+/// point — CLI, MCP, and the SessionEnd hook — comes through this function,
+/// and one that forgot the step would quietly resurrect settled sessions.
 pub async fn session_scope(dir: &Path, registry: &dyn RegistryBackend) -> Result<SessionScope> {
     let registry_data = registry.load().await?;
     let own_id = project_id::compute_project_id(dir);
     let root_id = crate::storage::resolve_root_project_id(&registry_data, &own_id);
 
+    // A root registered at a path that is gone would have the ledger written
+    // into a checkout the user deleted, recreating `.engramdb/state/` there.
+    // Nothing else can reach that ledger, so stay local instead.
+    let root_dir = registry_data
+        .projects
+        .iter()
+        .find(|e| e.project_id == root_id)
+        .map(|e| PathBuf::from(&e.project_path))
+        .filter(|p| p.is_dir())
+        .unwrap_or_else(|| dir.to_path_buf());
     let mut ids = vec![root_id.clone()];
     ids.extend(collect_descendants(&registry_data, &root_id));
 
@@ -124,8 +155,27 @@ pub async fn session_scope(dir: &Path, registry: &dyn RegistryBackend) -> Result
     paths.sort();
     paths.dedup();
 
+    // Adopt across the *whole* hierarchy, not just the invoking directory: the
+    // sub-project whose ledger was left behind is usually not the one the
+    // command is run from — a parent listing its children's sessions is the
+    // common case, and it would otherwise keep re-offering everything they
+    // reviewed while their ledger sat one directory away.
+    for path in &paths {
+        if let Err(e) = harvest_state::adopt_ledger(path, &root_dir) {
+            // Advisory state, as everywhere else in this module: a failed
+            // adoption costs the old decisions, not the harvest.
+            tracing::warn!(
+                "could not adopt the harvest ledger at {} into {} ({e}); \
+                 previously reviewed sessions may be offered again",
+                path.display(),
+                root_dir.display()
+            );
+        }
+    }
+
     Ok(SessionScope {
         root_project_id: root_id,
+        root_dir,
         paths,
     })
 }
@@ -156,6 +206,11 @@ pub struct SelectedSession {
 }
 
 /// Select the sessions a harvest should consider, newest activity first.
+///
+/// `project_dir` is where the ledger is read from, so it must be
+/// [`SessionScope::root_dir`] — the whole scope shares one ledger, and reading
+/// a sub-project's own directory offers back sessions the root already
+/// settled.
 pub fn select_sessions(
     scope: &SessionScope,
     project_dir: &Path,

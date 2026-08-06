@@ -13,7 +13,9 @@
 //! - `collision` — sits in the target project's encoded directory but records a
 //!   foreign cwd; must never be offered (the encoding is lossy).
 //! - `sibling` — a project whose path shares a textual prefix with the target;
-//!   must never be offered.
+//!   must never be offered. The parent/child tests reuse it as a *linked*
+//!   sub-project, where the opposite holds: once linked it shares the root's
+//!   scope, ledger, and archive directory.
 
 use super::helpers::{cmd, data_dir};
 use std::path::{Path, PathBuf};
@@ -117,6 +119,10 @@ struct Corpus {
     _tmp: TempDir,
     claude: PathBuf,
     main: PathBuf,
+    /// A second, independent project whose path shares a prefix with `main`.
+    /// Used both as the out-of-scope fixture and, once linked, as the
+    /// sub-project half of the parent/child tests.
+    sibling: PathBuf,
     worktree: PathBuf,
 }
 
@@ -157,6 +163,31 @@ impl Corpus {
             .write_stdin(event)
             .assert()
             .success();
+    }
+
+    /// The registry id of the project at `dir` — what `projects link` takes.
+    fn project_id(&self, dir: &Path) -> String {
+        let out = cmd()
+            .env("CLAUDE_CONFIG_DIR", &self.claude)
+            .arg("--dir")
+            .arg(dir)
+            .args(["--json", "projects", "info"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "projects info failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        value["project_id"].as_str().unwrap().to_string()
+    }
+
+    /// The harvest ledger file for a project directory.
+    fn ledger_file(&self, dir: &Path) -> PathBuf {
+        dir.join(".engramdb")
+            .join("state")
+            .join("harvested_sessions.json")
     }
 
     fn stdout(&self, dir: &Path, args: &[&str]) -> String {
@@ -305,6 +336,7 @@ fn build_corpus() -> Corpus {
         _tmp: tmp,
         claude,
         main,
+        sibling,
         worktree,
     }
 }
@@ -323,6 +355,187 @@ fn init_with_worktree(c: &Corpus) {
         .success();
     // Any non-exempt command inside the worktree consolidates and registers it.
     c.engramdb(&c.worktree, &["list"]).assert().success();
+}
+
+/// Initialize both projects and make `sibling` a sub-project of `main` with
+/// `projects link`.
+///
+/// Deliberately *not* a git worktree: `resolve_project_root` rewrites the
+/// working directory only for worktrees, so a linked sub-project is the case
+/// where nothing upstream has already collapsed the two paths into one. It
+/// still shares the parent's harvest scope and archive directory, which is
+/// what makes a split ledger a bug rather than a preference.
+fn init_linked_projects(c: &Corpus) {
+    c.engramdb(&c.main, &["init", "--no-embeddings"])
+        .assert()
+        .success();
+    c.engramdb(&c.sibling, &["init", "--no-embeddings"])
+        .assert()
+        .success();
+    link_sibling_to_main(c);
+}
+
+fn link_sibling_to_main(c: &Corpus) {
+    let child = c.project_id(&c.sibling);
+    let parent = c.project_id(&c.main);
+    c.engramdb(&c.main, &["projects", "link", &child, "--parent", &parent])
+        .assert()
+        .success();
+}
+
+/// A parent and a linked sub-project list the *same* sessions, so a review
+/// recorded from either side has to settle it for both. Splitting the ledger
+/// by invoking directory means each one re-offers forever what the other
+/// already decided.
+#[test]
+fn a_linked_sub_project_shares_the_root_ledger() {
+    let c = build_corpus();
+    init_linked_projects(&c);
+
+    // Both directions: the parent's session marked from the child...
+    c.engramdb(&c.sibling, &["harvest", "mark", "aaaa"])
+        .assert()
+        .success();
+    let from_main = c.stdout(&c.main, &["harvest", "list"]);
+    assert!(
+        !from_main.contains("aaaa1111"),
+        "a session settled in the sub-project is still offered by the root: {from_main}"
+    );
+
+    // ...and the child's session marked from the parent.
+    c.engramdb(&c.main, &["harvest", "mark", "ffff6666"])
+        .assert()
+        .success();
+    let from_sibling = c.stdout(&c.sibling, &["harvest", "list"]);
+    assert!(
+        !from_sibling.contains("ffff6666"),
+        "a session settled in the root is still offered by the sub-project: {from_sibling}"
+    );
+
+    // One ledger, at the root — the same place the archives are keyed by.
+    assert!(
+        !c.ledger_file(&c.sibling).exists(),
+        "the sub-project kept a ledger of its own"
+    );
+}
+
+/// The SessionEnd hook prunes archives on every session, from whichever
+/// directory the session ran in. Pruning is keyed by the *root* project, so a
+/// sweep run in the sub-project deletes the parent's archives — and must clear
+/// the same ledger those files are recorded in, or the parent advertises a
+/// transcript with a sha256 that no longer exists and `export` fails.
+#[test]
+fn pruning_from_a_linked_sub_project_clears_the_root_ledger() {
+    let c = build_corpus();
+    init_linked_projects(&c);
+    c.session_end(&c.main, "aaaa1111-rich");
+    assert!(
+        find_archive("aaaa1111-rich").is_some(),
+        "positive control: nothing was archived"
+    );
+
+    c.engramdb(
+        &c.sibling,
+        &["harvest", "ledger", "prune", "--max-bytes", "1", "--apply"],
+    )
+    .assert()
+    .success();
+    assert!(
+        find_archive("aaaa1111-rich").is_none(),
+        "the sub-project's prune did not reach the root's archives"
+    );
+
+    let show = c.stdout(&c.main, &["harvest", "ledger", "show", "aaaa"]);
+    assert!(
+        show.contains("Archive:   none"),
+        "the root still advertises an archive the sub-project deleted: {show}"
+    );
+}
+
+/// A ledger written under a sub-project's own path — every review recorded
+/// before it was linked, or by an older version — must not become invisible
+/// when the root takes over.
+#[test]
+fn a_ledger_left_at_a_sub_project_path_is_adopted_by_the_root() {
+    let c = build_corpus();
+    c.engramdb(&c.main, &["init", "--no-embeddings"])
+        .assert()
+        .success();
+    c.engramdb(&c.sibling, &["init", "--no-embeddings"])
+        .assert()
+        .success();
+
+    // Reviewed while `sibling` was still a root project of its own.
+    c.engramdb(&c.sibling, &["harvest", "mark", "ffff6666"])
+        .assert()
+        .success();
+    assert!(
+        c.ledger_file(&c.sibling).exists(),
+        "fixture wrote no ledger"
+    );
+
+    link_sibling_to_main(&c);
+
+    let from_main = c.stdout(&c.main, &["harvest", "list"]);
+    assert!(
+        !from_main.contains("ffff6666"),
+        "linking silently discarded the sub-project's review decisions: {from_main}"
+    );
+    // Kept, not deleted: nothing here is worth destroying evidence over.
+    assert!(
+        !c.ledger_file(&c.sibling).exists()
+            && c.ledger_file(&c.sibling)
+                .with_extension("json.adopted")
+                .exists(),
+        "the old ledger was not moved aside"
+    );
+}
+
+/// An archive is only reachable *through* its ledger entry, so the entry must
+/// outlive the entry-retention window whenever a file is still behind it.
+/// `archive_retention_days` defaults to a year and the docs tell users to set
+/// 3650, so the ledger's own 365-day sweep otherwise strands the file: no
+/// `show`, no `export`, no `ledger list`, and 2 GiB of budget still spoken for.
+#[test]
+fn an_archived_session_survives_the_ledger_age_sweep() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+    c.session_end(&c.main, "aaaa1111-rich");
+
+    // Age the entry past the ledger's retention window.
+    let path = c.ledger_file(&c.main);
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let mut ledger: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    ledger["aaaa1111-rich"]["harvested_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    std::fs::write(&path, serde_json::to_string_pretty(&ledger).unwrap()).unwrap();
+
+    // Any later session end runs the sweep — unattended, on every session.
+    c.session_end(&c.main, "bbbb2222-empty");
+
+    assert!(
+        find_archive("aaaa1111-rich").is_some(),
+        "the archive file itself must still be there"
+    );
+    let show = c.stdout(&c.main, &["harvest", "ledger", "show", "aaaa"]);
+    assert!(
+        show.contains(".jsonl.zst"),
+        "the archive became unreachable when its entry aged out: {show}"
+    );
+    let dest = c.main.join("restored.jsonl");
+    c.engramdb(
+        &c.main,
+        &[
+            "harvest",
+            "ledger",
+            "export",
+            "aaaa",
+            "-o",
+            dest.to_str().unwrap(),
+        ],
+    )
+    .assert()
+    .success();
+    assert!(dest.is_file(), "export produced no file");
 }
 
 #[test]

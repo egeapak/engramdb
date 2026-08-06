@@ -24,6 +24,13 @@ pub async fn run_harvest(
     formatter: &OutputFormatter,
     prompter: &dyn Prompter,
 ) -> Result<()> {
+    // Resolved once, up front: every branch below touches the ledger, and the
+    // ledger belongs to the **root** project — the same root the archives are
+    // keyed by. `resolve_project_root` only rewrites `dir` for git worktrees,
+    // so for a project linked with `projects link` this is the only thing that
+    // keeps the two halves pointing at the same place.
+    let scope = harvest::session_scope(dir, registry).await?;
+    let ledger_dir = scope.root_dir.as_path();
     match command {
         HarvestCommand::List {
             since,
@@ -33,7 +40,6 @@ pub async fn run_harvest(
             all_projects,
             exclude_session,
         } => {
-            let scope = harvest::session_scope(dir, registry).await?;
             let params = harvest::SelectParams {
                 since: since.as_deref().map(harvest::parse_since).transpose()?,
                 limit,
@@ -42,7 +48,7 @@ pub async fn run_harvest(
                 all_projects,
                 skip_empty: !include_empty,
             };
-            let sessions = harvest::select_sessions(&scope, dir, &params)?;
+            let sessions = harvest::select_sessions(&scope, ledger_dir, &params)?;
 
             let output: Vec<HarvestSessionOutput> = sessions
                 .iter()
@@ -74,14 +80,12 @@ pub async fn run_harvest(
             // and reading a *pruned* session is the entire reason archives
             // exist. `_restored` holds the temp file alive for the digest.
             let (transcript_path, _restored) =
-                match resolve_session(dir, registry, &session_id, all_projects).await {
+                match resolve_session(&scope, &session_id, all_projects) {
                     Ok(selected) => (selected.transcript_path, None),
-                    Err(live_err) => {
-                        match restore_archived_session(dir, registry, &session_id).await? {
-                            Some((guard, path)) => (path, Some(guard)),
-                            None => return Err(live_err),
-                        }
-                    }
+                    Err(live_err) => match restore_archived_session(&scope, &session_id)? {
+                        Some((guard, path)) => (path, Some(guard)),
+                        None => return Err(live_err),
+                    },
                 };
             let params = harvest::DigestParams {
                 parse: ParseOptions {
@@ -124,9 +128,11 @@ pub async fn run_harvest(
             // silently re-offers one forever. That now includes sessions whose
             // live transcript is gone and which `show` reads from an archive,
             // so fall back to the ledger exactly as `reset` does.
-            let resolved = match resolve_session(dir, registry, &session_id, all_projects).await {
+            let resolved = match resolve_session(&scope, &session_id, all_projects) {
                 Ok(selected) => selected.session_id,
-                Err(live_err) => resolve_ledger_key(dir, &session_id).map_err(|_| live_err)?,
+                Err(live_err) => {
+                    resolve_ledger_key(ledger_dir, &session_id).map_err(|_| live_err)?
+                }
             };
             let decision = if defer {
                 HarvestDecision::Deferred
@@ -135,7 +141,8 @@ pub async fn run_harvest(
             } else {
                 HarvestDecision::Harvested
             };
-            let entry = harvest_state::mark_harvested(dir, &resolved, &memory_ids, decision, note)?;
+            let entry =
+                harvest_state::mark_harvested(ledger_dir, &resolved, &memory_ids, decision, note)?;
             if formatter.is_json() {
                 println!(
                     "{}",
@@ -147,15 +154,15 @@ pub async fn run_harvest(
         }
 
         HarvestCommand::Reset { session_id } => {
-            let resolved = resolve_ledger_key(dir, &session_id)?;
-            harvest_state::clear_harvested(dir, &resolved)?;
+            let resolved = resolve_ledger_key(ledger_dir, &session_id)?;
+            harvest_state::clear_harvested(ledger_dir, &resolved)?;
             formatter.print_success(&format!(
                 "Cleared harvest record for session {resolved}; it will be offered again."
             ));
         }
 
         HarvestCommand::Ledger { command } => {
-            run_ledger(dir, registry, command, config, formatter, prompter).await?;
+            run_ledger(&scope, command, config, formatter, prompter).await?;
         }
     }
     Ok(())
@@ -202,14 +209,21 @@ fn entry_json(session_id: &str, entry: &HarvestEntry) -> serde_json::Value {
     })
 }
 
+/// Ledger subcommands, driven entirely off the resolved scope.
+///
+/// Takes the scope rather than the invoking directory so the ledger it reads
+/// and the archive directory it deletes from are, by construction, the same
+/// project's — the pairing whose absence let a prune from a sub-project erase
+/// archives its parent's ledger still pointed at.
 async fn run_ledger(
-    dir: &Path,
-    registry: &dyn RegistryBackend,
+    scope: &harvest::SessionScope,
     command: LedgerCommand,
     config: &HarvestConfig,
     formatter: &OutputFormatter,
     prompter: &dyn Prompter,
 ) -> Result<()> {
+    let dir = scope.root_dir.as_path();
+    let project_id = scope.root_project_id.as_str();
     match command {
         LedgerCommand::List {
             decision,
@@ -305,11 +319,10 @@ async fn run_ledger(
 `[harvest] archive` and only captures sessions that ended after it was enabled."
                 );
             };
-            let project_id = archive_project_id(dir, registry).await?;
             // The ledger can outlive the file: eviction on another machine, a
             // restored backup, or a manual cleanup all strand the reference.
             // Say so plainly rather than surfacing a bare "no such file".
-            if !transcript_archive::archive_path(&project_id, &key)?.exists() {
+            if !transcript_archive::archive_path(project_id, &key)?.exists() {
                 bail!(
                     "Session {key} has a recorded archive ({}) but the file is gone — it was \
 most likely evicted by `harvest ledger prune` or the `[harvest] archive_*` budgets.",
@@ -320,7 +333,7 @@ most likely evicted by `harvest ledger prune` or the `[harvest] archive_*` budge
             // The ledger recorded the plaintext size at archive time, so the
             // decompression bound here is exact rather than a backstop.
             let sha = transcript_archive::export_archive_bounded(
-                &project_id,
+                project_id,
                 &key,
                 &dest,
                 Some(archive.original_bytes),
@@ -345,7 +358,6 @@ time — the archive is corrupt.",
             force,
         } => {
             let key = resolve_ledger_key(dir, &session_id)?;
-            let project_id = archive_project_id(dir, registry).await?;
             // Read the archive metadata *before* deleting, so the prompt can
             // say how much conversation is about to go.
             let archive = harvest_state::read_harvested(dir)
@@ -389,7 +401,7 @@ be offered again by `harvest list`."
                 }
             }
 
-            let removed_archive = transcript_archive::remove_archive(&project_id, &key)?;
+            let removed_archive = transcript_archive::remove_archive(project_id, &key)?;
             if archive_only {
                 // Keep the review record, drop the now-dangling file pointer.
                 harvest_state::clear_archive_refs(dir, std::slice::from_ref(&key))?;
@@ -424,8 +436,7 @@ be offered again by `harvest list`."
                 None => config.archive_retention_days,
             };
             let cap = max_bytes.unwrap_or(config.archive_max_bytes);
-            let project_id = archive_project_id(dir, registry).await?;
-            let outcome = transcript_archive::prune_archives(&project_id, retention, cap, !apply)?;
+            let outcome = transcript_archive::prune_archives(project_id, retention, cap, !apply)?;
             if apply {
                 // The files are gone; the ledger must stop pointing at them or
                 // `show` advertises an export that cannot succeed.
@@ -463,14 +474,6 @@ be offered again by `harvest list`."
         }
     }
     Ok(())
-}
-
-/// Project id whose archive directory holds this project's transcripts.
-///
-/// Archives are keyed by the **root** project, matching the ledger, so a
-/// worktree and its main checkout share one archive directory.
-async fn archive_project_id(dir: &Path, registry: &dyn RegistryBackend) -> Result<String> {
-    Ok(harvest::session_scope(dir, registry).await?.root_project_id)
 }
 
 fn parse_decision(value: &str) -> Result<HarvestDecision> {
@@ -549,11 +552,12 @@ fn human_bytes(bytes: u64) -> String {
 /// only remaining path from a session id to its conversation, and reading the
 /// raw `.jsonl` by hand is exactly what the harvest docs tell agents never to
 /// do (it is ~99% tool payload).
-async fn restore_archived_session(
-    dir: &Path,
-    registry: &dyn RegistryBackend,
+fn restore_archived_session(
+    scope: &harvest::SessionScope,
     prefix: &str,
 ) -> Result<Option<(tempfile::TempDir, PathBuf)>> {
+    let dir = scope.root_dir.as_path();
+    let project_id = scope.root_project_id.as_str();
     let Ok(key) = resolve_ledger_key(dir, prefix) else {
         return Ok(None);
     };
@@ -561,8 +565,7 @@ async fn restore_archived_session(
     let Some(archive) = ledger.get(&key).and_then(|e| e.archive.clone()) else {
         return Ok(None);
     };
-    let project_id = archive_project_id(dir, registry).await?;
-    if !transcript_archive::archive_path(&project_id, &key)?.exists() {
+    if !transcript_archive::archive_path(project_id, &key)?.exists() {
         return Ok(None);
     }
 
@@ -573,7 +576,7 @@ async fn restore_archived_session(
     let tmp = tempfile::TempDir::new()?;
     let restored = tmp.path().join(format!("{key}.jsonl"));
     let sha = transcript_archive::export_archive_bounded(
-        &project_id,
+        project_id,
         &key,
         &restored,
         Some(archive.original_bytes),
@@ -592,19 +595,17 @@ written — the archive is corrupt. `harvest ledger rm {key} --archive-only` wil
 /// Already-harvested sessions are included: `show` on a session you have
 /// reviewed before is a legitimate thing to want, and `mark` operates on
 /// exactly those.
-async fn resolve_session(
-    dir: &Path,
-    registry: &dyn RegistryBackend,
+fn resolve_session(
+    scope: &harvest::SessionScope,
     prefix: &str,
     all_projects: bool,
 ) -> Result<engramdb::storage::transcripts::SessionSummary> {
-    let scope = harvest::session_scope(dir, registry).await?;
     let params = harvest::SelectParams {
         include_harvested: true,
         all_projects,
         ..Default::default()
     };
-    let sessions = harvest::select_sessions(&scope, dir, &params)?;
+    let sessions = harvest::select_sessions(scope, &scope.root_dir, &params)?;
 
     let mut matches: Vec<_> = sessions
         .into_iter()

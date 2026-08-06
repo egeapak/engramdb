@@ -384,7 +384,12 @@ offered again, and *must* be used even when a session yielded nothing —
 a zero-yield session leaves no other trace, so without a mark it is re-read
 on every future harvest. `reset` clears the record. The ledger lives in
 `.engramdb/state/harvested_sessions.json` under the root project, shared by
-all its worktrees.
+all its worktrees and by any sub-project linked to it with
+`engramdb projects link` — the same root the archives are keyed by, since
+those projects are offered each other's sessions and prune each other's
+archives. A ledger found at a sub-project's own path (written before it was
+linked) is merged into the root's the next time a harvest command runs there,
+and the old file is kept alongside as `harvested_sessions.json.adopted`.
 
 Each entry carries a **decision**: `harvested` (memories saved), `skipped`
 (reviewed and passed over), or `deferred` (postponed — deferred sessions keep
@@ -409,7 +414,10 @@ Real transcripts compress about 4.5x (less than one might assume — most of a
 transcript is high-entropy tool output), so a typical session lands around
 650 KB. `archive_retention_days` (365) and `archive_max_bytes` (2 GiB, with
 oldest-first eviction) bound the total; `harvest ledger prune` reclaims space
-on demand and, like `gc` and `compress`, is a dry run until `--apply`.
+on demand and, like `gc` and `compress`, is a dry run until `--apply`. These
+budgets are what expire an archive: the ledger's own entry-retention window
+never does, because an entry is the only route to the file it names, so a
+session whose archive is still held keeps its record however old it is.
 `harvest ledger rm` deletes one — it confirms first, since once Claude Code has pruned its own transcript the archive is the only remaining copy; `--force` skips the prompt and is **required** under `--format json`, which never prompts. `harvest ledger export` restores one, verifying it against the SHA-256
 recorded when it was written.
 

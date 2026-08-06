@@ -20,7 +20,10 @@
 //!
 //! Entries are keyed by session id and live under the **root** project, so a
 //! worktree's sessions and the main checkout's sessions share one ledger —
-//! matching the fact that they share one memory store.
+//! matching the fact that they share one memory store. Every function here
+//! takes the directory to use verbatim; resolving the root is the caller's
+//! job, and [`adopt_ledger`] is what folds a ledger an older version left at a
+//! non-root path into the root's.
 
 use crate::error::Result;
 use chrono::{DateTime, Duration, Utc};
@@ -31,6 +34,8 @@ use std::path::{Path, PathBuf};
 /// Entries older than this are pruned on write, bounding the file's growth
 /// on a long-lived project. Well past any window in which re-harvesting an
 /// old session would be useful.
+///
+/// Applies only to entries that hold no archive — see [`prune_stale`].
 const PRUNE_AFTER_DAYS: i64 = 365;
 
 /// What the user decided about a reviewed session.
@@ -305,14 +310,95 @@ pub fn clear_archive_refs(project_dir: &Path, session_ids: &[String]) -> Result<
     write_harvested(project_dir, &map)
 }
 
-/// Drop entries past the ledger's retention window.
+/// Drop entries past the ledger's retention window, **except** ones that still
+/// point at an archive.
 ///
-/// Archives are pruned independently, by their own age/size budget in
-/// `transcript_archive`, so an entry aging out here cannot strand a file
-/// permanently — the orphan is reclaimed by that pass.
+/// An archive is only reachable *through* its ledger entry: `harvest show`,
+/// `ledger export` and `ledger rm` all resolve a session id against this map
+/// first, so dropping an entry whose file is still on disk makes that file
+/// unreachable by every route while it keeps consuming the archive budget.
+/// The two windows are independent and users are explicitly told to set
+/// `archive_retention_days = 3650`, so "the archive pass will reclaim it"
+/// holds only when that window is the shorter of the two — which is exactly
+/// the configuration the docs steer people away from.
+///
+/// Exempting them does not unbound the file: `clear_archive_refs` runs on
+/// every eviction, so an entry loses its exemption the moment its archive
+/// goes, and the number of archives is itself bounded by
+/// `archive_max_bytes` / `archive_retention_days`.
 fn prune_stale(map: &mut HashMap<String, HarvestEntry>) {
     let cutoff = Utc::now() - Duration::days(PRUNE_AFTER_DAYS);
-    map.retain(|_, e| e.harvested_at > cutoff);
+    map.retain(|_, e| e.archive.is_some() || e.harvested_at > cutoff);
+}
+
+/// Fold a ledger left at `sub_dir` into the root project's ledger at
+/// `root_dir`, then move the old file aside.
+///
+/// Callers resolve the root themselves, and older versions did not: a project
+/// linked with `engramdb projects link` wrote its ledger under its own path
+/// while its archives already went to the root. Silently reading the root's
+/// ledger from then on would lose every review decision recorded before the
+/// fix — sessions re-offered, notes and memory attributions gone — so the old
+/// file is merged rather than abandoned.
+///
+/// Merging (not moving) because both files can hold entries for the same
+/// session: the SessionEnd hook has been writing archive references to the
+/// root's ledger all along, while the review decisions landed in the
+/// sub-project's. The old file is renamed rather than deleted — this runs
+/// unattended from the SessionEnd hook, and nothing here is worth destroying
+/// evidence over.
+pub fn adopt_ledger(sub_dir: &Path, root_dir: &Path) -> Result<()> {
+    if sub_dir == root_dir {
+        return Ok(());
+    }
+    let legacy_path = ledger_path(sub_dir);
+    if !legacy_path.exists() {
+        return Ok(());
+    }
+    // Reads as empty (and quarantines the file) if it is corrupt, in which
+    // case there is nothing to adopt and the rename below finds nothing.
+    let legacy = read_harvested(sub_dir);
+
+    if !legacy.is_empty() {
+        let _lock = lock_ledger(root_dir);
+        let mut map = read_harvested(root_dir);
+        for (id, entry) in legacy {
+            let merged = match map.get(&id) {
+                Some(existing) => merge_entries(existing, &entry),
+                None => entry,
+            };
+            map.insert(id, merged);
+        }
+        prune_stale(&mut map);
+        write_harvested(root_dir, &map)?;
+    }
+    let _ = std::fs::rename(&legacy_path, legacy_path.with_extension("json.adopted"));
+    Ok(())
+}
+
+/// Reconcile two records of the same session found in two ledgers.
+///
+/// A settled decision outranks a `Deferred` one regardless of timestamps: the
+/// SessionEnd hook writes a `Deferred` entry for every session it archives, so
+/// the root's copy is routinely *younger* than the review it must not
+/// overwrite. Beyond that the newer record wins, and an archive reference is
+/// kept from whichever side has one — the file it names is the same either
+/// way, since archives have always been keyed by the root project.
+fn merge_entries(root: &HarvestEntry, legacy: &HarvestEntry) -> HarvestEntry {
+    let prefer_legacy = match (root.is_settled(), legacy.is_settled()) {
+        (false, true) => true,
+        (true, false) => false,
+        _ => legacy.harvested_at > root.harvested_at,
+    };
+    let (base, other) = if prefer_legacy {
+        (legacy, root)
+    } else {
+        (root, legacy)
+    };
+    HarvestEntry {
+        archive: base.archive.clone().or_else(|| other.archive.clone()),
+        ..base.clone()
+    }
 }
 
 /// Forget a session's harvest record so it is offered again.
@@ -514,6 +600,120 @@ mod tests {
         assert!(
             !is_harvested(tmp.path(), "later"),
             "a deferred session must keep being offered"
+        );
+    }
+
+    #[test]
+    fn an_entry_still_holding_an_archive_outlives_the_age_window() {
+        // The entry is the only index into the archive file — `show`,
+        // `ledger export` and `ledger rm` all resolve through it — so aging it
+        // out makes the file unreachable by every route while it keeps
+        // consuming the archive budget. That is not hypothetical: the docs
+        // tell users to set `archive_retention_days = 3650`, ten times this
+        // window.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let long_ago = Utc::now() - Duration::days(PRUNE_AFTER_DAYS + 35);
+        let mut seeded = HashMap::new();
+        seeded.insert(
+            "archived".to_string(),
+            HarvestEntry {
+                harvested_at: long_ago,
+                memories_created: 1,
+                memory_ids: vec!["m1".into()],
+                decision: Some(HarvestDecision::Harvested),
+                note: None,
+                archive: Some(sample_archive()),
+            },
+        );
+        seeded.insert(
+            "no-archive".to_string(),
+            HarvestEntry {
+                harvested_at: long_ago,
+                memories_created: 0,
+                memory_ids: vec![],
+                decision: Some(HarvestDecision::Skipped),
+                note: None,
+                archive: None,
+            },
+        );
+        write_harvested(dir, &seeded).unwrap();
+
+        // Any write runs the prune pass; the SessionEnd hook's `set_archive`
+        // is the one that fires unattended on every session.
+        set_archive(dir, "fresh", sample_archive()).unwrap();
+
+        let after = read_harvested(dir);
+        let entry = after
+            .get("archived")
+            .expect("an entry pointing at a live archive was pruned, orphaning the file");
+        assert_eq!(
+            entry.memory_ids,
+            vec!["m1"],
+            "the review record must survive"
+        );
+        assert!(
+            !after.contains_key("no-archive"),
+            "the age bound must still apply to entries with no file behind them"
+        );
+    }
+
+    #[test]
+    fn adopting_a_sub_project_ledger_keeps_both_sides_and_moves_the_file_aside() {
+        // A project linked with `projects link` used to keep its own ledger
+        // while its archives went to the root. Reading the root's ledger from
+        // then on must not lose those decisions.
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("child");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+
+        mark_harvested(&sub, "only-sub", &[], HarvestDecision::Skipped, None).unwrap();
+        mark_harvested(&root, "only-root", &[], HarvestDecision::Skipped, None).unwrap();
+
+        adopt_ledger(&sub, &root).unwrap();
+
+        let merged = read_harvested(&root);
+        assert!(merged.contains_key("only-sub"), "sub-project record lost");
+        assert!(merged.contains_key("only-root"), "root record clobbered");
+        assert!(
+            !ledger_path(&sub).exists(),
+            "the adopted ledger must stop being written to"
+        );
+        assert!(
+            ledger_path(&sub).with_extension("json.adopted").exists(),
+            "the old file must be kept, not deleted"
+        );
+
+        // Idempotent: nothing left to adopt, and the root is untouched.
+        adopt_ledger(&sub, &root).unwrap();
+        assert_eq!(read_harvested(&root).len(), 2);
+    }
+
+    #[test]
+    fn adoption_does_not_let_a_hook_deferral_undo_a_review() {
+        // The SessionEnd hook writes a `Deferred` entry to the root for every
+        // session it archives, so the root's copy is routinely *newer* than
+        // the review recorded on the sub-project side. Timestamp alone would
+        // reopen a session the user already settled.
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("child");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+
+        mark_harvested(&sub, "s1", &["m1".into()], HarvestDecision::Harvested, None).unwrap();
+        set_archive(&root, "s1", sample_archive()).unwrap();
+
+        adopt_ledger(&sub, &root).unwrap();
+
+        let entry = &read_harvested(&root)["s1"];
+        assert_eq!(entry.decision(), HarvestDecision::Harvested);
+        assert_eq!(entry.memory_ids, vec!["m1"]);
+        assert!(
+            entry.archive.is_some(),
+            "the archive reference must survive the merge"
         );
     }
 

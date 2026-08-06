@@ -966,20 +966,27 @@ async fn archive_ending_session(
     };
 
     // Resolve the **root** project, exactly as every reader does
-    // (`commands::harvest::archive_project_id` → `session_scope`). Using the
-    // invoking directory's own id agrees only when `cli::run` already
-    // rewrote `dir` to the main worktree; for a project linked with
-    // `engramdb projects link` it does not, and the archive would land in a
-    // directory no `harvest ledger` command ever reads — invisible to
-    // export, and never bounded by the prune budget.
-    let own_id = engramdb::storage::project_id::compute_project_id(dir);
-    let project_id = match registry.load().await {
-        Ok(data) => engramdb::storage::resolve_root_project_id(&data, &own_id),
+    // (`harvest::session_scope`). Using the invoking directory's own id agrees
+    // only when `cli::run` already rewrote `dir` to the main worktree; for a
+    // project linked with `engramdb projects link` it does not, and the
+    // archive would land in a directory no `harvest ledger` command ever reads
+    // — invisible to export, and never bounded by the prune budget.
+    //
+    // The ledger has to come from the same resolution, not from `dir`: the
+    // prune below deletes the root's archives, so writing the eviction back to
+    // a sub-project's own ledger would leave the root advertising files this
+    // very call removed.
+    let (project_id, ledger_dir) = match engramdb::ops::harvest::session_scope(dir, registry).await
+    {
+        Ok(scope) => (scope.root_project_id, scope.root_dir),
         // Fail open, consistent with the rest of SessionEnd: an unreadable
         // registry must not cost the archive entirely.
         Err(e) => {
-            tracing::debug!("SessionEnd archive: registry unreadable, using own id: {e}");
-            own_id
+            tracing::debug!("SessionEnd archive: scope unresolved, using own id: {e}");
+            (
+                engramdb::storage::project_id::compute_project_id(dir),
+                dir.to_path_buf(),
+            )
         }
     };
     if !too_big {
@@ -990,7 +997,7 @@ async fn archive_ending_session(
         ) {
             Ok(archive) => {
                 if let Err(e) =
-                    engramdb::storage::harvest_state::set_archive(dir, session_id, archive)
+                    engramdb::storage::harvest_state::set_archive(&ledger_dir, session_id, archive)
                 {
                     tracing::debug!("SessionEnd archive: ledger update failed (non-fatal): {e}");
                 }
@@ -1011,7 +1018,7 @@ async fn archive_ending_session(
         // `harvest ledger show` offers an export that cannot succeed.
         Ok(outcome) => {
             if let Err(e) =
-                engramdb::storage::harvest_state::clear_archive_refs(dir, &outcome.removed)
+                engramdb::storage::harvest_state::clear_archive_refs(&ledger_dir, &outcome.removed)
             {
                 tracing::debug!(
                     "SessionEnd archive: clearing evicted refs failed (non-fatal): {e}"
