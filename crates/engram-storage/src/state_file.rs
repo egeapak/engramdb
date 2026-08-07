@@ -1,4 +1,4 @@
-//! Temp-then-rename writer shared by the small JSON files under a project's
+//! Writers shared by the small state files under a project's
 //! `.engramdb/state/` ([`crate::harvest_state`], [`crate::task_state`]).
 //!
 //! Both wrote through a *predictable* temp path (`<name>.json.tmp`) with a
@@ -13,10 +13,14 @@
 //! `O_NOFOLLOW` is the fix: the open fails outright rather than following.
 //! The `rename` needs no equivalent — it never dereferences its source, so
 //! once the temp file is known to be a real file the move is safe.
+//!
+//! [`append_state_file`] needs the same flag for a stronger reason: it opens
+//! the *live* path rather than a temp, so a symlink planted there is followed
+//! on every append, not just on the first write after a crash.
 
 use crate::error::{Result, StorageError};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Write `contents` to a `.json` file under a state dir, atomically.
 ///
@@ -25,10 +29,80 @@ use std::path::Path;
 /// up: silently unlinking whatever sits there is how a *legitimate* file gets
 /// destroyed, and advisory state is not worth that trade.
 pub(crate) fn write_state_json(path: &Path, contents: &str) -> Result<()> {
+    write_via_temp(path, path.with_extension("json.tmp"), contents)
+}
+
+/// Replace a state file of any extension, atomically.
+///
+/// Same discipline as [`write_state_json`], but the temp name is the file name
+/// with `.tmp` *appended* rather than the extension replaced: on
+/// `harvest_ledger.jsonl` the latter yields `harvest_ledger.tmp`, colliding
+/// with any sibling of another extension.
+pub(crate) fn write_state_file(path: &Path, contents: &str) -> Result<()> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    let tmp: PathBuf = path.with_file_name(name);
+    write_via_temp(path, tmp, contents)
+}
+
+/// Append to a state file, creating it if needed.
+///
+/// The write is a single `write_all` on a handle opened `O_APPEND`, which is
+/// what makes concurrent writers safe without a lock: the kernel places each
+/// record at the current end of file, so two processes appending at the same
+/// moment interleave records rather than overwrite each other. Callers must
+/// therefore hand over whole, newline-terminated records — a caller that
+/// appends half a line at a time gets the interleaving it asked for.
+///
+/// An unterminated final byte gets a newline first. A crash mid-append leaves
+/// one, and splicing the next record onto that fragment would make a torn line
+/// cost *two* records instead of one — turning the format's whole crash story
+/// ("a partial write costs the partial line") into a lie the very next time
+/// anything is written.
+pub(crate) fn append_state_file(path: &Path, contents: &str) -> Result<()> {
+    if contents.is_empty() {
+        return Ok(());
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("json.tmp");
+    // Named rather than inlined, for the same reason as `open_temp`: a bare
+    // ELOOP reads like a broken filesystem instead of a planted file.
+    let mut file = open_append(path).map_err(|e| {
+        StorageError::Validation(format!(
+            "could not append to {} ({e}); if that path is a symlink, remove it — \
+             state writes deliberately refuse to follow one",
+            path.display()
+        ))
+    })?;
+    if ends_mid_line(&mut file).unwrap_or(false) {
+        file.write_all(b"\n")?;
+    }
+    file.write_all(contents.as_bytes())?;
+    Ok(())
+}
+
+/// Is there a trailing fragment with no newline after it?
+///
+/// Reads through the same handle the append goes to; `O_APPEND` fixes the
+/// *write* offset at the end regardless of where the read cursor is left, so
+/// the seek here cannot misplace the record.
+fn ends_mid_line(file: &mut std::fs::File) -> std::io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(false);
+    }
+    file.seek(SeekFrom::Start(len - 1))?;
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last)?;
+    Ok(last[0] != b'\n')
+}
+
+fn write_via_temp(path: &Path, tmp: PathBuf, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     {
         // Named rather than inlined: `?` on the open would surface an attack
         // as a bare ELOOP ("Too many levels of symbolic links"), which reads
@@ -73,6 +147,28 @@ fn open_temp(tmp: &Path) -> std::io::Result<std::fs::File> {
         .open(tmp)
 }
 
+/// Same protections as [`open_temp`], on the live path.
+#[cfg(unix)]
+fn open_append(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_append(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .open(path)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -100,6 +196,54 @@ mod tests {
             "the refusal should name the cause: {err}"
         );
         assert!(!target.exists(), "the symlink was renamed over the target");
+    }
+
+    #[test]
+    fn appends_land_at_the_end_and_create_the_file() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("state").join("log.jsonl");
+        append_state_file(&target, "one\n").unwrap();
+        append_state_file(&target, "two\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "one\ntwo\n");
+    }
+
+    /// A crash leaves a fragment with no newline after it. Splicing the next
+    /// record onto it would make one torn write cost two records.
+    #[test]
+    fn an_append_after_a_torn_write_starts_its_own_line() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("log.jsonl");
+        std::fs::write(&target, "whole\ntor").unwrap();
+
+        append_state_file(&target, "next\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "whole\ntor\nnext\n"
+        );
+    }
+
+    /// An append opens the *live* path, so unlike the temp-then-rename writers
+    /// a symlink planted there is followed on every single write.
+    #[test]
+    fn a_symlinked_target_cannot_redirect_an_append() {
+        let tmp = TempDir::new().unwrap();
+        let victim = tmp.path().join("victim.txt");
+        std::fs::write(&victim, "do not touch").unwrap();
+
+        let target = tmp.path().join("state").join("log.jsonl");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&victim, &target).unwrap();
+
+        let err = append_state_file(&target, "line\n").unwrap_err();
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "do not touch",
+            "the append landed on the symlink's target"
+        );
+        assert!(
+            err.to_string().contains("symlink"),
+            "the refusal should name the cause: {err}"
+        );
     }
 
     #[test]

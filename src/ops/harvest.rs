@@ -1777,6 +1777,7 @@ mod tests {
                         memories_created: 0,
                         memory_ids: vec![],
                         decision: Some(harvest_state::HarvestDecision::Skipped),
+                        stage: harvest_state::HarvestStage::Collected,
                         note: None,
                         archive: None,
                     },
@@ -1826,6 +1827,7 @@ mod tests {
             memories_created: 0,
             memory_ids: vec![],
             decision: Some(decision),
+            stage: harvest_state::HarvestStage::Collected,
             note: None,
             archive: None,
         };

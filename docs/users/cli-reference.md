@@ -408,34 +408,56 @@ archive behind it the entry is removed outright, and the session is offered
 again only while Claude Code still holds the live transcript; the success
 message says which of the two happened. To delete an entry *and* its archive,
 use `harvest ledger rm`. The ledger lives in
-`.engramdb/state/harvested_sessions.json` under the root project, shared by
+`.engramdb/state/harvest_ledger.jsonl` under the root project, shared by
 all its worktrees and by any sub-project linked to it with
 `engramdb projects link` — the same root the archives are keyed by, since
 those projects are offered each other's sessions and prune each other's
 archives. A ledger found at a sub-project's own path (written before it was
-linked) is merged into the root's the next time a harvest command runs there,
-and the old file is kept alongside as `harvested_sessions.json.adopted`. Moving
-it aside is what commits the merge, so a sub-project directory that cannot be
-written to adopts nothing (with a warning naming the path) rather than
-re-merging the same entries on every command — which would undo a
+linked) is appended to the root's the next time a harvest command runs there,
+and the old file is kept alongside as `harvest_ledger.jsonl.adopted`. Moving
+it aside is what commits the adoption, so a sub-project directory that cannot
+be written to adopts nothing (with a warning naming the path) rather than
+re-appending the same entries on every command — which would undo a
 `harvest reset` each time.
 
-Entries are pruned on write once they are **365 days** old — a fixed window,
-with no config knob — but only ones that hold no archive; an entry naming an
-archived transcript is exempt however old it is, because it is the only route
-to that file. So a `skipped` session with no archive behind it is eventually
-forgotten, and is offered once more if Claude Code somehow still holds the
-live transcript. Archiving (on by default) is what makes a review permanent.
+**The ledger is an append-only log.** Every state change is one JSON line, and
+a line records only the fields that change — so the SessionEnd hook writing
+where a transcript ended up cannot disturb a decision you recorded, and vice
+versa, without either side reading the file first. Reading folds the lines
+together in timestamp order, last write wins. A partial line left by a crash
+costs that line and nothing else. The file is rewritten from scratch once it
+holds more than **four** lines per live entry, which is what drops entries that
+have been removed or aged out.
 
-Each entry carries a **decision**: `harvested` (memories saved), `skipped`
-(reviewed and passed over), `deferred` (a human looked at it and postponed the
-call — `--defer` records this), or `unreviewed` (nobody has looked at it yet).
-The last is written by the SessionEnd hook for every session it archives, so it
-is by far the most common; keeping it out of `deferred` is what makes a real
-deferral findable. Neither settles a session, so both keep appearing in
-`harvest list`. Ledgers written before this distinction existed record the
-hook's entries as `deferred` and are left as they are — this is a plain JSON
-file, not the versioned Lance table.
+Upgrading from an earlier version converts `harvested_sessions.json` the first
+time any harvest command runs, and keeps the original next to it as
+`harvested_sessions.json.migrated`. No review decision is lost; a record the
+converter cannot read is skipped with a warning naming the session, and the
+original file is your copy of it.
+
+Entries are dropped once they are **365 days** old — a fixed window, with no
+config knob — but only ones that hold no archive; an entry naming an archived
+transcript is exempt however old it is, because it is the only route to that
+file. So a `skipped` session with no archive behind it is eventually forgotten,
+and is offered once more if Claude Code somehow still holds the live
+transcript. Archiving (on by default) is what makes a review permanent.
+
+Each entry carries two independent fields. A **decision** — what you concluded:
+`harvested` (memories saved), `skipped` (reviewed and passed over), `deferred`
+(a human looked at it and postponed the call — `--defer` records this), or
+`unreviewed` (nobody has looked at it yet). The last is written for every
+session the SessionEnd hook collects, so it is by far the most common; keeping
+it out of `deferred` is what makes a real deferral findable. Neither settles a
+session, so both keep appearing in `harvest list`.
+
+And a **stage** — where the conversation's bytes are: `collected` (a transcript
+is reachable), `indexed` (a search row exists for it), or `compressed`. The two
+never move each other: a session can be `indexed` while `skipped`, or
+`compressed` while `deferred`. `harvest ledger list --stage <stage>` filters on
+it, alongside `--decision`. An entry that reaches `compressed` leaves the
+ledger, and until conversation search ships there is nothing behind it — so
+this version never writes that stage on its own, and says so loudly in the log
+if something else does.
 
 **Transcript archives.** With `[harvest] archive = true` (the default), the
 SessionEnd hook compresses each ending session's transcript so it can still

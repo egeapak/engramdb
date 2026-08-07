@@ -187,7 +187,7 @@ impl Corpus {
     fn ledger_file(&self, dir: &Path) -> PathBuf {
         dir.join(".engramdb")
             .join("state")
-            .join("harvested_sessions.json")
+            .join("harvest_ledger.jsonl")
     }
 
     fn stdout(&self, dir: &Path, args: &[&str]) -> String {
@@ -485,7 +485,7 @@ fn a_ledger_left_at_a_sub_project_path_is_adopted_by_the_root() {
     assert!(
         !c.ledger_file(&c.sibling).exists()
             && c.ledger_file(&c.sibling)
-                .with_extension("json.adopted")
+                .with_extension("jsonl.adopted")
                 .exists(),
         "the old ledger was not moved aside"
     );
@@ -502,12 +502,22 @@ fn an_archived_session_survives_the_ledger_age_sweep() {
     init_with_worktree(&c);
     c.session_end(&c.main, "aaaa1111-rich");
 
-    // Age the entry past the ledger's retention window.
+    // Age the entry past the ledger's retention window by back-dating every
+    // line written about it.
     let path = c.ledger_file(&c.main);
     let raw = std::fs::read_to_string(&path).unwrap();
-    let mut ledger: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    ledger["aaaa1111-rich"]["harvested_at"] = serde_json::json!("2020-01-01T00:00:00Z");
-    std::fs::write(&path, serde_json::to_string_pretty(&ledger).unwrap()).unwrap();
+    let aged: String = raw
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|line| {
+            let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+            if record["session_id"] == serde_json::json!("aaaa1111-rich") {
+                record["at"] = serde_json::json!("2020-01-01T00:00:00Z");
+            }
+            format!("{}\n", serde_json::to_string(&record).unwrap())
+        })
+        .collect();
+    std::fs::write(&path, aged).unwrap();
 
     // Any later session end runs the sweep — unattended, on every session.
     c.session_end(&c.main, "bbbb2222-empty");

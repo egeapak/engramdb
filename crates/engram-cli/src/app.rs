@@ -209,6 +209,10 @@ pub enum LedgerCommand {
         #[arg(long, value_name = "DECISION")]
         decision: Option<String>,
 
+        /// Only entries at this stage (collected, indexed, compressed)
+        #[arg(long, value_name = "STAGE")]
+        stage: Option<String>,
+
         /// Only entries that still have an archived transcript
         #[arg(long)]
         with_archive: bool,

@@ -3342,7 +3342,7 @@ impl EngramDbServer {
 
     #[tool(
         name = "harvest_ledger",
-        description = "Read the harvest ledger: which past sessions were reviewed, what was decided, and whether an archived transcript is still held for each. Decisions are harvested, skipped, deferred (a deliberate postponement), or unreviewed (the SessionEnd hook archived the session and nobody has looked at it yet)."
+        description = "Read the harvest ledger: which past sessions were reviewed, what was decided, and whether an archived transcript is still held for each. Decisions are harvested, skipped, deferred (a deliberate postponement), or unreviewed (the SessionEnd hook archived the session and nobody has looked at it yet). Each entry also carries an independent stage saying where its bytes are: collected, indexed, or compressed."
     )]
     async fn harvest_ledger(
         &self,
@@ -3377,6 +3377,7 @@ impl EngramDbServer {
                 serde_json::json!({
                     "session_id": id,
                     "decision": e.decision(),
+                    "stage": e.stage,
                     "harvested_at": e.harvested_at,
                     "memories_created": e.memories_created,
                     "memory_ids": e.memory_ids,

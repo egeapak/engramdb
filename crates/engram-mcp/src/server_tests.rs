@@ -4967,7 +4967,7 @@ async fn harvest_mark_is_blocked_by_the_cross_project_write_gate() {
     assert!(
         !dir_b
             .path()
-            .join(".engramdb/state/harvested_sessions.json")
+            .join(".engramdb/state/harvest_ledger.jsonl")
             .exists(),
         "a blocked mark still wrote to the target project's ledger"
     );
@@ -4996,7 +4996,7 @@ async fn harvest_mark_cross_project_is_gated_not_blocked() {
     assert_eq!(out["decision"], "skipped", "{out}");
     assert!(dir_b
         .path()
-        .join(".engramdb/state/harvested_sessions.json")
+        .join(".engramdb/state/harvest_ledger.jsonl")
         .exists());
 }
 
@@ -5272,7 +5272,7 @@ async fn harvest_tools_reject_memory_store_targets() {
     // The orphan ledger a store target would otherwise create.
     assert!(!engramdb::storage::paths::global_store_dir()
         .unwrap()
-        .join(".engramdb/state/harvested_sessions.json")
+        .join(".engramdb/state/harvest_ledger.jsonl")
         .exists());
 }
 
@@ -5433,7 +5433,7 @@ async fn setup_linked_child() -> (ScopedClaudeHome, TempDir, TempDir, EngramDbSe
 }
 
 fn ledger_file(dir: &std::path::Path) -> std::path::PathBuf {
-    dir.join(".engramdb/state/harvested_sessions.json")
+    dir.join(".engramdb/state/harvest_ledger.jsonl")
 }
 
 #[tokio::test]

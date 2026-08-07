@@ -236,6 +236,7 @@ fn entry_json(session_id: &str, entry: &HarvestEntry) -> serde_json::Value {
     serde_json::json!({
         "session_id": session_id,
         "decision": entry.decision(),
+        "stage": entry.stage,
         "harvested_at": entry.harvested_at,
         "memories_created": entry.memories_created,
         "memory_ids": entry.memory_ids,
@@ -269,13 +270,16 @@ async fn run_ledger(
     match command {
         LedgerCommand::List {
             decision,
+            stage,
             with_archive,
         } => {
             let wanted = decision.as_deref().map(parse_decision).transpose()?;
+            let wanted_stage = stage.as_deref().map(parse_stage).transpose()?;
             let ledger = harvest_state::read_harvested(dir);
             let mut rows: Vec<(String, HarvestEntry)> = ledger
                 .into_iter()
                 .filter(|(_, e)| wanted.is_none_or(|w| e.decision() == w))
+                .filter(|(_, e)| wanted_stage.is_none_or(|w| e.stage == w))
                 .filter(|(_, e)| !with_archive || e.archive.is_some())
                 .collect();
             rows.sort_by_key(|r| std::cmp::Reverse(r.1.harvested_at));
@@ -293,9 +297,10 @@ async fn run_ledger(
                         .map(|a| format!("  archive {}", human_bytes(a.bytes)))
                         .unwrap_or_default();
                     println!(
-                        "{}  {:?}  {}  {} memor{}{}",
+                        "{}  {:?}/{:?}  {}  {} memor{}{}",
                         crate::output::short_id(id),
                         e.decision(),
+                        e.stage,
                         e.harvested_at.format("%Y-%m-%d %H:%M"),
                         e.memories_created,
                         if e.memories_created == 1 { "y" } else { "ies" },
@@ -311,9 +316,9 @@ async fn run_ledger(
         LedgerCommand::Show { session_id } => {
             let key = resolve_ledger_key(dir, &session_id)?;
             let ledger = harvest_state::read_harvested(dir);
-            // `resolve_ledger_key` read the ledger separately and unlocked, so
-            // a concurrent SessionEnd hook or `harvest reset` can drop the key
-            // in between. Indexing a `HashMap` would panic on that race.
+            // `resolve_ledger_key` read the ledger separately, so a concurrent
+            // SessionEnd hook or `harvest reset` can drop the key in between.
+            // Indexing a `HashMap` would panic on that race.
             let entry = ledger
                 .get(&key)
                 .ok_or_else(|| anyhow::anyhow!("No harvest record for session {key}"))?;
@@ -325,6 +330,7 @@ async fn run_ledger(
             } else {
                 println!("Session:   {key}");
                 println!("Decision:  {:?}", entry.decision());
+                println!("Stage:     {:?}", entry.stage);
                 println!(
                     "Recorded:  {}",
                     entry.harvested_at.format("%Y-%m-%d %H:%M UTC")
@@ -531,6 +537,16 @@ fn parse_decision(value: &str) -> Result<HarvestDecision> {
         other => bail!(
             "unknown decision '{other}' (expected harvested, skipped, deferred, or unreviewed)"
         ),
+    }
+}
+
+fn parse_stage(value: &str) -> Result<harvest_state::HarvestStage> {
+    use harvest_state::HarvestStage;
+    match value.to_ascii_lowercase().as_str() {
+        "collected" => Ok(HarvestStage::Collected),
+        "indexed" => Ok(HarvestStage::Indexed),
+        "compressed" => Ok(HarvestStage::Compressed),
+        other => bail!("unknown stage '{other}' (expected collected, indexed, or compressed)"),
     }
 }
 
