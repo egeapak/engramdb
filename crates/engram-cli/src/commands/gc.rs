@@ -106,9 +106,19 @@ pub async fn run_gc(
             "Found {} memories eligible for removal (dry run):",
             result.count
         ));
+        // One batched load, matching the JSON branch above (finding #5): a
+        // dry run lists every candidate, and each `get` is a full directory
+        // scan, so the pretty branch was the one still paying O(N^2).
+        let removed_refs: Vec<&str> = result.removed.iter().map(String::as_str).collect();
+        let loaded: std::collections::HashMap<String, engramdb::types::Memory> = store
+            .get_batch(&removed_refs)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         for id in &result.removed {
             let id_short = short_id(id);
-            match store.get(id).await {
+            match loaded.get(id).ok_or(()) {
                 Ok(memory) => {
                     println!(
                         "  {} {:8}  {} (criticality: {:.2})",
@@ -118,7 +128,7 @@ pub async fn run_gc(
                         memory.criticality
                     );
                 }
-                Err(_) => {
+                Err(()) => {
                     println!("  {}", id_short);
                 }
             }

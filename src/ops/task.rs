@@ -124,6 +124,7 @@ pub async fn task_complete(
     let now = chrono::Utc::now();
 
     let mut result = TaskCompleteResult::default();
+    let mut to_demote: Vec<String> = Vec::new();
     for (id, memory) in &loaded {
         if memory.is_invalidated_at(now) {
             continue;
@@ -146,20 +147,23 @@ pub async fn task_complete(
                     result.kept_custom_decay.push(id.clone());
                     continue;
                 }
-                let demoted = store
-                    .update_with(id, |m| {
-                        m.decay = Some(demotion_decay());
-                        Ok(())
-                    })
-                    .await;
-                match demoted {
-                    Ok(_) => result.demoted.push(id.clone()),
-                    Err(e) => {
-                        tracing::warn!(memory_id = %id, "task_complete demotion failed: {e}");
-                    }
-                }
+                to_demote.push(id.clone());
             }
         }
+    }
+
+    // One lock, one batched read, one index upsert and one manifest refresh
+    // for every demotion, instead of all of that per memory. `update_with` in
+    // a loop measured 28 ms/memory at n=16 rising to 60 ms/memory at n=128.
+    let (demoted, failures) = store
+        .update_batch_with(&to_demote, |m| {
+            m.decay = Some(demotion_decay());
+            Ok(())
+        })
+        .await?;
+    result.demoted.extend(demoted);
+    for (id, e) in failures {
+        tracing::warn!(memory_id = %id, "task_complete demotion failed: {e}");
     }
 
     Ok(result)
