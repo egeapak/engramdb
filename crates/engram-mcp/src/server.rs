@@ -3042,7 +3042,7 @@ impl EngramDbServer {
 
     #[tool(
         name = "harvest_list",
-        description = "List past Claude Code sessions that may hold knowledge worth remembering. Covers this project and its git worktrees. Sessions already reviewed are hidden unless include_harvested is set. Use before harvest_show to pick which sessions to digest."
+        description = "List past Claude Code sessions that may hold knowledge worth remembering. Covers the root of this project's hierarchy and everything registered under it — from a git worktree that includes the main checkout and its sibling worktrees, plus any linked sub-project. Sessions already reviewed are hidden unless include_harvested is set. Lists live transcripts only: Claude Code prunes its own, so a session missing here may still be archived — harvest_ledger shows which ones are. Use before harvest_show to pick which sessions to digest."
     )]
     async fn harvest_list(
         &self,
@@ -3451,8 +3451,11 @@ impl EngramDbServer {
             0 => Err(error_response(
                 ErrorCode::ValidationError,
                 &format!(
-                    "No session matching '{prefix}' in this project or its sub-projects. \
-Call harvest_list to see what is available, or set all_projects."
+                    "No session matching '{prefix}' in this project's scope — the root of \
+its hierarchy plus every registered worktree and linked sub-project. Call harvest_list to \
+see what is available, or set all_projects. If Claude Code has already pruned the \
+transcript the session is gone from that list but may still be archived: harvest_ledger \
+finds it and harvest_show digests it straight from the archive."
                 ),
             )),
             1 => Ok(matches.remove(0)),

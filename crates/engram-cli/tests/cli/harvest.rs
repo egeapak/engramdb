@@ -1121,4 +1121,29 @@ fn unknown_session_is_a_clear_error() {
         err.contains("No session matching"),
         "unhelpful error: {err}"
     );
+    // A pruned session is the common reason a prefix stops resolving, and the
+    // archive is the only thing that still answers it — so the error has to
+    // name that route, not just `harvest list` and `--all-projects`.
+    assert!(
+        err.contains("harvest ledger list"),
+        "the archive recovery route must be named: {err}"
+    );
+}
+
+#[test]
+fn an_empty_listing_names_the_archive_route() {
+    // `harvest list` reads live transcripts only. In a scope whose sessions
+    // Claude Code has already pruned, "no unharvested sessions" is exactly
+    // what a full archive looks like.
+    let c = build_corpus();
+    let empty = c._tmp.path().join("no-sessions");
+    std::fs::create_dir_all(&empty).unwrap();
+    c.engramdb(&empty, &["init"]).assert().success();
+
+    let out = c.stdout(&empty, &["harvest", "list"]);
+    assert!(out.contains("No unharvested sessions"), "{out}");
+    assert!(
+        out.contains("harvest ledger list"),
+        "an empty listing must point at the archive: {out}"
+    );
 }

@@ -1603,16 +1603,23 @@ pub struct SecurityConfig {
     /// project than the session's own. Default `true` (preserves historical
     /// behavior — cross-project writes allowed). When `false`, MCP mutating
     /// tools (`create`, `update`, `delete`, `challenge`, `resolve`,
-    /// `compress_apply`, `gc`, `reindex`) are rejected when their `project`
-    /// override resolves to a project id other than the session's own. The
+    /// `compress_apply`, `gc`, `reindex`, `harvest_mark`) are rejected when
+    /// their `project` override resolves to a project id other than the
+    /// session's own. `harvest_mark` needs
+    /// [`Self::allow_all_projects_harvest`] as well, for the reason recorded
+    /// there. The
     /// session's own project (`project` omitted) and the shared global store
     /// (`project = "global"`) are always allowed.
     #[serde(default = "default_allow_cross_project_writes")]
     pub allow_cross_project_writes: bool,
 
-    /// Whether the **MCP** harvest tools may set `all_projects`, which reads
-    /// every Claude Code conversation on the machine rather than this
-    /// project's. Default `false`.
+    /// Whether the **MCP** harvest tools may read transcripts beyond the
+    /// session's own project. Default `false`.
+    ///
+    /// Two things, not one, because both widen the same read: setting
+    /// `all_projects` (every Claude Code conversation on the machine) *and*
+    /// naming a different `project` (that one project's raw conversations).
+    /// Cross-project *memory* reads stay ungated — memories are curated.
     ///
     /// A read, so the write gate above does not cover it — and unlike every
     /// other cross-project read, what comes back is raw conversation rather

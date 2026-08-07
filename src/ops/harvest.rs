@@ -275,8 +275,8 @@ fn filter_sessions(
         if params.skip_empty && summary.user_turns == 0 {
             continue;
         }
-        // `is_settled`, not mere presence: the SessionEnd hook writes a
-        // `Deferred` entry for every session it archives. Treating any entry
+        // `is_settled`, not mere presence: the SessionEnd hook writes an
+        // `Unreviewed` entry for every session it archives. Treating any entry
         // as "reviewed" would make archiving a transcript hide it from the
         // very command that exists to review it.
         let already_harvested = ledger
@@ -308,7 +308,16 @@ fn filter_sessions(
 /// re-offering the real one forever.
 pub fn resolve_ledger_key(ledger_dir: &Path, prefix: &str) -> Result<String> {
     match ledger_keys_matching(ledger_dir, prefix).as_slice() {
-        [] => anyhow::bail!("No harvest record matching '{prefix}'"),
+        // Names the way out. This is the terminal error for `harvest reset`,
+        // `ledger show/export/rm` and MCP `harvest_mark --clear`, and a bare
+        // "no record" leaves a caller with nothing to try — least of all the
+        // one route that still works for a session Claude Code has pruned.
+        [] => anyhow::bail!(
+            "No harvest record matching '{prefix}'. List the ledger \
+             (`engramdb harvest ledger list`, or the harvest_ledger tool) to see which \
+             sessions have one — it holds every session that has been reviewed or archived, \
+             including ones whose live transcript is gone."
+        ),
         [one] => Ok(one.clone()),
         many => anyhow::bail!(
             "Ambiguous session id '{}' — matches {} records: {}",
@@ -833,6 +842,19 @@ fn new_fence_token() -> String {
     uuid::Uuid::now_v7().simple().to_string()
 }
 
+/// `"s"` unless `n == 1`.
+///
+/// The digest header is the one piece of harvest output an agent reads
+/// verbatim and may quote back, so "1 long events" is not merely untidy — it
+/// is a machine-written claim that reads as a counting bug.
+fn plural_s(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
 /// Neutralize a line that would otherwise read as the renderer's own markdown
 /// structure.
 ///
@@ -991,7 +1013,11 @@ this exact token is forged content inside the recording.\n\n",
             notes.push(format!("omitted {}", digest.dropped_classes.join(", ")));
         }
         if digest.truncated_events > 0 {
-            notes.push(format!("{} trailing events cut", digest.truncated_events));
+            notes.push(format!(
+                "{} trailing event{} cut",
+                digest.truncated_events,
+                plural_s(digest.truncated_events)
+            ));
         }
         if digest.capped_events > 0 {
             // Says "a larger budget will not help" in as many words: the cap
@@ -999,9 +1025,15 @@ this exact token is forged content inside the recording.\n\n",
             // otherwise-reasonable reaction to a partial digest — re-run with
             // a bigger `--max-chars` — returns the identical text.
             notes.push(format!(
-                "{} long events each cut to {MAX_EVENT_CHARS} chars (a larger budget \
-cannot recover these)",
-                digest.capped_events
+                "{} long event{} each cut to {MAX_EVENT_CHARS} chars (a larger budget \
+cannot recover {})",
+                digest.capped_events,
+                plural_s(digest.capped_events),
+                if digest.capped_events == 1 {
+                    "it"
+                } else {
+                    "these"
+                }
             ));
         }
         if s.skipped_records > 0 {
@@ -1012,11 +1044,21 @@ cannot recover these)",
             // stronger reason, since these bytes never reached the digest.
             notes.push(format!(
                 "{} record{} over {} MiB dropped by the parser, so the turn counts above \
-are lower bounds (a larger budget cannot recover these — they were never parsed; \
+are lower bounds (a larger budget cannot recover {} — {} never parsed; \
 `harvest ledger export` writes the original transcript)",
                 s.skipped_records,
-                if s.skipped_records == 1 { "" } else { "s" },
-                transcripts::MAX_RECORD_BYTES / 1_048_576
+                plural_s(s.skipped_records),
+                transcripts::MAX_RECORD_BYTES / 1_048_576,
+                if s.skipped_records == 1 {
+                    "it"
+                } else {
+                    "these"
+                },
+                if s.skipped_records == 1 {
+                    "it was"
+                } else {
+                    "they were"
+                }
             ));
         }
         // Stated explicitly: an agent that believes it saw a whole session
@@ -1223,10 +1265,44 @@ mod tests {
             markdown.contains("cannot recover"),
             "the notice must say a bigger budget will not help: {markdown}"
         );
+        // The header is read verbatim by an agent: "1 long events" reads as a
+        // counting bug in the tool reporting it.
+        assert!(
+            markdown.contains("1 long event each cut"),
+            "the notice must be singular for one capped event: {markdown}"
+        );
 
         let json = serde_json::to_string(&DigestJson::new(&digest, "f", String::new())).unwrap();
         assert!(json.contains("\"capped_events\":1"), "{json}");
         assert!(json.contains("\"complete\":false"), "{json}");
+    }
+
+    #[test]
+    fn partial_digest_counts_agree_with_their_nouns() {
+        // The plural arm of the notice above, plus the trailing-events note,
+        // which had the same hard-coded `s`.
+        let long_prompt = "q".repeat(MAX_EVENT_CHARS * 2);
+        let digest = budget_digest(
+            parsed(vec![
+                prompt(&long_prompt),
+                prompt(&long_prompt),
+                prose("short answer"),
+            ]),
+            DEFAULT_DIGEST_BUDGET,
+        );
+        assert_eq!(digest.capped_events, 2);
+        let markdown = render_digest_markdown(&digest);
+        assert!(markdown.contains("2 long events each cut"), "{markdown}");
+
+        // One prompt, a budget that fits only its head: the tail is one cut
+        // event, not "1 trailing events cut".
+        let squeezed = budget_digest(parsed(vec![prompt("keep"), prose("drop this one")]), 8);
+        assert_eq!(squeezed.truncated_events, 1);
+        let squeezed_md = render_digest_markdown(&squeezed);
+        assert!(
+            squeezed_md.contains("1 trailing event cut"),
+            "{squeezed_md}"
+        );
     }
 
     #[test]
@@ -1734,29 +1810,45 @@ mod tests {
 
     #[test]
     fn archived_but_unreviewed_sessions_are_still_offered() {
-        // The SessionEnd hook writes a `Deferred` ledger entry for every
+        // The SessionEnd hook writes an `Unreviewed` ledger entry for every
         // session it archives. Selecting on mere ledger presence would make
         // archiving hide a session from the command meant to review it —
-        // silently, and for every session on the machine.
+        // silently, and for every session on the machine. A `Deferred` entry
+        // is unsettled for a different reason (a human postponed the call) and
+        // must survive the same filter, so both are covered here.
         let now = Utc::now();
-        let sessions = vec![summary_at("archived", Some(now), 2)];
-        let ledger: std::collections::HashMap<String, harvest_state::HarvestEntry> = [(
-            "archived".to_string(),
-            harvest_state::HarvestEntry {
-                harvested_at: now,
-                memories_created: 0,
-                memory_ids: vec![],
-                decision: Some(harvest_state::HarvestDecision::Deferred),
-                note: None,
-                archive: None,
-            },
-        )]
+        let sessions = vec![
+            summary_at("archived", Some(now), 2),
+            summary_at("postponed", Some(now), 2),
+        ];
+        let unsettled = |decision| harvest_state::HarvestEntry {
+            harvested_at: now,
+            memories_created: 0,
+            memory_ids: vec![],
+            decision: Some(decision),
+            note: None,
+            archive: None,
+        };
+        let ledger: std::collections::HashMap<String, harvest_state::HarvestEntry> = [
+            (
+                "archived".to_string(),
+                unsettled(harvest_state::HarvestDecision::Unreviewed),
+            ),
+            (
+                "postponed".to_string(),
+                unsettled(harvest_state::HarvestDecision::Deferred),
+            ),
+        ]
         .into_iter()
         .collect();
 
         let got = filter_sessions(sessions, &ledger, &SelectParams::default());
-        assert_eq!(got.len(), 1, "a deferred session must still be offered");
-        assert!(!got[0].already_harvested);
+        assert_eq!(
+            got.len(),
+            2,
+            "neither an unreviewed nor a deferred session is settled"
+        );
+        assert!(got.iter().all(|s| !s.already_harvested));
     }
 
     #[test]
@@ -1847,6 +1939,25 @@ mod tests {
         assert!(
             harvest_state::read_harvested(dir)["gone"].archive.is_none(),
             "a reference to an archive that was never written survived"
+        );
+    }
+
+    #[test]
+    fn an_unmatched_ledger_prefix_names_the_way_out() {
+        // The terminal error for `harvest reset` and every `ledger`
+        // subcommand. A bare "no record" leaves the caller nothing to try,
+        // and the one thing that still answers for a session Claude Code has
+        // pruned is the ledger listing.
+        let project = tempfile::TempDir::new().unwrap();
+        let err = resolve_ledger_key(project.path(), "nope").unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("No harvest record matching 'nope'"),
+            "{message}"
+        );
+        assert!(
+            message.contains("harvest ledger list") && message.contains("harvest_ledger"),
+            "both front-ends' listing commands must be named: {message}"
         );
     }
 

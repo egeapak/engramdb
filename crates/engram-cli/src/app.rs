@@ -964,9 +964,11 @@ pub enum Command {
     /// Provides the raw material for the `/engram:harvest` slash command:
     /// `list` shows which sessions are in scope, `show` prints a budgeted
     /// digest of one, and `mark` records that a session has been reviewed so
-    /// it is not offered again. Scope defaults to this project plus its
-    /// registered sub-projects (git worktrees), which file their transcripts
-    /// under their own paths.
+    /// it is not offered again. Scope defaults to the root of this project's
+    /// hierarchy plus every project registered under it — so from a git
+    /// worktree that is the main checkout and its sibling worktrees too, since
+    /// they share one memory store while filing transcripts under their own
+    /// paths.
     Harvest {
         #[command(subcommand)]
         command: HarvestCommand,

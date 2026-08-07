@@ -65,13 +65,16 @@ and it can be disabled with `enabled = false` under `[daemon]` in
 - **PreToolUse (Read/Write/Edit)** — surfaces relevant memories as context when the agent touches files
 - **UserPromptSubmit** — surfaces prompt-relevant memories, inferring your situation (debugging vs. design) to reweight what appears
 - **PostToolUse (Write/Edit/MultiEdit)** — warns when an edit touches a path some memory declared as its invalidation trigger
-- **SessionEnd** — housekeeping: clears the session's task mapping (and optionally demotes task-scoped memories), and archives a compressed copy of the session transcript so it can still be read after Claude Code prunes its own
+- **SessionEnd** — housekeeping: clears the session's task mapping (and optionally demotes task-scoped memories), and archives a compressed copy of the session transcript so it can still be read after Claude Code prunes its own. Like the other hooks it does nothing at all in a directory where EngramDB was never initialized — the plugin registers hooks machine-wide, and a project with no store gets no archive
 
 > **What the transcript archive stores.** Claude Code prunes its own
 > transcripts, so a session becomes unharvestable once its file is gone.
 > SessionEnd therefore keeps a zstd-compressed copy at
-> `<engramdb data dir>/projects/<project-id>/transcripts/` — deliberately
+> `<engramdb data dir>/projects/<root-project-id>/transcripts/` — deliberately
 > **outside** your repository, never under `.engramdb/`, which gets committed.
+> The id is the **root** of the project's hierarchy, so a git worktree's
+> archives land beside the main checkout's rather than in a directory of
+> their own.
 >
 > It is a verbatim copy of the whole conversation: your prompts, the
 > assistant's replies, and full tool output — in practice that includes
@@ -92,8 +95,9 @@ and it can be disabled with `enabled = false` under `[daemon]` in
   durable project / environment / preference learnings.
 - **`/engram:harvest`** — mine sessions that are already *over*. Reads past
   transcripts, proposes what is worth remembering, lists every candidate for
-  your approval, and saves only what you accept. Covers this project and its
-  worktrees by default.
+  your approval, and saves only what you accept. Covers the root of this
+  project's hierarchy and everything registered under it by default — from a
+  worktree, that includes the main checkout and its siblings.
 
 Use `harvest` to backfill a project whose earlier sessions were never
 captured; use `reflect` at the end of the session you are in.

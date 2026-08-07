@@ -14,11 +14,13 @@ Arguments (all optional): $ARGUMENTS
 
 ## Scope
 
-Default scope is **this project plus its registered sub-projects** — git
-worktrees file their transcripts under their own paths but share this
-project's memory store, so they are harvested together. `engramdb harvest`
-resolves that automatically; pass `--all-projects` only if the user asks for
-machine-wide history.
+Default scope is **the root of this project's hierarchy plus everything
+registered under it** — git worktrees and linked sub-projects file their
+transcripts under their own paths but share one memory store, so they are
+harvested together. Note this resolves *upward first*: run from a worktree,
+the scope still includes the main checkout and its sibling worktrees.
+`engramdb harvest` resolves that automatically; pass `--all-projects` only if
+the user asks for machine-wide history.
 
 ## Steps
 
@@ -76,7 +78,11 @@ what you can do about it differs by cause:
 - `N long events each cut to 1500 chars` — a per-event ceiling, applied before
   the budget is consulted. **A larger `--max-chars` returns the identical
   text.** Treat those turns as excerpts: if what you need is inside one,
-  `harvest ledger export <id>` writes the full transcript to a file.
+  `harvest ledger export <id>` writes the full transcript to a file — but only
+  when the session was archived (`[harvest] archive`, on by default, and only
+  for sessions that ended after it was enabled). It fails with a plain message
+  when no archive is held; `harvest ledger list --with-archive` says in advance
+  which sessions have one.
 
 **When there are more than 3 sessions**, dispatch one subagent per session
 rather than reading them all yourself — the digests are large and would crowd
@@ -160,6 +166,8 @@ archived it is still readable: `engramdb harvest ledger list` shows what is
 held, and `engramdb harvest show <session-id> --format pretty` digests it straight from the
 archive. `engramdb harvest ledger export <session-id>` writes the full
 original to a file — useful when a memory is later challenged and you need the
-conversation it came from.
+conversation it came from. Both depend on an archive existing: a session that
+ended before archiving was enabled has none, and export says so rather than
+producing an empty file.
 
 Finally, report what was saved and what was skipped.

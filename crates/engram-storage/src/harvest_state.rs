@@ -264,7 +264,7 @@ pub fn mark_harvested(
     Ok(entry)
 }
 
-/// Attach an archive to a session's entry, creating a `Deferred` entry when
+/// Attach an archive to a session's entry, creating an `Unreviewed` entry when
 /// the session has not been reviewed yet.
 ///
 /// Symmetric to [`mark_harvested`]: an existing decision is preserved, so
@@ -863,9 +863,9 @@ mod tests {
     }
 
     #[test]
-    fn adoption_does_not_let_a_hook_deferral_undo_a_review() {
-        // The SessionEnd hook writes a `Deferred` entry to the root for every
-        // session it archives, so the root's copy is routinely *newer* than
+    fn adoption_does_not_let_a_hook_archive_undo_a_review() {
+        // The SessionEnd hook writes an `Unreviewed` entry to the root for
+        // every session it archives, so the root's copy is routinely *newer* than
         // the review recorded on the sub-project side. Timestamp alone would
         // reopen a session the user already settled.
         let tmp = TempDir::new().unwrap();

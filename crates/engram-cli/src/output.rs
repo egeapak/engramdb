@@ -1047,7 +1047,12 @@ impl OutputFormatter {
             for path in scope_paths {
                 println!("  {}", path.display());
             }
+            // Only live transcripts are listed, so "nothing found" is also
+            // what a scope full of sessions Claude Code has already pruned
+            // looks like — and those are exactly the ones the archive exists
+            // for. Naming the ledger route here is what makes them findable.
             println!("\nUse --include-harvested to re-review sessions, or --all-projects to widen the search.");
+            println!("This lists live transcripts only. Claude Code prunes its own, so for older sessions try `engramdb harvest ledger list` — an archived one is still readable with `engramdb harvest show`.");
             return;
         }
 

@@ -50,21 +50,7 @@ pub async fn run_harvest(
             };
             let sessions = harvest::select_sessions(&scope, ledger_dir, &params)?;
 
-            let output: Vec<HarvestSessionOutput> = sessions
-                .iter()
-                .map(|s| HarvestSessionOutput {
-                    session_id: s.summary.session_id.clone(),
-                    cwd: s.summary.cwd.clone(),
-                    git_branch: s.summary.git_branch.clone(),
-                    started_at: s.summary.started_at,
-                    ended_at: s.summary.ended_at,
-                    user_turns: s.summary.user_turns,
-                    assistant_turns: s.summary.assistant_turns,
-                    bytes: s.summary.bytes,
-                    first_prompt: s.summary.first_prompt.clone(),
-                    already_harvested: s.already_harvested,
-                })
-                .collect();
+            let output: Vec<HarvestSessionOutput> = sessions.iter().map(harvest_row).collect();
             formatter.print_harvest_sessions(&output, &scope.paths);
         }
 
@@ -166,6 +152,36 @@ pub async fn run_harvest(
         }
     }
     Ok(())
+}
+
+/// One `harvest list` row, with every transcript-derived string sanitized.
+///
+/// Sanitizing here rather than in the pretty renderer is deliberate: these
+/// three fields are bytes another program wrote and third parties fed, and
+/// `--format json` used to emit them verbatim. `serde_json` escapes C0
+/// controls, so the terminal-rewriting characters the pretty path guards
+/// against were covered by accident — but bidi overrides, zero-width joiners
+/// and the rest of the invisible set are ordinary Unicode to a JSON encoder
+/// and passed straight through, into whatever renders the JSON next. The MCP
+/// listing has always sanitized the same three fields; this is the CLI
+/// catching up.
+fn harvest_row(s: &harvest::SelectedSession) -> HarvestSessionOutput {
+    let clean = |v: &Option<String>| {
+        v.as_deref()
+            .map(|t| transcripts::sanitize_one_line(t).into_owned())
+    };
+    HarvestSessionOutput {
+        session_id: s.summary.session_id.clone(),
+        cwd: clean(&s.summary.cwd),
+        git_branch: clean(&s.summary.git_branch),
+        started_at: s.summary.started_at,
+        ended_at: s.summary.ended_at,
+        user_turns: s.summary.user_turns,
+        assistant_turns: s.summary.assistant_turns,
+        bytes: s.summary.bytes,
+        first_prompt: clean(&s.summary.first_prompt),
+        already_harvested: s.already_harvested,
+    }
 }
 
 /// Human-readable one-liner for a recorded decision.
@@ -580,8 +596,12 @@ fn resolve_session(
 
     match matches.len() {
         0 => bail!(
-            "No session matching '{prefix}' in this project or its sub-projects. \
-Run `engramdb harvest list` to see what is available, or pass --all-projects."
+            "No session matching '{prefix}' in this project's scope — the root of its \
+hierarchy plus every registered worktree and linked sub-project. Run \
+`engramdb harvest list` to see what is available, or pass --all-projects. If Claude Code \
+has already pruned the transcript the session is gone from that list but may still be \
+archived: `engramdb harvest ledger list` finds it and `engramdb harvest show` digests it \
+straight from the archive."
         ),
         1 => Ok(matches.remove(0)),
         n => bail!(
@@ -601,6 +621,53 @@ Run `engramdb harvest list` to see what is available, or pass --all-projects."
 mod tests {
     use super::*;
     use engramdb::storage::harvest_state::ClearOutcome;
+
+    /// `--format json` serialized the transcript-derived strings verbatim.
+    /// `serde_json` escapes C0, which hid the problem for control characters,
+    /// but bidi overrides and the rest of the invisible set are ordinary
+    /// Unicode to it and reached the consumer intact.
+    #[test]
+    fn json_rows_sanitize_transcript_derived_strings() {
+        let hostile = "look\u{202e}gnp.exe\u{200b} here\nsecond line";
+        let selected = harvest::SelectedSession {
+            summary: engramdb::storage::transcripts::SessionSummary {
+                session_id: "abc123".into(),
+                transcript_path: PathBuf::from("/tmp/abc123.jsonl"),
+                cwd: Some(format!("/repo/{hostile}")),
+                git_branch: Some(hostile.to_string()),
+                started_at: None,
+                ended_at: None,
+                user_turns: 1,
+                assistant_turns: 1,
+                bytes: 10,
+                first_prompt: Some(hostile.to_string()),
+                skipped_records: 0,
+            },
+            already_harvested: false,
+        };
+
+        let row = harvest_row(&selected);
+        let json = serde_json::to_string(&row).unwrap();
+        for (label, value) in [
+            ("cwd", &row.cwd),
+            ("git_branch", &row.git_branch),
+            ("first_prompt", &row.first_prompt),
+        ] {
+            let value = value.as_deref().unwrap();
+            assert!(
+                !value.contains('\u{202e}') && !value.contains('\u{200b}'),
+                "{label} kept an invisible character: {value:?}"
+            );
+            assert!(!value.contains('\n'), "{label} kept a newline: {value:?}");
+        }
+        // The escaping encoder would have hidden a raw newline; the invisible
+        // characters it would not have.
+        assert!(!json.contains('\u{202e}'), "{json}");
+        assert!(
+            json.contains("look"),
+            "the visible text must survive: {json}"
+        );
+    }
 
     /// Control for the behavioral fix in `harvest_state::clear_harvested`:
     /// the two outcomes must not share one message, because the promise that

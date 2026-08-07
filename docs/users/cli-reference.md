@@ -360,10 +360,12 @@ Reads the transcripts Claude Code writes to
 review. This command only *presents* sessions — it never writes a memory.
 The `/engram:harvest` slash command drives it and does the saving.
 
-**Scope.** `list` and `show` cover the current project **and its registered
-sub-projects**. A git worktree files its transcripts under its own path but
-shares the main checkout's memory store, so its sessions are harvested
-alongside the main ones. Attribution uses the `cwd` recorded inside each
+**Scope.** `list` and `show` cover the **root** of the current project's
+hierarchy and every project registered under it — so running from a git
+worktree also covers the main checkout and the sibling worktrees, not just
+this one. A worktree files its transcripts under its own path but shares the
+main checkout's memory store, so its sessions are harvested alongside the main
+ones. Attribution uses the `cwd` recorded inside each
 transcript, not the directory name — that name is a lossy encoding of the
 path and can collide. `--all-projects` ignores scoping entirely.
 
@@ -417,6 +419,13 @@ it aside is what commits the merge, so a sub-project directory that cannot be
 written to adopts nothing (with a warning naming the path) rather than
 re-merging the same entries on every command — which would undo a
 `harvest reset` each time.
+
+Entries are pruned on write once they are **365 days** old — a fixed window,
+with no config knob — but only ones that hold no archive; an entry naming an
+archived transcript is exempt however old it is, because it is the only route
+to that file. So a `skipped` session with no archive behind it is eventually
+forgotten, and is offered once more if Claude Code somehow still holds the
+live transcript. Archiving (on by default) is what makes a review permanent.
 
 Each entry carries a **decision**: `harvested` (memories saved), `skipped`
 (reviewed and passed over), `deferred` (a human looked at it and postponed the
