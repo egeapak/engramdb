@@ -1,6 +1,6 @@
 //! Delete a memory from the store.
 
-use crate::output::OutputFormatter;
+use crate::output::{errraw, OutputFormatter};
 use anyhow::Result;
 use engramdb::ops::{delete_memory, get_memory};
 use engramdb::storage::MemoryStore;
@@ -41,7 +41,12 @@ pub async fn run_delete(
         }
 
         // Prompt on stderr so a piped/redirected stdout stays clean.
-        eprint!("Delete memory {} ({})? [y/N] ", memory.id, memory.summary);
+        errraw!(
+            formatter,
+            "Delete memory {} ({})? [y/N] ",
+            memory.id,
+            memory.summary
+        );
         io::stderr().flush()?;
 
         let mut input = String::new();

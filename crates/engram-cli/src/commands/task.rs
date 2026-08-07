@@ -1,6 +1,6 @@
 //! Task lifecycle CLI commands (§11.1–11.2).
 
-use crate::output::OutputFormatter;
+use crate::output::{outln, OutputFormatter};
 use anyhow::Result;
 use engramdb::ops;
 use engramdb::storage::MemoryStore;
@@ -44,7 +44,8 @@ pub fn run_task_current(
     let result = ops::task_current(&target_dir, &session_id, name)?;
 
     if formatter.is_json() {
-        println!(
+        outln!(
+            formatter,
             "{}",
             serde_json::json!({ "session_id": result.session_id, "task": result.task })
         );
@@ -80,7 +81,8 @@ pub async fn run_task_complete(
     let result = ops::task_complete(&store, name, &config.epistemic).await?;
 
     if formatter.is_json() {
-        println!(
+        outln!(
+            formatter,
             "{}",
             serde_json::json!({
                 "task": name,

@@ -71,24 +71,43 @@ impl Sink {
     }
 }
 
+// The four macros below are the crate's replacements for `println!` and
+// friends. Command modules import them by name — `use crate::output::outln;` —
+// via the `pub(crate) use` re-exports underneath. They are *not* exported with
+// `#[macro_use]`: that is textually ordered, and `mod commands` is declared
+// before `mod output` in `lib.rs`, so it would silently export nothing.
+//
+// They expand to `OutputFormatter::write_*`, not to the private `out`/`err`
+// fields, so a caller outside this module compiles.
+
 /// `println!` routed through a formatter's stdout sink.
 ///
 /// `outln!(f)` writes a blank line, matching bare `println!()`.
 macro_rules! outln {
-    ($f:expr) => { $f.out.line(format_args!("")) };
-    ($f:expr, $($arg:tt)*) => { $f.out.line(format_args!($($arg)*)) };
+    ($f:expr) => { $f.write_line(format_args!("")) };
+    ($f:expr, $($arg:tt)*) => { $f.write_line(format_args!($($arg)*)) };
 }
 
 /// `eprintln!` routed through a formatter's stderr sink.
 macro_rules! errln {
-    ($f:expr) => { $f.err.line(format_args!("")) };
-    ($f:expr, $($arg:tt)*) => { $f.err.line(format_args!($($arg)*)) };
+    ($f:expr) => { $f.write_err_line(format_args!("")) };
+    ($f:expr, $($arg:tt)*) => { $f.write_err_line(format_args!($($arg)*)) };
 }
 
 /// `print!` (no trailing newline) routed through a formatter's stdout sink.
 macro_rules! outraw {
-    ($f:expr, $($arg:tt)*) => { $f.out.raw(format_args!($($arg)*)) };
+    ($f:expr, $($arg:tt)*) => { $f.write_raw(format_args!($($arg)*)) };
 }
+
+/// `eprint!` (no trailing newline) routed through a formatter's stderr sink.
+///
+/// The one caller is an inline confirmation prompt, which has to leave the
+/// cursor on the same line as the question.
+macro_rules! errraw {
+    ($f:expr, $($arg:tt)*) => { $f.write_err_raw(format_args!($($arg)*)) };
+}
+
+pub(crate) use {errln, errraw, outln, outraw};
 
 /// Helper function to truncate IDs to 13 characters.
 ///
@@ -261,6 +280,29 @@ impl OutputFormatter {
     /// output on a terminal — which `print_project_list` did.
     fn styled(&self) -> bool {
         self.use_color && matches!(self.format, OutputFormat::Pretty)
+    }
+
+    /// Write a line to the stdout sink. Use the [`outln!`] macro, not this.
+    ///
+    /// Exists so the macros can expand outside this module without `out` and
+    /// `err` becoming crate-visible fields.
+    pub(crate) fn write_line(&self, args: std::fmt::Arguments<'_>) {
+        self.out.line(args);
+    }
+
+    /// Write to the stdout sink with no trailing newline. See [`outraw!`].
+    pub(crate) fn write_raw(&self, args: std::fmt::Arguments<'_>) {
+        self.out.raw(args);
+    }
+
+    /// Write a line to the stderr sink. See [`errln!`].
+    pub(crate) fn write_err_line(&self, args: std::fmt::Arguments<'_>) {
+        self.err.line(args);
+    }
+
+    /// Write to the stderr sink with no trailing newline. See [`errraw!`].
+    pub(crate) fn write_err_raw(&self, args: std::fmt::Arguments<'_>) {
+        self.err.raw(args);
     }
 
     /// Whether output is JSON (machine-consumed; never prompt interactively).

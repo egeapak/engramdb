@@ -91,6 +91,16 @@ instead of placeholders.
 string buffers. Use `snap_formats(case, |f| …)` for the three-format sweep, and
 give any new fixture a fixed timestamp via `fixed(…)` — never `Utc::now()`.
 
+**Everything the CLI prints must go through the formatter.** insta does not
+read a stream — `assert_snapshot!` compares a `String` — so a bare `println!`
+puts its bytes somewhere no in-process test can reach, permanently and
+silently. Use `outln!` / `errln!` / `outraw!` / `errraw!`
+(`use crate::output::{outln, …};`), which mirror
+`println!`/`eprintln!`/`print!`/`eprint!` including the bare `outln!(f)` form.
+The `formatter-output` CI job enforces this; it exempts only `output.rs`, which
+defines the macros, and `commands/hook.rs`, which emits the hook protocol
+document Claude Code parses off stdout and must never be styled or JSON-wrapped.
+
 **Colour is a tier-1 concern too.** `snap_colored(case, |f| …)` renders Pretty
 with styling forced on and writes a `<case>__pretty_color.snap` next to the
 uncoloured twin. Two gates have to be lifted to get an escape out under a test

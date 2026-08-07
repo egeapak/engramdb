@@ -1,6 +1,6 @@
 //! Interactive review of memories needing attention.
 
-use crate::output::OutputFormatter;
+use crate::output::{outln, OutputFormatter};
 use crate::prompter::Prompter;
 use anyhow::Result;
 use engramdb::ops::{self, parse_memory_type, review_memories, ReviewParams};
@@ -59,26 +59,31 @@ pub async fn run_review(
     formatter.print_message(&format!("{} memories need review:\n", memories.len()));
 
     for memory in &memories {
-        println!("ID: {}", memory.id.chars().take(8).collect::<String>());
-        println!("Type: {:?}", memory.type_);
-        println!("Summary: {}", memory.summary);
-        println!("Status: {:?}", memory.status);
-        println!("Criticality: {:.2}", memory.criticality);
+        outln!(
+            formatter,
+            "ID: {}",
+            memory.id.chars().take(8).collect::<String>()
+        );
+        outln!(formatter, "Type: {:?}", memory.type_);
+        outln!(formatter, "Summary: {}", memory.summary);
+        outln!(formatter, "Status: {:?}", memory.status);
+        outln!(formatter, "Criticality: {:.2}", memory.criticality);
 
         if !memory.challenges.is_empty() {
-            println!("Challenges:");
+            outln!(formatter, "Challenges:");
             for challenge in &memory.challenges {
-                println!(
+                outln!(
+                    formatter,
                     "  - {} ({})",
                     challenge.evidence,
                     challenge.timestamp.format("%Y-%m-%d")
                 );
                 if let Some(ref sf) = challenge.source_file {
-                    println!("    Source: {}", sf);
+                    outln!(formatter, "    Source: {}", sf);
                 }
             }
         }
-        println!();
+        outln!(formatter);
 
         let options = vec![
             "Keep (reset to Active)",
@@ -184,7 +189,7 @@ pub async fn run_review(
             }
             _ => {}
         }
-        println!();
+        outln!(formatter);
     }
 
     Ok(())

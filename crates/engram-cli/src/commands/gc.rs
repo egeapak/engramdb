@@ -1,6 +1,6 @@
 //! Garbage collection command.
 
-use crate::output::{short_id, OutputFormatter};
+use crate::output::{outln, short_id, OutputFormatter};
 use crate::validation::validate_score;
 use anyhow::Result;
 use engramdb::ops::gc_memories;
@@ -76,7 +76,8 @@ pub async fn run_gc(
                 "old_versions_removed": m.old_versions_removed,
             })
         });
-        println!(
+        outln!(
+            formatter,
             "{}",
             serde_json::json!({
                 "dry_run": dry_run,
@@ -110,7 +111,8 @@ pub async fn run_gc(
             let id_short = short_id(id);
             match store.get(id).await {
                 Ok(memory) => {
-                    println!(
+                    outln!(
+                        formatter,
                         "  {} {:8}  {} (criticality: {:.2})",
                         id_short,
                         format!("{:?}", memory.type_),
@@ -119,7 +121,7 @@ pub async fn run_gc(
                     );
                 }
                 Err(_) => {
-                    println!("  {}", id_short);
+                    outln!(formatter, "  {}", id_short);
                 }
             }
         }
