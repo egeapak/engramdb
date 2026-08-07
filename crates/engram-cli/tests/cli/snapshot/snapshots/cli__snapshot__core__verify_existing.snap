@@ -1,0 +1,13 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"verify\", &id])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] verify [UUID]
+exit: 0
+--- stdout ---
+{
+  "id": "[UUID]",
+  "review_cleared": false,
+  "verified": true
+}
+--- stderr ---

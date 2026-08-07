@@ -1,0 +1,64 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/query.rs
+expression: "f.run(&[\"query\", \"--mode\", \"rank\", \"-l\", \"core.lang\", \"--show-scores\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] query --mode rank -l core.lang --show-scores
+exit: 0
+--- stdout ---
+{
+  "memories": [
+    {
+      "breakdown": {
+        "criticality": 0.9,
+        "decay": 0.0,
+        "final_score": 0.[PROJECT_ID],
+        "keyword": null,
+        "relevance": 0.9,
+        "rerank": null,
+        "scope": 0.8,
+        "scope_multiplier": 0.8,
+        "semantic": null,
+        "situation_multiplier": 1.0,
+        "trust": 1.0,
+        "trust_multiplier": 1.0
+      },
+      "memory": {
+        "accessed_at": "[TIMESTAMP]",
+        "challenges": [],
+        "confidence": 0.8,
+        "content": "Chosen for the memory-safety guarantees.",
+        "created_at": "[TIMESTAMP]",
+        "criticality": 0.9,
+        "decay": {
+          "floor": 0.0,
+          "strategy": "none"
+        },
+        "epistemic": "decision",
+        "id": "[UUID]",
+        "logical": [
+          "core.lang"
+        ],
+        "physical": [
+          "src/main.rs"
+        ],
+        "provenance": {
+          "source": "human"
+        },
+        "status": "Active",
+        "summary": "Use Rust for the backend",
+        "supersedes": [],
+        "tags": [
+          "rust",
+          "backend"
+        ],
+        "title": "Use Rust Backend",
+        "type": "decision",
+        "updated_at": "[TIMESTAMP]",
+        "visibility": "Shared"
+      },
+      "score": 0.[PROJECT_ID]
+    }
+  ],
+  "total": 1
+}
+--- stderr ---

@@ -104,6 +104,62 @@ jobs:
           print("OK: fuzz/Cargo.lock agrees with the root workspace on every shared crate")
           PY
 
+  formatter-output:
+    name: CLI output goes through the formatter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # `OutputFormatter` writes through an injectable `Sink` (real streams in
+      # production, an in-memory buffer under `#[cfg(test)]`), which is what
+      # makes the tier-1 renderer snapshots possible at all — a snapshot needs
+      # the rendered bytes as a *value*, and a bare `println!` sends them
+      # somewhere no in-process test can read. A single reintroduced `println!`
+      # is invisible to tier 1 forever, and silently so.
+      #
+      # Exempt, both deliberately outside the formatter:
+      #   - output.rs        defines the macros.
+      #   - commands/hook.rs emits the hook protocol document that Claude Code
+      #                      parses off stdout, plus its stderr diagnostics.
+      #                      Styling or JSON-wrapping must never reach it, and
+      #                      those handlers hold no formatter.
+      # `#[cfg(test)]` bodies are skipped: `println!` in a test is debugging
+      # output, not product output.
+      - name: No bare println!/eprintln!/print!/eprint! in engram-cli
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+
+          EXEMPT = {"output.rs", "hook.rs"}
+          PRINT = re.compile(r"(?<![\w:])(eprintln|println|eprint|print)!\(")
+          TEST_MOD = re.compile(r"^\s*mod tests\s*\{")
+
+          offenders = []
+          for path in sorted(pathlib.Path("crates/engram-cli/src").rglob("*.rs")):
+              if path.name in EXEMPT:
+                  continue
+              lines = path.read_text(encoding="utf-8").split("\n")
+              # Everything from `mod tests {` on is test code. Match the real
+              # module opener, not the first `#[cfg(test)]` — hook.rs carries
+              # that attribute on plain helper fns hundreds of lines earlier.
+              cutoff = next(
+                  (i for i, line in enumerate(lines) if TEST_MOD.match(line)), len(lines)
+              )
+              for i, line in enumerate(lines[:cutoff]):
+                  if PRINT.search(line):
+                      offenders.append(f"{path}:{i + 1}: {line.strip()}")
+
+          if offenders:
+              for entry in offenders:
+                  print(entry)
+              print(
+                  "::error::bare print macros bypass OutputFormatter's Sink and are "
+                  "invisible to the tier-1 snapshots. Use outln! / errln! / outraw! / "
+                  "errraw! from crate::output (see docs/contributors/testing.md)."
+              )
+              sys.exit(1)
+          print("OK: all engram-cli output goes through OutputFormatter")
+          PY
+
   check:
     name: Check & Lint
     runs-on: ubuntu-latest

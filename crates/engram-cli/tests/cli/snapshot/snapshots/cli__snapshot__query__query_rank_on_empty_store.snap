@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/query.rs
+expression: "f.run(&[\"query\", \"--mode\", \"rank\", \"-p\", \"src/main.rs\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] query --mode rank -p src/main.rs
+exit: 0
+--- stdout ---
+{
+  "memories": [],
+  "total": 0
+}
+--- stderr ---

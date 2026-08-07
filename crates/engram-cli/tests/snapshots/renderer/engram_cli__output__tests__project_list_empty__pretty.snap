@@ -1,0 +1,7 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+No registered projects.
+--- stderr ---

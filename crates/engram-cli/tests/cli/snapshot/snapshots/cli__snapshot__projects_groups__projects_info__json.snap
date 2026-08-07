@@ -1,0 +1,16 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/projects_groups.rs
+expression: f.run(& all)
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format json projects info
+exit: 0
+--- stdout ---
+{
+  "created_at": "[TIMESTAMP]",
+  "logical_scopes": [],
+  "memory_count": 3,
+  "project_id": "[PROJECT_ID]",
+  "project_name": "workspace",
+  "project_path": "[PROJECT]"
+}
+--- stderr ---

@@ -1,0 +1,7 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{"message":"it worked","success":true}
+--- stderr ---

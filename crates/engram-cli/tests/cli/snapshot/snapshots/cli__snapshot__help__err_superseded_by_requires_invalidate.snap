@@ -1,0 +1,14 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"update\", \"some-id\", \"--superseded-by\", \"other-id\"])"
+---
+$ engramdb update some-id --superseded-by other-id
+exit: 2
+--- stdout ---
+--- stderr ---
+error: the following required arguments were not provided:
+  --invalidate
+
+Usage: engramdb update --invalidate --superseded-by <SUPERSEDED_BY> <ID>
+
+For more information, try '--help'.

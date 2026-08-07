@@ -1,0 +1,10 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: f.run(& all)
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format pretty stats --daemon
+exit: 0
+--- stdout ---
+Embedding daemon: not running and no metrics persisted yet.
+It is auto-spawned on demand by the next MCP run when [daemon] is enabled.
+--- stderr ---

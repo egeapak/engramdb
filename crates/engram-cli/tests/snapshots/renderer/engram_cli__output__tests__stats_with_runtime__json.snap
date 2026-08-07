@@ -1,0 +1,144 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "total": 3,
+  "by_type": [
+    [
+      "decision",
+      2
+    ],
+    [
+      "convention",
+      1
+    ]
+  ],
+  "by_status": [
+    [
+      "Active",
+      3
+    ]
+  ],
+  "by_scope": [
+    [
+      "services/api",
+      2
+    ]
+  ],
+  "expired": 0,
+  "oldest": null,
+  "newest": null,
+  "avg_criticality": 0.75,
+  "since": "2026-01-01T00:00:00Z",
+  "project_id": "project-a",
+  "persistence_failures": 0,
+  "usage": {
+    "total_calls": 16,
+    "unique_sessions": 3,
+    "by_tool": {
+      "create": 4,
+      "query": 12
+    },
+    "errors_by_tool": {
+      "query": 2
+    }
+  },
+  "queries": {
+    "total": 6,
+    "hits": 5,
+    "zero_results": 1,
+    "hit_rate": 0.833,
+    "followups": 2,
+    "followup_rate": 0.333,
+    "by_quality": {
+      "full": 5,
+      "keyword_only": 1
+    }
+  },
+  "timings_ms": {
+    "tool": {
+      "query": {
+        "count": 12,
+        "avg": 42.5,
+        "p50": 38.0,
+        "p95": 80.0
+      }
+    },
+    "stages": {
+      "embed": {
+        "count": 16,
+        "avg": 8.1,
+        "p50": 7.0,
+        "p95": 14.0
+      }
+    }
+  },
+  "by_project": {
+    "project-a": {
+      "usage": {
+        "total_calls": 16,
+        "unique_sessions": 3,
+        "by_tool": {
+          "create": 4,
+          "query": 12
+        },
+        "errors_by_tool": {
+          "query": 2
+        }
+      },
+      "queries": {
+        "total": 6,
+        "hits": 5,
+        "zero_results": 1,
+        "hit_rate": 0.833,
+        "followups": 2,
+        "followup_rate": 0.333,
+        "by_quality": {
+          "full": 5,
+          "keyword_only": 1
+        }
+      },
+      "timings_ms": {
+        "tool": {
+          "query": {
+            "count": 12,
+            "avg": 42.5,
+            "p50": 38.0,
+            "p95": 80.0
+          }
+        },
+        "stages": {
+          "embed": {
+            "count": 16,
+            "avg": 8.1,
+            "p50": 7.0,
+            "p95": 14.0
+          }
+        }
+      }
+    },
+    "project-b": {
+      "usage": {
+        "total_calls": 0,
+        "unique_sessions": 0,
+        "by_tool": {}
+      },
+      "queries": {
+        "total": 0,
+        "hits": 0,
+        "zero_results": 0,
+        "hit_rate": 0.0,
+        "followups": 0,
+        "followup_rate": 0.0,
+        "by_quality": {}
+      },
+      "timings_ms": {
+        "tool": {},
+        "stages": {}
+      }
+    }
+  }
+}
+--- stderr ---

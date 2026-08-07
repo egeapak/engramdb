@@ -1,7 +1,9 @@
 //! Handler for the `engramdb projects` subcommand.
 
 use crate::app::ProjectsCommand;
-use crate::output::{AggregateStatsOutput, OutputFormatter, ProjectInfoOutput, ProjectListOutput};
+use crate::output::{
+    outln, AggregateStatsOutput, OutputFormatter, ProjectInfoOutput, ProjectListOutput,
+};
 use crate::prompter::Prompter;
 use anyhow::Result;
 use engramdb::ops::projects;
@@ -141,7 +143,8 @@ pub async fn run_projects(
             if stale.is_empty() && orphan_count == 0 && hierarchy_issues.total() == 0 {
                 if json_mode {
                     // Same object shape as a real prune so scripts parse one form.
-                    println!(
+                    outln!(
+                        formatter,
                         "{}",
                         serde_json::json!({
                             "stale_removed": 0,
@@ -155,9 +158,9 @@ pub async fn run_projects(
                 return Ok(());
             }
 
-            // Preview goes through the formatter so --no-color and plain mode
-            // are honored (raw owo-colors println! ignored both), and is
-            // suppressed entirely in JSON mode where stdout must carry
+            // Preview uses print_message so --no-color and plain mode are
+            // honored (the owo-colors styling this replaced ignored both), and
+            // is suppressed entirely in JSON mode where stdout must carry
             // exactly one JSON object.
             if !json_mode {
                 if stale.is_empty() {
@@ -245,7 +248,8 @@ pub async fn run_projects(
             hierarchy_pb.finish_and_clear();
 
             if json_mode {
-                println!(
+                outln!(
+                    formatter,
                     "{}",
                     serde_json::json!({
                         "stale_removed": result.stale_removed,

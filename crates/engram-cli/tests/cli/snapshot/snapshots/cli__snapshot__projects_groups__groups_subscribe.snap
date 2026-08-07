@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/projects_groups.rs
+expression: "f.run(&[\"groups\", \"subscribe\", \"backend\", \"--yes\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] groups subscribe backend --yes
+exit: 0
+--- stdout ---
+{
+  "message": "Subscribed project '[PROJECT_ID]' to group 'backend' (id: __g_10e08a419e85).",
+  "success": true
+}
+--- stderr ---

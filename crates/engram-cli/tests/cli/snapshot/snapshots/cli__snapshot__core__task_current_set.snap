@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"task\", \"current\", \"refactor-output\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] task current refactor-output
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: no session id: pass --session-id or set CLAUDE_SESSION_ID (the task mapping is per-session)

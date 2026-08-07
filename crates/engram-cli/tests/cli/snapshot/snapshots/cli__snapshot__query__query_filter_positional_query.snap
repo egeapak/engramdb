@@ -1,0 +1,49 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/query.rs
+expression: "f.run(&[\"query\", \"--mode\", \"filter\", \"snake_case\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] query --mode filter snake_case
+exit: 0
+--- stdout ---
+{
+  "memories": [
+    {
+      "memory": {
+        "accessed_at": "[TIMESTAMP]",
+        "challenges": [],
+        "confidence": 0.8,
+        "content": "Applies to every crate in the workspace.",
+        "created_at": "[TIMESTAMP]",
+        "criticality": 0.6,
+        "decay": {
+          "floor": 0.0,
+          "strategy": "none"
+        },
+        "epistemic": "fact",
+        "id": "[UUID]",
+        "logical": [
+          "core.style"
+        ],
+        "physical": [
+          "/"
+        ],
+        "provenance": {
+          "source": "human"
+        },
+        "status": "Active",
+        "summary": "Name variables in snake_case",
+        "supersedes": [],
+        "tags": [
+          "style"
+        ],
+        "title": "Name Variables Snake Case",
+        "type": "convention",
+        "updated_at": "[TIMESTAMP]",
+        "visibility": "Shared"
+      },
+      "score": 0.[PROJECT_ID]
+    }
+  ],
+  "total": 1
+}
+--- stderr ---

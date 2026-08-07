@@ -1,7 +1,7 @@
 //! Rebuild index and re-embed memories.
 
 use crate::engine::engine_for;
-use crate::output::OutputFormatter;
+use crate::output::{errln, outln, OutputFormatter};
 use anyhow::Result;
 use engramdb::daemon::{DaemonCell, DaemonPolicy};
 use engramdb::ops::reindex;
@@ -48,10 +48,10 @@ pub async fn run_reindex(
     // the JSON document the formatter emits below — finding #7).
     if !formatter.is_json() {
         if !embeddings_only {
-            println!("Reindexing...");
+            outln!(formatter, "Reindexing...");
         }
         if !index_only && engine.is_some() {
-            println!("Regenerating embeddings...");
+            outln!(formatter, "Regenerating embeddings...");
         }
     }
 
@@ -73,7 +73,7 @@ pub async fn run_reindex(
     if !result.errors.is_empty() {
         formatter.print_error(&format!("{} errors during reindex:", result.errors.len()));
         for err in &result.errors {
-            eprintln!("  {}", err);
+            errln!(formatter, "  {}", err);
         }
     }
     if result.indexed == 0

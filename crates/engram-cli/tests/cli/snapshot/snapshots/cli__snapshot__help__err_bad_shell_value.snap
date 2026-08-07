@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"completions\", \"klingon\"])"
+---
+$ engramdb completions klingon
+exit: 2
+--- stdout ---
+--- stderr ---
+error: invalid value 'klingon' for '<SHELL>'
+  [possible values: bash, elvish, fish, powershell, zsh]
+
+For more information, try '--help'.

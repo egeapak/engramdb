@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"add\", \"-t\", \"convention\", \"-s\", \"Quick start form\",\n\"Positional content.\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] add -t convention -s Quick start form Positional content.
+exit: 0
+--- stdout ---
+{
+  "message": "Created memory [UUID]",
+  "success": true
+}
+--- stderr ---

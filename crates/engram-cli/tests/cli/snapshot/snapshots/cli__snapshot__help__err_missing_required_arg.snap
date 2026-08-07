@@ -1,0 +1,14 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"get\"])"
+---
+$ engramdb get
+exit: 2
+--- stdout ---
+--- stderr ---
+error: the following required arguments were not provided:
+  <ID>
+
+Usage: engramdb get <ID>
+
+For more information, try '--help'.

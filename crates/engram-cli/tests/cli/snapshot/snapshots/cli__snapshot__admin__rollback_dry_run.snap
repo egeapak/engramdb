@@ -1,0 +1,14 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: "f.run(&[\"rollback\", \"--dry-run\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] rollback --dry-run
+exit: 0
+--- stdout ---
+{
+  "message": "Dry run: 3 memories would be rolled back to v1 (legacy), 0 already at target."
+}
+--- stderr ---
+  Would roll back: [PROJECT]/.engramdb/memories/name-variables-snake-case_[UUID].md (v2 -> legacy)
+  Would roll back: [PROJECT]/.engramdb/memories/never-unwrap-production-paths_[UUID].md (v2 -> legacy)
+  Would roll back: [PROJECT]/.engramdb/memories/use-rust-backend_[UUID].md (v2 -> legacy)

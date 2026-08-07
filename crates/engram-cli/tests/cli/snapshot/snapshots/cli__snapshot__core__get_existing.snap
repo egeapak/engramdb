@@ -1,0 +1,40 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"get\", &id])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] get [UUID]
+exit: 0
+--- stdout ---
+{
+  "accessed_at": "[TIMESTAMP]",
+  "challenges": [],
+  "confidence": 0.8,
+  "content": "Its content.",
+  "created_at": "[TIMESTAMP]",
+  "criticality": 0.5,
+  "decay": {
+    "floor": 0.0,
+    "strategy": "none"
+  },
+  "epistemic": "decision",
+  "id": "[UUID]",
+  "logical": [],
+  "physical": [
+    "/"
+  ],
+  "provenance": {
+    "source": "human"
+  },
+  "status": "Active",
+  "summary": "The one memory",
+  "supersedes": [],
+  "tags": [
+    "alpha",
+    "beta"
+  ],
+  "title": "One Memory",
+  "type": "decision",
+  "updated_at": "[TIMESTAMP]",
+  "visibility": "Shared"
+}
+--- stderr ---

@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/hook.rs
+expression: "f.run_with_stdin(&[\"hook\"], \"{}\")"
+---
+$ engramdb --no-maintenance --dir [PROJECT] hook
+exit: 0
+--- stdout ---
+--- stderr ---
+engramdb hook: no hook event given. Expected one of: pre-tool-use, session-start, user-prompt-submit, post-tool-use, session-end, pre-compact.

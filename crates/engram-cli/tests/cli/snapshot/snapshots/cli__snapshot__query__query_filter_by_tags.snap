@@ -1,0 +1,50 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/query.rs
+expression: "f.run(&[\"query\", \"--mode\", \"filter\", \"--tags\", \"backend\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] query --mode filter --tags backend
+exit: 0
+--- stdout ---
+{
+  "memories": [
+    {
+      "memory": {
+        "accessed_at": "[TIMESTAMP]",
+        "challenges": [],
+        "confidence": 0.8,
+        "content": "Chosen for the memory-safety guarantees.",
+        "created_at": "[TIMESTAMP]",
+        "criticality": 0.9,
+        "decay": {
+          "floor": 0.0,
+          "strategy": "none"
+        },
+        "epistemic": "decision",
+        "id": "[UUID]",
+        "logical": [
+          "core.lang"
+        ],
+        "physical": [
+          "src/main.rs"
+        ],
+        "provenance": {
+          "source": "human"
+        },
+        "status": "Active",
+        "summary": "Use Rust for the backend",
+        "supersedes": [],
+        "tags": [
+          "rust",
+          "backend"
+        ],
+        "title": "Use Rust Backend",
+        "type": "decision",
+        "updated_at": "[TIMESTAMP]",
+        "visibility": "Shared"
+      },
+      "score": 0.9
+    }
+  ],
+  "total": 1
+}
+--- stderr ---

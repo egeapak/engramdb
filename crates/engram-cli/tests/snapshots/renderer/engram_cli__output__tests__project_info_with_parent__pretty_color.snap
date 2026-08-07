@@ -1,0 +1,13 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+Project: engramdb
+ID: <cyan>0123456789abcdef</cyan>
+Parent: <cyan>fedcba9876543210</cyan>
+Path: /w/engramdb
+Memories: 42
+Scopes: daemon, retrieval
+Created: 2026-01-02 03:04:05
+--- stderr ---

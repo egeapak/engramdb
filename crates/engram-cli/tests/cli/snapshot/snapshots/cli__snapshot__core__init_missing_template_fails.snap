@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"init\", \"--no-embeddings\", \"--template\", \"/no/such/template.toml\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] init --no-embeddings --template /no/such/template.toml
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Failed to copy template from /no/such/template.toml
+
+Caused by:
+    No such file or directory (os error 2)

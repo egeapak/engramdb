@@ -1,0 +1,14 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/hook.rs
+expression: "f.run_with_stdin(& [\"hook\", \"session-start\"], & stdin)"
+---
+$ engramdb --no-maintenance --dir [PROJECT] hook session-start
+exit: 0
+--- stdout ---
+{
+  "hookSpecificOutput": {
+    "additionalContext": "[EngramDB] Key project memories:\n\n## Facts (1):\n- [hazard] Avoid blocking calls in async (source: shared/human)\n  \n\n[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up — not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.",
+    "hookEventName": "SessionStart"
+  }
+}
+--- stderr ---

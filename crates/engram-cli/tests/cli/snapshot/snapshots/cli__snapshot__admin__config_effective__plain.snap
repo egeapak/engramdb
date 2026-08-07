@@ -1,0 +1,30 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: f.run(& all)
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format plain config
+exit: 0
+--- stdout ---
+Limits
+  summary max chars:      200
+  content soft target:    500 tokens
+  embedding chunk window: 256 tokens (content is chunked; nothing is truncated)
+
+Retrieval / search
+  default max results:    10
+  relevance threshold:    0.45
+  search threshold:       0.2
+  search semantic weight: 3
+  include expired:        false
+
+Features
+  rerank:                 off
+  contradiction check:    off
+  title strategy:         keyword
+
+Embedding
+  provider:               onnx
+  dimensions:             384
+
+Top tags: (none yet)
+--- stderr ---

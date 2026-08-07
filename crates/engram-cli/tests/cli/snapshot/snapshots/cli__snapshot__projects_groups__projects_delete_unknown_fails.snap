@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/projects_groups.rs
+expression: "f.run(&[\"projects\", \"delete\", \"0000000000000000\", \"--force\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] projects delete [PROJECT_ID] --force
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Project '[PROJECT_ID]' not found in registry

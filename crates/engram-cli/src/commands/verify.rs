@@ -1,6 +1,6 @@
 //! Verify a memory is still accurate (§10.4).
 
-use crate::output::OutputFormatter;
+use crate::output::{outln, OutputFormatter};
 use anyhow::Result;
 use engramdb::ops;
 use engramdb::storage::MemoryStore;
@@ -23,7 +23,8 @@ pub async fn run_verify(
     let result = ops::verify_memory(&store, id).await?;
 
     if formatter.is_json() {
-        println!(
+        outln!(
+            formatter,
             "{}",
             serde_json::json!({
                 "id": result.id,

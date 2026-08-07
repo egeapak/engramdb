@@ -1,0 +1,14 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"task\", \"complete\", \"refactor-output\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] task complete refactor-output
+exit: 0
+--- stdout ---
+{
+  "demoted": [],
+  "kept_custom_decay": [],
+  "project_wide_review": [],
+  "task": "refactor-output"
+}
+--- stderr ---

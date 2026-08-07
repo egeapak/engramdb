@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"add\", \"-t\", \"hazard\", \"-s\", \"Do not block the async runtime\", \"-c\",\n\"Blocking calls in an async context deadlock the daemon.\", \"-p\",\n\"src/daemon/server.rs\", \"-l\", \"daemon.runtime\", \"--tags\", \"async,deadlock\",\n\"--criticality\", \"0.95\", \"--confidence\", \"0.7\", \"--details\",\n\"Seen once in production.\",])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] add -t hazard -s Do not block the async runtime -c Blocking calls in an async context deadlock the daemon. -p src/daemon/server.rs -l daemon.runtime --tags async,deadlock --criticality 0.95 --confidence 0.7 --details Seen once in production.
+exit: 0
+--- stdout ---
+{
+  "message": "Created memory [UUID]",
+  "success": true
+}
+--- stderr ---

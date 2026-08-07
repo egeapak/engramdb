@@ -1,0 +1,10 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+Found 2 memories (out of 7 total):
+
+  550e8400-e29b Decision  Test summary
+  018f2a1b-3c4d Hazard [observation] [invalidated 2020-06-15]  Blocking calls deadlock the daemon
+--- stderr ---

@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"--version\"])"
+---
+$ engramdb --version
+exit: 0
+--- stdout ---
+engramdb [VERSION]
+--- stderr ---

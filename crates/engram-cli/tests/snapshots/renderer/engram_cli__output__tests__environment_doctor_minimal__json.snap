@@ -1,0 +1,22 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "sections": [
+    {
+      "name": "System",
+      "checks": [
+        {
+          "name": "binary",
+          "passed": true,
+          "message": "ok"
+        }
+      ]
+    }
+  ],
+  "all_passed": true,
+  "store_check": null
+}
+--- stderr ---

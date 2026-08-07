@@ -1,0 +1,13 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/projects_groups.rs
+expression: "f.run(&[\"projects\", \"prune\", \"--force\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] projects prune --force
+exit: 0
+--- stdout ---
+{
+  "hierarchy_cleared": [],
+  "orphans_removed": 0,
+  "stale_removed": 0
+}
+--- stderr ---

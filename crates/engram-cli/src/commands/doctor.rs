@@ -1,7 +1,7 @@
 //! Doctor (health check) command.
 
 use crate::app::{DoctorCommand, ProjectsCommand};
-use crate::output::{short_id, OutputFormatter};
+use crate::output::{outln, short_id, OutputFormatter};
 use crate::prompter::Prompter;
 use anyhow::Result;
 use engramdb::ops::{
@@ -54,7 +54,8 @@ async fn run_store_check(dir: &Path, global: bool, formatter: &OutputFormatter) 
             // One machine-readable object on stdout: the raw per-id lines in
             // the pretty branch would interleave with print_* JSON and
             // corrupt the stream for scripted consumers (finding #7 pattern).
-            println!(
+            outln!(
+                formatter,
                 "{}",
                 serde_json::json!({
                     "healthy": false,
@@ -71,7 +72,7 @@ async fn run_store_check(dir: &Path, global: bool, formatter: &OutputFormatter) 
                     result.stale_entries.len()
                 ));
                 for id in &result.stale_entries {
-                    println!("  {}", short_id(id));
+                    outln!(formatter, "  {}", short_id(id));
                 }
             }
             if !result.orphaned_files.is_empty() {
@@ -80,7 +81,7 @@ async fn run_store_check(dir: &Path, global: bool, formatter: &OutputFormatter) 
                     result.orphaned_files.len()
                 ));
                 for id in &result.orphaned_files {
-                    println!("  {}", short_id(id));
+                    outln!(formatter, "  {}", short_id(id));
                 }
             }
             formatter.print_message("\nRun `engramdb reindex` to repair.");
@@ -147,7 +148,8 @@ async fn run_environment_check(
                     } else {
                         ""
                     };
-                    println!(
+                    outln!(
+                        formatter,
                         "  {} {} — {}{}",
                         short_id(&f.id),
                         f.summary,

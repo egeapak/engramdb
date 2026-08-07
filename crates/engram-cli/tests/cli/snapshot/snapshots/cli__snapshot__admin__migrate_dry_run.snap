@@ -1,0 +1,11 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: "f.run(&[\"migrate\", \"--dry-run\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] migrate --dry-run
+exit: 0
+--- stdout ---
+{
+  "message": "Dry run: 0 memories need migration, 3 already at v2."
+}
+--- stderr ---

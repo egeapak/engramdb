@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"add\", \"-t\", \"not-a-real-type\", \"-s\", \"S\", \"-c\", \"C\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] add -t not-a-real-type -s S -c C
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Invalid memory type: not-a-real-type. Valid types: decision, convention, hazard, context, intent, relationship, debug, preference

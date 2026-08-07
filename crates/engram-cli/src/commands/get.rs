@@ -1,6 +1,6 @@
 //! Get a single memory by ID.
 
-use crate::output::OutputFormatter;
+use crate::output::{outln, outraw, OutputFormatter};
 use anyhow::Result;
 use engramdb::ops::get_memory;
 use engramdb::storage::{memory_file, paths, MemoryStore};
@@ -54,14 +54,14 @@ pub async fn run_get(
 
     // Handle --path flag: print file path and exit
     if path_only {
-        println!("{}", memory_file_path()?.display());
+        outln!(formatter, "{}", memory_file_path()?.display());
         return Ok(());
     }
 
     // Handle --raw flag: read and print raw markdown file
     if raw {
         let content = fs::read_to_string(&memory_file_path()?).await?;
-        print!("{}", content);
+        outraw!(formatter, "{}", content);
         return Ok(());
     }
 

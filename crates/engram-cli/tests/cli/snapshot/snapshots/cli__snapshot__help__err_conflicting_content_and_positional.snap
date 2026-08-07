@@ -1,0 +1,13 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(&\n[\"add\", \"-t\", \"decision\", \"-s\", \"s\", \"-c\", \"flag-content\",\n\"positional-content\"])"
+---
+$ engramdb add -t decision -s s -c flag-content positional-content
+exit: 2
+--- stdout ---
+--- stderr ---
+error: the argument '--content <CONTENT>' cannot be used with '[CONTENT]'
+
+Usage: engramdb add --type <TYPE> --summary <SUMMARY> --content <CONTENT> [CONTENT]
+
+For more information, try '--help'.

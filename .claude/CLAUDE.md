@@ -82,6 +82,21 @@ Feature flags from `Cargo.toml`:
 - `coreml` (macOS only) — Apple Neural Engine EP for `ort` (implies `onnxruntime`).
 - `xnnpack` — portable CPU-kernel EP for A/B benchmarking (implies `onnxruntime`).
 
+### CLI snapshot tests (insta)
+
+CLI output is pinned by `insta` snapshots in two tiers. Full guidance is in `docs/contributors/testing.md`; the parts worth knowing before you touch CLI output:
+
+- **Tier 1 — renderers** (`crates/engram-cli/src/output.rs::tests`, snapshots in `crates/engram-cli/tests/snapshots/renderer/`). Every `OutputFormatter::print_*` × `pretty`/`json`/`plain`, driven in-process from fixtures with pinned ids and pinned clocks, so the snapshots hold the **real bytes with no redaction**. Layout changes belong here.
+- **Tier 2 — the binary** (`crates/engram-cli/tests/cli/snapshot/`). Spawns `engramdb` and snapshots command line + exit code + stdout + stderr. Exit codes, stream routing, and clap's exit-2 errors are only reachable here.
+
+`OutputFormatter` writes through a `Sink` (`Stdout`/`Stderr` in production, `Capture` under `#[cfg(test)]`) rather than calling `println!` directly — that seam is what makes tier 1 possible, because a snapshot needs the rendered bytes as a *value* and `println!` sends them where no in-process test can read them. **All CLI output goes through `outln!` / `errln!` / `outraw!` / `errraw!`** (`use crate::output::{outln, …};` — they are `pub(crate) use`d, not `#[macro_use]`d, because `mod commands` precedes `mod output` in `lib.rs` and `#[macro_use]` is textually ordered). The `formatter-output` CI job fails the build on a bare print macro anywhere in `crates/engram-cli/src`. Exactly two exemptions, both deliberately outside the formatter: `output.rs` defines the macros, and `commands/hook.rs` emits the hook protocol document Claude Code parses off stdout (plus `warn_unknown_hook`, moved there from `lib.rs` so the whole raw-output surface is one file). `#[cfg(test)]` bodies are skipped — but match the real `mod tests {` opener, not the first `#[cfg(test)]`, since `hook.rs` carries that attribute on helper fns hundreds of lines earlier.
+
+**Colour is tier 1 only**, via `snap_colored` (Pretty) / `assert_never_styled` (the deliberately-colourless renderers). Getting an escape out under a test runner needs both `capturing_colored()` (clears the formatter's `use_color`) and `owo_colors::with_override(true, …)` (short-circuits `if_supports_color`, which otherwise probes the real stdout); the helpers do both and assert escapes were/weren't produced. Snapshots store readable tags — `ansi_to_tags` turns `\x1b[32m✓\x1b[39m` into `<green>✓</green>` — so never write a raw escape into a `.snap`. Tier 2 stays colourless by construction: `OutputFormatter::new` checks `is_tty` itself, so no env var can force styling into a pipe. **Gate styling on `self.styled()`, not `self.use_color`** — `use_color` excludes only Json, so a shared Pretty/Plain code path that reads it directly styles Plain output on a terminal (`print_project_list` did).
+
+Regenerate with `cargo insta test --accept --test-runner nextest`, review with `cargo insta review`; never hand-edit a `.snap`. Under CI insta refuses to write, so a drifted snapshot fails rather than passing silently. **Always re-run a snapshot suite twice** — non-determinism only shows on the second run.
+
+Two hazards the harness already handles, worth not reintroducing: id-redaction regexes must not use `\b` (ids sit inside filenames, and `_` is a word character), and model-backed subsystems are disabled in `fixture_config()` rather than assumed absent (CI installs an ONNX runtime; a developer box may not).
+
 ### Nextest test groups
 
 `.config/nextest.toml` puts ONNX-model-loading tests (`nli::onnx::tests::*`, `embeddings::onnx::tests::*`, `retrieval::engine::tests::test_rerank`, `test_search_with_real`) in the `ml-models` group with `max-threads = 1`. Don't parallelize these — they share heavyweight model state.

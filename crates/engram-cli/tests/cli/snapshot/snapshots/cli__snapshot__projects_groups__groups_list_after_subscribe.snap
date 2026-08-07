@@ -1,0 +1,10 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/projects_groups.rs
+expression: "f.run(&[\"groups\", \"list\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] groups list
+exit: 0
+--- stdout ---
+{"message":"Groups:"}
+{"message":"  backend — __g_10e08a419e85 (subscribed)"}
+--- stderr ---

@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/env.rs
+expression: "f.run(&[\"serve\", \"--transport\", \"carrier-pigeon\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] serve --transport carrier-pigeon
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Unknown transport: carrier-pigeon. Use 'stdio' or 'sse'.

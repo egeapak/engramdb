@@ -1,12 +1,12 @@
 //! Migrate memory files to the latest format version.
 
-use crate::output::OutputFormatter;
+use crate::output::{errln, OutputFormatter};
 use anyhow::Result;
 use engramdb::storage::memory_file::{
     detect_format_version, latest_writer, parser_for_version, CURRENT_FORMAT_VERSION,
 };
 use engramdb::storage::paths;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Run the migrate command.
 ///
@@ -80,6 +80,7 @@ pub async fn run_migrate(
         &mut migrated,
         &mut already_current,
         &mut errors,
+        formatter,
     )
     .await;
 
@@ -91,6 +92,7 @@ pub async fn run_migrate(
             &mut migrated,
             &mut already_current,
             &mut errors,
+            formatter,
         )
         .await;
     }
@@ -116,7 +118,7 @@ pub async fn run_migrate(
     if !errors.is_empty() {
         formatter.print_error(&format!("{} errors during migration:", errors.len()));
         for err in &errors {
-            eprintln!("  {err}");
+            errln!(formatter, "  {err}");
         }
         // The per-file findings were already printed; the error sets the exit
         // code (main maps Err → exit 1) so `engramdb migrate && deploy`
@@ -134,6 +136,7 @@ async fn migrate_dir(
     migrated: &mut u32,
     already_current: &mut u32,
     errors: &mut Vec<String>,
+    formatter: &OutputFormatter,
 ) {
     if !dir.exists() {
         return;
@@ -147,16 +150,18 @@ async fn migrate_dir(
         }
     };
 
+    // Sorted for the same reason as in `rollback`: `read_dir` order is
+    // unspecified, and `--dry-run` output is meant to be read and compared.
+    let mut paths: Vec<PathBuf> = Vec::new();
     for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                errors.push(format!("Failed to read entry in {}: {e}", dir.display()));
-                continue;
-            }
-        };
+        match entry {
+            Ok(e) => paths.push(e.path()),
+            Err(e) => errors.push(format!("Failed to read entry in {}: {e}", dir.display())),
+        }
+    }
+    paths.sort();
 
-        let path = entry.path();
+    for path in paths {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
@@ -178,7 +183,8 @@ async fn migrate_dir(
         // Needs migration
         if dry_run {
             let from = version.map_or("legacy".to_string(), |v| format!("v{v}"));
-            eprintln!(
+            errln!(
+                formatter,
                 "  Would migrate: {} ({from} -> v{CURRENT_FORMAT_VERSION})",
                 path.display()
             );

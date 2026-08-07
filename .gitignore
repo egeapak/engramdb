@@ -2,3 +2,11 @@
 .engramdb/
 .mcp.json
 .worktrees/
+
+# insta writes these next to the accepted snapshot when one is missing or has
+# changed. They are a local review artifact — `cargo insta review` either folds
+# them into the `.snap` or discards them. (Under CI insta never writes them:
+# its default `Auto` behaviour becomes `NoUpdate`, so a drifted snapshot fails
+# the run instead.)
+*.snap.new
+*.pending-snap
