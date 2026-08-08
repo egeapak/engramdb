@@ -176,6 +176,15 @@ engramdb harvest mark <session-id>
 engramdb harvest mark <session-id> --defer --note "revisit after the refactor"
 ```
 
+**Pass every saved memory's id to `--memory`.** That is what records the
+session on each memory as the conversation it came from, and it is the only
+call where both halves are known. Two things follow from it: a memory that is
+later challenged resolves back to what was actually said, and the session's
+stored transcript copy is **pinned** — exempt from the archive retention and
+size budgets, which would otherwise eventually delete the evidence behind the
+memory you just saved. Omitting the ids records the decision and nothing else,
+and the omission is invisible until the copy is gone.
+
 **Write the `--summary` (`summary` on `harvest_mark`).** You have just read the
 whole conversation; nobody will be better placed to say what it settled. That
 sentence is embedded as its own vector, and `harvest search` breaks ties toward
@@ -196,8 +205,13 @@ archived it is still readable: `engramdb harvest ledger list` shows what is
 held, and `engramdb harvest show <session-id> --format pretty` digests it straight from the
 archive. `engramdb harvest ledger export <session-id>` writes the full
 original to a file — useful when a memory is later challenged and you need the
-conversation it came from. Both depend on an archive existing: a session that
-ended before archiving was enabled has none, and export says so rather than
-producing an empty file.
+conversation it came from; `engramdb get <memory-id> --format json` shows the
+sessions a memory cites, under `source_sessions`. Both depend on an archive
+existing: a session that ended before archiving was enabled has none, and
+export says so rather than producing an empty file. A copy a memory cites is
+never evicted by the budgets; `engramdb doctor` reports it as **evidence
+expired** if one goes anyway (a copy collected on another machine, or one
+released with `harvest ledger rm --unpin`), which is a note about traceability
+and not a fault to repair.
 
 Finally, report what was saved and what was skipped.

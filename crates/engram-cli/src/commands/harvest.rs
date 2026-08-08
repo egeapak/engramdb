@@ -155,6 +155,12 @@ pub async fn run_harvest(
             };
             let entry =
                 harvest_state::mark_harvested(ledger_dir, &resolved, &memory_ids, decision, note)?;
+            // The provenance link, written from the one call that already names
+            // both halves — the agent does nothing extra. After the ledger, for
+            // the same reason the summary is: the decision is what must not be
+            // lost, and a memory that failed to record its source is a weaker
+            // failure than a session that keeps being re-offered.
+            let links = link_marked_memories(dir, &resolved, &memory_ids, formatter).await;
             // After the decision is recorded, never before: the ledger write
             // is the thing that must not be lost, and attaching a summary
             // needs a model that may not load. A session with a decision and
@@ -173,10 +179,14 @@ pub async fn run_harvest(
                 .await?;
             }
             if formatter.is_json() {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&entry_json(&resolved, &entry))?
-                );
+                let mut json = entry_json(&resolved, &entry);
+                json["pinned"] = serde_json::json!(links.pinned());
+                json["unresolved_memories"] = serde_json::json!(links
+                    .unresolved
+                    .iter()
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>());
+                println!("{}", serde_json::to_string_pretty(&json)?);
             } else {
                 formatter.print_success(&describe_mark(&resolved, &entry));
             }
@@ -625,6 +635,68 @@ for it, so `harvest list` offers it again only while Claude Code still has the l
     }
 }
 
+/// Record `session_id` as the source of each marked memory.
+///
+/// Advisory, and loudly so. The ledger decision is already on disk when this
+/// runs, so a failure here must not be fatal — but it must not be silent
+/// either: a memory that failed to record its source keeps no pin, and the
+/// transcript copy behind it becomes evictable without anyone being told.
+///
+/// The store is the one at `dir`, which is where the memories being marked
+/// were just created — not `scope.root_dir`. Those differ only for a project
+/// linked with `projects link`, and there the memory genuinely lives in the
+/// sub-project's store; `evidence_links` walks the whole scope for exactly that
+/// reason, so a pin recorded here is still seen by the root's eviction pass.
+async fn link_marked_memories(
+    dir: &Path,
+    session_id: &str,
+    memory_ids: &[String],
+    formatter: &OutputFormatter,
+) -> engramdb::ops::LinkReport {
+    if memory_ids.is_empty() {
+        return engramdb::ops::LinkReport::default();
+    }
+    let store = match MemoryStore::open(dir).await {
+        Ok(store) => store,
+        Err(e) => {
+            formatter.print_warning(&format!(
+                "Recorded the decision, but could not open the memory store to record \
+                 session {session_id} as the source of {} memor{} ({e}). Their transcript copy \
+                 is not pinned.",
+                memory_ids.len(),
+                if memory_ids.len() == 1 { "y" } else { "ies" }
+            ));
+            return engramdb::ops::LinkReport::default();
+        }
+    };
+    match engramdb::ops::link_memories(&store, session_id, memory_ids).await {
+        Ok(report) => {
+            if !report.unresolved.is_empty() {
+                formatter.print_warning(&format!(
+                    "Recorded the decision, but {} of the memory id(s) given did not name a \
+                     memory in this store, so session {session_id} is not recorded as their \
+                     source: {}",
+                    report.unresolved.len(),
+                    report
+                        .unresolved
+                        .iter()
+                        .map(|(id, why)| format!("{id} ({why})"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            report
+        }
+        Err(e) => {
+            formatter.print_warning(&format!(
+                "Recorded the decision, but could not record session {session_id} as the source \
+                 of the marked memories ({e}). Their transcript copy is not pinned."
+            ));
+            engramdb::ops::LinkReport::default()
+        }
+    }
+}
+
 fn entry_json(session_id: &str, entry: &HarvestEntry) -> serde_json::Value {
     serde_json::json!({
         "session_id": session_id,
@@ -796,6 +868,7 @@ time — the archive is corrupt.",
         LedgerCommand::Rm {
             session_id,
             archive_only,
+            unpin,
             force,
         } => {
             let key = resolve_ledger_key(dir, &session_id)?;
@@ -804,6 +877,31 @@ time — the archive is corrupt.",
             let archive = harvest_state::read_harvested(dir)
                 .get(&key)
                 .and_then(|e| e.archive.clone());
+
+            // Releasing a pin is deliberate and confirmed, never a side effect.
+            // `--force` alone is not enough: it skips the *prompt*, and someone
+            // scripting a cleanup has not thereby decided to strand a memory's
+            // evidence. `--unpin` is the decision; the prompt below is the
+            // confirmation, and `--force --unpin` together is the scripted form
+            // of both.
+            let citing = engramdb::ops::evidence_links(scope)
+                .await?
+                .by_session
+                .remove(&key)
+                .unwrap_or_default();
+            if !citing.is_empty() && !unpin {
+                bail!(
+                    "Session {key} is cited as the source of {} memor{} ({}), so its transcript \
+copy is pinned: deleting it leaves {} claim{} with no evidence behind {}. Re-run with --unpin to \
+release the pin and delete anyway.",
+                    citing.len(),
+                    if citing.len() == 1 { "y" } else { "ies" },
+                    citing.join(", "),
+                    if citing.len() == 1 { "that" } else { "those" },
+                    if citing.len() == 1 { "" } else { "s" },
+                    if citing.len() == 1 { "it" } else { "them" },
+                );
+            }
 
             if !force {
                 // Follows `delete` / `projects delete` rather than the
@@ -836,6 +934,16 @@ transcript ({}), the only remaining copy. The session will be offered again.",
 be offered again by `harvest list`."
                     ),
                 });
+                if !citing.is_empty() {
+                    formatter.print_warning(&format!(
+                        "{} memor{} cite{} this conversation as evidence ({}); they will keep the \
+citation but it will no longer resolve.",
+                        citing.len(),
+                        if citing.len() == 1 { "y" } else { "ies" },
+                        if citing.len() == 1 { "s" } else { "" },
+                        citing.join(", ")
+                    ));
+                }
                 if !prompter.confirm("Continue?", false).unwrap_or(false) {
                     formatter.print_message("Aborted.");
                     return Ok(());
@@ -881,7 +989,15 @@ be offered again by `harvest list`."
                 None => config.archive_retention_days,
             };
             let cap = max_bytes.unwrap_or(config.archive_max_bytes);
-            let outcome = transcript_archive::prune_archives(project_id, retention, cap, !apply)?;
+            // Propagated, not defaulted: a store that cannot be read leaves the
+            // pin set unknown, and an unknown pin is indistinguishable from an
+            // absent one right up until the copy is gone. `harvest ledger rm
+            // --unpin` is the way to delete a cited copy.
+            let pinned = engramdb::ops::evidence_links(scope)
+                .await?
+                .pinned_sessions();
+            let outcome =
+                transcript_archive::prune_archives(project_id, retention, cap, !apply, &pinned)?;
             if apply {
                 // The files are gone; the ledger must stop pointing at them or
                 // `show` advertises an export that cannot succeed.
@@ -896,6 +1012,8 @@ be offered again by `harvest list`."
                         "removed": outcome.removed,
                         "bytes_freed": outcome.bytes_freed,
                         "bytes_remaining": outcome.bytes_remaining,
+                        "pinned_bytes": outcome.pinned_bytes,
+                        "pinned_count": outcome.pinned_count,
                     }))?
                 );
             } else if outcome.removed.is_empty() {
@@ -903,6 +1021,7 @@ be offered again by `harvest list`."
                     "Nothing to prune ({} held).",
                     human_bytes(outcome.bytes_remaining)
                 );
+                print_pinned_note(&outcome, cap);
             } else {
                 println!(
                     "{} {} archive(s), freeing {} ({} {} remain).",
@@ -912,6 +1031,7 @@ be offered again by `harvest list`."
                     human_bytes(outcome.bytes_remaining),
                     if apply { "now" } else { "would" }
                 );
+                print_pinned_note(&outcome, cap);
                 if !apply {
                     println!("Re-run with --apply to delete.");
                 }
@@ -919,6 +1039,29 @@ be offered again by `harvest list`."
         }
     }
     Ok(())
+}
+
+/// Report the copies the budget did not apply to.
+///
+/// Shown rather than enforced: these are the conversations behind memories, and
+/// the point of the pin is that the budget yields to the evidence. Naming the
+/// overrun is what keeps that from being a silent surprise about disk usage.
+fn print_pinned_note(outcome: &transcript_archive::PruneOutcome, cap: u64) {
+    if outcome.pinned_count == 0 {
+        return;
+    }
+    println!(
+        "{} held by {} copy(ies) backing memories — exempt from the budget.",
+        human_bytes(outcome.pinned_bytes),
+        outcome.pinned_count
+    );
+    if cap > 0 && outcome.pinned_bytes > cap {
+        println!(
+            "That is over the {} budget on its own. `engramdb harvest ledger rm <id> --unpin` \
+releases a pin.",
+            human_bytes(cap)
+        );
+    }
 }
 
 fn parse_decision(value: &str) -> Result<HarvestDecision> {

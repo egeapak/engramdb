@@ -3227,7 +3227,7 @@ impl EngramDbServer {
 
     #[tool(
         name = "harvest_mark",
-        description = "Record what was decided about a reviewed session so it is not offered again. Call this for EVERY session reviewed, including ones that yielded nothing — a zero-yield session leaves no other trace and would be re-read forever. session_id may be a unique prefix, exactly as in harvest_show; it is expanded to the full id, and an id matching no known session is refused rather than recorded. Accepts all_projects on the same terms as harvest_show, so anything you were allowed to digest you can settle. Set clear=true to forget a previous review instead; that keeps any archived transcript reachable by leaving the session `unreviewed`."
+        description = "Record what was decided about a reviewed session so it is not offered again. Call this for EVERY session reviewed, including ones that yielded nothing — a zero-yield session leaves no other trace and would be re-read forever. session_id may be a unique prefix, exactly as in harvest_show; it is expanded to the full id, and an id matching no known session is refused rather than recorded. Accepts all_projects on the same terms as harvest_show, so anything you were allowed to digest you can settle. Pass every saved memory's id in memory_ids: that records this session on each memory as the conversation it came from, so a challenged memory resolves back to what was said, and it pins the session's stored transcript copy against the archive budgets. Omitting them records the decision only, and the omission is invisible until the copy is evicted. Set clear=true to forget a previous review instead; that keeps any archived transcript reachable by leaving the session `unreviewed`."
     )]
     async fn harvest_mark(
         &self,
@@ -3359,6 +3359,40 @@ impl EngramDbServer {
             harvest_state::mark_harvested(ledger_dir, &resolved, &memory_ids, decision, input.note)
                 .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
+        // The provenance link, from the one call that names both halves. Same
+        // ordering and the same reasoning as the summary below: reported, never
+        // fatal, because the ledger decision is already on disk. A failure is
+        // surfaced rather than swallowed — an unrecorded source means the
+        // transcript copy is not pinned, which is invisible until the day it is
+        // evicted.
+        //
+        // The store open is inside the fallible half for that reason: `mark`
+        // has always worked in a directory with no store (the ledger is the
+        // only thing it needs), and making it fail there now would break
+        // settling a session for anyone who has not run `init`.
+        let (pinned, provenance_error) = if memory_ids.is_empty() {
+            (0, None)
+        } else {
+            match self.open_store_for(input.project.as_deref()).await {
+                Ok(store) => match ops::link_memories(&store, &resolved, &memory_ids).await {
+                    Ok(report) => {
+                        let unresolved: Vec<String> =
+                            report.unresolved.iter().map(|(id, _)| id.clone()).collect();
+                        let err = (!unresolved.is_empty()).then(|| {
+                            format!(
+                                "these memory ids did not name a memory in this store, so the \
+                                 session is not recorded as their source: {}",
+                                unresolved.join(", ")
+                            )
+                        });
+                        (report.pinned(), err)
+                    }
+                    Err(e) => (0, Some(e.to_string())),
+                },
+                Err(e) => (0, Some(e)),
+            }
+        };
+
         // After the ledger write, never before. The decision is what stops the
         // session being re-offered forever; the summary needs a model that may
         // not load. A decision without a summary is an ordinary state, a
@@ -3379,6 +3413,10 @@ impl EngramDbServer {
             "memories_created": entry.memories_created,
             "summary_recorded": input.summary.is_some() && summary_error.is_none(),
             "summary_error": summary_error,
+            // How many memories now cite this session — and so how many
+            // transcript copies this call pinned against eviction.
+            "provenance_recorded": pinned,
+            "provenance_error": provenance_error,
         }))
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();

@@ -5927,3 +5927,68 @@ async fn harvest_search_rejects_a_store_target() {
         "{err}"
     );
 }
+
+/// `harvest_mark` writes the evidence link, not just the ledger decision.
+///
+/// The MCP surface is the one an agent actually drives, so a link written only
+/// by the CLI would mean every harvest done through the plugin pins nothing —
+/// invisible until the day a copy is evicted.
+#[tokio::test]
+async fn harvest_mark_records_the_session_as_the_memory_source() {
+    let home = ScopedClaudeHome::new();
+    let (dir, server) = setup().await;
+    let store = MemoryStore::init(dir.path(), &InMemoryRegistry::new())
+        .await
+        .unwrap();
+    home.plant_session(dir.path(), "sess-provenance");
+
+    let mut memory = engramdb::types::Memory::new(
+        engramdb::types::MemoryType::Decision,
+        "mined from a conversation",
+        "body",
+        engramdb::types::Provenance::agent("claude"),
+    );
+    memory.id = "prov-mem-1".to_string();
+    store.create(&memory).await.unwrap();
+
+    let mut input = mark_input("sess-provenance", None);
+    input.memory_ids = Some(vec!["prov-mem-1".to_string()]);
+    let out = parse_ok(&server.harvest_mark(Parameters(input)).await);
+    assert_eq!(out["decision"], "harvested", "{out}");
+    assert_eq!(out["provenance_recorded"], 1, "{out}");
+    assert!(out["provenance_error"].is_null(), "{out}");
+
+    let stored = MemoryStore::open(dir.path())
+        .await
+        .unwrap()
+        .get("prov-mem-1")
+        .await
+        .unwrap();
+    assert_eq!(stored.source_sessions, vec!["sess-provenance".to_string()]);
+}
+
+/// A memory id that names nothing is reported, never fatal: the ledger
+/// decision is already written by then, and losing it to a typo would leave
+/// the session re-offered forever.
+#[tokio::test]
+async fn harvest_mark_reports_an_unknown_memory_id_without_failing() {
+    let home = ScopedClaudeHome::new();
+    let (dir, server) = setup().await;
+    MemoryStore::init(dir.path(), &InMemoryRegistry::new())
+        .await
+        .unwrap();
+    home.plant_session(dir.path(), "sess-typo");
+
+    let mut input = mark_input("sess-typo", None);
+    input.memory_ids = Some(vec!["no-such-memory".to_string()]);
+    let out = parse_ok(&server.harvest_mark(Parameters(input)).await);
+    assert_eq!(out["decision"], "harvested", "{out}");
+    assert_eq!(out["provenance_recorded"], 0, "{out}");
+    assert!(
+        out["provenance_error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no-such-memory"),
+        "the unresolved id must be named: {out}"
+    );
+}

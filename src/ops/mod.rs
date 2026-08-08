@@ -14,6 +14,7 @@ pub mod gc;
 pub mod get;
 pub mod harvest;
 pub mod harvest_index;
+pub mod harvest_pin;
 pub mod list;
 pub mod maintenance;
 pub mod parsing;
@@ -57,6 +58,10 @@ pub use harvest_index::{
     index_pending, index_session, index_sessions, reindex_from_copies,
     search as search_conversations, set_summary as set_conversation_summary, IndexAction,
     IndexReport,
+};
+pub use harvest_pin::{
+    evidence_links, expired_evidence, link_memories, sessions_with_bytes, EvidenceLinks,
+    ExpiredEvidence, LinkReport,
 };
 pub use list::{list_memories, parse_sort_field, ListParams, SortField};
 pub use maintenance::{

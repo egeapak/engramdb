@@ -990,6 +990,19 @@ impl MemoryStore {
             .map_err(|e| StorageError::Validation(format!("LanceDB list_ids failed: {}", e)))
     }
 
+    /// List every memory in this store that cites a source session
+    /// (schema v0.7.0). See [`LanceIndex::list_source_session_links`].
+    pub async fn list_source_session_links(
+        &self,
+    ) -> Result<Vec<super::lance_index::SourceSessionLink>> {
+        self.lance_index
+            .list_source_session_links()
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB source-session scan failed: {}", e))
+            })
+    }
+
     /// Compact fragments and prune old LanceDB dataset versions for the
     /// memories and chunks tables. See [`LanceIndex::optimize`].
     ///
@@ -2344,6 +2357,172 @@ mod tests {
                 .keyword_stems
                 .is_some(),
             "stems must be present after the normalizer-triggered rebuild"
+        );
+    }
+
+    /// Rewrite a store's `memories` table without the `source_sessions`
+    /// column, and stamp the manifest at 0.6.0.
+    ///
+    /// The other migration tests here downgrade only the manifest stamp, which
+    /// exercises the backfill but never the case that actually breaks: a table
+    /// whose Arrow schema is genuinely missing the new column. This builds that
+    /// table by reading the current one, dropping the field and its array, and
+    /// recreating the table from the reduced batches — so the fixture is the
+    /// previous version's on-disk shape rather than a stand-in for it, and it
+    /// stays honest if a later version adds another column.
+    async fn downgrade_to_0_6_0(dir: &Path) {
+        use arrow_array::RecordBatchIterator;
+        use futures_util::stream::StreamExt;
+        use lancedb::query::ExecutableQuery;
+        use std::sync::Arc;
+
+        let project_id = project_id::compute_project_id(dir);
+        let lance_path = paths::lancedb_dir(&project_id).unwrap();
+        let conn = lancedb::connect(lance_path.to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        let table = conn.open_table("memories").execute().await.unwrap();
+
+        let mut stream = table.query().execute().await.unwrap();
+        let mut reduced = Vec::new();
+        let mut reduced_schema = None;
+        while let Some(batch) = stream.next().await {
+            let batch = batch.unwrap();
+            let schema = batch.schema();
+            let keep: Vec<usize> = (0..schema.fields().len())
+                .filter(|i| schema.field(*i).name() != "source_sessions")
+                .collect();
+            assert_eq!(
+                keep.len() + 1,
+                schema.fields().len(),
+                "fixture must actually remove the new column"
+            );
+            let fields: Vec<_> = keep.iter().map(|i| schema.field(*i).clone()).collect();
+            let new_schema = Arc::new(arrow_schema::Schema::new(fields));
+            let columns: Vec<_> = keep.iter().map(|i| batch.column(*i).clone()).collect();
+            reduced.push(arrow_array::RecordBatch::try_new(new_schema.clone(), columns).unwrap());
+            reduced_schema = Some(new_schema);
+        }
+        let schema = reduced_schema.expect("fixture needs at least one memory");
+
+        conn.drop_table("memories", &[]).await.unwrap();
+        let batches: Box<dyn arrow_array::RecordBatchReader + Send> = Box::new(
+            RecordBatchIterator::new(reduced.into_iter().map(Ok), schema),
+        );
+        conn.create_table("memories", batches)
+            .execute()
+            .await
+            .unwrap();
+
+        let manifest_path = paths::project_dir(dir).join("manifest.toml");
+        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
+        m.schema_version = "0.6.0".to_string();
+        // Only the schema axis may trigger: leaving the normalizer stale would
+        // migrate for the wrong reason and the test would pass with the version
+        // gate broken.
+        m.normalizer = Some(engram_types::NORMALIZER_STAMP.to_string());
+        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+    }
+
+    /// The 0.7.0 schema migration (harvest provenance), against a store whose
+    /// table really was written by the previous version: the memories survive
+    /// intact, the `source_sessions` column appears, vectors are preserved, and
+    /// the stamp advances.
+    #[tokio::test]
+    async fn schema_migration_to_0_7_0_upgrades_a_real_0_6_0_store() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        {
+            let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+            let mut shared = create_test_memory("mig7-shared", Visibility::Shared);
+            shared.tags = vec!["alpha".into(), "beta".into()];
+            shared.details = Some("details that must survive".into());
+            store.create(&shared).await.unwrap();
+            store
+                .upsert_chunks("mig7-shared", vec![vec![0.2f32; 384]])
+                .await
+                .unwrap();
+            store
+                .create(&create_test_memory("mig7-personal", Visibility::Personal))
+                .await
+                .unwrap();
+        }
+        downgrade_to_0_6_0(tmp.path()).await;
+
+        // Control: the fixture is genuinely old. A projection of the new column
+        // against it fails, which is exactly what would happen to every pin
+        // scan if the migration did not run.
+        {
+            let old = LanceIndex::new(
+                &paths::lancedb_dir(&project_id::compute_project_id(tmp.path())).unwrap(),
+                384,
+            )
+            .await
+            .unwrap();
+            assert!(
+                old.list_source_session_links().await.is_err(),
+                "fixture still has the 0.7.0 column, so the test proves nothing"
+            );
+        }
+
+        // The hot path: a plain open must upgrade it.
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+        let manifest_path = paths::project_dir(tmp.path()).join("manifest.toml");
+        assert_eq!(
+            manifest::load_manifest(&manifest_path)
+                .await
+                .unwrap()
+                .schema_version,
+            manifest::CURRENT_SCHEMA_VERSION,
+            "migration must stamp the current schema version"
+        );
+
+        // Nothing lost: both memories, both visibilities, content and metadata.
+        assert_eq!(store.count().await.unwrap(), 2);
+        let shared = store.get("mig7-shared").await.unwrap();
+        assert_eq!(shared.tags, vec!["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(shared.details.as_deref(), Some("details that must survive"));
+        assert_eq!(shared.visibility, Visibility::Shared);
+        assert!(
+            shared.source_sessions.is_empty(),
+            "a memory written before the column cites nothing — not an error"
+        );
+        let personal = store.get("mig7-personal").await.unwrap();
+        assert_eq!(personal.visibility, Visibility::Personal);
+        assert!(
+            has_embedding_flag(&store, "mig7-shared").await,
+            "vectors preserved across the 0.7.0 migration"
+        );
+
+        // The column is there and usable: the scan runs, and a link written
+        // after the upgrade is visible to it.
+        assert!(store.list_source_session_links().await.unwrap().is_empty());
+        store
+            .update_with("mig7-shared", |m| {
+                m.link_source_session("sess-after-migration");
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let links = store.list_source_session_links().await.unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].memory_id, "mig7-shared");
+        assert_eq!(links[0].sessions, vec!["sess-after-migration".to_string()]);
+
+        // Idempotent: a second open does not re-migrate.
+        let _store2 = MemoryStore::open(tmp.path()).await.unwrap();
+        assert_eq!(
+            manifest::load_manifest(&manifest_path)
+                .await
+                .unwrap()
+                .schema_version,
+            manifest::CURRENT_SCHEMA_VERSION
+        );
+        assert_eq!(
+            store.list_source_session_links().await.unwrap().len(),
+            1,
+            "the link written after the migration must survive the next open"
         );
     }
 

@@ -355,7 +355,7 @@ engramdb harvest ledger list [--decision harvested|skipped|deferred|unreviewed]
                              [--with-archive]
 engramdb harvest ledger show <session_id>
 engramdb harvest ledger export <session_id> [-o <path>]
-engramdb harvest ledger rm <session_id> [--archive-only] [--force]
+engramdb harvest ledger rm <session_id> [--archive-only] [--unpin] [--force]
 engramdb harvest ledger prune [--older-than 90d] [--max-bytes N] [--apply]
 ```
 
@@ -524,6 +524,36 @@ restored backup, or an eviction on another machine took away loses the
 reference, and with it the exemption, on the next harvest command.
 `harvest ledger rm` deletes one — it confirms first, since once Claude Code has pruned its own transcript the archive is the only remaining copy; `--force` skips the prompt and is **required** under `--format json`, which never prompts. `harvest ledger export` restores one, verifying it against the SHA-256
 recorded when it was written.
+
+**Provenance and pinning.** `harvest mark <session> --memory <id>` records the
+session on each named memory as the conversation it was extracted from, so a
+memory that is later challenged resolves back to what was actually said
+(`harvest show <session>`). The agent does nothing extra for this — `mark` is
+already the one call that names both halves. The link is stored in the memory
+file itself, so it is committed and travels with a clone; `engramdb get <id>
+--format json` shows it as `source_sessions`.
+
+A cited conversation's transcript copy is **pinned**: neither
+`archive_retention_days` nor `archive_max_bytes` evicts it, and neither does
+the unattended SessionEnd sweep. The budget is measured over the *unpinned*
+copies only — counting pinned bytes toward the cap would quietly evict every
+unpinned copy to make room for files it is not allowed to touch. Pinned bytes
+beyond the budget are therefore reported rather than enforced, by
+`harvest ledger prune` and by `doctor`.
+
+Releasing a pin is deliberate: `harvest ledger rm <id>` refuses to delete a
+cited copy and names the memories citing it. `--unpin` is the decision to
+delete it anyway; `--force` only skips the prompt, so a scripted cleanup can
+never strand a memory's evidence by accident. Once the copy is gone the memory
+keeps its citation and `doctor` reports it as **evidence expired** — the same
+thing that happens naturally when a copy reaches the end of its retention
+window. Nothing is broken and nothing needs repairing; the claim still holds,
+it just can no longer be traced back.
+
+`doctor` reports four harvest facts under **Project → Harvest**, none of which
+affects the exit code: sessions due for indexing, ledger lines against live
+entries (compaction is opportunistic, so a long log is normal), expired
+evidence, and pinned bytes.
 
 ## `completions` — shell completions
 

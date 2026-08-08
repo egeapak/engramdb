@@ -369,22 +369,55 @@ pub struct PruneOutcome {
     pub removed: Vec<String>,
     pub bytes_freed: u64,
     pub bytes_remaining: u64,
+    /// Bytes held by copies a memory cites as its evidence, and so exempt from
+    /// both limits.
+    pub pinned_bytes: u64,
+    /// How many copies those bytes are spread over.
+    pub pinned_count: usize,
 }
 
-/// Evict archives past the retention limits, oldest first.
+/// Evict archives past the retention limits, oldest first, sparing pinned ones.
 ///
 /// Age is applied before size, so an over-budget store first drops genuinely
 /// stale archives and only then eats into recent ones. `max_bytes == 0`
 /// disables the size limit; `retention_days == None` disables the age limit.
+///
+/// # Pinning
+///
+/// A copy whose session id is in `pinned` is never evicted by either limit.
+/// The pin is what makes a memory's provenance mean something: a memory that
+/// cites a conversation nobody can read any more is an assertion with no
+/// evidence behind it, and the whole reason the copy is taken at session end is
+/// that Claude Code will delete the original.
+///
+/// **The budget is therefore measured over the *unpinned* copies only.** The
+/// alternative — counting pinned bytes toward the cap — would make a large
+/// harvested history silently evict every unpinned copy to make room for files
+/// it is not allowed to touch, which is a limit enforced against the user in
+/// the guise of a limit they set. Over-budget pinned bytes are instead reported
+/// ([`PruneOutcome::pinned_bytes`]) so `doctor` can show the state.
+///
+/// The caller supplies `pinned`; this module cannot compute it (it would have
+/// to read memories, and storage does not depend on `ops`). A caller that
+/// *cannot* determine the pinned set must not call this with an empty one — an
+/// unknown pin is indistinguishable here from an absent one, and the difference
+/// is a deleted transcript.
 pub fn prune_archives(
     project_id: &str,
     retention_days: Option<u64>,
     max_bytes: u64,
     dry_run: bool,
+    pinned: &std::collections::HashSet<String>,
 ) -> Result<PruneOutcome> {
     let archives = list_archives(project_id)?;
     let mut outcome = PruneOutcome::default();
     let mut keep: Vec<&StoredArchive> = Vec::new();
+    for archive in &archives {
+        if pinned.contains(&archive.session_id) {
+            outcome.pinned_bytes += archive.bytes;
+            outcome.pinned_count += 1;
+        }
+    }
 
     // Fallible throughout: `Duration::days` panics past ~1e11 days and
     // `DateTime - Duration` panics on underflow, and this runs inside the
@@ -400,7 +433,7 @@ pub fn prune_archives(
     });
     for archive in &archives {
         let too_old = cutoff.is_some_and(|c| archive.modified < c);
-        if too_old {
+        if too_old && !pinned.contains(&archive.session_id) {
             outcome.removed.push(archive.session_id.clone());
             outcome.bytes_freed += archive.bytes;
         } else {
@@ -409,22 +442,32 @@ pub fn prune_archives(
     }
 
     if max_bytes > 0 {
-        let mut remaining: u64 = keep.iter().map(|a| a.bytes).sum();
-        // `keep` is oldest-first, so draining from the front evicts the
-        // oldest survivors until the budget is met.
+        // Measured over unpinned copies only — see the pinning note above.
+        let mut unpinned: u64 = keep
+            .iter()
+            .filter(|a| !pinned.contains(&a.session_id))
+            .map(|a| a.bytes)
+            .sum();
+        // `keep` is oldest-first, so walking from the front evicts the oldest
+        // survivors until the budget is met; a pinned one is stepped over
+        // rather than stopping the walk, or one ancient pinned copy would
+        // shield every younger file behind it.
         let mut idx = 0;
-        while remaining > max_bytes && idx < keep.len() {
+        let mut evicted = Vec::new();
+        while unpinned > max_bytes && idx < keep.len() {
             let archive = keep[idx];
+            idx += 1;
+            if pinned.contains(&archive.session_id) {
+                continue;
+            }
             outcome.removed.push(archive.session_id.clone());
             outcome.bytes_freed += archive.bytes;
-            remaining -= archive.bytes;
-            idx += 1;
+            unpinned -= archive.bytes;
+            evicted.push(archive.session_id.clone());
         }
-        keep.drain(..idx);
-        outcome.bytes_remaining = remaining;
-    } else {
-        outcome.bytes_remaining = keep.iter().map(|a| a.bytes).sum();
+        keep.retain(|a| !evicted.contains(&a.session_id));
     }
+    outcome.bytes_remaining = keep.iter().map(|a| a.bytes).sum();
 
     if !dry_run {
         for session_id in &outcome.removed {
@@ -454,6 +497,16 @@ mod tests {
             None => std::env::remove_var("ENGRAMDB_DATA_DIR"),
         }
         out
+    }
+
+    /// No memory cites anything — the state of a store that has never
+    /// harvested, and the control for every pinning test below.
+    fn no_pins() -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+
+    fn pins(ids: &[&str]) -> std::collections::HashSet<String> {
+        ids.iter().map(|s| (*s).to_string()).collect()
     }
 
     fn write_transcript(dir: &Path, name: &str, lines: usize) -> PathBuf {
@@ -545,7 +598,7 @@ mod tests {
             let total = total_bytes("proj").unwrap();
 
             // Budget that fits roughly one archive: the two oldest must go.
-            let outcome = prune_archives("proj", None, total / 3, false).unwrap();
+            let outcome = prune_archives("proj", None, total / 3, false, &no_pins()).unwrap();
             assert!(!outcome.removed.is_empty());
             assert_eq!(outcome.removed[0], "a", "oldest must be evicted first");
             assert!(outcome.bytes_remaining <= total / 3);
@@ -572,7 +625,7 @@ mod tests {
             let t2 = write_transcript(src.path(), "new.jsonl", 20);
             archive_transcript("proj", "new", &t2).unwrap();
 
-            let outcome = prune_archives("proj", Some(30), 0, false).unwrap();
+            let outcome = prune_archives("proj", Some(30), 0, false, &no_pins()).unwrap();
             assert_eq!(outcome.removed, vec!["old"]);
             let left = list_archives("proj").unwrap();
             assert_eq!(left.len(), 1);
@@ -587,10 +640,111 @@ mod tests {
             let t = write_transcript(src.path(), "s.jsonl", 50);
             archive_transcript("proj", "s", &t).unwrap();
 
-            let outcome = prune_archives("proj", None, 1, true).unwrap();
+            let outcome = prune_archives("proj", None, 1, true, &no_pins()).unwrap();
             assert_eq!(outcome.removed, vec!["s"]);
             assert!(outcome.bytes_freed > 0);
             assert_eq!(list_archives("proj").unwrap().len(), 1, "dry run deleted");
+        });
+    }
+
+    /// Age eviction spares a pinned copy. The unpinned run in
+    /// `prune_by_age_drops_stale_archives` is the control: same fixture, same
+    /// window, and there the file goes.
+    #[test]
+    fn age_eviction_spares_a_pinned_copy() {
+        with_data_dir(|_| {
+            let src = TempDir::new().unwrap();
+            let t = write_transcript(src.path(), "old.jsonl", 20);
+            archive_transcript("proj", "old", &t).unwrap();
+            let path = archive_path("proj", "old").unwrap();
+            let f = std::fs::File::options().write(true).open(&path).unwrap();
+            f.set_modified(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(86_400 * 40),
+            )
+            .unwrap();
+
+            let outcome = prune_archives("proj", Some(30), 0, false, &pins(&["old"])).unwrap();
+            assert!(
+                outcome.removed.is_empty(),
+                "a cited conversation was evicted by the age window"
+            );
+            assert_eq!(list_archives("proj").unwrap().len(), 1);
+            assert_eq!(outcome.pinned_count, 1);
+            assert!(outcome.pinned_bytes > 0);
+        });
+    }
+
+    /// The size budget is measured over *unpinned* bytes, and the walk steps
+    /// over a pinned copy rather than stopping at it — otherwise one ancient
+    /// pinned file would shield every younger one behind it and the budget
+    /// would never be met.
+    #[test]
+    fn size_eviction_skips_pins_and_budgets_only_unpinned() {
+        with_data_dir(|_| {
+            let src = TempDir::new().unwrap();
+            for (i, name) in ["a", "b", "c"].iter().enumerate() {
+                let t = write_transcript(src.path(), &format!("{name}.jsonl"), 200);
+                archive_transcript("proj", name, &t).unwrap();
+                let path = archive_path("proj", name).unwrap();
+                let when = std::time::SystemTime::now()
+                    - std::time::Duration::from_secs(300 - i as u64 * 60);
+                let f = std::fs::File::options().write(true).open(&path).unwrap();
+                f.set_modified(when).unwrap();
+            }
+            let total = total_bytes("proj").unwrap();
+
+            // "a" is the oldest and would go first unpinned; pinned, the walk
+            // must move on to "b".
+            let outcome = prune_archives("proj", None, total / 3, false, &pins(&["a"])).unwrap();
+            assert!(
+                !outcome.removed.contains(&"a".to_string()),
+                "a cited conversation was evicted to meet the budget"
+            );
+            assert!(
+                outcome.removed.contains(&"b".to_string()),
+                "the walk stopped at the pin instead of stepping over it"
+            );
+            let left: Vec<String> = list_archives("proj")
+                .unwrap()
+                .into_iter()
+                .map(|a| a.session_id)
+                .collect();
+            assert!(left.contains(&"a".to_string()));
+            // The budget is measured over the *unpinned* copies, so evicting
+            // `b` alone satisfies it. Counting the pinned `a` toward the cap
+            // would take `c` down as well — an unpinned copy deleted to make
+            // room for a file the sweep is not allowed to touch.
+            assert!(
+                left.contains(&"c".to_string()),
+                "the budget was measured over total bytes, not unpinned ones"
+            );
+
+            // Pinned bytes are reported, not enforced: what remains is over the
+            // cap precisely because the pin is exempt from it.
+            assert_eq!(outcome.pinned_count, 1);
+            assert!(outcome.bytes_remaining > total / 3);
+        });
+    }
+
+    /// Every copy pinned ⇒ nothing is evicted however small the budget, and the
+    /// over-budget state is reported instead of enforced.
+    #[test]
+    fn an_all_pinned_store_evicts_nothing_and_reports_the_overrun() {
+        with_data_dir(|_| {
+            let src = TempDir::new().unwrap();
+            for name in ["a", "b"] {
+                let t = write_transcript(src.path(), &format!("{name}.jsonl"), 200);
+                archive_transcript("proj", name, &t).unwrap();
+            }
+            let total = total_bytes("proj").unwrap();
+
+            let outcome = prune_archives("proj", None, 1, false, &pins(&["a", "b"])).unwrap();
+            assert!(outcome.removed.is_empty());
+            assert_eq!(outcome.bytes_freed, 0);
+            assert_eq!(outcome.pinned_count, 2);
+            assert_eq!(outcome.pinned_bytes, total);
+            assert_eq!(outcome.bytes_remaining, total);
+            assert_eq!(list_archives("proj").unwrap().len(), 2);
         });
     }
 

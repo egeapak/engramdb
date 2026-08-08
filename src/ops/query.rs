@@ -343,6 +343,7 @@ mod tests {
                 status: Status::Active,
                 visibility: Visibility::Shared,
                 audience: None,
+                source_sessions: vec![],
                 challenges: vec![],
                 verified_at: None,
                 created_at: now,

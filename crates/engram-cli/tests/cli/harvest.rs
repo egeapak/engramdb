@@ -1157,3 +1157,297 @@ fn an_empty_listing_names_the_archive_route() {
         "an empty listing must point at the archive: {out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Provenance and pinning (schema 0.7.0)
+// ---------------------------------------------------------------------------
+
+/// Run a command in JSON mode.
+///
+/// Not `Corpus::engramdb`, which pins `--format plain`: these assertions are
+/// about a *field* of a memory, and plain output does not carry it.
+fn json_out(c: &Corpus, dir: &Path, args: &[&str]) -> serde_json::Value {
+    let mut command = cmd();
+    command.env("CLAUDE_CONFIG_DIR", &c.claude);
+    command.arg("--dir").arg(dir).arg("--format").arg("json");
+    command.args(args);
+    let out = command.output().unwrap();
+    assert!(
+        out.status.success(),
+        "command {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("--format json must emit JSON")
+}
+
+/// Create a memory and return its id.
+fn add_memory(c: &Corpus, summary: &str) -> String {
+    let out = c.stdout(
+        &c.main,
+        &["add", "-t", "decision", "-s", summary, "-c", "body"],
+    );
+    out.split_whitespace()
+        .last()
+        .expect("add must report the id")
+        .trim()
+        .to_string()
+}
+
+/// `harvest mark --memory` is the only place both halves are named, so the
+/// link has to be written from there — the agent does nothing extra.
+#[test]
+fn marking_a_session_records_it_as_the_memory_source() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+    let id = add_memory(&c, "a fact mined from the rich session");
+
+    c.engramdb(
+        &c.main,
+        &["harvest", "mark", "aaaa1111-rich", "--memory", &id],
+    )
+    .assert()
+    .success();
+
+    let memory = json_out(&c, &c.main, &["get", &id]);
+    assert_eq!(
+        memory["source_sessions"],
+        serde_json::json!(["aaaa1111-rich"]),
+        "the memory does not record the session it came from: {memory}"
+    );
+}
+
+/// The pin: a cited conversation is exempt from the size budget, and the
+/// uncited one beside it is not. Both halves in one test, because "nothing was
+/// evicted" is only meaningful next to something that was.
+#[test]
+fn a_cited_transcript_copy_is_exempt_from_the_budget() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+    c.session_end(&c.main, "aaaa1111-rich");
+    c.session_end(&c.main, "bbbb2222-empty");
+    assert!(find_archive("aaaa1111-rich").is_some());
+    assert!(find_archive("bbbb2222-empty").is_some());
+
+    let id = add_memory(&c, "mined from the rich session");
+    c.engramdb(
+        &c.main,
+        &["harvest", "mark", "aaaa1111-rich", "--memory", &id],
+    )
+    .assert()
+    .success();
+
+    // A budget of one byte: everything unpinned must go.
+    let out = c.stdout(
+        &c.main,
+        &["harvest", "ledger", "prune", "--max-bytes", "1", "--apply"],
+    );
+    assert!(
+        find_archive("aaaa1111-rich").is_some(),
+        "the copy behind a memory was evicted by the budget: {out}"
+    );
+    assert!(
+        find_archive("bbbb2222-empty").is_none(),
+        "the control copy survived, so the budget was not applied at all: {out}"
+    );
+    assert!(
+        out.contains("exempt from the budget"),
+        "the overrun must be reported, not hidden: {out}"
+    );
+}
+
+/// Releasing a pin is deliberate and confirmed. `--force` skips the *prompt*;
+/// it is not a decision to strand a memory's evidence, so `rm` refuses without
+/// `--unpin` and names the memories that would be left citing nothing.
+#[test]
+fn removing_a_pinned_copy_requires_an_explicit_unpin() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+    c.session_end(&c.main, "aaaa1111-rich");
+    let id = add_memory(&c, "mined from the rich session");
+    c.engramdb(
+        &c.main,
+        &["harvest", "mark", "aaaa1111-rich", "--memory", &id],
+    )
+    .assert()
+    .success();
+
+    let out = c
+        .engramdb(
+            &c.main,
+            &[
+                "harvest",
+                "ledger",
+                "rm",
+                "aaaa",
+                "--archive-only",
+                "--force",
+            ],
+        )
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "a pinned copy was deleted by --force alone"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("--unpin"),
+        "the release path must be named: {err}"
+    );
+    assert!(err.contains(&id), "the citing memory must be named: {err}");
+    assert!(
+        find_archive("aaaa1111-rich").is_some(),
+        "the copy was removed despite the refusal"
+    );
+
+    // With the pin explicitly released, the same command goes through.
+    c.engramdb(
+        &c.main,
+        &[
+            "harvest",
+            "ledger",
+            "rm",
+            "aaaa",
+            "--archive-only",
+            "--unpin",
+            "--force",
+        ],
+    )
+    .assert()
+    .success();
+    assert!(find_archive("aaaa1111-rich").is_none());
+}
+
+/// A memory whose copy is gone reads as expired evidence, never as damage.
+#[test]
+fn doctor_reports_expired_evidence_without_failing() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+    c.session_end(&c.main, "aaaa1111-rich");
+    let id = add_memory(&c, "mined from the rich session");
+    c.engramdb(
+        &c.main,
+        &["harvest", "mark", "aaaa1111-rich", "--memory", &id],
+    )
+    .assert()
+    .success();
+
+    // Delete the copy AND the live transcript: nothing is left to read.
+    c.engramdb(
+        &c.main,
+        &[
+            "harvest",
+            "ledger",
+            "rm",
+            "aaaa",
+            "--archive-only",
+            "--unpin",
+            "--force",
+        ],
+    )
+    .assert()
+    .success();
+    std::fs::remove_file(
+        c.claude
+            .join("projects")
+            .join(encode(&c.main))
+            .join("aaaa1111-rich.jsonl"),
+    )
+    .unwrap();
+
+    let out = c.stdout(&c.main, &["doctor"]);
+    assert!(
+        out.contains("evidence expired"),
+        "doctor must report the expiry: {out}"
+    );
+    assert!(
+        !out.to_lowercase()
+            .contains("run `engramdb reindex` to repair"),
+        "expiry must not be presented as damage: {out}"
+    );
+}
+
+/// The SessionEnd sweep is the eviction path nobody watches: it runs
+/// unattended on every session that ends, and until now it was the only thing
+/// that could delete a transcript copy without anyone asking. It must honor
+/// the pin too — a rule enforced only by the interactive command is not a rule.
+#[test]
+fn the_unattended_session_end_sweep_honors_the_pin() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+    c.session_end(&c.main, "aaaa1111-rich");
+    let id = add_memory(&c, "mined from the rich session");
+    c.engramdb(
+        &c.main,
+        &["harvest", "mark", "aaaa1111-rich", "--memory", &id],
+    )
+    .assert()
+    .success();
+
+    // One byte of budget, set only now: the sweep runs inside the very call
+    // that writes a copy, so tightening it first would evict `aaaa1111` before
+    // anything had a chance to cite it.
+    std::fs::write(
+        c.main.join(".engramdb").join("config.toml"),
+        "[harvest]\narchive_max_bytes = 1\n",
+    )
+    .unwrap();
+
+    // Any later session end runs the sweep.
+    c.session_end(&c.main, "bbbb2222-empty");
+
+    assert!(
+        find_archive("aaaa1111-rich").is_some(),
+        "the unattended sweep deleted the copy behind a memory"
+    );
+    assert!(
+        find_archive("bbbb2222-empty").is_none(),
+        "the control copy survived, so the sweep did not run at all"
+    );
+}
+
+/// Fail closed. An unknown pin set is indistinguishable from an empty one, and
+/// acting on that guess is how an unattended hook deletes the last copy behind
+/// a harvested memory — so a sweep that cannot read the stores evicts nothing
+/// at all and says so, rather than treating "I could not look" as "nothing is
+/// cited".
+#[test]
+fn a_sweep_that_cannot_enumerate_pins_evicts_nothing() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+    c.session_end(&c.main, "aaaa1111-rich");
+    let id = add_memory(&c, "mined from the rich session");
+    c.engramdb(
+        &c.main,
+        &["harvest", "mark", "aaaa1111-rich", "--memory", &id],
+    )
+    .assert()
+    .success();
+    std::fs::write(
+        c.main.join(".engramdb").join("config.toml"),
+        "[harvest]\narchive_max_bytes = 1\n",
+    )
+    .unwrap();
+
+    // Break the store the pin scan has to read: a plain file where the LanceDB
+    // directory belongs makes `MemoryStore::open` fail with something that is
+    // *not* "no store here", which is exactly the case the guess would cover up.
+    let lance = data_dir()
+        .join("projects")
+        .join(c.project_id(&c.main))
+        .join("lancedb");
+    std::fs::remove_dir_all(&lance).unwrap();
+    std::fs::write(&lance, b"not a directory").unwrap();
+
+    c.session_end(&c.main, "bbbb2222-empty");
+
+    assert!(
+        find_archive("aaaa1111-rich").is_some(),
+        "the pinned copy was evicted by a sweep that could not read the pins"
+    );
+    assert!(
+        find_archive("bbbb2222-empty").is_some(),
+        "the sweep ran anyway on an empty pin set — an unknown pin was treated \
+         as an absent one"
+    );
+}

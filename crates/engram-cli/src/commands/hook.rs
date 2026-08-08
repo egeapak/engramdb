@@ -976,18 +976,21 @@ async fn archive_ending_session(
     // prune below deletes the root's archives, so writing the eviction back to
     // a sub-project's own ledger would leave the root advertising files this
     // very call removed.
-    let (project_id, ledger_dir) = match engramdb::ops::harvest::session_scope(dir, registry).await
-    {
-        Ok(scope) => (scope.root_project_id, scope.root_dir),
+    let scope = match engramdb::ops::harvest::session_scope(dir, registry).await {
+        Ok(scope) => Some(scope),
         // Fail open, consistent with the rest of SessionEnd: an unreadable
         // registry must not cost the archive entirely.
         Err(e) => {
             tracing::debug!("SessionEnd archive: scope unresolved, using own id: {e}");
-            (
-                engramdb::storage::project_id::compute_project_id(dir),
-                dir.to_path_buf(),
-            )
+            None
         }
+    };
+    let (project_id, ledger_dir) = match &scope {
+        Some(scope) => (scope.root_project_id.clone(), scope.root_dir.clone()),
+        None => (
+            engramdb::storage::project_id::compute_project_id(dir),
+            dir.to_path_buf(),
+        ),
     };
     if !too_big {
         match engramdb::storage::transcript_archive::archive_transcript(
@@ -1006,6 +1009,34 @@ async fn archive_ending_session(
         }
     }
 
+    // Which copies are cited as a memory's evidence, and so exempt. Unlike
+    // everything else on this path a failure here is **not** shrugged off into
+    // a default: an empty pin set is indistinguishable from "no memory cites
+    // anything", and acting on that guess would let an unattended hook delete
+    // the one surviving copy behind a harvested memory. Unknown pins therefore
+    // mean no eviction this run; the next `harvest ledger prune` or the next
+    // session end reclaims the bytes once the stores are readable again.
+    let pinned = match &scope {
+        Some(scope) => match engramdb::ops::evidence_links(scope).await {
+            Ok(links) => Some(links.pinned_sessions()),
+            Err(e) => {
+                tracing::warn!(
+                    "SessionEnd archive: skipping the retention sweep — could not determine \
+                     which transcript copies memories still cite ({e})"
+                );
+                None
+            }
+        },
+        None => {
+            tracing::warn!(
+                "SessionEnd archive: skipping the retention sweep — the project scope did not \
+                 resolve, so pinned transcript copies cannot be identified"
+            );
+            None
+        }
+    };
+    let Some(pinned) = pinned else { return };
+
     // Always: session end is the only moment this reliably runs, so an
     // oversized transcript must not also cost the retention sweep.
     match engramdb::storage::transcript_archive::prune_archives(
@@ -1013,6 +1044,7 @@ async fn archive_ending_session(
         config.harvest.archive_retention_days,
         config.harvest.archive_max_bytes,
         false,
+        &pinned,
     ) {
         // Evicted files must stop being advertised by the ledger, or
         // `harvest ledger show` offers an export that cannot succeed.

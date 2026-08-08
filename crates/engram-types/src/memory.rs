@@ -231,6 +231,24 @@ pub struct Memory {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audience: Option<Vec<String>>,
 
+    /// Claude Code session ids this memory was extracted from.
+    ///
+    /// The evidence link: a challenged memory resolves back to the conversation
+    /// that produced it, and the stored transcript copy for a session named
+    /// here is exempt from budget eviction (it is *pinned*). Written by the
+    /// harvest flow, which is the only place both halves are known at once
+    /// (`harvest mark <session> --memory <id>`).
+    ///
+    /// Distinct from `provenance.session_id`, which records the session that
+    /// *authored* the memory. Harvesting is precisely the case where the two
+    /// differ: an agent in today's session extracts a memory from a transcript
+    /// recorded weeks ago, and it is the older one that has to survive.
+    ///
+    /// Empty is the normal state — most memories are written directly rather
+    /// than mined out of a conversation, and they pin nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_sessions: Vec<String>,
+
     /// Challenges to this memory's validity
     #[serde(default)]
     pub challenges: Vec<Challenge>,
@@ -287,6 +305,7 @@ impl Memory {
             status: Status::Active,
             visibility: Visibility::Shared,
             audience: None,
+            source_sessions: vec![],
             challenges: vec![],
             verified_at: None,
             created_at: now,
@@ -294,6 +313,21 @@ impl Memory {
             accessed_at: now,
             expires_at: None,
         }
+    }
+
+    /// Record that this memory was extracted from `session_id`, returning
+    /// whether that was new information.
+    ///
+    /// Idempotent and order-preserving: `harvest mark` may name the same
+    /// session and memory twice (re-running a mark to fix a note is normal),
+    /// and a duplicate would inflate the pin's apparent support without
+    /// changing what it pins.
+    pub fn link_source_session(&mut self, session_id: &str) -> bool {
+        if self.source_sessions.iter().any(|s| s == session_id) {
+            return false;
+        }
+        self.source_sessions.push(session_id.to_string());
+        true
     }
 
     /// Update the accessed_at timestamp
@@ -978,6 +1012,39 @@ mod tests {
         // None ⇒ unchanged behavior
         memory.invalidated_at = None;
         assert!(memory.is_active());
+    }
+
+    #[test]
+    fn test_link_source_session_dedupes_and_preserves_order() {
+        let mut memory = Memory::new(MemoryType::Debug, "s", "c", Provenance::human());
+        assert!(memory.source_sessions.is_empty());
+
+        assert!(memory.link_source_session("sess-a"));
+        // Re-marking the same pair is routine (`harvest mark` re-run to fix a
+        // note) and must not inflate the citation.
+        assert!(!memory.link_source_session("sess-a"));
+        assert!(memory.link_source_session("sess-b"));
+        assert_eq!(
+            memory.source_sessions,
+            vec!["sess-a".to_string(), "sess-b".to_string()]
+        );
+    }
+
+    /// An empty citation list must not serialize a key: that is what keeps a
+    /// memory written by this version byte-identical to one written before the
+    /// field existed, and what makes the pre-0.7.0 file parse without it.
+    #[test]
+    fn test_source_sessions_serde_is_absent_when_empty() {
+        let mut memory = Memory::new(MemoryType::Debug, "s", "c", Provenance::human());
+        let json = serde_json::to_string(&memory).unwrap();
+        assert!(!json.contains("source_sessions"), "{json}");
+        let back: Memory = serde_json::from_str(&json).unwrap();
+        assert!(back.source_sessions.is_empty());
+
+        memory.source_sessions = vec!["sess-a".to_string()];
+        let json = serde_json::to_string(&memory).unwrap();
+        let back: Memory = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.source_sessions, vec!["sess-a".to_string()]);
     }
 
     #[test]

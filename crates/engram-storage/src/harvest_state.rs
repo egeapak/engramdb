@@ -447,6 +447,35 @@ fn drain_and_prune(folded: &mut HashMap<String, Folded>) {
     folded.retain(|_, f| f.entry.archive.is_some() || f.entry.harvested_at > cutoff);
 }
 
+/// How far the log has outgrown the state it carries: `(lines, live entries)`.
+///
+/// The same two numbers [`maybe_compact`] compares, exposed so `doctor` can
+/// report pending compaction without duplicating the fold. A missing file is
+/// `(0, 0)`.
+///
+/// Reported rather than acted on: compaction is opportunistic (it happens on
+/// the next append that crosses the size gate) and a log that is merely long
+/// costs disk, not correctness. What a user needs to know is that the append
+/// path has not run recently enough to reclaim it — a project nobody has
+/// harvested in months never appends, so the file sits at whatever size it
+/// reached.
+pub fn compaction_pressure(project_dir: &Path) -> (usize, usize) {
+    let Ok(raw) = std::fs::read_to_string(ledger_path(project_dir)) else {
+        return (0, 0);
+    };
+    let lines = raw.lines().filter(|l| !l.trim().is_empty()).count();
+    let mut folded = fold(parse_lines(&raw));
+    drain_and_prune(&mut folded);
+    (lines, folded.len())
+}
+
+/// Whether the log has outgrown its live entries by the factor compaction acts
+/// on. Shares [`COMPACT_FACTOR`] with [`maybe_compact`] so the two can never
+/// disagree about what "pending" means.
+pub fn compaction_is_pending(lines: usize, live: usize) -> bool {
+    lines > live.max(1) * COMPACT_FACTOR
+}
+
 /// Is this session settled — i.e. should `list` stop offering it?
 ///
 /// An entry that only records a collected transcript (written by the SessionEnd

@@ -299,6 +299,11 @@ pub enum LedgerCommand {
         #[arg(long)]
         archive_only: bool,
 
+        /// Release the pin held by memories that cite this conversation, and
+        /// delete the copy anyway
+        #[arg(long)]
+        unpin: bool,
+
         /// Skip confirmation prompt
         #[arg(long, short = 'f')]
         force: bool,
