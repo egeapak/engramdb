@@ -346,12 +346,12 @@ stats`, and every cross-project surface until they are registered.
 
 | Flag | Behavior |
 | --- | --- |
-| `PATH` | Directory to scan. Defaults to the current project directory. |
+| `PATH` | Directory to scan. Defaults to the project directory this invocation resolved to — note that inside a linked git worktree that is the **main** checkout, not the cwd. |
 | `--max-depth <N>` | Maximum depth to descend below the scan root (default 6). The summary says when a subtree was cut off. |
 | `--hidden` | Also descend into dot-directories. |
 | `--follow-symlinks` | Follow directory symlinks (the walk visits each canonical path once either way). |
-| `-y`, `--yes` | Register everything found without prompting. Required in JSON mode. |
-| `--dry-run` | Report what would be registered and exit without changing anything. |
+| `-y`, `--yes` | Register everything found without prompting. Required in JSON mode unless `--dry-run` is passed (JSON is machine-consumed, so the command never prompts). |
+| `--dry-run` | Report what would be registered without registering anything. (The usual automatic maintenance pass still runs, as it does for every command.) |
 | `--no-index` | Register only. Memories stay unsearchable until you run `engramdb reindex`. |
 
 Without `--yes` you are asked once per project, so a scratch clone can be
@@ -362,17 +362,38 @@ bar over the batch.
 
 Directories that can't hold a project root are never descended into
 (`node_modules`, `target`, `.git`, `vendor`, `dist`, `build`, virtualenvs, …),
-and engramdb's own global/group stores are never offered. A project whose ID is
-already registered to a *different*, still-existing checkout (two clones of one
-git remote hash to the same ID and would share one index) is reported as a
-warning and skipped rather than registered.
+and engramdb's own global/group stores are never offered. Two kinds of project
+are reported but never registered — as a warning in human output, and in the
+`skipped[]` array in JSON:
+
+- **Shared project ID** — the ID is already claimed by a different checkout
+  that still exists, either in the registry or earlier in the same scan. Two
+  clones of one git remote hash to the same ID and would share a single index.
+- **Linked git worktree** — worktrees are sub-projects, not roots: engramdb
+  routes their memory operations to the main checkout automatically. Adopting
+  one would create a second owner of the same memory files.
+
+Exit status is non-zero if any project failed to register; the report is still
+emitted first, so you can see which ones. Directories that can't be read
+(permissions, dead mounts) are skipped and counted, and the summary says so —
+"no unregistered projects found" after a partial scan is not the same claim as
+"there are none".
 
 JSON mode emits exactly one of two objects, both carrying `root`,
-`scanned_dirs`, `depth_limited`, and `dry_run`. A `--dry-run` adds
-`candidates[]`, `already_registered[]`, `shared_id[]`; a real run adds
-`registered[]` (each with `project_id`, `indexed`, `embedded`, `warnings[]`),
-`declined[]`, and `errors[]` — with empty arrays when nothing was found or
-everything was declined, so the shape never varies with the outcome.
+`scanned_dirs`, `depth_limited`, `unreadable_dirs`, `dry_run`, and `skipped[]`
+(each `{path, project_id, reason, owner}` where `reason` is
+`shared_project_id` or `git_worktree`).
+
+- `--dry-run` adds `candidates[]` (each `{path, project_id, memory_count}`) and
+  `already_registered[]`.
+- A real run adds `no_index`, `found_unregistered`, `registered[]` (each
+  `{path, project_id, indexed, embedded, warnings[]}`), `declined[]`, and
+  `errors[]` (each `{path, error}`).
+
+Arrays are empty rather than absent when nothing was found or everything was
+declined, so the shape never varies with the outcome. Under `--no-index`,
+`indexed` and `embedded` are `null` — "not rebuilt", as distinct from `0`,
+which means the rebuild ran and found nothing.
 
 See [projects-and-worktrees.md](./projects-and-worktrees.md).
 

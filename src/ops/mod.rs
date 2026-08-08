@@ -38,10 +38,11 @@ pub use compress::{
 pub use config::{top_tags, AgentConfigView, TagCount, DEFAULT_TOP_TAGS};
 pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
 pub use delete::delete_memory;
-pub use discover::{
-    discover_projects, discover_projects_in, DiscoverOptions, DiscoveredProject, DiscoveryReport,
-    DiscoveryStatus, DEFAULT_MAX_DEPTH as DEFAULT_DISCOVER_MAX_DEPTH,
-};
+// `discover` is deliberately NOT flat-re-exported, matching its sibling
+// `projects` (the registry-management family it belongs to): callers use
+// `ops::discover::…`. A flat re-export would need `DEFAULT_MAX_DEPTH` aliased
+// to something unique — the only aliased re-export in this file, and a sign the
+// name is too generic for the crate-wide op surface.
 pub use doctor::{
     doctor, doctor_environment, doctor_epistemic, enrichment_gaps, validate_models, CheckStatus,
     DoctorResult, DoctorSection, EnrichmentGaps, EnvironmentCheck, EnvironmentDoctorResult,

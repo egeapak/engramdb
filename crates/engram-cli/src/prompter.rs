@@ -68,6 +68,7 @@ use anyhow::bail;
 #[cfg(test)]
 pub struct MockPrompter {
     responses: std::sync::Mutex<std::collections::VecDeque<String>>,
+    prompts: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -77,10 +78,24 @@ impl MockPrompter {
             responses: std::sync::Mutex::new(
                 responses.into_iter().map(|s| s.to_string()).collect(),
             ),
+            prompts: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
+    /// How many prompts have been issued.
+    ///
+    /// An exhausted queue returns `Err`, not a panic, and a caller that maps
+    /// the error to a default (or declines on it) absorbs the mistake — so
+    /// "this path must not prompt" cannot be tested by supplying an empty
+    /// queue alone. Assert on this counter instead.
+    #[allow(dead_code)]
+    pub fn prompt_count(&self) -> usize {
+        self.prompts.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn pop(&self) -> Result<String> {
+        self.prompts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.responses
             .lock()
             .unwrap()

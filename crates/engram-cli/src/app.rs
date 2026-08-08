@@ -143,7 +143,7 @@ pub enum ProjectsCommand {
         /// Directory to scan (defaults to the current project directory)
         path: Option<std::path::PathBuf>,
         /// Maximum directory depth to descend below the scan root
-        #[arg(long, default_value_t = engramdb::ops::DEFAULT_DISCOVER_MAX_DEPTH)]
+        #[arg(long, default_value_t = engramdb::ops::discover::DEFAULT_MAX_DEPTH)]
         max_depth: usize,
         /// Also descend into hidden (dot-prefixed) directories
         #[arg(long)]

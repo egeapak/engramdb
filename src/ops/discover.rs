@@ -84,14 +84,28 @@ pub enum DiscoveryStatus {
     Unregistered,
     /// Already tracked: a registry entry points at this exact directory.
     Registered,
-    /// This directory's project ID is already registered to a *different*
-    /// directory that still exists — two clones of the same git remote hash to
-    /// the same ID and would share one index. Registering here would not
-    /// repoint the entry (`RegistryBackend::update` keeps the first
+    /// This directory's project ID is claimed by a *different* directory that
+    /// still exists — either an existing registry entry, or an earlier
+    /// candidate in this same scan. Two clones of one git remote hash to the
+    /// same ID and would share a single index, and registering the second
+    /// would not repoint the entry (`RegistryBackend::update` keeps the first
     /// registration), so these are reported, never auto-registered.
     SharedId {
-        /// The checkout that currently owns the project ID.
+        /// The checkout that owns (or will own) the project ID.
         owner: PathBuf,
+    },
+    /// A linked git worktree carrying its own `.engramdb/`.
+    ///
+    /// Worktrees are not independent projects: `worktree::resolve_project_root`
+    /// routes their memory operations to the main checkout, consolidates any
+    /// stray local store into it, and registers them as *sub-projects* with a
+    /// `parent_project_id`. Adopting one as a root project here would create a
+    /// second owner of the same memory files — double-counted by
+    /// `projects list`/`stats` until the next ordinary command inside the
+    /// worktree undoes it. Reported, never auto-registered.
+    Worktree {
+        /// The main worktree's project root.
+        main: PathBuf,
     },
 }
 
@@ -102,8 +116,10 @@ pub struct DiscoveredProject {
     pub path: PathBuf,
     /// Project ID this directory would resolve to.
     pub project_id: String,
-    /// Number of shared `.md` memory files in `.engramdb/memories/`. Personal
-    /// memories live in the global data dir and are not counted here.
+    /// Memory files this project would index: the shared `.md` files under
+    /// `.engramdb/memories/` plus the machine-local personal ones. Both are
+    /// what a reindex walks, so this is the number the adoption prompt can
+    /// honestly show.
     pub memory_count: usize,
     /// Relation to the registry.
     pub status: DiscoveryStatus,
@@ -119,6 +135,10 @@ pub struct DiscoveryReport {
     /// True when at least one subtree was cut off by `max_depth` — the scan
     /// may be incomplete, so front-ends should suggest raising it.
     pub depth_limited: bool,
+    /// Directories that could not be listed (permissions, dead mounts). Their
+    /// subtrees were skipped, so a nonzero count means "no projects found" is
+    /// not the same as "there are none" — front-ends must say so.
+    pub unreadable_dirs: usize,
 }
 
 impl DiscoveryReport {
@@ -136,11 +156,16 @@ impl DiscoveryReport {
             .filter(|p| p.status == DiscoveryStatus::Registered)
     }
 
-    /// Projects whose ID is owned by another existing checkout.
-    pub fn shared_id(&self) -> impl Iterator<Item = &DiscoveredProject> {
-        self.projects
-            .iter()
-            .filter(|p| matches!(p.status, DiscoveryStatus::SharedId { .. }))
+    /// Projects found but deliberately not offered: an ID owned by another
+    /// checkout, or a linked git worktree. Front-ends must account for these —
+    /// silently dropping them makes "found N, registered fewer" unreconcilable.
+    pub fn skipped(&self) -> impl Iterator<Item = &DiscoveredProject> {
+        self.projects.iter().filter(|p| {
+            matches!(
+                p.status,
+                DiscoveryStatus::SharedId { .. } | DiscoveryStatus::Worktree { .. }
+            )
+        })
     }
 }
 
@@ -187,12 +212,16 @@ pub async fn discover_projects_in(
 
     let mut report = DiscoveryReport::default();
     let mut visited: HashSet<PathBuf> = HashSet::new();
-    let mut stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+    // Paths on the stack are always canonical: the root is canonicalized here,
+    // and children are read from an already-canonical parent (so they are
+    // canonical too) except symlinks, which are resolved at push time. That
+    // keeps the cycle guard exact without a `realpath(3)` per directory —
+    // which matters at the scale this command advertises (a home directory).
+    let mut stack: Vec<(PathBuf, usize)> = vec![(canonical(root), 0)];
 
-    while let Some((dir, depth)) = stack.pop() {
-        let canon = canonical(&dir);
-        // Cycle/duplicate guard: a directory reachable twice (symlinks, or a
-        // root passed under two spellings) is walked once.
+    while let Some((canon, depth)) = stack.pop() {
+        // Cycle/duplicate guard: a directory reachable twice (via symlinks, or
+        // a root passed under two spellings) is walked once.
         if !visited.insert(canon.clone()) {
             continue;
         }
@@ -204,16 +233,15 @@ pub async fn discover_projects_in(
         }
 
         report.scanned_dirs += 1;
-        on_dir(&dir);
+        on_dir(&canon);
 
         if is_dir(&canon.join(".engramdb")).await {
             let project_id = project_id::compute_project_id(&canon);
             let status = classify(&canon, &project_id, &by_path, &by_id);
-            let memory_count = count_memory_files(&paths::memories_dir(&canon)).await;
             report.projects.push(DiscoveredProject {
                 path: canon.clone(),
+                memory_count: count_memories(&canon, &project_id).await,
                 project_id,
-                memory_count,
                 status,
             });
             // Fall through: a project can contain nested projects (monorepo
@@ -222,17 +250,37 @@ pub async fn discover_projects_in(
         }
 
         let Ok(mut entries) = async_fs::read_dir(&canon).await else {
-            // Unreadable directory (permissions): skip it, keep scanning.
+            // Unreadable directory (permissions, dead mount): skip the subtree
+            // but record it, so the caller can qualify an empty result.
+            report.unreadable_dirs += 1;
             continue;
         };
-        while let Ok(Some(entry)) = entries.next_entry().await {
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                // A per-entry error must not silently truncate the rest of the
+                // listing (`while let Ok(Some(_))` would drop every remaining
+                // sibling); skip this one and keep reading.
+                Err(_) => {
+                    report.unreadable_dirs += 1;
+                    continue;
+                }
+            };
             let Ok(file_type) = entry.file_type().await else {
                 continue;
             };
             if file_type.is_symlink() && !opts.follow_symlinks {
                 continue;
             }
-            if !is_dir(&entry.path()).await {
+            // `file_type` already answers dir-ness for everything but a
+            // symlink, which needs a following `stat` to see its target.
+            let is_directory = if file_type.is_symlink() {
+                is_dir(&entry.path()).await
+            } else {
+                file_type.is_dir()
+            };
+            if !is_directory {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
@@ -250,12 +298,48 @@ pub async fn discover_projects_in(
                 report.depth_limited = true;
                 continue;
             }
-            stack.push((entry.path(), depth + 1));
+            let child = if file_type.is_symlink() {
+                canonical(&entry.path())
+            } else {
+                entry.path()
+            };
+            stack.push((child, depth + 1));
         }
     }
 
     report.projects.sort_by(|a, b| a.path.cmp(&b.path));
+    demote_intra_scan_id_collisions(&mut report.projects);
     Ok(report)
+}
+
+/// Re-classify unregistered candidates that collide with each other.
+///
+/// `classify` only sees the pre-scan registry snapshot, so two clones of one
+/// git remote that are *both* missing from the registry — precisely the "I lost
+/// `registry.json`" case this module exists for — each look `Unregistered`.
+/// Adopting both would register only the first (`RegistryBackend::update` keeps
+/// the first registration) while reporting success for both, and the second's
+/// memories would be reindexed into the first's shared index.
+///
+/// Runs after the sort, so "first" is the lowest path and the outcome is
+/// deterministic rather than dependent on directory-iteration order.
+fn demote_intra_scan_id_collisions(projects: &mut [DiscoveredProject]) {
+    let mut claimed: HashMap<String, PathBuf> = HashMap::new();
+    for project in projects.iter_mut() {
+        if project.status != DiscoveryStatus::Unregistered {
+            continue;
+        }
+        match claimed.get(&project.project_id) {
+            Some(owner) => {
+                project.status = DiscoveryStatus::SharedId {
+                    owner: owner.clone(),
+                }
+            }
+            None => {
+                claimed.insert(project.project_id.clone(), project.path.clone());
+            }
+        }
+    }
 }
 
 /// Classify one project root against the registry indices.
@@ -265,8 +349,19 @@ fn classify(
     by_path: &HashSet<PathBuf>,
     by_id: &HashMap<&str, &RegistryEntry>,
 ) -> DiscoveryStatus {
+    // A registry entry pointing here wins over everything else — a worktree
+    // already linked as a sub-project is correctly tracked, not a finding.
     if by_path.contains(canon) {
         return DiscoveryStatus::Registered;
+    }
+    // A linked worktree's `.git` is a file, so `compute_project_id` finds no
+    // `.git/config` and falls back to the path hash — giving it an ID distinct
+    // from its main checkout's. It therefore looks unregistered, and without
+    // this check would be adopted as an independent root project.
+    if let Some(main) = project_id::detect_worktree_main(canon) {
+        return DiscoveryStatus::Worktree {
+            main: canonical(&main),
+        };
     }
     // The path isn't tracked, but the ID might be — two clones of the same git
     // remote share an ID. Only an owner that still exists is a conflict; a
@@ -289,6 +384,22 @@ async fn is_dir(path: &Path) -> bool {
         .await
         .map(|m| m.is_dir())
         .unwrap_or(false)
+}
+
+/// Memory files this project would index: the shared ones that travel with the
+/// repo plus the machine-local personal ones.
+///
+/// Both are what `MemoryStore::reindex` walks, so counting only the shared dir
+/// would tell a user "0 memories" for a project that indexes several — and
+/// personal memories are exactly the ones that survive a lost `registry.json`,
+/// the case this module exists for.
+async fn count_memories(project_dir: &Path, project_id: &str) -> usize {
+    let shared = count_memory_files(&paths::memories_dir(project_dir)).await;
+    let personal = match paths::personal_memories_dir(project_id) {
+        Ok(dir) => count_memory_files(&dir).await,
+        Err(_) => 0,
+    };
+    shared + personal
 }
 
 /// Count `.md` files directly under `dir` (0 when it doesn't exist).
@@ -466,13 +577,104 @@ mod tests {
         let report = discover_projects_in(&clone, &reg, &DiscoverOptions::default(), |_| {})
             .await
             .unwrap();
-        let found: Vec<_> = report.shared_id().collect();
+        let owner_canon = owner.canonicalize().unwrap();
+        let found: Vec<_> = report.skipped().collect();
         assert_eq!(found.len(), 1);
         assert!(matches!(
             &found[0].status,
-            DiscoveryStatus::SharedId { owner: o } if o == &owner.canonicalize().unwrap()
+            DiscoveryStatus::SharedId { owner: o } if o == &owner_canon
         ));
         assert_eq!(report.unregistered().count(), 0);
+    }
+
+    /// The registry-loss case: NEITHER clone is registered, so the pre-scan
+    /// snapshot can't tell them apart. Without the post-pass both look
+    /// adoptable, the second registration silently no-ops (the registry keeps
+    /// the first), and its memories land in the first's index.
+    #[tokio::test]
+    async fn two_unregistered_clones_of_one_id_collapse_to_one_candidate() {
+        let tmp = TempDir::new().unwrap();
+        // Same fake git remote in both → identical project IDs.
+        for name in ["a-clone", "z-clone"] {
+            let dir = fake_project(tmp.path(), name, 0);
+            std::fs::create_dir_all(dir.join(".git")).unwrap();
+            std::fs::write(
+                dir.join(".git").join("config"),
+                "[remote \"origin\"]\n\turl = git@github.com:acme/thing.git\n",
+            )
+            .unwrap();
+        }
+
+        let report = scan(tmp.path(), &Registry::default()).await;
+        let candidates: Vec<_> = report.unregistered().collect();
+        assert_eq!(
+            candidates.len(),
+            1,
+            "only one of two same-ID clones may be offered"
+        );
+        assert!(candidates[0].path.ends_with("a-clone"), "lowest path wins");
+
+        let skipped: Vec<_> = report.skipped().collect();
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].path.ends_with("z-clone"));
+        assert!(matches!(
+            &skipped[0].status,
+            DiscoveryStatus::SharedId { owner } if owner.ends_with("a-clone")
+        ));
+    }
+
+    /// A linked worktree's `.git` is a FILE, so `compute_project_id` finds no
+    /// `.git/config` and falls back to the path hash — giving it an ID distinct
+    /// from main's. It therefore looks unregistered, and adopting it would make
+    /// a second root project owning main's memory files.
+    #[tokio::test]
+    async fn linked_worktree_is_skipped_not_offered_as_a_root_project() {
+        let tmp = TempDir::new().unwrap();
+        let main = tmp.path().join("main");
+        let wt = tmp.path().join("feature");
+        let wt_gitdir = main.join(".git").join("worktrees").join("feature");
+        std::fs::create_dir_all(main.join(".git")).unwrap();
+        std::fs::create_dir_all(&wt_gitdir).unwrap();
+        std::fs::write(wt_gitdir.join("commondir"), "../..").unwrap();
+        // The worktree carries a committed `.engramdb/` — the case that makes
+        // it visible to discovery at all.
+        fake_project(tmp.path(), "feature", 0);
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", wt_gitdir.display()),
+        )
+        .unwrap();
+
+        let report = scan(tmp.path(), &Registry::default()).await;
+        assert_eq!(
+            report.unregistered().count(),
+            0,
+            "a worktree must never be offered as an independent project"
+        );
+        let skipped: Vec<_> = report.skipped().collect();
+        assert_eq!(skipped.len(), 1);
+        assert!(matches!(
+            &skipped[0].status,
+            DiscoveryStatus::Worktree { main: m } if m == &main.canonicalize().unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn memory_count_includes_personal_memories() {
+        // Personal memories live in the global data dir, not the project tree —
+        // and are exactly what survives a lost registry, so a count that omits
+        // them tells the user "0 memories" for a project that indexes several.
+        let tmp = TempDir::new().unwrap();
+        let dir = fake_project(tmp.path(), "proj", 2);
+        let pid = project_id::compute_project_id(&dir);
+        let personal = paths::personal_memories_dir(&pid).unwrap();
+        std::fs::create_dir_all(&personal).unwrap();
+        std::fs::write(personal.join("p.md"), "---\n---\n").unwrap();
+
+        let report = scan(tmp.path(), &Registry::default()).await;
+        let found: Vec<_> = report.unregistered().collect();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].memory_count, 3, "2 shared + 1 personal");
     }
 
     #[tokio::test]

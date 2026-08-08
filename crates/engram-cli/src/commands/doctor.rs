@@ -325,11 +325,6 @@ impl FixAction {
                     formatter,
                     &crate::prompter::InquirePrompter,
                     engramdb::types::ProjectListGrouping::default(),
-                    // Prune needs no model providers; `discover` is the only
-                    // `projects` subcommand that does.
-                    None,
-                    &std::sync::Arc::new(engramdb::daemon::DaemonCell::new()),
-                    engramdb::daemon::DaemonPolicy::InProcess,
                 )
                 .await
             }

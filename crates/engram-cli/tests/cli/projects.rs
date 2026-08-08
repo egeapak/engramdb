@@ -178,6 +178,28 @@ fn projects_discover_yes_registers_found_projects() {
         .unwrap_or_else(|e| panic!("discover JSON: {e} — output: {stdout}"));
     assert_eq!(val["registered"].as_array().unwrap().len(), 1, "{stdout}");
 
+    // Every key the CLI reference documents for a real run, so a rename can't
+    // break the published contract while CI stays green.
+    for key in [
+        "root",
+        "scanned_dirs",
+        "depth_limited",
+        "unreadable_dirs",
+        "dry_run",
+        "no_index",
+        "found_unregistered",
+        "skipped",
+        "registered",
+        "declined",
+        "errors",
+    ] {
+        assert!(val.get(key).is_some(), "missing key {key} in {stdout}");
+    }
+    assert_eq!(val["no_index"], serde_json::Value::Bool(true));
+    // `--no-index` must report "not rebuilt", not "rebuilt and found nothing".
+    assert_eq!(val["registered"][0]["indexed"], serde_json::Value::Null);
+    assert_eq!(val["registered"][0]["embedded"], serde_json::Value::Null);
+
     let listed = helpers::cmd()
         .args(["--json", "projects", "list"])
         .output()
@@ -203,4 +225,48 @@ fn projects_discover_json_without_yes_refuses_to_prompt() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("--yes"));
+}
+
+#[test]
+fn projects_discover_reports_skipped_worktrees_in_json() {
+    // A linked worktree carrying a committed `.engramdb/` must be reported as
+    // skipped rather than adopted as an independent root project — and must be
+    // visible in JSON, where the human warning is suppressed.
+    let tree = TempDir::new().unwrap();
+    let main = tree.path().join("main");
+    let wt = tree.path().join("feature");
+    let wt_gitdir = main.join(".git").join("worktrees").join("feature");
+    std::fs::create_dir_all(main.join(".git")).unwrap();
+    std::fs::create_dir_all(&wt_gitdir).unwrap();
+    std::fs::write(wt_gitdir.join("commondir"), "../..").unwrap();
+    unregistered_project(tree.path(), "feature");
+    std::fs::write(
+        wt.join(".git"),
+        format!("gitdir: {}\n", wt_gitdir.display()),
+    )
+    .unwrap();
+
+    let output = helpers::cmd()
+        .args([
+            "--json",
+            "projects",
+            "discover",
+            tree.path().to_str().unwrap(),
+            "--yes",
+            "--no-index",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("discover JSON: {e} — output: {stdout}"));
+    assert!(
+        val["registered"].as_array().unwrap().is_empty(),
+        "a worktree must not be registered as its own project: {stdout}"
+    );
+    let skipped = val["skipped"].as_array().unwrap();
+    assert_eq!(skipped.len(), 1, "{stdout}");
+    assert_eq!(skipped[0]["reason"], "git_worktree");
 }
