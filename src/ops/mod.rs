@@ -9,6 +9,7 @@ pub mod compress;
 pub mod config;
 pub mod create;
 pub mod delete;
+pub mod discover;
 pub mod doctor;
 pub mod gc;
 pub mod get;
@@ -37,6 +38,10 @@ pub use compress::{
 pub use config::{top_tags, AgentConfigView, TagCount, DEFAULT_TOP_TAGS};
 pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
 pub use delete::delete_memory;
+pub use discover::{
+    discover_projects, discover_projects_in, DiscoverOptions, DiscoveredProject, DiscoveryReport,
+    DiscoveryStatus, DEFAULT_MAX_DEPTH as DEFAULT_DISCOVER_MAX_DEPTH,
+};
 pub use doctor::{
     doctor, doctor_environment, doctor_epistemic, enrichment_gaps, validate_models, CheckStatus,
     DoctorResult, DoctorSection, EnrichmentGaps, EnvironmentCheck, EnvironmentDoctorResult,

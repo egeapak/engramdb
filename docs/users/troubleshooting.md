@@ -133,6 +133,13 @@ If a worktree was init'd before this routing was added, you may have a stray `.e
 **`projects prune` lists projects I want to keep.**
 Those projects' on-disk paths no longer exist. Either restore the path, or accept the prune. The data isn't lost — `prune` deletes only the registry entry; the global data dir is preserved unless you confirm.
 
+**`projects list` is missing a project I know has memories.**
+The registry is machine-local: it only records projects `init`'d or opened on
+this machine. A repo cloned with its `.engramdb/memories/` already committed, a
+restored backup, or a lost `registry.json` leaves the project on disk but
+unregistered. Run `engramdb projects discover <dir> --dry-run` to find them, then
+without `--dry-run` to register and reindex the ones you want.
+
 **Want this worktree to be its own project, not a sub-project of main.**
 After init: `engramdb projects unlink <worktree_id>`. It becomes a root project.
 

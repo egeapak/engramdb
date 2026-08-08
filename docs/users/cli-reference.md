@@ -315,6 +315,7 @@ Invoked by Claude Code, not manually. See [claude-code.md](./claude-code.md#how-
 ```bash
 engramdb projects info                          # current project info (default)
 engramdb projects list [--group auto|always|none]  # all registered projects as a tree
+engramdb projects discover [PATH] [--yes] [--dry-run]  # adopt unregistered projects
 engramdb projects stats                         # cross-project aggregate stats
 engramdb projects delete <project_id> [-f] [--cascade]
 engramdb projects link <child_id> --parent <parent_id>
@@ -334,6 +335,44 @@ parent (marked `↳`). `--group` sets the grouping for one run, overriding the
 
 Worktree nesting and path sorting apply in every mode. `--json` output is
 unaffected by `--group`: it stays a flat array carrying `parent_project_id`.
+
+### `projects discover`
+
+Walks a directory tree for `.engramdb/` projects the registry doesn't know
+about and offers to register and index each one. Useful after cloning a repo
+that carries its memories, restoring from a backup, or losing `registry.json` —
+those projects exist on disk but are invisible to `projects list`, `projects
+stats`, and every cross-project surface until they are registered.
+
+| Flag | Behavior |
+| --- | --- |
+| `PATH` | Directory to scan. Defaults to the current project directory. |
+| `--max-depth <N>` | Maximum depth to descend below the scan root (default 6). The summary says when a subtree was cut off. |
+| `--hidden` | Also descend into dot-directories. |
+| `--follow-symlinks` | Follow directory symlinks (the walk visits each canonical path once either way). |
+| `-y`, `--yes` | Register everything found without prompting. Required in JSON mode. |
+| `--dry-run` | Report what would be registered and exit without changing anything. |
+| `--no-index` | Register only. Memories stay unsearchable until you run `engramdb reindex`. |
+
+Without `--yes` you are asked once per project, so a scratch clone can be
+declined while a real checkout is adopted. Accepting registers the project
+(idempotent — an existing `manifest.toml` / `config.toml` is never overwritten)
+and rebuilds its index from the on-disk `.md` files, with an indicatif progress
+bar over the batch.
+
+Directories that can't hold a project root are never descended into
+(`node_modules`, `target`, `.git`, `vendor`, `dist`, `build`, virtualenvs, …),
+and engramdb's own global/group stores are never offered. A project whose ID is
+already registered to a *different*, still-existing checkout (two clones of one
+git remote hash to the same ID and would share one index) is reported as a
+warning and skipped rather than registered.
+
+JSON mode emits exactly one of two objects, both carrying `root`,
+`scanned_dirs`, `depth_limited`, and `dry_run`. A `--dry-run` adds
+`candidates[]`, `already_registered[]`, `shared_id[]`; a real run adds
+`registered[]` (each with `project_id`, `indexed`, `embedded`, `warnings[]`),
+`declined[]`, and `errors[]` — with empty arrays when nothing was found or
+everything was declined, so the shape never varies with the outcome.
 
 See [projects-and-worktrees.md](./projects-and-worktrees.md).
 

@@ -759,6 +759,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 &formatter,
                 &prompter,
                 config.cli.project_list_grouping,
+                backend,
+                &daemon_cell,
+                daemon_policy,
             )
             .await
         }

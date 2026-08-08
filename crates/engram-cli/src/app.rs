@@ -132,6 +132,35 @@ pub enum ProjectsCommand {
         #[arg(long, value_name = "MODE")]
         group: Option<engramdb::types::ProjectListGrouping>,
     },
+    /// Walk a directory tree for `.engramdb/` projects the registry doesn't
+    /// know about, then offer to register and index each one.
+    ///
+    /// Useful after cloning a repo that carries its memories, restoring from a
+    /// backup, or losing `registry.json`: those projects exist on disk but are
+    /// invisible to `projects list` and every cross-project surface until they
+    /// are registered.
+    Discover {
+        /// Directory to scan (defaults to the current project directory)
+        path: Option<std::path::PathBuf>,
+        /// Maximum directory depth to descend below the scan root
+        #[arg(long, default_value_t = engramdb::ops::DEFAULT_DISCOVER_MAX_DEPTH)]
+        max_depth: usize,
+        /// Also descend into hidden (dot-prefixed) directories
+        #[arg(long)]
+        hidden: bool,
+        /// Follow directory symlinks while scanning
+        #[arg(long)]
+        follow_symlinks: bool,
+        /// Register every discovered project without prompting (required in JSON mode)
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Report what would be registered and exit without changing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Register only — skip the index rebuild and re-embedding
+        #[arg(long)]
+        no_index: bool,
+    },
     /// Remove a project from the registry and delete its global data.
     ///
     /// Refuses by default when the project has sub-projects (children).

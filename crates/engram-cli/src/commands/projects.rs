@@ -1,16 +1,23 @@
 //! Handler for the `engramdb projects` subcommand.
 
 use crate::app::ProjectsCommand;
+use crate::commands::discover::{run_discover, DiscoverParams};
 use crate::output::{AggregateStatsOutput, OutputFormatter, ProjectInfoOutput, ProjectListOutput};
 use crate::prompter::Prompter;
 use anyhow::Result;
+use engramdb::daemon::{DaemonCell, DaemonPolicy};
 use engramdb::ops::projects;
 use engramdb::storage::RegistryBackend;
-use engramdb::types::ProjectListGrouping;
+use engramdb::types::{EmbeddingBackend, ProjectListGrouping};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
+use std::sync::Arc;
 
 /// Run the `projects` command with the given subcommand (defaults to `Info`).
+///
+/// `embedding_backend` / `cell` / `policy` are only used by `discover`, the one
+/// subcommand that (re)builds an index and therefore needs model providers.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_projects(
     dir: &Path,
     registry: &dyn RegistryBackend,
@@ -18,6 +25,9 @@ pub async fn run_projects(
     formatter: &OutputFormatter,
     prompter: &dyn Prompter,
     grouping: ProjectListGrouping,
+    embedding_backend: Option<EmbeddingBackend>,
+    cell: &Arc<DaemonCell>,
+    policy: DaemonPolicy,
 ) -> Result<()> {
     let command = command.unwrap_or(ProjectsCommand::Info);
 
@@ -47,6 +57,36 @@ pub async fn run_projects(
                 .collect();
             // The per-invocation `--group` flag overrides the config default.
             formatter.print_project_list(&output, group.unwrap_or(grouping));
+        }
+        ProjectsCommand::Discover {
+            path,
+            max_depth,
+            hidden,
+            follow_symlinks,
+            yes,
+            dry_run,
+            no_index,
+        } => {
+            run_discover(
+                DiscoverParams {
+                    // No explicit path: scan from the project directory this
+                    // invocation resolved to (cwd, or `--dir`).
+                    root: path.unwrap_or_else(|| dir.to_path_buf()),
+                    max_depth,
+                    hidden,
+                    follow_symlinks,
+                    yes,
+                    dry_run,
+                    no_index,
+                },
+                registry,
+                formatter,
+                prompter,
+                embedding_backend,
+                cell,
+                policy,
+            )
+            .await?;
         }
         ProjectsCommand::Delete {
             project_id,
@@ -313,6 +353,9 @@ mod tests {
             &formatter,
             &prompter,
             ProjectListGrouping::default(),
+            None,
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
         )
         .await;
 
@@ -347,6 +390,9 @@ mod tests {
             &formatter,
             &prompter,
             ProjectListGrouping::default(),
+            None,
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
         )
         .await;
 
@@ -388,6 +434,9 @@ mod tests {
             &formatter,
             &prompter,
             ProjectListGrouping::default(),
+            None,
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
         )
         .await;
         assert!(result.is_ok(), "CLI returns Ok and prints a warning");
@@ -409,6 +458,9 @@ mod tests {
             &formatter,
             &prompter,
             ProjectListGrouping::default(),
+            None,
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
         )
         .await;
         assert!(result.is_ok());
@@ -436,6 +488,9 @@ mod tests {
             &formatter,
             &prompter,
             ProjectListGrouping::default(),
+            None,
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
         )
         .await;
         assert!(result.is_err(), "JSON mode without --force must error");
@@ -464,6 +519,9 @@ mod tests {
             &formatter,
             &prompter,
             ProjectListGrouping::default(),
+            None,
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
         )
         .await
         .unwrap();
@@ -500,6 +558,9 @@ mod tests {
             &formatter,
             &prompter,
             ProjectListGrouping::default(),
+            None,
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
         )
         .await
         .unwrap();
@@ -525,6 +586,9 @@ mod tests {
             &formatter,
             &prompter,
             ProjectListGrouping::default(),
+            None,
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
         )
         .await
         .unwrap();

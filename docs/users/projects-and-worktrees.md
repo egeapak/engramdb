@@ -73,7 +73,34 @@ engramdb projects delete <id> [-f] [--cascade]         # remove from registry + 
 engramdb projects link <child_id> --parent <parent_id> # link as sub-project
 engramdb projects unlink <child_id>                    # promote back to root
 engramdb projects prune [-f]                           # remove stale registry entries + orphan data
+engramdb projects discover [PATH] [-y] [--dry-run]     # adopt projects on disk that aren't registered
 ```
+
+`projects discover` is prune's mirror image. Prune removes registry entries with
+no project behind them; discover finds projects with no registry entry in front
+of them. The registry is machine-local and only written when a project is
+`init`'d or opened *here*, so a repo cloned with its `.engramdb/memories/`
+already committed, a restored backup, or a lost `registry.json` all leave real
+projects invisible to `projects list` and every cross-project surface.
+
+```bash
+engramdb projects discover ~/src --dry-run   # what's out there?
+engramdb projects discover ~/src             # ask per project, then register + index
+```
+
+It walks from `PATH` (default: the current project directory) up to
+`--max-depth` levels (6), skipping dependency and build trees (`node_modules`,
+`target`, `.git`, `vendor`, …) and dot-directories unless `--hidden` is passed.
+Each unregistered project is offered individually — accepting registers it and
+rebuilds its index from the on-disk `.md` files, with a progress bar over the
+batch. `--yes` takes them all, `--no-index` registers without rebuilding (run
+`engramdb reindex` later), and `--dry-run` only reports.
+
+Two things are deliberately never auto-registered: engramdb's own global and
+group stores (they live under the global data dir in the same `.engramdb/`
+layout), and a directory whose project ID is already registered to a different
+checkout that still exists — two clones of one git remote hash to the same ID
+and would share a single index, so discover warns and skips instead.
 
 `projects list` prints a directory tree. Projects are grouped under their
 containing folder and sorted by path; a worktree (or any linked sub-project)
