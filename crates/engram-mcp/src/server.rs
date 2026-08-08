@@ -664,12 +664,41 @@ struct HarvestMarkInput {
     note: Option<String>,
 
     #[schemars(
+        description = "One or two sentences saying what this conversation settled, written into the conversation search index and embedded as its own vector. Worth the keystrokes: a human-written summary is higher-precision than the machine digest, and harvest_search breaks ties toward it. Recorded after the decision, so a model that fails to load costs the summary and not the review."
+    )]
+    summary: Option<String>,
+
+    #[schemars(
         description = "Forget the existing review so the session is unreviewed again. An archived transcript is kept (the ledger entry is the only route to it), so the entry becomes `unreviewed` rather than disappearing; with no archive the entry is removed."
     )]
     clear: Option<bool>,
 
     #[schemars(
         description = "Resolve session_id against every session on this machine, not just this project's — the same scope harvest_show accepts. Off by default, and refused unless [security] allow_all_projects_harvest = true in YOUR OWN project config (it is false by default)."
+    )]
+    all_projects: Option<bool>,
+
+    #[schemars(
+        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here. Naming a project other than your own is refused unless [security] allow_all_projects_harvest = true in your own config."
+    )]
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct HarvestSearchInput {
+    #[schemars(description = "What to look for, in natural language")]
+    query: String,
+
+    #[schemars(description = "Maximum number of conversations to return (default 10)")]
+    limit: Option<usize>,
+
+    #[schemars(
+        description = "Only conversations that ended since this point: RFC 3339, or relative shorthand like `30d`, `12h`, `2w`."
+    )]
+    since: Option<String>,
+
+    #[schemars(
+        description = "Search every project's conversations on this machine. Off by default, and refused unless [security] allow_all_projects_harvest = true in YOUR OWN project config (it is false by default)."
     )]
     all_projects: Option<bool>,
 
@@ -3170,7 +3199,7 @@ impl EngramDbServer {
                     .include_thinking
                     .unwrap_or(config.harvest.include_thinking),
                 include_sidechains: config.harvest.include_sidechains,
-                include_tools: true,
+                tools: engramdb::storage::transcripts::ToolDetail::All,
             },
             // Same single-session budget the CLI uses: `harvest_show` is the
             // deep-read tool, and an agent reviewing one session needs the
@@ -3330,10 +3359,177 @@ impl EngramDbServer {
             harvest_state::mark_harvested(ledger_dir, &resolved, &memory_ids, decision, input.note)
                 .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
+        // After the ledger write, never before. The decision is what stops the
+        // session being re-offered forever; the summary needs a model that may
+        // not load. A decision without a summary is an ordinary state, a
+        // summary without a decision is a session offered again tomorrow — so
+        // a failure here is reported alongside a successful mark rather than
+        // failing the call.
+        let summary_error = match input.summary.as_deref() {
+            Some(summary) => self
+                .write_conversation_summary(&scope, &resolved, summary, input.project.as_deref())
+                .await
+                .err(),
+            None => None,
+        };
+
         let r = serde_json::to_string(&serde_json::json!({
             "session_id": resolved,
             "decision": entry.decision(),
             "memories_created": entry.memories_created,
+            "summary_recorded": input.summary.is_some() && summary_error.is_none(),
+            "summary_error": summary_error,
+        }))
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
+    }
+
+    /// Index a session if needed, then attach a curated summary to its row.
+    ///
+    /// Returns the failure as a `String` rather than propagating it: the
+    /// caller has already recorded a decision it must not lose.
+    async fn write_conversation_summary(
+        &self,
+        scope: &ops::harvest::SessionScope,
+        session_id: &str,
+        summary: &str,
+        project: Option<&str>,
+    ) -> Result<(), String> {
+        let config = self.load_config_for(project).await?;
+        let index = ops::harvest_index::open_index(scope, config.embeddings.dimensions)
+            .await
+            .map_err(|e| e.to_string())?;
+        let engine = self.build_engine_for(project).await?;
+        if index
+            .fetch(session_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
+            ops::harvest_index::index_session(scope, &index, &engine, session_id, false)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        ops::harvest_index::set_summary(&index, &engine, session_id, summary)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "harvest_search",
+        description = "Search past Claude Code conversations by meaning — 'did we ever discuss X', 'why did the build break in July'. Returns session ids and metadata, not conversation text; pass an id to harvest_show to read one. Covers sessions indexed at harvest or automatically after [harvest] index_after_hours, so a very recent session may not be in here yet. Queries both the machine-generated digest and any human-written summary and reports which matched. Same project scope and the same [security] allow_all_projects_harvest gate as harvest_list."
+    )]
+    async fn harvest_search(
+        &self,
+        Parameters(input): Parameters<HarvestSearchInput>,
+    ) -> Result<String, String> {
+        let _scope = self.scope("harvest_search", input.project.as_deref());
+        reject_store_target(input.project.as_deref())?;
+        // Results are derived from conversation text and every field below —
+        // the summary, the first prompt, the cwd, and the *count* of hits —
+        // says something about a project the caller may not be allowed to
+        // read. Gated on exactly the same terms as `harvest_list`, from the
+        // caller's own config, and BEFORE `session_scope`, which is not a
+        // pure read: it adopts ledgers and reconciles archive references, so
+        // running it first would let a refused call mutate the target.
+        let all_projects = self
+            .check_harvest_scope(input.project.as_deref(), input.all_projects)
+            .await?;
+        let dir = self.resolve_dir(input.project.as_deref()).await?;
+        let config = self.load_config_for(input.project.as_deref()).await?;
+        let since = input
+            .since
+            .as_deref()
+            .map(ops::harvest::parse_since)
+            .transpose()
+            .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        let limit = input.limit.unwrap_or(10).clamp(1, 100);
+
+        let scope = ops::harvest::session_scope(&dir, self.registry.as_ref())
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        let engine = self.build_engine_for(input.project.as_deref()).await?;
+        let index = ops::harvest_index::open_index(&scope, config.embeddings.dimensions)
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        let mut hits = ops::harvest_index::search(&index, &engine, &input.query, limit, since)
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+
+        if all_projects {
+            let registry_data = self
+                .registry
+                .load()
+                .await
+                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            let mut seen = vec![scope.root_project_id.clone()];
+            for entry in &registry_data.projects {
+                // Project *ids*, never paths: two registry entries can name
+                // the same checkout through a symlink, and one would then be
+                // searched twice while the dedupe silently failed.
+                let root =
+                    engramdb::storage::resolve_root_project_id(&registry_data, &entry.project_id);
+                // `exists`, not `open`: opening creates the table, and a
+                // machine-wide search must not leave an empty one behind in
+                // every project it merely looked at.
+                if seen.contains(&root) || !engramdb::storage::ConversationIndex::exists(&root) {
+                    continue;
+                }
+                seen.push(root.clone());
+                let other =
+                    engramdb::storage::ConversationIndex::open(&root, config.embeddings.dimensions)
+                        .await
+                        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+                hits.extend(
+                    ops::harvest_index::search(&other, &engine, &input.query, limit, since)
+                        .await
+                        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?,
+                );
+            }
+            hits.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.session_id.cmp(&b.session_id))
+            });
+            hits.truncate(limit);
+        }
+
+        let json: Vec<serde_json::Value> = hits
+            .iter()
+            .map(|h| {
+                // Transcript-derived, and this payload carries no trust marker
+                // of its own — the same reasoning `harvest_list` applies to
+                // `first_prompt`.
+                let clean = |v: &Option<String>| -> Option<String> {
+                    v.as_deref()
+                        .map(|t| engramdb::storage::transcripts::sanitize_one_line(t).into_owned())
+                };
+                serde_json::json!({
+                    "session_id": h.session_id,
+                    "project_id": h.project_id,
+                    "score": (h.score * 1000.0).round() / 1000.0,
+                    "matched_on": match h.matched_on {
+                        engramdb::storage::MatchedOn::Digest => "digest",
+                        engramdb::storage::MatchedOn::Summary => "summary",
+                    },
+                    "cwd": clean(&h.cwd),
+                    "git_branch": clean(&h.git_branch),
+                    "started_at": h.started_at,
+                    "ended_at": h.ended_at,
+                    "first_prompt": clean(&h.first_prompt),
+                    "summary": clean(&h.summary),
+                    // A partial row is a session whose tail was never
+                    // embedded, so a miss against it is not evidence the
+                    // topic was absent.
+                    "indexed_complete": h.indexed_complete,
+                })
+            })
+            .collect();
+        let r = serde_json::to_string(&serde_json::json!({
+            "conversations": json,
+            "hint": "Pass a session_id to harvest_show to read one.",
         }))
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();

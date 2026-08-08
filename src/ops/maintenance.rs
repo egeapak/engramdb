@@ -53,6 +53,9 @@ pub struct MaintenanceReport {
     /// §11.4 consolidation pass result, if an engine was supplied and the
     /// pass ran (it skips gracefully with no providers).
     pub consolidation: Option<crate::ops::compress::ConsolidationReport>,
+    /// Conversation-index pass result, if an engine was supplied and
+    /// `[harvest] index` is on.
+    pub conversation_index: Option<crate::ops::harvest_index::IndexReport>,
 }
 
 /// Effective auto-maintenance status, for diagnostics (`engramdb doctor`).
@@ -322,11 +325,94 @@ pub async fn auto_maintain_with_engine(
                         tracing::warn!("engramdb auto-maintenance: consolidation failed: {e}")
                     }
                 }
+
+                // 5) Make past conversations searchable. Driven from here
+                // rather than from `harvest mark` because the timeout arm is
+                // the load-bearing one: a session nobody reviewed has no
+                // command to hang off, and if search only found what had been
+                // read it would only find what you no longer need. Sessions a
+                // human *did* settle are due immediately, so "at harvest" and
+                // "on timeout" are the same pass with two triggers.
+                report.conversation_index =
+                    index_conversations(dir, registry, &full_config, engine).await;
             }
         }
     }
 
     report
+}
+
+/// The conversation-index pass, split out to keep [`auto_maintain_with_engine`]
+/// readable.
+///
+/// Returns `None` when the pass did not run at all — disabled, or the scope
+/// could not be resolved — which is distinct from a pass that ran and indexed
+/// nothing.
+async fn index_conversations(
+    dir: &Path,
+    registry: &dyn RegistryBackend,
+    config: &crate::types::EngramConfig,
+    engine: &crate::retrieval::engine::RetrievalEngine,
+) -> Option<crate::ops::harvest_index::IndexReport> {
+    if !config.harvest.index {
+        return None;
+    }
+    // Without a provider there is nothing to embed, and the graceful-skip
+    // contract says a missing model degrades rather than errors.
+    if !engine.embeddings_available() {
+        return None;
+    }
+    let scope = match crate::ops::harvest::session_scope(dir, registry).await {
+        Ok(scope) => scope,
+        Err(e) => {
+            tracing::warn!("engramdb auto-maintenance: could not resolve a harvest scope: {e}");
+            return None;
+        }
+    };
+    // The root project id, never `dir`'s own: the ledger, the transcript
+    // copies and this index have to name one root or each half re-offers what
+    // the other settled.
+    let index = match crate::ops::harvest_index::open_index(&scope, config.embeddings.dimensions)
+        .await
+    {
+        Ok(index) => index,
+        Err(e) => {
+            tracing::warn!("engramdb auto-maintenance: could not open the conversation index: {e}");
+            return None;
+        }
+    };
+    match crate::ops::harvest_index::index_pending(
+        &scope,
+        &index,
+        engine,
+        config.harvest.index_after(),
+        config.harvest.index_batch,
+    )
+    .await
+    {
+        Ok(report) => {
+            if !report.indexed.is_empty() {
+                tracing::info!(
+                    "engramdb auto-maintenance: indexed {} conversation(s) for search",
+                    report.indexed.len()
+                );
+            }
+            for skipped in &report.skipped {
+                // Named, not counted: a conversation missing from search is
+                // indistinguishable from one that never mentioned the topic.
+                tracing::warn!(
+                    "engramdb auto-maintenance: session {} was not indexed ({})",
+                    skipped.session_id,
+                    skipped.reason
+                );
+            }
+            Some(report)
+        }
+        Err(e) => {
+            tracing::warn!("engramdb auto-maintenance: conversation indexing failed: {e}");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -443,6 +529,92 @@ mod tests {
         // Second pass: a huge interval → throttled (marker is fresh).
         let second = auto_maintain(dir.path(), &registry, &cfg(100_000), false).await;
         assert!(!second.ran, "a fresh marker must throttle the next pass");
+    }
+
+    /// Minimal deterministic provider: the conversation pass must be shown
+    /// to run or not run on the config, and loading a real model here would
+    /// put this test in the `ml-models` group for no added coverage.
+    struct StubEmbedder;
+
+    #[async_trait::async_trait]
+    impl crate::embeddings::EmbeddingProvider for StubEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.1; 8])
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.1; 8]).collect())
+        }
+        fn dimensions(&self) -> usize {
+            8
+        }
+        fn model_id(&self) -> String {
+            "stub".into()
+        }
+        fn max_tokens(&self) -> usize {
+            512
+        }
+    }
+
+    async fn engine_with_stub(
+        dir: &std::path::Path,
+        registry: &InMemoryRegistry,
+    ) -> crate::retrieval::engine::RetrievalEngine {
+        let store = MemoryStore::open(dir).await.unwrap();
+        let _ = registry;
+        crate::retrieval::engine::RetrievalEngine::new(store, crate::types::EngramConfig::default())
+            .with_embedding_provider(std::sync::Arc::new(StubEmbedder))
+    }
+
+    #[tokio::test]
+    async fn conversation_indexing_runs_by_default_and_is_config_gated() {
+        // The pass is what makes a session nobody reviewed searchable, so
+        // "did it run" has to be observable — `None` (never ran) and an empty
+        // report (ran, nothing due) are different states.
+        let dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(dir.path(), &registry).await.unwrap();
+        let engine = engine_with_stub(dir.path(), &registry).await;
+
+        let report =
+            auto_maintain_with_engine(dir.path(), &registry, &cfg(0), false, Some(&engine)).await;
+        assert!(report.ran);
+        assert!(
+            report.conversation_index.is_some(),
+            "conversation indexing must run by default"
+        );
+
+        tokio::fs::write(
+            dir.path().join(".engramdb").join("config.toml"),
+            "[harvest]\nindex = false\n",
+        )
+        .await
+        .unwrap();
+        let report =
+            auto_maintain_with_engine(dir.path(), &registry, &cfg(0), false, Some(&engine)).await;
+        assert!(report.ran);
+        assert!(
+            report.conversation_index.is_none(),
+            "`[harvest] index = false` must skip the pass entirely"
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_indexing_skips_without_an_embedding_provider() {
+        // Graceful-skip contract: a missing model degrades the pass, it does
+        // not error and it does not stop the rest of maintenance.
+        let dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(dir.path(), &registry).await.unwrap();
+        let store = MemoryStore::open(dir.path()).await.unwrap();
+        let engine = crate::retrieval::engine::RetrievalEngine::new(
+            store,
+            crate::types::EngramConfig::default(),
+        );
+
+        let report =
+            auto_maintain_with_engine(dir.path(), &registry, &cfg(0), false, Some(&engine)).await;
+        assert!(report.ran, "the rest of maintenance still runs");
+        assert!(report.conversation_index.is_none());
     }
 
     // --- Env-precedence tests ---

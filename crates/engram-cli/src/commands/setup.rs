@@ -60,6 +60,7 @@ const MCP_TOOL_SUFFIXES: &[&str] = &[
     "projects_unlink",
     "harvest_list",
     "harvest_show",
+    "harvest_search",
     "harvest_mark",
     "harvest_ledger",
 ];

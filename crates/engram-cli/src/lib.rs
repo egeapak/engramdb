@@ -621,13 +621,16 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Reindex {
             embeddings_only,
             index_only,
+            archive_only,
             global,
         } => {
             commands::reindex::run_reindex(
                 &dir,
+                &registry,
                 global,
                 embeddings_only,
                 index_only,
+                archive_only,
                 backend,
                 &formatter,
                 &daemon_cell,
@@ -715,9 +718,14 @@ pub async fn run(cli: Cli) -> Result<()> {
                 &dir,
                 &registry,
                 command,
-                &config.harvest,
+                &config,
                 &formatter,
                 &prompter,
+                commands::harvest::HarvestEngineContext {
+                    backend,
+                    cell: &daemon_cell,
+                    policy: daemon_policy,
+                },
             )
             .await
         }

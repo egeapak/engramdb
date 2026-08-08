@@ -2325,6 +2325,7 @@ version = "0.10.0"
 dependencies = [
  "anyhow",
  "arrow-array",
+ "arrow-buffer",
  "arrow-schema",
  "async-trait",
  "chrono",

@@ -7,23 +7,42 @@
 use crate::app::{HarvestCommand, LedgerCommand};
 use crate::output::{HarvestSessionOutput, OutputFormatter};
 use crate::prompter::Prompter;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
+use engramdb::daemon::{DaemonCell, DaemonPolicy};
 use engramdb::ops::harvest::{self, resolve_ledger_key};
+use engramdb::ops::harvest_index;
+use engramdb::retrieval::engine::RetrievalEngine;
+use engramdb::storage::conversation_index::{ConversationHit, ConversationIndex, MatchedOn};
 use engramdb::storage::harvest_state::{self, HarvestDecision, HarvestEntry};
 use engramdb::storage::transcripts::{self, ParseOptions};
-use engramdb::storage::{transcript_archive, RegistryBackend};
-use engramdb::types::HarvestConfig;
+use engramdb::storage::{transcript_archive, MemoryStore, RegistryBackend};
+use engramdb::types::{EmbeddingBackend, EngramConfig, HarvestConfig};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// Everything the index-backed subcommands need to reach a model.
+///
+/// Bundled rather than threaded as four more arguments: `list`, `show`,
+/// `mark`, `reset` and every `ledger` subcommand never touch a model, and the
+/// engine is built lazily so those paths still cost nothing.
+pub struct HarvestEngineContext<'a> {
+    pub backend: Option<EmbeddingBackend>,
+    pub cell: &'a Arc<DaemonCell>,
+    pub policy: DaemonPolicy,
+}
 
 /// Run the `harvest` command.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_harvest(
     dir: &Path,
     registry: &dyn RegistryBackend,
     command: HarvestCommand,
-    config: &HarvestConfig,
+    full_config: &EngramConfig,
     formatter: &OutputFormatter,
     prompter: &dyn Prompter,
+    engine_ctx: HarvestEngineContext<'_>,
 ) -> Result<()> {
+    let config = &full_config.harvest;
     // Resolved once, up front: every branch below touches the ledger, and the
     // ledger belongs to the **root** project — the same root the archives are
     // keyed by. `resolve_project_root` only rewrites `dir` for git worktrees,
@@ -82,7 +101,11 @@ pub async fn run_harvest(
                     // it is a no-op rather than a toggle-off.
                     include_thinking: include_thinking || config.include_thinking,
                     include_sidechains: include_sidechains || config.include_sidechains,
-                    include_tools: !no_tools,
+                    tools: if no_tools {
+                        transcripts::ToolDetail::None
+                    } else {
+                        transcripts::ToolDetail::All
+                    },
                 },
                 max_chars: match max_chars {
                     Some(0) => usize::MAX,
@@ -111,6 +134,7 @@ pub async fn run_harvest(
             all_projects,
             defer,
             note,
+            summary,
         } => {
             // `mark` must reach every session `show` can, or the ledger
             // silently re-offers one forever. That now includes sessions whose
@@ -131,6 +155,23 @@ pub async fn run_harvest(
             };
             let entry =
                 harvest_state::mark_harvested(ledger_dir, &resolved, &memory_ids, decision, note)?;
+            // After the decision is recorded, never before: the ledger write
+            // is the thing that must not be lost, and attaching a summary
+            // needs a model that may not load. A session with a decision and
+            // no summary is a normal state; one with a summary and no
+            // decision would keep being re-offered.
+            if let Some(summary) = summary {
+                write_summary(
+                    dir,
+                    full_config,
+                    &scope,
+                    &engine_ctx,
+                    &resolved,
+                    &summary,
+                    formatter,
+                )
+                .await?;
+            }
             if formatter.is_json() {
                 println!(
                     "{}",
@@ -139,6 +180,71 @@ pub async fn run_harvest(
             } else {
                 formatter.print_success(&describe_mark(&resolved, &entry));
             }
+        }
+
+        HarvestCommand::Index {
+            session_id,
+            all,
+            force,
+        } => {
+            let (index, engine) = open_engine(dir, full_config, &scope, &engine_ctx).await?;
+            let ids = match (session_id, all) {
+                (Some(prefix), _) => vec![resolve_indexable(&scope, &prefix)?],
+                (None, true) => harvest_index::all_indexable(&scope)?,
+                (None, false) => bail!(
+                    "Name a session to index, or pass --all. \
+`engramdb harvest ledger list` shows which sessions have bytes behind them."
+                ),
+            };
+            let report =
+                harvest_index::index_sessions(&scope, &index, &engine, &ids, force).await?;
+            print_index_report(&report, formatter)?;
+        }
+
+        HarvestCommand::Search {
+            query,
+            limit,
+            since,
+            all_projects,
+        } => {
+            let since = since.as_deref().map(harvest::parse_since).transpose()?;
+            let (index, engine) = open_engine(dir, full_config, &scope, &engine_ctx).await?;
+            let mut hits = harvest_index::search(&index, &engine, &query, limit, since).await?;
+            if all_projects {
+                hits = search_all_projects(
+                    registry,
+                    full_config,
+                    &engine,
+                    &scope,
+                    &query,
+                    limit,
+                    since,
+                    hits,
+                )
+                .await?;
+            }
+            print_search_hits(&hits, formatter)?;
+        }
+
+        HarvestCommand::Summary {
+            session_id,
+            text,
+            editor,
+            from_file,
+        } => {
+            let resolved = resolve_ledger_key(ledger_dir, &session_id)
+                .or_else(|_| resolve_indexable(&scope, &session_id))?;
+            let body = read_summary_text(text, editor, from_file, prompter)?;
+            write_summary(
+                dir,
+                full_config,
+                &scope,
+                &engine_ctx,
+                &resolved,
+                &body,
+                formatter,
+            )
+            .await?;
         }
 
         HarvestCommand::Reset { session_id } => {
@@ -151,6 +257,293 @@ pub async fn run_harvest(
             run_ledger(&scope, command, config, formatter, prompter).await?;
         }
     }
+    Ok(())
+}
+
+/// Open the conversation table and a model-backed engine for this scope.
+///
+/// Both at once, because every command that needs one needs the other and the
+/// failure modes read the same: no model means nothing to embed, and no table
+/// means nothing to embed *into*.
+async fn open_engine(
+    dir: &Path,
+    config: &EngramConfig,
+    scope: &harvest::SessionScope,
+    ctx: &HarvestEngineContext<'_>,
+) -> Result<(ConversationIndex, RetrievalEngine)> {
+    let index = harvest_index::open_index(scope, config.embeddings.dimensions).await?;
+    let store = MemoryStore::open(dir)
+        .await
+        .context("open the memory store for conversation indexing")?;
+    let engine = crate::engine::engine_for(store, ctx.backend, ctx.cell, ctx.policy).await;
+    if !engine.embeddings_available() {
+        bail!(
+            "No embedding provider is available, so conversations cannot be indexed or \
+searched. Run `engramdb doctor` to see why the model did not load."
+        );
+    }
+    Ok((index, engine))
+}
+
+/// Resolve a session-id prefix for the index commands.
+///
+/// Wider than [`resolve_ledger_key`] on purpose: a session with a live
+/// transcript and no ledger entry at all is perfectly indexable, and refusing
+/// it would mean nothing could be indexed before it was reviewed.
+fn resolve_indexable(scope: &harvest::SessionScope, prefix: &str) -> Result<String> {
+    let mut matches: Vec<String> = harvest_index::all_indexable(scope)?
+        .into_iter()
+        .filter(|id| id.starts_with(prefix))
+        .collect();
+    matches.sort();
+    matches.dedup();
+    match matches.len() {
+        0 => bail!(
+            "No session matching '{prefix}' has any bytes behind it — neither a live transcript \
+nor a collected copy. `engramdb harvest ledger list --with-archive` shows which sessions do."
+        ),
+        1 => Ok(matches.remove(0)),
+        n => bail!(
+            "Ambiguous session id '{prefix}' — matches {n} sessions: {}",
+            matches.join(", ")
+        ),
+    }
+}
+
+/// Where the summary text comes from: an argument, `$EDITOR`, or a file.
+fn read_summary_text(
+    text: Option<String>,
+    editor: bool,
+    from_file: Option<PathBuf>,
+    _prompter: &dyn Prompter,
+) -> Result<String> {
+    if let Some(path) = from_file {
+        // `-` reads stdin, so a summary can be piped in without a temp file.
+        if path == Path::new("-") {
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+                .context("read the summary from stdin")?;
+            return Ok(buf);
+        }
+        return std::fs::read_to_string(&path)
+            .with_context(|| format!("read the summary from {}", path.display()));
+    }
+    if editor {
+        return compose_in_editor();
+    }
+    text.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Pass the summary text, --editor, or --from-file. An empty string clears the \
+summary and its vector."
+        )
+    })
+}
+
+/// Compose a summary in `$EDITOR`, mirroring `add --editor`.
+fn compose_in_editor() -> Result<String> {
+    let temp = tempfile::Builder::new()
+        .prefix("engramdb-summary-")
+        .suffix(".md")
+        .tempfile()
+        .context("create the editor scratch file")?;
+    std::fs::write(
+        temp.path(),
+        "# One or two sentences about what this conversation settled.\n\
+         # Lines starting with '#' are ignored.\n",
+    )?;
+    let editor_raw = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    let parts = shell_words::split(&editor_raw)
+        .map_err(|e| anyhow::anyhow!("Invalid EDITOR value '{editor_raw}': {e}"))?;
+    let (cmd, args) = parts
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("EDITOR environment variable is empty"))?;
+    let status = std::process::Command::new(cmd)
+        .args(args)
+        .arg(temp.path())
+        .status()
+        .with_context(|| format!("Failed to launch editor '{cmd}'"))?;
+    if !status.success() {
+        bail!("Editor exited with non-zero status");
+    }
+    let body = std::fs::read_to_string(temp.path()).context("read the edited summary")?;
+    Ok(body
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// Attach (or clear) a curated summary, re-embedding only `summary_vec`.
+async fn write_summary(
+    dir: &Path,
+    config: &EngramConfig,
+    scope: &harvest::SessionScope,
+    ctx: &HarvestEngineContext<'_>,
+    session_id: &str,
+    body: &str,
+    formatter: &OutputFormatter,
+) -> Result<()> {
+    let (index, engine) = open_engine(dir, config, scope, ctx).await?;
+    // A summary for a session with no row has nowhere to go, and silently
+    // indexing here would make `harvest summary` an embedding of the whole
+    // conversation rather than of two sentences. Index first, explicitly.
+    if index.fetch(session_id).await?.is_none() {
+        harvest_index::index_session(scope, &index, &engine, session_id, false).await?;
+    }
+    harvest_index::set_summary(&index, &engine, session_id, body).await?;
+    if body.trim().is_empty() {
+        formatter.print_success(&format!("Cleared the summary for session {session_id}."));
+    } else {
+        formatter.print_success(&format!("Summary recorded for session {session_id}."));
+    }
+    Ok(())
+}
+
+/// Fold in every *other* root project's conversations.
+///
+/// Only projects that already have a table are opened: opening one creates it,
+/// and a machine-wide search must not leave an empty table behind in every
+/// project it merely looked at.
+#[allow(clippy::too_many_arguments)]
+async fn search_all_projects(
+    registry: &dyn RegistryBackend,
+    config: &EngramConfig,
+    engine: &RetrievalEngine,
+    own: &harvest::SessionScope,
+    query: &str,
+    limit: usize,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    mut hits: Vec<ConversationHit>,
+) -> Result<Vec<ConversationHit>> {
+    let data = registry.load().await?;
+    let mut seen: Vec<String> = vec![own.root_project_id.clone()];
+    for entry in &data.projects {
+        // Project *ids*, never paths: two registry entries can name the same
+        // checkout through a symlink, and one of them would then be searched
+        // twice while the dedupe silently failed.
+        let root = engramdb::storage::resolve_root_project_id(&data, &entry.project_id);
+        if seen.contains(&root) || !ConversationIndex::exists(&root) {
+            continue;
+        }
+        seen.push(root.clone());
+        let index = ConversationIndex::open(&root, config.embeddings.dimensions).await?;
+        hits.extend(harvest_index::search(&index, engine, query, limit, since).await?);
+    }
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+    hits.truncate(limit);
+    Ok(hits)
+}
+
+fn print_index_report(
+    report: &harvest_index::IndexReport,
+    formatter: &OutputFormatter,
+) -> Result<()> {
+    if formatter.is_json() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "indexed": report.indexed,
+                "unchanged": report.unchanged,
+                "skipped": report.skipped.iter().map(|s| serde_json::json!({
+                    "session_id": s.session_id,
+                    "reason": s.reason,
+                })).collect::<Vec<_>>(),
+            }))?
+        );
+        return Ok(());
+    }
+    formatter.print_success(&format!(
+        "Indexed {} conversation(s); {} already current.",
+        report.indexed.len(),
+        report.unchanged.len()
+    ));
+    // Named individually rather than counted: a conversation missing from
+    // search is indistinguishable from one that never mentioned the topic.
+    for skipped in &report.skipped {
+        formatter.print_warning(&format!(
+            "{}: {}",
+            crate::output::short_id(&skipped.session_id),
+            skipped.reason
+        ));
+    }
+    Ok(())
+}
+
+/// The human-readable search listing, built as text so it can be asserted on
+/// without capturing stdout.
+fn render_search_hits(hits: &[ConversationHit]) -> String {
+    if hits.is_empty() {
+        return "No indexed conversation matched. Sessions become searchable at harvest or after \
+`[harvest] index_after_hours`; `engramdb harvest index --all` indexes them now.\n"
+            .to_string();
+    }
+    let mut out = String::new();
+    for hit in hits {
+        out.push_str(&format!(
+            "{}  {:.3} ({})  {}\n",
+            crate::output::short_id(&hit.session_id),
+            hit.score,
+            match hit.matched_on {
+                MatchedOn::Digest => "digest",
+                MatchedOn::Summary => "summary",
+            },
+            hit.ended_at
+                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "unknown date".into())
+        ));
+        // Both strings are transcript-derived and already sanitized on the
+        // way into the table; re-sanitizing costs nothing and keeps this
+        // renderer safe if the row ever gains another writer.
+        if let Some(summary) = &hit.summary {
+            out.push_str(&format!(
+                "    {}\n",
+                transcripts::sanitize_one_line(summary)
+            ));
+        } else if let Some(prompt) = &hit.first_prompt {
+            out.push_str(&format!("    {}\n", transcripts::sanitize_one_line(prompt)));
+        }
+        // A partial row is a session whose tail was never embedded, so a miss
+        // against it is not evidence the topic was absent.
+        if !hit.indexed_complete {
+            out.push_str("    (partial: only the head of this conversation is indexed)\n");
+        }
+    }
+    out.push_str("\nRead one with `engramdb harvest show <id>`.\n");
+    out
+}
+
+fn print_search_hits(hits: &[ConversationHit], formatter: &OutputFormatter) -> Result<()> {
+    if formatter.is_json() {
+        let out: Vec<_> = hits
+            .iter()
+            .map(|h| {
+                serde_json::json!({
+                    "session_id": h.session_id,
+                    "project_id": h.project_id,
+                    "score": (h.score * 1000.0).round() / 1000.0,
+                    "matched_on": match h.matched_on {
+                        MatchedOn::Digest => "digest",
+                        MatchedOn::Summary => "summary",
+                    },
+                    "cwd": h.cwd,
+                    "git_branch": h.git_branch,
+                    "started_at": h.started_at,
+                    "ended_at": h.ended_at,
+                    "first_prompt": h.first_prompt,
+                    "summary": h.summary,
+                    "indexed_complete": h.indexed_complete,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    print!("{}", render_search_hits(hits));
     Ok(())
 }
 
@@ -701,5 +1094,90 @@ mod tests {
             "the unconditional promise is false for a pruned session: {removed}"
         );
         assert_ne!(kept, removed);
+    }
+
+    /// `--from-file` reads a path; the positional argument is only one of
+    /// three sources, and none of them may be silently defaulted.
+    #[test]
+    fn summary_text_comes_from_an_argument_or_a_file() {
+        use crate::prompter::MockPrompter;
+        let prompter = MockPrompter::new(vec![]);
+
+        assert_eq!(
+            read_summary_text(Some("inline".into()), false, None, &prompter).unwrap(),
+            "inline"
+        );
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "from a file\n").unwrap();
+        assert_eq!(
+            read_summary_text(None, false, Some(tmp.path().to_path_buf()), &prompter).unwrap(),
+            "from a file\n"
+        );
+
+        // With no source at all the caller is told the three that exist,
+        // rather than getting an empty summary that silently clears the row.
+        let err = read_summary_text(None, false, None, &prompter)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("--editor") && err.contains("--from-file"),
+            "{err}"
+        );
+    }
+
+    fn hit(first_prompt: &str, complete: bool) -> ConversationHit {
+        ConversationHit {
+            session_id: "abcdef123456".into(),
+            project_id: "p".into(),
+            cwd: None,
+            git_branch: None,
+            started_at: None,
+            ended_at: None,
+            first_prompt: Some(first_prompt.to_string()),
+            summary: None,
+            indexed_complete: complete,
+            score: 0.9,
+            matched_on: MatchedOn::Digest,
+        }
+    }
+
+    /// A run that matched nothing must say why a session might be missing.
+    /// "No results" alone reads as "we never discussed it", which is exactly
+    /// the wrong conclusion for a session that was simply never indexed.
+    #[test]
+    fn an_empty_search_explains_how_sessions_become_searchable() {
+        let out = render_search_hits(&[]);
+        assert!(out.contains("harvest index --all"), "{out}");
+        assert!(out.contains("index_after_hours"), "{out}");
+    }
+
+    /// A partial row is a session whose tail was never embedded, so a miss
+    /// against it is not evidence the topic was absent.
+    #[test]
+    fn a_partially_indexed_hit_says_so() {
+        let partial = render_search_hits(&[hit("why is the build failing", false)]);
+        assert!(partial.contains("partial"), "{partial}");
+
+        let whole = render_search_hits(&[hit("why is the build failing", true)]);
+        assert!(
+            !whole.contains("partial"),
+            "the notice must not fire on a whole session: {whole}"
+        );
+    }
+
+    /// Search hits carry transcript-derived strings into a terminal.
+    #[test]
+    fn search_hits_sanitize_transcript_derived_strings() {
+        let out = render_search_hits(&[hit("look\u{202e}gnp.exe here\nsecond line", true)]);
+        assert!(!out.contains('\u{202e}'), "{out:?}");
+        assert!(
+            !out.contains("here\nsecond"),
+            "a forged extra row survived: {out:?}"
+        );
+        assert!(
+            out.contains("look"),
+            "the visible text must survive: {out:?}"
+        );
     }
 }

@@ -1236,6 +1236,34 @@ pub struct HarvestConfig {
     /// keeping: its digest would be budget-truncated anyway.
     #[serde(default = "default_archive_max_transcript_bytes")]
     pub archive_max_transcript_bytes: u64,
+
+    /// Build the searchable conversation index during automatic maintenance.
+    ///
+    /// On by default. With it off, `harvest search` still works but only over
+    /// whatever `harvest index` was run by hand — which, for the sessions
+    /// nobody reviewed, is nothing.
+    #[serde(default = "default_true")]
+    pub index: bool,
+
+    /// How long after a session ends before it is indexed unreviewed.
+    ///
+    /// A session a human settled is indexed on the next maintenance pass
+    /// regardless; this window is what makes a session **nobody** reviewed
+    /// searchable anyway. Long enough that a same-day `/engram:harvest` still
+    /// gets to write its summary first, short enough that a conversation is
+    /// findable the next morning.
+    #[serde(default = "default_index_after_hours")]
+    pub index_after_hours: u64,
+
+    /// Most sessions one automatic pass will embed.
+    ///
+    /// Maintenance is throttled and best-effort, and indexing is the only
+    /// step in it that runs a model per item. A first pass on a machine with
+    /// years of history would otherwise embed thousands of conversations
+    /// inside one MCP startup; the cap spreads that over successive passes,
+    /// newest first.
+    #[serde(default = "default_index_batch")]
+    pub index_batch: usize,
 }
 
 fn default_digest_budget() -> usize {
@@ -1263,6 +1291,16 @@ fn default_archive_max_transcript_bytes() -> u64 {
     16 * 1024 * 1024
 }
 
+/// One day: a session reviewed the same day keeps its curated summary as the
+/// first thing written about it, while yesterday's is searchable today.
+fn default_index_after_hours() -> u64 {
+    24
+}
+
+fn default_index_batch() -> usize {
+    25
+}
+
 impl Default for HarvestConfig {
     fn default() -> Self {
         Self {
@@ -1273,6 +1311,9 @@ impl Default for HarvestConfig {
             archive_retention_days: default_archive_retention_days(),
             archive_max_bytes: default_archive_max_bytes(),
             archive_max_transcript_bytes: default_archive_max_transcript_bytes(),
+            index: true,
+            index_after_hours: default_index_after_hours(),
+            index_batch: default_index_batch(),
         }
     }
 }
@@ -1305,7 +1346,23 @@ impl HarvestConfig {
                 anyhow::bail!("harvest.archive_retention_days ({days}) must be <= 3650");
             }
         }
+        // A zero batch reads as "index nothing", which `index = false`
+        // already says unambiguously. Left as an error rather than silently
+        // corrected, because a store that quietly indexes nothing looks
+        // identical to one where search simply found no match.
+        if self.index && self.index_batch == 0 {
+            anyhow::bail!(
+                "harvest.index_batch must be >= 1 when harvest.index is true — set \
+                 `index = false` to turn conversation indexing off instead."
+            );
+        }
         Ok(())
+    }
+
+    /// The unreviewed-session indexing window as a duration.
+    pub fn index_after(&self) -> chrono::Duration {
+        chrono::Duration::try_hours(self.index_after_hours as i64)
+            .unwrap_or_else(chrono::Duration::zero)
     }
 }
 
@@ -2418,7 +2475,38 @@ interval_secs = 60
         assert_eq!(c.archive_retention_days, Some(365));
         assert_eq!(c.archive_max_bytes, 2 * 1024 * 1024 * 1024);
         assert_eq!(c.archive_max_transcript_bytes, 16 * 1024 * 1024);
+        assert!(c.index, "conversation indexing is on by default");
+        assert_eq!(c.index_after_hours, 24);
+        assert_eq!(c.index_batch, 25);
         assert_eq!(EngramConfig::default().harvest, c);
+    }
+
+    #[test]
+    fn test_harvest_index_batch_must_be_positive_when_indexing() {
+        // A zero batch reads as "index nothing", which `index = false`
+        // already says. Silently correcting it would leave a store that
+        // indexes nothing looking exactly like one where search found no
+        // match.
+        let mut c = EngramConfig::default();
+        c.harvest.index_batch = 0;
+        assert!(c.validate().is_err());
+        c.harvest.index = false;
+        assert!(
+            c.validate().is_ok(),
+            "with indexing off the batch size is irrelevant"
+        );
+    }
+
+    #[test]
+    fn test_harvest_index_after_is_the_hours_field() {
+        let mut c = HarvestConfig::default();
+        assert_eq!(c.index_after(), chrono::Duration::hours(24));
+        c.index_after_hours = 0;
+        assert_eq!(
+            c.index_after(),
+            chrono::Duration::zero(),
+            "0 means index on the next pass"
+        );
     }
 
     #[test]

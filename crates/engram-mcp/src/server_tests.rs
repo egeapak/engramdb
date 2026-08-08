@@ -4887,6 +4887,7 @@ fn mark_input(session_id: &str, project: Option<String>) -> HarvestMarkInput {
         memory_ids: None,
         decision: None,
         note: None,
+        summary: None,
         clear: None,
         all_projects: None,
         project,
@@ -5816,6 +5817,113 @@ async fn the_ledger_is_not_a_way_around_the_read_gate() {
             .as_str()
             .unwrap()
             .contains("another project's transcripts"),
+        "{err}"
+    );
+}
+
+fn search_input(query: &str) -> HarvestSearchInput {
+    HarvestSearchInput {
+        query: query.to_string(),
+        limit: None,
+        since: None,
+        all_projects: None,
+        project: None,
+    }
+}
+
+#[tokio::test]
+async fn harvest_search_all_projects_rides_the_same_gate_as_harvest_list() {
+    // `harvest_search` returns conversation-derived text, so machine-wide
+    // search is exactly as sensitive as a machine-wide listing. A review
+    // already found this hole in `harvest_mark`, where prefix resolution
+    // leaked session ids past the gate.
+    let _home = ScopedClaudeHome::new();
+    let (dir, server) = setup().await;
+
+    let mut wide = search_input("anything");
+    wide.all_projects = Some(true);
+    let err = parse_err(&server.harvest_search(Parameters(wide)).await);
+    let message = err["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("allow_all_projects_harvest"),
+        "the flag must be gated, not silently honored: {err}"
+    );
+    // The gate must fire before anything reaches a model or a table: an
+    // error about a missing provider would mean the refusal came *after* the
+    // work, and a result count is itself information about a project the
+    // caller may not read.
+    assert!(
+        !message.contains("embedding provider"),
+        "the gate ran after provider resolution: {err}"
+    );
+
+    write_config_toml(
+        dir.path(),
+        "[security]\nallow_all_projects_harvest = true\n",
+    )
+    .await;
+    // With the opt-in the call is no longer refused *by the gate*. It may
+    // still fail for want of a model in a bare test environment, which is a
+    // different error and the point of the assertion.
+    let mut wide = search_input("anything");
+    wide.all_projects = Some(true);
+    if let Err(raw) = server.harvest_search(Parameters(wide)).await {
+        assert!(
+            !raw.contains("allow_all_projects_harvest"),
+            "the opt-in did not open the gate: {raw}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn harvest_search_refuses_another_project_without_the_opt_in() {
+    // Naming a different project is the second half of the same gate: the
+    // agent picks the target, so the permission has to come from the caller's
+    // own config.
+    let _home = ScopedClaudeHome::new();
+    let (dir_a, dir_b, server) = setup_cross_project().await;
+
+    let mut cross = search_input("anything");
+    cross.project = Some(dir_b.path().to_string_lossy().to_string());
+    let err = parse_err(&server.harvest_search(Parameters(cross)).await);
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("another project's transcripts"),
+        "{err}"
+    );
+
+    // ...and a permissive *target* must not open it either.
+    write_config_toml(
+        dir_b.path(),
+        "[security]\nallow_all_projects_harvest = true\n",
+    )
+    .await;
+    let _ = dir_a;
+    let mut cross = search_input("anything");
+    cross.project = Some(dir_b.path().to_string_lossy().to_string());
+    let err = parse_err(&server.harvest_search(Parameters(cross)).await);
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("another project's transcripts"),
+        "a permissive target opened the gate: {err}"
+    );
+}
+
+#[tokio::test]
+async fn harvest_search_rejects_a_store_target() {
+    // `global` and `group:<name>` are memory stores, not filesystem projects
+    // with transcripts — the same rejection every other harvest tool makes.
+    let _home = ScopedClaudeHome::new();
+    let (_dir, server) = setup().await;
+    let mut input = search_input("anything");
+    input.project = Some("global".into());
+    let err = parse_err(&server.harvest_search(Parameters(input)).await);
+    assert!(
+        err["error"]["message"].as_str().unwrap().contains("global"),
         "{err}"
     );
 }

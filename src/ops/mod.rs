@@ -13,6 +13,7 @@ pub mod doctor;
 pub mod gc;
 pub mod get;
 pub mod harvest;
+pub mod harvest_index;
 pub mod list;
 pub mod maintenance;
 pub mod parsing;
@@ -51,6 +52,11 @@ pub use harvest::{
     budget_digest, digest_session, parse_since, render_digest_markdown, select_sessions,
     session_scope, DigestParams, SelectParams, SelectedSession, SessionDigest, SessionScope,
     DEFAULT_DIGEST_BUDGET,
+};
+pub use harvest_index::{
+    index_pending, index_session, index_sessions, reindex_from_copies,
+    search as search_conversations, set_summary as set_conversation_summary, IndexAction,
+    IndexReport,
 };
 pub use list::{list_memories, parse_sort_field, ListParams, SortField};
 pub use maintenance::{

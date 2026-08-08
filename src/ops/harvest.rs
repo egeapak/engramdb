@@ -32,7 +32,9 @@
 //! overruns loses its tool trace before it loses a word of what the human
 //! asked for.
 
-use crate::storage::transcripts::{self, Event, ParseOptions, ParsedSession, SessionSummary};
+use crate::storage::transcripts::{
+    self, Event, ParseOptions, ParsedSession, SessionSummary, ToolDetail,
+};
 use crate::storage::{collect_descendants, harvest_state, project_id, RegistryBackend};
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
@@ -617,6 +619,134 @@ fn cap_event(event: Event, max: usize) -> (Event, bool) {
             )
         }
     }
+}
+
+/// Character budget for the text behind a conversation's `digest_vec`.
+///
+/// Not a context-window budget like [`DEFAULT_DIGEST_BUDGET`] — this text is
+/// read by an embedding model, not an agent, and the model's own window is the
+/// real ceiling. all-MiniLM truncates at 512 tokens, roughly 2,000 characters,
+/// so anything past a few thousand contributes nothing to the vector and only
+/// makes [`index_text`]'s checksum needlessly brittle. It is set above that
+/// ceiling rather than at it so the *ordering* of what survives is decided by
+/// the digest's own class-drop rules, which prefer prompts and prose, rather
+/// than by a hard cut mid-sentence.
+pub const INDEX_TEXT_BUDGET: usize = 6_000;
+
+/// The parse profile the search index is built from.
+///
+/// The spec's projection table, in code: tool output is noise that dilutes the
+/// vector, but a *failure* and the error text behind it is frequently the whole
+/// durable lesson — "why did the build break in July" is a question about a
+/// failure. Reasoning and subagent turns are dropped whatever the caller's
+/// digest settings say, so two projects with different `[harvest]` config still
+/// index comparable text.
+///
+/// A profile on the existing [`ParseOptions`] rather than a second parsing
+/// pipeline: one parser, one set of defenses against hostile transcript
+/// content, one place where a fix lands.
+pub fn index_parse_options() -> ParseOptions {
+    ParseOptions {
+        include_thinking: false,
+        include_sidechains: false,
+        tools: ToolDetail::FailuresOnly,
+    }
+}
+
+/// Digest one session the way the search index wants it.
+pub fn index_digest(transcript_path: &Path) -> Result<SessionDigest> {
+    digest_session(
+        transcript_path,
+        DigestParams {
+            parse: index_parse_options(),
+            max_chars: INDEX_TEXT_BUDGET,
+        },
+    )
+}
+
+/// The exact text embedded into `digest_vec`.
+///
+/// Deterministic by construction, which is the property `reindex
+/// --archive-only` rests on: the same stored transcript must re-derive the same
+/// vector, or a rebuild silently changes what search returns.
+///
+/// That is why this is not [`render_digest_markdown`]. That render draws a
+/// fresh random fence token per call — deliberately, so recorded content cannot
+/// forge the framing — and a random token in the embedded text would make the
+/// vector different on every run. It also prefixes the trust header, which is
+/// the same few hundred characters in every session and would spend a fifth of
+/// the model's window saying nothing that distinguishes one conversation from
+/// another. Neither guard is needed here: this string is never shown to an
+/// agent, only embedded.
+///
+/// The content-level defenses that are *not* about framing still apply — each
+/// event goes through the same [`defang`] pipeline as the agent-facing render,
+/// so terminal escapes and forged harness tags never reach the index either.
+pub fn index_text(digest: &SessionDigest) -> String {
+    let mut out = String::new();
+    for event in &digest.events {
+        match event {
+            Event::UserPrompt { text, .. } => {
+                out.push_str("Human: ");
+                out.push_str(&defang(text));
+                out.push_str("\n\n");
+            }
+            Event::AssistantText { text, .. } => {
+                out.push_str("Assistant: ");
+                out.push_str(&defang(text));
+                out.push_str("\n\n");
+            }
+            // Only failures survive `index_parse_options`, so no `ok` test is
+            // needed here — but a caller that hands in an all-tools digest
+            // would get its successes too, which is why the marker says
+            // FAILED rather than assuming it.
+            Event::ToolCall {
+                name,
+                target,
+                ok,
+                result_preview,
+                ..
+            } => {
+                if *ok != Some(false) {
+                    continue;
+                }
+                out.push_str("Failed: ");
+                out.push_str(&defang_plain(name));
+                if let Some(target) = target {
+                    out.push(' ');
+                    out.push_str(&defang_plain(target));
+                }
+                if let Some(preview) = result_preview {
+                    out.push_str(" — ");
+                    out.push_str(&defang_plain(preview));
+                }
+                out.push('\n');
+            }
+            // Never produced by `index_parse_options`; dropped rather than
+            // rendered so a caller passing a thinking-enabled digest gets the
+            // same text as one that did not.
+            Event::Thinking { .. } => {}
+        }
+    }
+    out
+}
+
+/// SHA-256 of an index text, hex-encoded.
+///
+/// The idempotency key for `harvest index`: identical text embeds to an
+/// identical vector, so re-running the command has nothing to do.
+pub fn index_text_digest(text: &str) -> String {
+    // sha2 0.11's `finalize` returns a `hybrid_array::Array` with no
+    // `LowerHex`, so `{:x}` does not compile — the same gotcha
+    // `transcript_archive::hex_digest` and `project_id::hash_to_id` document.
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Trust marker prefixed to every rendered digest.

@@ -9,6 +9,7 @@
 //! `storage` / `telemetry` module paths.
 
 pub mod config;
+pub mod conversation_index;
 pub mod error;
 pub mod harvest_state;
 pub mod lance_index;
@@ -28,6 +29,7 @@ pub mod transcripts;
 pub mod worktree;
 pub mod write_lock;
 
+pub use conversation_index::{ConversationHit, ConversationIndex, ConversationRow, MatchedOn};
 pub use error::{Result, StorageError};
 pub use lance_index::{
     IndexFilterable, IndexForFiltering, IndexOptimizeStats, IndexSummary, VectorMatch,

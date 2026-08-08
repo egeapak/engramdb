@@ -185,6 +185,62 @@ pub enum HarvestCommand {
         /// Why the session was skipped or deferred
         #[arg(long)]
         note: Option<String>,
+
+        /// Curated one-or-two-sentence summary of what this session was
+        /// about, written into the search index alongside the decision
+        #[arg(long)]
+        summary: Option<String>,
+    },
+
+    /// Index one or more sessions for `harvest search`
+    Index {
+        /// Session id, or a unique prefix of one. Omit with `--all`.
+        session_id: Option<String>,
+
+        /// Index every session in scope that still has bytes behind it
+        #[arg(long, conflicts_with = "session_id")]
+        all: bool,
+
+        /// Re-embed even when the digest text is unchanged
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Search indexed past conversations
+    Search {
+        /// What to look for
+        query: String,
+
+        /// Maximum number of conversations to return
+        #[arg(long, short = 'n', default_value_t = 10)]
+        limit: usize,
+
+        /// Only conversations that ended since this point: an RFC 3339
+        /// timestamp or a relative shorthand like `30d`, `12h`, `2w`
+        #[arg(long, value_name = "WHEN")]
+        since: Option<String>,
+
+        /// Search every project's conversations on this machine
+        #[arg(long)]
+        all_projects: bool,
+    },
+
+    /// Set or replace a session's curated summary, re-embedding only it
+    Summary {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+
+        /// The summary text. Pass an empty string to clear it.
+        #[arg(conflicts_with_all = ["editor", "from_file"])]
+        text: Option<String>,
+
+        /// Compose the summary in $EDITOR
+        #[arg(long, conflicts_with = "from_file")]
+        editor: bool,
+
+        /// Read the summary from a file (`-` for stdin)
+        #[arg(long, value_name = "PATH")]
+        from_file: Option<PathBuf>,
     },
 
     /// Forget a session's harvest record so it is offered again
@@ -1091,6 +1147,13 @@ pub enum Command {
         /// Only rebuild index, don't re-embed
         #[arg(long)]
         index_only: bool,
+
+        /// Rebuild the conversation search rows from the stored transcript
+        /// copies instead of touching memories. Mirrors `--embeddings-only`:
+        /// a rebuild of one index, from bytes that were kept verbatim so a
+        /// better reduction is always a re-derivation away.
+        #[arg(long, conflicts_with_all = ["embeddings_only", "index_only", "global"])]
+        archive_only: bool,
 
         /// Reindex the global (cross-project) memory store instead of the current project
         #[arg(long)]

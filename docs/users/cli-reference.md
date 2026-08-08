@@ -245,7 +245,7 @@ Reports candidates only. The actual merge happens via the MCP `compress_apply` t
 ## `reindex` — rebuild vectors and index
 
 ```bash
-engramdb reindex [--embeddings-only|--index-only] [--global]
+engramdb reindex [--embeddings-only|--index-only|--archive-only] [--global]
 ```
 
 | Flag | What runs |
@@ -253,6 +253,7 @@ engramdb reindex [--embeddings-only|--index-only] [--global]
 | (no flag) | Re-embed everything + rebuild the LanceDB index. |
 | `--embeddings-only` | Re-embed only. |
 | `--index-only` | Rebuild the index without re-embedding. |
+| `--archive-only` | Rebuild the **conversation** search rows from the stored transcript copies. Touches no memory; see [`harvest search`](#harvest--mine-past-claude-code-sessions). Curated summaries are preserved — they are the one thing a rebuild cannot recreate. |
 
 ## `migrate` / `rollback` — memory format migrations
 
@@ -345,7 +346,10 @@ engramdb harvest list [--since 7d] [-n N] [--include-harvested]
 engramdb harvest show <session_id> [--max-chars N] [--include-thinking]
                       [--include-sidechains] [--no-tools] [--all-projects]
 engramdb harvest mark <session_id> [--memory <id>]... [--defer] [--note <text>]
-                      [--all-projects]
+                      [--all-projects] [--summary "<text>"]
+engramdb harvest index [<session_id> | --all] [--force]
+engramdb harvest search <query> [-n N] [--since 30d] [--all-projects]
+engramdb harvest summary <session_id> [<text> | --editor | --from-file <path>]
 engramdb harvest reset <session_id>
 engramdb harvest ledger list [--decision harvested|skipped|deferred|unreviewed]
                              [--with-archive]
@@ -395,6 +399,38 @@ original.
 
 Session ids accept unique prefixes. `--json` (or any non-TTY invocation)
 emits the structured event list alongside the rendered markdown.
+
+**Searching past conversations.** `harvest search` answers "did we ever
+discuss X" and "why did the build break in July" over the conversations that
+have been indexed. Indexing is automatic: a session a human settled with
+`mark` is indexed on the next maintenance pass, and a session **nobody**
+reviewed is indexed once it is older than `[harvest] index_after_hours` (24 by
+default). That timeout is the point — if search only found what you had
+already read, it would only find what you no longer need. `harvest index`
+forces it by hand.
+
+Each conversation gets two vectors. `digest_vec` is always present and is
+embedded from the deterministic, code-generated reduction of the session:
+prompts and assistant prose, plus every **failed** tool call and its error
+text, with successful tool calls dropped because they dilute the vector.
+`summary_vec` is present only once someone has written a curated summary
+(`harvest summary`, or `mark --summary`). Both are queried and the better score
+wins, with an exact tie broken toward the summary — a human wrote it, so a
+match there is higher precision. Editing a summary re-embeds only the summary;
+the digest vector is untouched.
+
+Search returns session ids and metadata, not conversation text — pass an id to
+`harvest show` to read one. A hit marked `partial` is a session whose tail was
+never embedded (the indexed text is budgeted to what the embedding model can
+actually read), so a *miss* against it is not evidence the topic was absent.
+
+`harvest index` is idempotent: each row records the checksum of the exact text
+behind its vector, so re-running costs one hash and no embedding call.
+`--force` re-embeds anyway. `reindex --archive-only` rebuilds every row from
+the stored transcript copies — the payoff of keeping those copies verbatim, and
+the reason the digest vector is never derived from an agent's prose: an
+agent-authored summary is not regenerable by code, so it is stored and
+separately embedded but never what recall depends on. A rebuild preserves it.
 
 **The ledger.** `mark` records that a session was reviewed so it is not
 offered again, and *must* be used even when a session yielded nothing —

@@ -280,10 +280,13 @@ impl FixAction {
             FixAction::Reindex { embeddings_only } => {
                 // The doctor fix flow has no daemon cell; run in-process
                 // (matches the old `run_reindex` default).
+                let registry = engramdb::storage::FileRegistry::global()?;
                 crate::commands::run_reindex(
                     dir,
+                    &registry,
                     global,
                     *embeddings_only,
+                    false,
                     false,
                     None,
                     formatter,

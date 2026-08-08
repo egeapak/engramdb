@@ -21,6 +21,7 @@ engram-types = { path = "../engram-types" }
 
 lancedb = { version = "0.31", default-features = false }
 arrow-array = "58"
+arrow-buffer = "58"
 arrow-schema = "58"
 
 serde = { version = "1", features = ["derive"] }

@@ -356,6 +356,29 @@ impl Event {
     }
 }
 
+/// How much of the tool trace a consumer wants.
+///
+/// A three-state axis rather than the `bool` it replaced, because the search
+/// index needs a third disposition the bool could not express: drop the tool
+/// noise that dilutes an embedding, but keep every *failure* and the error
+/// text behind it. "This command failed and that one worked" is frequently the
+/// durable lesson, and it is more true of search than of an agent's read —
+/// "why did the build break in July" is a question about a failure.
+///
+/// Two booleans would encode the same three states plus an illegal fourth, so
+/// this is an enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolDetail {
+    /// Every tool call, successful or not.
+    All,
+    /// Only calls whose result came back an error. A call whose result never
+    /// arrived (`ok == None` — the session was cut off mid-call) is *not* a
+    /// known failure and is dropped with the rest.
+    FailuresOnly,
+    /// No tool calls at all: prompts and prose only.
+    None,
+}
+
 /// What to keep when parsing a transcript.
 #[derive(Debug, Clone, Copy)]
 pub struct ParseOptions {
@@ -365,9 +388,9 @@ pub struct ParseOptions {
     /// report their findings back into the main thread, so their raw turns
     /// are mostly duplicate volume.
     pub include_sidechains: bool,
-    /// Include tool calls. Default `true` — the sequence of actions is often
-    /// where a convention or hazard is visible.
-    pub include_tools: bool,
+    /// Which tool calls survive. Default [`ToolDetail::All`] — the sequence of
+    /// actions is often where a convention or hazard is visible.
+    pub tools: ToolDetail,
 }
 
 impl Default for ParseOptions {
@@ -375,7 +398,7 @@ impl Default for ParseOptions {
         Self {
             include_thinking: false,
             include_sidechains: false,
-            include_tools: true,
+            tools: ToolDetail::All,
         }
     }
 }
@@ -637,7 +660,7 @@ pub fn parse_session(transcript_path: &Path, opts: ParseOptions) -> Result<Parse
                             }
                         }
                         ("assistant", "tool_use") => {
-                            if !opts.include_tools {
+                            if opts.tools == ToolDetail::None {
                                 continue;
                             }
                             let name = block
@@ -663,6 +686,14 @@ pub fn parse_session(transcript_path: &Path, opts: ParseOptions) -> Result<Parse
             }
             _ => {}
         }
+    }
+
+    // Applied here and not at the `tool_use` block above, because that is not
+    // where the outcome is known: a call is emitted with `ok: None` and only
+    // back-filled when its `tool_result` record arrives, several records
+    // later. Filtering at emit time would therefore keep nothing.
+    if opts.tools == ToolDetail::FailuresOnly {
+        events.retain(|e| !matches!(e, Event::ToolCall { ok, .. } if *ok != Some(false)));
     }
 
     Ok(ParsedSession { summary, events })
@@ -740,7 +771,7 @@ pub fn summarize_session(transcript_path: &Path) -> Result<SessionSummary> {
     let opts = ParseOptions {
         include_thinking: false,
         include_sidechains: false,
-        include_tools: false,
+        tools: ToolDetail::None,
     };
     Ok(parse_session(transcript_path, opts)?.summary)
 }
@@ -1127,6 +1158,122 @@ mod tests {
             ),
             other => panic!("expected a user prompt, got {other:?}"),
         }
+    }
+
+    /// The projection the search index is built from: tool noise dilutes the
+    /// vector, but a failure and its error text is frequently the whole
+    /// durable lesson. Success/failure is only known when the *result* record
+    /// arrives, so filtering at the `tool_use` block would keep nothing.
+    #[test]
+    fn failures_only_keeps_failed_calls_and_drops_successful_ones() {
+        let tmp = TempDir::new().unwrap();
+        let assistant = serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "trying"},
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "cargo build"}},
+                {"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": "/a.rs"}},
+            ]},
+        })
+        .to_string();
+        let results = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "is_error": true,
+                 "content": "error: could not find protoc"},
+                {"type": "tool_result", "tool_use_id": "t2", "is_error": false, "content": "ok"},
+            ]},
+        })
+        .to_string();
+        let path = write_transcript(tmp.path(), "s", &[&assistant, &results]);
+
+        let all = parse_session(&path, ParseOptions::default()).unwrap();
+        assert_eq!(
+            all.events
+                .iter()
+                .filter(|e| matches!(e, Event::ToolCall { .. }))
+                .count(),
+            2,
+            "the default profile keeps the whole trace"
+        );
+
+        let failures = parse_session(
+            &path,
+            ParseOptions {
+                tools: ToolDetail::FailuresOnly,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let tools: Vec<&Event> = failures
+            .events
+            .iter()
+            .filter(|e| matches!(e, Event::ToolCall { .. }))
+            .collect();
+        assert_eq!(tools.len(), 1, "{tools:?}");
+        match tools[0] {
+            Event::ToolCall {
+                name,
+                ok,
+                result_preview,
+                ..
+            } => {
+                assert_eq!(name, "Bash");
+                assert_eq!(*ok, Some(false));
+                assert!(
+                    result_preview
+                        .as_deref()
+                        .is_some_and(|p| p.contains("could not find protoc")),
+                    "the error text must survive: {result_preview:?}"
+                );
+            }
+            other => panic!("expected a tool call, got {other:?}"),
+        }
+        // Prose is untouched by the profile.
+        assert!(failures
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::AssistantText { .. })));
+
+        let none = parse_session(
+            &path,
+            ParseOptions {
+                tools: ToolDetail::None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(none
+            .events
+            .iter()
+            .all(|e| !matches!(e, Event::ToolCall { .. })));
+    }
+
+    /// A call whose result never arrived is not a *known* failure — the
+    /// session was cut off mid-call — so it must not be reported as one.
+    #[test]
+    fn failures_only_drops_a_call_with_no_result() {
+        let tmp = TempDir::new().unwrap();
+        let assistant = serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "sleep 1"}},
+            ]},
+        })
+        .to_string();
+        let path = write_transcript(tmp.path(), "s", &[&assistant]);
+        let parsed = parse_session(
+            &path,
+            ParseOptions {
+                tools: ToolDetail::FailuresOnly,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(parsed
+            .events
+            .iter()
+            .all(|e| !matches!(e, Event::ToolCall { .. })));
     }
 
     fn write_transcript(dir: &Path, name: &str, lines: &[&str]) -> PathBuf {

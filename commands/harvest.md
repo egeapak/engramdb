@@ -24,6 +24,27 @@ the user asks for machine-wide history.
 
 ## Steps
 
+### 0. Check whether the question is already answered
+
+If the user is asking *about* past work — "did we ever discuss X", "why did we
+choose Y", "when did the build break" — search the indexed conversations
+first rather than listing and digesting everything:
+
+```bash
+engramdb harvest search "why did the protoc build break" --since 90d
+```
+
+or the `harvest_search` MCP tool. It returns session ids and metadata, not
+conversation text; feed a promising id straight to step 2. A hit reported as
+`partial` is a session whose tail was never embedded, so a *miss* against it
+is not evidence the topic was absent.
+
+Not every session is in there: indexing happens at harvest, or automatically
+once a session nobody reviewed is older than `[harvest] index_after_hours`
+(24 by default). `engramdb harvest index --all` indexes everything now. If
+the user wants a *review* pass rather than an answer to a question, skip this
+step and start at the listing below.
+
 ### 1. List candidate sessions
 
 Use the `harvest_list` MCP tool if it is available; otherwise the CLI:
@@ -144,8 +165,9 @@ each reviewed session, **including the ones that yielded nothing**:
 Use the `harvest_mark` MCP tool if available, or the CLI:
 
 ```bash
-# with memories saved
-engramdb harvest mark <session-id> --memory <memory-id> --memory <memory-id>
+# with memories saved, plus a one-line summary for conversation search
+engramdb harvest mark <session-id> --memory <memory-id> --memory <memory-id> \
+  --summary "Settled that the daemon socket comes from resolve_socket, never from config directly."
 
 # reviewed, nothing worth saving
 engramdb harvest mark <session-id>
@@ -153,6 +175,14 @@ engramdb harvest mark <session-id>
 # looked at, decision postponed — stays in the list
 engramdb harvest mark <session-id> --defer --note "revisit after the refactor"
 ```
+
+**Write the `--summary` (`summary` on `harvest_mark`).** You have just read the
+whole conversation; nobody will be better placed to say what it settled. That
+sentence is embedded as its own vector, and `harvest search` breaks ties toward
+it because a human-written summary is higher-precision than the machine
+digest. It is recorded *after* the decision, so a summary that fails to embed
+costs the summary and not the review. `engramdb harvest summary <session-id>
+"..."` sets or replaces one later without touching the decision.
 
 Marking is what stops a session being re-read on every future harvest, so a
 zero-yield session must be marked too. `engramdb harvest reset <session-id>`
