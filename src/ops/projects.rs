@@ -44,9 +44,10 @@ pub struct DeleteResult {
     /// Project IDs of descendants that were also removed (cascade delete).
     /// Empty when cascade was not requested or the project had no descendants.
     pub cascaded_ids: Vec<String>,
-    /// Data directories kept whole because they still hold personal memories
-    /// and `purge` was not requested.
-    pub retained_with_personal: Vec<String>,
+    /// Data directories kept whole because they still hold data that exists
+    /// nowhere else — personal memories or archived transcripts — and `purge`
+    /// was not requested.
+    pub retained_irreplaceable: Vec<String>,
 }
 
 /// Aggregate statistics across all projects.
@@ -147,10 +148,12 @@ pub async fn list_projects(registry: &dyn RegistryBackend) -> Result<Vec<Project
 /// When `cascade` is false and the project has descendants, this function
 /// returns an error rather than silently leaving orphaned children behind.
 ///
-/// `purge` decides what happens to personal memories, which live *only* in the
-/// data directory and have no copy in the project tree. With `purge = false`
-/// (the default everywhere) the directory is kept whole whenever it still holds
-/// them, index included, exactly as `prune_stale_projects` does — because a
+/// `purge` decides what happens to the data that lives *only* in the data
+/// directory and has no copy in the project tree: personal memories, and the
+/// transcript archives that outlive Claude Code's own pruning. With
+/// `purge = false` (the default everywhere) the directory is kept whole
+/// whenever it still holds either, index included, exactly as
+/// `prune_stale_projects` does — because a
 /// project ID derived from a git remote is shared by every
 /// clone of that remote on the machine, and the registry keeps one row per ID,
 /// so a sibling clone is structurally invisible here. Deleting project A's data
@@ -200,7 +203,7 @@ pub async fn delete_project(
     // Delete global data directory for this project.
     let projects_dir = paths::global_data_dir()?.join("projects");
     let global_project_dir = projects_dir.join(project_id);
-    let mut retained_with_personal = Vec::new();
+    let mut retained_irreplaceable = Vec::new();
     let global_data_removed = if global_project_dir.exists() {
         if purge {
             async_fs::remove_dir_all(&global_project_dir).await?;
@@ -208,7 +211,7 @@ pub async fn delete_project(
         } else if reclaim_data_dir(&global_project_dir).await {
             true
         } else {
-            retained_with_personal.push(project_id.to_string());
+            retained_irreplaceable.push(project_id.to_string());
             false
         }
     } else {
@@ -225,7 +228,7 @@ pub async fn delete_project(
                 if purge {
                     let _ = async_fs::remove_dir_all(&dir).await;
                 } else if !reclaim_data_dir(&dir).await {
-                    retained_with_personal.push(desc_id.clone());
+                    retained_irreplaceable.push(desc_id.clone());
                 }
             }
         }
@@ -235,7 +238,7 @@ pub async fn delete_project(
         project_path: entry.project_path,
         global_data_removed,
         cascaded_ids: descendants,
-        retained_with_personal,
+        retained_irreplaceable,
     })
 }
 
@@ -304,7 +307,7 @@ pub struct PruneResult {
     /// Data directories kept because they still hold personal memories — the
     /// only copy of those. Their derived index was reclaimed. Reported so the
     /// retained disk usage is visible rather than mysterious.
-    pub retained_with_personal: Vec<String>,
+    pub retained_irreplaceable: Vec<String>,
 }
 
 /// Classification of a sub-project's parent chain.
@@ -447,7 +450,7 @@ pub async fn count_orphan_dirs(registry: &dyn RegistryBackend) -> Result<usize> 
             }
             let dir_name = entry.file_name().to_string_lossy().to_string();
             if !registered_ids.contains(&dir_name)
-                && !crate::storage::paths::holds_personal_memories(&entry.path()).await
+                && !crate::storage::paths::holds_irreplaceable_data(&entry.path()).await
             {
                 count += 1;
             }
@@ -493,7 +496,7 @@ pub enum PrunePhase {
 /// Orphan: data directory exists under `projects/` but not in registry.
 ///
 /// Neither ever removes personal memories — see [`reclaim_data_dir`]. Retained
-/// directories come back in [`PruneResult::retained_with_personal`], and
+/// directories come back in [`PruneResult::retained_irreplaceable`], and
 /// [`count_orphan_dirs`] excludes them so `doctor` cannot recommend a prune
 /// that then declines to act.
 ///
@@ -533,14 +536,14 @@ pub async fn prune_stale_projects(
     // index, vectors and personal memories with it — no drift required. The
     // set is computed from the post-removal registry for exactly that reason.
     let survivors = crate::storage::protected_project_ids(&reg);
-    let mut retained_with_personal: Vec<String> = Vec::new();
+    let mut retained_irreplaceable: Vec<String> = Vec::new();
     for entry in stale.iter().filter(|e| !survivors.contains(&e.project_id)) {
         let dir = projects_dir.join(&entry.project_id);
         if !dir.exists() {
             continue;
         }
         if !reclaim_data_dir(&dir).await {
-            retained_with_personal.push(entry.project_id.clone());
+            retained_irreplaceable.push(entry.project_id.clone());
         }
         on_progress(PrunePhase::Stale);
     }
@@ -579,7 +582,7 @@ pub async fn prune_stale_projects(
             orphans_removed += 1;
         } else {
             // Held back: still the only copy of its personal memories.
-            retained_with_personal.push(id.clone());
+            retained_irreplaceable.push(id.clone());
             kept_orphan_ids.push(id.clone());
         }
         on_progress(PrunePhase::Orphan);
@@ -621,7 +624,7 @@ pub async fn prune_stale_projects(
         orphans_removed,
         orphan_ids,
         hierarchy_cleared,
-        retained_with_personal,
+        retained_irreplaceable,
     })
 }
 
@@ -860,13 +863,13 @@ mod tests {
             "a retained directory must keep its index too"
         );
         assert!(!result.global_data_removed);
-        assert_eq!(result.retained_with_personal, vec![pid.clone()]);
+        assert_eq!(result.retained_irreplaceable, vec![pid.clone()]);
 
         // And `--purge` is the escape hatch that really removes it.
         registry.update(temp_dir.path(), &pid).await.unwrap();
         let result = delete_project(&registry, &pid, false, true).await.unwrap();
         assert!(result.global_data_removed);
-        assert!(result.retained_with_personal.is_empty());
+        assert!(result.retained_irreplaceable.is_empty());
         assert!(!only_copy.exists());
     }
 
@@ -1107,7 +1110,7 @@ mod tests {
         );
         assert!(
             result
-                .retained_with_personal
+                .retained_irreplaceable
                 .contains(&shared_id.to_string()),
             "a directory kept for its personal memories must be reported: {result:?}"
         );

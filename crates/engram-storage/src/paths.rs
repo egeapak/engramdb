@@ -10,6 +10,7 @@
 //!   - Linux: `$XDG_DATA_HOME/engramdb/` (default `~/.local/share/engramdb/`)
 //! - Personal project paths (`<global_data_dir>/projects/{id}/personal/`)
 //! - LanceDB vector storage paths (`<global_data_dir>/projects/{id}/lancedb/`)
+//! - Transcript archives (`<global_data_dir>/projects/{id}/transcripts/`)
 //! - Registry path
 //!
 //! Functions that depend on platform directories return `Result<PathBuf>` so
@@ -17,6 +18,7 @@
 //! cannot be determined.
 
 use super::error::{Result, StorageError};
+use crate::transcript_archive;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tokio::fs as async_fs;
@@ -370,10 +372,19 @@ pub async fn find_memory_in_dir(dir: &Path, id: &str) -> Option<PathBuf> {
     None
 }
 
-/// Whether `<data>/projects/<id>/` still holds personal memories.
+/// Whether `<data>/projects/<id>/` still holds data that exists nowhere else.
 ///
 /// `dir` is the project data directory, not the memories dir. An unreadable
 /// directory counts as holding something: the alternative is deleting blind.
+///
+/// Two payloads qualify, and the test is the same for both — *is this the only
+/// copy?*
+///
+/// - `personal/memories/*.md`, which have no counterpart in any project tree.
+/// - `transcripts/*.jsonl.zst`. Claude Code prunes its own transcripts, which
+///   is the entire reason [`crate::transcript_archive`] takes a copy at
+///   `SessionEnd`; by the time a sweep runs, the archive is routinely the last
+///   surviving copy of the conversation behind a memory's provenance.
 ///
 /// This is the single predicate behind every "may I remove this data
 /// directory?" decision — `ops::projects::prune_stale_projects`, its orphan
@@ -381,13 +392,32 @@ pub async fn find_memory_in_dir(dir: &Path, id: &str) -> Option<PathBuf> {
 /// `worktree::consolidate_worktree_into_main`. They must agree: a directory one
 /// of them retains and another deletes is a data-loss bug, and a directory
 /// prune retains but doctor still counts as reclaimable is a warning the user
-/// can never clear.
-pub async fn holds_personal_memories(dir: &Path) -> bool {
-    let personal = dir.join("personal").join("memories");
-    match tokio::fs::read_dir(&personal).await {
+/// can never clear. **Anything added under `<data>/projects/<id>/` that is not
+/// rebuildable from the project tree has to be added here too**, or the next
+/// sweep silently eats it.
+pub async fn holds_irreplaceable_data(dir: &Path) -> bool {
+    holds_files_with_extension(&dir.join("personal").join("memories"), "md").await
+        || holds_files_with_extension(&dir.join("transcripts"), transcript_archive::ARCHIVE_EXT)
+            .await
+}
+
+/// Whether a directory holds at least one file with the given extension.
+///
+/// A read error other than "not found" counts as `true`: EACCES or a dead
+/// mount must not read as "nothing of value here".
+async fn holds_files_with_extension(dir: &Path, ext: &str) -> bool {
+    match tokio::fs::read_dir(dir).await {
         Ok(mut entries) => {
             while let Ok(Some(entry)) = entries.next_entry().await {
-                if entry.path().extension().and_then(|s| s.to_str()) == Some("md") {
+                // `ARCHIVE_EXT` is `jsonl.zst`, a compound suffix that
+                // `Path::extension` reports as just `zst`, so match on the
+                // file name rather than the parsed extension.
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if name
+                    .strip_suffix(ext)
+                    .is_some_and(|stem| stem.ends_with('.') && stem.len() > 1)
+                {
                     return true;
                 }
             }
@@ -397,13 +427,13 @@ pub async fn holds_personal_memories(dir: &Path) -> bool {
     }
 }
 
-/// Remove a project data directory unless it still holds personal memories.
+/// Remove a project data directory unless it still holds irreplaceable data.
 ///
-/// Returns whether it was removed. Personal memories exist *only* here — there
-/// is no copy in any project tree — and no caller can prove the directory is
-/// theirs alone: a project ID derived from a git remote is shared by every
-/// clone of that remote, and the registry keeps one row per ID, so a sibling
-/// clone is structurally invisible.
+/// Returns whether it was removed. Personal memories and archived transcripts
+/// exist *only* here — there is no copy in any project tree — and no caller can
+/// prove the directory is theirs alone: a project ID derived from a git remote
+/// is shared by every clone of that remote, and the registry keeps one row per
+/// ID, so a sibling clone is structurally invisible.
 ///
 /// A retained directory is kept **whole**, index included. Reclaiming just the
 /// index looks free — it rebuilds from the `.md` files — but the directory is
@@ -411,7 +441,7 @@ pub async fn holds_personal_memories(dir: &Path) -> bool {
 /// unregistered sibling's index would then be wiped on every sweep, leaving a
 /// healthy project silently unsearchable until someone re-embedded it by hand.
 pub async fn reclaim_project_data_dir(dir: &Path) -> bool {
-    if holds_personal_memories(dir).await {
+    if holds_irreplaceable_data(dir).await {
         return false;
     }
     tokio::fs::remove_dir_all(dir).await.is_ok()
@@ -420,6 +450,107 @@ pub async fn reclaim_project_data_dir(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A data directory holding only archived transcripts must survive a sweep.
+    // Claude Code prunes its own transcripts, so by the time prune runs the
+    // archive is routinely the last copy of the conversation a memory cites —
+    // and it lives beside `personal/` in the very directory being reclaimed.
+    #[tokio::test]
+    async fn transcripts_alone_keep_a_data_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("proj");
+        let transcripts = dir.join("transcripts");
+        tokio::fs::create_dir_all(&transcripts).await.unwrap();
+        tokio::fs::write(
+            transcripts.join(format!("abc123.{}", transcript_archive::ARCHIVE_EXT)),
+            b"z",
+        )
+        .await
+        .unwrap();
+
+        assert!(holds_irreplaceable_data(&dir).await);
+        assert!(!reclaim_project_data_dir(&dir).await);
+        assert!(
+            dir.exists(),
+            "prune destroyed the only copy of a transcript"
+        );
+    }
+
+    // Derived data alone is reclaimable — otherwise a genuinely dead project's
+    // index would pin disk forever and `doctor`'s orphan warning could never
+    // be cleared.
+    #[tokio::test]
+    async fn a_directory_with_only_derived_data_is_reclaimed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("proj");
+        tokio::fs::create_dir_all(dir.join("lancedb"))
+            .await
+            .unwrap();
+        // An empty archive dir is not a reason to keep anything.
+        tokio::fs::create_dir_all(dir.join("transcripts"))
+            .await
+            .unwrap();
+
+        assert!(!holds_irreplaceable_data(&dir).await);
+        assert!(reclaim_project_data_dir(&dir).await);
+        assert!(!dir.exists());
+    }
+
+    // `ARCHIVE_EXT` is a compound suffix (`jsonl.zst`). `Path::extension`
+    // reports only `zst`, so a naive extension match would also retain a
+    // directory holding unrelated `.zst` files — and, worse, an exact-suffix
+    // match without the dot check would treat a file literally named
+    // `jsonl.zst` as an archive.
+    #[tokio::test]
+    async fn only_real_archive_names_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("proj");
+        let transcripts = dir.join("transcripts");
+        tokio::fs::create_dir_all(&transcripts).await.unwrap();
+        tokio::fs::write(transcripts.join("scratch.zst"), b"z")
+            .await
+            .unwrap();
+        tokio::fs::write(transcripts.join("session.jsonl"), b"z")
+            .await
+            .unwrap();
+        assert!(!holds_irreplaceable_data(&dir).await);
+
+        tokio::fs::write(transcripts.join("s1.jsonl.zst"), b"z")
+            .await
+            .unwrap();
+        assert!(holds_irreplaceable_data(&dir).await);
+    }
+
+    // An unreadable directory counts as holding something: the alternative is
+    // deleting blind on a transient EACCES or a dead mount.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_archive_dir_is_not_read_as_empty() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("proj");
+        let transcripts = dir.join("transcripts");
+        tokio::fs::create_dir_all(&transcripts).await.unwrap();
+
+        let set_mode = |mode: u32| {
+            let mut perms = std::fs::metadata(&transcripts).unwrap().permissions();
+            perms.set_mode(mode);
+            std::fs::set_permissions(&transcripts, perms).unwrap();
+        };
+        set_mode(0o000);
+
+        // Root ignores the mode bits, so there is no unreadable directory to
+        // observe — skip rather than assert something this environment cannot
+        // produce. (CI containers routinely run as root.)
+        let denied = tokio::fs::read_dir(&transcripts).await.is_err();
+        let held = holds_irreplaceable_data(&dir).await;
+        set_mode(0o755);
+
+        if denied {
+            assert!(held, "an unreadable directory must not read as empty");
+        }
+    }
 
     #[test]
     fn test_project_dir() {

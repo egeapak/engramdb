@@ -635,7 +635,7 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
                         {
                             continue;
                         }
-                        if !crate::storage::paths::holds_personal_memories(&path).await {
+                        if !crate::storage::paths::holds_irreplaceable_data(&path).await {
                             orphan_dirs += 1;
                         }
                     }

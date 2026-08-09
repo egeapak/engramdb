@@ -15,6 +15,7 @@
 
 use crate::storage::{paths, project_id, Registry, RegistryBackend, RegistryEntry};
 use anyhow::{bail, Result};
+use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::fs as async_fs;
@@ -258,113 +259,91 @@ pub async fn discover_projects_in(
     let internal_root = paths::global_data_dir().ok().map(|p| canonical(&p));
 
     let mut report = DiscoveryReport::default();
-    let mut visited: HashSet<PathBuf> = HashSet::new();
-    // Paths on the stack are always canonical: the root is canonicalized here,
-    // and children are read from an already-canonical parent (so they are
-    // canonical too) except symlinks, which are resolved at push time. That
-    // keeps the cycle guard exact without a `realpath(3)` per directory —
-    // which matters at the scale this command advertises (a home directory).
-    let mut stack: Vec<(PathBuf, usize)> = vec![(canonical(root), 0)];
 
-    while let Some((canon, depth)) = stack.pop() {
-        // Cycle/duplicate guard: a directory reachable twice (via symlinks, or
-        // a root passed under two spellings) is walked once.
-        if !visited.insert(canon.clone()) {
-            continue;
-        }
-        if internal_root
+    // Breadth-first with bounded concurrency, one wave per depth level.
+    //
+    // Every directory costs a `read_dir` plus a `stat` per entry, and on the
+    // scale this command advertises — a home directory, tens of thousands of
+    // directories — that is pure I/O latency: a serial walk spends nearly all
+    // of its wall clock waiting on one syscall at a time, and the work does
+    // not shrink with a better algorithm. Sibling directories are entirely
+    // independent, so running a bounded number of them at once turns N round
+    // trips into roughly N/DIR_CONCURRENCY. The cap is what keeps a wide
+    // directory from putting thousands of concurrent reads onto tokio's
+    // blocking pool at once.
+    //
+    // Completion order is not part of the contract: the report is sorted by
+    // path below, and `demote_intra_scan_id_collisions` runs after that sort,
+    // so which sibling finishes first cannot change the outcome. `on_dir` is
+    // progress reporting, so its order is free too.
+    const DIR_CONCURRENCY: usize = 16;
+
+    // Paths in the frontier are always canonical: the root is canonicalized
+    // here, and children are read from an already-canonical parent (so they
+    // are canonical too) except symlinks, which are resolved at push time.
+    // That keeps the cycle guard exact without a `realpath(3)` per directory.
+    let root_canon = canonical(root);
+    let is_internal = |p: &Path| {
+        internal_root
             .as_ref()
-            .is_some_and(|internal| canon.starts_with(internal))
-        {
-            continue;
-        }
+            .is_some_and(|internal| p.starts_with(internal))
+    };
+    // Cycle/duplicate guard: a directory reachable twice (via symlinks, or a
+    // root passed under two spellings) is walked once. Membership is decided
+    // when a child is queued rather than when it is popped, so a directory
+    // reachable from two parents in the SAME wave is scanned once, not twice.
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    visited.insert(root_canon.clone());
+    let mut frontier: Vec<(PathBuf, usize)> = if is_internal(&root_canon) {
+        Vec::new()
+    } else {
+        vec![(root_canon, 0)]
+    };
 
-        report.scanned_dirs += 1;
-        on_dir(&canon);
+    while !frontier.is_empty() {
+        let wave = std::mem::take(&mut frontier);
+        let scanned: Vec<DirScan> = futures_util::stream::iter(
+            wave.into_iter()
+                .map(|(canon, depth)| scan_one_dir(canon, depth, opts)),
+        )
+        .buffer_unordered(DIR_CONCURRENCY)
+        .collect()
+        .await;
 
-        if is_dir(&canon.join(".engramdb")).await {
-            let project_id = project_id::compute_project_id(&canon);
-            let status = classify(&canon, &project_id, reg, &by_path, &by_id);
-            report.projects.push(DiscoveredProject {
-                path: canon.clone(),
-                memory_count: count_memories(&canon, &project_id).await,
-                project_id,
-                status,
-            });
-            // Fall through: a project can contain nested projects (monorepo
-            // packages), so keep descending — `.engramdb` itself is in
-            // `DEFAULT_SKIP_DIRS`.
-        }
+        for scan in scanned {
+            report.scanned_dirs += 1;
+            on_dir(&scan.canon);
+            report.unreadable_dirs += scan.unreadable_dirs;
+            report.depth_limited |= scan.depth_limited;
 
-        let Ok(mut entries) = async_fs::read_dir(&canon).await else {
-            // Unreadable directory (permissions, dead mount): skip the subtree
-            // but record it, so the caller can qualify an empty result.
-            report.unreadable_dirs += 1;
-            continue;
-        };
-        // Consecutive `next_entry` failures, reset by any success. A single bad
-        // entry must not truncate the listing — but `next_entry` is not
-        // guaranteed to advance past a failed `getdents` (a dead NFS mount
-        // fails every call), and retrying forever would hang the scan with no
-        // output at all. Bounded retry keeps the siblings and ends the spin.
-        const MAX_CONSECUTIVE_ENTRY_ERRORS: u32 = 16;
-        let mut entry_errors = 0u32;
-        loop {
-            let entry = match entries.next_entry().await {
-                Ok(Some(entry)) => {
-                    entry_errors = 0;
-                    entry
-                }
-                Ok(None) => break,
-                // A per-entry error must not silently truncate the rest of the
-                // listing (`while let Ok(Some(_))` would drop every remaining
-                // sibling); skip this one and keep reading.
-                Err(_) => {
-                    report.unreadable_dirs += 1;
-                    entry_errors += 1;
-                    if entry_errors >= MAX_CONSECUTIVE_ENTRY_ERRORS {
-                        break;
-                    }
+            if let Some((project_id, memory_count)) = scan.project {
+                // `classify` is pure and needs the borrowed registry indices,
+                // so it stays on this side of the fan-out.
+                let status = classify(&scan.canon, &project_id, reg, &by_path, &by_id);
+                report.projects.push(DiscoveredProject {
+                    path: scan.canon.clone(),
+                    memory_count,
+                    project_id,
+                    status,
+                });
+                // A project can contain nested projects (monorepo packages),
+                // so its children are still queued below — `.engramdb` itself
+                // is in `DEFAULT_SKIP_DIRS`.
+            }
+
+            for child in scan.children {
+                // The global/group stores live under the global data dir in
+                // the same `.engramdb/` layout. They are engramdb's own
+                // storage, not user projects, and are never registry entries —
+                // without this guard, scanning a home directory would offer to
+                // "register" them.
+                if is_internal(&child) {
                     continue;
                 }
-            };
-            let Ok(file_type) = entry.file_type().await else {
-                continue;
-            };
-            if file_type.is_symlink() && !opts.follow_symlinks {
-                continue;
+                if visited.insert(child.clone()) {
+                    frontier.push((child, scan.depth + 1));
+                }
             }
-            // `file_type` already answers dir-ness for everything but a
-            // symlink, which needs a following `stat` to see its target.
-            let is_directory = if file_type.is_symlink() {
-                is_dir(&entry.path()).await
-            } else {
-                file_type.is_dir()
-            };
-            if !is_directory {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if opts.skip_dirs.iter().any(|s| s == &name) {
-                continue;
-            }
-            if !opts.include_hidden && name.starts_with('.') {
-                continue;
-            }
-            // The depth check lives here, past the filters, so `depth_limited`
-            // means "a directory we would have scanned was cut off" — reaching
-            // max depth on a leaf (or on one holding nothing but skipped dirs)
-            // is a complete scan, not a truncated one.
-            if depth >= opts.max_depth {
-                report.depth_limited = true;
-                continue;
-            }
-            let child = if file_type.is_symlink() {
-                canonical(&entry.path())
-            } else {
-                entry.path()
-            };
-            stack.push((child, depth + 1));
         }
     }
 
@@ -490,12 +469,138 @@ async fn is_dir(path: &Path) -> bool {
 /// personal memories are exactly the ones that survive a lost `registry.json`,
 /// the case this module exists for.
 async fn count_memories(project_dir: &Path, project_id: &str) -> usize {
-    let shared = count_memory_files(&paths::memories_dir(project_dir)).await;
-    let personal = match paths::personal_memories_dir(project_id) {
-        Ok(dir) => count_memory_files(&dir).await,
-        Err(_) => 0,
-    };
+    let personal_dir = paths::personal_memories_dir(project_id).ok();
+    // The shared and personal directories are on different filesystems as
+    // often as not (one repo-adjacent, one under the global data dir), so
+    // there is no reason to wait for the first read before starting the
+    // second.
+    let (shared, personal) = futures_util::future::join(
+        count_memory_files(&paths::memories_dir(project_dir)),
+        async {
+            match &personal_dir {
+                Some(dir) => count_memory_files(dir).await,
+                None => 0,
+            }
+        },
+    )
+    .await;
     shared + personal
+}
+
+/// One directory's worth of scan results, produced off the critical path.
+///
+/// Kept deliberately data-only: the fan-out below borrows the registry
+/// indices, and classification needs them, so this carries the *facts* a
+/// directory read yields and leaves every registry decision to the driver.
+struct DirScan {
+    /// The canonical directory that was read.
+    canon: PathBuf,
+    /// Its depth below the scan root.
+    depth: usize,
+    /// `(project_id, memory_count)` when this directory holds `.engramdb/`.
+    project: Option<(String, usize)>,
+    /// Canonical child directories worth descending into.
+    children: Vec<PathBuf>,
+    /// Directories that could not be listed (this one, or entries within it
+    /// whose reads failed).
+    unreadable_dirs: usize,
+    /// Whether a child was cut off by `max_depth`.
+    depth_limited: bool,
+}
+
+/// Read one directory: detect a project, count its memories, and collect the
+/// children to descend into.
+///
+/// Everything here is independent per directory, which is what makes the walk
+/// safe to run several-at-a-time.
+async fn scan_one_dir(canon: PathBuf, depth: usize, opts: &DiscoverOptions) -> DirScan {
+    let mut out = DirScan {
+        canon,
+        depth,
+        project: None,
+        children: Vec::new(),
+        unreadable_dirs: 0,
+        depth_limited: false,
+    };
+
+    if is_dir(&out.canon.join(".engramdb")).await {
+        let project_id = project_id::compute_project_id(&out.canon);
+        let memory_count = count_memories(&out.canon, &project_id).await;
+        out.project = Some((project_id, memory_count));
+    }
+
+    let Ok(mut entries) = async_fs::read_dir(&out.canon).await else {
+        // Unreadable directory (permissions, dead mount): skip the subtree
+        // but record it, so the caller can qualify an empty result.
+        out.unreadable_dirs += 1;
+        return out;
+    };
+    // Consecutive `next_entry` failures, reset by any success. A single bad
+    // entry must not truncate the listing — but `next_entry` is not
+    // guaranteed to advance past a failed `getdents` (a dead NFS mount
+    // fails every call), and retrying forever would hang the scan with no
+    // output at all. Bounded retry keeps the siblings and ends the spin.
+    const MAX_CONSECUTIVE_ENTRY_ERRORS: u32 = 16;
+    let mut entry_errors = 0u32;
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => {
+                entry_errors = 0;
+                entry
+            }
+            Ok(None) => break,
+            // A per-entry error must not silently truncate the rest of the
+            // listing (`while let Ok(Some(_))` would drop every remaining
+            // sibling); skip this one and keep reading.
+            Err(_) => {
+                out.unreadable_dirs += 1;
+                entry_errors += 1;
+                if entry_errors >= MAX_CONSECUTIVE_ENTRY_ERRORS {
+                    break;
+                }
+                continue;
+            }
+        };
+        let Ok(file_type) = entry.file_type().await else {
+            continue;
+        };
+        if file_type.is_symlink() && !opts.follow_symlinks {
+            continue;
+        }
+        // `file_type` already answers dir-ness for everything but a
+        // symlink, which needs a following `stat` to see its target.
+        let is_directory = if file_type.is_symlink() {
+            is_dir(&entry.path()).await
+        } else {
+            file_type.is_dir()
+        };
+        if !is_directory {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if opts.skip_dirs.iter().any(|s| s == &name) {
+            continue;
+        }
+        if !opts.include_hidden && name.starts_with('.') {
+            continue;
+        }
+        // The depth check lives here, past the filters, so `depth_limited`
+        // means "a directory we would have scanned was cut off" — reaching
+        // max depth on a leaf (or on one holding nothing but skipped dirs)
+        // is a complete scan, not a truncated one.
+        if depth >= opts.max_depth {
+            out.depth_limited = true;
+            continue;
+        }
+        let child = if file_type.is_symlink() {
+            canonical(&entry.path())
+        } else {
+            entry.path()
+        };
+        out.children.push(child);
+    }
+
+    out
 }
 
 /// Count `.md` files directly under `dir` (0 when it doesn't exist).

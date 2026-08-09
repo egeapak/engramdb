@@ -139,7 +139,7 @@ pub async fn run_projects(
                         "project_path": result.project_path,
                         "purge": purge,
                         "global_data_removed": result.global_data_removed,
-                        "retained_with_personal": result.retained_with_personal,
+                        "retained_irreplaceable": result.retained_irreplaceable,
                         "cascaded_ids": result.cascaded_ids,
                     })
                 );
@@ -152,17 +152,19 @@ pub async fn run_projects(
             ));
             if result.global_data_removed {
                 if purge {
-                    formatter.print_success("Deleted global data (LanceDB + personal memories).");
+                    formatter.print_success(
+                        "Deleted global data (LanceDB, personal memories, transcripts).",
+                    );
                 } else {
                     formatter.print_success("Deleted global data (LanceDB index).");
                 }
             }
-            if !result.retained_with_personal.is_empty() {
+            if !result.retained_irreplaceable.is_empty() {
                 formatter.print_message(&format!(
-                    "Kept {} data director(ies) holding personal memories: {}. \
-                     Re-run with --purge to delete them too.",
-                    result.retained_with_personal.len(),
-                    result.retained_with_personal.join(", ")
+                    "Kept {} data director(ies) holding personal memories or \
+                     archived transcripts: {}. Re-run with --purge to delete them too.",
+                    result.retained_irreplaceable.len(),
+                    result.retained_irreplaceable.join(", ")
                 ));
             }
             if !result.cascaded_ids.is_empty() {
@@ -228,7 +230,7 @@ pub async fn run_projects(
                             "orphans_removed": 0,
                             "orphan_ids": [],
                             "hierarchy_cleared": [],
-                            "retained_with_personal": [],
+                            "retained_irreplaceable": [],
                         })
                     );
                 } else {
@@ -331,7 +333,7 @@ pub async fn run_projects(
                         "orphans_removed": result.orphans_removed,
                         "orphan_ids": result.orphan_ids,
                         "hierarchy_cleared": result.hierarchy_cleared,
-                        "retained_with_personal": result.retained_with_personal,
+                        "retained_irreplaceable": result.retained_irreplaceable,
                     })
                 );
                 return Ok(());
@@ -355,14 +357,14 @@ pub async fn run_projects(
                     result.hierarchy_cleared.len()
                 ));
             }
-            if !result.retained_with_personal.is_empty() {
+            if !result.retained_irreplaceable.is_empty() {
                 // Silence here would read as "everything was reclaimed", and
                 // these directories hold the only copy of their personal
                 // memories — the user needs to know they are still on disk.
                 formatter.print_message(&format!(
                     "Kept {} data director(ies) holding personal memories: {}",
-                    result.retained_with_personal.len(),
-                    result.retained_with_personal.join(", ")
+                    result.retained_irreplaceable.len(),
+                    result.retained_irreplaceable.join(", ")
                 ));
             }
         }
