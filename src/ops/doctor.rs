@@ -337,7 +337,7 @@ pub async fn doctor_environment(
         // group — readability + embedding-fingerprint alignment. Omitted
         // entirely when the project subscribes to no groups.
         let group_checks = check_subscribed_groups(dir).await;
-        let project_subsections = if group_checks.is_empty() {
+        let mut project_subsections = if group_checks.is_empty() {
             vec![]
         } else {
             vec![DoctorSubSection {
@@ -345,6 +345,15 @@ pub async fn doctor_environment(
                 checks: group_checks,
             }]
         };
+        // Harvest: index backlog, ledger compaction, expired evidence, pinned
+        // bytes. Omitted entirely for a project that has never harvested, so it
+        // costs nothing to read and nothing to compute.
+        if let Some(health) = gather_harvest_health(dir).await {
+            project_subsections.push(DoctorSubSection {
+                name: "Harvest".to_string(),
+                checks: build_harvest_checks(&health),
+            });
+        }
 
         sections.push(DoctorSection {
             name: "Project".to_string(),
@@ -615,6 +624,237 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
             conflicting_checkout: None,
         },
     }
+}
+
+/// The four facts the Harvest subsection reports, gathered once.
+///
+/// Split from the checks that render them so the wording and the severities are
+/// testable without a project, a ledger and a set of transcript copies on disk
+/// — the same split `filter_sessions` and `due_sessions` already use.
+#[derive(Debug, Clone, Default)]
+pub struct HarvestHealth {
+    /// Sessions with bytes behind them that no `conversations` row covers yet.
+    /// Until one exists, `harvest search` cannot find that conversation and a
+    /// miss is indistinguishable from the topic never coming up.
+    pub pending_index: usize,
+    /// Ledger lines, and the live entries they fold down to.
+    pub ledger_lines: usize,
+    pub ledger_entries: usize,
+    /// Cited conversations with no bytes left, and the memories citing them.
+    pub expired: Vec<crate::ops::harvest_pin::ExpiredEvidence>,
+    /// Transcript copies pinned by a memory, and their total size.
+    pub pinned_count: usize,
+    pub pinned_bytes: u64,
+    /// `[harvest] archive_max_bytes`; `0` disables the size limit.
+    pub archive_max_bytes: u64,
+}
+
+impl HarvestHealth {
+    /// Nothing to say: no ledger, no pins, nothing waiting.
+    fn is_quiet(&self) -> bool {
+        self.pending_index == 0
+            && self.ledger_lines == 0
+            && self.expired.is_empty()
+            && self.pinned_count == 0
+    }
+}
+
+/// Render the harvest facts as checks.
+///
+/// None of these flips `passed`. Every one of them describes a state the
+/// harvest flow reaches in normal use — an index pass that has not run yet, a
+/// log that has not been appended to since it grew, a retention window that
+/// finally closed — and a `doctor` that exits non-zero over any of them would
+/// be telling users their store is broken when it is working exactly as
+/// designed.
+pub fn build_harvest_checks(health: &HarvestHealth) -> Vec<EnvironmentCheck> {
+    let mut checks = Vec::new();
+
+    checks.push(if health.pending_index == 0 {
+        EnvironmentCheck {
+            name: "Conversation index".to_string(),
+            passed: true,
+            message: "every session with bytes behind it is indexed".to_string(),
+            suggestion: None,
+            details: vec![],
+            status: None,
+        }
+    } else {
+        EnvironmentCheck {
+            name: "Conversation index".to_string(),
+            passed: true,
+            message: format!(
+                "{} session(s) are due for indexing and not yet searchable",
+                health.pending_index
+            ),
+            suggestion: Some(
+                "Run `engramdb harvest index --all`, or leave it to the next \
+                 auto-maintenance pass."
+                    .to_string(),
+            ),
+            details: vec![],
+            status: Some(CheckStatus::Warn),
+        }
+    });
+
+    let pending_compaction = crate::storage::harvest_state::compaction_is_pending(
+        health.ledger_lines,
+        health.ledger_entries,
+    );
+    checks.push(EnvironmentCheck {
+        name: "Harvest ledger".to_string(),
+        passed: true,
+        message: format!(
+            "{} line(s) for {} live entr{}{}",
+            health.ledger_lines,
+            health.ledger_entries,
+            if health.ledger_entries == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            if pending_compaction {
+                " — compaction pending"
+            } else {
+                ""
+            }
+        ),
+        suggestion: pending_compaction.then(|| {
+            "The log is rewritten by the next harvest write that crosses the size gate; \
+             nothing is lost in the meantime."
+                .to_string()
+        }),
+        details: vec![],
+        status: pending_compaction.then_some(CheckStatus::Info),
+    });
+
+    if !health.expired.is_empty() {
+        let memories: usize = health
+            .expired
+            .iter()
+            .flat_map(|e| &e.memory_ids)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        checks.push(EnvironmentCheck {
+            name: "Harvest evidence".to_string(),
+            passed: true,
+            message: format!(
+                "evidence expired for {} conversation(s) cited by {} memor{}",
+                health.expired.len(),
+                memories,
+                if memories == 1 { "y" } else { "ies" }
+            ),
+            suggestion: Some(
+                "Nothing is broken and nothing needs repairing: those memories still hold, \
+                 the copies behind them simply aged out of `[harvest] archive_retention_days` \
+                 (or were never collected on this machine), so `harvest show` can no longer \
+                 reproduce what was said."
+                    .to_string(),
+            ),
+            details: health
+                .expired
+                .iter()
+                .map(|e| format!("{} — cited by {}", e.session_id, e.memory_ids.join(", ")))
+                .collect(),
+            status: Some(CheckStatus::Info),
+        });
+    }
+
+    if health.pinned_count > 0 {
+        let over_budget =
+            health.archive_max_bytes > 0 && health.pinned_bytes > health.archive_max_bytes;
+        checks.push(EnvironmentCheck {
+            name: "Pinned transcripts".to_string(),
+            passed: true,
+            message: format!(
+                "{} held by {} copy(ies) backing memories{}",
+                format_bytes(health.pinned_bytes),
+                health.pinned_count,
+                if over_budget {
+                    format!(
+                        " — over the {} budget",
+                        format_bytes(health.archive_max_bytes)
+                    )
+                } else {
+                    String::new()
+                }
+            ),
+            suggestion: over_budget.then(|| {
+                "Pinned copies are exempt from `[harvest] archive_max_bytes` rather than \
+                 evicted against it, so this is a state to know about, not a limit being \
+                 breached. `engramdb harvest ledger rm <id> --unpin` releases one."
+                    .to_string()
+            }),
+            details: vec![],
+            status: Some(if over_budget {
+                CheckStatus::Warn
+            } else {
+                CheckStatus::Info
+            }),
+        });
+    }
+
+    checks
+}
+
+/// Gather [`HarvestHealth`] for `dir`'s scope.
+///
+/// Returns `None` when the harvest flow is not in play for this project (no
+/// ledger, no pins, nothing pending) or when the scope cannot be resolved —
+/// `doctor` should not grow a section about a feature the user has not used,
+/// and a registry that will not load is already reported by the Projects
+/// section.
+async fn gather_harvest_health(dir: &Path) -> Option<HarvestHealth> {
+    use crate::storage::{FileRegistry, RegistryBackend};
+    let registry: Box<dyn RegistryBackend> = Box::new(FileRegistry::global().ok()?);
+    let scope = crate::ops::harvest::session_scope(dir, registry.as_ref())
+        .await
+        .ok()?;
+
+    let (ledger_lines, ledger_entries) =
+        crate::storage::harvest_state::compaction_pressure(&scope.root_dir);
+
+    let config_path = crate::storage::paths::project_dir(dir).join("config.toml");
+    let config = crate::storage::config::load_config_or_default(&config_path).await;
+
+    // Due-ness uses the same `index_after_hours` the automatic pass does, so
+    // the count doctor reports is exactly what that pass would pick up.
+    let after = chrono::Duration::hours(config.harvest.index_after_hours as i64);
+    let pending_index =
+        crate::ops::harvest_index::pending_sessions(&scope, after, chrono::Utc::now())
+            .map(|v| v.len())
+            .unwrap_or(0);
+
+    // Both fallible halves bail rather than default. An empty `with_bytes`
+    // would report every citation in the store as expired evidence, which is
+    // the most alarming thing this subsection can say — and it would be saying
+    // it because the transcript directory could not be listed, not because
+    // anything expired.
+    let links = crate::ops::harvest_pin::evidence_links(&scope).await.ok()?;
+    let with_bytes = crate::ops::harvest_pin::sessions_with_bytes(&scope).ok()?;
+    let expired = crate::ops::harvest_pin::expired_evidence(&links, &with_bytes);
+
+    let pinned = links.pinned_sessions();
+    let (pinned_count, pinned_bytes) =
+        crate::storage::transcript_archive::list_archives(&scope.root_project_id)
+            .map(|archives| {
+                archives
+                    .into_iter()
+                    .filter(|a| pinned.contains(&a.session_id))
+                    .fold((0usize, 0u64), |(n, b), a| (n + 1, b + a.bytes))
+            })
+            .unwrap_or((0, 0));
+
+    let health = HarvestHealth {
+        pending_index,
+        ledger_lines,
+        ledger_entries,
+        expired,
+        pinned_count,
+        pinned_bytes,
+        archive_max_bytes: config.harvest.archive_max_bytes,
+    };
+    (!health.is_quiet()).then_some(health)
 }
 
 /// Check `.engramdb/config.toml` syntax and values.
@@ -4915,5 +5155,164 @@ mod epistemic_doctor_tests {
             result.findings.is_empty(),
             "closed windows have nothing to review"
         );
+    }
+}
+
+#[cfg(test)]
+mod harvest_doctor_tests {
+    use super::*;
+    use crate::ops::harvest_pin::ExpiredEvidence;
+
+    fn find<'a>(checks: &'a [EnvironmentCheck], name: &str) -> Option<&'a EnvironmentCheck> {
+        checks.iter().find(|c| c.name == name)
+    }
+
+    /// The quiet store: everything indexed, a short ledger, nothing cited.
+    /// Two checks, both clean, and no exit-code effect.
+    #[test]
+    fn a_settled_store_reports_two_clean_checks() {
+        let health = HarvestHealth {
+            ledger_lines: 3,
+            ledger_entries: 2,
+            ..Default::default()
+        };
+        let checks = build_harvest_checks(&health);
+        assert_eq!(checks.len(), 2);
+        assert!(checks.iter().all(|c| c.passed));
+        assert!(find(&checks, "Conversation index")
+            .unwrap()
+            .status
+            .is_none());
+        let ledger = find(&checks, "Harvest ledger").unwrap();
+        assert!(!ledger.message.contains("compaction pending"));
+        assert!(find(&checks, "Harvest evidence").is_none());
+        assert!(find(&checks, "Pinned transcripts").is_none());
+    }
+
+    /// A backlog is a warning to act on, not a failure: the automatic pass
+    /// would clear it on its own.
+    #[test]
+    fn pending_index_warns_without_failing() {
+        let health = HarvestHealth {
+            pending_index: 4,
+            ..Default::default()
+        };
+        let check = find(&build_harvest_checks(&health), "Conversation index")
+            .unwrap()
+            .clone();
+        assert!(check.passed);
+        assert_eq!(check.status, Some(CheckStatus::Warn));
+        assert!(check.message.contains('4'));
+        assert!(check.suggestion.unwrap().contains("harvest index"));
+    }
+
+    /// Compaction pressure is read off the same factor the append path acts
+    /// on, so doctor cannot claim "pending" for a log the writer would leave
+    /// alone (or stay silent about one it would rewrite).
+    #[test]
+    fn pending_compaction_tracks_the_compaction_factor() {
+        // 2 live entries: the writer rewrites above 2 * COMPACT_FACTOR lines.
+        let below = HarvestHealth {
+            ledger_lines: 8,
+            ledger_entries: 2,
+            ..Default::default()
+        };
+        assert!(!find(&build_harvest_checks(&below), "Harvest ledger")
+            .unwrap()
+            .message
+            .contains("compaction pending"));
+
+        let above = HarvestHealth {
+            ledger_lines: 9,
+            ledger_entries: 2,
+            ..Default::default()
+        };
+        let check = find(&build_harvest_checks(&above), "Harvest ledger")
+            .unwrap()
+            .clone();
+        assert!(check.message.contains("compaction pending"));
+        assert!(check.passed, "a long log costs disk, not correctness");
+        assert_eq!(check.status, Some(CheckStatus::Info));
+    }
+
+    /// Expired evidence must read as expiry. It names the memories so the loss
+    /// is traceable, and says nothing needs repairing — a memory whose copy
+    /// aged out is still true, and telling the user their store is damaged
+    /// over it would be false.
+    #[test]
+    fn expired_evidence_reads_as_expiry_not_breakage() {
+        let health = HarvestHealth {
+            expired: vec![
+                ExpiredEvidence {
+                    session_id: "sess-old".into(),
+                    memory_ids: vec!["m1".into(), "m2".into()],
+                },
+                ExpiredEvidence {
+                    session_id: "sess-older".into(),
+                    // Shared with the entry above: the memory count is over
+                    // memories, not over citations.
+                    memory_ids: vec!["m2".into()],
+                },
+            ],
+            ..Default::default()
+        };
+        let check = find(&build_harvest_checks(&health), "Harvest evidence")
+            .unwrap()
+            .clone();
+        assert!(check.passed, "expiry must never fail the run");
+        assert_eq!(check.status, Some(CheckStatus::Info));
+        assert!(
+            check.message.starts_with("evidence expired"),
+            "{}",
+            check.message
+        );
+        assert!(check.message.contains("2 conversation(s)"));
+        assert!(check.message.contains("2 memories"), "{}", check.message);
+        let suggestion = check.suggestion.unwrap();
+        assert!(suggestion.contains("Nothing is broken"));
+        assert!(suggestion.contains("archive_retention_days"));
+        assert!(check.details.iter().any(|d| d.contains("sess-old")));
+    }
+
+    /// Pinned bytes within budget are informational; over budget they are
+    /// shown as a state with the release path named — never as a limit being
+    /// enforced.
+    #[test]
+    fn pinned_bytes_are_shown_and_only_flagged_over_budget() {
+        let under = HarvestHealth {
+            pinned_count: 2,
+            pinned_bytes: 100,
+            archive_max_bytes: 1000,
+            ..Default::default()
+        };
+        let check = find(&build_harvest_checks(&under), "Pinned transcripts")
+            .unwrap()
+            .clone();
+        assert_eq!(check.status, Some(CheckStatus::Info));
+        assert!(!check.message.contains("over the"));
+        assert!(check.suggestion.is_none());
+
+        let over = HarvestHealth {
+            pinned_bytes: 5000,
+            ..under
+        };
+        let check = find(&build_harvest_checks(&over), "Pinned transcripts")
+            .unwrap()
+            .clone();
+        assert!(check.passed, "an exempt overrun is not a failure");
+        assert_eq!(check.status, Some(CheckStatus::Warn));
+        assert!(check.message.contains("over the"));
+        assert!(check.suggestion.unwrap().contains("--unpin"));
+
+        // `archive_max_bytes = 0` disables the size limit, so nothing can be
+        // over it.
+        let no_cap = HarvestHealth {
+            archive_max_bytes: 0,
+            ..over
+        };
+        assert!(!find(&build_harvest_checks(&no_cap), "Pinned transcripts")
+            .unwrap()
+            .message
+            .contains("over the"));
     }
 }

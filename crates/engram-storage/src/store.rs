@@ -112,6 +112,30 @@ pub struct MemoryStore {
     lance_index: LanceIndex,
 }
 
+/// Keep `.engramdb/state/` out of version control.
+///
+/// `.engramdb/memories/` is meant to be committed — shared memories travel
+/// with a `git clone`. `.engramdb/state/` is not: it holds per-machine session
+/// bookkeeping (session→task mappings, the harvest ledger) whose contents are
+/// session ids, task names, and local decisions. Committing those leaks local
+/// working context into a shared repository and produces pointless diffs on
+/// every checkout.
+///
+/// Written on `init` and best-effort: an existing file is never overwritten
+/// (a user may have customized it), and a failure must not fail `init`.
+async fn write_state_gitignore(engramdb_dir: &Path) {
+    let path = engramdb_dir.join(".gitignore");
+    if path.exists() {
+        return;
+    }
+    let body = "# Per-machine session bookkeeping — not shared state.\n\
+                # `memories/` is deliberately NOT ignored: it is meant to be committed.\n\
+                state/\n";
+    if let Err(e) = async_fs::write(&path, body).await {
+        tracing::debug!("could not write .engramdb/.gitignore (non-fatal): {e}");
+    }
+}
+
 impl MemoryStore {
     /// Initialize a new EngramDB store in the given directory.
     ///
@@ -153,6 +177,8 @@ impl MemoryStore {
             };
             manifest::save_manifest(&manifest_path, &manifest).await?;
         }
+
+        write_state_gitignore(&engramdb_dir).await;
 
         // Create the placeholder config.toml only if missing — never clobber
         // a user-customized config (a dimensions change alone would make the
@@ -430,6 +456,14 @@ impl MemoryStore {
         if !engramdb_dir.exists() {
             return Err(StorageError::NotInitialized);
         }
+
+        // Backfill on open, not just on init: every store created before the
+        // `.gitignore` existed would otherwise keep `state/` tracked forever,
+        // and nobody re-runs `init` on an existing project. `state/` now holds
+        // the harvest ledger — session ids and free-text review notes — so
+        // leaving it committable is exactly the leak the file exists to stop.
+        // Cheap and idempotent: it returns immediately when the file is there.
+        write_state_gitignore(&engramdb_dir).await;
 
         // Compute project ID
         let project_id = project_id::compute_project_id(dir);
@@ -856,7 +890,17 @@ impl MemoryStore {
     /// and a failing closure fails only its own memory. Ids that do not resolve
     /// are reported rather than aborting the batch.
     ///
-    /// Returns `(updated_ids, per_id_errors)`.
+    /// **Prefix ids resolve, as they do for `update_with`.** [`Self::get_batch`]
+    /// keys off the exact id, so anything shorter than a full id missed the map
+    /// and would have been reported as "memory not found" — a silent divergence
+    /// from the per-memory version this is documented to match. Resolution is a
+    /// second pass over only the ids the batched read did not answer, so a
+    /// caller passing full ids (all of them today) pays nothing for it.
+    ///
+    /// Returns `(updated_ids, per_id_errors)`, where the updated ids are the
+    /// **canonical** ones — `update_with` returns the persisted `Memory`, whose
+    /// id is canonical, so a caller that reports what it changed must not be
+    /// handed back the prefix it happened to pass in.
     pub async fn update_batch_with<F>(
         &self,
         ids: &[String],
@@ -874,18 +918,45 @@ impl MemoryStore {
         let mut current: HashMap<String, Memory> =
             self.get_batch(&id_refs).await?.into_iter().collect();
 
+        // Second pass for the ids the exact-keyed batch read could not answer.
+        // `get` is what `update_with` calls, so a prefix resolves by exactly
+        // the same rules (including "an exact full-id match beats prefix
+        // ambiguity") rather than by a second, subtly different implementation.
+        // Empty in the common case — every caller today passes full ids — so
+        // the directory scan it costs is paid only by a batch that would
+        // otherwise have reported a resolvable id as missing.
+        let unresolved: Vec<&String> = ids.iter().filter(|id| !current.contains_key(*id)).collect();
+        let mut aliases: HashMap<String, String> = HashMap::new();
+        for id in unresolved {
+            let Ok(memory) = self.get(id).await else {
+                continue;
+            };
+            let full = memory.id.clone();
+            // Two spellings of one memory in the same batch: alias the prefix
+            // onto the row already read rather than keeping both, so `f` still
+            // sees each memory exactly once — running the caller's mutation
+            // twice, the second time against a copy that predates the first
+            // write, is a lost update.
+            current.entry(full.clone()).or_insert(memory);
+            aliases.insert(id.clone(), full);
+        }
+
         let mut updated: Vec<String> = Vec::new();
         let mut errors: Vec<(String, String)> = Vec::new();
         let mut entries: Vec<IndexEntry> = Vec::new();
 
-        for id in ids {
-            let Some(mut memory) = current.remove(id) else {
-                errors.push((id.clone(), "memory not found".to_string()));
+        for given in ids {
+            let key = aliases.get(given).unwrap_or(given);
+            let Some(mut memory) = current.remove(key) else {
+                errors.push((given.clone(), "memory not found".to_string()));
                 continue;
             };
+            // Errors stay keyed by the id the caller passed — that is the
+            // string it can act on — while `updated` reports the canonical one.
+            let canonical = memory.id.clone();
             let old_visibility = memory.visibility;
             if let Err(e) = f(&mut memory) {
-                errors.push((id.clone(), format!("{:#}", e)));
+                errors.push((given.clone(), format!("{:#}", e)));
                 continue;
             }
             memory.mark_updated();
@@ -895,10 +966,10 @@ impl MemoryStore {
             // per-file. It is the LanceDB commits and the manifest scan that
             // were quadratic, not this.
             if let Err(e) = self
-                .write_updated_file_locked(id, &memory, old_visibility)
+                .write_updated_file_locked(&canonical, &memory, old_visibility)
                 .await
             {
-                errors.push((id.clone(), format!("{:#}", e)));
+                errors.push((given.clone(), format!("{:#}", e)));
                 continue;
             }
 
@@ -907,7 +978,7 @@ impl MemoryStore {
                 StorageError::Validation(format!("LanceDB has_chunks failed: {}", e))
             })?;
             entries.push(entry);
-            updated.push(id.clone());
+            updated.push(canonical);
         }
 
         if !entries.is_empty() {
@@ -1294,6 +1365,19 @@ impl MemoryStore {
             .list_ids()
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB list_ids failed: {}", e)))
+    }
+
+    /// List every memory in this store that cites a source session
+    /// (schema v0.7.0). See [`LanceIndex::list_source_session_links`].
+    pub async fn list_source_session_links(
+        &self,
+    ) -> Result<Vec<super::lance_index::SourceSessionLink>> {
+        self.lance_index
+            .list_source_session_links()
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB source-session scan failed: {}", e))
+            })
     }
 
     /// Compact fragments and prune old LanceDB dataset versions for the
@@ -2958,6 +3042,172 @@ mod tests {
         );
     }
 
+    /// Rewrite a store's `memories` table without the `source_sessions`
+    /// column, and stamp the manifest at 0.6.0.
+    ///
+    /// The other migration tests here downgrade only the manifest stamp, which
+    /// exercises the backfill but never the case that actually breaks: a table
+    /// whose Arrow schema is genuinely missing the new column. This builds that
+    /// table by reading the current one, dropping the field and its array, and
+    /// recreating the table from the reduced batches — so the fixture is the
+    /// previous version's on-disk shape rather than a stand-in for it, and it
+    /// stays honest if a later version adds another column.
+    async fn downgrade_to_0_6_0(dir: &Path) {
+        use arrow_array::RecordBatchIterator;
+        use futures_util::stream::StreamExt;
+        use lancedb::query::ExecutableQuery;
+        use std::sync::Arc;
+
+        let project_id = project_id::compute_project_id(dir);
+        let lance_path = paths::lancedb_dir(&project_id).unwrap();
+        let conn = lancedb::connect(lance_path.to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        let table = conn.open_table("memories").execute().await.unwrap();
+
+        let mut stream = table.query().execute().await.unwrap();
+        let mut reduced = Vec::new();
+        let mut reduced_schema = None;
+        while let Some(batch) = stream.next().await {
+            let batch = batch.unwrap();
+            let schema = batch.schema();
+            let keep: Vec<usize> = (0..schema.fields().len())
+                .filter(|i| schema.field(*i).name() != "source_sessions")
+                .collect();
+            assert_eq!(
+                keep.len() + 1,
+                schema.fields().len(),
+                "fixture must actually remove the new column"
+            );
+            let fields: Vec<_> = keep.iter().map(|i| schema.field(*i).clone()).collect();
+            let new_schema = Arc::new(arrow_schema::Schema::new(fields));
+            let columns: Vec<_> = keep.iter().map(|i| batch.column(*i).clone()).collect();
+            reduced.push(arrow_array::RecordBatch::try_new(new_schema.clone(), columns).unwrap());
+            reduced_schema = Some(new_schema);
+        }
+        let schema = reduced_schema.expect("fixture needs at least one memory");
+
+        conn.drop_table("memories", &[]).await.unwrap();
+        let batches: Box<dyn arrow_array::RecordBatchReader + Send> = Box::new(
+            RecordBatchIterator::new(reduced.into_iter().map(Ok), schema),
+        );
+        conn.create_table("memories", batches)
+            .execute()
+            .await
+            .unwrap();
+
+        let manifest_path = paths::project_dir(dir).join("manifest.toml");
+        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
+        m.schema_version = "0.6.0".to_string();
+        // Only the schema axis may trigger: leaving the normalizer stale would
+        // migrate for the wrong reason and the test would pass with the version
+        // gate broken.
+        m.normalizer = Some(engram_types::NORMALIZER_STAMP.to_string());
+        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+    }
+
+    /// The 0.7.0 schema migration (harvest provenance), against a store whose
+    /// table really was written by the previous version: the memories survive
+    /// intact, the `source_sessions` column appears, vectors are preserved, and
+    /// the stamp advances.
+    #[tokio::test]
+    async fn schema_migration_to_0_7_0_upgrades_a_real_0_6_0_store() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        {
+            let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+            let mut shared = create_test_memory("mig7-shared", Visibility::Shared);
+            shared.tags = vec!["alpha".into(), "beta".into()];
+            shared.details = Some("details that must survive".into());
+            store.create(&shared).await.unwrap();
+            store
+                .upsert_chunks("mig7-shared", vec![vec![0.2f32; 384]])
+                .await
+                .unwrap();
+            store
+                .create(&create_test_memory("mig7-personal", Visibility::Personal))
+                .await
+                .unwrap();
+        }
+        downgrade_to_0_6_0(tmp.path()).await;
+
+        // Control: the fixture is genuinely old. A projection of the new column
+        // against it fails, which is exactly what would happen to every pin
+        // scan if the migration did not run.
+        {
+            let old = LanceIndex::new(
+                &paths::lancedb_dir(&project_id::compute_project_id(tmp.path())).unwrap(),
+                384,
+            )
+            .await
+            .unwrap();
+            assert!(
+                old.list_source_session_links().await.is_err(),
+                "fixture still has the 0.7.0 column, so the test proves nothing"
+            );
+        }
+
+        // The hot path: a plain open must upgrade it.
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+        let manifest_path = paths::project_dir(tmp.path()).join("manifest.toml");
+        assert_eq!(
+            manifest::load_manifest(&manifest_path)
+                .await
+                .unwrap()
+                .schema_version,
+            manifest::CURRENT_SCHEMA_VERSION,
+            "migration must stamp the current schema version"
+        );
+
+        // Nothing lost: both memories, both visibilities, content and metadata.
+        assert_eq!(store.count().await.unwrap(), 2);
+        let shared = store.get("mig7-shared").await.unwrap();
+        assert_eq!(shared.tags, vec!["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(shared.details.as_deref(), Some("details that must survive"));
+        assert_eq!(shared.visibility, Visibility::Shared);
+        assert!(
+            shared.source_sessions.is_empty(),
+            "a memory written before the column cites nothing — not an error"
+        );
+        let personal = store.get("mig7-personal").await.unwrap();
+        assert_eq!(personal.visibility, Visibility::Personal);
+        assert!(
+            has_embedding_flag(&store, "mig7-shared").await,
+            "vectors preserved across the 0.7.0 migration"
+        );
+
+        // The column is there and usable: the scan runs, and a link written
+        // after the upgrade is visible to it.
+        assert!(store.list_source_session_links().await.unwrap().is_empty());
+        store
+            .update_with("mig7-shared", |m| {
+                m.link_source_session("sess-after-migration");
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let links = store.list_source_session_links().await.unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].memory_id, "mig7-shared");
+        assert_eq!(links[0].sessions, vec!["sess-after-migration".to_string()]);
+
+        // Idempotent: a second open does not re-migrate.
+        let _store2 = MemoryStore::open(tmp.path()).await.unwrap();
+        assert_eq!(
+            manifest::load_manifest(&manifest_path)
+                .await
+                .unwrap()
+                .schema_version,
+            manifest::CURRENT_SCHEMA_VERSION
+        );
+        assert_eq!(
+            store.list_source_session_links().await.unwrap().len(),
+            1,
+            "the link written after the migration must survive the next open"
+        );
+    }
+
     /// A store already current on both axes must NOT reindex — migration is
     /// meant to be a one-time cost, not a per-open one.
     #[tokio::test]
@@ -3791,6 +4041,106 @@ mod tests {
 
         let reloaded = store.get("test-update-with-err").await.unwrap();
         assert_eq!(reloaded.summary, "Test summary");
+    }
+
+    /// `update_batch_with` is documented to match `update_with` per entry, and
+    /// `update_with` resolves a prefix id. The batched read keys off the exact
+    /// id, so a prefix used to fall straight through to "memory not found" —
+    /// silently, and only for the batched callers.
+    #[tokio::test]
+    async fn update_batch_with_resolves_a_prefix_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("abcdef012345", Visibility::Shared))
+            .await
+            .unwrap();
+
+        let (updated, errors) = store
+            .update_batch_with(&["abcdef".to_string()], |m| {
+                m.summary = "Reached by prefix".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert!(errors.is_empty(), "prefix must resolve, got {errors:?}");
+        assert_eq!(
+            updated,
+            vec!["abcdef012345".to_string()],
+            "the report names the canonical id, not the prefix the caller passed"
+        );
+        assert_eq!(
+            store.get("abcdef012345").await.unwrap().summary,
+            "Reached by prefix"
+        );
+    }
+
+    /// Two spellings of one memory in one batch must not apply the closure
+    /// twice — the closure is the caller's mutation, and running it on a
+    /// stale copy of the same memory would let the second write erase the
+    /// first.
+    #[tokio::test]
+    async fn update_batch_with_applies_a_duplicated_id_once() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("dupdupdup1234", Visibility::Shared))
+            .await
+            .unwrap();
+
+        let mut calls = 0usize;
+        let (updated, errors) = store
+            .update_batch_with(&["dupdupdup1234".to_string(), "dupdup".to_string()], |m| {
+                calls += 1;
+                m.tags.push(format!("call-{calls}"));
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(calls, 1, "the closure must see each memory exactly once");
+        assert_eq!(updated, vec!["dupdupdup1234".to_string()]);
+        assert_eq!(
+            errors.len(),
+            1,
+            "the second spelling has nothing left to do"
+        );
+        assert_eq!(
+            store.get("dupdupdup1234").await.unwrap().tags,
+            vec!["call-1"]
+        );
+    }
+
+    /// An id that resolves and one that does not, in the same batch: the good
+    /// one is applied and the bad one is reported under **the spelling the
+    /// caller passed**, which is the only string it can act on.
+    #[tokio::test]
+    async fn update_batch_with_reports_an_unresolvable_id_by_the_caller_s_spelling() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("realmemory0001", Visibility::Shared))
+            .await
+            .unwrap();
+
+        let (updated, errors) = store
+            .update_batch_with(&["realme".to_string(), "no-such-memory".to_string()], |m| {
+                m.summary = "touched".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(updated, vec!["realmemory0001".to_string()]);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, "no-such-memory");
     }
 
     #[tokio::test]

@@ -58,6 +58,11 @@ const MCP_TOOL_SUFFIXES: &[&str] = &[
     "projects_info",
     "projects_link",
     "projects_unlink",
+    "harvest_list",
+    "harvest_show",
+    "harvest_search",
+    "harvest_mark",
+    "harvest_ledger",
 ];
 
 /// MCP tool suffixes that were removed or renamed and must be stripped from

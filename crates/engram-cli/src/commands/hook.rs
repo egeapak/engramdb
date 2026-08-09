@@ -19,7 +19,7 @@ use engramdb::types::{Epistemic, Generality, MemoryType, Situation};
 // itself); the hook still pre-relativizes so the injected context shows
 // repo-relative paths.
 use engramdb::storage::paths::relativize_path;
-use engramdb::storage::MemoryStore;
+use engramdb::storage::{MemoryStore, RegistryBackend};
 use std::io::Read;
 use std::path::Path;
 
@@ -848,13 +848,30 @@ pub async fn run_hook_post_tool_use(dir: &Path) -> Result<()> {
 /// a mapping existed, runs the §11.2 demotion for that task. Best-effort:
 /// every failure is logged and swallowed. (Telemetry flushes live in the
 /// long-running MCP/daemon processes; a one-shot hook has none.)
-pub async fn run_hook_session_end(dir: &Path) -> Result<()> {
+pub async fn run_hook_session_end(dir: &Path, registry: &dyn RegistryBackend) -> Result<()> {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
 
     let Some(session_id) = extract_session_id(&input) else {
         return Ok(());
     };
+
+    // Every other hook handler bails when the project was never `init`ed (see
+    // `run_hook_pre_tool_use`); SessionEnd must too, and more so, because it
+    // *writes*. Key off `manifest.toml` rather than `.engramdb/`: the latter
+    // is created by this very hook's own state writes, so it would
+    // self-satisfy on the second run. The plugin registers SessionEnd
+    // machine-wide, so without this every directory Claude Code is ever
+    // started in collects a `state/` tree and a permanent transcript archive.
+    // `manifest.toml` OR `memories/`: `MemoryStore` self-heals a missing
+    // manifest (it recreates one on open), so keying on the manifest alone
+    // would be stricter than every other handler and would silently disable
+    // SessionEnd for a store that is live everywhere else.
+    let project_dir = engramdb::storage::paths::project_dir(dir);
+    if !project_dir.join("manifest.toml").exists() && !project_dir.join("memories").is_dir() {
+        return Ok(());
+    }
+
     let ended_task = match engramdb::storage::task_state::clear_session_task(dir, &session_id) {
         Ok(t) => t,
         Err(e) => {
@@ -879,7 +896,179 @@ pub async fn run_hook_session_end(dir: &Path) -> Result<()> {
             }
         }
     }
+
+    // Last, deliberately: archiving is the slowest thing on this path
+    // (compression is proportional to transcript size), and if the hook is
+    // killed by a timeout the task-mapping clear above must already have
+    // happened. Bounded by `archive_max_transcript_bytes` as well.
+    archive_ending_session(dir, &session_id, &input, registry).await;
     Ok(())
+}
+
+/// Archive the ending session's transcript, if archiving is enabled.
+///
+/// This is the whole reason the archive exists. Claude Code prunes its own
+/// transcripts, and once one is gone the conversation cannot be harvested and
+/// any memory derived from it has lost its evidence. Session end is the last
+/// moment the file is reliably still there — archiving at *harvest* time
+/// would protect nothing, since you necessarily still hold the transcript
+/// then.
+///
+/// Entirely best-effort, in keeping with the rest of SessionEnd: every
+/// failure is logged and swallowed, because nothing here may block session
+/// teardown. The archive is written under the **root** project so a worktree
+/// and its main checkout share one directory, matching the ledger.
+async fn archive_ending_session(
+    dir: &Path,
+    session_id: &str,
+    input: &str,
+    registry: &dyn RegistryBackend,
+) {
+    let config_path = engramdb::storage::paths::project_dir(dir).join("config.toml");
+    let config = engramdb::storage::config::load_config_or_default(&config_path).await;
+    if !config.harvest.archive {
+        return;
+    }
+
+    // Prefer the path the event hands us; fall back to locating it ourselves
+    // (older Claude Code builds, or an event missing the field).
+    let transcript = extract_transcript_path(input)
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(|| {
+            engramdb::storage::transcripts::list_sessions_for(std::slice::from_ref(
+                &dir.to_path_buf(),
+            ))
+            .ok()?
+            .into_iter()
+            .find(|s| s.session_id == session_id)
+            .map(|s| s.transcript_path)
+        });
+    let Some(transcript) = transcript else {
+        tracing::debug!("SessionEnd archive: no transcript found for {session_id}");
+        return;
+    };
+
+    // Skip *writing* an oversized archive, but keep going: returning here
+    // would also skip the retention sweep below, so the very user this
+    // ceiling exists for — one whose sessions routinely exceed it — would
+    // stop having their existing archives aged out at all.
+    let limit = config.harvest.archive_max_transcript_bytes;
+    let too_big = limit > 0 && {
+        let size = std::fs::metadata(&transcript).map(|m| m.len()).unwrap_or(0);
+        if size > limit {
+            tracing::debug!(
+                "SessionEnd archive: skipping {session_id} ({size} bytes exceeds \
+                 [harvest] archive_max_transcript_bytes = {limit})"
+            );
+        }
+        size > limit
+    };
+
+    // Resolve the **root** project, exactly as every reader does
+    // (`harvest::session_scope`). Using the invoking directory's own id agrees
+    // only when `cli::run` already rewrote `dir` to the main worktree; for a
+    // project linked with `engramdb projects link` it does not, and the
+    // archive would land in a directory no `harvest ledger` command ever reads
+    // — invisible to export, and never bounded by the prune budget.
+    //
+    // The ledger has to come from the same resolution, not from `dir`: the
+    // prune below deletes the root's archives, so writing the eviction back to
+    // a sub-project's own ledger would leave the root advertising files this
+    // very call removed.
+    let scope = match engramdb::ops::harvest::session_scope(dir, registry).await {
+        Ok(scope) => Some(scope),
+        // Fail open, consistent with the rest of SessionEnd: an unreadable
+        // registry must not cost the archive entirely.
+        Err(e) => {
+            tracing::debug!("SessionEnd archive: scope unresolved, using own id: {e}");
+            None
+        }
+    };
+    let (project_id, ledger_dir) = match &scope {
+        Some(scope) => (scope.root_project_id.clone(), scope.root_dir.clone()),
+        None => (
+            engramdb::storage::project_id::compute_project_id(dir),
+            dir.to_path_buf(),
+        ),
+    };
+    if !too_big {
+        match engramdb::storage::transcript_archive::archive_transcript(
+            &project_id,
+            session_id,
+            &transcript,
+        ) {
+            Ok(archive) => {
+                if let Err(e) =
+                    engramdb::storage::harvest_state::set_archive(&ledger_dir, session_id, archive)
+                {
+                    tracing::debug!("SessionEnd archive: ledger update failed (non-fatal): {e}");
+                }
+            }
+            Err(e) => tracing::debug!("SessionEnd archive failed (non-fatal): {e}"),
+        }
+    }
+
+    // Which copies are cited as a memory's evidence, and so exempt. Unlike
+    // everything else on this path a failure here is **not** shrugged off into
+    // a default: an empty pin set is indistinguishable from "no memory cites
+    // anything", and acting on that guess would let an unattended hook delete
+    // the one surviving copy behind a harvested memory. Unknown pins therefore
+    // mean no eviction this run; the next `harvest ledger prune` or the next
+    // session end reclaims the bytes once the stores are readable again.
+    let pinned = match &scope {
+        Some(scope) => match engramdb::ops::evidence_links(scope).await {
+            Ok(links) => Some(links.pinned_sessions()),
+            Err(e) => {
+                tracing::warn!(
+                    "SessionEnd archive: skipping the retention sweep — could not determine \
+                     which transcript copies memories still cite ({e})"
+                );
+                None
+            }
+        },
+        None => {
+            tracing::warn!(
+                "SessionEnd archive: skipping the retention sweep — the project scope did not \
+                 resolve, so pinned transcript copies cannot be identified"
+            );
+            None
+        }
+    };
+    let Some(pinned) = pinned else { return };
+
+    // Always: session end is the only moment this reliably runs, so an
+    // oversized transcript must not also cost the retention sweep.
+    match engramdb::storage::transcript_archive::prune_archives(
+        &project_id,
+        config.harvest.archive_retention_days,
+        config.harvest.archive_max_bytes,
+        false,
+        &pinned,
+    ) {
+        // Evicted files must stop being advertised by the ledger, or
+        // `harvest ledger show` offers an export that cannot succeed.
+        Ok(outcome) => {
+            if let Err(e) =
+                engramdb::storage::harvest_state::clear_archive_refs(&ledger_dir, &outcome.removed)
+            {
+                tracing::debug!(
+                    "SessionEnd archive: clearing evicted refs failed (non-fatal): {e}"
+                );
+            }
+        }
+        Err(e) => tracing::debug!("SessionEnd archive: prune failed (non-fatal): {e}"),
+    }
+}
+
+/// Extract `transcript_path`, which every hook event carries.
+fn extract_transcript_path(input: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(input).ok()?;
+    value
+        .get("transcript_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Static PreCompact reminder (§8.5.4): context loss is a memory system's

@@ -9,21 +9,27 @@
 //! `storage` / `telemetry` module paths.
 
 pub mod config;
+pub mod conversation_index;
 pub mod error;
+pub mod harvest_state;
 pub mod lance_index;
 pub mod manifest;
 pub mod memory_file;
 pub mod paths;
 pub mod project_id;
 pub mod registry;
+mod state_file;
 pub mod store;
 pub mod task_state;
 pub mod telemetry;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+pub mod transcript_archive;
+pub mod transcripts;
 pub mod worktree;
 pub mod write_lock;
 
+pub use conversation_index::{ConversationHit, ConversationIndex, ConversationRow, MatchedOn};
 pub use error::{Result, StorageError};
 pub use lance_index::{
     IndexFilterable, IndexForFiltering, IndexOptimizeStats, IndexSummary, VectorMatch,

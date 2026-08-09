@@ -23,10 +23,22 @@ use std::path::Path;
 /// `invalidated_at`, `watch_paths`); `0.4.0` added the `audience` column
 /// (multi-project memories); `0.5.0` added `keyword_stems`, the precomputed
 /// stem index the keyword scorer reads instead of re-deriving it from every
-/// memory on every query. A store whose manifest records an older
-/// version is transparently re-indexed once on open (seconds, no re-embed)
-/// and stamped up to this.
-pub const CURRENT_SCHEMA_VERSION: &str = "0.5.0";
+/// memory on every query. `0.6.0` added the `conversations` table
+/// (`storage::conversation_index`) beside `memories` and `chunks` — additive,
+/// so the migration it triggers rewrites nothing and exists only to make the
+/// new table appear in stores created before it. `0.7.0` added
+/// `source_sessions`, the harvest evidence link — the sessions a memory was
+/// extracted from, which is also what pins their transcript copies against
+/// budget eviction. A store whose manifest records an older version is
+/// transparently re-indexed once on open (seconds, no re-embed) and stamped up
+/// to this.
+///
+/// That column is also why the evidence link is a *field* rather than a join
+/// table: the migration rebuilds this table from the `.md` files, so a relation
+/// held only in LanceDB is destroyed by the very mechanism that adds the
+/// column. Unlike `keyword_stems` — a cache the rebuild recomputes — a citation
+/// cannot be recomputed from anything.
+pub const CURRENT_SCHEMA_VERSION: &str = "0.7.0";
 
 /// The pre-migration baseline, used as the serde default so a manifest written
 /// before the field existed parses as "needs migration" rather than failing.
@@ -296,8 +308,10 @@ logical_scopes = []
         assert!(!schema_version_is_current("0.1.9"));
         assert!(!schema_version_is_current("0.2.0"));
         assert!(!schema_version_is_current("0.3.0")); // pre-audience, behind 0.4.0
+        assert!(!schema_version_is_current("0.5.0")); // pre-conversations, behind 0.6.0
+        assert!(!schema_version_is_current("0.6.0")); // pre-source_sessions, behind 0.7.0
                                                       // Ahead of current → must NOT migrate (no silent downgrade).
-        assert!(schema_version_is_current("0.5.0"));
+        assert!(schema_version_is_current("0.8.0"));
         assert!(schema_version_is_current("1.0.0"));
         // Short / unparseable forms.
         assert!(!schema_version_is_current("0.3")); // 0.3.0, behind 0.4.0

@@ -104,6 +104,13 @@ struct HiddenMeta {
     /// block rather than the human-facing frontmatter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     audience: Option<Vec<String>>,
+    /// Sessions this memory was extracted from (schema v0.7.0). In the hidden
+    /// block rather than the `## Provenance` section because it is a machine
+    /// relation — it is what exempts a transcript copy from eviction — and
+    /// because the provenance section is parsed as single-valued `**Field:**`
+    /// lines, which cannot carry a list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    source_sessions: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     challenges: Vec<Challenge>,
 }
@@ -211,6 +218,14 @@ fn parse_v2(frontmatter: &str, body: &str) -> Result<Memory> {
         // Normalize an empty audience away on read so a hand-edited file can't
         // smuggle a "visible to nobody" list into the domain model.
         audience: hidden.audience.filter(|a| !a.is_empty()),
+        // Dropped rather than trusted when it is not a plain session id: this
+        // value is later joined into a transcript path by the pin lookup, and
+        // a memory file is hand-editable and travels with a clone.
+        source_sessions: hidden
+            .source_sessions
+            .into_iter()
+            .filter(|s| crate::transcripts::is_valid_session_id(s))
+            .collect(),
         challenges: hidden.challenges,
         verified_at: hidden.verified_at,
         created_at,
@@ -355,6 +370,7 @@ fn write_v2(memory: &Memory) -> Result<String> {
         decay: memory.decay.clone(),
         supersedes: memory.supersedes.clone(),
         audience: memory.audience.clone().filter(|a| !a.is_empty()),
+        source_sessions: memory.source_sessions.clone(),
         challenges: memory.challenges.clone(),
     };
     let hidden_yaml = serde_yaml_ng::to_string(&hidden)?;
