@@ -14,6 +14,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
+#[cfg(feature = "onnxruntime")]
 use engram_types::DEFAULT_RERANK_MODEL;
 #[cfg(feature = "onnxruntime")]
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
@@ -240,13 +241,6 @@ impl Reranker for LocalReranker {
     }
 }
 
-/// Map a reranker model name string to a fastembed `RerankerModel` variant.
-///
-/// [`LocalReranker::load`] gates this behind [`FASTEMBED_RERANKERS`], so every
-/// name reaching here is known. The catch-all arm is defensive only (keeping
-/// the two lists in sync is enforced by a test) and mirrors the gate's
-/// behaviour by warning rather than silently substituting.
-#[cfg(feature = "onnxruntime")]
 /// Refuse to download an uncached cross-encoder in offline mode.
 ///
 /// The embedding, NLI and T5 loaders all gate on
@@ -256,6 +250,7 @@ impl Reranker for LocalReranker {
 /// the cross-encoder already in the shared cache loaded it anyway, while a
 /// cold CI runner tried to download it — so tests asserting model
 /// *unavailability* disagreed between machines.
+#[cfg(feature = "onnxruntime")]
 fn ensure_cached_when_offline(model_name: &str, repo: &str) -> Result<()> {
     if engram_storage::paths::offline_enabled() && !engram_storage::paths::hf_repo_cached(repo) {
         anyhow::bail!(
@@ -265,6 +260,13 @@ fn ensure_cached_when_offline(model_name: &str, repo: &str) -> Result<()> {
     Ok(())
 }
 
+/// Map a reranker model name string to a fastembed `RerankerModel` variant.
+///
+/// [`LocalReranker::load`] gates this behind [`FASTEMBED_RERANKERS`], so every
+/// name reaching here is known. The catch-all arm is defensive only (keeping
+/// the two lists in sync is enforced by a test) and mirrors the gate's
+/// behaviour by warning rather than silently substituting.
+#[cfg(feature = "onnxruntime")]
 fn resolve_reranker_model(name: &str) -> RerankerModel {
     match name {
         "bge-reranker-v2-m3" => RerankerModel::BGERerankerV2M3,

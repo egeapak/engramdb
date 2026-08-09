@@ -165,6 +165,19 @@ fn rollback_unsupported_version_fails() {
 // reindex
 // =====================================================================
 
+/// The per-memory failure line reads `embedding failed`, with no cause.
+///
+/// It used to name one — `Failed to send embed request to Ollama` — and this
+/// snapshot is what caught the change when master's batching work merged in.
+/// `RetrievalEngine::embed_texts` returns `Vec<Option<Vec<f32>>>`, so a failure
+/// arrives as a bare `None` and `embed_memories` has nothing to report
+/// (`src/retrieval/engine.rs:493`). The batched path *structurally* cannot say
+/// why, where the per-memory path it replaced could.
+///
+/// Pinned as-is because it is current behaviour, not because it is good: a
+/// user whose reindex fails now cannot tell an unreachable Ollama from a
+/// missing ONNX runtime. Restoring the detail means threading the error
+/// through `embed_texts`, and this snapshot will flag that when it happens.
 #[test]
 fn reindex_full() {
     let f = seeded();

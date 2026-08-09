@@ -10,6 +10,7 @@ use crate::storage::{
 use crate::types::MemoryType;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
+use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tokio::fs as async_fs;
@@ -542,31 +543,47 @@ pub async fn aggregate_stats(registry: &dyn RegistryBackend) -> Result<Aggregate
     let reg = registry.load().await?;
     let total_projects = reg.projects.len();
 
+    // Each project is an independent store open (config load, LanceDB
+    // connect, possible schema migration) followed by one index scan, so the
+    // walk is I/O-bound and the per-project cost dominates — it does not
+    // shrink with a better query. Run a bounded number concurrently: on a
+    // slow disk this is the difference between N serial round trips and
+    // roughly N/CONCURRENCY. The cap keeps a machine with hundreds of
+    // registered projects from opening hundreds of LanceDB connections at
+    // once. Per-project write locks are independent, so concurrent opens of
+    // *different* projects never contend.
+    const CONCURRENCY: usize = 8;
+
+    let per_project = futures_util::stream::iter(reg.projects.iter().map(|entry| async move {
+        let dir = Path::new(&entry.project_path);
+        if !dir.join(".engramdb").exists() {
+            return None;
+        }
+
+        let store = MemoryStore::open(dir).await.ok()?;
+
+        // Reachability is recorded even when the count below fails, matching
+        // the sequential version: the store opened, so the project exists.
+        // `count_by_type` reads one column instead of the seven
+        // `list_summary` decodes — the six others (id, status, logical,
+        // criticality, created_at, expires_at) cost a `serde_json` parse and
+        // two RFC3339 parses per memory whose results were discarded here.
+        Some(store.count_by_type().await.ok())
+    }))
+    .buffer_unordered(CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
     let mut reachable_projects = 0;
     let mut total_memories = 0;
     let mut type_counts: HashMap<MemoryType, usize> = HashMap::new();
 
-    for entry in &reg.projects {
-        let dir = Path::new(&entry.project_path);
-        if !dir.join(".engramdb").exists() {
-            continue;
-        }
-
-        let store = match MemoryStore::open(dir).await {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
+    for counts in per_project.into_iter().flatten() {
         reachable_projects += 1;
-
-        let summaries = match store.list_summary().await {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        total_memories += summaries.len();
-        for e in &summaries {
-            *type_counts.entry(e.type_).or_insert(0) += 1;
+        let Some(counts) = counts else { continue };
+        for (type_, n) in counts {
+            total_memories += n;
+            *type_counts.entry(type_).or_insert(0) += n;
         }
     }
 

@@ -191,6 +191,23 @@ jobs:
       - name: Check (no default features)
         run: cargo check --workspace --no-default-features --features onnxruntime,load-dynamic --locked
 
+      # The mirror image of the step above: ONNX compiled out entirely, with
+      # Ollama the only embedding backend. `#[cfg(feature = "onnxruntime")]`
+      # gates a large surface here (the whole reranker loader, NLI, T5), and no
+      # other CI job builds the crate without it, so that surface had no
+      # compile coverage at all. It was in fact broken when this step was
+      # added: a doc comment inserted between `resolve_reranker_model`'s
+      # `#[cfg]` and the function itself moved the gate onto its new neighbour,
+      # leaving `RerankerModel` — a `fastembed` type that does not exist in
+      # this configuration — referenced unconditionally.
+      #
+      # `load-dynamic` is named explicitly for the same reason as above:
+      # `--no-default-features` also strips `engram-onnx`'s own default, and it
+      # is a workspace member, so `--workspace` checks it even though nothing
+      # depends on it once `onnxruntime` is off.
+      - name: Check (Ollama only, ONNX compiled out)
+        run: cargo check --workspace --no-default-features --features ollama,load-dynamic --locked
+
   # Linux full tests run in the `test` job below; this matrix covers the
   # non-Linux targets that `release.yml` actually ships (macOS + Windows):
   # a full-workspace `cargo check` so every platform-gated line compiles on

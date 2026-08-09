@@ -11,6 +11,6 @@ exit: 0
 }
 --- stderr ---
 {"error":"3 errors during reindex:"}
-  [UUID]: Failed to send embed request to Ollama
-  [UUID]: Failed to send embed request to Ollama
-  [UUID]: Failed to send embed request to Ollama
+  [UUID]: embedding failed
+  [UUID]: embedding failed
+  [UUID]: embedding failed

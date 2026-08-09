@@ -526,6 +526,26 @@ impl LanceIndex {
         Ok(())
     }
 
+    /// Delete many entries from the memories table in one commit per 500 ids.
+    ///
+    /// Same bound and rationale as [`Self::delete_chunks_batch`]: an unbounded
+    /// `IN (...)` is a single enormous predicate for the planner.
+    pub async fn delete_batch(&self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let table = self.open_table().await?;
+        const DELETE_BATCH_SIZE: usize = 500;
+        for group in ids.chunks(DELETE_BATCH_SIZE) {
+            let list = group.iter().map(lit).collect::<Vec<_>>();
+            table
+                .delete(&is_in(col("id"), list))
+                .await
+                .context("Failed to delete entry batch")?;
+        }
+        Ok(())
+    }
+
     /// Return the number of entries in the memories table.
     ///
     /// Uses `count_rows` (O(table metadata)) rather than streaming a column —
@@ -575,6 +595,42 @@ impl LanceIndex {
             }
         }
         Ok((count, scopes))
+    }
+
+    /// Count rows grouped by memory type in one single-column scan
+    /// (`type` only).
+    ///
+    /// Backs the cross-project `aggregate_stats` rollup, which needs exactly
+    /// a total and a per-type histogram. Deriving those from the 7-column
+    /// summary projection made every counted memory pay a `serde_json`
+    /// parse of `logical` and two RFC3339 timestamp parses whose results
+    /// were then dropped on the floor.
+    pub async fn count_by_type(&self) -> Result<HashMap<MemoryType, usize>> {
+        let table = self.open_table().await?;
+
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec!["type".into()]))
+            .execute()
+            .await
+            .context("Failed to query LanceDB table for type counts")?;
+
+        let mut counts: HashMap<MemoryType, usize> = HashMap::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read batch")?;
+            let types = batch
+                .column_by_name("type")
+                .context("Missing 'type' column")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("Failed to cast 'type'")?;
+            for i in 0..batch.num_rows() {
+                *counts
+                    .entry(parse_memory_type(types.value(i))?)
+                    .or_insert(0) += 1;
+            }
+        }
+        Ok(counts)
     }
 
     /// List all memory IDs in the memories table.
@@ -846,6 +902,136 @@ impl LanceIndex {
         Ok(())
     }
 
+    /// Upsert chunks for MANY memories in one merge_insert plus one
+    /// `has_embedding` update.
+    ///
+    /// [`Self::upsert_chunks`] is two commits (the merge plus the flag
+    /// update) and one table open per memory, so re-embedding a whole store
+    /// through it is `2N` commits over a dataset whose manifest is itself
+    /// growing with `N` — the same quadratic shape `chunks_for_memories`
+    /// fixed on the read side. This collapses that to two commits total.
+    ///
+    /// Stale-chunk deletion is scoped with `is_in` over exactly the memories
+    /// being written, so a memory that is not in `entries` keeps its chunks —
+    /// matching [`Self::upsert_chunks`]'s per-memory
+    /// `when_not_matched_by_source_delete_expr`. Entries with no chunks are
+    /// routed to [`Self::delete_chunks_batch`] instead, mirroring
+    /// `upsert_chunks`'s empty-input behaviour.
+    ///
+    /// Batched at the same 500 ids as `delete_chunks_batch` for the same
+    /// reason: an unbounded `IN (...)` is one enormous predicate.
+    pub async fn upsert_chunks_batch(&self, entries: &[(String, Vec<Vec<f32>>)]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        // Same pre-validation as the single-memory path, and for the same
+        // reason: `FixedSizeListArray::new` PANICS on a width mismatch, which
+        // in a batch would take down every memory in it, not just the bad one.
+        for (memory_id, chunks) in entries {
+            for (i, chunk) in chunks.iter().enumerate() {
+                if chunk.len() != self.dimensions {
+                    anyhow::bail!(
+                        "Embedding dimension mismatch for memory '{}': chunk {} has {} \
+                         dimensions but the index expects {}. The embedding provider and the \
+                         configured [embeddings].dimensions disagree — set \
+                         [embeddings].dimensions = {} in config.toml, then run \
+                         `engramdb reindex --embeddings-only`.",
+                        memory_id,
+                        i,
+                        chunk.len(),
+                        self.dimensions,
+                        chunk.len()
+                    );
+                }
+            }
+        }
+
+        // Memories whose new chunk list is empty are deletions, not upserts.
+        let (empty, populated): (Vec<_>, Vec<_>) =
+            entries.iter().partition(|(_, chunks)| chunks.is_empty());
+        if !empty.is_empty() {
+            let ids: Vec<String> = empty.iter().map(|(id, _)| id.clone()).collect();
+            self.delete_chunks_batch(&ids).await?;
+        }
+        if populated.is_empty() {
+            return Ok(());
+        }
+
+        let table = self.open_chunks_table().await?;
+        let schema = self.chunks_schema();
+
+        const UPSERT_BATCH_SIZE: usize = 500;
+        for group in populated.chunks(UPSERT_BATCH_SIZE) {
+            let mut memory_ids: Vec<&str> = Vec::new();
+            let mut chunk_indices: Vec<u32> = Vec::new();
+            let mut all_values: Vec<f32> = Vec::new();
+            for (memory_id, chunks) in group {
+                for (i, chunk) in chunks.iter().enumerate() {
+                    memory_ids.push(memory_id.as_str());
+                    chunk_indices.push(i as u32);
+                    all_values.extend_from_slice(chunk);
+                }
+            }
+            let num_rows = memory_ids.len();
+            let vector_array = FixedSizeListArray::new(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                self.dimensions as i32,
+                Arc::new(Float32Array::from(all_values)) as ArrayRef,
+                None,
+            );
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(memory_ids)) as ArrayRef,
+                    Arc::new(UInt32Array::from(chunk_indices)) as ArrayRef,
+                    Arc::new(vector_array) as ArrayRef,
+                ],
+            )
+            .context("Failed to create batched chunks RecordBatch")?;
+            debug_assert_eq!(batch.num_rows(), num_rows);
+
+            let group_ids: Vec<_> = group.iter().map(|(id, _)| lit(id)).collect();
+            let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema.clone());
+            let mut op = table.merge_insert(&["memory_id", "chunk_index"]);
+            op.when_matched_update_all(None);
+            op.when_not_matched_insert_all();
+            // Scoped to this group: a memory outside it must keep its chunks.
+            op.when_not_matched_by_source_delete_expr(is_in(col("memory_id"), group_ids));
+            op.execute(Box::new(batches))
+                .await
+                .context("Failed to upsert chunk batch")?;
+        }
+
+        let ids: Vec<String> = populated.iter().map(|(id, _)| id.clone()).collect();
+        self.set_has_embedding_batch(&ids, true).await?;
+        Ok(())
+    }
+
+    /// [`Self::set_has_embedding`] for many memories in one update per 500.
+    pub async fn set_has_embedding_batch(&self, memory_ids: &[String], value: bool) -> Result<()> {
+        if memory_ids.is_empty() {
+            return Ok(());
+        }
+        let table = self.open_table().await?;
+        const UPDATE_BATCH_SIZE: usize = 500;
+        for group in memory_ids.chunks(UPDATE_BATCH_SIZE) {
+            let list = group.iter().map(lit).collect::<Vec<_>>();
+            // Same rationale as `set_has_embedding`: render the typed
+            // expression with lancedb's own renderer rather than hand-quoting.
+            let filter = lancedb::expr::expr_to_sql_string(&is_in(col("id"), list))
+                .context("Failed to render batched has_embedding update filter")?;
+            table
+                .update()
+                .only_if(filter)
+                .column("has_embedding", if value { "true" } else { "false" })
+                .execute()
+                .await
+                .context("Failed to batch-update has_embedding")?;
+        }
+        Ok(())
+    }
+
     /// List all distinct memory_ids present in the chunks table.
     pub async fn list_chunk_memory_ids(&self) -> Result<Vec<String>> {
         let table = self.open_chunks_table().await?;
@@ -878,47 +1064,104 @@ impl LanceIndex {
     /// Empty when the memory has no embeddings. Used to relocate vectors when
     /// consolidating a worktree's stray store into the main project so the
     /// migrated memories stay searchable without re-embedding.
+    ///
+    /// **One memory at a time is a trap.** Every call re-opens the chunks
+    /// dataset (re-reading a manifest whose fragment list grows with the
+    /// table), builds its own query plan, and scans. Calling it in a loop is
+    /// therefore O(n²) overall — measured at 90ms for 16 memories and 12.7s
+    /// for 256, with per-memory cost doubling on every doubling of n. Use
+    /// [`Self::chunks_for_memories`] for more than one.
     pub async fn chunks_for_memory(&self, memory_id: &str) -> Result<Vec<Vec<f32>>> {
+        Ok(self
+            .chunks_for_memories(&[memory_id])
+            .await?
+            .remove(memory_id)
+            .unwrap_or_default())
+    }
+
+    /// Return the ordered embedding chunks for many memories in **one** scan
+    /// per batch, keyed by memory id.
+    ///
+    /// This is the O(n) form of [`Self::chunks_for_memory`]. The saving is not
+    /// the row filter — it is that N table opens, N manifest reads and N query
+    /// plans collapse into one. That holds no matter how the table is indexed
+    /// or fragmented, which is why this, rather than a scalar index on
+    /// `memory_id`, is what fixes the complexity.
+    ///
+    /// Ids with no chunks are simply absent from the map (not empty entries),
+    /// so a caller can distinguish "no vectors" from "not asked for".
+    pub async fn chunks_for_memories(
+        &self,
+        memory_ids: &[&str],
+    ) -> Result<HashMap<String, Vec<Vec<f32>>>> {
+        // `IN ()` is not valid SQL, and an empty request has an empty answer.
+        if memory_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
         let table = self.open_chunks_table().await?;
+        let mut rows: HashMap<String, Vec<(u32, Vec<f32>)>> = HashMap::new();
 
-        let mut stream = table
-            .query()
-            .select(lancedb::query::Select::Columns(vec![
-                "chunk_index".into(),
-                "vector".into(),
-            ]))
-            .only_if_expr(col("memory_id").eq(lit(memory_id)))
-            .execute()
-            .await
-            .context("Failed to query chunks for memory")?;
+        // Same predicate bound as `delete_chunks_batch`: an unbounded
+        // `IN (...)` over thousands of 36-char UUIDs builds one enormous
+        // predicate for the planner. Each sub-batch is still a single scan, so
+        // this is O(ids / SCAN_ID_BATCH) scans, not O(ids).
+        const SCAN_ID_BATCH: usize = 500;
+        for id_batch in memory_ids.chunks(SCAN_ID_BATCH) {
+            let list = id_batch.iter().copied().map(lit).collect::<Vec<_>>();
+            let mut stream = table
+                .query()
+                .select(lancedb::query::Select::Columns(vec![
+                    "memory_id".into(),
+                    "chunk_index".into(),
+                    "vector".into(),
+                ]))
+                .only_if_expr(is_in(col("memory_id"), list))
+                .execute()
+                .await
+                .context("Failed to query chunks for memories")?;
 
-        let mut rows: Vec<(u32, Vec<f32>)> = Vec::new();
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.context("Failed to read chunk batch")?;
-            let idx_col = batch
-                .column_by_name("chunk_index")
-                .context("Missing 'chunk_index' column in chunks")?
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .context("Failed to cast 'chunk_index'")?;
-            let vec_col = batch
-                .column_by_name("vector")
-                .context("Missing 'vector' column in chunks")?
-                .as_any()
-                .downcast_ref::<FixedSizeListArray>()
-                .context("Failed to cast 'vector'")?;
-            for i in 0..batch.num_rows() {
-                let values = vec_col.value(i);
-                let floats = values
+            while let Some(batch_result) = stream.next().await {
+                let batch = batch_result.context("Failed to read chunk batch")?;
+                let id_col = batch
+                    .column_by_name("memory_id")
+                    .context("Missing 'memory_id' column in chunks")?
                     .as_any()
-                    .downcast_ref::<Float32Array>()
-                    .context("Failed to cast chunk vector values")?;
-                rows.push((idx_col.value(i), floats.values().to_vec()));
+                    .downcast_ref::<StringArray>()
+                    .context("Failed to cast 'memory_id'")?;
+                let idx_col = batch
+                    .column_by_name("chunk_index")
+                    .context("Missing 'chunk_index' column in chunks")?
+                    .as_any()
+                    .downcast_ref::<UInt32Array>()
+                    .context("Failed to cast 'chunk_index'")?;
+                let vec_col = batch
+                    .column_by_name("vector")
+                    .context("Missing 'vector' column in chunks")?
+                    .as_any()
+                    .downcast_ref::<FixedSizeListArray>()
+                    .context("Failed to cast 'vector'")?;
+                for i in 0..batch.num_rows() {
+                    let values = vec_col.value(i);
+                    let floats = values
+                        .as_any()
+                        .downcast_ref::<Float32Array>()
+                        .context("Failed to cast chunk vector values")?;
+                    rows.entry(id_col.value(i).to_string())
+                        .or_default()
+                        .push((idx_col.value(i), floats.values().to_vec()));
+                }
             }
         }
 
-        rows.sort_by_key(|(idx, _)| *idx);
-        Ok(rows.into_iter().map(|(_, v)| v).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(id, mut chunks)| {
+                // Scan order is not row order; `chunk_index` is the contract.
+                chunks.sort_by_key(|(idx, _)| *idx);
+                (id, chunks.into_iter().map(|(_, v)| v).collect())
+            })
+            .collect())
     }
 
     /// Delete all chunks for a given memory_id.
@@ -963,6 +1206,56 @@ impl LanceIndex {
     /// Used by the `create`/`update` write path to set the memories-table
     /// `has_embedding` flag correctly (an update to a memory that already has
     /// chunks must not reset the flag to false).
+    /// [`Self::has_chunks`] for many memories in one scan.
+    ///
+    /// Returns the subset of `memory_ids` that have at least one chunk row.
+    /// Only the `memory_id` column is read — the vectors themselves are not
+    /// needed to answer a presence question, and they are by far the widest
+    /// column in the table.
+    ///
+    /// Backs [`MemoryStore::create_batch`]'s `has_embedding` carry-forward,
+    /// which otherwise costs one chunks-table query per memory created.
+    pub async fn memory_ids_with_chunks(
+        &self,
+        memory_ids: &[&str],
+    ) -> Result<std::collections::HashSet<String>> {
+        // `IN ()` is not valid SQL, and an empty request has an empty answer.
+        if memory_ids.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+
+        let table = self.open_chunks_table().await?;
+        let mut found = std::collections::HashSet::new();
+
+        // Same predicate bound as `chunks_for_memories`: an unbounded
+        // `IN (...)` over thousands of UUIDs builds one enormous predicate.
+        const SCAN_ID_BATCH: usize = 500;
+        for id_batch in memory_ids.chunks(SCAN_ID_BATCH) {
+            let list = id_batch.iter().copied().map(lit).collect::<Vec<_>>();
+            let mut stream = table
+                .query()
+                .select(lancedb::query::Select::Columns(vec!["memory_id".into()]))
+                .only_if_expr(is_in(col("memory_id"), list))
+                .execute()
+                .await
+                .context("Failed to query chunk presence for memories")?;
+
+            while let Some(batch_result) = stream.next().await {
+                let batch = batch_result.context("Failed to read chunk presence batch")?;
+                let id_col = batch
+                    .column_by_name("memory_id")
+                    .context("Missing 'memory_id' column in chunks")?
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .context("Failed to cast 'memory_id'")?;
+                for i in 0..batch.num_rows() {
+                    found.insert(id_col.value(i).to_string());
+                }
+            }
+        }
+        Ok(found)
+    }
+
     pub async fn has_chunks(&self, memory_id: &str) -> Result<bool> {
         let table = self.open_chunks_table().await?;
         let mut stream = table
@@ -1272,17 +1565,39 @@ impl LanceIndex {
         // single maintenance entry point (gc / reindex / auto-maintain all call
         // it), so no new call site is needed.
         match self.open_chunks_table().await {
-            Ok(chunks) => match chunks.count_rows(None).await {
-                Ok(rows) if rows >= VECTOR_INDEX_MIN_ROWS => {
-                    if let Err(e) = self.create_vector_index().await {
-                        tracing::warn!("optimize: vector index creation failed (continuing): {e}");
+            Ok(chunks) => {
+                // Scalar index on the chunks table's `memory_id`, which every
+                // single-id lookup filters on (`chunks_for_memory`,
+                // `has_chunks`, `delete_chunks`, and `vector_search`'s
+                // `restrict_to` prefilter). Built unconditionally — unlike the
+                // IVF index below there is no training-set minimum, and a BTree
+                // over a high-cardinality string key is cheap.
+                //
+                // Note this is NOT what fixes the O(n²) in a per-memory read
+                // loop: an index removes the row filter, not the per-call table
+                // open, manifest read and query plan, and it is stale for rows
+                // written since the last `optimize`. `chunks_for_memories` is
+                // the fix for that; this helps the lookups that are genuinely
+                // single-id.
+                if let Err(e) = self.create_chunk_scalar_index().await {
+                    tracing::warn!(
+                        "optimize: chunk scalar index creation failed (continuing): {e}"
+                    );
+                }
+                match chunks.count_rows(None).await {
+                    Ok(rows) if rows >= VECTOR_INDEX_MIN_ROWS => {
+                        if let Err(e) = self.create_vector_index().await {
+                            tracing::warn!(
+                                "optimize: vector index creation failed (continuing): {e}"
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("optimize: failed to count chunk rows for indexing: {e}");
                     }
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!("optimize: failed to count chunk rows for indexing: {e}");
-                }
-            },
+            }
             Err(e) => {
                 tracing::warn!("optimize: failed to open chunks table for indexing: {e}");
             }
@@ -1467,6 +1782,43 @@ impl LanceIndex {
             tracing::debug!("create_scalar_indexes: built indexes on {built:?}");
         }
         Ok(built)
+    }
+
+    /// Build a BTree index on the **chunks** table's `memory_id`.
+    ///
+    /// BTree rather than Bitmap: `memory_id` has one distinct value per
+    /// memory, and Bitmap is documented for under ~1000 unique values. Same
+    /// idempotent, best-effort contract as the other index builders — an index
+    /// only changes how fast a predicate is evaluated, never which rows match,
+    /// so a skipped or failed build is correctness-preserving.
+    ///
+    /// Adds no column and changes no on-disk schema, so it needs no
+    /// `CURRENT_SCHEMA_VERSION` bump: existing stores pick it up on their next
+    /// `optimize()` (gc / reindex / auto-maintain all call it).
+    ///
+    /// Returns `false` when an index already covers the column.
+    pub async fn create_chunk_scalar_index(&self) -> Result<bool> {
+        let table = self.open_chunks_table().await?;
+        let existing = table
+            .list_indices()
+            .await
+            .context("Failed to list existing chunks-table indices")?;
+        if existing
+            .iter()
+            .any(|idx| idx.columns.iter().any(|c| c == "memory_id"))
+        {
+            return Ok(false);
+        }
+        table
+            .create_index(
+                &["memory_id"],
+                lancedb::index::Index::BTree(Default::default()),
+            )
+            .execute()
+            .await
+            .context("Failed to create BTree index on chunks.memory_id")?;
+        tracing::debug!("create_chunk_scalar_index: built BTree index on chunks.memory_id");
+        Ok(true)
     }
 
     /// Build an FM (Ferragina–Manzini) substring index on the `tags` column.
@@ -2694,6 +3046,71 @@ mod tests {
     /// Deterministic vectors from a fixed-seed xorshift64* PRNG (no external
     /// rng dependency). 384-dim random floats in [-1, 1); collisions are
     /// statistically impossible, so every generated vector is distinct.
+    /// The batch read must be a drop-in for the per-memory one: same vectors,
+    /// same `chunk_index` ordering, and ids with no chunks absent rather than
+    /// present-and-empty (so callers can tell "no vectors" from "not asked").
+    #[tokio::test]
+    async fn chunks_for_memories_matches_per_memory() {
+        let tmp = TempDir::new().unwrap();
+        let lance = LanceIndex::new(tmp.path(), 384).await.unwrap();
+
+        // Multi-chunk memories, written out of index order so the sort is
+        // actually doing something.
+        for (id, count) in [("mem-a", 3usize), ("mem-b", 1), ("mem-c", 5)] {
+            let mut chunks = seeded_vectors(id.len() as u64, count, 384);
+            chunks.reverse();
+            lance.upsert_chunks(id, chunks).await.unwrap();
+        }
+
+        let ids = ["mem-a", "mem-b", "mem-c", "mem-absent"];
+        let batch = lance.chunks_for_memories(&ids).await.unwrap();
+
+        assert!(
+            !batch.contains_key("mem-absent"),
+            "an id with no chunks must be absent from the map, not empty"
+        );
+        assert_eq!(batch.len(), 3);
+        for id in ["mem-a", "mem-b", "mem-c"] {
+            let one = lance.chunks_for_memory(id).await.unwrap();
+            assert_eq!(
+                batch.get(id).expect("id present"),
+                &one,
+                "batch and per-memory disagree for {id}"
+            );
+        }
+        assert_eq!(batch["mem-a"].len(), 3);
+        assert_eq!(batch["mem-c"].len(), 5);
+    }
+
+    /// Empty input is an empty answer, not an `IN ()` that LanceDB rejects.
+    #[tokio::test]
+    async fn chunks_for_memories_empty_input_is_empty_map() {
+        let tmp = TempDir::new().unwrap();
+        let lance = LanceIndex::new(tmp.path(), 384).await.unwrap();
+        assert!(lance.chunks_for_memories(&[]).await.unwrap().is_empty());
+    }
+
+    /// The chunks-table index is idempotent and best-effort, like its siblings.
+    #[tokio::test]
+    async fn chunk_scalar_index_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let lance = LanceIndex::new(tmp.path(), 384).await.unwrap();
+        seed_chunks_batch(&lance, "idx", 7, 64).await;
+
+        assert!(
+            lance.create_chunk_scalar_index().await.unwrap(),
+            "first call builds the index"
+        );
+        assert!(
+            !lance.create_chunk_scalar_index().await.unwrap(),
+            "second call finds it already covering memory_id and skips"
+        );
+        // Reads still return the same rows with the index in place — an index
+        // changes speed, never which rows match.
+        let got = lance.chunks_for_memories(&["idx-0000"]).await.unwrap();
+        assert_eq!(got["idx-0000"].len(), 1);
+    }
+
     fn seeded_vectors(seed: u64, n: usize, dim: usize) -> Vec<Vec<f32>> {
         let mut state = seed;
         let mut next = move || {
