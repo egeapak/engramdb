@@ -116,12 +116,19 @@ jobs:
       # somewhere no in-process test can read. A single reintroduced `println!`
       # is invisible to tier 1 forever, and silently so.
       #
-      # Exempt, both deliberately outside the formatter:
-      #   - output.rs        defines the macros.
+      # Exempt, deliberately outside the formatter:
       #   - commands/hook.rs emits the hook protocol document that Claude Code
       #                      parses off stdout, plus its stderr diagnostics.
       #                      Styling or JSON-wrapping must never reach it, and
       #                      those handlers hold no formatter.
+      #
+      # output.rs is NOT exempt as a file. It was, on the grounds that it
+      # defines the macros — and that hole is how `print_harvest_sessions`
+      # arrived writing to the real stdout, invisible to tier 1 for exactly the
+      # reason this job exists. The only legitimate print macros in the crate
+      # are the four inside `impl Sink`, which are the sink, so they are
+      # allowed by their exact shape and nothing else in the file is.
+      #
       # `#[cfg(test)]` bodies are skipped: `println!` in a test is debugging
       # output, not product output.
       - name: No bare println!/eprintln!/print!/eprint! in engram-cli
@@ -129,9 +136,13 @@ jobs:
           python3 - <<'PY'
           import pathlib, re, sys
 
-          EXEMPT = {"output.rs", "hook.rs"}
+          EXEMPT = {"hook.rs"}
           PRINT = re.compile(r"(?<![\w:])(eprintln|println|eprint|print)!\(")
           TEST_MOD = re.compile(r"^\s*mod tests\s*\{")
+          # `Sink::Stdout => println!("{}", args),` and its three siblings.
+          SINK_WRITE = re.compile(
+              r'^\s*Sink::(Stdout|Stderr) => (eprintln|println|eprint|print)!\("\{\}", args\),$'
+          )
 
           offenders = []
           for path in sorted(pathlib.Path("crates/engram-cli/src").rglob("*.rs")):
@@ -145,7 +156,13 @@ jobs:
                   (i for i, line in enumerate(lines) if TEST_MOD.match(line)), len(lines)
               )
               for i, line in enumerate(lines[:cutoff]):
-                  if PRINT.search(line):
+                  # A comment naming a print macro is prose, not output — and
+                  # output.rs's own doc comments name them constantly now that
+                  # the file is scanned. Only whole-line comments are skipped,
+                  # so a real call with a trailing comment is still caught.
+                  if line.lstrip().startswith("//"):
+                      continue
+                  if PRINT.search(line) and not SINK_WRITE.match(line):
                       offenders.append(f"{path}:{i + 1}: {line.strip()}")
 
           if offenders:

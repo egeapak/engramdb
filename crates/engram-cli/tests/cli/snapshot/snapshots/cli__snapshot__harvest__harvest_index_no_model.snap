@@ -1,0 +1,18 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"index\", \"session-alpha\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest index session-alpha
+exit: 0
+--- stdout ---
+{
+  "indexed": [],
+  "skipped": [
+    {
+      "reason": "session session-alpha cannot be indexed: [EMBEDDING_UNAVAILABLE]",
+      "session_id": "session-alpha"
+    }
+  ],
+  "unchanged": []
+}
+--- stderr ---

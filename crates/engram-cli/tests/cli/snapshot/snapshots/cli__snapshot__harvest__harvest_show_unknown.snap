@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"show\", \"session-omega\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest show session-omega
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: No session matching 'session-omega' in this project's scope — the root of its hierarchy plus every registered worktree and linked sub-project. Run `engramdb harvest list` to see what is available, or pass --all-projects. If Claude Code has already pruned the transcript the session is gone from that list but may still be archived: `engramdb harvest ledger list` finds it and `engramdb harvest show` digests it straight from the archive.

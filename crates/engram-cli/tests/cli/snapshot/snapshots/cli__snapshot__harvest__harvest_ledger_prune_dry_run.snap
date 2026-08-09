@@ -1,0 +1,16 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"ledger\", \"prune\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest ledger prune
+exit: 0
+--- stdout ---
+{
+  "bytes_freed": 0,
+  "bytes_remaining": 0,
+  "dry_run": true,
+  "pinned_bytes": 0,
+  "pinned_count": 0,
+  "removed": []
+}
+--- stderr ---

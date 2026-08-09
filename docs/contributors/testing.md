@@ -177,6 +177,23 @@ clap's own errors (exit 2, which never reaches `run`). Default format only,
 except for the renderer-thin commands (`config`, `stats`, `daemon`, `review`,
 `doctor`) that print outside `OutputFormatter` and so are invisible to tier 1.
 
+"Default format" is *JSON*, not pretty: `OutputFormatter::new` falls back to
+Json when stdout is not a terminal, and the fixture always pipes. A case that
+means to pin the human layout has to pass `--format plain` explicitly —
+`snapshot::harvest::list_sessions_plain` is the example, and without it the row
+layout is unreachable from this tier.
+
+`snapshot::harvest` needs a corpus rather than just a store, and
+`Fixture::write_transcript` builds it: a `.jsonl` under
+`$HOME/.claude/projects/<encoded cwd>/`, using the real `encode_project_dir` so
+a change to Claude Code's naming breaks the tests instead of quietly making
+them search an empty directory. Session ids there are descriptive stems, not
+uuids — `normalize` would rewrite a uuid to `[UUID]` and every session would
+read alike, so the snapshots could not show which one was listed or marked.
+This is deliberately *not* a second copy of `tests/cli/harvest.rs`: that file
+owns scope-resolution behaviour and greps for substrings, this one owns the
+bytes, the streams and the exit codes.
+
 Tier 2 needs redaction, and `Fixture::normalize` is where it lives. Two rules
 about it are easy to get wrong:
 
@@ -202,6 +219,24 @@ about it are easy to get wrong:
   `EngramConfig::default()` and serialized whole — a hand-written *partial*
   table fails to deserialize (several fields have no serde default) and
   `load_config_or_default` quietly substitutes defaults.
+- **Redact anything generated fresh per render.** `harvest show` frames the
+  recorded transcript with a random fence token, deliberately, so recorded
+  content cannot forge the framing — three occurrences per digest, 32 undashed
+  hex characters, caught by neither the UUID nor the project-id rule. A value
+  like this is a guaranteed flake rather than a possible one: the snapshot
+  passes on the run that records it and fails on the next. This is what "always
+  run a snapshot suite twice" is for.
+- **A live service is a machine report too.** The fixture pins model
+  *availability*, but not which backend `Auto` lands on, so `harvest index` /
+  `harvest search` end in an Ollama socket error whose wording is the OS's
+  (`os error 111` on Linux, `61` on macOS, different again with Ollama actually
+  running). Redacted to `[EMBEDDING_UNAVAILABLE]` after the command's own
+  framing, which is the part that is a contract. `setup` had the same shape and
+  no redaction: it probes for the Claude CLI by running `claude --version`, so
+  the snapshot recorded whichever branch the recording machine happened to
+  have, passed locally and failed on CI. `Fixture::base` now strips `claude`
+  from `PATH` alongside `engramdb`, and `setup_dry_run_with_claude_cli` plants a
+  stub to cover the other branch on purpose.
 - **Structural redaction has to survive JSON-lines.** What config cannot pin,
   `render_stdout` redacts by parsing — `doctor`'s ONNX Runtime row reports
   *where* `libonnxruntime` was loaded from, and the passing and failing forms

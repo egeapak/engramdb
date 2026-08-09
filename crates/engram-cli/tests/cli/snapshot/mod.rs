@@ -84,6 +84,7 @@ mod core;
 #[cfg(unix)]
 mod editor;
 mod env;
+mod harvest;
 mod help;
 mod hook;
 mod projects_groups;
@@ -272,6 +273,78 @@ impl Fixture {
         .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
+    }
+
+    /// Like [`Fixture::run`], but with a stub `claude` executable first on
+    /// `PATH` — for `setup`, the only command that probes for the Claude CLI.
+    ///
+    /// A separate entry point for the same reason as
+    /// [`run_with_editor`](Self::run_with_editor): every other case depends on
+    /// the CLI being *absent*, and [`base`](Self::base) strips it from the
+    /// inherited `PATH` so the answer never depends on the machine. The stub
+    /// only has to answer `--version` with exit 0, which is the whole of the
+    /// probe; `--dry-run` stops before anything would actually be installed.
+    ///
+    /// The directory sits inside the project root so [`normalize`] redacts it
+    /// if it ever surfaces.
+    ///
+    /// [`normalize`]: Fixture::normalize
+    #[cfg(unix)]
+    pub fn run_with_claude_cli(&self, args: &[&str]) -> String {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = self.root.join("fake-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let claude = bin.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\necho 'claude 1.0.0'\n").unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let path = std::env::join_paths(
+            std::iter::once(bin).chain(std::env::split_paths(&path_without_engramdb())),
+        )
+        .expect("PATH entries contain no separator");
+
+        let mut all = vec!["--no-maintenance", "--dir", self.path().to_str().unwrap()];
+        all.extend_from_slice(args);
+        let mut cmd = self.base();
+        cmd.env("PATH", path);
+        self.finish(cmd, &all, None)
+    }
+
+    /// Plant a Claude Code transcript for this project, as `harvest` reads it.
+    ///
+    /// The layout is Claude Code's: `<claude home>/projects/<encoded cwd>/
+    /// <session>.jsonl`, one JSON object per line. `claude_home` resolves to
+    /// `$HOME/.claude`, and [`base`](Self::base) already redirects `HOME`, so
+    /// the corpus lands inside the fixture with nothing else to override.
+    /// `encode_project_dir` is the real encoder rather than a copy of it, so a
+    /// change to Claude Code's naming breaks these tests instead of quietly
+    /// making them search an empty directory.
+    ///
+    /// `session` is used verbatim as the filename stem, and `harvest` treats
+    /// that stem as the session id. Real ids are uuids, but a uuid here would
+    /// be rewritten to `[UUID]` by [`normalize`] — every session would read the
+    /// same and the snapshots could not show which one was listed, marked or
+    /// skipped. Descriptive stems keep the transcripts legible; the *shape* of
+    /// an id is pinned by tier 1, which renders fixtures with real uuids in
+    /// them.
+    ///
+    /// [`normalize`]: Fixture::normalize
+    pub fn write_transcript(&self, session: &str, lines: &[String]) {
+        let dir = self.home.path().join(".claude").join("projects").join(
+            engramdb::storage::transcripts::encode_project_dir(
+                &self
+                    .root
+                    .canonicalize()
+                    .unwrap_or_else(|_| self.root.clone()),
+            ),
+        );
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{session}.jsonl")),
+            format!("{}\n", lines.join("\n")),
+        )
+        .unwrap();
     }
 
     /// Run with no store flags at all — for `--help`, `--version` and
@@ -493,9 +566,29 @@ fn display(p: &Path) -> String {
 /// The inherited `PATH` with every directory that contains an `engramdb`
 /// executable removed.
 fn path_without_engramdb() -> String {
+    path_without(&["engramdb", "claude"])
+}
+
+/// The inherited `PATH` with every directory holding one of `names` removed.
+///
+/// `engramdb` is removed so `doctor`'s "binary on PATH" check reports a fixed
+/// answer. `claude` is removed for the same reason and it is *not* theoretical:
+/// `setup` probes for the Claude CLI by running `claude --version`, and the
+/// snapshot was recorded on a machine that had one while CI has none — so
+/// `setup_dry_run_global` passed locally and failed on the runner with an
+/// entirely different branch ("Claude CLI not found, falling back to
+/// settings.json"). Removing it pins every fixture to the no-CLI branch, which
+/// is also what a fresh install hits; `setup_dry_run_with_claude_cli` covers
+/// the other branch by planting a fake `claude` rather than hoping for a real
+/// one.
+fn path_without(names: &[&str]) -> String {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let kept: Vec<PathBuf> = std::env::split_paths(&path)
-        .filter(|dir| !dir.join("engramdb").exists() && !dir.join("engramdb.exe").exists())
+        .filter(|dir| {
+            !names
+                .iter()
+                .any(|n| dir.join(n).exists() || dir.join(format!("{n}.exe")).exists())
+        })
         .collect();
     std::env::join_paths(kept)
         .expect("PATH entries contain no separator")
@@ -664,6 +757,16 @@ static FILTERS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
             Regex::new(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").unwrap(),
             "[UUID]",
         ),
+        // `harvest show` frames the recorded transcript with a fence token
+        // that is *deliberately* freshly random on every render, so recorded
+        // content cannot forge the framing (`ops::harvest`). It appears three
+        // times per digest — the `fence` field and the BEGIN/END lines — and
+        // being 32 undashed hex characters it is caught by neither the UUID
+        // rule above nor the 16-hex project-id rule below. It must precede
+        // that one, which would otherwise consume the token's first half and
+        // leave the second behind. Left unredacted this is a guaranteed flake:
+        // the snapshot passes on the run that records it and fails on the next.
+        (Regex::new(r"[0-9a-f]{32}").unwrap(), "[FENCE]"),
         // `short_id` truncates a UUID to 13 chars: `0198f2a1-9e4b`.
         (
             Regex::new(r"[0-9a-f]{8}-[0-9a-f]{4}").unwrap(),
@@ -688,6 +791,19 @@ static FILTERS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
         (
             Regex::new(r"Searched: [^\n]*libonnxruntime\.so").unwrap(),
             "Searched: [ORT_SEARCH_PATHS]",
+        ),
+        // Why the embedding provider was unavailable is a report about the
+        // machine, in the same sense as the ONNX Runtime check. The fixture
+        // pins model *availability* (empty cache + `ENGRAMDB_OFFLINE`) but not
+        // which backend `Auto` lands on, and the Ollama arm ends in a socket
+        // error whose wording is the OS's: `os error 111` on Linux, `61` on
+        // macOS, different again if a developer happens to have Ollama
+        // running. The command's own framing before the colon is the contract
+        // — that it names what it could not do — and it stays asserted, along
+        // with the exit code and the stream.
+        (
+            Regex::new(r#"(cannot be (?:indexed|searched)): [^\n"]*"#).unwrap(),
+            "${1}: [EMBEDDING_UNAVAILABLE]",
         ),
         (
             Regex::new(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?")

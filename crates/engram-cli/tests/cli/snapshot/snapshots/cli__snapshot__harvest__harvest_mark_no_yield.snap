@@ -1,0 +1,23 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"mark\", \"session-alpha\", \"--note\",\n\"Nothing durable — all of it is already in the daemon docs.\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest mark session-alpha --note Nothing durable — all of it is already in the daemon docs.
+exit: 0
+--- stdout ---
+{
+  "archive": null,
+  "decision": "skipped",
+  "harvested_at": "[TIMESTAMP]",
+  "memories_created": 0,
+  "memory_ids": [],
+  "note": "Nothing durable — all of it is already in the daemon docs.",
+  "pinned": 0,
+  "session_id": "session-alpha",
+  "stage": "collected",
+  "summary_error": null,
+  "summary_recorded": false,
+  "superseded": false,
+  "unresolved_memories": []
+}
+--- stderr ---

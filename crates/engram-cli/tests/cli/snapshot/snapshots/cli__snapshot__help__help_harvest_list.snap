@@ -1,0 +1,68 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"harvest\", \"list\", \"--help\"])"
+---
+$ engramdb harvest list --help
+exit: 0
+--- stdout ---
+List past sessions in scope, newest activity first
+
+Usage: engramdb harvest list [OPTIONS]
+
+Options:
+      --since <WHEN>
+          Only sessions active since this point: an RFC 3339 timestamp or a relative shorthand like `7d`, `12h`, `30m`, `2w`
+
+  -n, --limit <LIMIT>
+          Maximum number of sessions to list
+
+      --include-harvested
+          Also list sessions already recorded as harvested
+
+      --include-empty
+          Include sessions with no human turns
+
+      --all-projects
+          Ignore project scoping and list every session on this machine
+
+      --exclude-session <ID>
+          Session id to omit (typically the caller's own, still being written)
+
+      --format <FORMAT>
+          Output format
+
+          Possible values:
+          - pretty: Human-friendly colored output with formatting
+          - json:   JSON output for programmatic parsing
+          - plain:  Plain text output without colors
+
+      --json
+          Output as JSON
+
+  -q, --quiet
+          Suppress non-essential output
+
+  -v, --verbose
+          Verbose output
+
+      --no-color
+          No colored output
+
+      --dir <DIR>
+          Working directory (default: current directory)
+
+      --embedding-backend <EMBEDDING_BACKEND>
+          Embedding backend: auto, onnx, or ollama
+
+      --in-process
+          Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1
+
+      --spawn-daemon
+          Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)
+
+      --no-maintenance
+          Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1
+
+  -h, --help
+          Print help (see a summary with '-h')
+--- stderr ---

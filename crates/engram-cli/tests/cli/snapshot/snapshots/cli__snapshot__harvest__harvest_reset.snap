@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"reset\", \"session-alpha\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest reset session-alpha
+exit: 0
+--- stdout ---
+{
+  "message": "Cleared the harvest record for session session-alpha. No archived transcript is held for it, so `harvest list` offers it again only while Claude Code still has the live one.",
+  "success": true
+}
+--- stderr ---

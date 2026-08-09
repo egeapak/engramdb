@@ -1,0 +1,8 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+019fd0b6-ae1c  unknown  3 turns  [main�[31m]
+    first line SECOND LINE�[0m pretending to be output
+--- stderr ---

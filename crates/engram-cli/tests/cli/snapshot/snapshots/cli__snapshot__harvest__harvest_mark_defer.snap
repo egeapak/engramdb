@@ -1,0 +1,23 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"mark\", \"session-alpha\", \"--defer\", \"--note\",\n\"Worth a second pass once the reranker lands.\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest mark session-alpha --defer --note Worth a second pass once the reranker lands.
+exit: 0
+--- stdout ---
+{
+  "archive": null,
+  "decision": "deferred",
+  "harvested_at": "[TIMESTAMP]",
+  "memories_created": 0,
+  "memory_ids": [],
+  "note": "Worth a second pass once the reranker lands.",
+  "pinned": 0,
+  "session_id": "session-alpha",
+  "stage": "collected",
+  "summary_error": null,
+  "summary_recorded": false,
+  "superseded": false,
+  "unresolved_memories": []
+}
+--- stderr ---

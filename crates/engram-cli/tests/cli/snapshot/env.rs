@@ -186,6 +186,36 @@ fn setup_dry_run_global_scope() {
     );
 }
 
+/// The plugin branch, with a stub CLI standing in for a real one.
+///
+/// `--global` because that is the only scope that probes: project scope writes
+/// `.mcp.json` and never asks about a plugin, which is why running it with a
+/// stub on PATH produces bytes identical to running it without one.
+///
+/// Every other `setup` case runs with `claude` stripped from `PATH`, so they
+/// all take the "not found, falling back to settings.json" route. That was not
+/// a choice until now — it was whatever the machine happened to have installed,
+/// and `setup_dry_run_global` duly passed on a developer box with the CLI and
+/// failed on CI without it. Both branches are pinned now, neither by accident.
+#[cfg(unix)]
+#[test]
+fn setup_dry_run_with_claude_cli() {
+    let f = Fixture::new();
+    f.init();
+    let claude = f.path().join("claude-home");
+    std::fs::create_dir_all(&claude).unwrap();
+    insta::assert_snapshot!(
+        "setup_dry_run_with_claude_cli",
+        f.run_with_claude_cli(&[
+            "setup",
+            "--dry-run",
+            "--global",
+            "--claude-dir",
+            claude.to_str().unwrap()
+        ])
+    );
+}
+
 #[test]
 fn setup_dry_run_no_plugin() {
     let f = Fixture::new();

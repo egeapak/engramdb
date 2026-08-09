@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"show\", \"session-\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest show session-
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Ambiguous session id 'session-' — matches 3 sessions: session-gamma, session-beta, session-alpha

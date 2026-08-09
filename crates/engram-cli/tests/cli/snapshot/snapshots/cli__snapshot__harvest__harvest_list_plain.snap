@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"--format\", \"plain\", \"harvest\", \"list\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format plain harvest list
+exit: 0
+--- stdout ---
+session-beta  [DATE] 14:15  1 turn  [main]
+    What is the default digest budget?
+session-alpha  [DATE] 09:05  2 turns  [feat/harvest]
+    Why does the daemon reap while a session is still open?
+--- stderr ---

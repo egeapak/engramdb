@@ -1,0 +1,18 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"ledger\", \"show\", \"session-alpha\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest ledger show session-alpha
+exit: 0
+--- stdout ---
+{
+  "archive": null,
+  "decision": "skipped",
+  "harvested_at": "[TIMESTAMP]",
+  "memories_created": 0,
+  "memory_ids": [],
+  "note": "Superseded by the daemon design note.",
+  "session_id": "session-alpha",
+  "stage": "collected"
+}
+--- stderr ---

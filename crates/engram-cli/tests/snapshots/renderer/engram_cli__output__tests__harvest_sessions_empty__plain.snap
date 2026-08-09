@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+No unharvested sessions found. Searched:
+  /w/engramdb
+  /w/engramdb-worktree
+
+Use --include-harvested to re-review sessions, or --all-projects to widen the search.
+This lists live transcripts only. Claude Code prunes its own, so for older sessions try `engramdb harvest ledger list` — an archived one is still readable with `engramdb harvest show`.
+--- stderr ---

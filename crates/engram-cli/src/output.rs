@@ -1299,7 +1299,8 @@ impl OutputFormatter {
         scope_paths: &[std::path::PathBuf],
     ) {
         if let OutputFormat::Json = self.format {
-            println!(
+            outln!(
+                self,
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "scope": scope_paths,
@@ -1311,16 +1312,16 @@ impl OutputFormatter {
         }
 
         if sessions.is_empty() {
-            println!("No unharvested sessions found. Searched:");
+            outln!(self, "No unharvested sessions found. Searched:");
             for path in scope_paths {
-                println!("  {}", path.display());
+                outln!(self, "  {}", path.display());
             }
             // Only live transcripts are listed, so "nothing found" is also
             // what a scope full of sessions Claude Code has already pruned
             // looks like — and those are exactly the ones the archive exists
             // for. Naming the ledger route here is what makes them findable.
-            println!("\nUse --include-harvested to re-review sessions, or --all-projects to widen the search.");
-            println!("This lists live transcripts only. Claude Code prunes its own, so for older sessions try `engramdb harvest ledger list` — an archived one is still readable with `engramdb harvest show`.");
+            outln!(self, "\nUse --include-harvested to re-review sessions, or --all-projects to widen the search.");
+            outln!(self, "This lists live transcripts only. Claude Code prunes its own, so for older sessions try `engramdb harvest ledger list` — an archived one is still readable with `engramdb harvest show`.");
             return;
         }
 
@@ -1334,7 +1335,11 @@ impl OutputFormatter {
             // where they reach a terminal rather than a model.
             let safe_id = sanitize_one_line(&s.session_id);
             let id = short_id(&safe_id);
-            let id_display = if self.use_color {
+            // `styled()`, not `use_color`: this body is shared by Pretty and
+            // Plain (Json returned above), and `use_color` excludes only Json
+            // — so reading it directly puts escapes in `--format plain` on a
+            // terminal. `print_project_list` had exactly this bug.
+            let id_display = if self.styled() {
                 id.if_supports_color(Stream::Stdout, |t| t.cyan())
                     .to_string()
             } else {
@@ -1352,20 +1357,20 @@ impl OutputFormatter {
             if s.already_harvested {
                 line.push_str("  (harvested)");
             }
-            println!("{line}");
+            outln!(self, "{line}");
             if let Some(prompt) = &s.first_prompt {
                 // Sanitize *before* the dim wrapper, so our own escapes are
                 // the last thing added and an embedded reset cannot escape
                 // the styling and run unconstrained.
                 let prompt = sanitize_one_line(prompt);
-                let preview = if self.use_color {
+                let preview = if self.styled() {
                     prompt
                         .if_supports_color(Stream::Stdout, |t| t.dimmed())
                         .to_string()
                 } else {
                     prompt.to_string()
                 };
-                println!("    {preview}");
+                outln!(self, "    {preview}");
             }
         }
     }
@@ -3162,6 +3167,95 @@ mod tests {
         snap_formats("aggregate_stats", |f| f.print_aggregate_stats(&stats));
     }
 
+    // ---- harvest --------------------------------------------------------
+
+    /// Two sessions covering the renderer's optional branches between them.
+    ///
+    /// The first has everything — branch, prompt preview, plural turn count —
+    /// and is already harvested; the second has no branch, no prompt and
+    /// exactly one turn, which is the only way to reach the singular "1 turn"
+    /// and the skipped preview line.
+    fn harvest_sessions() -> Vec<HarvestSessionOutput> {
+        vec![
+            HarvestSessionOutput {
+                session_id: "019fd0b6-ae1c-72c2-9f4e-2b7c8d1e0a35".to_string(),
+                cwd: Some("/w/engramdb".to_string()),
+                git_branch: Some("feat/harvest".to_string()),
+                started_at: Some(fixed(2026, 3, 4, 9, 0, 0)),
+                ended_at: Some(fixed(2026, 3, 4, 10, 30, 0)),
+                user_turns: 12,
+                assistant_turns: 31,
+                bytes: 184_320,
+                first_prompt: Some("Why does the daemon reap while a session is open?".to_string()),
+                already_harvested: true,
+            },
+            HarvestSessionOutput {
+                session_id: "019fd0c1-4d2a-7b31-8e60-5a9f3c2d1b47".to_string(),
+                cwd: Some("/w/engramdb".to_string()),
+                git_branch: None,
+                started_at: Some(fixed(2026, 3, 5, 14, 15, 0)),
+                ended_at: Some(fixed(2026, 3, 5, 14, 20, 0)),
+                user_turns: 1,
+                assistant_turns: 2,
+                bytes: 4_096,
+                first_prompt: None,
+                already_harvested: false,
+            },
+        ]
+    }
+
+    fn harvest_scope() -> Vec<std::path::PathBuf> {
+        vec![
+            std::path::PathBuf::from("/w/engramdb"),
+            std::path::PathBuf::from("/w/engramdb-worktree"),
+        ]
+    }
+
+    #[test]
+    fn snap_harvest_sessions() {
+        snap_formats("harvest_sessions", |f| {
+            f.print_harvest_sessions(&harvest_sessions(), &harvest_scope())
+        });
+    }
+
+    /// The empty case is a different renderer path, not a shorter one: it
+    /// echoes the searched scope and points at `--include-harvested` /
+    /// `--all-projects` / the ledger, because "no sessions" is otherwise
+    /// indistinguishable from a scope that resolved somewhere unexpected.
+    #[test]
+    fn snap_harvest_sessions_empty() {
+        snap_formats("harvest_sessions_empty", |f| {
+            f.print_harvest_sessions(&[], &harvest_scope())
+        });
+    }
+
+    /// A session whose id and prompt carry an ANSI reset and a newline.
+    ///
+    /// Transcript text is the one thing this renderer prints that a third
+    /// party wrote — a prompt is whatever was typed or pasted into Claude
+    /// Code — so the sanitizer standing between it and the terminal is load
+    /// bearing, and this is the case that pins it.
+    #[test]
+    fn snap_harvest_sessions_hostile_text() {
+        let sessions = vec![HarvestSessionOutput {
+            session_id: "019fd0b6-ae1c\u{1b}[0m-72c2-9f4e-2b7c8d1e0a35".to_string(),
+            cwd: None,
+            git_branch: Some("main\u{1b}[31m".to_string()),
+            started_at: None,
+            ended_at: None,
+            user_turns: 3,
+            assistant_turns: 4,
+            bytes: 2_048,
+            first_prompt: Some(
+                "first line\nSECOND LINE\u{1b}[0m pretending to be output".to_string(),
+            ),
+            already_harvested: false,
+        }];
+        snap_formats("harvest_sessions_hostile_text", |f| {
+            f.print_harvest_sessions(&sessions, &[])
+        });
+    }
+
     // ---- doctor ---------------------------------------------------------
 
     #[test]
@@ -3353,6 +3447,29 @@ mod tests {
     fn snap_color_project_list_plain_is_never_styled() {
         assert_never_styled("project_list_always", OutputFormat::Plain, |f| {
             f.print_project_list(&project_entries(), ProjectListGrouping::Always)
+        });
+    }
+
+    // ---- harvest --------------------------------------------------------
+
+    /// Cyan session id, dimmed prompt preview.
+    #[test]
+    fn snap_color_harvest_sessions() {
+        snap_colored("harvest_sessions", |f| {
+            f.print_harvest_sessions(&harvest_sessions(), &harvest_scope())
+        });
+    }
+
+    /// The same pairing as `print_project_list`, and it caught the same bug.
+    /// `print_harvest_sessions` shares one body between Pretty and Plain —
+    /// Json returns early — and it reached the id and the preview through
+    /// `use_color`, which excludes only Json. `--format plain` on a terminal
+    /// therefore came out coloured. It reads `styled()` now, and this is what
+    /// holds it there.
+    #[test]
+    fn snap_color_harvest_sessions_plain_is_never_styled() {
+        assert_never_styled("harvest_sessions", OutputFormat::Plain, |f| {
+            f.print_harvest_sessions(&harvest_sessions(), &harvest_scope())
         });
     }
 

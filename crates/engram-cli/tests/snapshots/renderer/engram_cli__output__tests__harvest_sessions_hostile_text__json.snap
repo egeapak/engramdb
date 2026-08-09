@@ -1,0 +1,20 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "scope": [],
+  "sessions": [
+    {
+      "already_harvested": false,
+      "assistant_turns": 4,
+      "bytes": 2048,
+      "first_prompt": "first line\nSECOND LINE\u001b[0m pretending to be output",
+      "git_branch": "main\u001b[31m",
+      "session_id": "019fd0b6-ae1c\u001b[0m-72c2-9f4e-2b7c8d1e0a35",
+      "user_turns": 3
+    }
+  ]
+}
+--- stderr ---

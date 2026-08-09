@@ -1,0 +1,14 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"list\", \"--since\", \"1h\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest list --since 1h
+exit: 0
+--- stdout ---
+{
+  "scope": [
+    "[PROJECT]"
+  ],
+  "sessions": []
+}
+--- stderr ---

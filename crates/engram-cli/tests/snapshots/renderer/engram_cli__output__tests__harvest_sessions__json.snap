@@ -1,0 +1,36 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "scope": [
+    "/w/engramdb",
+    "/w/engramdb-worktree"
+  ],
+  "sessions": [
+    {
+      "already_harvested": true,
+      "assistant_turns": 31,
+      "bytes": 184320,
+      "cwd": "/w/engramdb",
+      "ended_at": "2026-03-04T10:30:00Z",
+      "first_prompt": "Why does the daemon reap while a session is open?",
+      "git_branch": "feat/harvest",
+      "session_id": "019fd0b6-ae1c-72c2-9f4e-2b7c8d1e0a35",
+      "started_at": "2026-03-04T09:00:00Z",
+      "user_turns": 12
+    },
+    {
+      "already_harvested": false,
+      "assistant_turns": 2,
+      "bytes": 4096,
+      "cwd": "/w/engramdb",
+      "ended_at": "2026-03-05T14:20:00Z",
+      "session_id": "019fd0c1-4d2a-7b31-8e60-5a9f3c2d1b47",
+      "started_at": "2026-03-05T14:15:00Z",
+      "user_turns": 1
+    }
+  ]
+}
+--- stderr ---

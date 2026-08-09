@@ -1,0 +1,27 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"list\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest list
+exit: 0
+--- stdout ---
+{
+  "scope": [
+    "[PROJECT]"
+  ],
+  "sessions": [
+    {
+      "already_harvested": false,
+      "assistant_turns": 0,
+      "bytes": 177,
+      "cwd": "[PROJECT]",
+      "ended_at": "[TIMESTAMP]",
+      "first_prompt": "What is the default digest budget?",
+      "git_branch": "main",
+      "session_id": "session-beta",
+      "started_at": "[TIMESTAMP]",
+      "user_turns": 1
+    }
+  ]
+}
+--- stderr ---

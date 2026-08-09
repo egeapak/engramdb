@@ -31,7 +31,7 @@ help_cases! {
     help_root_short => ["-h"],
     help_version => ["--version"],
 
-    // ---- top-level subcommands (26) -------------------------------------
+    // ---- top-level subcommands (27) -------------------------------------
     help_init => ["init", "--help"],
     help_add => ["add", "--help"],
     help_get => ["get", "--help"],
@@ -58,6 +58,7 @@ help_cases! {
     help_hook => ["hook", "--help"],
     help_setup => ["setup", "--help"],
     help_review => ["review", "--help"],
+    help_harvest => ["harvest", "--help"],
 
     // ---- task (2) -------------------------------------------------------
     help_task_current => ["task", "current", "--help"],
@@ -98,6 +99,23 @@ help_cases! {
     help_hook_post_tool_use => ["hook", "post-tool-use", "--help"],
     help_hook_session_end => ["hook", "session-end", "--help"],
     help_hook_pre_compact => ["hook", "pre-compact", "--help"],
+
+    // ---- harvest (8) ----------------------------------------------------
+    help_harvest_list => ["harvest", "list", "--help"],
+    help_harvest_show => ["harvest", "show", "--help"],
+    help_harvest_mark => ["harvest", "mark", "--help"],
+    help_harvest_index => ["harvest", "index", "--help"],
+    help_harvest_search => ["harvest", "search", "--help"],
+    help_harvest_summary => ["harvest", "summary", "--help"],
+    help_harvest_reset => ["harvest", "reset", "--help"],
+    help_harvest_ledger => ["harvest", "ledger", "--help"],
+
+    // ---- harvest ledger (5) ---------------------------------------------
+    help_harvest_ledger_list => ["harvest", "ledger", "list", "--help"],
+    help_harvest_ledger_show => ["harvest", "ledger", "show", "--help"],
+    help_harvest_ledger_export => ["harvest", "ledger", "export", "--help"],
+    help_harvest_ledger_rm => ["harvest", "ledger", "rm", "--help"],
+    help_harvest_ledger_prune => ["harvest", "ledger", "prune", "--help"],
 
     // ---- clap-level failures (exit 2) -----------------------------------
     err_unknown_subcommand => ["definitely-not-a-command"],
