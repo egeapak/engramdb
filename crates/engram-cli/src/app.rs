@@ -191,6 +191,11 @@ pub enum ProjectsCommand {
         /// Also delete all descendants (children and their children).
         #[arg(long)]
         cascade: bool,
+        /// Also delete personal memories. Without this they are kept: a
+        /// remote-derived project ID is shared by every clone of that remote,
+        /// and the registry cannot see the others.
+        #[arg(long)]
+        purge: bool,
     },
     /// Show aggregate statistics across all projects
     Stats,
@@ -2183,11 +2188,13 @@ mod tests {
                         project_id,
                         force,
                         cascade,
+                        purge,
                     }),
             } => {
                 assert_eq!(project_id, "some-id");
                 assert!(force);
                 assert!(!cascade);
+                assert!(!purge, "personal memories are kept unless asked for");
             }
             _ => panic!("Expected Projects Delete command"),
         }

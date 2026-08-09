@@ -27,21 +27,21 @@ use tokio::fs as async_fs;
 /// embedding vectors over from `wt_store` so search keeps working without
 /// re-embedding. Returns `(migrated, left_behind)`.
 ///
-/// `left_behind` counts files this pass could not read or parse; the caller
-/// must not delete `src_dir` while it is non-zero — skipping a file only
-/// protects it if something else does not then remove the directory it sits in.
+/// Files that can't be read or parsed are skipped (a single corrupt file must
+/// not abort consolidation) and counted in `left_behind`. The caller must not
+/// delete `src_dir` while that count is non-zero: skipping a file only protects
+/// it if something else does not then remove the directory it sits in.
 ///
-/// Files that can't be read or parsed are skipped (a single corrupt file
-/// must not abort consolidation). Re-runs are made safe two ways:
+/// Re-runs are made safe two ways:
 /// - **newest wins**: when main already holds the same ID with an
 ///   `updated_at` at least as new, the stray copy is dropped instead of
 ///   migrated — `create` is a full overwrite, so migrating unconditionally
 ///   would resurrect a stale snapshot (file, index row, AND vectors) over
 ///   changes made in the main store after a partial run (a crash or a failed
 ///   `remove_dir_all` leaves the stray store behind while main keeps moving);
-/// - **per-file deletion**: each source file is removed right after its
-///   successful migration, so a crash mid-loop leaves only not-yet-migrated
-///   files for the next run instead of the whole set.
+/// - **delete-after-durable**: source files are removed only once the batched
+///   `create` has committed, so a crash before that point leaves every source
+///   file in place for the next run instead of losing the ones already handled.
 async fn migrate_dir(
     src_dir: &Path,
     wt_store: &MemoryStore,
@@ -51,7 +51,18 @@ async fn migrate_dir(
         return Ok((0, 0));
     }
 
-    let mut migrated = 0;
+    // Phase 1 — read and parse every stray file up front.
+    //
+    // The per-file work below needs two lookups against *other* stores
+    // (main's current copy, and the worktree's vectors), and both have batch
+    // forms. Collecting the parse results first is what makes those batchable
+    // — the previous shape interleaved them one memory at a time, so the
+    // `get` against main was a full directory scan per stray file, i.e.
+    // O(stray * main_size). Unreadable or unparseable files are skipped here
+    // exactly as before: a single corrupt file must not abort consolidation —
+    // and counted, so the caller knows not to remove the directory holding
+    // them.
+    let mut pending: Vec<(PathBuf, engram_types::Memory)> = Vec::new();
     let mut left_behind = 0;
     let mut entries = async_fs::read_dir(src_dir).await?;
     while let Some(entry) = entries.next_entry().await? {
@@ -67,36 +78,107 @@ async fn migrate_dir(
             left_behind += 1;
             continue;
         };
+        pending.push((path, memory));
+    }
+    if pending.is_empty() {
+        return Ok((0, left_behind));
+    }
 
-        // Newest wins (see doc comment): a STRICTLY newer copy in main means
-        // this stray file is a leftover from an earlier (partial)
-        // consolidation whose memory has since been edited — drop it, don't
-        // resurrect it. Equal timestamps re-migrate: a crash between main's
-        // `create` and the chunk relocation below leaves an equal-updated_at
-        // copy in main with NO vectors, and dropping the stray file then
-        // would lose them; re-migrating the identical snapshot is idempotent
-        // (create is a full overwrite, chunk upsert replaces in place).
-        if let Ok(existing) = main_store.get(&memory.id).await {
-            if existing.updated_at > memory.updated_at {
+    // Phase 2 — one batched read of main's existing copies, replacing the
+    // per-file `get`.
+    //
+    // A missing row here means main has no copy, which is the common case and
+    // the same thing the old `get` reported as `Err(NotFound)`. Unlike the
+    // `compress` verification loops, this call site does not need to tell a
+    // missing memory from an unreadable one: the old code treated *every*
+    // `get` error identically (fall through and migrate), because migrating
+    // over an unreadable main-side copy is the correct repair either way.
+    let ids: Vec<&str> = pending.iter().map(|(_, m)| m.id.as_str()).collect();
+    let existing: std::collections::HashMap<String, engram_types::Memory> = main_store
+        .get_batch(&ids)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
+    // Newest wins (see doc comment): a STRICTLY newer copy in main means this
+    // stray file is a leftover from an earlier (partial) consolidation whose
+    // memory has since been edited — drop it, don't resurrect it. Equal
+    // timestamps re-migrate: a crash between main's `create` and the chunk
+    // relocation below leaves an equal-updated_at copy in main with NO
+    // vectors, and dropping the stray file then would lose them; re-migrating
+    // the identical snapshot is idempotent (create is a full overwrite, chunk
+    // upsert replaces in place).
+    let mut to_migrate = Vec::with_capacity(pending.len());
+    for (path, memory) in pending {
+        match existing.get(&memory.id) {
+            Some(e) if e.updated_at > memory.updated_at => {
                 let _ = async_fs::remove_file(&path).await;
-                continue;
+            }
+            _ => to_migrate.push((path, memory)),
+        }
+    }
+    if to_migrate.is_empty() {
+        return Ok((0, left_behind));
+    }
+
+    // Phase 3 — pull all the vectors out of the worktree store in one scan
+    // rather than one `export_chunks` query per memory.
+    let migrate_ids: Vec<&str> = to_migrate.iter().map(|(_, m)| m.id.as_str()).collect();
+    let mut chunks_by_id = wt_store
+        .export_chunks_batch(&migrate_ids)
+        .await
+        .unwrap_or_default();
+
+    // Phase 4 — write into main with a single batched create.
+    //
+    // This is the term that actually dominates consolidation. A per-memory
+    // `create` pays four separate O(main store size) operations (ID probe,
+    // chunk-presence probe, index commit, manifest stats scan), so migrating
+    // W memories into a store of M was quadratic — measured at 24 ms per
+    // create into an empty store rising to 582 ms into a 1000-memory one.
+    // Batching the *lookups* around it, as an earlier pass did, changed
+    // nothing measurable precisely because this was the floor.
+    let batch: Vec<engram_types::Memory> = to_migrate.iter().map(|(_, m)| m.clone()).collect();
+    main_store.create_batch(&batch).await?;
+    let migrated = batch.len();
+
+    // Source files are consumed only once the whole batch is durable. The
+    // per-file version deleted each source immediately after its own create,
+    // so a crash mid-loop left the remainder for the next run; with one
+    // batched commit there is no mid-loop to crash in — either every memory
+    // is in main or none is, and in the latter case every source file is
+    // still present for a re-run.
+    let mut relocate: Vec<(String, chrono::DateTime<chrono::Utc>, Vec<Vec<f32>>)> = Vec::new();
+    for (path, memory) in &to_migrate {
+        if let Some(chunks) = chunks_by_id.remove(&memory.id) {
+            if !chunks.is_empty() {
+                relocate.push((memory.id.clone(), memory.updated_at, chunks));
             }
         }
-
-        // Write the memory (file + metadata) into the main project.
-        main_store.create(&memory).await?;
-
-        // Relocate the existing embedding vectors so the migrated memory
-        // stays searchable immediately — no model load, no re-embedding.
-        let chunks = wt_store.export_chunks(&memory.id).await.unwrap_or_default();
-        if !chunks.is_empty() {
-            main_store.upsert_chunks(&memory.id, chunks).await?;
-        }
-
-        // Source file is consumed the moment its migration is durable.
-        let _ = async_fs::remove_file(&path).await;
-        migrated += 1;
+        let _ = async_fs::remove_file(path).await;
     }
+
+    // Phase 5 — one batched vector upsert. Ordering is unchanged from the
+    // per-memory version: every file and index row is durable in main before
+    // any vector is attached, so a crash here leaves memories that are
+    // present but not yet semantically searchable — recoverable by a
+    // `reindex --embeddings-only` — never vectors pointing at absent
+    // memories.
+    //
+    // This is the *guarded* batch (the batched `upsert_chunks_if_current`),
+    // where the per-memory original used the unguarded `upsert_chunks`. The
+    // snapshot is the `updated_at` we just wrote via `create`, so the guard
+    // is a no-op unless another writer changed the memory in between — and in
+    // that case dropping the vectors is the correct outcome, not a
+    // regression: attaching the worktree's vectors to content that has since
+    // been edited would leave the memory silently mis-embedded, where
+    // skipping leaves it merely un-embedded and a `reindex
+    // --embeddings-only` away from correct.
+    if !relocate.is_empty() {
+        main_store.upsert_chunks_batch(relocate).await?;
+    }
+
     Ok((migrated, left_behind))
 }
 
@@ -444,6 +526,89 @@ mod tests {
             async_fs::read_to_string(&corrupt).await.unwrap(),
             "not frontmatter at all"
         );
+    }
+
+    /// A mixed batch: some stray files are stale (main is newer, drop them),
+    /// some are fresh (migrate them), in one consolidation.
+    ///
+    /// The single-memory tests above cannot catch a partitioning bug in the
+    /// batched migrate path — dropping the wrong file, migrating a stale
+    /// snapshot, or losing the count — because with one memory every
+    /// partition is trivially correct.
+    #[tokio::test]
+    async fn consolidate_mixed_batch_drops_only_the_stale_entries() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree(tmp.path());
+        let registry = InMemoryRegistry::new();
+
+        let main_store = MemoryStore::init(&main, &registry).await.unwrap();
+        let wt_store = MemoryStore::init(&wt, &registry).await.unwrap();
+
+        // Two memories that already exist in main and will be advanced there,
+        // so their stray copies are stale by the time we consolidate.
+        let mut stale_ids = Vec::new();
+        for i in 0..2 {
+            let mem = Memory::new(
+                MemoryType::Decision,
+                format!("Stale {}", i),
+                "Original content",
+                Provenance::human(),
+            );
+            let id = wt_store.create(&mem).await.unwrap();
+            main_store.create(&mem).await.unwrap();
+            main_store
+                .update_with(&id, |m| {
+                    m.summary = format!("Updated in main {}", i);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            stale_ids.push(id);
+        }
+
+        // Three memories that exist only in the worktree — these must migrate,
+        // vectors and all.
+        let mut fresh_ids = Vec::new();
+        for i in 0..3 {
+            let mem = Memory::new(
+                MemoryType::Convention,
+                format!("Fresh {}", i),
+                "Worktree-only content",
+                Provenance::human(),
+            );
+            let id = wt_store.create(&mem).await.unwrap();
+            wt_store
+                .upsert_chunks(&id, vec![vec![0.25f32; 384]])
+                .await
+                .unwrap();
+            fresh_ids.push(id);
+        }
+
+        let migrated = consolidate_worktree_into_main(&wt, &main).await.unwrap();
+        assert_eq!(migrated, 3, "only the three worktree-only memories migrate");
+
+        for (i, id) in stale_ids.iter().enumerate() {
+            let m = main_store.get(id).await.unwrap();
+            assert_eq!(
+                m.summary,
+                format!("Updated in main {}", i),
+                "a stale stray copy must not overwrite the newer main copy"
+            );
+        }
+
+        for (i, id) in fresh_ids.iter().enumerate() {
+            let m = main_store.get(id).await.unwrap();
+            assert_eq!(m.summary, format!("Fresh {}", i));
+            let chunks = main_store.export_chunks(id).await.unwrap();
+            assert_eq!(
+                chunks.len(),
+                1,
+                "vectors must relocate for every migrated memory"
+            );
+            assert!((chunks[0][0] - 0.25).abs() < f32::EPSILON);
+        }
+
+        assert!(!wt.join(".engramdb").exists(), "stray store is removed");
     }
 
     #[tokio::test]

@@ -97,7 +97,7 @@ engramdb projects list                                 # full registry as a tree
 engramdb projects list --group none                    # flat, one full path per line
 engramdb projects info                                 # current project
 engramdb projects stats                                # aggregate stats
-engramdb projects delete <id> [-f] [--cascade]         # remove from registry + delete data
+engramdb projects delete <id> [-f] [--cascade] [--purge] # remove from registry + delete data
 engramdb projects link <child_id> --parent <parent_id> # link as sub-project
 engramdb projects unlink <child_id>                    # promote back to root
 engramdb projects prune [-f]                           # remove stale registry entries + orphan data

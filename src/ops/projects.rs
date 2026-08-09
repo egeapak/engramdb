@@ -10,6 +10,7 @@ use crate::storage::{
 use crate::types::MemoryType;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
+use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tokio::fs as async_fs;
@@ -43,6 +44,9 @@ pub struct DeleteResult {
     /// Project IDs of descendants that were also removed (cascade delete).
     /// Empty when cascade was not requested or the project had no descendants.
     pub cascaded_ids: Vec<String>,
+    /// Data directories kept because they still hold personal memories and
+    /// `purge` was not requested. Their index was reclaimed either way.
+    pub retained_with_personal: Vec<String>,
 }
 
 /// Aggregate statistics across all projects.
@@ -142,10 +146,22 @@ pub async fn list_projects(registry: &dyn RegistryBackend) -> Result<Vec<Project
 ///
 /// When `cascade` is false and the project has descendants, this function
 /// returns an error rather than silently leaving orphaned children behind.
+///
+/// `purge` decides what happens to personal memories, which live *only* in the
+/// data directory and have no copy in the project tree. With `purge = false`
+/// (the default everywhere) the directory is kept whenever it still holds them,
+/// exactly as `prune_stale_projects` does, and only the rebuildable index is
+/// reclaimed — because a project ID derived from a git remote is shared by every
+/// clone of that remote on the machine, and the registry keeps one row per ID,
+/// so a sibling clone is structurally invisible here. Deleting project A's data
+/// directory can therefore destroy project B's only copy, and no check inside
+/// this function can rule that out. `purge = true` is the user saying they mean
+/// it anyway.
 pub async fn delete_project(
     registry: &dyn RegistryBackend,
     project_id: &str,
     cascade: bool,
+    purge: bool,
 ) -> Result<DeleteResult> {
     // Registry removal is a manual load → mutate → save cycle, so it must
     // run under the backend's cross-process mutation lock — otherwise a
@@ -184,9 +200,17 @@ pub async fn delete_project(
     // Delete global data directory for this project.
     let projects_dir = paths::global_data_dir()?.join("projects");
     let global_project_dir = projects_dir.join(project_id);
+    let mut retained_with_personal = Vec::new();
     let global_data_removed = if global_project_dir.exists() {
-        async_fs::remove_dir_all(&global_project_dir).await?;
-        true
+        if purge {
+            async_fs::remove_dir_all(&global_project_dir).await?;
+            true
+        } else if reclaim_data_dir(&global_project_dir).await {
+            true
+        } else {
+            retained_with_personal.push(project_id.to_string());
+            false
+        }
     } else {
         false
     };
@@ -198,7 +222,11 @@ pub async fn delete_project(
             if dir.exists() {
                 // Best-effort: don't abort the whole delete if one child's
                 // data dir can't be removed.
-                let _ = async_fs::remove_dir_all(&dir).await;
+                if purge {
+                    let _ = async_fs::remove_dir_all(&dir).await;
+                } else if !reclaim_data_dir(&dir).await {
+                    retained_with_personal.push(desc_id.clone());
+                }
             }
         }
     }
@@ -207,6 +235,7 @@ pub async fn delete_project(
         project_path: entry.project_path,
         global_data_removed,
         cascaded_ids: descendants,
+        retained_with_personal,
     })
 }
 
@@ -601,31 +630,47 @@ pub async fn aggregate_stats(registry: &dyn RegistryBackend) -> Result<Aggregate
     let reg = registry.load().await?;
     let total_projects = reg.projects.len();
 
+    // Each project is an independent store open (config load, LanceDB
+    // connect, possible schema migration) followed by one index scan, so the
+    // walk is I/O-bound and the per-project cost dominates — it does not
+    // shrink with a better query. Run a bounded number concurrently: on a
+    // slow disk this is the difference between N serial round trips and
+    // roughly N/CONCURRENCY. The cap keeps a machine with hundreds of
+    // registered projects from opening hundreds of LanceDB connections at
+    // once. Per-project write locks are independent, so concurrent opens of
+    // *different* projects never contend.
+    const CONCURRENCY: usize = 8;
+
+    let per_project = futures_util::stream::iter(reg.projects.iter().map(|entry| async move {
+        let dir = Path::new(&entry.project_path);
+        if !dir.join(".engramdb").exists() {
+            return None;
+        }
+
+        let store = MemoryStore::open(dir).await.ok()?;
+
+        // Reachability is recorded even when the count below fails, matching
+        // the sequential version: the store opened, so the project exists.
+        // `count_by_type` reads one column instead of the seven
+        // `list_summary` decodes — the six others (id, status, logical,
+        // criticality, created_at, expires_at) cost a `serde_json` parse and
+        // two RFC3339 parses per memory whose results were discarded here.
+        Some(store.count_by_type().await.ok())
+    }))
+    .buffer_unordered(CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
     let mut reachable_projects = 0;
     let mut total_memories = 0;
     let mut type_counts: HashMap<MemoryType, usize> = HashMap::new();
 
-    for entry in &reg.projects {
-        let dir = Path::new(&entry.project_path);
-        if !dir.join(".engramdb").exists() {
-            continue;
-        }
-
-        let store = match MemoryStore::open(dir).await {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
+    for counts in per_project.into_iter().flatten() {
         reachable_projects += 1;
-
-        let summaries = match store.list_summary().await {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        total_memories += summaries.len();
-        for e in &summaries {
-            *type_counts.entry(e.type_).or_insert(0) += 1;
+        let Some(counts) = counts else { continue };
+        for (type_, n) in counts {
+            total_memories += n;
+            *type_counts.entry(type_).or_insert(0) += n;
         }
     }
 
@@ -764,7 +809,7 @@ mod tests {
         // Re-ensure our entry is in the registry right before deleting
         registry.update(temp_dir.path(), &pid).await.unwrap();
 
-        let result = delete_project(&registry, &pid, false).await.unwrap();
+        let result = delete_project(&registry, &pid, false, true).await.unwrap();
         assert!(!result.project_path.is_empty());
         assert!(!global_dir.exists(), "Global data dir should be removed");
         assert!(result.cascaded_ids.is_empty());
@@ -773,8 +818,50 @@ mod tests {
     #[tokio::test]
     async fn test_delete_project_not_found() {
         let registry = InMemoryRegistry::new();
-        let result = delete_project(&registry, "nonexistent-id-12345", false).await;
+        let result = delete_project(&registry, "nonexistent-id-12345", false, true).await;
         assert!(result.is_err());
+    }
+
+    /// `delete` removes a *registration*. The data directory behind it can be
+    /// shared: a remote-derived ID is the same for every clone of that remote,
+    /// and the registry keeps one row per ID, so a sibling clone is invisible
+    /// here. Without `--purge`, personal memories — the only copy — survive.
+    #[tokio::test]
+    async fn delete_keeps_personal_memories_unless_purge_is_asked_for() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        let pid = store.project_id.clone();
+
+        let personal = paths::personal_memories_dir(&pid).unwrap();
+        async_fs::create_dir_all(&personal).await.unwrap();
+        let only_copy = personal.join("a-note_00000000-0000-0000-0000-000000000001.md");
+        async_fs::write(&only_copy, "personal memory body")
+            .await
+            .unwrap();
+        let lancedb = paths::global_data_dir()
+            .unwrap()
+            .join("projects")
+            .join(&pid)
+            .join("lancedb");
+        assert!(lancedb.exists(), "init must have created an index");
+
+        let result = delete_project(&registry, &pid, false, false).await.unwrap();
+        assert!(registry.load().await.unwrap().projects.is_empty());
+        assert!(
+            only_copy.exists(),
+            "a sibling clone's only copy must survive a registration delete"
+        );
+        assert!(!lancedb.exists(), "the derived index is still reclaimed");
+        assert!(!result.global_data_removed);
+        assert_eq!(result.retained_with_personal, vec![pid.clone()]);
+
+        // And `--purge` is the escape hatch that really removes it.
+        registry.update(temp_dir.path(), &pid).await.unwrap();
+        let result = delete_project(&registry, &pid, false, true).await.unwrap();
+        assert!(result.global_data_removed);
+        assert!(result.retained_with_personal.is_empty());
+        assert!(!only_copy.exists());
     }
 
     #[tokio::test]
@@ -1258,7 +1345,7 @@ mod tests {
             .await
             .unwrap();
 
-        let err = delete_project(&registry, &parent.project_id, false)
+        let err = delete_project(&registry, &parent.project_id, false, true)
             .await
             .expect_err("must refuse to delete a parent with children by default");
         assert!(format!("{err}").to_lowercase().contains("descendant"));
@@ -1292,7 +1379,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = delete_project(&registry, &root.project_id, true)
+        let result = delete_project(&registry, &root.project_id, true, true)
             .await
             .unwrap();
 
@@ -1335,7 +1422,7 @@ mod tests {
         assert!(parent_global.exists());
         assert!(child_global.exists());
 
-        delete_project(&registry, &parent.project_id, true)
+        delete_project(&registry, &parent.project_id, true, true)
             .await
             .unwrap();
 

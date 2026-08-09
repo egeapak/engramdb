@@ -318,7 +318,7 @@ engramdb projects list [--group auto|always|none]  # all registered projects as 
 engramdb projects discover [PATH] [--yes] [--dry-run]  # adopt unregistered projects
 engramdb projects repair [-f] [--no-index]      # re-key a project whose ID drifted
 engramdb projects stats                         # cross-project aggregate stats
-engramdb projects delete <project_id> [-f] [--cascade]
+engramdb projects delete <project_id> [-f] [--cascade] [--purge]
 engramdb projects link <child_id> --parent <parent_id>
 engramdb projects unlink <project_id>
 engramdb projects prune [-f]
@@ -336,6 +336,14 @@ parent (marked `↳`). `--group` sets the grouping for one run, overriding the
 
 Worktree nesting and path sorting apply in every mode. `--json` output is
 unaffected by `--group`: it stays a flat array carrying `parent_project_id`.
+
+`projects delete` removes a *registration* and reclaims the rebuildable index
+behind it. It keeps personal memories unless `--purge` is passed, and reports
+what it kept as `retained_with_personal` — a project ID derived from a git
+remote is shared by every clone of that remote on the machine, and the registry
+records only one of them, so deleting one checkout's registration can otherwise
+destroy another checkout's only copy. `--purge` is the explicit "I mean it";
+without `-f` the prompt spells out which of the two you are about to do.
 
 `projects prune` drops registry entries whose project directory is gone and
 reclaims data directories no registration answers to. It never deletes personal

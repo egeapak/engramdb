@@ -60,6 +60,7 @@ pub async fn run_projects(
             project_id,
             force,
             cascade,
+            purge,
         } => {
             // Preview descendants so the confirmation prompt is informative.
             let reg = registry.load().await?;
@@ -77,17 +78,32 @@ pub async fn run_projects(
             }
 
             if !force {
+                let data = if purge {
+                    "delete their global data, personal memories included"
+                } else {
+                    "delete their index (personal memories are kept unless you pass --purge)"
+                };
                 if cascade && !descendants.is_empty() {
                     formatter.print_warning(&format!(
-                        "This will remove project '{}' AND {} descendant(s) from the registry and delete their global data.",
+                        "This will remove project '{}' AND {} descendant(s) from the registry and {}.",
                         project_id,
-                        descendants.len()
+                        descendants.len(),
+                        data
                     ));
                 } else {
                     formatter.print_warning(&format!(
-                        "This will remove project '{}' from the registry and delete its global data.",
-                        project_id
+                        "This will remove project '{}' from the registry and {}.",
+                        project_id,
+                        data.replace("their", "its")
                     ));
+                }
+                if purge {
+                    formatter.print_warning(
+                        "A project ID derived from a git remote is shared by every clone of that \
+                         remote on this machine, and the registry records only one of them — so \
+                         --purge can destroy another checkout's only copy of its personal \
+                         memories.",
+                    );
                 }
                 let confirm = prompter.confirm("Continue?", false).unwrap_or(false);
                 if !confirm {
@@ -96,13 +112,25 @@ pub async fn run_projects(
                 }
             }
 
-            let result = projects::delete_project(registry, &project_id, cascade).await?;
+            let result = projects::delete_project(registry, &project_id, cascade, purge).await?;
             formatter.print_success(&format!(
                 "Removed project from registry (path: {})",
                 result.project_path
             ));
             if result.global_data_removed {
-                formatter.print_success("Deleted global data (LanceDB + personal memories).");
+                if purge {
+                    formatter.print_success("Deleted global data (LanceDB + personal memories).");
+                } else {
+                    formatter.print_success("Deleted global data (LanceDB index).");
+                }
+            }
+            if !result.retained_with_personal.is_empty() {
+                formatter.print_message(&format!(
+                    "Kept {} data director(ies) holding personal memories (index reclaimed): {}. \
+                     Re-run with --purge to delete them too.",
+                    result.retained_with_personal.len(),
+                    result.retained_with_personal.join(", ")
+                ));
             }
             if !result.cascaded_ids.is_empty() {
                 formatter.print_success(&format!(
@@ -338,6 +366,7 @@ mod tests {
                 project_id: "test-proj".to_string(),
                 force: false,
                 cascade: false,
+                purge: false,
             }),
             &formatter,
             &prompter,
@@ -372,6 +401,7 @@ mod tests {
                 project_id: "test-proj".to_string(),
                 force: false,
                 cascade: false,
+                purge: false,
             }),
             &formatter,
             &prompter,
@@ -413,6 +443,7 @@ mod tests {
                 project_id: "parent".to_string(),
                 force: true, // doesn't matter — the block is informational
                 cascade: false,
+                purge: false,
             }),
             &formatter,
             &prompter,
