@@ -93,18 +93,47 @@ impl EvidenceLinks {
 /// harvested conversation. So the *directory* is what separates them — present
 /// but storeless is a real answer, absent is not an answer at all.
 pub async fn evidence_links(scope: &SessionScope) -> Result<EvidenceLinks> {
-    let mut links: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    use futures_util::StreamExt;
+
+    // Each path is an independent store open (config load, LanceDB connect,
+    // possible schema migration) followed by one two-column scan, so the walk
+    // is I/O-bound and the per-path cost does not shrink with a better query.
+    // This runs unattended on the SessionEnd path, where the latency is a
+    // human waiting for a session to finish tearing down. Bounded so a machine
+    // with many linked sub-projects does not open every LanceDB connection at
+    // once; the same cap `aggregate_stats` uses for the same shape.
+    const CONCURRENCY: usize = 8;
+
+    // Phase 1 — open every path concurrently, **in order**. `buffered`, not
+    // `buffer_unordered`: the dedupe below is order-sensitive (see the comment
+    // on it), so completion order must not decide which of two paths sharing a
+    // project id is the one that gets scanned.
+    let opened: Vec<(usize, crate::storage::Result<MemoryStore>)> = futures_util::stream::iter(
+        scope
+            .paths
+            .iter()
+            .enumerate()
+            .map(|(i, path)| async move { (i, MemoryStore::open(path).await) }),
+    )
+    .buffered(CONCURRENCY)
+    .collect()
+    .await;
+
+    // Phase 2 — decide, sequentially, which stores to scan. Opening *before*
+    // the id is marked seen is the property being preserved: a git worktree
+    // shares its main checkout's project id but has no `.engramdb/` of its
+    // own, so marking first would let whichever of the two sorts earlier claim
+    // the id — and if that was the worktree, the store holding every pin would
+    // be skipped and the whole scope would look uncited.
+    //
     // Deduped by project id, never by path spelling: `.`, a relative `--dir`
     // and a symlinked checkout are the same store under three names, and
-    // opening one twice would double every memory id behind a session.
+    // scanning one twice would double every memory id behind a session.
     let mut seen: HashSet<String> = HashSet::new();
-    for path in &scope.paths {
-        // Opened *before* the id is marked seen. A git worktree shares its main
-        // checkout's project id but has no `.engramdb/` of its own, so marking
-        // first would let whichever of the two sorts earlier claim the id — and
-        // if that was the worktree, the store holding every pin would be
-        // skipped and the whole scope would look uncited.
-        let store = match MemoryStore::open(path).await {
+    let mut to_scan: Vec<MemoryStore> = Vec::new();
+    for (i, result) in opened {
+        let path = &scope.paths[i];
+        let store = match result {
             Ok(store) => store,
             Err(crate::storage::StorageError::NotInitialized) if is_readable_dir(path) => continue,
             Err(crate::storage::StorageError::NotInitialized) => {
@@ -128,7 +157,24 @@ pub async fn evidence_links(scope: &SessionScope) -> Result<EvidenceLinks> {
         if !seen.insert(project_id::compute_project_id(path)) {
             continue;
         }
-        for link in store.list_source_session_links().await? {
+        to_scan.push(store);
+    }
+
+    // Phase 3 — scan the survivors concurrently. A failure here is still
+    // fatal: an unknown pin set is not an empty one, and the caller's next
+    // move is to delete transcript copies.
+    let scanned: Vec<crate::storage::Result<Vec<_>>> = futures_util::stream::iter(
+        to_scan
+            .iter()
+            .map(|store| store.list_source_session_links()),
+    )
+    .buffer_unordered(CONCURRENCY)
+    .collect()
+    .await;
+
+    let mut links: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for result in scanned {
+        for link in result? {
             for session in link.sessions {
                 links
                     .entry(session)
@@ -137,6 +183,8 @@ pub async fn evidence_links(scope: &SessionScope) -> Result<EvidenceLinks> {
             }
         }
     }
+    // Sorted and deduped, so the unordered fan-in above cannot change the
+    // answer — only the order the ids arrived in, which this erases.
     for ids in links.values_mut() {
         ids.sort();
         ids.dedup();
@@ -239,28 +287,48 @@ pub async fn link_memories(
 identifier (letters, digits, '-', '_', '.') that is not a path"
         );
     }
+    // One lock, one batched read, one index commit for the whole mark.
+    //
+    // Both properties the per-memory `update_with` loop was written for are
+    // *strengthened* here, not traded away:
+    //
+    // - **Atomic read-modify-write.** `update_batch_with` acquires the same
+    //   per-project write lock and re-reads every memory inside it, so two
+    //   harvests marking the same memory from different sessions still cannot
+    //   erase each other's citation. The critical section now spans the whole
+    //   batch instead of being reacquired per memory, so it is one
+    //   serialization point rather than N interleavable ones.
+    // - **`was_new` is still computed from the pre-state, inside the lock.**
+    //   The closure is called with the memory as re-read under the lock — the
+    //   only place the pre-state exists — exactly as before. It is recorded by
+    //   *canonical* id (`memory.id`), not the caller's `id`, because a caller
+    //   may pass a prefix and the report names full ids.
+    //
+    // The per-memory error granularity is preserved too: `update_batch_with`
+    // reports an unresolvable id (or a failing file write) against that id and
+    // carries on, which is what keeps a typo'd memory id from losing an
+    // already-written ledger decision.
+    let mut newly_linked: HashSet<String> = HashSet::new();
+    let (updated, errors) = store
+        .update_batch_with(memory_ids, |memory| {
+            if memory.link_source_session(session_id) {
+                newly_linked.insert(memory.id.clone());
+            }
+            Ok(())
+        })
+        .await?;
+
+    // `updated` is canonical, and so is what the closure recorded, so the two
+    // sides of the split agree even when the caller passed a prefix.
     let mut report = LinkReport::default();
-    for id in memory_ids {
-        // Only the pre-state knows whether the citation is new, and the closure
-        // is the only place that sees it — `update_with` re-reads inside the
-        // lock, so comparing before the call would be racing the very thing the
-        // lock exists to prevent.
-        let mut was_new = false;
-        // `update_with` is that atomic read-modify-write: two harvests marking
-        // the same memory from different sessions must not erase each other's
-        // citation, which an unlocked read-then-update would allow.
-        match store
-            .update_with(id, |memory| {
-                was_new = memory.link_source_session(session_id);
-                Ok(())
-            })
-            .await
-        {
-            Ok(memory) if was_new => report.linked.push(memory.id),
-            Ok(memory) => report.unchanged.push(memory.id),
-            Err(e) => report.unresolved.push((id.clone(), format!("{e}"))),
+    for id in updated {
+        if newly_linked.contains(&id) {
+            report.linked.push(id);
+        } else {
+            report.unchanged.push(id);
         }
     }
+    report.unresolved = errors;
     Ok(report)
 }
 
@@ -427,6 +495,146 @@ mod tests {
             err.to_string().contains("not a readable directory"),
             "the refusal must name the path it could not read: {err:#}"
         );
+    }
+
+    /// The batched mark must split `linked` from `unchanged` per memory, not
+    /// per call.
+    ///
+    /// `was_new` is what tells a fresh citation from one that was already
+    /// there, and it is only knowable from the pre-state under the lock. A
+    /// batch that collapsed it to a single flag would report every memory the
+    /// same way — and `pinned()` counts both, so the bug would be invisible in
+    /// the pin count and visible only in the report a human reads.
+    #[tokio::test]
+    async fn a_mixed_batch_reports_each_memory_s_own_newness() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_with(tmp.path()).await;
+        let already = store.create(&memory("already")).await.unwrap();
+        let fresh_a = store.create(&memory("fresh-a")).await.unwrap();
+        let fresh_b = store.create(&memory("fresh-b")).await.unwrap();
+
+        // One of the three already cites the session.
+        link_memories(&store, "sess-a", std::slice::from_ref(&already))
+            .await
+            .unwrap();
+
+        let report = link_memories(
+            &store,
+            "sess-a",
+            &[
+                already.clone(),
+                fresh_a.clone(),
+                fresh_b.clone(),
+                "no-such-memory".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.linked, vec![fresh_a.clone(), fresh_b.clone()]);
+        assert_eq!(report.unchanged, vec![already.clone()]);
+        assert_eq!(report.unresolved.len(), 1);
+        assert_eq!(report.unresolved[0].0, "no-such-memory");
+        assert_eq!(report.pinned(), 3);
+
+        // And every one of them actually carries the citation, exactly once.
+        for id in [&already, &fresh_a, &fresh_b] {
+            assert_eq!(
+                store.get(id).await.unwrap().source_sessions,
+                vec!["sess-a".to_string()],
+                "{id} lost or duplicated its citation"
+            );
+        }
+    }
+
+    /// Marking two sessions across one batch must accumulate, not replace.
+    ///
+    /// The batch holds the write lock for the whole set and re-reads every
+    /// memory inside it, which is the property that makes this safe; a
+    /// read-before-the-lock version would let the second call's pre-state
+    /// predate the first call's write and drop `sess-a`.
+    #[tokio::test]
+    async fn a_second_batch_adds_a_citation_rather_than_replacing_it() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_with(tmp.path()).await;
+        let ids: Vec<String> = {
+            let mut v = Vec::new();
+            for i in 0..8 {
+                v.push(store.create(&memory(&format!("m{i}"))).await.unwrap());
+            }
+            v
+        };
+
+        link_memories(&store, "sess-a", &ids).await.unwrap();
+        let second = link_memories(&store, "sess-b", &ids).await.unwrap();
+        assert_eq!(second.linked.len(), 8, "sess-b is new to all of them");
+
+        for id in &ids {
+            assert_eq!(
+                store.get(id).await.unwrap().source_sessions,
+                vec!["sess-a".to_string(), "sess-b".to_string()]
+            );
+        }
+    }
+
+    /// The pin scan runs its per-project opens and scans concurrently, so
+    /// every project's citations must still reach the merged map — a dropped
+    /// one is a transcript copy the next eviction sweep is free to delete.
+    #[tokio::test]
+    async fn every_project_in_a_scope_contributes_its_pins() {
+        let tmp = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let mut paths = Vec::new();
+        let mut expected: Vec<(String, String)> = Vec::new();
+
+        // More projects than the concurrency bound, so the stream actually
+        // has to refill rather than issuing everything at once.
+        for p in 0..12 {
+            let dir = tmp.path().join(format!("project-{p:02}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let store = MemoryStore::init(&dir, &registry).await.unwrap();
+            // Two memories each, and every *other* project shares session
+            // `common` with its neighbour — so the merge has to union lists
+            // under one key as well as collect distinct keys.
+            let a = store.create(&memory("a")).await.unwrap();
+            let b = store.create(&memory("b")).await.unwrap();
+            let own = format!("sess-{p:02}");
+            link_memories(&store, &own, std::slice::from_ref(&a))
+                .await
+                .unwrap();
+            link_memories(&store, "common", std::slice::from_ref(&b))
+                .await
+                .unwrap();
+            expected.push((own, a));
+            expected.push(("common".to_string(), b));
+            paths.push(dir);
+        }
+
+        let scope = SessionScope {
+            root_project_id: project_id::compute_project_id(&paths[0]),
+            root_dir: paths[0].clone(),
+            paths,
+        };
+        let links = evidence_links(&scope).await.unwrap();
+
+        assert_eq!(
+            links.pinned_sessions().len(),
+            13,
+            "twelve per-project sessions plus the shared one"
+        );
+        assert_eq!(links.by_session["common"].len(), 12);
+        assert_eq!(links.citing_memories(), 24);
+        for (session, memory_id) in expected {
+            assert!(
+                links.by_session[&session].contains(&memory_id),
+                "{memory_id} is missing from the pins for {session}"
+            );
+        }
+
+        // Deterministic across repeats: the fan-in is unordered, and the sort
+        // + dedupe is what makes that unobservable.
+        let again = evidence_links(&scope).await.unwrap();
+        assert_eq!(again.by_session, links.by_session);
     }
 
     #[test]

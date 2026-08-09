@@ -245,7 +245,7 @@ Reports candidates only. The actual merge happens via the MCP `compress_apply` t
 ## `reindex` — rebuild vectors and index
 
 ```bash
-engramdb reindex [--embeddings-only|--index-only|--archive-only] [--global]
+engramdb reindex [[--embeddings-only|--index-only] [--global] | --archive-only]
 ```
 
 | Flag | What runs |
@@ -253,7 +253,7 @@ engramdb reindex [--embeddings-only|--index-only|--archive-only] [--global]
 | (no flag) | Re-embed everything + rebuild the LanceDB index. |
 | `--embeddings-only` | Re-embed only. |
 | `--index-only` | Rebuild the index without re-embedding. |
-| `--archive-only` | Rebuild the **conversation** search rows from the stored transcript copies — the copies, not the live transcripts, even where Claude Code still has one. Touches no memory; see [`harvest search`](#harvest--mine-past-claude-code-sessions). Curated summaries are preserved — they are the one thing a rebuild cannot recreate. This is also the remediation when `[embeddings].dimensions` changed under an existing conversation index: the table's vector width is fixed at creation, so it is recreated at the new width (carrying the summaries across) before the rows are rebuilt. |
+| `--archive-only` | Rebuild the **conversation** search rows from the stored transcript copies — the copies, not the live transcripts, even where Claude Code still has one. Touches no memory; see [`harvest search`](#harvest--mine-past-claude-code-sessions). Curated summaries are preserved — they are the one thing a rebuild cannot recreate. This is also the remediation when `[embeddings].dimensions` changed under an existing conversation index: the table's vector width is fixed at creation, so it is recreated at the new width (carrying the summaries across) before the rows are rebuilt. Rejected alongside any other flag, `--global` included: conversation rows live in the **root project's** index, which has no global-store counterpart. |
 
 ## `migrate` / `rollback` — memory format migrations
 
@@ -305,7 +305,7 @@ engramdb hook pre-tool-use                            # PreToolUse for Read/Writ
 engramdb hook session-start [--min-criticality <0..1>] # SessionStart, default 0.6
 engramdb hook user-prompt-submit                      # UserPromptSubmit: prompt-relevant memories
 engramdb hook post-tool-use                           # PostToolUse for Write/Edit/MultiEdit: watch-path warnings
-engramdb hook session-end                             # SessionEnd: housekeeping, no output
+engramdb hook session-end                             # SessionEnd: housekeeping + transcript copy, no output
 engramdb hook pre-compact                             # PreCompact: store-your-memories reminder
 ```
 
@@ -345,14 +345,14 @@ engramdb harvest list [--since 7d] [-n N] [--include-harvested]
                       [--include-empty] [--all-projects] [--exclude-session ID]
 engramdb harvest show <session_id> [--max-chars N] [--include-thinking]
                       [--include-sidechains] [--no-tools] [--all-projects]
-engramdb harvest mark <session_id> [--memory <id>]... [--defer] [--note <text>]
+engramdb harvest mark <session_id> [[--memory <id>]... | --defer] [--note <text>]
                       [--all-projects] [--summary "<text>"]
 engramdb harvest index [<session_id> | --all] [--force]
 engramdb harvest search <query> [-n N] [--since 30d] [--all-projects]
 engramdb harvest summary <session_id> [<text> | --editor | --from-file <path>]
 engramdb harvest reset <session_id>
 engramdb harvest ledger list [--decision harvested|skipped|deferred|unreviewed]
-                             [--with-archive]
+                             [--stage collected|indexed|compressed] [--with-archive]
 engramdb harvest ledger show <session_id>
 engramdb harvest ledger export <session_id> [-o <path>]
 engramdb harvest ledger rm <session_id> [--archive-only] [--unpin] [--force]
@@ -402,12 +402,24 @@ emits the structured event list alongside the rendered markdown.
 
 **Searching past conversations.** `harvest search` answers "did we ever
 discuss X" and "why did the build break in July" over the conversations that
-have been indexed. Indexing is automatic: a session a human settled with
-`mark` is indexed on the next maintenance pass, and a session **nobody**
-reviewed is indexed once it is older than `[harvest] index_after_hours` (24 by
-default). That timeout is the point — if search only found what you had
-already read, it would only find what you no longer need. `harvest index`
-forces it by hand.
+have been indexed.
+
+Indexing rides the throttled maintenance pass, which runs at most once per
+`[maintenance] interval_secs` (**21600**, six hours). Two things become due: a
+session a human settled with `mark`, at once, and a session **nobody** reviewed,
+once it is older than `[harvest] index_after_hours` (**24**). That second
+trigger is the point — if search only found what you had already read, it would
+only find what you no longer need. One pass embeds at most
+`[harvest] index_batch` (**25**) conversations, newest first, so a machine with
+years of history fills in over successive passes.
+
+**The pass only indexes where an embedding provider is already loaded, which
+means the MCP server** — running the CLI does not build one, and its maintenance
+pass skips indexing entirely (the same way it skips consolidation). So on a
+machine that has never run `engramdb serve`, nothing is indexed until you ask:
+`harvest index <session_id>` or `harvest index --all` does it by hand, and is
+the only route on a CLI-only setup. `[harvest] index = false` turns the
+automatic pass off altogether.
 
 Each conversation gets two vectors. `digest_vec` is always present and is
 embedded from the deterministic, code-generated reduction of the session:
@@ -500,10 +512,14 @@ And a **stage** — where the conversation's bytes are: `collected` (a transcrip
 is reachable), `indexed` (a search row exists for it), or `compressed`. The two
 never move each other: a session can be `indexed` while `skipped`, or
 `compressed` while `deferred`. `harvest ledger list --stage <stage>` filters on
-it, alongside `--decision`. An entry that reaches `compressed` leaves the
-ledger, and until conversation search ships there is nothing behind it — so
-this version never writes that stage on its own, and says so loudly in the log
-if something else does.
+it, alongside `--decision`. An entry that reaches `compressed` is dropped from
+the ledger on the next read, on the premise that something else carries it from
+then on. Conversation search now ships, but its row is not that something: it
+holds the session's first prompt, curated summary and vectors — not the
+decision, the memory ids or the note. Dropping an entry therefore still destroys
+its review record, so **nothing in this version writes `compressed`**; the stage
+exists only so the format does not have to change later. If something else ever
+writes it, the drain says so loudly in the log, naming every session it dropped.
 
 **Transcript archives.** With `[harvest] archive = true` (the default), the
 SessionEnd hook compresses each ending session's transcript so it can still
@@ -572,10 +588,11 @@ thing that happens naturally when a copy reaches the end of its retention
 window. Nothing is broken and nothing needs repairing; the claim still holds,
 it just can no longer be traced back.
 
-`doctor` reports four harvest facts under **Project → Harvest**, none of which
-affects the exit code: sessions due for indexing, ledger lines against live
-entries (compaction is opportunistic, so a long log is normal), expired
-evidence, and pinned bytes.
+`doctor` reports up to four harvest facts under **Project → Harvest**, none of
+which affects the exit code: sessions due for indexing and ledger lines against
+live entries (compaction is opportunistic, so a long log is normal) are always
+shown; expired evidence and pinned bytes appear only when there is any. The
+whole subsection is omitted for a project that has never harvested.
 
 ## `completions` — shell completions
 

@@ -179,6 +179,15 @@ harness = false
 name = "project_scan"
 harness = false
 
+# A/B harness for the harvest paths: the per-memory provenance loop, the pin
+# scan, the machine-wide conversation search and the transcript listing, each
+# measured in the serial shape it had against the shape it has now. Also splits
+# `harvest index` into its embedding half and everything else, which is what
+# decides whether batching the embeddings there could pay.
+[[bench]]
+name = "harvest_paths"
+harness = false
+
 # Dev/test disk diet: full debug info across the ~400-crate dependency tree
 # (lance, datafusion, arrow, ort, …) made a single `--all-features` debug
 # build ~25 GB — enough to exhaust CI sandboxes and small dev machines.

@@ -118,6 +118,26 @@ pub enum DaemonCommand {
     },
 }
 
+/// Reject a blank `--memory` id at parse time.
+///
+/// `memories_created` is derived from how many ids were passed, so an empty
+/// one made the ledger claim a memory that does not exist: `mark --memory ""`
+/// reported "1 memory saved" and `ledger show` printed a blank line under
+/// `Memories: 1`. Failing in clap names the flag and stops before anything is
+/// written; `harvest_state::mark_harvested` refuses the same thing, which is
+/// what covers the MCP `harvest_mark` tool.
+fn parse_memory_id(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(
+            "a memory id cannot be empty — omit --memory entirely when the session yielded \
+             nothing, which still records the review"
+                .to_string(),
+        );
+    }
+    Ok(trimmed.to_string())
+}
+
 /// Subcommands for `engramdb harvest`.
 #[derive(Subcommand)]
 pub enum HarvestCommand {
@@ -185,7 +205,7 @@ pub enum HarvestCommand {
         /// Id of a memory created from this session (repeatable). Omit when
         /// the session yielded nothing — recording a zero-yield review is
         /// what stops it being re-read on the next harvest.
-        #[arg(long = "memory", value_name = "ID")]
+        #[arg(long = "memory", value_name = "ID", value_parser = parse_memory_id)]
         memory_ids: Vec<String>,
 
         /// Search every session on this machine, not just this project's.
@@ -278,7 +298,8 @@ pub enum HarvestCommand {
 pub enum LedgerCommand {
     /// List recorded sessions and their decisions
     List {
-        /// Only entries with this decision
+        /// Only entries with this decision (harvested, skipped, deferred,
+        /// unreviewed)
         #[arg(long, value_name = "DECISION")]
         decision: Option<String>,
 
@@ -1045,12 +1066,20 @@ pub enum Command {
     ///
     /// Provides the raw material for the `/engram:harvest` slash command:
     /// `list` shows which sessions are in scope, `show` prints a budgeted
-    /// digest of one, and `mark` records that a session has been reviewed so
-    /// it is not offered again. Scope defaults to the root of this project's
-    /// hierarchy plus every project registered under it — so from a git
-    /// worktree that is the main checkout and its sibling worktrees too, since
-    /// they share one memory store while filing transcripts under their own
-    /// paths.
+    /// digest of one, `mark` records that a session has been reviewed so it is
+    /// not offered again, and `reset` undoes that record.
+    ///
+    /// `search` answers "did we ever discuss X" over past conversations,
+    /// `index` builds the rows it reads (otherwise built by the maintenance
+    /// pass), and `summary` attaches a curated description of a session to its
+    /// row. `ledger` inspects and manages what has accumulated — the review
+    /// decisions and the compressed transcript copies the SessionEnd hook
+    /// keeps (`list`, `show`, `export`, `rm`, `prune`).
+    ///
+    /// Scope defaults to the root of this project's hierarchy plus every
+    /// project registered under it — so from a git worktree that is the main
+    /// checkout and its sibling worktrees too, since they share one memory
+    /// store while filing transcripts under their own paths.
     Harvest {
         #[command(subcommand)]
         command: HarvestCommand,
@@ -2946,6 +2975,90 @@ mod tests {
                 assert_eq!(decay_floor, Some(0.15));
             }
             _ => panic!("Expected Update command"),
+        }
+    }
+
+    /// `harvest mark --memory ""` used to be accepted: the ledger then
+    /// recorded `memory_ids: [""]` with `memories_created: 1`, so
+    /// `ledger show` claimed a memory and printed a blank line where its id
+    /// should have been. Rejecting at parse names the flag and writes nothing.
+    #[test]
+    fn harvest_mark_rejects_an_empty_memory_id() {
+        for blank in ["", "   ", "\t"] {
+            let parsed =
+                Cli::try_parse_from(["engramdb", "harvest", "mark", "s1", "--memory", blank]);
+            let Err(err) = parsed else {
+                panic!("an empty --memory must not parse (blank {blank:?})");
+            };
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains("cannot be empty"),
+                "the error must name the problem, got: {rendered}"
+            );
+        }
+
+        // The zero-yield form the message points at still works, and a real
+        // id is untouched (trimmed, not rejected).
+        let cli = Cli::try_parse_from(["engramdb", "harvest", "mark", "s1"]).unwrap();
+        match cli.command {
+            Command::Harvest {
+                command: HarvestCommand::Mark { memory_ids, .. },
+            } => assert!(memory_ids.is_empty()),
+            _ => panic!("expected harvest mark"),
+        }
+        let cli =
+            Cli::try_parse_from(["engramdb", "harvest", "mark", "s1", "--memory", " abc123 "])
+                .unwrap();
+        match cli.command {
+            Command::Harvest {
+                command: HarvestCommand::Mark { memory_ids, .. },
+            } => assert_eq!(memory_ids, vec!["abc123".to_string()]),
+            _ => panic!("expected harvest mark"),
+        }
+    }
+
+    /// `--stage` enumerated its values while `--decision` did not, so the one
+    /// flag whose vocabulary is not guessable was the one `--help` withheld.
+    #[test]
+    fn ledger_list_help_enumerates_both_filters() {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("harvest")
+            .and_then(|c| c.find_subcommand_mut("ledger"))
+            .and_then(|c| c.find_subcommand_mut("list"))
+            .expect("harvest ledger list exists")
+            .render_long_help()
+            .to_string();
+        for value in ["harvested", "skipped", "deferred", "unreviewed"] {
+            assert!(help.contains(value), "--decision must list {value}: {help}");
+        }
+        for value in ["collected", "indexed", "compressed"] {
+            assert!(help.contains(value), "--stage must list {value}: {help}");
+        }
+    }
+
+    /// `harvest --help` named only `list`/`show`/`mark`, omitting the whole
+    /// search-and-ledger surface a reader would otherwise never learn about
+    /// from the long description.
+    #[test]
+    fn harvest_long_help_names_every_subcommand() {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let harvest = cmd
+            .find_subcommand_mut("harvest")
+            .expect("harvest exists")
+            .clone();
+        let help = harvest.clone().render_long_help().to_string();
+        for name in harvest
+            .get_subcommands()
+            .map(|s| s.get_name().to_string())
+            .filter(|n| n != "help")
+        {
+            assert!(
+                help.contains(&format!("`{name}`")),
+                "the long description must name `{name}`: {help}"
+            );
         }
     }
 }

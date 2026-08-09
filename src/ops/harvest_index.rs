@@ -26,7 +26,53 @@ use crate::storage::harvest_state::{self, HarvestStage};
 use crate::storage::transcripts::{self, SessionSummary};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// What to tell someone whose backend exists and did not answer.
+///
+/// Every message on these paths used to claim "no embedding provider
+/// available", which is the one thing that is usually *not* true when they
+/// fire. A provider is nearly always constructed: on a default build the `Auto`
+/// backend falls back to Ollama, and
+/// [`OllamaProvider::new`](crate::embeddings::OllamaProvider::new) only builds
+/// an HTTP client, contacting nothing. So the provider exists, `is_some()` is
+/// true, and the failure lands at the *call* — an ONNX runtime that was never
+/// installed, or an Ollama server that is not listening. Naming the fix is the
+/// point: `doctor` is what reports which backend was selected and whether its
+/// model actually loaded.
+pub const EMBEDDING_FAILED_HINT: &str =
+    "The embedding backend is configured but did not answer — it can be selected and still \
+     fail (an ONNX runtime that is not installed, an Ollama server that is not running). Run \
+     `engramdb doctor` to see which backend was chosen and whether its model loaded.";
+
+/// What to tell someone with no backend at all.
+///
+/// The rarer half, and the only one for which "no embedding provider" is a true
+/// statement — a build without the `ollama` feature, or an explicit
+/// `--embedding-backend onnx` whose model did not load. It still named no fix,
+/// so it names one now.
+pub const EMBEDDING_MISSING_HINT: &str =
+    "Run `engramdb doctor` to see which backend the configuration selects and why none could \
+     be built.";
+
+/// Wrap an embedding failure with its cause *and* the fix.
+///
+/// Which of the two hints applies is decided by asking the engine, not by
+/// reading the error text: the two states produce different advice, and
+/// appending the "configured but did not answer" sentence to the *unconfigured*
+/// case produced a message that contradicted its own first clause.
+///
+/// `anyhow`'s `Display` prints only the outermost context and the CLI prints
+/// errors with `{}`, so a bare `.context(…)` also threw away the real cause
+/// ("connection refused"). Folding the chain in with `{source:#}` keeps it.
+fn embedding_failure(engine: &RetrievalEngine, what: &str, source: anyhow::Error) -> anyhow::Error {
+    if engine.embeddings_available() {
+        anyhow::anyhow!("{what}: {source:#}. {EMBEDDING_FAILED_HINT}")
+    } else {
+        anyhow::anyhow!("no embedding provider is available, so {what}. {EMBEDDING_MISSING_HINT}")
+    }
+}
 
 /// What happened to one session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,15 +168,41 @@ enum Prefer {
 /// exactly the ones most likely to have been pruned), while a session that was
 /// never archived has only the live file.
 fn locate(scope: &SessionScope, session_id: &str, prefer: Prefer) -> Result<Option<Source>> {
+    locate_in(scope, &live_sessions(scope)?, session_id, prefer)
+}
+
+/// Every live transcript in scope, by session id.
+///
+/// One listing, hoisted so a pass over many sessions builds it once. It parses
+/// every transcript under the scope's project directories, which is exactly
+/// what made the per-session [`locate`] quadratic: `harvest index --all` over
+/// N sessions listed — and therefore re-parsed — all N transcripts N times.
+fn live_sessions(scope: &SessionScope) -> Result<HashMap<String, SessionSummary>> {
+    let mut map: HashMap<String, SessionSummary> = HashMap::new();
+    for summary in transcripts::list_sessions_for(&scope.paths)? {
+        // **First wins**, matching the `.find()` this replaced. The listing is
+        // ordered newest-activity-first, and two project directories in one
+        // scope can hold a file with the same session id — so a plain
+        // `collect()` would silently start resolving such a collision to the
+        // *oldest* transcript.
+        map.entry(summary.session_id.clone()).or_insert(summary);
+    }
+    Ok(map)
+}
+
+/// [`locate`] against a listing the caller already has.
+fn locate_in(
+    scope: &SessionScope,
+    live: &HashMap<String, SessionSummary>,
+    session_id: &str,
+    prefer: Prefer,
+) -> Result<Option<Source>> {
     let live = || -> Result<Option<Source>> {
-        Ok(transcripts::list_sessions_for(&scope.paths)?
-            .into_iter()
-            .find(|s| s.session_id == session_id)
-            .map(|summary| Source {
-                path: summary.transcript_path.clone(),
-                _restored: None,
-                summary: Some(summary),
-            }))
+        Ok(live.get(session_id).map(|summary| Source {
+            path: summary.transcript_path.clone(),
+            _restored: None,
+            summary: Some(summary.clone()),
+        }))
     };
     let copy = || -> Result<Option<Source>> {
         Ok(
@@ -195,6 +267,50 @@ sessions still have bytes behind them."
     .await
 }
 
+/// [`index_session`] against a transcript file the caller has already located.
+///
+/// The public form of the half `reindex --archive-only` drives internally.
+/// [`index_session`] resolves the file through the live `~/.claude/projects`
+/// tree and the archive, which a caller that already holds the path (a
+/// benchmark of the indexing pass, a restored copy) has no way to satisfy
+/// without standing that tree up. Semantics are identical to
+/// [`index_session`] otherwise, including the unchanged-digest short circuit.
+pub async fn index_transcript(
+    scope: &SessionScope,
+    index: &ConversationIndex,
+    engine: &RetrievalEngine,
+    session_id: &str,
+    transcript_path: &Path,
+    force: bool,
+) -> Result<IndexAction> {
+    index_from_path(
+        scope,
+        index,
+        engine,
+        session_id,
+        transcript_path,
+        None,
+        force,
+    )
+    .await
+}
+
+/// Everything a session's row needs except its vector.
+///
+/// The split exists so a pass over many sessions can do all the parsing and
+/// all the table reads first, hand the whole set of texts to the provider in
+/// one call, and only then write the rows — the embed is 71% of the wall time
+/// of `harvest index --all` (`benches/harvest_paths.rs`,
+/// `index_embed_share/*`), and the provider charges per *invocation* as well as
+/// per token.
+struct PreparedRow {
+    /// The text whose vector goes in `row.digest_vec`.
+    text: String,
+    /// Complete but for `digest_vec`, which is a placeholder until the embed
+    /// lands.
+    row: ConversationRow,
+}
+
 /// The half of [`index_session`] that has already resolved a transcript file,
 /// so `reindex --archive-only` can drive it straight off a restored copy.
 async fn index_from_path(
@@ -206,6 +322,43 @@ async fn index_from_path(
     live_summary: Option<&SessionSummary>,
     force: bool,
 ) -> Result<IndexAction> {
+    let Some(prepared) = prepare_row(
+        scope,
+        index,
+        session_id,
+        transcript_path,
+        live_summary,
+        force,
+    )
+    .await?
+    else {
+        return Ok(IndexAction::Unchanged);
+    };
+
+    let vector = engine
+        .embed_text_result(&prepared.text)
+        .await
+        .map_err(|e| {
+            embedding_failure(
+                engine,
+                &format!("session {session_id} cannot be indexed"),
+                e,
+            )
+        })?;
+
+    write_row(scope, index, prepared.row, vector).await
+}
+
+/// Parse the transcript, read the existing row, and build everything but the
+/// vector — or `None` when the stored row is already current.
+async fn prepare_row(
+    scope: &SessionScope,
+    index: &ConversationIndex,
+    session_id: &str,
+    transcript_path: &Path,
+    live_summary: Option<&SessionSummary>,
+    force: bool,
+) -> Result<Option<PreparedRow>> {
     let digest = harvest::index_digest(transcript_path)?;
     let text = harvest::index_text(&digest);
     if text.trim().is_empty() {
@@ -228,12 +381,8 @@ and no failed tool calls. There is nothing a search could match."
         // transcript to arrive back here. Writing the stage on this path is
         // what heals it, and it costs one appended line once.
         record_indexed_stage(scope, session_id);
-        return Ok(IndexAction::Unchanged);
+        return Ok(None);
     }
-
-    let vector = engine.embed_text(&text).await.with_context(|| {
-        format!("no embedding provider available, so session {session_id} cannot be indexed")
-    })?;
 
     let summary = live_summary.unwrap_or(&digest.summary);
     // The same three defenses the digest header applies to these exact
@@ -266,10 +415,24 @@ and no failed tool calls. There is nothing a search could match."
         summary: existing.as_ref().and_then(|r| r.summary.clone()),
         summary_updated_at: existing.as_ref().and_then(|r| r.summary_updated_at),
         summary_vec: existing.as_ref().and_then(|r| r.summary_vec.clone()),
-        digest_vec: vector,
+        // Placeholder. `write_row` is the only thing that fills this, so a row
+        // can never reach the table with an empty vector.
+        digest_vec: Vec::new(),
     };
+    Ok(Some(PreparedRow { text, row }))
+}
+
+/// Attach the vector and commit the row.
+async fn write_row(
+    scope: &SessionScope,
+    index: &ConversationIndex,
+    mut row: ConversationRow,
+    vector: Vec<f32>,
+) -> Result<IndexAction> {
+    let session_id = row.session_id.clone();
+    row.digest_vec = vector;
     index.upsert(&row).await?;
-    record_indexed_stage(scope, session_id);
+    record_indexed_stage(scope, &session_id);
     Ok(IndexAction::Indexed)
 }
 
@@ -345,17 +508,11 @@ pub async fn index_pending(
     after: Duration,
     limit: usize,
 ) -> Result<IndexReport> {
-    let mut report = IndexReport::default();
-    for session_id in pending_sessions(scope, after, Utc::now())?
+    let due: Vec<String> = pending_sessions(scope, after, Utc::now())?
         .into_iter()
         .take(limit)
-    {
-        match index_session(scope, index, engine, &session_id, false).await {
-            Ok(action) => report.record(&session_id, action),
-            Err(e) => report.skip(&session_id, e.to_string()),
-        }
-    }
-    Ok(report)
+        .collect();
+    index_sessions_with(scope, index, engine, &due, false, Prefer::Live).await
 }
 
 /// Index the sessions named, or every session with bytes behind it.
@@ -369,6 +526,32 @@ pub async fn index_sessions(
     index_sessions_with(scope, index, engine, session_ids, force, Prefer::Live).await
 }
 
+/// The multi-session pass, in three phases rather than one loop.
+///
+/// Best-effort per session throughout: one unreadable transcript must not stop
+/// the rest, so a failure is recorded in [`IndexReport::skipped`] and the pass
+/// carries on. What changed is *where* the work happens.
+///
+/// 1. **Locate**, against one listing of the scope. [`locate`] lists every
+///    transcript under the scope on every call, so the per-session loop this
+///    replaces re-parsed all N transcripts N times — a quadratic that dwarfed
+///    the embedding it was hiding behind.
+/// 2. **Prepare** each row: parse the transcript, read the row it already has,
+///    and short-circuit the ones whose digest is unchanged. No model is touched
+///    here, so an unchanged session still costs no embedding.
+/// 3. **Embed the survivors in one call**, then write. The provider charges per
+///    *invocation* as well as per token — the mutex, the `spawn_blocking` hop,
+///    the tokenizer setup and the ONNX session entry locally; a whole socket
+///    round trip through the daemon — and one padded batch beats N single-row
+///    matmuls. Measured at 71% of this pass's wall time
+///    (`benches/harvest_paths.rs`, `index_embed_share/*`), against a batching
+///    gain of 1.6x at 8 texts and 2.5x at 64 (`parallel_simd.rs`,
+///    `embed_batching/*`).
+///
+/// A text that comes back without a vector is re-embedded on its own, purely to
+/// recover the provider's error for the report: `embed_texts` logs and discards
+/// it, and "this conversation could not be indexed" with no reason is the same
+/// dead end the error messages here exist to avoid.
 async fn index_sessions_with(
     scope: &SessionScope,
     index: &ConversationIndex,
@@ -378,10 +561,83 @@ async fn index_sessions_with(
     prefer: Prefer,
 ) -> Result<IndexReport> {
     let mut report = IndexReport::default();
+    if session_ids.is_empty() {
+        return Ok(report);
+    }
+
+    // Phase 1 + 2. `source` is dropped at the end of each iteration, which for
+    // an archived session deletes the temp dir holding the restored transcript
+    // — safe because `prepare_row` has already read the whole file by then, and
+    // nothing after it touches the path. Holding every restored copy alive
+    // across the batch instead would put N decompressed transcripts on disk at
+    // once for no gain.
+    let live = live_sessions(scope)?;
+    let mut prepared: Vec<(String, PreparedRow)> = Vec::new();
     for session_id in session_ids {
-        match index_session_with(scope, index, engine, session_id, force, prefer).await {
-            Ok(action) => report.record(session_id, action),
+        let source = match locate_in(scope, &live, session_id, prefer) {
+            Ok(Some(source)) => source,
+            Ok(None) => {
+                report.skip(
+                    session_id,
+                    format!(
+                        "No transcript for session {session_id}: Claude Code no longer has the \
+live one and no copy was collected for it. `engramdb harvest ledger list --with-archive` shows \
+which sessions still have bytes behind them."
+                    ),
+                );
+                continue;
+            }
+            Err(e) => {
+                report.skip(session_id, e.to_string());
+                continue;
+            }
+        };
+        match prepare_row(
+            scope,
+            index,
+            session_id,
+            &source.path,
+            source.summary.as_ref(),
+            force,
+        )
+        .await
+        {
+            Ok(Some(row)) => prepared.push((session_id.clone(), row)),
+            Ok(None) => report.record(session_id, IndexAction::Unchanged),
             Err(e) => report.skip(session_id, e.to_string()),
+        }
+    }
+    if prepared.is_empty() {
+        return Ok(report);
+    }
+
+    // Phase 3.
+    let texts: Vec<&str> = prepared.iter().map(|(_, p)| p.text.as_str()).collect();
+    let vectors = engine.embed_texts(&texts).await;
+    debug_assert_eq!(vectors.len(), prepared.len());
+
+    for ((session_id, row), vector) in prepared.into_iter().zip(vectors) {
+        let vector = match vector {
+            Some(v) => v,
+            None => match engine.embed_text_result(&row.text).await {
+                Ok(v) => v,
+                Err(e) => {
+                    report.skip(
+                        &session_id,
+                        embedding_failure(
+                            engine,
+                            &format!("session {session_id} cannot be indexed"),
+                            e,
+                        )
+                        .to_string(),
+                    );
+                    continue;
+                }
+            },
+        };
+        match write_row(scope, index, row.row, vector).await {
+            Ok(action) => report.record(&session_id, action),
+            Err(e) => report.skip(&session_id, e.to_string()),
         }
     }
     Ok(report)
@@ -541,8 +797,12 @@ Run `engramdb harvest index {session_id}` first."
             );
         }
         let clean = harvest::defang_prose(summary);
-        let vector = engine.embed_text(&clean).await.with_context(|| {
-            format!("no embedding provider available, so the summary for {session_id} cannot be embedded")
+        let vector = engine.embed_text_result(&clean).await.map_err(|e| {
+            embedding_failure(
+                engine,
+                &format!("the summary for session {session_id} cannot be embedded"),
+                e,
+            )
         })?;
         row.summary = Some(clean);
         row.summary_vec = Some(vector);
@@ -560,10 +820,142 @@ pub async fn search(
     since: Option<DateTime<Utc>>,
 ) -> Result<Vec<ConversationHit>> {
     let vector = engine
-        .embed_text(query)
+        .embed_text_result(query)
         .await
-        .context("no embedding provider available, so conversations cannot be searched")?;
+        .map_err(|e| embedding_failure(engine, "conversations cannot be searched", e))?;
     index.search(&vector, limit, since).await
+}
+
+/// A project left out of a machine-wide search, and why.
+///
+/// Named rather than counted: a project silently missing from the results is
+/// indistinguishable from one that never discussed the topic.
+#[derive(Debug, Clone)]
+pub struct SkippedProject {
+    pub project_id: String,
+    pub reason: String,
+}
+
+/// How many other projects' conversation indexes are opened and searched at
+/// once.
+///
+/// Each one is an independent LanceDB connect plus two vector searches, so the
+/// walk is I/O-bound and the per-project cost does not shrink with a better
+/// query. The cap keeps a machine with hundreds of registered projects from
+/// opening hundreds of LanceDB connections at once. Matches the bound
+/// [`crate::ops::projects::aggregate_stats`] uses for the same shape.
+const SEARCH_CONCURRENCY: usize = 8;
+
+/// Fold in every root project's conversations *except* `own_root_id`.
+///
+/// The machine-wide half of `harvest search --all-projects`, shared by the CLI
+/// and the MCP tool: two copies of this loop drifted apart once already, and
+/// only one of them got the query-embedded-once fix below.
+///
+/// Three properties the callers depend on:
+///
+/// 1. **The query is embedded once for the whole fan-out**, not once per
+///    project. The per-project [`search`] re-embedded the identical string for
+///    every project on the machine, so a 30-project search paid 30 model
+///    invocations for one question. (The caller's *own* project still goes
+///    through [`search`] before this is called, so a machine-wide search costs
+///    two embeds in total rather than one — a constant, not a term in N.)
+/// 2. **Only projects that already have a table are opened.**
+///    [`ConversationIndex::open`] *creates* the table, so a machine-wide search
+///    must not leave an empty one behind in every project it merely looked at.
+/// 3. **One unusable project does not fail the search.** A table left at a
+///    stale vector width is exactly that case and is repairable per project, so
+///    it is reported in [`SkippedProject`] rather than propagated.
+///
+/// Dedupe is by resolved **root project id**, never by path: two registry
+/// entries can name the same checkout through a symlink, and one of them would
+/// then be searched twice while the dedupe silently failed. Results are
+/// unsorted — the caller merges them with its own project's hits and sorts the
+/// union.
+pub async fn search_other_projects(
+    registry: &crate::storage::Registry,
+    own_root_id: &str,
+    engine: &RetrievalEngine,
+    dimensions: usize,
+    query: &str,
+    limit: usize,
+    since: Option<DateTime<Utc>>,
+) -> Result<(Vec<ConversationHit>, Vec<SkippedProject>)> {
+    use futures_util::StreamExt;
+
+    // Embedded once, before the fan-out: every project searches the same
+    // question, and on the daemon path each re-embed was also a socket round
+    // trip.
+    let vector = engine
+        .embed_text_result(query)
+        .await
+        .map_err(|e| embedding_failure(engine, "conversations cannot be searched", e))?;
+
+    let mut roots: Vec<String> = Vec::new();
+    for entry in &registry.projects {
+        let root = crate::storage::resolve_root_project_id(registry, &entry.project_id);
+        if root == own_root_id || roots.contains(&root) || !ConversationIndex::exists(&root) {
+            continue;
+        }
+        roots.push(root);
+    }
+
+    // `buffered`, not `buffer_unordered`: the per-project results are
+    // concatenated into the caller's hit list, and the caller's tie-break only
+    // orders hits with *equal* scores from different projects. Completion
+    // order is a function of disk timing, so an unordered fan-in would make
+    // the reported set depend on which disk answered first whenever the
+    // truncation to `limit` cut through a tie.
+    let per_project = futures_util::stream::iter(roots.into_iter().map(|root| {
+        let vector = &vector;
+        async move {
+            let index = match ConversationIndex::open(&root, dimensions).await {
+                Ok(index) => index,
+                Err(e) => {
+                    return Err(SkippedProject {
+                        project_id: root,
+                        reason: format!("{e:#}"),
+                    })
+                }
+            };
+            match index.search(vector, limit, since).await {
+                Ok(hits) => Ok(hits),
+                Err(e) => Err(SkippedProject {
+                    project_id: root,
+                    reason: format!("{e:#}"),
+                }),
+            }
+        }
+    }))
+    .buffered(SEARCH_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
+    let mut hits = Vec::new();
+    let mut skipped = Vec::new();
+    for outcome in per_project {
+        match outcome {
+            Ok(found) => hits.extend(found),
+            Err(s) => skipped.push(s),
+        }
+    }
+    Ok((hits, skipped))
+}
+
+/// The ordering `harvest search` reports: best score first, session id as the
+/// tie-break so a tie is resolved the same way on every run.
+///
+/// Shared with the machine-wide path so the CLI and the MCP tool cannot sort
+/// two different ways, and truncation to `limit` happens here rather than being
+/// forgotten by one of them.
+pub fn rank_hits(hits: &mut Vec<ConversationHit>, limit: usize) {
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+    hits.truncate(limit);
 }
 
 #[cfg(test)]
@@ -572,7 +964,7 @@ mod tests {
     use crate::embeddings::EmbeddingProvider;
     use crate::storage::harvest_state::HarvestDecision;
     use crate::storage::transcript_archive::ArchiveRef;
-    use crate::storage::{InMemoryRegistry, MemoryStore};
+    use crate::storage::{InMemoryRegistry, MemoryStore, RegistryBackend};
     use crate::types::EngramConfig;
     use std::io::Write;
     use std::sync::Arc;
@@ -632,6 +1024,39 @@ mod tests {
             .unwrap();
         RetrievalEngine::new(store, EngramConfig::default())
             .with_embedding_provider(Arc::new(KeywordEmbedder))
+    }
+
+    /// A provider that constructs fine and fails on every call — the shape of
+    /// a default build whose ONNX runtime is missing (the `Auto` backend then
+    /// falls back to Ollama, whose constructor contacts nothing) or whose
+    /// Ollama server is not running.
+    struct UnreachableEmbedder;
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for UnreachableEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            anyhow::bail!("error sending request: connection refused")
+        }
+        async fn embed_batch(&self, _texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            anyhow::bail!("error sending request: connection refused")
+        }
+        fn dimensions(&self) -> usize {
+            DIM
+        }
+        fn model_id(&self) -> String {
+            "unreachable-stub".into()
+        }
+        fn max_tokens(&self) -> usize {
+            512
+        }
+    }
+
+    async fn engine_that_fails_to_embed(dir: &Path) -> RetrievalEngine {
+        let store = MemoryStore::init(dir, &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        RetrievalEngine::new(store, EngramConfig::default())
+            .with_embedding_provider(Arc::new(UnreachableEmbedder))
     }
 
     async fn engine_without_embeddings(dir: &Path) -> RetrievalEngine {
@@ -1068,6 +1493,133 @@ mod tests {
         assert!(report.skipped[0].reason.contains("No transcript"));
     }
 
+    /// The batched pass embeds every session in one provider call and then
+    /// zips the vectors back onto the rows. If that zip ever slipped, each
+    /// conversation would be searchable under its *neighbour's* words — a
+    /// silent, total corruption of the index that no error would report.
+    ///
+    /// Six sessions with disjoint keywords, indexed in one call, then each
+    /// keyword queried: every one must find its own session and only its own.
+    /// The keyword embedder makes that decidable, which a hash-based stub could
+    /// not express.
+    #[tokio::test]
+    async fn a_batched_pass_gives_every_session_its_own_vector() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let claude = root.join("claude");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &claude);
+
+        let scope = SessionScope {
+            root_project_id: "batch-align-proj".into(),
+            root_dir: root.clone(),
+            paths: vec![root.clone()],
+        };
+        let engine = engine_with_embeddings(&root).await;
+        let index = index_at(&root).await;
+        let live_dir = claude
+            .join("projects")
+            .join(transcripts::encode_project_dir(&root));
+
+        // One keyword per session, drawn from the embedder's vocabulary so a
+        // query for one cannot accidentally match another.
+        let topics = [
+            "protoc", "lancedb", "reindex", "daemon", "worktree", "clippy",
+        ];
+        let ids: Vec<String> = topics
+            .iter()
+            .enumerate()
+            .map(|(i, topic)| {
+                let session = format!("s{i}");
+                write_transcript_for(
+                    &live_dir,
+                    &root,
+                    &session,
+                    &format!("a question about {topic}"),
+                    "some answer with no keyword in it",
+                );
+                session
+            })
+            .collect();
+
+        let report = index_sessions(&scope, &index, &engine, &ids, false)
+            .await
+            .unwrap();
+        assert_eq!(report.indexed.len(), topics.len(), "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+
+        for (i, topic) in topics.iter().enumerate() {
+            let hits = search(&index, &engine, topic, 10, None).await.unwrap();
+            assert_eq!(
+                hits.first().map(|h| h.session_id.as_str()),
+                Some(format!("s{i}").as_str()),
+                "querying {topic:?} must find the session that discussed it, got {hits:?}"
+            );
+        }
+    }
+
+    /// A batch mixing "already current", "needs indexing" and "no transcript
+    /// at all" must classify each one on its own, and must not let the
+    /// short-circuited ones consume a slot in the embedding batch.
+    #[tokio::test]
+    async fn a_mixed_batch_classifies_each_session_independently() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let claude = root.join("claude");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &claude);
+
+        let scope = SessionScope {
+            root_project_id: "batch-mixed-proj".into(),
+            root_dir: root.clone(),
+            paths: vec![root.clone()],
+        };
+        let engine = engine_with_embeddings(&root).await;
+        let index = index_at(&root).await;
+        let live_dir = claude
+            .join("projects")
+            .join(transcripts::encode_project_dir(&root));
+
+        for (session, topic) in [("already", "protoc"), ("fresh", "lancedb")] {
+            write_transcript_for(
+                &live_dir,
+                &root,
+                session,
+                &format!("a question about {topic}"),
+                "ok",
+            );
+        }
+        // `already` is indexed on its own first, so the batch below meets it
+        // with a current digest.
+        index_sessions(&scope, &index, &engine, &["already".to_string()], false)
+            .await
+            .unwrap();
+
+        let report = index_sessions(
+            &scope,
+            &index,
+            &engine,
+            &[
+                "already".to_string(),
+                "fresh".to_string(),
+                "ghost".to_string(),
+            ],
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.indexed, vec!["fresh".to_string()], "{report:?}");
+        assert_eq!(report.unchanged, vec!["already".to_string()], "{report:?}");
+        assert_eq!(report.skipped.len(), 1, "{report:?}");
+        assert_eq!(report.skipped[0].session_id, "ghost");
+
+        // Both rows are intact and still findable by their own topic — the
+        // short-circuited one must not have been overwritten by the batch.
+        for (session, topic) in [("already", "protoc"), ("fresh", "lancedb")] {
+            let hits = search(&index, &engine, topic, 10, None).await.unwrap();
+            assert_eq!(hits.first().map(|h| h.session_id.as_str()), Some(session));
+        }
+    }
+
     // ---- summary ----
 
     #[tokio::test]
@@ -1180,6 +1732,111 @@ mod tests {
         let hits = search(&index, &engine, "lancedb", 5, None).await.unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].summary.is_none(), "nobody reviewed it");
+    }
+
+    /// A provider that counts its calls, so a test can assert *how many times*
+    /// a query was embedded rather than only that it was.
+    struct CountingEmbedder(
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        KeywordEmbedder,
+    );
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for CountingEmbedder {
+        async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.1.embed(text).await
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            self.0
+                .fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+            self.1.embed_batch(texts).await
+        }
+        fn dimensions(&self) -> usize {
+            DIM
+        }
+        fn model_id(&self) -> String {
+            "counting-stub".into()
+        }
+        fn max_tokens(&self) -> usize {
+            512
+        }
+    }
+
+    /// The machine-wide fan-in must reach every project that has a table,
+    /// exactly once, and must embed the query exactly once no matter how many
+    /// projects it visits.
+    ///
+    /// Both halves are regressions waiting to happen: the walk runs its
+    /// per-project opens concurrently now, so a hit dropped on the floor
+    /// reads as "that project never discussed the topic"; and the previous
+    /// shape called `search` per project, which re-embedded the identical
+    /// string every time.
+    #[tokio::test]
+    async fn the_machine_wide_search_visits_each_project_once_and_embeds_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let tmp = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+
+        let engine_dir = tmp.path().join("engine");
+        let engine_store = MemoryStore::init(&engine_dir, &registry).await.unwrap();
+        let engine = RetrievalEngine::new(engine_store, EngramConfig::default())
+            .with_embedding_provider(Arc::new(CountingEmbedder(
+                std::sync::Arc::clone(&calls),
+                KeywordEmbedder,
+            )));
+
+        // Six projects with a conversation each, plus one registered project
+        // that never indexed anything — `exists` must keep the search from
+        // creating a table there.
+        let mut with_tables = Vec::new();
+        for p in 0..6 {
+            let dir = tmp.path().join(format!("p{p}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            MemoryStore::init(&dir, &registry).await.unwrap();
+            let root_id = crate::storage::project_id::compute_project_id(&dir);
+            let index = ConversationIndex::open(&root_id, DIM).await.unwrap();
+            let scope = SessionScope {
+                root_project_id: root_id.clone(),
+                root_dir: dir.clone(),
+                paths: vec![dir.clone()],
+            };
+            let path = write_transcript(&dir, &format!("s{p}"), "about lancedb", "ok");
+            index_from_path(&scope, &index, &engine, &format!("s{p}"), &path, None, true)
+                .await
+                .unwrap();
+            with_tables.push(root_id);
+        }
+        let bare = tmp.path().join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        MemoryStore::init(&bare, &registry).await.unwrap();
+        let bare_id = crate::storage::project_id::compute_project_id(&bare);
+
+        let data = registry.load().await.unwrap();
+        calls.store(0, Ordering::SeqCst);
+        let (hits, skipped) =
+            search_other_projects(&data, &with_tables[0], &engine, DIM, "lancedb", 50, None)
+                .await
+                .unwrap();
+
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the query is embedded once for the whole fan-out, not once per project"
+        );
+        let mut found: Vec<String> = hits.into_iter().map(|h| h.session_id).collect();
+        found.sort();
+        assert_eq!(
+            found,
+            vec!["s1", "s2", "s3", "s4", "s5"],
+            "every other project contributes exactly one hit, and the caller's own is excluded"
+        );
+        assert!(
+            !ConversationIndex::exists(&bare_id),
+            "a project with no table must not have one created just by being searched"
+        );
     }
 
     #[tokio::test]
@@ -1529,5 +2186,81 @@ mod tests {
         .unwrap();
 
         assert_eq!(all_indexable(&scope).unwrap(), vec!["pruned".to_string()]);
+    }
+
+    /// The failure message named no cause and no fix, and its one claim — "no
+    /// embedding provider available" — was false in the common case: a
+    /// provider is nearly always constructed, and it is the *call* that fails.
+    #[tokio::test]
+    async fn a_failing_embed_names_the_cause_and_the_fix() {
+        let tmp = TempDir::new().unwrap();
+        let engine = engine_that_fails_to_embed(tmp.path()).await;
+        let index = index_at(tmp.path()).await;
+
+        let err = search(&index, &engine, "protoc", 5, None)
+            .await
+            .expect_err("an unreachable backend cannot answer a search");
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("connection refused"),
+            "the underlying cause must survive: {msg}"
+        );
+        assert!(
+            msg.contains("engramdb doctor"),
+            "the message must name a next step: {msg}"
+        );
+        assert!(
+            msg.contains("configured but did not answer"),
+            "the message must be honest about a backend that exists and fails: {msg}"
+        );
+        assert!(
+            !msg.contains("no embedding provider available"),
+            "the false claim is back: {msg}"
+        );
+    }
+
+    /// The unconfigured case keeps the claim that is true of it — and only of
+    /// it — and gains the next step it never named. Appending the
+    /// "configured but did not answer" sentence here instead produced a
+    /// message that contradicted its own first clause.
+    #[tokio::test]
+    async fn an_unconfigured_backend_says_so_and_still_names_the_fix() {
+        let tmp = TempDir::new().unwrap();
+        let engine = engine_without_embeddings(tmp.path()).await;
+        let index = index_at(tmp.path()).await;
+
+        let msg = search(&index, &engine, "protoc", 5, None)
+            .await
+            .expect_err("no backend cannot answer a search")
+            .to_string();
+        assert!(msg.contains("no embedding provider is available"), "{msg}");
+        assert!(msg.contains("engramdb doctor"), "{msg}");
+        assert!(
+            !msg.contains("configured but did not answer"),
+            "the two states must not both claim the other's cause: {msg}"
+        );
+    }
+
+    /// Indexing goes through the same helper, so a backend that exists and
+    /// fails explains itself on every route rather than only on search.
+    #[tokio::test]
+    async fn an_indexing_failure_carries_the_same_guidance() {
+        let tmp = TempDir::new().unwrap();
+        let engine = engine_that_fails_to_embed(tmp.path()).await;
+        let index = index_at(tmp.path()).await;
+        let scope = scope_at(tmp.path());
+        let path = write_transcript(tmp.path(), "s-fail", "protoc broke the build", "fixed it");
+
+        let msg = index_one(&scope, &index, &engine, "s-fail", &path, false)
+            .await
+            .expect_err("an unreachable backend cannot index")
+            .to_string();
+        assert!(msg.contains("engramdb doctor"), "{msg}");
+        assert!(msg.contains("connection refused"), "{msg}");
+        assert!(
+            !msg.contains("no embedding provider is available"),
+            "a provider exists; it failed: {msg}"
+        );
     }
 }

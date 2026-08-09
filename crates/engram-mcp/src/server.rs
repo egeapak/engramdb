@@ -3521,57 +3521,30 @@ impl EngramDbServer {
                 .load()
                 .await
                 .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
-            let mut seen = vec![scope.root_project_id.clone()];
-            for entry in &registry_data.projects {
-                // Project *ids*, never paths: two registry entries can name
-                // the same checkout through a symlink, and one would then be
-                // searched twice while the dedupe silently failed.
-                let root =
-                    engramdb::storage::resolve_root_project_id(&registry_data, &entry.project_id);
-                // `exists`, not `open`: opening creates the table, and a
-                // machine-wide search must not leave an empty one behind in
-                // every project it merely looked at.
-                if seen.contains(&root) || !engramdb::storage::ConversationIndex::exists(&root) {
-                    continue;
-                }
-                seen.push(root.clone());
-                // One unusable project must not fail the whole machine-wide
-                // search — a table left at a stale vector width is exactly
-                // that case, and it is repairable per project. Reported in the
-                // result rather than swallowed: a project silently missing
-                // from the hits is indistinguishable from one that never
-                // discussed the topic.
-                let other = match engramdb::storage::ConversationIndex::open(
-                    &root,
-                    config.embeddings.dimensions,
-                )
-                .await
-                {
-                    Ok(index) => index,
-                    Err(e) => {
-                        skipped_projects.push(serde_json::json!({
-                            "project_id": root,
-                            "reason": format!("{e:#}"),
-                        }));
-                        continue;
-                    }
-                };
-                match ops::harvest_index::search(&other, &engine, &input.query, limit, since).await
-                {
-                    Ok(found) => hits.extend(found),
-                    Err(e) => skipped_projects.push(serde_json::json!({
-                        "project_id": root,
-                        "reason": format!("{e:#}"),
-                    })),
-                }
-            }
-            hits.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.session_id.cmp(&b.session_id))
-            });
-            hits.truncate(limit);
+            // The same walk the CLI's `--all-projects` runs: one shared
+            // implementation, because two copies of it drifted apart once
+            // already. Skipped projects are reported in the result rather than
+            // swallowed — a project silently missing from the hits is
+            // indistinguishable from one that never discussed the topic.
+            let (found, skipped) = ops::harvest_index::search_other_projects(
+                &registry_data,
+                &scope.root_project_id,
+                &engine,
+                config.embeddings.dimensions,
+                &input.query,
+                limit,
+                since,
+            )
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &format!("{e:#}")))?;
+            hits.extend(found);
+            skipped_projects.extend(skipped.into_iter().map(|s| {
+                serde_json::json!({
+                    "project_id": s.project_id,
+                    "reason": s.reason,
+                })
+            }));
+            ops::harvest_index::rank_hits(&mut hits, limit);
         }
 
         let json: Vec<serde_json::Value> = hits.iter().map(harvest_hit_json).collect();

@@ -890,7 +890,17 @@ impl MemoryStore {
     /// and a failing closure fails only its own memory. Ids that do not resolve
     /// are reported rather than aborting the batch.
     ///
-    /// Returns `(updated_ids, per_id_errors)`.
+    /// **Prefix ids resolve, as they do for `update_with`.** [`Self::get_batch`]
+    /// keys off the exact id, so anything shorter than a full id missed the map
+    /// and would have been reported as "memory not found" — a silent divergence
+    /// from the per-memory version this is documented to match. Resolution is a
+    /// second pass over only the ids the batched read did not answer, so a
+    /// caller passing full ids (all of them today) pays nothing for it.
+    ///
+    /// Returns `(updated_ids, per_id_errors)`, where the updated ids are the
+    /// **canonical** ones — `update_with` returns the persisted `Memory`, whose
+    /// id is canonical, so a caller that reports what it changed must not be
+    /// handed back the prefix it happened to pass in.
     pub async fn update_batch_with<F>(
         &self,
         ids: &[String],
@@ -908,18 +918,45 @@ impl MemoryStore {
         let mut current: HashMap<String, Memory> =
             self.get_batch(&id_refs).await?.into_iter().collect();
 
+        // Second pass for the ids the exact-keyed batch read could not answer.
+        // `get` is what `update_with` calls, so a prefix resolves by exactly
+        // the same rules (including "an exact full-id match beats prefix
+        // ambiguity") rather than by a second, subtly different implementation.
+        // Empty in the common case — every caller today passes full ids — so
+        // the directory scan it costs is paid only by a batch that would
+        // otherwise have reported a resolvable id as missing.
+        let unresolved: Vec<&String> = ids.iter().filter(|id| !current.contains_key(*id)).collect();
+        let mut aliases: HashMap<String, String> = HashMap::new();
+        for id in unresolved {
+            let Ok(memory) = self.get(id).await else {
+                continue;
+            };
+            let full = memory.id.clone();
+            // Two spellings of one memory in the same batch: alias the prefix
+            // onto the row already read rather than keeping both, so `f` still
+            // sees each memory exactly once — running the caller's mutation
+            // twice, the second time against a copy that predates the first
+            // write, is a lost update.
+            current.entry(full.clone()).or_insert(memory);
+            aliases.insert(id.clone(), full);
+        }
+
         let mut updated: Vec<String> = Vec::new();
         let mut errors: Vec<(String, String)> = Vec::new();
         let mut entries: Vec<IndexEntry> = Vec::new();
 
-        for id in ids {
-            let Some(mut memory) = current.remove(id) else {
-                errors.push((id.clone(), "memory not found".to_string()));
+        for given in ids {
+            let key = aliases.get(given).unwrap_or(given);
+            let Some(mut memory) = current.remove(key) else {
+                errors.push((given.clone(), "memory not found".to_string()));
                 continue;
             };
+            // Errors stay keyed by the id the caller passed — that is the
+            // string it can act on — while `updated` reports the canonical one.
+            let canonical = memory.id.clone();
             let old_visibility = memory.visibility;
             if let Err(e) = f(&mut memory) {
-                errors.push((id.clone(), format!("{:#}", e)));
+                errors.push((given.clone(), format!("{:#}", e)));
                 continue;
             }
             memory.mark_updated();
@@ -929,10 +966,10 @@ impl MemoryStore {
             // per-file. It is the LanceDB commits and the manifest scan that
             // were quadratic, not this.
             if let Err(e) = self
-                .write_updated_file_locked(id, &memory, old_visibility)
+                .write_updated_file_locked(&canonical, &memory, old_visibility)
                 .await
             {
-                errors.push((id.clone(), format!("{:#}", e)));
+                errors.push((given.clone(), format!("{:#}", e)));
                 continue;
             }
 
@@ -941,7 +978,7 @@ impl MemoryStore {
                 StorageError::Validation(format!("LanceDB has_chunks failed: {}", e))
             })?;
             entries.push(entry);
-            updated.push(id.clone());
+            updated.push(canonical);
         }
 
         if !entries.is_empty() {
@@ -4004,6 +4041,106 @@ mod tests {
 
         let reloaded = store.get("test-update-with-err").await.unwrap();
         assert_eq!(reloaded.summary, "Test summary");
+    }
+
+    /// `update_batch_with` is documented to match `update_with` per entry, and
+    /// `update_with` resolves a prefix id. The batched read keys off the exact
+    /// id, so a prefix used to fall straight through to "memory not found" —
+    /// silently, and only for the batched callers.
+    #[tokio::test]
+    async fn update_batch_with_resolves_a_prefix_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("abcdef012345", Visibility::Shared))
+            .await
+            .unwrap();
+
+        let (updated, errors) = store
+            .update_batch_with(&["abcdef".to_string()], |m| {
+                m.summary = "Reached by prefix".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert!(errors.is_empty(), "prefix must resolve, got {errors:?}");
+        assert_eq!(
+            updated,
+            vec!["abcdef012345".to_string()],
+            "the report names the canonical id, not the prefix the caller passed"
+        );
+        assert_eq!(
+            store.get("abcdef012345").await.unwrap().summary,
+            "Reached by prefix"
+        );
+    }
+
+    /// Two spellings of one memory in one batch must not apply the closure
+    /// twice — the closure is the caller's mutation, and running it on a
+    /// stale copy of the same memory would let the second write erase the
+    /// first.
+    #[tokio::test]
+    async fn update_batch_with_applies_a_duplicated_id_once() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("dupdupdup1234", Visibility::Shared))
+            .await
+            .unwrap();
+
+        let mut calls = 0usize;
+        let (updated, errors) = store
+            .update_batch_with(&["dupdupdup1234".to_string(), "dupdup".to_string()], |m| {
+                calls += 1;
+                m.tags.push(format!("call-{calls}"));
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(calls, 1, "the closure must see each memory exactly once");
+        assert_eq!(updated, vec!["dupdupdup1234".to_string()]);
+        assert_eq!(
+            errors.len(),
+            1,
+            "the second spelling has nothing left to do"
+        );
+        assert_eq!(
+            store.get("dupdupdup1234").await.unwrap().tags,
+            vec!["call-1"]
+        );
+    }
+
+    /// An id that resolves and one that does not, in the same batch: the good
+    /// one is applied and the bad one is reported under **the spelling the
+    /// caller passed**, which is the only string it can act on.
+    #[tokio::test]
+    async fn update_batch_with_reports_an_unresolvable_id_by_the_caller_s_spelling() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("realmemory0001", Visibility::Shared))
+            .await
+            .unwrap();
+
+        let (updated, errors) = store
+            .update_batch_with(&["realme".to_string(), "no-such-memory".to_string()], |m| {
+                m.summary = "touched".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(updated, vec!["realmemory0001".to_string()]);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, "no-such-memory");
     }
 
     #[tokio::test]

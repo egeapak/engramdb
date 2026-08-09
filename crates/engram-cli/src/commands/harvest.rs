@@ -322,10 +322,17 @@ async fn open_engine(
         .await
         .context("open the memory store for conversation indexing")?;
     let engine = crate::engine::engine_for(store, ctx.backend, ctx.cell, ctx.policy).await;
+    // Only fires when no provider was constructed at all — a build with the
+    // `ollama` feature off, or an explicit `--embedding-backend onnx` whose
+    // model did not load. It is *not* the common failure: on a default build
+    // the `Auto` backend always constructs an Ollama provider (which contacts
+    // nothing at construction), so a broken setup reaches the embedding call
+    // instead and fails there. Both routes name `engramdb doctor`.
     if !engine.embeddings_available() {
         bail!(
             "No embedding provider is available, so conversations cannot be indexed or \
-searched. Run `engramdb doctor` to see why the model did not load."
+searched. {}",
+            harvest_index::EMBEDDING_MISSING_HINT
         );
     }
     Ok((index, engine))
@@ -464,9 +471,9 @@ async fn write_summary(
 
 /// Fold in every *other* root project's conversations.
 ///
-/// Only projects that already have a table are opened: opening one creates it,
-/// and a machine-wide search must not leave an empty table behind in every
-/// project it merely looked at.
+/// The walk itself is [`harvest_index::search_other_projects`], shared with the
+/// MCP `harvest_search` tool — this is the CLI's reporting half, which prints
+/// the skipped projects as warnings rather than returning them in a payload.
 #[allow(clippy::too_many_arguments)]
 async fn search_all_projects(
     registry: &dyn RegistryBackend,
@@ -480,44 +487,24 @@ async fn search_all_projects(
     formatter: &OutputFormatter,
 ) -> Result<Vec<ConversationHit>> {
     let data = registry.load().await?;
-    let mut seen: Vec<String> = vec![own.root_project_id.clone()];
-    for entry in &data.projects {
-        // Project *ids*, never paths: two registry entries can name the same
-        // checkout through a symlink, and one of them would then be searched
-        // twice while the dedupe silently failed.
-        let root = engramdb::storage::resolve_root_project_id(&data, &entry.project_id);
-        if seen.contains(&root) || !ConversationIndex::exists(&root) {
-            continue;
-        }
-        seen.push(root.clone());
-        // One unusable project must not take the whole machine-wide search
-        // down with it — a table left at a stale vector width is exactly that
-        // case, and it is repairable per-project. Named rather than counted,
-        // because a project silently missing from the results is
-        // indistinguishable from one that never discussed the topic.
-        let index = match ConversationIndex::open(&root, config.embeddings.dimensions).await {
-            Ok(index) => index,
-            Err(e) => {
-                formatter.print_warning(&format!(
-                    "Skipped project {root}: its conversation index could not be opened ({e:#})."
-                ));
-                continue;
-            }
-        };
-        match harvest_index::search(&index, engine, query, limit, since).await {
-            Ok(found) => hits.extend(found),
-            Err(e) => formatter.print_warning(&format!(
-                "Skipped project {root}: its conversations could not be searched ({e:#})."
-            )),
-        }
+    let (found, skipped) = harvest_index::search_other_projects(
+        &data,
+        &own.root_project_id,
+        engine,
+        config.embeddings.dimensions,
+        query,
+        limit,
+        since,
+    )
+    .await?;
+    for s in &skipped {
+        formatter.print_warning(&format!(
+            "Skipped project {}: its conversations could not be searched ({}).",
+            s.project_id, s.reason
+        ));
     }
-    hits.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.session_id.cmp(&b.session_id))
-    });
-    hits.truncate(limit);
+    hits.extend(found);
+    harvest_index::rank_hits(&mut hits, limit);
     Ok(hits)
 }
 
@@ -773,6 +760,40 @@ async fn link_marked_memories(
     }
 }
 
+/// Column headings for `ledger list`.
+///
+/// The rows used to render the two axes as a bare `Harvested/Collected` pair
+/// with nothing naming either half, so `Deferred/Indexed` was unreadable
+/// without already knowing that a decision and a stage are independent things.
+/// `ledger show` has always labelled them; this is the listing catching up.
+/// Widths hold every variant: `unreviewed` and `compressed` are the longest at
+/// ten, and [`crate::output::short_id`] is thirteen.
+const LEDGER_LIST_HEADER: &str =
+    "SESSION        DECISION    STAGE       RECORDED          MEMORIES";
+
+/// One `ledger list` row, built as text so it can be asserted on without
+/// capturing stdout — the same split [`render_ledger_entry`] uses.
+///
+/// Rendered lowercase to match what the filters accept: a `decision` printed
+/// here pastes straight into `--decision`, which the `Debug`-derived
+/// `Harvested` did not.
+fn render_ledger_row(id: &str, entry: &HarvestEntry) -> String {
+    let archive = entry
+        .archive
+        .as_ref()
+        .map(|a| format!("  archive {}", human_bytes(a.bytes)))
+        .unwrap_or_default();
+    format!(
+        "{:<14} {:<11} {:<11} {:<17} {}{}",
+        crate::output::short_id(id),
+        format!("{:?}", entry.decision()).to_lowercase(),
+        format!("{:?}", entry.stage).to_lowercase(),
+        entry.harvested_at.format("%Y-%m-%d %H:%M"),
+        entry.memories_created,
+        archive
+    )
+}
+
 /// The `ledger show` screen, built as text so it can be asserted on without
 /// capturing stdout — the same split [`render_search_hits`] uses.
 ///
@@ -890,22 +911,9 @@ async fn run_ledger(
             } else if rows.is_empty() {
                 println!("Ledger is empty.");
             } else {
+                println!("{}", LEDGER_LIST_HEADER);
                 for (id, e) in &rows {
-                    let archive = e
-                        .archive
-                        .as_ref()
-                        .map(|a| format!("  archive {}", human_bytes(a.bytes)))
-                        .unwrap_or_default();
-                    println!(
-                        "{}  {:?}/{:?}  {}  {} memor{}{}",
-                        crate::output::short_id(id),
-                        e.decision(),
-                        e.stage,
-                        e.harvested_at.format("%Y-%m-%d %H:%M"),
-                        e.memories_created,
-                        if e.memories_created == 1 { "y" } else { "ies" },
-                        archive
-                    );
+                    println!("{}", render_ledger_row(id, e));
                     if let Some(note) = &e.note {
                         println!("    {}", harvest::defang_prose(note));
                     }
@@ -993,12 +1001,21 @@ time — the archive is corrupt.",
             // evidence. `--unpin` is the decision; the prompt below is the
             // confirmation, and `--force --unpin` together is the scripted form
             // of both.
+            //
+            // A pin is a property of the *copy*, so there has to be one. An
+            // entry whose `Archive:` reads `none` has nothing pinned: the
+            // evidence is already unreachable, and refusing here told someone
+            // dropping a stale record to "release the pin" on a file that does
+            // not exist — with `--unpin` the only way past a guard protecting
+            // nothing. `reconcile_archive_refs` runs before every harvest
+            // command, so this field having been cleared already means the file
+            // is genuinely gone rather than merely unlisted.
             let citing = engramdb::ops::evidence_links(scope)
                 .await?
                 .by_session
                 .remove(&key)
                 .unwrap_or_default();
-            if !citing.is_empty() && !unpin {
+            if !citing.is_empty() && !unpin && archive.is_some() {
                 bail!(
                     "Session {key} is cited as the source of {} memor{} ({}), so its transcript \
 copy is pinned: deleting it leaves {} claim{} with no evidence behind {}. Re-run with --unpin to \
@@ -1047,13 +1064,21 @@ search row, including any curated summary. The session will be offered again by 
                     ),
                 });
                 if !citing.is_empty() {
+                    // Two different facts, and saying the first one over an
+                    // entry with no archive would be a warning about a loss
+                    // that already happened.
                     formatter.print_warning(&format!(
-                        "{} memor{} cite{} this conversation as evidence ({}); they will keep the \
-citation but it will no longer resolve.",
+                        "{} memor{} cite{} this conversation as evidence ({}); they keep the \
+citation{}.",
                         citing.len(),
                         if citing.len() == 1 { "y" } else { "ies" },
                         if citing.len() == 1 { "s" } else { "" },
-                        citing.join(", ")
+                        citing.join(", "),
+                        if archive.is_some() {
+                            ", but it will no longer resolve"
+                        } else {
+                            ", which already does not resolve — no transcript copy is held"
+                        }
                     ));
                 }
                 if !prompter.confirm("Continue?", false).unwrap_or(false) {
@@ -1349,6 +1374,79 @@ mod tests {
             json.contains("look"),
             "the visible text must survive: {json}"
         );
+    }
+
+    /// Build a ledger entry for the pure renderers.
+    fn entry(
+        decision: engramdb::storage::harvest_state::HarvestDecision,
+        stage: engramdb::storage::harvest_state::HarvestStage,
+        memories: usize,
+    ) -> HarvestEntry {
+        HarvestEntry {
+            harvested_at: "2026-08-02T10:00:00Z".parse().unwrap(),
+            memories_created: memories,
+            memory_ids: vec![],
+            decision: Some(decision),
+            stage,
+            note: None,
+            archive: None,
+        }
+    }
+
+    /// `ledger list` rendered the two axes as a bare `Deferred/Indexed` pair
+    /// with nothing naming either half — unreadable without already knowing
+    /// that a decision and a stage are independent. `ledger show` labels them;
+    /// the listing now carries column headings and one field per column.
+    #[test]
+    fn ledger_list_labels_decision_and_stage() {
+        use engramdb::storage::harvest_state::{HarvestDecision, HarvestStage};
+
+        assert!(
+            LEDGER_LIST_HEADER.contains("DECISION"),
+            "{LEDGER_LIST_HEADER}"
+        );
+        assert!(LEDGER_LIST_HEADER.contains("STAGE"), "{LEDGER_LIST_HEADER}");
+        assert!(
+            LEDGER_LIST_HEADER.contains("SESSION"),
+            "{LEDGER_LIST_HEADER}"
+        );
+        assert!(
+            LEDGER_LIST_HEADER.contains("MEMORIES"),
+            "{LEDGER_LIST_HEADER}"
+        );
+
+        let row = render_ledger_row(
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            &entry(HarvestDecision::Deferred, HarvestStage::Indexed, 0),
+        );
+        assert!(
+            !row.contains("Deferred/Indexed") && !row.contains("deferred/indexed"),
+            "the unlabelled pair is back: {row}"
+        );
+        // Lowercase so a value pastes straight into `--decision` / `--stage`.
+        assert!(row.contains("deferred"), "{row}");
+        assert!(row.contains("indexed"), "{row}");
+
+        // Every variant fits its column, so the headings keep lining up over
+        // the widest words (`unreviewed`, `compressed`).
+        let widest = render_ledger_row(
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            &entry(HarvestDecision::Unreviewed, HarvestStage::Compressed, 12),
+        );
+        let heading_cols: Vec<usize> = ["DECISION", "STAGE", "RECORDED", "MEMORIES"]
+            .iter()
+            .map(|h| LEDGER_LIST_HEADER.find(h).unwrap())
+            .collect();
+        for (label, col) in ["unreviewed", "compressed", "2026-08-02", "12"]
+            .iter()
+            .zip(heading_cols)
+        {
+            assert_eq!(
+                widest.find(*label),
+                Some(col),
+                "`{label}` must start under its heading\nheader: {LEDGER_LIST_HEADER}\nrow:    {widest}"
+            );
+        }
     }
 
     /// Control for the behavioral fix in `harvest_state::clear_harvested`:

@@ -40,6 +40,7 @@
 
 use crate::error::{Result, StorageError};
 use chrono::{DateTime, Utc};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, Read};
@@ -822,7 +823,10 @@ pub fn list_sessions_in(root: &Path, project_paths: &[PathBuf]) -> Result<Vec<Se
     // recorded `cwd` — authoritative regardless — does all the work.
     let fast_path_ok = wanted.iter().all(|p| p.to_string_lossy().is_ascii());
 
-    let mut out = Vec::new();
+    // Enumerated first, parsed second: the walk is a handful of `read_dir`
+    // calls and has to be sequential anyway, while the parse is the part worth
+    // spreading across cores.
+    let mut out: Vec<(PathBuf, bool)> = Vec::new();
     for entry in std::fs::read_dir(root)? {
         let Ok(entry) = entry else { continue };
         let dir = entry.path();
@@ -866,17 +870,44 @@ pub fn list_sessions_in(root: &Path, project_paths: &[PathBuf]) -> Result<Vec<Se
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
             }
-            let Ok(summary) = summarize_session(&path) else {
-                continue;
-            };
-            if !wanted.is_empty() && !cwd_matches(summary.cwd.as_deref(), &wanted, exact_dir) {
-                continue;
-            }
-            out.push(summary);
+            // Enumeration only. The parse is the expensive half and it is
+            // deferred to the parallel pass below; `exact_dir` travels with
+            // the path because it is a property of the *directory*, and the
+            // attribution rule needs it per file.
+            out.push((path, exact_dir));
         }
     }
 
-    out.sort_by_key(|s| std::cmp::Reverse(s.ended_at));
+    // Every transcript is an independent parse of an independent file, so this
+    // is embarrassingly parallel CPU work — `summarize_session` reads the
+    // whole JSONL and deserializes every record, and `harvest list` is
+    // interactive. Rayon's default pool is sized to the CPU count, which is
+    // also what bounds peak memory: each in-flight parse holds at most one
+    // `MAX_RECORD_BYTES` (4 MiB) line buffer plus the session's prose events,
+    // so the ceiling is per-core rather than per-transcript.
+    let mut out: Vec<SessionSummary> = out
+        .into_par_iter()
+        .filter_map(|(path, exact_dir)| {
+            let summary = summarize_session(&path).ok()?;
+            if !wanted.is_empty() && !cwd_matches(summary.cwd.as_deref(), &wanted, exact_dir) {
+                return None;
+            }
+            Some(summary)
+        })
+        .collect();
+
+    // Newest first, session id as the tie-break. The tie-break is load-bearing
+    // rather than cosmetic: `sort_by_key` is stable, so before this the order
+    // of two sessions sharing an `ended_at` (or both missing one) was whatever
+    // order `read_dir` happened to yield — and `harvest list --limit` and
+    // `index_pending`'s budget both cut through that order. Making it total
+    // means the parallel collect above cannot change the answer, and neither
+    // can the filesystem.
+    out.sort_by(|a, b| {
+        b.ended_at
+            .cmp(&a.ended_at)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
     Ok(out)
 }
 
@@ -1469,6 +1500,123 @@ mod tests {
         let found =
             list_sessions_in(&claude.join("projects"), std::slice::from_ref(&repo)).unwrap();
         assert_eq!(found.len(), 1);
+    }
+
+    /// The parse is spread across cores, so nothing may depend on the order
+    /// the transcripts happened to be enumerated in.
+    ///
+    /// The listing is what `harvest list --limit`, `pending_sessions`' budget
+    /// and the archive sweep all cut through, and `sort_by_key` is *stable* —
+    /// so before the total ordering below, two sessions sharing an `ended_at`
+    /// came back in whatever order `read_dir` yielded, which is filesystem
+    /// state, not data. Twenty sessions on one timestamp: every call must
+    /// produce the identical sequence.
+    #[test]
+    fn sessions_sharing_an_end_time_come_back_in_a_stable_order() {
+        let tmp = TempDir::new().unwrap();
+        let claude = tmp.path().join("claude");
+        let dir = claude.join("projects").join("-repo");
+        for i in 0..20 {
+            write_transcript(
+                &dir,
+                &format!("s{i:02}"),
+                &[
+                    r#"{"type":"user","cwd":"/repo","timestamp":"2026-07-31T10:00:00Z","message":{"role":"user","content":"same instant"}}"#,
+                ],
+            );
+        }
+
+        let first: Vec<String> = list_sessions_in(&claude.join("projects"), &[])
+            .unwrap()
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect();
+        assert_eq!(
+            first.len(),
+            20,
+            "every transcript must be parsed exactly once"
+        );
+        let mut expected = first.clone();
+        expected.sort();
+        assert_eq!(
+            first, expected,
+            "sessions on one timestamp must fall back to the session id, not to read_dir order"
+        );
+
+        // Repeated calls agree — a parallel collect that leaked into the
+        // result would show up here as a differing permutation.
+        for _ in 0..5 {
+            let again: Vec<String> = list_sessions_in(&claude.join("projects"), &[])
+                .unwrap()
+                .into_iter()
+                .map(|s| s.session_id)
+                .collect();
+            assert_eq!(again, first);
+        }
+    }
+
+    /// Newest-first is the primary key and must survive the parallel pass.
+    #[test]
+    fn sessions_are_still_ordered_newest_first() {
+        let tmp = TempDir::new().unwrap();
+        let claude = tmp.path().join("claude");
+        let dir = claude.join("projects").join("-repo");
+        for (session, ts) in [
+            ("oldest", "2026-07-01T10:00:00Z"),
+            ("middle", "2026-07-15T10:00:00Z"),
+            ("newest", "2026-07-31T10:00:00Z"),
+        ] {
+            write_transcript(
+                &dir,
+                session,
+                &[&format!(
+                    r#"{{"type":"user","cwd":"/repo","timestamp":"{ts}","message":{{"role":"user","content":"hi"}}}}"#
+                )],
+            );
+        }
+        let found: Vec<String> = list_sessions_in(&claude.join("projects"), &[])
+            .unwrap()
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect();
+        assert_eq!(found, vec!["newest", "middle", "oldest"]);
+    }
+
+    /// `exact_dir` is a property of the *directory*, and the parallel pass
+    /// moved the attribution decision away from the loop that computes it. If
+    /// it stopped travelling with the file, a sibling project whose encoded
+    /// name merely *prefixes* the wanted one would start contributing its
+    /// undated transcripts.
+    #[test]
+    fn a_prefix_named_sibling_directory_still_does_not_donate_undated_sessions() {
+        let tmp = TempDir::new().unwrap();
+        let claude = tmp.path().join("claude");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+        let encoded = encode_project_dir(&repo);
+
+        // Exact directory, no recorded cwd: attributable on the name alone.
+        write_transcript(
+            &claude.join("projects").join(&encoded),
+            "ours",
+            &[
+                r#"{"type":"user","timestamp":"2026-07-31T10:00:00Z","message":{"role":"user","content":"hi"}}"#,
+            ],
+        );
+        // Prefix-named sibling, no recorded cwd: must NOT be attributed.
+        write_transcript(
+            &claude.join("projects").join(format!("{encoded}-other")),
+            "theirs",
+            &[
+                r#"{"type":"user","timestamp":"2026-07-31T11:00:00Z","message":{"role":"user","content":"hi"}}"#,
+            ],
+        );
+
+        let found =
+            list_sessions_in(&claude.join("projects"), std::slice::from_ref(&repo)).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].session_id, "ours");
     }
 
     #[test]

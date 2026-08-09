@@ -1389,6 +1389,71 @@ fn removing_a_pinned_copy_requires_an_explicit_unpin() {
     assert!(find_archive("aaaa1111-rich").is_none());
 }
 
+/// A pin is a property of the *copy*, so the refusal needs one to exist.
+///
+/// With the archive already gone the entry has nothing pinned — the evidence
+/// is unreachable either way — yet `rm` still refused, telling someone dropping
+/// a stale record that "its transcript copy is pinned" and to "re-run with
+/// --unpin" to release a pin on a file that is not there.
+#[test]
+fn removing_an_entry_whose_copy_is_gone_is_not_a_pin_refusal() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+    c.session_end(&c.main, "aaaa1111-rich");
+    let id = add_memory(&c, "mined from the rich session");
+    c.engramdb(
+        &c.main,
+        &["harvest", "mark", "aaaa1111-rich", "--memory", &id],
+    )
+    .assert()
+    .success();
+
+    // Release the copy, leaving the entry and its citation behind.
+    c.engramdb(
+        &c.main,
+        &[
+            "harvest",
+            "ledger",
+            "rm",
+            "aaaa",
+            "--archive-only",
+            "--unpin",
+            "--force",
+        ],
+    )
+    .assert()
+    .success();
+    assert!(find_archive("aaaa1111-rich").is_none());
+    let shown = c.stdout(&c.main, &["harvest", "ledger", "show", "aaaa"]);
+    assert!(
+        shown.contains("Archive:   none"),
+        "the entry must have no archive left: {shown}"
+    );
+
+    // The entry is still cited, but there is no copy to pin, so dropping the
+    // stale record must not demand `--unpin`.
+    let out = c
+        .engramdb(&c.main, &["harvest", "ledger", "rm", "aaaa", "--force"])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "rm refused over a transcript copy that does not exist: {err}"
+    );
+    assert!(
+        !err.contains("--unpin"),
+        "a pin was released on nothing: {err}"
+    );
+
+    // The record really is gone.
+    let out = c
+        .engramdb(&c.main, &["harvest", "ledger", "show", "aaaa"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "the entry survived the rm");
+}
+
 /// A memory whose copy is gone reads as expired evidence, never as damage.
 #[test]
 fn doctor_reports_expired_evidence_without_failing() {

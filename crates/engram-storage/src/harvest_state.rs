@@ -455,11 +455,13 @@ fn fold(lines: Vec<LedgerLine>) -> HashMap<String, Folded> {
 /// Drop entries that have left the log, loudly, and ones past the age window.
 ///
 /// **The drain.** An entry that reaches [`HarvestStage::Compressed`] is meant to
-/// be carried by an index row from then on. That row does not exist yet in this
-/// version, so draining one really does destroy its review record — which is
-/// why it is a `warn` naming the sessions rather than a quiet `retain`. Nothing
-/// in this version *writes* `compressed`; the path exists so the format does
-/// not have to change under the index.
+/// be carried by something else from then on. The conversation index now
+/// exists, but its row is not that something: `ConversationRow` holds the
+/// session's first prompt, curated summary and vectors — not the decision, the
+/// memory ids or the note — so draining one really does destroy its review
+/// record. That is why it is a `warn` naming the sessions rather than a quiet
+/// `retain`. Nothing in this version *writes* `compressed`; the path exists so
+/// the format does not have to change when something finally does carry it.
 ///
 /// **The age window** drops entries past [`PRUNE_AFTER_DAYS`], **except** ones
 /// that still point at an archive. An archive is only reachable *through* its
@@ -490,7 +492,8 @@ fn drain_and_prune(folded: &mut HashMap<String, Folded>) {
         drained.sort();
         tracing::warn!(
             "harvest ledger: dropping {} entr{} that reached the `compressed` stage ({}); \
-             no index row carries them in this version, so their review records are gone",
+             nothing carries a review record past this stage in this version — the \
+             conversation index row holds search text, not the decision — so theirs are gone",
             drained.len(),
             if drained.len() == 1 { "y" } else { "ies" },
             drained.join(", ")
@@ -576,6 +579,20 @@ pub fn mark_harvested(
              plain identifier (letters, digits, '-', '_', '.') that is not a path"
         )));
     }
+    // A blank memory id is never a memory, and `memories_created` is derived
+    // from this slice's length — so accepting one made the entry claim a
+    // memory that does not exist, which `ledger show` then rendered as an
+    // empty line under `Memories: 1`. Refused here rather than at one front
+    // end, so the CLI's `--memory ""` and the MCP tool's `memory_ids: [""]`
+    // are both covered. Omitting the ids entirely is the supported way to
+    // record a session that yielded nothing.
+    if let Some(pos) = memory_ids.iter().position(|id| id.trim().is_empty()) {
+        return Err(crate::error::StorageError::Validation(format!(
+            "cannot record a harvest for session {session_id}: the memory id at \
+             position {pos} is empty — omit it entirely (a zero-yield review is \
+             recorded by passing no memory ids at all)"
+        )));
+    }
     let mut line = LedgerLine::touching(session_id);
     line.decision = Some(decision);
     line.memory_ids = Some(memory_ids.to_vec());
@@ -636,7 +653,7 @@ pub fn set_archive(
 ///
 /// The other half of the two axes. Writing [`HarvestStage::Compressed`] drains
 /// the entry on the next read — see [`drain_and_prune`] for what that costs
-/// until the index row exists.
+/// while nothing else carries a review record.
 pub fn set_stage(project_dir: &Path, session_id: &str, stage: HarvestStage) -> Result<()> {
     if !crate::transcripts::is_valid_session_id(session_id) {
         return Ok(());
@@ -1274,6 +1291,52 @@ mod tests {
             entry.archive.is_some(),
             "a decision line erased an archive it never mentioned"
         );
+    }
+
+    /// A blank memory id is never a memory, but `memories_created` counted it:
+    /// `harvest mark --memory ""` reported "1 memory saved" and `ledger show`
+    /// printed an empty line under `Memories: 1`. Refused in the writer so the
+    /// MCP `harvest_mark` tool is covered as well as the CLI flag.
+    #[test]
+    fn an_empty_memory_id_is_refused_rather_than_counted() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        for blank in ["", "   "] {
+            let err = mark_harvested(
+                dir,
+                "s1",
+                &[blank.to_string()],
+                HarvestDecision::Harvested,
+                None,
+            )
+            .expect_err("a blank memory id must not be recorded");
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains("is empty"),
+                "the error must name the problem, got: {rendered}"
+            );
+            assert!(
+                read_harvested(dir).is_empty(),
+                "a refused mark must write nothing"
+            );
+        }
+
+        // A blank among real ids is refused too — the count would be wrong
+        // either way.
+        assert!(mark_harvested(
+            dir,
+            "s1",
+            &["m1".into(), "".into()],
+            HarvestDecision::Harvested,
+            None,
+        )
+        .is_err());
+
+        // The supported zero-yield form still works and stays at zero.
+        let outcome = mark_harvested(dir, "s1", &[], HarvestDecision::Skipped, None).unwrap();
+        assert_eq!(outcome.entry.memories_created, 0);
+        assert!(outcome.entry.memory_ids.is_empty());
     }
 
     #[test]

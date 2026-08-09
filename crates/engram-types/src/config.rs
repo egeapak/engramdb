@@ -1659,14 +1659,20 @@ pub struct SecurityConfig {
     /// Whether MCP mutating tools may write to a *different* registered
     /// project than the session's own. Default `true` (preserves historical
     /// behavior — cross-project writes allowed). When `false`, MCP mutating
-    /// tools (`create`, `update`, `delete`, `challenge`, `resolve`,
-    /// `compress_apply`, `gc`, `reindex`, `harvest_mark`) are rejected when
-    /// their `project` override resolves to a project id other than the
-    /// session's own. `harvest_mark` needs
+    /// tools (`create`, `update`, `delete`, `challenge`, `resolve`, `verify`,
+    /// `task_complete`, `compress_apply`, `gc`, `reindex`, `harvest_mark`) are
+    /// rejected when their `project` override resolves to a project id other
+    /// than the session's own. `doctor` is gated too, but only for a call that
+    /// passes `fix: true` — a plain diagnostic read stays open, the flip to
+    /// `needs_review` does not. `harvest_mark` needs
     /// [`Self::allow_all_projects_harvest`] as well, for the reason recorded
     /// there. The
     /// session's own project (`project` omitted) and the shared global store
     /// (`project = "global"`) are always allowed.
+    ///
+    /// Keep this list in step with the `check_cross_project_write` call sites
+    /// in `engram_mcp::server` and with `docs/users/configuration.md`; the
+    /// three drifted apart once already.
     #[serde(default = "default_allow_cross_project_writes")]
     pub allow_cross_project_writes: bool,
 
