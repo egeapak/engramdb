@@ -26,9 +26,18 @@
 //!
 //! - `serve` and `daemon run` / `daemon restart` start a long-running process.
 //!   Only their `--help` and fast error paths (bad `--transport`) are here.
-//! - `add -i`, `add -e`, `update -e` need a TTY prompter or `$EDITOR`. Their
-//!   non-TTY *error* paths are covered; the interactive flows are not.
-//! - The `review` interactive loop, likewise — the empty-result path is here.
+//! - `add -i` needs a TTY prompter, so only its non-TTY *error* path is here;
+//!   the interactive flow belongs to the command tier (`crate::testutil`),
+//!   which swaps in a scripted `MockPrompter`. (`add -e` and `update -e` *are*
+//!   covered here, in `snapshot::editor` — an `$EDITOR` is just a child
+//!   process, so a shell script standing in for one drives the whole flow
+//!   from this tier.)
+//! - The `review` interactive loop, likewise — the empty-result path is here,
+//!   the loop itself is in the command tier.
+//! - The `projects prune` progress bar. `indicatif` draws to the real stderr,
+//!   whose `is_term()` is false under a pipe, so it renders nothing here by
+//!   design. It is covered in `crate::progress`, which takes the draw target
+//!   as a parameter so a test can hand it an `InMemoryTerm`.
 //! - Colour, in the positive direction — that is tier 1's, under
 //!   `snap_colored`. `OutputFormatter::new` checks `is_tty` itself, before
 //!   owo-colors is consulted, so no environment variable can make the binary
@@ -67,6 +76,13 @@ macro_rules! snap_all_formats {
 
 mod admin;
 mod core;
+// The `$EDITOR` cases stand a `#!/bin/sh` script up as the editor and set the
+// executable bit on it, neither of which means anything on Windows. CI's
+// Windows/macOS job runs `cargo check --workspace --all-features` *without*
+// `--all-targets`, so this module does not compile there today; the gate keeps
+// that a property of the code rather than of the CI invocation.
+#[cfg(unix)]
+mod editor;
 mod env;
 mod help;
 mod hook;
@@ -210,6 +226,54 @@ impl Fixture {
         self.exec(&all, Some(stdin))
     }
 
+    /// Like [`Fixture::run`], but with `EDITOR` set to `editor` — for `add -e`
+    /// and `update -e`, the only commands that read it.
+    ///
+    /// A separate entry point rather than a change to [`Fixture::base`]: every
+    /// other case in this tier depends on `EDITOR` being *absent*, and one that
+    /// leaked in would silently run the developer's editor on a temp file.
+    /// `editor` is passed through verbatim so the malformed values (empty, an
+    /// unbalanced quote) are reachable too.
+    pub fn run_with_editor(&self, args: &[&str], editor: &str) -> String {
+        let mut all = vec!["--no-maintenance", "--dir", self.path().to_str().unwrap()];
+        all.extend_from_slice(args);
+        let mut cmd = self.base();
+        cmd.env("EDITOR", editor);
+        self.finish(cmd, &all, None)
+    }
+
+    /// Write an executable `#!/bin/sh` script and return its path.
+    ///
+    /// This is how an `$EDITOR` is faked: the real flows just spawn a command
+    /// with the file path appended as the final argument, so a script that
+    /// rewrites `$1` is indistinguishable from a person editing and saving.
+    ///
+    /// The script lands *inside the project root* on purpose — [`normalize`]
+    /// already rewrites that prefix to `[PROJECT]`, so the path is redacted
+    /// wherever it surfaces (`update -e` prints the editor command on success,
+    /// and both flows name it in the launch-failure message) with no extra
+    /// rule. Callers must not use a random file name for the same reason.
+    ///
+    /// `PATH` is pinned to the system directories in the prologue. The one the
+    /// script would otherwise inherit is [`Fixture::base`]'s, which has had
+    /// every directory containing an `engramdb` removed — on a machine with
+    /// one installed in `/usr/bin`, that would take `cat` and `sed` with it.
+    ///
+    /// [`normalize`]: Fixture::normalize
+    #[cfg(unix)]
+    pub fn fake_editor(&self, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = self.root.join(name);
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\nPATH=/usr/bin:/bin\nexport PATH\n{body}"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
     /// Run with no store flags at all — for `--help`, `--version` and
     /// `completions`, which do not touch a store and read better without a
     /// temp path in the recorded command line.
@@ -218,7 +282,11 @@ impl Fixture {
     }
 
     fn exec(&self, args: &[&str], stdin: Option<&str>) -> String {
-        let mut cmd = self.base();
+        self.finish(self.base(), args, stdin)
+    }
+
+    /// Run an already-configured command and render its transcript.
+    fn finish(&self, mut cmd: assert_cmd::Command, args: &[&str], stdin: Option<&str>) -> String {
         cmd.args(args);
         if let Some(input) = stdin {
             cmd.write_stdin(input.to_string());
@@ -478,6 +546,15 @@ fn render_stdout(stdout: &str) -> String {
 #[allow(clippy::type_complexity)]
 static FILTERS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     vec![
+        // `add -e` writes its template to `std::env::temp_dir()` — *not* under
+        // any fixture directory, so no `[…]` path replacement above reaches it
+        // — under a per-run name, `engramdb-add-<uuid>.txt`. Must precede the
+        // UUID rule, which would otherwise consume the name's variable half
+        // and leave the machine's temp prefix behind.
+        (
+            Regex::new(r"\S*engramdb-add-[0-9a-f-]+\.txt").unwrap(),
+            "[ADD_TEMPLATE]",
+        ),
         (
             Regex::new(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").unwrap(),
             "[UUID]",

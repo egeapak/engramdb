@@ -4,12 +4,12 @@ use crate::app::ProjectsCommand;
 use crate::output::{
     outln, AggregateStatsOutput, OutputFormatter, ProjectInfoOutput, ProjectListOutput,
 };
+use crate::progress;
 use crate::prompter::Prompter;
 use anyhow::Result;
 use engramdb::ops::projects;
 use engramdb::storage::RegistryBackend;
 use engramdb::types::ProjectListGrouping;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 
 /// Run the `projects` command with the given subcommand (defaults to `Info`).
@@ -217,25 +217,14 @@ pub async fn run_projects(
             }
 
             // Progress bars are human-only chatter; hidden in JSON mode.
-            let style = ProgressStyle::default_bar()
-                .template("{prefix} [{bar:40.green/dim}] {pos}/{len} ({eta})")
-                .unwrap()
-                .progress_chars("=>-");
-            let make_bar = |len: u64, prefix: &'static str| {
-                if json_mode {
-                    return ProgressBar::hidden();
-                }
-                let pb = ProgressBar::new(len);
-                pb.set_style(style.clone());
-                pb.set_prefix(prefix);
-                if len == 0 {
-                    pb.finish_and_clear();
-                }
-                pb
-            };
-            let stale_pb = make_bar(stale.len() as u64, "stale");
-            let orphan_pb = make_bar(orphan_count as u64, "orphan");
-            let hierarchy_pb = make_bar(hierarchy_issues.total() as u64, "links");
+            // Construction lives in `crate::progress` so the draw target is a
+            // parameter — that seam is the only way a test can see a rendered
+            // bar (the default target is hidden under a pipe).
+            let target = || progress::prune_draw_target(json_mode);
+            let stale_pb = progress::make_bar(stale.len() as u64, "stale", target());
+            let orphan_pb = progress::make_bar(orphan_count as u64, "orphan", target());
+            let hierarchy_pb =
+                progress::make_bar(hierarchy_issues.total() as u64, "links", target());
 
             let result = projects::prune_stale_projects(registry, |phase| match phase {
                 projects::PrunePhase::Stale => stale_pb.inc(1),
@@ -555,6 +544,9 @@ mod tests {
     // `projects prune` builds `indicatif` bars, but their default draw target
     // is stderr and `is_term()` is false under the runner, so they are hidden
     // and never reach the capture (which is the formatter's sink anyway).
+    // What the bars *render* is covered separately in `crate::progress`,
+    // which takes the draw target as a parameter and points it at an
+    // `InMemoryTerm`.
     // =================================================================
 
     use crate::testutil::{

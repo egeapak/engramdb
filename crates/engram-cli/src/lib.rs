@@ -21,6 +21,8 @@ pub mod app;
 pub mod commands;
 pub mod engine;
 pub mod output;
+/// Progress-bar construction, split out so the draw target is injectable.
+pub(crate) mod progress;
 pub mod project_tree;
 pub mod prompter;
 #[cfg(test)]

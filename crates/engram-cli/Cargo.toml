@@ -74,3 +74,8 @@ predicates = "3"
 regex = "1"
 tempfile = "3"
 insta = { version = "1.48.0", features = ["filters"] }
+# `in_memory` pulls in `vt100` and gives us `InMemoryTerm`, the only way to see
+# what a `ProgressBar` renders (its normal draw target is hidden under a pipe).
+# Dev-only on purpose: the workspace uses feature resolver v2, so this does not
+# unify `vt100` into the shipped binary — see `progress.rs`.
+indicatif = { version = "0.18", features = ["in_memory"] }

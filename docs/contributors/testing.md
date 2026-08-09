@@ -65,6 +65,8 @@ For restricted-egress sandboxes (no `cdn.pyke.io` / `huggingface.co`), see the p
 | `crates/engram-cli/tests/cli/*.rs` | Black-box CLI tests using `assert_cmd` |
 | `crates/engram-cli/tests/cli/snapshot/` | Binary-level `insta` snapshots (tier 2, below) |
 | `crates/engram-cli/src/output.rs::tests` | Renderer `insta` snapshots (tier 1, below) |
+| `crates/engram-cli/src/commands/*.rs::tests` + `src/testutil.rs` | Command-tier `insta` snapshots (tier 1.5, below) |
+| `crates/engram-cli/src/progress.rs::tests` | `indicatif` bar rendering, via `InMemoryTerm` |
 | `crates/engram-cli/tests/title_integration.rs` | Title generation integration |
 | `benches/` | Criterion benches (run with `cargo bench`) |
 
@@ -154,6 +156,18 @@ Use `TempProject`, `capturing_plain()`, `interaction(&prompter, &cap)` and
 prefixed with the command — `snap_command` turns insta's module prefix off,
 because insta derives it from the *asserting* file and every snapshot would
 otherwise be attributed to `testutil`.
+
+Two things reachable only from an injected seam sit alongside this tier. The
+`$EDITOR` flows (`add -e`, `update -e`) go to **tier 2** — an editor is just a
+child process, so a `#!/bin/sh` script the fixture writes drives the whole
+round trip; the module is `#[cfg(unix)]`, matching what CI actually builds off
+Linux. The `projects prune` **progress bar** goes to `src/progress.rs`:
+`indicatif` draws to the real stderr and hides itself under a pipe, so
+construction takes the `ProgressDrawTarget` as a parameter and tests hand it an
+`InMemoryTerm`. That needs `indicatif`'s `in_memory` feature, which is a
+**dev-dependency only** — it pulls in `vt100`, and resolver v2 keeps
+dev-dependency features out of normal builds (`cargo tree -e normal -i vt100`
+must stay empty).
 
 **Tier 2 — the binary** (`crates/engram-cli/tests/cli/snapshot/`). Spawns the
 real `engramdb` and snapshots one transcript per invocation: command line, exit

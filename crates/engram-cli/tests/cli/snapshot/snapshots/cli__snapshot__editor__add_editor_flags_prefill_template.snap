@@ -1,0 +1,23 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/editor.rs
+expression: "f.run_with_editor(&[\"add\", \"-e\", \"-t\", \"decision\", \"-s\",\n\"Keep the module graph a DAG\", \"-c\",\n\"Lower layers must never use a higher one.\", \"--tags\",\n\"architecture,layering\", \"-p\", \"src/ops/mod.rs\", \"-l\", \"architecture.layers\",\n\"--visibility\", \"personal\",], &editor_arg(&editor))"
+---
+$ engramdb --no-maintenance --dir [PROJECT] add -e -t decision -s Keep the module graph a DAG -c Lower layers must never use a higher one. --tags architecture,layering -p src/ops/mod.rs -l architecture.layers --visibility personal
+exit: 0
+--- stdout ---
+{
+  "message": "Created memory [UUID]",
+  "success": true
+}
+--- stderr ---
+editing [ADD_TEMPLATE]
+# Type: decision (decision, convention, hazard, context, intent, relationship, debug, preference)
+# Summary: Keep the module graph a DAG
+# Title:  (short title for filename, a few words)
+# Tags: architecture, layering
+# Physical: src/ops/mod.rs
+# Logical: architecture.layers
+# Criticality: 0.7
+# Visibility: personal (shared, personal)
+
+Lower layers must never use a higher one.
