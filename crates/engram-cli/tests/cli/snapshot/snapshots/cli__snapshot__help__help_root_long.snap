@@ -23,6 +23,7 @@ Commands:
   stats        Show statistics
   doctor       Check environment and store health
   projects     Manage registered EngramDB projects
+  harvest      Inspect past Claude Code sessions for knowledge worth remembering
   groups       Manage multi-project memory groups and this project's subscriptions
   challenge    Challenge a memory's validity
   gc           Run garbage collection on low-relevance memories

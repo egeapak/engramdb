@@ -822,6 +822,481 @@ esac
     ;;
 esac
 ;;
+(harvest)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_engramdb__subcmd__harvest_commands" \
+"*::: :->harvest" \
+&& ret=0
+
+    case $state in
+    (harvest)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-harvest-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--since=[Only sessions active since this point\: an RFC 3339 timestamp or a relative shorthand like \`7d\`, \`12h\`, \`30m\`, \`2w\`]:WHEN:_default' \
+'-n+[Maximum number of sessions to list]:LIMIT:_default' \
+'--limit=[Maximum number of sessions to list]:LIMIT:_default' \
+'--exclude-session=[Session id to omit (typically the caller'\''s own, still being written)]:ID:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--include-harvested[Also list sessions already recorded as harvested]' \
+'--include-empty[Include sessions with no human turns]' \
+'--all-projects[Ignore project scoping and list every session on this machine]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+'--max-chars=[Character budget for the digest. Defaults to \`\[harvest\] digest_budget\` (200000); \`0\` means unlimited]:MAX_CHARS:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--include-thinking[Include the assistant'\''s reasoning blocks (verbose)]' \
+'--include-sidechains[Include subagent turns (verbose; subagents report back into the main thread, so their raw turns are largely duplicate volume)]' \
+'--no-tools[Omit the tool-call trace, leaving prompts and prose only]' \
+'--all-projects[Search every session on this machine, not just this project'\''s]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':session_id -- Session id, or a unique prefix of one:_default' \
+&& ret=0
+;;
+(mark)
+_arguments "${_arguments_options[@]}" : \
+'*--memory=[Id of a memory created from this session (repeatable). Omit when the session yielded nothing — recording a zero-yield review is what stops it being re-read on the next harvest]:ID:_default' \
+'--note=[Why the session was skipped or deferred]:NOTE:_default' \
+'--summary=[Curated one-or-two-sentence summary of what this session was about, written into the search index alongside the decision]:SUMMARY:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--all-projects[Search every session on this machine, not just this project'\''s. Mirrors \`show\`, so a session you were able to digest is always a session you can mark as reviewed]' \
+'(--memory)--defer[Record the session as deliberately postponed rather than settled. Deferred sessions keep appearing in \`harvest list\`]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':session_id -- Session id, or a unique prefix of one:_default' \
+&& ret=0
+;;
+(index)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'()--all[Index every session in scope that still has bytes behind it]' \
+'--force[Re-embed even when the digest text is unchanged]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'::session_id -- Session id, or a unique prefix of one. Omit with `--all`:_default' \
+&& ret=0
+;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+'-n+[Maximum number of conversations to return]:LIMIT:_default' \
+'--limit=[Maximum number of conversations to return]:LIMIT:_default' \
+'--since=[Only conversations that ended since this point\: an RFC 3339 timestamp or a relative shorthand like \`30d\`, \`12h\`, \`2w\`]:WHEN:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--all-projects[Search every project'\''s conversations on this machine]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':query -- What to look for:_default' \
+&& ret=0
+;;
+(summary)
+_arguments "${_arguments_options[@]}" : \
+'--from-file=[Read the summary from a file (\`-\` for stdin)]:PATH:_files' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'(--from-file)--editor[Compose the summary in \$EDITOR]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':session_id -- Session id, or a unique prefix of one:_default' \
+'::text -- The summary text. Pass an empty string to clear it:_default' \
+&& ret=0
+;;
+(reset)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':session_id -- Session id, or a unique prefix of one:_default' \
+&& ret=0
+;;
+(ledger)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_engramdb__subcmd__harvest__subcmd__ledger_commands" \
+"*::: :->ledger" \
+&& ret=0
+
+    case $state in
+    (ledger)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-harvest-ledger-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--decision=[Only entries with this decision (harvested, skipped, deferred, unreviewed)]:DECISION:_default' \
+'--stage=[Only entries at this stage (collected, indexed, compressed)]:STAGE:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--with-archive[Only entries that still have an archived transcript]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':session_id -- Session id, or a unique prefix of one:_default' \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+'-o+[Destination path (default\: \`<session-id>.jsonl\` in the cwd)]:OUTPUT:_files' \
+'--output=[Destination path (default\: \`<session-id>.jsonl\` in the cwd)]:OUTPUT:_files' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':session_id -- Session id, or a unique prefix of one:_default' \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--archive-only[Delete only the archived transcript, keeping the decision record]' \
+'--unpin[Release the pin held by memories that cite this conversation, and delete the copy anyway]' \
+'-f[Skip confirmation prompt]' \
+'--force[Skip confirmation prompt]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':session_id -- Session id, or a unique prefix of one:_default' \
+&& ret=0
+;;
+(prune)
+_arguments "${_arguments_options[@]}" : \
+'--older-than=[Override \`\[harvest\] archive_retention_days\` for this run (days, e.g. \`90d\`)]:WHEN:_default' \
+'--max-bytes=[Override \`\[harvest\] archive_max_bytes\` for this run]:BYTES:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--apply[Actually delete (default is a dry run, like \`gc\` and \`compress\`)]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-harvest-ledger-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(prune)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__harvest__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-harvest-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(mark)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(index)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(summary)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(reset)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(ledger)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger_commands" \
+"*::: :->ledger" \
+&& ret=0
+
+    case $state in
+    (ledger)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-harvest-help-ledger-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(prune)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
 (groups)
 _arguments "${_arguments_options[@]}" : \
 '(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
@@ -1324,6 +1799,7 @@ plain\:"Plain text output without colors"))' \
 '--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
 '(--index-only)--embeddings-only[Only re-embed, don'\''t rebuild index]' \
 '--index-only[Only rebuild index, don'\''t re-embed]' \
+'(--embeddings-only --index-only --global)--archive-only[Rebuild the conversation search rows from the stored transcript copies instead of touching memories. Mirrors \`--embeddings-only\`\: a rebuild of one index, from bytes that were kept verbatim so a better reduction is always a re-derivation away]' \
 '--global[Reindex the global (cross-project) memory store instead of the current project]' \
 '--json[Output as JSON]' \
 '-q[Suppress non-essential output]' \
@@ -1730,6 +2206,86 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
+(harvest)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__help__subcmd__harvest_commands" \
+"*::: :->harvest" \
+&& ret=0
+
+    case $state in
+    (harvest)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-help-harvest-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(mark)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(index)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(summary)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(reset)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(ledger)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger_commands" \
+"*::: :->ledger" \
+&& ret=0
+
+    case $state in
+    (ledger)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-help-harvest-ledger-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(prune)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
 (groups)
 _arguments "${_arguments_options[@]}" : \
 ":: :_engramdb__subcmd__help__subcmd__groups_commands" \
@@ -1907,6 +2463,7 @@ _engramdb_commands() {
 'stats:Show statistics' \
 'doctor:Check environment and store health' \
 'projects:Manage registered EngramDB projects' \
+'harvest:Inspect past Claude Code sessions for knowledge worth remembering' \
 'groups:Manage multi-project memory groups and this project'\''s subscriptions' \
 'challenge:Challenge a memory'\''s validity' \
 'gc:Run garbage collection on low-relevance memories' \
@@ -2153,6 +2710,226 @@ _engramdb__subcmd__groups__subcmd__unsubscribe_commands() {
     local commands; commands=()
     _describe -t commands 'engramdb groups unsubscribe commands' commands "$@"
 }
+(( $+functions[_engramdb__subcmd__harvest_commands] )) ||
+_engramdb__subcmd__harvest_commands() {
+    local commands; commands=(
+'list:List past sessions in scope, newest activity first' \
+'show:Print a budgeted digest of one session' \
+'mark:Record that a session has been reviewed, so it is not offered again' \
+'index:Index one or more sessions for \`harvest search\`' \
+'search:Search indexed past conversations' \
+'summary:Set or replace a session'\''s curated summary, re-embedding only it' \
+'reset:Forget a session'\''s harvest record so it is offered again' \
+'ledger:Inspect and manage the harvest ledger and its transcript archives' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb harvest commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help_commands() {
+    local commands; commands=(
+'list:List past sessions in scope, newest activity first' \
+'show:Print a budgeted digest of one session' \
+'mark:Record that a session has been reviewed, so it is not offered again' \
+'index:Index one or more sessions for \`harvest search\`' \
+'search:Search indexed past conversations' \
+'summary:Set or replace a session'\''s curated summary, re-embedding only it' \
+'reset:Forget a session'\''s harvest record so it is offered again' \
+'ledger:Inspect and manage the harvest ledger and its transcript archives' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb harvest help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__help_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__index_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__index_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help index commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger_commands() {
+    local commands; commands=(
+'list:List recorded sessions and their decisions' \
+'show:Show one entry in full, including archive metadata' \
+'export:Decompress an archived transcript back to a file' \
+'rm:Delete a ledger entry and/or its archive' \
+'prune:Evict archives past the retention limits (dry run by default)' \
+    )
+    _describe -t commands 'engramdb harvest help ledger commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__export_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help ledger export commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__list_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help ledger list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__prune_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__prune_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help ledger prune commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__rm_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help ledger rm commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__show_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help ledger show commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__list_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__mark_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__mark_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help mark commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__reset_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__reset_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help reset commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__search_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help search commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__show_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help show commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__summary_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__summary_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help summary commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__index_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__index_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest index commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger_commands() {
+    local commands; commands=(
+'list:List recorded sessions and their decisions' \
+'show:Show one entry in full, including archive metadata' \
+'export:Decompress an archived transcript back to a file' \
+'rm:Delete a ledger entry and/or its archive' \
+'prune:Evict archives past the retention limits (dry run by default)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb harvest ledger commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__export_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger export commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help_commands() {
+    local commands; commands=(
+'list:List recorded sessions and their decisions' \
+'show:Show one entry in full, including archive metadata' \
+'export:Decompress an archived transcript back to a file' \
+'rm:Delete a ledger entry and/or its archive' \
+'prune:Evict archives past the retention limits (dry run by default)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb harvest ledger help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__export_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger help export commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__help_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger help help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__list_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger help list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__prune_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__prune_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger help prune commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__rm_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger help rm commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__show_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger help show commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__list_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__prune_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__prune_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger prune commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__rm_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger rm commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__show_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger show commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__list_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__mark_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__mark_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest mark commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__reset_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__reset_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest reset commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__search_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest search commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__show_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest show commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__summary_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__summary_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest summary commands' commands "$@"
+}
 (( $+functions[_engramdb__subcmd__help_commands] )) ||
 _engramdb__subcmd__help_commands() {
     local commands; commands=(
@@ -2169,6 +2946,7 @@ _engramdb__subcmd__help_commands() {
 'stats:Show statistics' \
 'doctor:Check environment and store health' \
 'projects:Manage registered EngramDB projects' \
+'harvest:Inspect past Claude Code sessions for knowledge worth remembering' \
 'groups:Manage multi-project memory groups and this project'\''s subscriptions' \
 'challenge:Challenge a memory'\''s validity' \
 'gc:Run garbage collection on low-relevance memories' \
@@ -2309,6 +3087,91 @@ _engramdb__subcmd__help__subcmd__groups__subcmd__subscribe_commands() {
 _engramdb__subcmd__help__subcmd__groups__subcmd__unsubscribe_commands() {
     local commands; commands=()
     _describe -t commands 'engramdb help groups unsubscribe commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest_commands() {
+    local commands; commands=(
+'list:List past sessions in scope, newest activity first' \
+'show:Print a budgeted digest of one session' \
+'mark:Record that a session has been reviewed, so it is not offered again' \
+'index:Index one or more sessions for \`harvest search\`' \
+'search:Search indexed past conversations' \
+'summary:Set or replace a session'\''s curated summary, re-embedding only it' \
+'reset:Forget a session'\''s harvest record so it is offered again' \
+'ledger:Inspect and manage the harvest ledger and its transcript archives' \
+    )
+    _describe -t commands 'engramdb help harvest commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__index_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__index_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest index commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger_commands() {
+    local commands; commands=(
+'list:List recorded sessions and their decisions' \
+'show:Show one entry in full, including archive metadata' \
+'export:Decompress an archived transcript back to a file' \
+'rm:Delete a ledger entry and/or its archive' \
+'prune:Evict archives past the retention limits (dry run by default)' \
+    )
+    _describe -t commands 'engramdb help harvest ledger commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__export_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest ledger export commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__list_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest ledger list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__prune_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__prune_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest ledger prune commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__rm_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest ledger rm commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__show_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest ledger show commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__list_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__mark_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__mark_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest mark commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__reset_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__reset_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest reset commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__search_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest search commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__show_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest show commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__summary_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__summary_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest summary commands' commands "$@"
 }
 (( $+functions[_engramdb__subcmd__help__subcmd__help_commands] )) ||
 _engramdb__subcmd__help__subcmd__help_commands() {

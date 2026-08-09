@@ -2870,6 +2870,11 @@ mod tests {
                 floor: 0.1,
             }),
             provenance: Provenance::agent("claude"),
+            // Deliberately not the provenance session: this fixture is the
+            // "every optional field populated" end of the matrix, and the two
+            // differing is the case `source_sessions` exists for — a memory
+            // mined out of an older transcript.
+            source_sessions: vec!["b2c3d4e5-6789-4abc-8def-0123456789ab".to_string()],
             confidence: 0.65,
             supersedes: vec!["018f2a1b-3c4d-7e5f-8a9b-000000000011".to_string()],
             status: Status::Active,

@@ -148,7 +148,10 @@ async fn run_archive_reindex(
     }
 
     if !formatter.is_json() {
-        println!("Rebuilding conversation rows from stored transcript copies...");
+        outln!(
+            formatter,
+            "Rebuilding conversation rows from stored transcript copies..."
+        );
     }
     let report = engramdb::ops::harvest_index::reindex_from_copies(&scope, &index, &engine).await?;
     // After the rows exist, because a summary has nowhere to go without one.
@@ -162,7 +165,8 @@ async fn run_archive_reindex(
     }
 
     if formatter.is_json() {
-        println!(
+        outln!(
+            formatter,
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "rebuilt": report.indexed,

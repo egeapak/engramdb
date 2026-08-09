@@ -194,7 +194,7 @@ exit: 0
       "checks": [
         {
           "details": [
-            "projects: [SIZE] (2 registered)",
+            "projects: [SIZE] (3 registered)",
             "models: no cached models"
           ],
           "message": "[SIZE]",

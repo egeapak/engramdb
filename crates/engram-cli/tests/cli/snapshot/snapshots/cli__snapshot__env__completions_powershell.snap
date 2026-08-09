@@ -57,6 +57,7 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             [CompletionResult]::new('stats', 'stats', [CompletionResultType]::ParameterValue, 'Show statistics')
             [CompletionResult]::new('doctor', 'doctor', [CompletionResultType]::ParameterValue, 'Check environment and store health')
             [CompletionResult]::new('projects', 'projects', [CompletionResultType]::ParameterValue, 'Manage registered EngramDB projects')
+            [CompletionResult]::new('harvest', 'harvest', [CompletionResultType]::ParameterValue, 'Inspect past Claude Code sessions for knowledge worth remembering')
             [CompletionResult]::new('groups', 'groups', [CompletionResultType]::ParameterValue, 'Manage multi-project memory groups and this project''s subscriptions')
             [CompletionResult]::new('challenge', 'challenge', [CompletionResultType]::ParameterValue, 'Challenge a memory''s validity')
             [CompletionResult]::new('gc', 'gc', [CompletionResultType]::ParameterValue, 'Run garbage collection on low-relevance memories')
@@ -702,6 +703,382 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
         'engramdb;projects;help;help' {
             break
         }
+        'engramdb;harvest' {
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
+            [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
+            [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
+            [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'No colored output')
+            [CompletionResult]::new('--in-process', '--in-process', [CompletionResultType]::ParameterName, 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1')
+            [CompletionResult]::new('--spawn-daemon', '--spawn-daemon', [CompletionResultType]::ParameterName, 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)')
+            [CompletionResult]::new('--no-maintenance', '--no-maintenance', [CompletionResultType]::ParameterName, 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'List past sessions in scope, newest activity first')
+            [CompletionResult]::new('show', 'show', [CompletionResultType]::ParameterValue, 'Print a budgeted digest of one session')
+            [CompletionResult]::new('mark', 'mark', [CompletionResultType]::ParameterValue, 'Record that a session has been reviewed, so it is not offered again')
+            [CompletionResult]::new('index', 'index', [CompletionResultType]::ParameterValue, 'Index one or more sessions for `harvest search`')
+            [CompletionResult]::new('search', 'search', [CompletionResultType]::ParameterValue, 'Search indexed past conversations')
+            [CompletionResult]::new('summary', 'summary', [CompletionResultType]::ParameterValue, 'Set or replace a session''s curated summary, re-embedding only it')
+            [CompletionResult]::new('reset', 'reset', [CompletionResultType]::ParameterValue, 'Forget a session''s harvest record so it is offered again')
+            [CompletionResult]::new('ledger', 'ledger', [CompletionResultType]::ParameterValue, 'Inspect and manage the harvest ledger and its transcript archives')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'engramdb;harvest;list' {
+            [CompletionResult]::new('--since', '--since', [CompletionResultType]::ParameterName, 'Only sessions active since this point: an RFC 3339 timestamp or a relative shorthand like `7d`, `12h`, `30m`, `2w`')
+            [CompletionResult]::new('-n', '-n', [CompletionResultType]::ParameterName, 'Maximum number of sessions to list')
+            [CompletionResult]::new('--limit', '--limit', [CompletionResultType]::ParameterName, 'Maximum number of sessions to list')
+            [CompletionResult]::new('--exclude-session', '--exclude-session', [CompletionResultType]::ParameterName, 'Session id to omit (typically the caller''s own, still being written)')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
+            [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
+            [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
+            [CompletionResult]::new('--include-harvested', '--include-harvested', [CompletionResultType]::ParameterName, 'Also list sessions already recorded as harvested')
+            [CompletionResult]::new('--include-empty', '--include-empty', [CompletionResultType]::ParameterName, 'Include sessions with no human turns')
+            [CompletionResult]::new('--all-projects', '--all-projects', [CompletionResultType]::ParameterName, 'Ignore project scoping and list every session on this machine')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
+            [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'No colored output')
+            [CompletionResult]::new('--in-process', '--in-process', [CompletionResultType]::ParameterName, 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1')
+            [CompletionResult]::new('--spawn-daemon', '--spawn-daemon', [CompletionResultType]::ParameterName, 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)')
+            [CompletionResult]::new('--no-maintenance', '--no-maintenance', [CompletionResultType]::ParameterName, 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
+        'engramdb;harvest;show' {
+            [CompletionResult]::new('--max-chars', '--max-chars', [CompletionResultType]::ParameterName, 'Character budget for the digest. Defaults to `[harvest] digest_budget` (200000); `0` means unlimited')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
+            [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
+            [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
+            [CompletionResult]::new('--include-thinking', '--include-thinking', [CompletionResultType]::ParameterName, 'Include the assistant''s reasoning blocks (verbose)')
+            [CompletionResult]::new('--include-sidechains', '--include-sidechains', [CompletionResultType]::ParameterName, 'Include subagent turns (verbose; subagents report back into the main thread, so their raw turns are largely duplicate volume)')
+            [CompletionResult]::new('--no-tools', '--no-tools', [CompletionResultType]::ParameterName, 'Omit the tool-call trace, leaving prompts and prose only')
+            [CompletionResult]::new('--all-projects', '--all-projects', [CompletionResultType]::ParameterName, 'Search every session on this machine, not just this project''s')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
+            [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'No colored output')
+            [CompletionResult]::new('--in-process', '--in-process', [CompletionResultType]::ParameterName, 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1')
+            [CompletionResult]::new('--spawn-daemon', '--spawn-daemon', [CompletionResultType]::ParameterName, 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)')
+            [CompletionResult]::new('--no-maintenance', '--no-maintenance', [CompletionResultType]::ParameterName, 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
+        'engramdb;harvest;mark' {
+            [CompletionResult]::new('--memory', '--memory', [CompletionResultType]::ParameterName, 'Id of a memory created from this session (repeatable). Omit when the session yielded nothing — recording a zero-yield review is what stops it being re-read on the next harvest')
+            [CompletionResult]::new('--note', '--note', [CompletionResultType]::ParameterName, 'Why the session was skipped or deferred')
+            [CompletionResult]::new('--summary', '--summary', [CompletionResultType]::ParameterName, 'Curated one-or-two-sentence summary of what this session was about, written into the search index alongside the decision')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
+            [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
+            [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
+            [CompletionResult]::new('--all-projects', '--all-projects', [CompletionResultType]::ParameterName, 'Search every session on this machine, not just this project''s. Mirrors `show`, so a session you were able to digest is always a session you can mark as reviewed')
+            [CompletionResult]::new('--defer', '--defer', [CompletionResultType]::ParameterName, 'Record the session as deliberately postponed rather than settled. Deferred sessions keep appearing in `harvest list`')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
+            [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'No colored output')
+            [CompletionResult]::new('--in-process', '--in-process', [CompletionResultType]::ParameterName, 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1')
+            [CompletionResult]::new('--spawn-daemon', '--spawn-daemon', [CompletionResultType]::ParameterName, 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)')
+            [CompletionResult]::new('--no-maintenance', '--no-maintenance', [CompletionResultType]::ParameterName, 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
+        'engramdb;harvest;index' {
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
+            [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
+            [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
+            [CompletionResult]::new('--all', '--all', [CompletionResultType]::ParameterName, 'Index every session in scope that still has bytes behind it')
+            [CompletionResult]::new('--force', '--force', [CompletionResultType]::ParameterName, 'Re-embed even when the digest text is unchanged')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
+            [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'No colored output')
+            [CompletionResult]::new('--in-process', '--in-process', [CompletionResultType]::ParameterName, 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1')
+            [CompletionResult]::new('--spawn-daemon', '--spawn-daemon', [CompletionResultType]::ParameterName, 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)')
+            [CompletionResult]::new('--no-maintenance', '--no-maintenance', [CompletionResultType]::ParameterName, 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
+        'engramdb;harvest;search' {
+            [CompletionResult]::new('-n', '-n', [CompletionResultType]::ParameterName, 'Maximum number of conversations to return')
+            [CompletionResult]::new('--limit', '--limit', [CompletionResultType]::ParameterName, 'Maximum number of conversations to return')
+            [CompletionResult]::new('--since', '--since', [CompletionResultType]::ParameterName, 'Only conversations that ended since this point: an RFC 3339 timestamp or a relative shorthand like `30d`, `12h`, `2w`')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
+            [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
+            [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
+            [CompletionResult]::new('--all-projects', '--all-projects', [CompletionResultType]::ParameterName, 'Search every project''s conversations on this machine')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
+            [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'No colored output')
+            [CompletionResult]::new('--in-process', '--in-process', [CompletionResultType]::ParameterName, 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1')
+            [CompletionResult]::new('--spawn-daemon', '--spawn-daemon', [CompletionResultType]::ParameterName, 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)')
+            [CompletionResult]::new('--no-maintenance', '--no-maintenance', [CompletionResultType]::ParameterName, 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
+        'engramdb;harvest;summary' {
+            [CompletionResult]::new('--from-file', '--from-file', [CompletionResultType]::ParameterName, 'Read the summary from a file (`-` for stdin)')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
+            [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
+            [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
+            [CompletionResult]::new('--editor', '--editor', [CompletionResultType]::ParameterName, 'Compose the summary in $EDITOR')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
+            [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'No colored output')
+            [CompletionResult]::new('--in-process', '--in-process', [CompletionResultType]::ParameterName, 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1')
+            [CompletionResult]::new('--spawn-daemon', '--spawn-daemon', [CompletionResultType]::ParameterName, 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)')
+            [CompletionResult]::new('--no-maintenance', '--no-maintenance', [CompletionResultType]::ParameterName, 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
+        'engramdb;harvest;reset' {
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
+            [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
+            [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
+            [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'No colored output')
+            [CompletionResult]::new('--in-process', '--in-process', [CompletionResultType]::ParameterName, 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1')
+            [CompletionResult]::new('--spawn-daemon', '--spawn-daemon', [CompletionResultType]::ParameterName, 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)')
+            [CompletionResult]::new('--no-maintenance', '--no-maintenance', [CompletionResultType]::ParameterName, 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
+        'engramdb;harvest;ledger' {
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
+            [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
+            [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
+            [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'No colored output')
+            [CompletionResult]::new('--in-process', '--in-process', [CompletionResultType]::ParameterName, 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1')
+            [CompletionResult]::new('--spawn-daemon', '--spawn-daemon', [CompletionResultType]::ParameterName, 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)')
+            [CompletionResult]::new('--no-maintenance', '--no-maintenance', [CompletionResultType]::ParameterName, 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'List recorded sessions and their decisions')
+            [CompletionResult]::new('show', 'show', [CompletionResultType]::ParameterValue, 'Show one entry in full, including archive metadata')
+            [CompletionResult]::new('export', 'export', [CompletionResultType]::ParameterValue, 'Decompress an archived transcript back to a file')
+            [CompletionResult]::new('rm', 'rm', [CompletionResultType]::ParameterValue, 'Delete a ledger entry and/or its archive')
+            [CompletionResult]::new('prune', 'prune', [CompletionResultType]::ParameterValue, 'Evict archives past the retention limits (dry run by default)')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'engramdb;harvest;ledger;list' {
+            [CompletionResult]::new('--decision', '--decision', [CompletionResultType]::ParameterName, 'Only entries with this decision (harvested, skipped, deferred, unreviewed)')
+            [CompletionResult]::new('--stage', '--stage', [CompletionResultType]::ParameterName, 'Only entries at this stage (collected, indexed, compressed)')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
+            [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
+            [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
+            [CompletionResult]::new('--with-archive', '--with-archive', [CompletionResultType]::ParameterName, 'Only entries that still have an archived transcript')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
+            [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'No colored output')
+            [CompletionResult]::new('--in-process', '--in-process', [CompletionResultType]::ParameterName, 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1')
+            [CompletionResult]::new('--spawn-daemon', '--spawn-daemon', [CompletionResultType]::ParameterName, 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)')
+            [CompletionResult]::new('--no-maintenance', '--no-maintenance', [CompletionResultType]::ParameterName, 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
+        'engramdb;harvest;ledger;show' {
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
+            [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
+            [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
+            [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'No colored output')
+            [CompletionResult]::new('--in-process', '--in-process', [CompletionResultType]::ParameterName, 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1')
+            [CompletionResult]::new('--spawn-daemon', '--spawn-daemon', [CompletionResultType]::ParameterName, 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)')
+            [CompletionResult]::new('--no-maintenance', '--no-maintenance', [CompletionResultType]::ParameterName, 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
+        'engramdb;harvest;ledger;export' {
+            [CompletionResult]::new('-o', '-o', [CompletionResultType]::ParameterName, 'Destination path (default: `<session-id>.jsonl` in the cwd)')
+            [CompletionResult]::new('--output', '--output', [CompletionResultType]::ParameterName, 'Destination path (default: `<session-id>.jsonl` in the cwd)')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
+            [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
+            [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
+            [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'No colored output')
+            [CompletionResult]::new('--in-process', '--in-process', [CompletionResultType]::ParameterName, 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1')
+            [CompletionResult]::new('--spawn-daemon', '--spawn-daemon', [CompletionResultType]::ParameterName, 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)')
+            [CompletionResult]::new('--no-maintenance', '--no-maintenance', [CompletionResultType]::ParameterName, 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
+        'engramdb;harvest;ledger;rm' {
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
+            [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
+            [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
+            [CompletionResult]::new('--archive-only', '--archive-only', [CompletionResultType]::ParameterName, 'Delete only the archived transcript, keeping the decision record')
+            [CompletionResult]::new('--unpin', '--unpin', [CompletionResultType]::ParameterName, 'Release the pin held by memories that cite this conversation, and delete the copy anyway')
+            [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Skip confirmation prompt')
+            [CompletionResult]::new('--force', '--force', [CompletionResultType]::ParameterName, 'Skip confirmation prompt')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
+            [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'No colored output')
+            [CompletionResult]::new('--in-process', '--in-process', [CompletionResultType]::ParameterName, 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1')
+            [CompletionResult]::new('--spawn-daemon', '--spawn-daemon', [CompletionResultType]::ParameterName, 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)')
+            [CompletionResult]::new('--no-maintenance', '--no-maintenance', [CompletionResultType]::ParameterName, 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
+        'engramdb;harvest;ledger;prune' {
+            [CompletionResult]::new('--older-than', '--older-than', [CompletionResultType]::ParameterName, 'Override `[harvest] archive_retention_days` for this run (days, e.g. `90d`)')
+            [CompletionResult]::new('--max-bytes', '--max-bytes', [CompletionResultType]::ParameterName, 'Override `[harvest] archive_max_bytes` for this run')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
+            [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
+            [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
+            [CompletionResult]::new('--apply', '--apply', [CompletionResultType]::ParameterName, 'Actually delete (default is a dry run, like `gc` and `compress`)')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
+            [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'No colored output')
+            [CompletionResult]::new('--in-process', '--in-process', [CompletionResultType]::ParameterName, 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1')
+            [CompletionResult]::new('--spawn-daemon', '--spawn-daemon', [CompletionResultType]::ParameterName, 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)')
+            [CompletionResult]::new('--no-maintenance', '--no-maintenance', [CompletionResultType]::ParameterName, 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
+        'engramdb;harvest;ledger;help' {
+            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'List recorded sessions and their decisions')
+            [CompletionResult]::new('show', 'show', [CompletionResultType]::ParameterValue, 'Show one entry in full, including archive metadata')
+            [CompletionResult]::new('export', 'export', [CompletionResultType]::ParameterValue, 'Decompress an archived transcript back to a file')
+            [CompletionResult]::new('rm', 'rm', [CompletionResultType]::ParameterValue, 'Delete a ledger entry and/or its archive')
+            [CompletionResult]::new('prune', 'prune', [CompletionResultType]::ParameterValue, 'Evict archives past the retention limits (dry run by default)')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'engramdb;harvest;ledger;help;list' {
+            break
+        }
+        'engramdb;harvest;ledger;help;show' {
+            break
+        }
+        'engramdb;harvest;ledger;help;export' {
+            break
+        }
+        'engramdb;harvest;ledger;help;rm' {
+            break
+        }
+        'engramdb;harvest;ledger;help;prune' {
+            break
+        }
+        'engramdb;harvest;ledger;help;help' {
+            break
+        }
+        'engramdb;harvest;help' {
+            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'List past sessions in scope, newest activity first')
+            [CompletionResult]::new('show', 'show', [CompletionResultType]::ParameterValue, 'Print a budgeted digest of one session')
+            [CompletionResult]::new('mark', 'mark', [CompletionResultType]::ParameterValue, 'Record that a session has been reviewed, so it is not offered again')
+            [CompletionResult]::new('index', 'index', [CompletionResultType]::ParameterValue, 'Index one or more sessions for `harvest search`')
+            [CompletionResult]::new('search', 'search', [CompletionResultType]::ParameterValue, 'Search indexed past conversations')
+            [CompletionResult]::new('summary', 'summary', [CompletionResultType]::ParameterValue, 'Set or replace a session''s curated summary, re-embedding only it')
+            [CompletionResult]::new('reset', 'reset', [CompletionResultType]::ParameterValue, 'Forget a session''s harvest record so it is offered again')
+            [CompletionResult]::new('ledger', 'ledger', [CompletionResultType]::ParameterValue, 'Inspect and manage the harvest ledger and its transcript archives')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'engramdb;harvest;help;list' {
+            break
+        }
+        'engramdb;harvest;help;show' {
+            break
+        }
+        'engramdb;harvest;help;mark' {
+            break
+        }
+        'engramdb;harvest;help;index' {
+            break
+        }
+        'engramdb;harvest;help;search' {
+            break
+        }
+        'engramdb;harvest;help;summary' {
+            break
+        }
+        'engramdb;harvest;help;reset' {
+            break
+        }
+        'engramdb;harvest;help;ledger' {
+            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'List recorded sessions and their decisions')
+            [CompletionResult]::new('show', 'show', [CompletionResultType]::ParameterValue, 'Show one entry in full, including archive metadata')
+            [CompletionResult]::new('export', 'export', [CompletionResultType]::ParameterValue, 'Decompress an archived transcript back to a file')
+            [CompletionResult]::new('rm', 'rm', [CompletionResultType]::ParameterValue, 'Delete a ledger entry and/or its archive')
+            [CompletionResult]::new('prune', 'prune', [CompletionResultType]::ParameterValue, 'Evict archives past the retention limits (dry run by default)')
+            break
+        }
+        'engramdb;harvest;help;ledger;list' {
+            break
+        }
+        'engramdb;harvest;help;ledger;show' {
+            break
+        }
+        'engramdb;harvest;help;ledger;export' {
+            break
+        }
+        'engramdb;harvest;help;ledger;rm' {
+            break
+        }
+        'engramdb;harvest;help;ledger;prune' {
+            break
+        }
+        'engramdb;harvest;help;help' {
+            break
+        }
         'engramdb;groups' {
             [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
             [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
@@ -1102,6 +1479,7 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
             [CompletionResult]::new('--embeddings-only', '--embeddings-only', [CompletionResultType]::ParameterName, 'Only re-embed, don''t rebuild index')
             [CompletionResult]::new('--index-only', '--index-only', [CompletionResultType]::ParameterName, 'Only rebuild index, don''t re-embed')
+            [CompletionResult]::new('--archive-only', '--archive-only', [CompletionResultType]::ParameterName, 'Rebuild the conversation search rows from the stored transcript copies instead of touching memories. Mirrors `--embeddings-only`: a rebuild of one index, from bytes that were kept verbatim so a better reduction is always a re-derivation away')
             [CompletionResult]::new('--global', '--global', [CompletionResultType]::ParameterName, 'Reindex the global (cross-project) memory store instead of the current project')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
             [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
@@ -1333,6 +1711,7 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             [CompletionResult]::new('stats', 'stats', [CompletionResultType]::ParameterValue, 'Show statistics')
             [CompletionResult]::new('doctor', 'doctor', [CompletionResultType]::ParameterValue, 'Check environment and store health')
             [CompletionResult]::new('projects', 'projects', [CompletionResultType]::ParameterValue, 'Manage registered EngramDB projects')
+            [CompletionResult]::new('harvest', 'harvest', [CompletionResultType]::ParameterValue, 'Inspect past Claude Code sessions for knowledge worth remembering')
             [CompletionResult]::new('groups', 'groups', [CompletionResultType]::ParameterValue, 'Manage multi-project memory groups and this project''s subscriptions')
             [CompletionResult]::new('challenge', 'challenge', [CompletionResultType]::ParameterValue, 'Challenge a memory''s validity')
             [CompletionResult]::new('gc', 'gc', [CompletionResultType]::ParameterValue, 'Run garbage collection on low-relevance memories')
@@ -1430,6 +1809,61 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             break
         }
         'engramdb;help;projects;unlink' {
+            break
+        }
+        'engramdb;help;harvest' {
+            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'List past sessions in scope, newest activity first')
+            [CompletionResult]::new('show', 'show', [CompletionResultType]::ParameterValue, 'Print a budgeted digest of one session')
+            [CompletionResult]::new('mark', 'mark', [CompletionResultType]::ParameterValue, 'Record that a session has been reviewed, so it is not offered again')
+            [CompletionResult]::new('index', 'index', [CompletionResultType]::ParameterValue, 'Index one or more sessions for `harvest search`')
+            [CompletionResult]::new('search', 'search', [CompletionResultType]::ParameterValue, 'Search indexed past conversations')
+            [CompletionResult]::new('summary', 'summary', [CompletionResultType]::ParameterValue, 'Set or replace a session''s curated summary, re-embedding only it')
+            [CompletionResult]::new('reset', 'reset', [CompletionResultType]::ParameterValue, 'Forget a session''s harvest record so it is offered again')
+            [CompletionResult]::new('ledger', 'ledger', [CompletionResultType]::ParameterValue, 'Inspect and manage the harvest ledger and its transcript archives')
+            break
+        }
+        'engramdb;help;harvest;list' {
+            break
+        }
+        'engramdb;help;harvest;show' {
+            break
+        }
+        'engramdb;help;harvest;mark' {
+            break
+        }
+        'engramdb;help;harvest;index' {
+            break
+        }
+        'engramdb;help;harvest;search' {
+            break
+        }
+        'engramdb;help;harvest;summary' {
+            break
+        }
+        'engramdb;help;harvest;reset' {
+            break
+        }
+        'engramdb;help;harvest;ledger' {
+            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'List recorded sessions and their decisions')
+            [CompletionResult]::new('show', 'show', [CompletionResultType]::ParameterValue, 'Show one entry in full, including archive metadata')
+            [CompletionResult]::new('export', 'export', [CompletionResultType]::ParameterValue, 'Decompress an archived transcript back to a file')
+            [CompletionResult]::new('rm', 'rm', [CompletionResultType]::ParameterValue, 'Delete a ledger entry and/or its archive')
+            [CompletionResult]::new('prune', 'prune', [CompletionResultType]::ParameterValue, 'Evict archives past the retention limits (dry run by default)')
+            break
+        }
+        'engramdb;help;harvest;ledger;list' {
+            break
+        }
+        'engramdb;help;harvest;ledger;show' {
+            break
+        }
+        'engramdb;help;harvest;ledger;export' {
+            break
+        }
+        'engramdb;help;harvest;ledger;rm' {
+            break
+        }
+        'engramdb;help;harvest;ledger;prune' {
             break
         }
         'engramdb;help;groups' {

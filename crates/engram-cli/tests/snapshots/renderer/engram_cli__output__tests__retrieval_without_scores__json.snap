@@ -70,6 +70,9 @@ expression: rendered
           "agent_id": "claude",
           "source": "agent"
         },
+        "source_sessions": [
+          "b2c3d4e5-6789-4abc-8def-0123456789ab"
+        ],
         "status": "Active",
         "summary": "Blocking calls deadlock the daemon",
         "superseded_by": "018f2a1b-3c4d-7e5f-8a9b-000000000099",

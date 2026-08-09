@@ -54,6 +54,7 @@ set edit:completion:arg-completer[engramdb] = {|@words|
             cand stats 'Show statistics'
             cand doctor 'Check environment and store health'
             cand projects 'Manage registered EngramDB projects'
+            cand harvest 'Inspect past Claude Code sessions for knowledge worth remembering'
             cand groups 'Manage multi-project memory groups and this project''s subscriptions'
             cand challenge 'Challenge a memory''s validity'
             cand gc 'Run garbage collection on low-relevance memories'
@@ -657,6 +658,346 @@ set edit:completion:arg-completer[engramdb] = {|@words|
         }
         &'engramdb;projects;help;help'= {
         }
+        &'engramdb;harvest'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+            cand list 'List past sessions in scope, newest activity first'
+            cand show 'Print a budgeted digest of one session'
+            cand mark 'Record that a session has been reviewed, so it is not offered again'
+            cand index 'Index one or more sessions for `harvest search`'
+            cand search 'Search indexed past conversations'
+            cand summary 'Set or replace a session''s curated summary, re-embedding only it'
+            cand reset 'Forget a session''s harvest record so it is offered again'
+            cand ledger 'Inspect and manage the harvest ledger and its transcript archives'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;harvest;list'= {
+            cand --since 'Only sessions active since this point: an RFC 3339 timestamp or a relative shorthand like `7d`, `12h`, `30m`, `2w`'
+            cand -n 'Maximum number of sessions to list'
+            cand --limit 'Maximum number of sessions to list'
+            cand --exclude-session 'Session id to omit (typically the caller''s own, still being written)'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --include-harvested 'Also list sessions already recorded as harvested'
+            cand --include-empty 'Include sessions with no human turns'
+            cand --all-projects 'Ignore project scoping and list every session on this machine'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;harvest;show'= {
+            cand --max-chars 'Character budget for the digest. Defaults to `[harvest] digest_budget` (200000); `0` means unlimited'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --include-thinking 'Include the assistant''s reasoning blocks (verbose)'
+            cand --include-sidechains 'Include subagent turns (verbose; subagents report back into the main thread, so their raw turns are largely duplicate volume)'
+            cand --no-tools 'Omit the tool-call trace, leaving prompts and prose only'
+            cand --all-projects 'Search every session on this machine, not just this project''s'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;harvest;mark'= {
+            cand --memory 'Id of a memory created from this session (repeatable). Omit when the session yielded nothing — recording a zero-yield review is what stops it being re-read on the next harvest'
+            cand --note 'Why the session was skipped or deferred'
+            cand --summary 'Curated one-or-two-sentence summary of what this session was about, written into the search index alongside the decision'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --all-projects 'Search every session on this machine, not just this project''s. Mirrors `show`, so a session you were able to digest is always a session you can mark as reviewed'
+            cand --defer 'Record the session as deliberately postponed rather than settled. Deferred sessions keep appearing in `harvest list`'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;harvest;index'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --all 'Index every session in scope that still has bytes behind it'
+            cand --force 'Re-embed even when the digest text is unchanged'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;harvest;search'= {
+            cand -n 'Maximum number of conversations to return'
+            cand --limit 'Maximum number of conversations to return'
+            cand --since 'Only conversations that ended since this point: an RFC 3339 timestamp or a relative shorthand like `30d`, `12h`, `2w`'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --all-projects 'Search every project''s conversations on this machine'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;harvest;summary'= {
+            cand --from-file 'Read the summary from a file (`-` for stdin)'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --editor 'Compose the summary in $EDITOR'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;harvest;reset'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;harvest;ledger'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+            cand list 'List recorded sessions and their decisions'
+            cand show 'Show one entry in full, including archive metadata'
+            cand export 'Decompress an archived transcript back to a file'
+            cand rm 'Delete a ledger entry and/or its archive'
+            cand prune 'Evict archives past the retention limits (dry run by default)'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;harvest;ledger;list'= {
+            cand --decision 'Only entries with this decision (harvested, skipped, deferred, unreviewed)'
+            cand --stage 'Only entries at this stage (collected, indexed, compressed)'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --with-archive 'Only entries that still have an archived transcript'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;harvest;ledger;show'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;harvest;ledger;export'= {
+            cand -o 'Destination path (default: `<session-id>.jsonl` in the cwd)'
+            cand --output 'Destination path (default: `<session-id>.jsonl` in the cwd)'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;harvest;ledger;rm'= {
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --archive-only 'Delete only the archived transcript, keeping the decision record'
+            cand --unpin 'Release the pin held by memories that cite this conversation, and delete the copy anyway'
+            cand -f 'Skip confirmation prompt'
+            cand --force 'Skip confirmation prompt'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;harvest;ledger;prune'= {
+            cand --older-than 'Override `[harvest] archive_retention_days` for this run (days, e.g. `90d`)'
+            cand --max-bytes 'Override `[harvest] archive_max_bytes` for this run'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --apply 'Actually delete (default is a dry run, like `gc` and `compress`)'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
+        &'engramdb;harvest;ledger;help'= {
+            cand list 'List recorded sessions and their decisions'
+            cand show 'Show one entry in full, including archive metadata'
+            cand export 'Decompress an archived transcript back to a file'
+            cand rm 'Delete a ledger entry and/or its archive'
+            cand prune 'Evict archives past the retention limits (dry run by default)'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;harvest;ledger;help;list'= {
+        }
+        &'engramdb;harvest;ledger;help;show'= {
+        }
+        &'engramdb;harvest;ledger;help;export'= {
+        }
+        &'engramdb;harvest;ledger;help;rm'= {
+        }
+        &'engramdb;harvest;ledger;help;prune'= {
+        }
+        &'engramdb;harvest;ledger;help;help'= {
+        }
+        &'engramdb;harvest;help'= {
+            cand list 'List past sessions in scope, newest activity first'
+            cand show 'Print a budgeted digest of one session'
+            cand mark 'Record that a session has been reviewed, so it is not offered again'
+            cand index 'Index one or more sessions for `harvest search`'
+            cand search 'Search indexed past conversations'
+            cand summary 'Set or replace a session''s curated summary, re-embedding only it'
+            cand reset 'Forget a session''s harvest record so it is offered again'
+            cand ledger 'Inspect and manage the harvest ledger and its transcript archives'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'engramdb;harvest;help;list'= {
+        }
+        &'engramdb;harvest;help;show'= {
+        }
+        &'engramdb;harvest;help;mark'= {
+        }
+        &'engramdb;harvest;help;index'= {
+        }
+        &'engramdb;harvest;help;search'= {
+        }
+        &'engramdb;harvest;help;summary'= {
+        }
+        &'engramdb;harvest;help;reset'= {
+        }
+        &'engramdb;harvest;help;ledger'= {
+            cand list 'List recorded sessions and their decisions'
+            cand show 'Show one entry in full, including archive metadata'
+            cand export 'Decompress an archived transcript back to a file'
+            cand rm 'Delete a ledger entry and/or its archive'
+            cand prune 'Evict archives past the retention limits (dry run by default)'
+        }
+        &'engramdb;harvest;help;ledger;list'= {
+        }
+        &'engramdb;harvest;help;ledger;show'= {
+        }
+        &'engramdb;harvest;help;ledger;export'= {
+        }
+        &'engramdb;harvest;help;ledger;rm'= {
+        }
+        &'engramdb;harvest;help;ledger;prune'= {
+        }
+        &'engramdb;harvest;help;help'= {
+        }
         &'engramdb;groups'= {
             cand --format 'Output format'
             cand --dir 'Working directory (default: current directory)'
@@ -1026,6 +1367,7 @@ set edit:completion:arg-completer[engramdb] = {|@words|
             cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
             cand --embeddings-only 'Only re-embed, don''t rebuild index'
             cand --index-only 'Only rebuild index, don''t re-embed'
+            cand --archive-only 'Rebuild the conversation search rows from the stored transcript copies instead of touching memories. Mirrors `--embeddings-only`: a rebuild of one index, from bytes that were kept verbatim so a better reduction is always a re-derivation away'
             cand --global 'Reindex the global (cross-project) memory store instead of the current project'
             cand --json 'Output as JSON'
             cand -q 'Suppress non-essential output'
@@ -1239,6 +1581,7 @@ set edit:completion:arg-completer[engramdb] = {|@words|
             cand stats 'Show statistics'
             cand doctor 'Check environment and store health'
             cand projects 'Manage registered EngramDB projects'
+            cand harvest 'Inspect past Claude Code sessions for knowledge worth remembering'
             cand groups 'Manage multi-project memory groups and this project''s subscriptions'
             cand challenge 'Challenge a memory''s validity'
             cand gc 'Run garbage collection on low-relevance memories'
@@ -1312,6 +1655,47 @@ set edit:completion:arg-completer[engramdb] = {|@words|
         &'engramdb;help;projects;link'= {
         }
         &'engramdb;help;projects;unlink'= {
+        }
+        &'engramdb;help;harvest'= {
+            cand list 'List past sessions in scope, newest activity first'
+            cand show 'Print a budgeted digest of one session'
+            cand mark 'Record that a session has been reviewed, so it is not offered again'
+            cand index 'Index one or more sessions for `harvest search`'
+            cand search 'Search indexed past conversations'
+            cand summary 'Set or replace a session''s curated summary, re-embedding only it'
+            cand reset 'Forget a session''s harvest record so it is offered again'
+            cand ledger 'Inspect and manage the harvest ledger and its transcript archives'
+        }
+        &'engramdb;help;harvest;list'= {
+        }
+        &'engramdb;help;harvest;show'= {
+        }
+        &'engramdb;help;harvest;mark'= {
+        }
+        &'engramdb;help;harvest;index'= {
+        }
+        &'engramdb;help;harvest;search'= {
+        }
+        &'engramdb;help;harvest;summary'= {
+        }
+        &'engramdb;help;harvest;reset'= {
+        }
+        &'engramdb;help;harvest;ledger'= {
+            cand list 'List recorded sessions and their decisions'
+            cand show 'Show one entry in full, including archive metadata'
+            cand export 'Decompress an archived transcript back to a file'
+            cand rm 'Delete a ledger entry and/or its archive'
+            cand prune 'Evict archives past the retention limits (dry run by default)'
+        }
+        &'engramdb;help;harvest;ledger;list'= {
+        }
+        &'engramdb;help;harvest;ledger;show'= {
+        }
+        &'engramdb;help;harvest;ledger;export'= {
+        }
+        &'engramdb;help;harvest;ledger;rm'= {
+        }
+        &'engramdb;help;harvest;ledger;prune'= {
         }
         &'engramdb;help;groups'= {
             cand create 'Create a named group store (idempotent; prints its group id)'
