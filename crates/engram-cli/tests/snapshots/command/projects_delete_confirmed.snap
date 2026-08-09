@@ -1,0 +1,11 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- prompts ---
+? Continue? [y/N] → yes
+--- stdout ---
+Removed project from registry (path: [PROJECT])
+Deleted global data (LanceDB + personal memories).
+--- stderr ---
+Warning: This will remove project '[PID]' from the registry and delete its global data.

@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- prompts ---
+--- stdout ---
+--- stderr ---
+--- error ---
+prune requires confirmation; re-run with --force in JSON mode

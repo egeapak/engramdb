@@ -156,9 +156,28 @@ static FILTERS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
 });
 
 pub(crate) fn normalize(raw: &str, project_dir: &std::path::Path) -> String {
-    // The temp dir first: its path can contain hex runs the id rules would
-    // otherwise chew into placeholders.
-    let mut out = raw.replace(&project_dir.display().to_string(), "[PROJECT]");
+    // Both spellings of the temp dir. `RegistryBackend::update` stores
+    // `dir.canonicalize()`, and commands like `projects delete` echo that
+    // string back — while `TempProject::path()` hands out the uncanonicalised
+    // handle. On Linux the two are equal and this is redundant; on macOS
+    // `/tmp` resolves to `/private/tmp`, and without this the real temp path
+    // would land in a snapshot.
+    //
+    // Longest first: the raw path is a *prefix* of the canonical one on macOS,
+    // so replacing it first would leave a stray `/private` behind.
+    let mut spellings = vec![project_dir.display().to_string()];
+    if let Ok(canonical) = project_dir.canonicalize() {
+        spellings.push(canonical.display().to_string());
+    }
+    spellings.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    spellings.dedup();
+
+    // The temp dir before the id rules: its path can contain hex runs they
+    // would otherwise chew into placeholders.
+    let mut out = raw.to_string();
+    for spelling in spellings {
+        out = out.replace(&spelling, "[PROJECT]");
+    }
     for (re, replacement) in FILTERS.iter() {
         out = re.replace_all(&out, *replacement).into_owned();
     }
@@ -205,6 +224,26 @@ mod tests {
             normalize("Path: /tmp/.tmpAbC123/sub", dir),
             "Path: [PROJECT]/sub"
         );
+    }
+
+    /// A registry stores `dir.canonicalize()` and commands echo that back, so
+    /// the canonical spelling has to be redacted too — on macOS it differs
+    /// from what `TempProject::path()` returns. Both must collapse to the same
+    /// placeholder, with no `/private` fragment surviving.
+    #[test]
+    fn normalize_replaces_both_spellings_of_the_project_dir() {
+        let real = TempDir::new().unwrap();
+        let dir = real.path();
+        let canonical = dir.canonicalize().unwrap();
+        let text = format!(
+            "raw {} then canonical {}\n",
+            dir.display(),
+            canonical.display()
+        );
+
+        let out = normalize(&text, dir);
+        assert_eq!(out, "raw [PROJECT] then canonical [PROJECT]\n");
+        assert!(!out.contains("/private"), "canonical prefix leaked: {out}");
     }
 
     /// `short_id` output and `review`'s 8-char prefix both have to land on a

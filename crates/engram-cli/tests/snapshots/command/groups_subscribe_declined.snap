@@ -1,0 +1,10 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- prompts ---
+? Continue? [y/N] → no
+--- stdout ---
+Aborted.
+--- stderr ---
+Warning: Subscribing project '[PID]' to group 'shared-conventions' will fold 0 memories (store not yet created) into this project's queries, and let this project write to the group (no other projects share it yet).

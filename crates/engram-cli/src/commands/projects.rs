@@ -541,4 +541,189 @@ mod tests {
             .unwrap();
         assert_eq!(child_entry.parent_project_id, None);
     }
+
+    // =================================================================
+    // Command-tier snapshots
+    //
+    // The tests above assert registry *state* — that declining leaves the
+    // entry alone. These assert what the user was actually shown before they
+    // answered: the warning naming what is about to be destroyed, the
+    // confirmation and its default, and the outcome lines. Both flows here
+    // are destructive and both default to "no", so the warning is the whole
+    // safety story. See `crate::testutil` for why this tier exists.
+    //
+    // `projects prune` builds `indicatif` bars, but their default draw target
+    // is stderr and `is_term()` is false under the runner, so they are hidden
+    // and never reach the capture (which is the formatter's sink anyway).
+    // =================================================================
+
+    use crate::testutil::{
+        capturing_json, capturing_plain, interaction, snap_command, TempProject,
+    };
+
+    /// The registry stores the *canonicalized* project path (`update` calls
+    /// `Path::canonicalize`), and `delete` echoes it back. `TempProject::path`
+    /// is the uncanonicalized handle — identical on Linux, but `/tmp` is a
+    /// symlink on macOS — so normalization has to be given the resolved form
+    /// or the temp path would leak into the snapshot.
+    fn canonical_dir(p: &TempProject) -> std::path::PathBuf {
+        p.path().canonicalize().unwrap_or_else(|_| p.path().into())
+    }
+
+    /// Register a stale entry: a path that does not exist, so
+    /// `registry_entry_alive` classifies it as stale and prune has something
+    /// to preview. Nothing is created under the global data dir, so the
+    /// orphan and broken-parent-link counts stay at zero.
+    async fn with_stale_entry(p: &TempProject) {
+        p.registry
+            .update(&p.path().join("moved-away"), "stale-project")
+            .await
+            .unwrap();
+    }
+
+    /// Accepting the confirmation. The project was really initialised, so the
+    /// global-data line is part of the outcome too.
+    #[tokio::test]
+    async fn snap_projects_delete_confirmed() {
+        let p = TempProject::new();
+        let project_id = p.init_store().await.project_id.clone();
+
+        let prompter = MockPrompter::new(vec!["yes"]);
+        let (formatter, cap) = capturing_plain();
+        run_projects(
+            p.path(),
+            &p.registry,
+            Some(ProjectsCommand::Delete {
+                project_id,
+                force: false,
+                cascade: false,
+            }),
+            &formatter,
+            &prompter,
+            ProjectListGrouping::default(),
+        )
+        .await
+        .unwrap();
+
+        snap_command(
+            "projects_delete_confirmed",
+            &canonical_dir(&p),
+            interaction(&prompter, &cap),
+        );
+    }
+
+    /// Declining. The prompt defaults to `no`, so this is what a bare Enter
+    /// does too — worth pinning for a command that deletes a project's index
+    /// and personal memories.
+    #[tokio::test]
+    async fn snap_projects_delete_declined() {
+        let p = TempProject::new();
+        let project_id = p.init_store().await.project_id.clone();
+
+        let prompter = MockPrompter::new(vec!["no"]);
+        let (formatter, cap) = capturing_plain();
+        run_projects(
+            p.path(),
+            &p.registry,
+            Some(ProjectsCommand::Delete {
+                project_id,
+                force: false,
+                cascade: false,
+            }),
+            &formatter,
+            &prompter,
+            ProjectListGrouping::default(),
+        )
+        .await
+        .unwrap();
+
+        snap_command(
+            "projects_delete_declined",
+            &canonical_dir(&p),
+            interaction(&prompter, &cap),
+        );
+    }
+
+    /// Accepting the confirmation. The three preview lines are the point:
+    /// they are the only place the user learns *what* "Remove all?" covers,
+    /// and each category reports even when it found nothing.
+    #[tokio::test]
+    async fn snap_projects_prune_confirmed() {
+        let p = TempProject::new();
+        with_stale_entry(&p).await;
+
+        let prompter = MockPrompter::new(vec!["yes"]);
+        let (formatter, cap) = capturing_plain();
+        run_projects(
+            p.path(),
+            &p.registry,
+            Some(ProjectsCommand::Prune { force: false }),
+            &formatter,
+            &prompter,
+            ProjectListGrouping::default(),
+        )
+        .await
+        .unwrap();
+
+        snap_command(
+            "projects_prune_confirmed",
+            &canonical_dir(&p),
+            interaction(&prompter, &cap),
+        );
+    }
+
+    /// Declining after the same preview.
+    #[tokio::test]
+    async fn snap_projects_prune_declined() {
+        let p = TempProject::new();
+        with_stale_entry(&p).await;
+
+        let prompter = MockPrompter::new(vec!["no"]);
+        let (formatter, cap) = capturing_plain();
+        run_projects(
+            p.path(),
+            &p.registry,
+            Some(ProjectsCommand::Prune { force: false }),
+            &formatter,
+            &prompter,
+            ProjectListGrouping::default(),
+        )
+        .await
+        .unwrap();
+
+        snap_command(
+            "projects_prune_declined",
+            &canonical_dir(&p),
+            interaction(&prompter, &cap),
+        );
+    }
+
+    /// JSON is machine-consumed, so prune refuses to prompt and bails. The
+    /// preview is suppressed as well — stdout must carry exactly one JSON
+    /// document or nothing — which leaves the error message as the only thing
+    /// the caller gets. Empty prompts *and* empty streams are the assertion.
+    #[tokio::test]
+    async fn snap_projects_prune_json_refuses() {
+        let p = TempProject::new();
+        with_stale_entry(&p).await;
+
+        let prompter = MockPrompter::new(vec![]);
+        let (formatter, cap) = capturing_json();
+        let err = run_projects(
+            p.path(),
+            &p.registry,
+            Some(ProjectsCommand::Prune { force: false }),
+            &formatter,
+            &prompter,
+            ProjectListGrouping::default(),
+        )
+        .await
+        .expect_err("JSON mode must refuse to prompt");
+
+        snap_command(
+            "projects_prune_json_refuses",
+            &canonical_dir(&p),
+            format!("{}--- error ---\n{err}\n", interaction(&prompter, &cap)),
+        );
+    }
 }
