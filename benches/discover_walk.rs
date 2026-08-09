@@ -29,6 +29,26 @@
 //! environment (a real home directory, possibly on a network mount) has far
 //! more of it than a warm tmpfs.
 //!
+//! Measured (warm cache, 16-way, mean of 100+ samples):
+//!
+//! | case | previous | shipped | |
+//! |------|---------:|--------:|-|
+//! | 85 dirs (4x3) | 10.5 ms | 2.2 ms | 4.8x |
+//! | 1555 dirs (6x4) | 240.6 ms | 37.1 ms | 6.5x |
+//! | 4681 dirs (8x4) | 746.2 ms | 115.0 ms | 6.5x |
+//! | 1555 dirs, 1-in-64 projects | 160.9 ms | 30.4 ms | 5.3x |
+//! | 1555 dirs, 1-in-8 projects | 251.4 ms | 36.8 ms | 6.8x |
+//! | 1555 dirs, every dir a project | 449.5 ms | 88.7 ms | 5.1x |
+//!
+//! Larger than a cached-read model predicts, because tokio dispatches every
+//! `fs` call to its blocking pool: the per-await cost is a thread hand-off, not
+//! just a syscall, and that is exactly what overlapping recovers. The figures
+//! are also conservative in the shipped arm's disfavour — it additionally
+//! classifies, accumulates and sorts a report that the copy does not build.
+//!
+//! `DIR_CONCURRENCY` was set from the blocking-pool argument rather than swept;
+//! if it is ever retuned, this is the group to retune it against.
+//!
 //! Run with: `cargo bench --bench discover_walk`
 
 use std::path::{Path, PathBuf};
