@@ -245,7 +245,7 @@ Reports candidates only. The actual merge happens via the MCP `compress_apply` t
 ## `reindex` — rebuild vectors and index
 
 ```bash
-engramdb reindex [--embeddings-only|--index-only] [--global]
+engramdb reindex [[--embeddings-only|--index-only] [--global] | --archive-only]
 ```
 
 | Flag | What runs |
@@ -253,6 +253,7 @@ engramdb reindex [--embeddings-only|--index-only] [--global]
 | (no flag) | Re-embed everything + rebuild the LanceDB index. |
 | `--embeddings-only` | Re-embed only. |
 | `--index-only` | Rebuild the index without re-embedding. |
+| `--archive-only` | Rebuild the **conversation** search rows from the stored transcript copies — the copies, not the live transcripts, even where Claude Code still has one. Touches no memory; see [`harvest search`](#harvest--mine-past-claude-code-sessions). Curated summaries are preserved — they are the one thing a rebuild cannot recreate. This is also the remediation when `[embeddings].dimensions` changed under an existing conversation index: the table's vector width is fixed at creation, so it is recreated at the new width (carrying the summaries across) before the rows are rebuilt. Rejected alongside any other flag, `--global` included: conversation rows live in the **root project's** index, which has no global-store counterpart. |
 
 ## `migrate` / `rollback` — memory format migrations
 
@@ -304,7 +305,7 @@ engramdb hook pre-tool-use                            # PreToolUse for Read/Writ
 engramdb hook session-start [--min-criticality <0..1>] # SessionStart, default 0.6
 engramdb hook user-prompt-submit                      # UserPromptSubmit: prompt-relevant memories
 engramdb hook post-tool-use                           # PostToolUse for Write/Edit/MultiEdit: watch-path warnings
-engramdb hook session-end                             # SessionEnd: housekeeping, no output
+engramdb hook session-end                             # SessionEnd: housekeeping + transcript copy, no output
 engramdb hook pre-compact                             # PreCompact: store-your-memories reminder
 ```
 
@@ -336,6 +337,262 @@ Worktree nesting and path sorting apply in every mode. `--json` output is
 unaffected by `--group`: it stays a flat array carrying `parent_project_id`.
 
 See [projects-and-worktrees.md](./projects-and-worktrees.md).
+
+## `harvest` — mine past Claude Code sessions
+
+```bash
+engramdb harvest list [--since 7d] [-n N] [--include-harvested]
+                      [--include-empty] [--all-projects] [--exclude-session ID]
+engramdb harvest show <session_id> [--max-chars N] [--include-thinking]
+                      [--include-sidechains] [--no-tools] [--all-projects]
+engramdb harvest mark <session_id> [[--memory <id>]... | --defer] [--note <text>]
+                      [--all-projects] [--summary "<text>"]
+engramdb harvest index [<session_id> | --all] [--force]
+engramdb harvest search <query> [-n N] [--since 30d] [--all-projects]
+engramdb harvest summary <session_id> [<text> | --editor | --from-file <path>]
+engramdb harvest reset <session_id>
+engramdb harvest ledger list [--decision harvested|skipped|deferred|unreviewed]
+                             [--stage collected|indexed|compressed] [--with-archive]
+engramdb harvest ledger show <session_id>
+engramdb harvest ledger export <session_id> [-o <path>]
+engramdb harvest ledger rm <session_id> [--archive-only] [--unpin] [--force]
+engramdb harvest ledger prune [--older-than 90d] [--max-bytes N] [--apply]
+```
+
+Reads the transcripts Claude Code writes to
+`~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` and presents them for
+review. This command only *presents* sessions — it never writes a memory.
+The `/engram:harvest` slash command drives it and does the saving.
+
+**Scope.** `list` and `show` cover the **root** of the current project's
+hierarchy and every project registered under it — so running from a git
+worktree also covers the main checkout and the sibling worktrees, not just
+this one. A worktree files its transcripts under its own path but shares the
+main checkout's memory store, so its sessions are harvested alongside the main
+ones. Attribution uses the `cwd` recorded inside each
+transcript, not the directory name — that name is a lossy encoding of the
+path and can collide. `--all-projects` ignores scoping entirely.
+
+**Digests, not raw transcripts.** `show` prints a budgeted digest: prompts
+and assistant prose verbatim, each tool call as a single line with its
+target and success/failure, results as a one-line preview. A raw transcript
+is ~99% tool payload, so digesting is what makes review affordable — a
+1.2 MB transcript renders to ~63 KB, and a 2.9 MB one to ~60 KB — the
+default budget is a ceiling against a pathological session, not a routine
+constraint. When content had
+to be dropped to fit, the header says `partial digest` and names what went;
+raise `--max-chars` to see more. One entry there does *not* respond to a larger
+budget: a single event is capped at 1,500 characters before the budget is even
+consulted, so one pasted stack trace cannot cost a whole session its slot. The
+digest reports those separately as `N long events each cut to 1500 chars`
+(`capped_events` in `--json`); `harvest ledger export` is the route to the full
+text.
+
+A second entry is beyond any budget's reach: a single JSONL record larger than
+4 MiB — in practice a pasted screenshot, which Claude Code embeds as base64 —
+is dropped by the parser before the digest is assembled. The header reports
+`N records over 4 MiB dropped by the parser` (`skipped_records` in `--json`)
+and the turn counts printed above it are then lower bounds, since the dropped
+records never became turns. Re-running with a larger `--max-chars` returns the
+identical text; `harvest ledger export` is again the only route to the
+original.
+
+Session ids accept unique prefixes. `--json` (or any non-TTY invocation)
+emits the structured event list alongside the rendered markdown.
+
+**Searching past conversations.** `harvest search` answers "did we ever
+discuss X" and "why did the build break in July" over the conversations that
+have been indexed.
+
+Indexing rides the throttled maintenance pass, which runs at most once per
+`[maintenance] interval_secs` (**21600**, six hours). Two things become due: a
+session a human settled with `mark`, at once, and a session **nobody** reviewed,
+once it is older than `[harvest] index_after_hours` (**24**). That second
+trigger is the point — if search only found what you had already read, it would
+only find what you no longer need. One pass embeds at most
+`[harvest] index_batch` (**25**) conversations, newest first, so a machine with
+years of history fills in over successive passes.
+
+**The pass only indexes where an embedding provider is already loaded, which
+means the MCP server** — running the CLI does not build one, and its maintenance
+pass skips indexing entirely (the same way it skips consolidation). So on a
+machine that has never run `engramdb serve`, nothing is indexed until you ask:
+`harvest index <session_id>` or `harvest index --all` does it by hand, and is
+the only route on a CLI-only setup. `[harvest] index = false` turns the
+automatic pass off altogether.
+
+Each conversation gets two vectors. `digest_vec` is always present and is
+embedded from the deterministic, code-generated reduction of the session:
+prompts and assistant prose, plus every **failed** tool call and its error
+text, with successful tool calls dropped because they dilute the vector.
+`summary_vec` is present only once someone has written a curated summary
+(`harvest summary`, or `mark --summary`). Both are queried and the better score
+wins, with an exact tie broken toward the summary — a human wrote it, so a
+match there is higher precision. Editing a summary re-embeds only the summary;
+the digest vector is untouched.
+
+Search returns session ids and metadata, not conversation text — pass an id to
+`harvest show` to read one. A hit marked `partial` is a session whose tail was
+never embedded (the indexed text is budgeted to what the embedding model can
+actually read), so a *miss* against it is not evidence the topic was absent.
+`--since` narrows the candidates *before* the nearest-neighbour cut rather than
+trimming its output, so a window still returns its best `-n` matches however
+many older conversations rank above them. A session with no recorded end time
+is excluded by `--since`, the same rule `harvest list` applies: it cannot be
+shown to fall inside the window.
+
+`harvest index` is idempotent: each row records the checksum of the exact text
+behind its vector, so re-running costs one hash and no embedding call.
+`--force` re-embeds anyway. `reindex --archive-only` rebuilds every row from
+the stored transcript copies — the payoff of keeping those copies verbatim, and
+the reason the digest vector is never derived from an agent's prose: an
+agent-authored summary is not regenerable by code, so it is stored and
+separately embedded but never what recall depends on. A rebuild preserves it.
+
+**The ledger.** `mark` records that a session was reviewed so it is not
+offered again, and *must* be used even when a session yielded nothing —
+a zero-yield session leaves no other trace, so without a mark it is re-read
+on every future harvest. `reset` clears the review. When the session has an
+archived transcript the entry is **kept** and set back to `unreviewed` rather
+than deleted: that entry is the only route to the archive, so removing it would
+strand the file — unreachable by `harvest show`, `ledger export` and
+`ledger list` alike, while still counting against the archive budget. With no
+archive behind it the entry is removed outright, and the session is offered
+again only while Claude Code still holds the live transcript; the success
+message says which of the two happened. To delete an entry *and* its archive,
+use `harvest ledger rm`. The ledger lives in
+`.engramdb/state/harvest_ledger.jsonl` under the root project, shared by
+all its worktrees and by any sub-project linked to it with
+`engramdb projects link` — the same root the archives are keyed by, since
+those projects are offered each other's sessions and prune each other's
+archives. A ledger found at a sub-project's own path (written before it was
+linked) is appended to the root's the next time a harvest command runs there,
+and the old file is kept alongside as `harvest_ledger.jsonl.adopted`. Moving
+it aside is what commits the adoption, so a sub-project directory that cannot
+be written to adopts nothing (with a warning naming the path) rather than
+re-appending the same entries on every command — which would undo a
+`harvest reset` each time.
+
+**The ledger is an append-only log.** Every state change is one JSON line, and
+a line records only the fields that change — so the SessionEnd hook writing
+where a transcript ended up cannot disturb a decision you recorded, and vice
+versa, without either side reading the file first. Reading folds the lines
+together in timestamp order, last write wins. A partial line left by a crash
+costs that line and nothing else. The file is also only ever read and written
+as a **plain file**: if `harvest_ledger.jsonl` is a symlink, a named pipe or
+anything else — which a repository you cloned can arrange, since `.engramdb/`
+is meant to be committed — every read folds as empty and every write is
+refused, each with a warning naming the path. Nothing is deleted for you;
+remove the planted path and the ledger works again. The file is rewritten from scratch once it
+holds more than **four** lines per live entry, which is what drops entries that
+have been removed or aged out.
+
+Upgrading from an earlier version converts `harvested_sessions.json` the first
+time any harvest command runs, and keeps the original next to it as
+`harvested_sessions.json.migrated`. No review decision is lost; a record the
+converter cannot read is skipped with a warning naming the session, and the
+original file is your copy of it.
+
+Entries are dropped once they are **365 days** old — a fixed window, with no
+config knob — but only ones that hold no archive; an entry naming an archived
+transcript is exempt however old it is, because it is the only route to that
+file. So a `skipped` session with no archive behind it is eventually forgotten,
+and is offered once more if Claude Code somehow still holds the live
+transcript. Archiving (on by default) is what makes a review permanent.
+
+Each entry carries two independent fields. A **decision** — what you concluded:
+`harvested` (memories saved), `skipped` (reviewed and passed over), `deferred`
+(a human looked at it and postponed the call — `--defer` records this), or
+`unreviewed` (nobody has looked at it yet). The last is written for every
+session the SessionEnd hook collects, so it is by far the most common; keeping
+it out of `deferred` is what makes a real deferral findable. Neither settles a
+session, so both keep appearing in `harvest list`.
+
+And a **stage** — where the conversation's bytes are: `collected` (a transcript
+is reachable), `indexed` (a search row exists for it), or `compressed`. The two
+never move each other: a session can be `indexed` while `skipped`, or
+`compressed` while `deferred`. `harvest ledger list --stage <stage>` filters on
+it, alongside `--decision`. An entry that reaches `compressed` is dropped from
+the ledger on the next read, on the premise that something else carries it from
+then on. Conversation search now ships, but its row is not that something: it
+holds the session's first prompt, curated summary and vectors — not the
+decision, the memory ids or the note. Dropping an entry therefore still destroys
+its review record, so **nothing in this version writes `compressed`**; the stage
+exists only so the format does not have to change later. If something else ever
+writes it, the drain says so loudly in the log, naming every session it dropped.
+
+**Transcript archives.** With `[harvest] archive = true` (the default), the
+SessionEnd hook compresses each ending session's transcript so it can still
+be read later. `harvest show <id>` falls back to the archive automatically
+once the live transcript is gone — but a pruned session no longer appears in
+`harvest list`, which reads live transcripts only, so find it with
+`harvest ledger list` first. This matters because Claude Code prunes its own
+transcripts: archiving at *harvest* time would protect nothing, since you
+necessarily still hold the file then.
+
+Archives live at `<global_data_dir>/projects/<root_id>/transcripts/` —
+deliberately **not** under `.engramdb/`, which is repo-adjacent and gets
+committed. Transcripts routinely contain environment variables echoed by
+commands and keys pasted into chat; committing them to a shared repository
+would be a serious leak.
+
+Real transcripts compress about 4.5x (less than one might assume — most of a
+transcript is high-entropy tool output), so a typical session lands around
+650 KB. `archive_retention_days` (365) and `archive_max_bytes` (2 GiB, with
+oldest-first eviction) bound the total; `harvest ledger prune` reclaims space
+on demand and, like `gc` and `compress`, is a dry run until `--apply`. These
+budgets are what expire an archive: the ledger's own entry-retention window
+never does, because an entry is the only route to the file it names, so a
+session whose archive is still held keeps its record however old it is. That
+exemption is checked against the archive directory rather than against what the
+entry claims — an entry naming a file that `projects delete --cascade`, a
+restored backup, or an eviction on another machine took away loses the
+reference, and with it the exemption, on the next harvest command.
+`harvest ledger rm` deletes one — it confirms first, since once Claude Code has pruned its own transcript the archive is the only remaining copy; `--force` skips the prompt and is **required** under `--format json`, which never prompts. `harvest ledger export` restores one, verifying it against the SHA-256
+recorded when it was written.
+
+A conversation lives in **three** places, and `harvest ledger rm <id>` (without
+`--archive-only`) removes all three: the ledger entry, the archived transcript,
+and the conversation **search row** — which stores the session's first prompt
+and its curated summary verbatim, so leaving it would keep the conversation
+findable by `harvest search` after you were told the only copy was gone, with
+nothing left for `harvest show` to open. `--archive-only` deliberately keeps the
+search row, because it retracts nothing: it reclaims bytes while the review
+record stands, and dropping the row would destroy a curated summary that no
+rebuild can recreate. A session that is searchable but no longer readable is an
+ordinary state either way — it is what any indexed session becomes once Claude
+Code prunes its transcript and no copy was taken.
+
+**Provenance and pinning.** `harvest mark <session> --memory <id>` records the
+session on each named memory as the conversation it was extracted from, so a
+memory that is later challenged resolves back to what was actually said
+(`harvest show <session>`). The agent does nothing extra for this — `mark` is
+already the one call that names both halves. The link is stored in the memory
+file itself, so it is committed and travels with a clone; `engramdb get <id>
+--format json` shows it as `source_sessions`.
+
+A cited conversation's transcript copy is **pinned**: neither
+`archive_retention_days` nor `archive_max_bytes` evicts it, and neither does
+the unattended SessionEnd sweep. The budget is measured over the *unpinned*
+copies only — counting pinned bytes toward the cap would quietly evict every
+unpinned copy to make room for files it is not allowed to touch. Pinned bytes
+beyond the budget are therefore reported rather than enforced, by
+`harvest ledger prune` and by `doctor`.
+
+Releasing a pin is deliberate: `harvest ledger rm <id>` refuses to delete a
+cited copy and names the memories citing it. `--unpin` is the decision to
+delete it anyway; `--force` only skips the prompt, so a scripted cleanup can
+never strand a memory's evidence by accident. Once the copy is gone the memory
+keeps its citation and `doctor` reports it as **evidence expired** — the same
+thing that happens naturally when a copy reaches the end of its retention
+window. Nothing is broken and nothing needs repairing; the claim still holds,
+it just can no longer be traced back.
+
+`doctor` reports up to four harvest facts under **Project → Harvest**, none of
+which affects the exit code: sessions due for indexing and ledger lines against
+live entries (compaction is opportunistic, so a long log is normal) are always
+shown; expired evidence and pinned bytes appear only when there is any. The
+whole subsection is omitted for a project that has never harvested.
 
 ## `completions` — shell completions
 

@@ -26,11 +26,12 @@ mod title_strategy;
 pub use challenge::Challenge;
 pub use config::{
     ChallengePenalty, CliConfig, ContentConfig, DaemonConfig, EmbeddingBackend, EmbeddingsConfig,
-    EngramConfig, EpistemicConfig, HooksConfig, LogicalBonusConfig, MaintenanceConfig, NliConfig,
-    ReindexOnModelChange, RerankConfig, RetrievalConfig, ScopeProximityConfig, ScoringConfig,
-    ScoringWeights, SearchConfig, SituationConfig, SituationProfile, ThresholdsConfig,
-    TrustWeights, COMPOSITION_METADATA_V1, CONTENT_SOFT_TOKEN_TARGET, DEFAULT_NLI_MODEL_REPO,
-    DEFAULT_RERANK_MODEL, DEFAULT_SUMMARY_MAX_CHARS,
+    EngramConfig, EpistemicConfig, HarvestConfig, HooksConfig, LogicalBonusConfig,
+    MaintenanceConfig, NliConfig, ReindexOnModelChange, RerankConfig, RetrievalConfig,
+    ScopeProximityConfig, ScoringConfig, ScoringWeights, SearchConfig, SituationConfig,
+    SituationProfile, ThresholdsConfig, TrustWeights, COMPOSITION_METADATA_V1,
+    CONTENT_SOFT_TOKEN_TARGET, DEFAULT_NLI_MODEL_REPO, DEFAULT_RERANK_MODEL,
+    DEFAULT_SUMMARY_MAX_CHARS,
 };
 pub use decay::{Decay, DecayStrategy};
 pub use env::in_process_override;

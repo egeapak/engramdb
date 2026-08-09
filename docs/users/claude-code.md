@@ -6,7 +6,7 @@ Once wired up, EngramDB exposes its MCP tool surface and runs six hooks automati
 - **PreToolUse (Read|Write|Edit)** surfaces memories relevant to the file being touched.
 - **UserPromptSubmit** surfaces memories relevant to the prompt you just submitted.
 - **PostToolUse (Write|Edit|MultiEdit)** warns when an edit touches a path a memory is watching.
-- **SessionEnd** does task housekeeping (no context output).
+- **SessionEnd** does task housekeeping and keeps a compressed copy of the session transcript (no context output).
 - **PreCompact** reminds the agent to store durable discoveries before context is compacted.
 
 Two ways to wire this up: the plugin (recommended) or `engramdb setup`.
@@ -142,7 +142,74 @@ Invalidated memories never warn. No output in the common case (no watch-path mat
 
 ### `SessionEnd`
 
-Housekeeping only, no context output: clears the session's task mapping. When `[epistemic].demote_on_session_end = true` and the session had a declared task, it also demotes that task's task-scoped memories (same effect as `engramdb task complete`).
+No context output. It clears the session's task mapping, and when
+`[epistemic].demote_on_session_end = true` and the session had a declared task,
+demotes that task's task-scoped memories (same effect as `engramdb task
+complete`). It then keeps a copy of the session transcript. Everything here is
+best-effort — a failure is logged and swallowed, never blocking session
+teardown — and the hook does nothing at all in a directory that was never
+`engramdb init`ed, which matters because the plugin registers SessionEnd
+machine-wide.
+
+**The transcript copy.** Claude Code prunes its own transcripts, so a session
+becomes unharvestable once its file is gone — and any memory derived from it
+loses its evidence. Session end is the last moment the file is reliably still
+there, so SessionEnd writes a zstd-compressed copy to
+
+```
+<engramdb data dir>/projects/<root-project-id>/transcripts/
+```
+
+deliberately **outside** your repository, never under `.engramdb/`, which gets
+committed. The id is the **root** of the project's hierarchy, so a git
+worktree's copies land beside the main checkout's rather than in a directory of
+their own.
+
+It is a **verbatim copy of the whole conversation**: your prompts, the
+assistant's replies, and full tool output — in practice that includes command
+output, file contents, and anything pasted into the chat. It is kept verbatim
+on purpose: it is the evidence a challenged memory resolves back to, and a
+reduction taken at copy time could never be improved on later. It stays on your
+machine, owner-readable only; nothing is transmitted.
+
+The same run appends one line to the project's harvest ledger, recording where
+the copy landed and its size. The ledger is an append-only JSONL log at
+
+```
+<project>/.engramdb/state/harvest_ledger.jsonl
+```
+
+under the root project — one line per state change, holding session ids,
+review decisions, timestamps and the pointer to the copy. **No conversation
+content is in it**; unlike the copy it is repo-adjacent and meant to be
+committed. A session the hook collects is recorded as `unreviewed`, which is
+what later lets `/engram:harvest` offer it.
+
+Last, the run does a retention sweep over the copies. The bounds, all under
+`[harvest]` in `.engramdb/config.toml`:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `archive_retention_days` | `365` | copies older than this are deleted (max `3650`) |
+| `archive_max_bytes` | `2147483648` (2 GiB) | total budget; oldest evicted first |
+| `archive_max_transcript_bytes` | `16777216` (16 MiB) | a transcript larger than this is not copied (the sweep still runs) |
+
+Evicted files are cleared from the ledger too, so it never advertises an export
+that cannot succeed. A copy cited as a memory's evidence (see
+[`harvest mark --memory`](./cli-reference.md#harvest--mine-past-claude-code-sessions))
+is **pinned** and is not evicted by either bound.
+
+**To turn it off**, set `archive = false` under `[harvest]`:
+
+```toml
+[harvest]
+archive = false
+```
+
+The rest of SessionEnd (task housekeeping) still runs. To clear what has
+already accumulated, `engramdb harvest ledger prune --apply`; to pull one copy
+back out, `engramdb harvest ledger export <session-id>`; to delete one copy and
+its record, `engramdb harvest ledger rm <session-id>`.
 
 ### `PreCompact`
 
@@ -151,6 +218,34 @@ Injects a short static reminder to store durable discoveries — decisions with 
 ## Declaring tasks: `task_current` / `task_complete`
 
 Memories created with `generality = task` + an `origin_task` are scoped to a piece of work, not the whole project. Hooks hide them by default so one task's scratch findings don't pollute another session. To surface yours, declare what you're working on — via the MCP `task_current` tool, or `engramdb task current <NAME>` on the CLI. When the work is done, `task_complete` (MCP) or `engramdb task complete <NAME>` demotes the task's memories to fast decay so they age out on their own. The SessionStart hook tells the agent when task-scoped memories were hidden, so in practice the agent drives this flow itself.
+
+## Slash commands: `/engram:reflect` and `/engram:harvest`
+
+Both ship with the plugin (they are markdown command files, so a hooks-only
+`engramdb setup` install does not get them).
+
+`/engram:reflect` reviews the session you are **in**: it asks the agent to
+capture anything durable about the project, the environment, or your
+preferences before handing back.
+
+`/engram:harvest` reviews sessions that are already **over**. Claude Code
+keeps a transcript of every session on disk; this command reads the ones
+belonging to the current project — **including its git worktrees**, which
+file transcripts under their own paths but share the project's memory store
+— and mines them for knowledge that was never captured. Use it to backfill a
+project you have been working on since before EngramDB was installed.
+
+The flow is deliberately gated: the agent lists **every** candidate memory
+with the evidence behind it and waits for your approval before saving
+anything. Sessions that hold nothing worth keeping are reported as such —
+that is a normal outcome, not a failure — and are recorded as reviewed so
+they are not re-read next time.
+
+It is backed by the `engramdb harvest` CLI command, which does the
+transcript reading and digesting; see
+[cli-reference.md](./cli-reference.md#harvest--mine-past-claude-code-sessions)
+for the flags, including `--since`, `--all-projects`, and the `--max-chars`
+budget.
 
 ## Troubleshooting
 

@@ -21,6 +21,7 @@ engram-types = { path = "../engram-types" }
 
 lancedb = { version = "0.31", default-features = false }
 arrow-array = "58"
+arrow-buffer = "58"
 arrow-schema = "58"
 
 serde = { version = "1", features = ["derive"] }
@@ -31,6 +32,7 @@ toml = "1"
 uuid = { version = "1", features = ["v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.11"
+zstd = "0.13"
 dirs = "6"
 jwalk = "0.8"
 # Data parallelism for the bulk CPU work on the read/reindex paths: parsing a
@@ -48,6 +50,11 @@ tracing = "0.1"
 thiserror = "2"
 anyhow = "1"
 tempfile = "3"
+
+# `O_NOFOLLOW` for the state-file writer (`state_file.rs`). Unix-only: the
+# flag has no Windows equivalent and no delivery path there either.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 engram-test-support = { path = "../engram-test-support" }

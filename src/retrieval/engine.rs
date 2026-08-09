@@ -655,14 +655,31 @@ impl RetrievalEngine {
     /// when no provider is configured or the embed fails (logged). Used by
     /// the §11.4 consolidation pass; NOT a retrieval path.
     pub async fn embed_text(&self, text: &str) -> Option<Vec<f32>> {
-        let provider = self.embedding_provider.as_ref()?;
-        match provider.embed(text).await {
+        match self.embed_text_result(text).await {
             Ok(v) => Some(v),
             Err(e) => {
                 tracing::debug!("embed_text failed (non-fatal): {e}");
                 None
             }
         }
+    }
+
+    /// [`Self::embed_text`], keeping the failure instead of logging it away.
+    ///
+    /// `embed_text` collapses two very different states into one `None` — "no
+    /// backend is configured" and "the backend was asked and did not answer" —
+    /// and drops the provider's error into a `debug!` line nobody sees. That
+    /// is the right trade for the consolidation pass, which only wants a vector
+    /// if one is cheap. It is the wrong trade wherever the outcome is reported
+    /// to a person: `harvest search` told users "no embedding provider
+    /// available" for an Ollama server that was simply not running, because on
+    /// a default build the `Auto` backend always constructs an Ollama provider
+    /// (construction contacts nothing) and only the *call* fails.
+    pub async fn embed_text_result(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        let Some(provider) = self.embedding_provider.as_ref() else {
+            anyhow::bail!("no embedding backend is configured");
+        };
+        provider.embed(text).await
     }
 
     /// [`Self::embed_text`] for many texts at once, one embedding slot per

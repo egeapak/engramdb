@@ -639,13 +639,16 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Reindex {
             embeddings_only,
             index_only,
+            archive_only,
             global,
         } => {
             commands::reindex::run_reindex(
                 &dir,
+                &registry,
                 global,
                 embeddings_only,
                 index_only,
+                archive_only,
                 backend,
                 &formatter,
                 &daemon_cell,
@@ -703,7 +706,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                     commands::run_hook_user_prompt_submit(&dir).await
                 }
                 Some(HookCommand::PostToolUse) => commands::run_hook_post_tool_use(&dir).await,
-                Some(HookCommand::SessionEnd) => commands::run_hook_session_end(&dir).await,
+                Some(HookCommand::SessionEnd) => {
+                    commands::run_hook_session_end(&dir, &registry).await
+                }
                 Some(HookCommand::PreCompact) => commands::run_hook_pre_compact(&dir).await,
                 // Version skew: the Claude Code hook config names an event this
                 // binary predates (or is a bare `engramdb hook`). Report on
@@ -740,6 +745,22 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Groups { command } => {
             commands::run_groups(&dir, &registry, command, &prompter, &formatter).await
+        }
+        Command::Harvest { command } => {
+            commands::run_harvest(
+                &dir,
+                &registry,
+                command,
+                &config,
+                &formatter,
+                &prompter,
+                commands::harvest::HarvestEngineContext {
+                    backend,
+                    cell: &daemon_cell,
+                    policy: daemon_policy,
+                },
+            )
+            .await
         }
     }
 }

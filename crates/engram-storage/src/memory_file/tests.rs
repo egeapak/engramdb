@@ -33,6 +33,7 @@ fn sample_memory() -> Memory {
         status: Status::Active,
         visibility: Visibility::Shared,
         audience: None,
+        source_sessions: vec![],
         challenges: vec![],
         verified_at: None,
         created_at: "2026-01-15T10:00:00Z".parse().unwrap(),
@@ -69,6 +70,7 @@ fn full_memory() -> Memory {
         status: Status::Active,
         visibility: Visibility::Personal,
         audience: None,
+        source_sessions: vec![],
         challenges: vec![],
         verified_at: None,
         created_at: "2026-01-15T10:00:00Z".parse().unwrap(),
@@ -596,6 +598,75 @@ fn test_v2_audience_roundtrip() {
     assert_eq!(parser.parse(&written).unwrap().audience, None);
 }
 
+/// The harvest evidence link survives write→parse, and an empty list writes
+/// nothing — which is what makes a 0.7.0 file byte-identical to a pre-0.7.0
+/// one for the memories that were never harvested, i.e. most of them.
+#[test]
+fn test_v2_source_sessions_roundtrip() {
+    let writer = V2Writer;
+    let parser = V2Parser;
+
+    let mut memory = sample_memory();
+    assert!(memory.source_sessions.is_empty());
+    let written = writer.write(&memory).unwrap();
+    assert!(!written.contains("source_sessions"));
+    assert!(parser.parse(&written).unwrap().source_sessions.is_empty());
+
+    memory.source_sessions = vec!["sess-a".to_string(), "sess-b".to_string()];
+    let written = writer.write(&memory).unwrap();
+    assert!(written.contains("source_sessions"));
+    assert_eq!(
+        parser.parse(&written).unwrap().source_sessions,
+        vec!["sess-a".to_string(), "sess-b".to_string()]
+    );
+}
+
+/// A file written before the field existed parses with no citations rather
+/// than failing — the backward-compat half of the 0.7.0 migration, on the
+/// authoritative source that migration rebuilds the table from.
+#[test]
+fn test_v2_file_without_source_sessions_parses_as_uncited() {
+    let content = r#"---
+version: 2
+id: pre-0-7-0
+type: decision
+status: Active
+---
+
+# A memory from before the column existed
+
+## Content
+
+body
+
+<!-- engramdb
+visibility: Shared
+accessed_at: "2026-01-15T10:00:00Z"
+-->
+"#;
+    let memory = V2Parser.parse(content).unwrap();
+    assert_eq!(memory.id, "pre-0-7-0");
+    assert!(memory.source_sessions.is_empty());
+}
+
+/// A hand-edited (or cloned-in) file cannot smuggle a path through the
+/// citation list: the value is later joined into a transcript path by the pin
+/// lookup, so it is filtered on read exactly as the ledger filters its keys.
+#[test]
+fn test_v2_source_sessions_drops_path_shaped_ids() {
+    let mut memory = sample_memory();
+    memory.source_sessions = vec![
+        "../../etc/passwd".to_string(),
+        "/abs".to_string(),
+        "good-id".to_string(),
+    ];
+    let written = V2Writer.write(&memory).unwrap();
+    assert_eq!(
+        V2Parser.parse(&written).unwrap().source_sessions,
+        vec!["good-id".to_string()]
+    );
+}
+
 // ===========================================================================
 // Migration path: V1 → V2
 // ===========================================================================
@@ -834,6 +905,7 @@ fn test_v2_output_format_readable() {
         status: Status::Active,
         visibility: Visibility::Shared,
         audience: None,
+        source_sessions: vec![],
         challenges: vec![],
         verified_at: None,
         created_at: "2026-01-15T10:00:00Z".parse().unwrap(),
