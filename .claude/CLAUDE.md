@@ -3,7 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 EngramDB is a project-scoped persistent memory store for coding agents.
-Tech stack: Rust (edition 2021), LanceDB (vector index), ONNX Runtime via `fastembed` / raw `ort` (all-MiniLM-L6-v2 embeddings, BGE reranker, NLI), MCP protocol via `rmcp`, Tokio.
+Tech stack: Rust (edition 2021), LanceDB (vector index), ONNX Runtime via `fastembed` / raw `ort` (all-MiniLM embeddings, cross-encoder reranker, NLI), MCP protocol via `rmcp`, Tokio.
 
 The repo ships **one binary** (`engramdb`, `crates/engram-cli/src/main.rs`) that does everything — CLI, `serve` for the MCP server, `daemon` for the shared embedding host, and `hook` for Claude Code hook handlers. The same binary is what the Claude Code plugin in `.claude-plugin/` wires up.
 
@@ -76,7 +76,7 @@ Feature flags from `Cargo.toml`:
 
   **Build-time linking is deliberately not offered.** A `pkg-config` strategy (`ort/pkg-config`) would record `libonnxruntime` as a load-time dependency, and the dynamic loader resolves those before `main()` runs — so a missing runtime would stop the binary from starting at all, with no `doctor` output and no chance for the pre-flight probe to run. A CI step asserts the default binary has no ONNX entry in `ldd` and starts with no runtime installed; don't reintroduce one.
 
-  Two consequences worth internalizing. **(1)** `--all-features` necessarily turns `bundled-onnxruntime` back on, so `cargo clippy/nextest --all-features` still links a static ORT and does *not* exercise the default path — the `test-load-dynamic` CI job is what covers that. **(2)** Under `load-dynamic`, `ort`'s own loader **panics** when the dylib is missing, and the release profile is `panic = "abort"`, so it cannot be caught. `engram_onnx::runtime` therefore probes and validates the library with `libloading` *before* any `ort` call, and every model loader in `engram-models` calls `crate::ensure_onnx_runtime()` first. **Any new ONNX-backed loader must do the same**, or a user without the runtime gets a hard abort instead of the documented fallback to keyword search.
+  Two consequences worth internalizing. **(1)** `--all-features` necessarily turns `bundled-onnxruntime` back on, so `cargo clippy/nextest --all-features` links a static ORT — but `load-dynamic` is *also* on (it is in `default`) and takes precedence at run time, so those runs still `dlopen` a **shared** library and still need `ORT_DYLIB_PATH`. Linking static does not exempt you; see the sandbox section. The `test-load-dynamic` CI job is what covers the no-`bundled` build. **(2)** Under `load-dynamic`, `ort`'s own loader **panics** when the dylib is missing, and the release profile is `panic = "abort"`, so it cannot be caught. `engram_onnx::runtime` therefore probes and validates the library with `libloading` *before* any `ort` call, and every model loader in `engram-models` calls `crate::ensure_onnx_runtime()` first. **Any new ONNX-backed loader must do the same**, or a user without the runtime gets a hard abort instead of the documented fallback to keyword search.
 
 - `ollama` (default) — Ollama embedding backend via `reqwest`. Disable for pure offline ONNX.
 - `coreml` (macOS only) — Apple Neural Engine EP for `ort` (implies `onnxruntime`).
@@ -164,7 +164,15 @@ The web sandbox's egress gateway uses a custom CA that rustls/webpki-based downl
 2. **ONNX Runtime binary.** Two separate needs now, because the runtime is no longer compiled in:
 
    - *Building* `--all-features` (which CI and the commands above use) still enables `bundled-onnxruntime`, so `ort-sys` still wants a static lib to link and its download still fails with `UnknownIssuer`. The `ORT_STRATEGY=system ORT_LIB_LOCATION=/tmp/ort-lib` workaround below is unchanged.
-   - *Running* anything under the default `load-dynamic` build (the `engramdb` binary, `cargo nextest run --workspace` without `--all-features`) needs a **shared** library at run time. Export `ORT_DYLIB_PATH=/path/to/libonnxruntime.so`, or drop the `.so` next to the binary — `engram_onnx::runtime` searches the executable's directory first. `engramdb doctor` reports which one it resolved.
+   - *Running* needs a **shared** library — and this includes `--all-features` runs, which is the trap. `load-dynamic` is in `default` and takes precedence over `bundled-onnxruntime`, so `cargo nextest run --workspace --all-features` links the static lib at build time and then still `dlopen`s at run time. Staging only the static lib leaves ~20 model-loading tests failing (`OnnxProvider::try_new()` → `None`) with nothing in the output pointing at the runtime. Export `ORT_DYLIB_PATH=/path/to/libonnxruntime.so`, or drop the `.so` next to the binary — `engram_onnx::runtime` searches the executable's directory first. `engramdb doctor` reports which one it resolved.
+
+     The pyke prebuilt fetched below is a `.a` only, so it does **not** satisfy this. Get a shared library from Microsoft's release (the same archive the AVX-512 note recommends):
+     ```
+     curl -LO https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz
+     tar -xzf onnxruntime-linux-x64-1.24.2.tgz
+     export ORT_DYLIB_PATH="$PWD/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so"
+     ```
+     A full green sandbox run therefore needs BOTH: `ORT_STRATEGY=system ORT_LIB_LOCATION=/tmp/ort-lib` (build) and `ORT_DYLIB_PATH=…/libonnxruntime.so` (run).
 
    Fetch + decode the prebuilt static lib via curl, then build with `ORT_STRATEGY=system ORT_LIB_LOCATION=/tmp/ort-lib`. The version must match what the locked `ort` crate expects (`2.0.0-rc.12` → ONNX Runtime 1.24.x / API 24); a mismatch surfaces at *runtime* as "The requested API version [N] is not available". If you swap the lib after a build, also `rm -rf target/debug/build/ort-sys-* target/debug/.fingerprint/ort-sys-* target/debug/deps/*ort_sys*` — the objects are bundled into the ort-sys rlib at its build time, so relinking alone keeps the old runtime:
    ```
@@ -189,9 +197,12 @@ The web sandbox's egress gateway uses a custom CA that rustls/webpki-based downl
    # binaries then need LD_LIBRARY_PATH="$ORT_LIB_LOCATION" at run time
    ```
    See `docs/contributors/embedding-model-alternatives.md` (R6/R9).
-3. **Embedding model** (fastembed download fails the same way): the default embedding is the **int8-quantized** `DEFAULT_ONNX_EMBEDDING = ONNX_ALL_MINILM_Q` (fastembed `AllMiniLML6V2Q` → repo `Xenova/all-MiniLM-L6-v2`, file `onnx/model_quantized.onnx`), **not** the fp32 `Qdrant/all-MiniLM-L6-v2-onnx`. Stage the quantized repo into `~/.cache/engramdb/models/models--Xenova--all-MiniLM-L6-v2/` with `refs/main` containing `main` and `snapshots/main/<file>` for `onnx/model_quantized.onnx`, `tokenizer.json`, `config.json`, `special_tokens_map.json`, `tokenizer_config.json` (curl from `https://huggingface.co/<repo>/resolve/main/<file>`). If you also exercise the fp32 path, stage `Qdrant/all-MiniLM-L6-v2-onnx` (file `model.onnx`) the same way. `hf-hub` serves cached files without any network call, so embedding tests then pass offline.
+3. **Embedding model** (fastembed download fails the same way): the default is the **uint8** `DEFAULT_ONNX_EMBEDDING = ONNX_ALL_MINILM_L12_U8` — fastembed `AllMiniLML12V2Q` with an `hf_override` that swaps only the weights file, so the repo is `Xenova/all-MiniLM-L12-v2` and the file is `onnx/model_uint8.onnx`. **L12, not L6, and `model_uint8`, not `model_quantized`** — staging the wrong one leaves ~20 tests failing with no obvious cause. `DEFAULT_ONNX_EMBEDDING` in `crates/engram-models/src/embeddings/onnx.rs` is the single source of truth; check it rather than trusting this paragraph if the two ever disagree.
 
-   ⚠️ If only the fp32 `Qdrant` repo is staged, `OnnxProvider::try_new()` (the default-quantized path) returns `None`: embeddings appear unavailable, the `Auto` backend silently falls back to Ollama (unreachable in the sandbox), and ~100 tests fail with `Failed to send embed request to Ollama`. Staging the quantized repo is what fixes that.
+   Stage it into `~/.cache/engramdb/models/models--Xenova--all-MiniLM-L12-v2/` with `refs/main` containing `main` and `snapshots/main/<file>` for `onnx/model_uint8.onnx`, `tokenizer.json`, `config.json`, `special_tokens_map.json`, `tokenizer_config.json` (curl from `https://huggingface.co/<repo>/resolve/main/<file>`). `hf-hub` serves cached files without any network call, so embedding tests then pass offline. Other providers (`all-minilm-l6`, the int8 and fp32 variants) are selectable via config and stage the same way — see the spec constants for each repo/file pair.
+
+   ⚠️ If the staged repo doesn't match `DEFAULT_ONNX_EMBEDDING`, `OnnxProvider::try_new()` returns `None`: embeddings appear unavailable, the `Auto` backend silently falls back to Ollama (unreachable in the sandbox), and ~100 tests fail with `Failed to send embed request to Ollama`.
+
 4. **T5 title model** (master makes `title.strategy = "t5"` the default; same download failure): pre-stage `DEFAULT_T5_MODEL = T5_XENOVA_Q` (repo `Xenova/t5-small`) into `~/.cache/engramdb/models/models--Xenova--t5-small/` with `refs/main` → `main` and `snapshots/main/<file>` for `onnx/encoder_model_quantized.onnx`, `onnx/decoder_model_quantized.onnx`, `tokenizer.json`. Without it, `create`-path title generation can't build T5.
 
 ## Architecture
