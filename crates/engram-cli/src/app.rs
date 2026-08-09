@@ -118,6 +118,251 @@ pub enum DaemonCommand {
     },
 }
 
+/// Reject a blank `--memory` id at parse time.
+///
+/// `memories_created` is derived from how many ids were passed, so an empty
+/// one made the ledger claim a memory that does not exist: `mark --memory ""`
+/// reported "1 memory saved" and `ledger show` printed a blank line under
+/// `Memories: 1`. Failing in clap names the flag and stops before anything is
+/// written; `harvest_state::mark_harvested` refuses the same thing, which is
+/// what covers the MCP `harvest_mark` tool.
+fn parse_memory_id(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(
+            "a memory id cannot be empty — omit --memory entirely when the session yielded \
+             nothing, which still records the review"
+                .to_string(),
+        );
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Subcommands for `engramdb harvest`.
+#[derive(Subcommand)]
+pub enum HarvestCommand {
+    /// List past sessions in scope, newest activity first
+    List {
+        /// Only sessions active since this point: an RFC 3339 timestamp or a
+        /// relative shorthand like `7d`, `12h`, `30m`, `2w`
+        #[arg(long, value_name = "WHEN")]
+        since: Option<String>,
+
+        /// Maximum number of sessions to list
+        #[arg(long, short = 'n')]
+        limit: Option<usize>,
+
+        /// Also list sessions already recorded as harvested
+        #[arg(long)]
+        include_harvested: bool,
+
+        /// Include sessions with no human turns
+        #[arg(long)]
+        include_empty: bool,
+
+        /// Ignore project scoping and list every session on this machine
+        #[arg(long)]
+        all_projects: bool,
+
+        /// Session id to omit (typically the caller's own, still being written)
+        #[arg(long, value_name = "ID")]
+        exclude_session: Option<String>,
+    },
+
+    /// Print a budgeted digest of one session
+    Show {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+
+        /// Character budget for the digest. Defaults to `[harvest]
+        /// digest_budget` (200000); `0` means unlimited.
+        #[arg(long)]
+        max_chars: Option<usize>,
+
+        /// Include the assistant's reasoning blocks (verbose)
+        #[arg(long)]
+        include_thinking: bool,
+
+        /// Include subagent turns (verbose; subagents report back into the
+        /// main thread, so their raw turns are largely duplicate volume)
+        #[arg(long)]
+        include_sidechains: bool,
+
+        /// Omit the tool-call trace, leaving prompts and prose only
+        #[arg(long)]
+        no_tools: bool,
+
+        /// Search every session on this machine, not just this project's
+        #[arg(long)]
+        all_projects: bool,
+    },
+
+    /// Record that a session has been reviewed, so it is not offered again
+    Mark {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+
+        /// Id of a memory created from this session (repeatable). Omit when
+        /// the session yielded nothing — recording a zero-yield review is
+        /// what stops it being re-read on the next harvest.
+        #[arg(long = "memory", value_name = "ID", value_parser = parse_memory_id)]
+        memory_ids: Vec<String>,
+
+        /// Search every session on this machine, not just this project's.
+        /// Mirrors `show`, so a session you were able to digest is always a
+        /// session you can mark as reviewed.
+        #[arg(long)]
+        all_projects: bool,
+
+        /// Record the session as deliberately postponed rather than settled.
+        /// Deferred sessions keep appearing in `harvest list`.
+        #[arg(long, conflicts_with = "memory_ids")]
+        defer: bool,
+
+        /// Why the session was skipped or deferred
+        #[arg(long)]
+        note: Option<String>,
+
+        /// Curated one-or-two-sentence summary of what this session was
+        /// about, written into the search index alongside the decision
+        #[arg(long)]
+        summary: Option<String>,
+    },
+
+    /// Index one or more sessions for `harvest search`
+    Index {
+        /// Session id, or a unique prefix of one. Omit with `--all`.
+        session_id: Option<String>,
+
+        /// Index every session in scope that still has bytes behind it
+        #[arg(long, conflicts_with = "session_id")]
+        all: bool,
+
+        /// Re-embed even when the digest text is unchanged
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Search indexed past conversations
+    Search {
+        /// What to look for
+        query: String,
+
+        /// Maximum number of conversations to return
+        #[arg(long, short = 'n', default_value_t = 10)]
+        limit: usize,
+
+        /// Only conversations that ended since this point: an RFC 3339
+        /// timestamp or a relative shorthand like `30d`, `12h`, `2w`
+        #[arg(long, value_name = "WHEN")]
+        since: Option<String>,
+
+        /// Search every project's conversations on this machine
+        #[arg(long)]
+        all_projects: bool,
+    },
+
+    /// Set or replace a session's curated summary, re-embedding only it
+    Summary {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+
+        /// The summary text. Pass an empty string to clear it.
+        #[arg(conflicts_with_all = ["editor", "from_file"])]
+        text: Option<String>,
+
+        /// Compose the summary in $EDITOR
+        #[arg(long, conflicts_with = "from_file")]
+        editor: bool,
+
+        /// Read the summary from a file (`-` for stdin)
+        #[arg(long, value_name = "PATH")]
+        from_file: Option<PathBuf>,
+    },
+
+    /// Forget a session's harvest record so it is offered again
+    Reset {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+    },
+
+    /// Inspect and manage the harvest ledger and its transcript archives
+    Ledger {
+        #[command(subcommand)]
+        command: LedgerCommand,
+    },
+}
+
+/// Subcommands for `engramdb harvest ledger`.
+#[derive(Subcommand)]
+pub enum LedgerCommand {
+    /// List recorded sessions and their decisions
+    List {
+        /// Only entries with this decision (harvested, skipped, deferred,
+        /// unreviewed)
+        #[arg(long, value_name = "DECISION")]
+        decision: Option<String>,
+
+        /// Only entries at this stage (collected, indexed, compressed)
+        #[arg(long, value_name = "STAGE")]
+        stage: Option<String>,
+
+        /// Only entries that still have an archived transcript
+        #[arg(long)]
+        with_archive: bool,
+    },
+
+    /// Show one entry in full, including archive metadata
+    Show {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+    },
+
+    /// Decompress an archived transcript back to a file
+    Export {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+
+        /// Destination path (default: `<session-id>.jsonl` in the cwd)
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+    },
+
+    /// Delete a ledger entry and/or its archive
+    Rm {
+        /// Session id, or a unique prefix of one
+        session_id: String,
+
+        /// Delete only the archived transcript, keeping the decision record
+        #[arg(long)]
+        archive_only: bool,
+
+        /// Release the pin held by memories that cite this conversation, and
+        /// delete the copy anyway
+        #[arg(long)]
+        unpin: bool,
+
+        /// Skip confirmation prompt
+        #[arg(long, short = 'f')]
+        force: bool,
+    },
+
+    /// Evict archives past the retention limits (dry run by default)
+    Prune {
+        /// Override `[harvest] archive_retention_days` for this run (days, e.g. `90d`)
+        #[arg(long, value_name = "WHEN")]
+        older_than: Option<String>,
+
+        /// Override `[harvest] archive_max_bytes` for this run
+        #[arg(long, value_name = "BYTES")]
+        max_bytes: Option<u64>,
+
+        /// Actually delete (default is a dry run, like `gc` and `compress`)
+        #[arg(long)]
+        apply: bool,
+    },
+}
+
 /// Subcommands for `engramdb projects`.
 #[derive(Subcommand)]
 pub enum ProjectsCommand {
@@ -873,6 +1118,29 @@ pub enum Command {
         command: Option<ProjectsCommand>,
     },
 
+    /// Inspect past Claude Code sessions for knowledge worth remembering
+    ///
+    /// Provides the raw material for the `/engram:harvest` slash command:
+    /// `list` shows which sessions are in scope, `show` prints a budgeted
+    /// digest of one, `mark` records that a session has been reviewed so it is
+    /// not offered again, and `reset` undoes that record.
+    ///
+    /// `search` answers "did we ever discuss X" over past conversations,
+    /// `index` builds the rows it reads (otherwise built by the maintenance
+    /// pass), and `summary` attaches a curated description of a session to its
+    /// row. `ledger` inspects and manages what has accumulated — the review
+    /// decisions and the compressed transcript copies the SessionEnd hook
+    /// keeps (`list`, `show`, `export`, `rm`, `prune`).
+    ///
+    /// Scope defaults to the root of this project's hierarchy plus every
+    /// project registered under it — so from a git worktree that is the main
+    /// checkout and its sibling worktrees too, since they share one memory
+    /// store while filing transcripts under their own paths.
+    Harvest {
+        #[command(subcommand)]
+        command: HarvestCommand,
+    },
+
     /// Manage multi-project memory groups and this project's subscriptions
     Groups {
         #[command(subcommand)]
@@ -986,6 +1254,13 @@ pub enum Command {
         /// Only rebuild index, don't re-embed
         #[arg(long)]
         index_only: bool,
+
+        /// Rebuild the conversation search rows from the stored transcript
+        /// copies instead of touching memories. Mirrors `--embeddings-only`:
+        /// a rebuild of one index, from bytes that were kept verbatim so a
+        /// better reduction is always a re-derivation away.
+        #[arg(long, conflicts_with_all = ["embeddings_only", "index_only", "global"])]
+        archive_only: bool,
 
         /// Reindex the global (cross-project) memory store instead of the current project
         #[arg(long)]
@@ -2758,6 +3033,90 @@ mod tests {
                 assert_eq!(decay_floor, Some(0.15));
             }
             _ => panic!("Expected Update command"),
+        }
+    }
+
+    /// `harvest mark --memory ""` used to be accepted: the ledger then
+    /// recorded `memory_ids: [""]` with `memories_created: 1`, so
+    /// `ledger show` claimed a memory and printed a blank line where its id
+    /// should have been. Rejecting at parse names the flag and writes nothing.
+    #[test]
+    fn harvest_mark_rejects_an_empty_memory_id() {
+        for blank in ["", "   ", "\t"] {
+            let parsed =
+                Cli::try_parse_from(["engramdb", "harvest", "mark", "s1", "--memory", blank]);
+            let Err(err) = parsed else {
+                panic!("an empty --memory must not parse (blank {blank:?})");
+            };
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains("cannot be empty"),
+                "the error must name the problem, got: {rendered}"
+            );
+        }
+
+        // The zero-yield form the message points at still works, and a real
+        // id is untouched (trimmed, not rejected).
+        let cli = Cli::try_parse_from(["engramdb", "harvest", "mark", "s1"]).unwrap();
+        match cli.command {
+            Command::Harvest {
+                command: HarvestCommand::Mark { memory_ids, .. },
+            } => assert!(memory_ids.is_empty()),
+            _ => panic!("expected harvest mark"),
+        }
+        let cli =
+            Cli::try_parse_from(["engramdb", "harvest", "mark", "s1", "--memory", " abc123 "])
+                .unwrap();
+        match cli.command {
+            Command::Harvest {
+                command: HarvestCommand::Mark { memory_ids, .. },
+            } => assert_eq!(memory_ids, vec!["abc123".to_string()]),
+            _ => panic!("expected harvest mark"),
+        }
+    }
+
+    /// `--stage` enumerated its values while `--decision` did not, so the one
+    /// flag whose vocabulary is not guessable was the one `--help` withheld.
+    #[test]
+    fn ledger_list_help_enumerates_both_filters() {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("harvest")
+            .and_then(|c| c.find_subcommand_mut("ledger"))
+            .and_then(|c| c.find_subcommand_mut("list"))
+            .expect("harvest ledger list exists")
+            .render_long_help()
+            .to_string();
+        for value in ["harvested", "skipped", "deferred", "unreviewed"] {
+            assert!(help.contains(value), "--decision must list {value}: {help}");
+        }
+        for value in ["collected", "indexed", "compressed"] {
+            assert!(help.contains(value), "--stage must list {value}: {help}");
+        }
+    }
+
+    /// `harvest --help` named only `list`/`show`/`mark`, omitting the whole
+    /// search-and-ledger surface a reader would otherwise never learn about
+    /// from the long description.
+    #[test]
+    fn harvest_long_help_names_every_subcommand() {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let harvest = cmd
+            .find_subcommand_mut("harvest")
+            .expect("harvest exists")
+            .clone();
+        let help = harvest.clone().render_long_help().to_string();
+        for name in harvest
+            .get_subcommands()
+            .map(|s| s.get_name().to_string())
+            .filter(|n| n != "help")
+        {
+            assert!(
+                help.contains(&format!("`{name}`")),
+                "the long description must name `{name}`: {help}"
+            );
         }
     }
 }

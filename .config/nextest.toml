@@ -1,6 +1,11 @@
 [test-groups.ml-models]
 max-threads = 1
 
+# `harvest_search_all_projects_rides_the_same_gate_as_harvest_list` is here
+# for its *second* half: once the opt-in is written the call is no longer
+# refused, so it proceeds into `build_engine_for` and loads the embedding
+# model in-process like any other engine builder.
+#
 # In-process ONNX loaders share heavyweight global model state; parallel
 # loads can transiently fail (`try_new()` → None), which downstream reads
 # as "embeddings unavailable" and flips test outcomes. Every test that
@@ -8,5 +13,5 @@ max-threads = 1
 # builders (reindex re-embed) and the daemon-less semantic-query path —
 # belongs in this serialized group.
 [[profile.default.overrides]]
-filter = "test(nli::onnx::tests::) | test(embeddings::onnx::tests::) | test(retrieval::engine::tests::test_rerank) | test(retrieval::engine::tests::test_search_with_real) | test(=server::tests::reindex_re_embeds_in_error_mode_despite_mismatch) | test(=server::tests::global_retrieve_with_semantic_query)"
+filter = "test(nli::onnx::tests::) | test(embeddings::onnx::tests::) | test(retrieval::engine::tests::test_rerank) | test(retrieval::engine::tests::test_search_with_real) | test(=server::tests::reindex_re_embeds_in_error_mode_despite_mismatch) | test(=server::tests::global_retrieve_with_semantic_query) | test(=server::tests::harvest_search_all_projects_rides_the_same_gate_as_harvest_list)"
 test-group = "ml-models"

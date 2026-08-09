@@ -202,6 +202,14 @@ When you run a memory operation inside a linked git worktree, EngramDB **routes 
 
 To make a worktree a standalone project: `engramdb projects unlink <worktree_id>` after init.
 
+**Session transcripts follow the same rule.** Claude Code files transcripts
+under the session's working directory, so each worktree's conversations land
+in their own place on disk — but their *memories* route to the main store, as
+above. `engramdb harvest` therefore walks the hierarchy from the root and
+covers the main checkout plus every registered sub-project in one pass, so
+`/engram:harvest` sees the conversations held in your worktrees. The harvest
+ledger lives under the root project too, shared by all of them.
+
 ## Multi-project workflows
 
 ```bash

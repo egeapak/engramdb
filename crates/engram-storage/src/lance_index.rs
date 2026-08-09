@@ -131,6 +131,25 @@ pub struct IndexEntry {
     // scoped) in an ordinary single-project store.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audience: Option<Vec<String>>,
+    // Added in schema v0.7.0 (harvest provenance). JSON array of the Claude
+    // Code session ids this memory was extracted from. Indexed rather than only
+    // stored in the `.md` file so the eviction pass can answer "is this
+    // transcript copy still cited?" with one column scan instead of parsing
+    // every memory on the machine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_sessions: Vec<String>,
+}
+
+/// One memory's evidence link (schema v0.7.0): the sessions it was extracted
+/// from.
+///
+/// Its own narrow projection rather than a field on [`IndexForFiltering`]:
+/// nothing on the query path reads it, and widening the hot projection to
+/// serve a maintenance scan would cost every query a column it never uses.
+#[derive(Debug, Clone)]
+pub struct SourceSessionLink {
+    pub memory_id: String,
+    pub sessions: Vec<String>,
 }
 
 /// Lightweight metadata for aggregation/stats queries (7 columns).
@@ -280,6 +299,7 @@ impl From<&Memory> for IndexEntry {
                 .map(|v| v.invalidated_by.clone())
                 .unwrap_or_default(),
             audience: memory.audience.clone(),
+            source_sessions: memory.source_sessions.clone(),
         }
     }
 }
@@ -397,6 +417,11 @@ impl LanceIndex {
             // `Option<Vec<String>>` — null when the memory has no audience
             // restriction — following the `decay` nullable-Utf8 convention.
             Field::new("audience", DataType::Utf8, true),
+            // Added in schema v0.7.0 (harvest provenance). Non-null JSON array
+            // — an empty list is the overwhelmingly common value and it means
+            // exactly "pins nothing", so it follows the `watch_paths`
+            // convention rather than `audience`'s nullable one.
+            Field::new("source_sessions", DataType::Utf8, false),
         ]))
     }
 
@@ -700,6 +725,70 @@ impl LanceIndex {
             }
         }
         Ok(ids)
+    }
+
+    /// List every memory that cites at least one source session (2 columns).
+    ///
+    /// The pin scan. Memories with no evidence link — most of them — are
+    /// dropped here rather than by the caller, so an eviction pass over a store
+    /// that has never harvested anything costs one projection and returns
+    /// nothing.
+    pub async fn list_source_session_links(&self) -> Result<Vec<SourceSessionLink>> {
+        let table = self.open_table().await?;
+
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec![
+                "id".into(),
+                "source_sessions".into(),
+            ]))
+            .execute()
+            .await
+            .context("Failed to query LanceDB table for source sessions")?;
+
+        let mut links = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read batch")?;
+            let id_col = batch
+                .column_by_name("id")
+                .context("Missing 'id' column")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("Failed to cast 'id'")?;
+            let src_col = batch
+                .column_by_name("source_sessions")
+                .context("Missing 'source_sessions' column")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("Failed to cast 'source_sessions'")?;
+            for i in 0..batch.num_rows() {
+                // Unparseable degrades to "cites nothing" for the *reporting*
+                // half, exactly like `audience` — but never for the eviction
+                // half: `prune_archives` is handed the pinned set, and a caller
+                // that could not build one does not prune at all rather than
+                // treat a broken row as permission to delete evidence.
+                let sessions: Vec<String> = match serde_json::from_str(src_col.value(i)) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            "ignoring unparseable source_sessions JSON for memory {} \
+                             (fix the memory file and reindex): {}",
+                            id_col.value(i),
+                            e
+                        );
+                        continue;
+                    }
+                };
+                if sessions.is_empty() {
+                    continue;
+                }
+                links.push(SourceSessionLink {
+                    memory_id: id_col.value(i).to_string(),
+                    sessions,
+                });
+            }
+        }
+        Ok(links)
     }
 
     /// List entries with lightweight metadata (7 columns).
@@ -1939,6 +2028,7 @@ impl LanceIndex {
         let mut invalidated_ats: Vec<Option<String>> = Vec::with_capacity(n);
         let mut watch_paths_col = Vec::with_capacity(n);
         let mut audiences: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut source_sessions_col = Vec::with_capacity(n);
 
         for entry in entries {
             ids.push(entry.id.clone());
@@ -1982,6 +2072,10 @@ impl LanceIndex {
                 Some(a) => Some(serde_json::to_string(a).context("Failed to serialize audience")?),
                 None => None,
             });
+            source_sessions_col.push(
+                serde_json::to_string(&entry.source_sessions)
+                    .context("Failed to serialize source_sessions")?,
+            );
         }
 
         let batch = RecordBatch::try_new(
@@ -2012,6 +2106,7 @@ impl LanceIndex {
                 Arc::new(StringArray::from(invalidated_ats)) as ArrayRef,
                 Arc::new(StringArray::from(watch_paths_col)) as ArrayRef,
                 Arc::new(StringArray::from(audiences)) as ArrayRef,
+                Arc::new(StringArray::from(source_sessions_col)) as ArrayRef,
             ],
         )
         .context("Failed to create RecordBatch")?;
@@ -2587,6 +2682,7 @@ mod tests {
             status: Status::Active,
             visibility: Visibility::Shared,
             audience: None,
+            source_sessions: vec![],
             challenges: vec![],
             verified_at: None,
             created_at: Utc::now(),
@@ -2660,6 +2756,30 @@ mod tests {
         assert_eq!(
             by_id("aud-some").audience,
             Some(vec!["proj-a".to_string(), "group-x".to_string()])
+        );
+    }
+
+    /// Schema v0.7.0: the pin scan sees exactly the memories that cite
+    /// something, with their citations intact, and skips the rest.
+    #[tokio::test]
+    async fn test_source_sessions_scan_returns_only_citing_memories() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+
+        let uncited = create_test_entry("src-none");
+        assert!(uncited.source_sessions.is_empty());
+        lance.upsert(&uncited).await.unwrap();
+
+        let mut cited = create_test_entry("src-some");
+        cited.source_sessions = vec!["sess-1".to_string(), "sess-2".to_string()];
+        lance.upsert(&cited).await.unwrap();
+
+        let links = lance.list_source_session_links().await.unwrap();
+        assert_eq!(links.len(), 1, "an uncited memory must not appear");
+        assert_eq!(links[0].memory_id, "src-some");
+        assert_eq!(
+            links[0].sessions,
+            vec!["sess-1".to_string(), "sess-2".to_string()]
         );
     }
 

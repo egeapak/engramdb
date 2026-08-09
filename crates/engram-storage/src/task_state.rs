@@ -69,9 +69,20 @@ fn lock_mapping(project_dir: &Path) -> Option<std::fs::File> {
 /// empty (the mapping is advisory state, never a hard failure).
 pub fn read_session_tasks(project_dir: &Path) -> HashMap<String, TaskEntry> {
     let path = mapping_path(project_dir);
-    match std::fs::read_to_string(&path) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-        Err(_) => HashMap::new(),
+    // Through the shared reader, which refuses to follow a symlink planted at
+    // this path or to block on a FIFO — the same delivery `state_file`'s docs
+    // describe for the write side, and this file is read by the unattended
+    // hooks.
+    match crate::state_file::read_state_file(&path) {
+        Ok(Some(s)) => serde_json::from_str(&s).unwrap_or_default(),
+        Ok(None) => HashMap::new(),
+        Err(e) => {
+            tracing::warn!(
+                "session tasks: refusing to read {} ({e}); it reads as empty",
+                path.display()
+            );
+            HashMap::new()
+        }
     }
 }
 
@@ -146,17 +157,12 @@ pub fn clear_session_task(project_dir: &Path, session_id: &str) -> Result<Option
 }
 
 fn write_session_tasks(project_dir: &Path, map: &HashMap<String, TaskEntry>) -> Result<()> {
-    let path = mapping_path(project_dir);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let json = serde_json::to_string_pretty(map)
         .map_err(|e| crate::error::StorageError::Validation(e.to_string()))?;
-    // Atomic temp-then-rename, same discipline as memory-file writes.
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    // Atomic temp-then-rename, same discipline as memory-file writes — and
+    // symlink-refusing, because the temp path is predictable and `.engramdb/`
+    // is committed. See `crate::state_file`.
+    crate::state_file::write_state_json(&mapping_path(project_dir), &json)
 }
 
 #[cfg(test)]
@@ -260,5 +266,29 @@ mod tests {
 
         clear_session_task(dir, "unrelated").unwrap();
         assert!(read_session_tasks(dir).is_empty());
+    }
+
+    /// Same committed-symlink delivery as the harvest ledger — this file
+    /// predates it and shares the state dir, so it is the same hole.
+    #[test]
+    #[cfg(unix)]
+    fn a_planted_temp_symlink_cannot_redirect_a_task_write() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, "do not touch").unwrap();
+
+        let path = mapping_path(dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&victim, path.with_extension("json.tmp")).unwrap();
+
+        let result = set_current_task(dir, "s1", "some-task");
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "do not touch",
+            "the mapping write landed on the symlink's target"
+        );
+        assert!(result.is_err(), "a redirected write reported success");
+        assert!(!path.exists(), "the symlink was renamed onto the mapping");
     }
 }

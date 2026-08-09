@@ -1168,6 +1168,202 @@ pub struct EngramConfig {
     /// CLI-only display preferences (project-list grouping, …)
     #[serde(default)]
     pub cli: CliConfig,
+
+    /// Past-session harvesting (digest budgets, transcript archiving)
+    #[serde(default)]
+    pub harvest: HarvestConfig,
+}
+
+/// Settings for harvesting past Claude Code sessions (`[harvest]` section).
+///
+/// **Not part of [`provider_cache_key`](crate) inputs.** Harvesting loads no
+/// model, so these fields must never be folded into the provider cache key —
+/// doing so would evict cached embedding/NLI/reranker bundles every time a
+/// budget was tweaked.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HarvestConfig {
+    /// Character budget for a single-session deep read (`harvest show`).
+    ///
+    /// Deliberately large: a 2.9 MB transcript digests to roughly 60 KB, so
+    /// this is effectively "the whole session" with a ceiling against a
+    /// pathological one. `0` means unlimited.
+    #[serde(default = "default_digest_budget")]
+    pub digest_budget: usize,
+
+    /// Include assistant reasoning blocks in digests.
+    #[serde(default)]
+    pub include_thinking: bool,
+
+    /// Include subagent (`isSidechain`) turns in digests.
+    #[serde(default)]
+    pub include_sidechains: bool,
+
+    /// Archive each session's transcript when the session ends.
+    ///
+    /// On by default: Claude Code prunes its own transcripts, so without a
+    /// copy taken at session end, harvesting a conversation weeks later is
+    /// simply not possible. Archives live in the global data dir, never in
+    /// the repo-adjacent `.engramdb/` (see `storage::transcript_archive`).
+    #[serde(default = "default_true")]
+    pub archive: bool,
+
+    /// Drop archives older than this many days. Defaults to 365 so the
+    /// archive cannot grow by age without bound.
+    ///
+    /// `None` disables age-based eviction but is reachable only
+    /// programmatically — TOML has no null literal, so omitting the key
+    /// yields the default rather than `None`. From config, set the maximum
+    /// of 3650 (10 years) to effectively keep everything and let
+    /// `archive_max_bytes` be the only bound. `0` is rejected by validation:
+    /// it would evict every archive immediately. Mirrors how
+    /// `[stats].retention_days` and `[review].recency_days` handle the same
+    /// shape — a fourth idiom here would be the confusing one.
+    #[serde(default = "default_archive_retention_days")]
+    pub archive_retention_days: Option<u64>,
+
+    /// Total archive budget in bytes; the oldest archives are evicted first
+    /// once it is exceeded. `0` disables size-based eviction.
+    #[serde(default = "default_archive_max_bytes")]
+    pub archive_max_bytes: u64,
+
+    /// Skip archiving a transcript larger than this. `0` disables the limit.
+    ///
+    /// The compress runs synchronously inside the SessionEnd hook, so an
+    /// unbounded one delays session teardown in proportion to file size —
+    /// measured ~2s for 20 MB, and note `[profile.release] opt-level = "z"`
+    /// propagates through `cc` to `zstd-sys`, so a release build is not
+    /// meaningfully faster. A session that large is also the least worth
+    /// keeping: its digest would be budget-truncated anyway.
+    #[serde(default = "default_archive_max_transcript_bytes")]
+    pub archive_max_transcript_bytes: u64,
+
+    /// Build the searchable conversation index during automatic maintenance.
+    ///
+    /// On by default. With it off, `harvest search` still works but only over
+    /// whatever `harvest index` was run by hand — which, for the sessions
+    /// nobody reviewed, is nothing.
+    #[serde(default = "default_true")]
+    pub index: bool,
+
+    /// How long after a session ends before it is indexed unreviewed.
+    ///
+    /// A session a human settled is indexed on the next maintenance pass
+    /// regardless; this window is what makes a session **nobody** reviewed
+    /// searchable anyway. Long enough that a same-day `/engram:harvest` still
+    /// gets to write its summary first, short enough that a conversation is
+    /// findable the next morning.
+    #[serde(default = "default_index_after_hours")]
+    pub index_after_hours: u64,
+
+    /// Most sessions one automatic pass will embed.
+    ///
+    /// Maintenance is throttled and best-effort, and indexing is the only
+    /// step in it that runs a model per item. A first pass on a machine with
+    /// years of history would otherwise embed thousands of conversations
+    /// inside one MCP startup; the cap spreads that over successive passes,
+    /// newest first.
+    #[serde(default = "default_index_batch")]
+    pub index_batch: usize,
+}
+
+fn default_digest_budget() -> usize {
+    200_000
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_archive_retention_days() -> Option<u64> {
+    Some(365)
+}
+
+/// 2 GiB. Measured compression on real transcripts is ~4.5x (not the ~10x
+/// one might assume — transcript payloads are mostly high-entropy text), so
+/// this holds on the order of a few thousand typical sessions.
+fn default_archive_max_bytes() -> u64 {
+    2 * 1024 * 1024 * 1024
+}
+
+/// 16 MiB — roughly 5x the largest real session the archive docs cite, which
+/// holds the worst-case teardown cost near a second.
+fn default_archive_max_transcript_bytes() -> u64 {
+    16 * 1024 * 1024
+}
+
+/// One day: a session reviewed the same day keeps its curated summary as the
+/// first thing written about it, while yesterday's is searchable today.
+fn default_index_after_hours() -> u64 {
+    24
+}
+
+fn default_index_batch() -> usize {
+    25
+}
+
+impl Default for HarvestConfig {
+    fn default() -> Self {
+        Self {
+            digest_budget: default_digest_budget(),
+            include_thinking: false,
+            include_sidechains: false,
+            archive: true,
+            archive_retention_days: default_archive_retention_days(),
+            archive_max_bytes: default_archive_max_bytes(),
+            archive_max_transcript_bytes: default_archive_max_transcript_bytes(),
+            index: true,
+            index_after_hours: default_index_after_hours(),
+            index_batch: default_index_batch(),
+        }
+    }
+}
+
+impl HarvestConfig {
+    /// Effective budget for a single-session read (`0` → unlimited).
+    pub fn effective_digest_budget(&self) -> usize {
+        if self.digest_budget == 0 {
+            usize::MAX
+        } else {
+            self.digest_budget
+        }
+    }
+
+    /// Validate the archive bounds.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if let Some(days) = self.archive_retention_days {
+            if days == 0 {
+                anyhow::bail!(
+                    "harvest.archive_retention_days must be >= 1 (0 is ambiguous — it would \
+                     evict every archive immediately). Omit the field for the default (365), \
+                     or set `archive = false` to stop archiving, or 3650 (the maximum) to \
+                     keep archives until the size budget evicts them."
+                );
+            }
+            if days > 3650 {
+                // Matches `[stats].retention_days`: an upper bound is what
+                // keeps the day arithmetic representable, and 10 years is
+                // already "forever" for a transcript archive.
+                anyhow::bail!("harvest.archive_retention_days ({days}) must be <= 3650");
+            }
+        }
+        // A zero batch reads as "index nothing", which `index = false`
+        // already says unambiguously. Left as an error rather than silently
+        // corrected, because a store that quietly indexes nothing looks
+        // identical to one where search simply found no match.
+        if self.index && self.index_batch == 0 {
+            anyhow::bail!(
+                "harvest.index_batch must be >= 1 when harvest.index is true — set \
+                 `index = false` to turn conversation indexing off instead."
+            );
+        }
+        Ok(())
+    }
+
+    /// The unreviewed-session indexing window as a duration.
+    pub fn index_after(&self) -> chrono::Duration {
+        chrono::Duration::try_hours(self.index_after_hours as i64)
+            .unwrap_or_else(chrono::Duration::zero)
+    }
 }
 
 /// CLI-only display preferences (`[cli]` section).
@@ -1463,13 +1659,50 @@ pub struct SecurityConfig {
     /// Whether MCP mutating tools may write to a *different* registered
     /// project than the session's own. Default `true` (preserves historical
     /// behavior — cross-project writes allowed). When `false`, MCP mutating
-    /// tools (`create`, `update`, `delete`, `challenge`, `resolve`,
-    /// `compress_apply`, `gc`, `reindex`) are rejected when their `project`
-    /// override resolves to a project id other than the session's own. The
+    /// tools (`create`, `update`, `delete`, `challenge`, `resolve`, `verify`,
+    /// `task_complete`, `compress_apply`, `gc`, `reindex`, `harvest_mark`) are
+    /// rejected when their `project` override resolves to a project id other
+    /// than the session's own. `doctor` is gated too, but only for a call that
+    /// passes `fix: true` — a plain diagnostic read stays open, the flip to
+    /// `needs_review` does not. `harvest_mark` needs
+    /// [`Self::allow_all_projects_harvest`] as well, for the reason recorded
+    /// there. The
     /// session's own project (`project` omitted) and the shared global store
     /// (`project = "global"`) are always allowed.
+    ///
+    /// Keep this list in step with the `check_cross_project_write` call sites
+    /// in `engram_mcp::server` and with `docs/users/configuration.md`; the
+    /// three drifted apart once already.
     #[serde(default = "default_allow_cross_project_writes")]
     pub allow_cross_project_writes: bool,
+
+    /// Whether the **MCP** harvest tools may read transcripts beyond the
+    /// session's own project. Default `false`.
+    ///
+    /// Two things, not one, because both widen the same read: setting
+    /// `all_projects` (every Claude Code conversation on the machine) *and*
+    /// naming a different `project` (that one project's raw conversations).
+    /// Cross-project *memory* reads stay ungated — memories are curated.
+    ///
+    /// A read, so the write gate above does not cover it — and unlike every
+    /// other cross-project read, what comes back is raw conversation rather
+    /// than curated memories: shell output, pasted credentials, source from
+    /// an unrelated repo that happens to share the laptop. The harvest tools
+    /// are auto-approved by `engramdb setup`, so without this the *model*
+    /// decides to widen the scope, with no prompt, while reading content an
+    /// attacker may have influenced.
+    ///
+    /// `harvest_mark` rides this too, even though it is a write. It resolves
+    /// a session-id *prefix* against the target's transcripts and ledger and
+    /// names every match in its ambiguity error, so under the write gate
+    /// alone (which defaults to allow) it answered the question `harvest_list`
+    /// refuses: which sessions does that project have?
+    ///
+    /// The CLI's `--all-projects` is deliberately **not** gated: a human
+    /// typing the flag is the request. This only governs an agent asking on
+    /// its own behalf.
+    #[serde(default)]
+    pub allow_all_projects_harvest: bool,
 }
 
 fn default_allow_cross_project_writes() -> bool {
@@ -1480,6 +1713,7 @@ impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             allow_cross_project_writes: default_allow_cross_project_writes(),
+            allow_all_projects_harvest: false,
         }
     }
 }
@@ -1621,6 +1855,7 @@ impl EngramConfig {
         self.daemon.validate()?;
         self.security.validate()?;
         self.review.validate()?;
+        self.harvest.validate()?;
 
         if !(0.0..=1.0).contains(&self.retrieval.scoring.scope_multiplier_floor) {
             anyhow::bail!("scoring.scope_multiplier_floor must be in [0.0, 1.0]");
@@ -2235,6 +2470,86 @@ interval_secs = 60
     }
 
     #[test]
+    fn test_harvest_config_defaults() {
+        // Pins every value `docs/users/configuration.md` publishes. The whole
+        // section had no tests, which is how the docs drifted from the code.
+        let c = HarvestConfig::default();
+        assert_eq!(c.digest_budget, 200_000);
+        assert!(!c.include_thinking);
+        assert!(!c.include_sidechains);
+        assert!(c.archive, "archiving is on by default");
+        assert_eq!(c.archive_retention_days, Some(365));
+        assert_eq!(c.archive_max_bytes, 2 * 1024 * 1024 * 1024);
+        assert_eq!(c.archive_max_transcript_bytes, 16 * 1024 * 1024);
+        assert!(c.index, "conversation indexing is on by default");
+        assert_eq!(c.index_after_hours, 24);
+        assert_eq!(c.index_batch, 25);
+        assert_eq!(EngramConfig::default().harvest, c);
+    }
+
+    #[test]
+    fn test_harvest_index_batch_must_be_positive_when_indexing() {
+        // A zero batch reads as "index nothing", which `index = false`
+        // already says. Silently correcting it would leave a store that
+        // indexes nothing looking exactly like one where search found no
+        // match.
+        let mut c = EngramConfig::default();
+        c.harvest.index_batch = 0;
+        assert!(c.validate().is_err());
+        c.harvest.index = false;
+        assert!(
+            c.validate().is_ok(),
+            "with indexing off the batch size is irrelevant"
+        );
+    }
+
+    #[test]
+    fn test_harvest_index_after_is_the_hours_field() {
+        let mut c = HarvestConfig::default();
+        assert_eq!(c.index_after(), chrono::Duration::hours(24));
+        c.index_after_hours = 0;
+        assert_eq!(
+            c.index_after(),
+            chrono::Duration::zero(),
+            "0 means index on the next pass"
+        );
+    }
+
+    #[test]
+    fn test_harvest_config_partial_toml() {
+        // The trap: a section-level-only default would zero every field the
+        // user did not name.
+        let empty: EngramConfig = toml::from_str("").unwrap();
+        assert_eq!(empty.harvest, HarvestConfig::default());
+        let bare: EngramConfig = toml::from_str("[harvest]\n").unwrap();
+        assert_eq!(bare.harvest, HarvestConfig::default());
+
+        let partial: EngramConfig = toml::from_str("[harvest]\ninclude_thinking = true\n").unwrap();
+        assert!(partial.harvest.include_thinking);
+        assert!(partial.harvest.archive, "unnamed fields kept their default");
+        assert_eq!(partial.harvest.archive_max_bytes, 2 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_harvest_config_validate_rejects_zero_retention() {
+        let mut c = EngramConfig::default();
+        c.harvest.archive_retention_days = Some(0);
+        assert!(c.validate().is_err(), "0 would evict every archive");
+        c.harvest.archive_retention_days = Some(1);
+        assert!(c.validate().is_ok());
+        c.harvest.archive_retention_days = None;
+        assert!(c.validate().is_ok(), "None is a legitimate disable");
+    }
+
+    #[test]
+    fn test_effective_digest_budget() {
+        let mut c = HarvestConfig::default();
+        assert_eq!(c.effective_digest_budget(), 200_000);
+        c.digest_budget = 0;
+        assert_eq!(c.effective_digest_budget(), usize::MAX, "0 means unlimited");
+    }
+
+    #[test]
     fn test_security_config_defaults() {
         // Default: cross-project writes allowed (preserves historical behavior).
         let config = EngramConfig::default();
@@ -2244,6 +2559,20 @@ interval_secs = 60
         // A config.toml with NO [security] section parses to the default true.
         let from_empty: EngramConfig = toml::from_str("").unwrap();
         assert!(from_empty.security.allow_cross_project_writes);
+
+        // The machine-wide harvest read is opt-in, and stays opt-in when the
+        // section is present but silent about it. A default of `true` here
+        // would let an auto-approved MCP tool pull every conversation on the
+        // machine into context without anyone asking.
+        assert!(!config.security.allow_all_projects_harvest);
+        assert!(!SecurityConfig::default().allow_all_projects_harvest);
+        assert!(!from_empty.security.allow_all_projects_harvest);
+        let partial: EngramConfig =
+            toml::from_str("[security]\nallow_cross_project_writes = false\n").unwrap();
+        assert!(!partial.security.allow_all_projects_harvest);
+        let enabled: EngramConfig =
+            toml::from_str("[security]\nallow_all_projects_harvest = true\n").unwrap();
+        assert!(enabled.security.allow_all_projects_harvest);
     }
 
     #[test]

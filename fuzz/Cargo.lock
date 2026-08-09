@@ -2043,7 +2043,7 @@ dependencies = [
 
 [[package]]
 name = "engram-models"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2067,7 +2067,7 @@ dependencies = [
 
 [[package]]
 name = "engram-onnx"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "libloading 0.8.9",
  "ort",
@@ -2075,7 +2075,7 @@ dependencies = [
 
 [[package]]
 name = "engram-storage"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -2098,11 +2098,12 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+ "zstd",
 ]
 
 [[package]]
 name = "engram-types"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2116,7 +2117,7 @@ dependencies = [
 
 [[package]]
 name = "engramdb"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "arrow-array",
