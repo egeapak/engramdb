@@ -50,7 +50,11 @@
 //! underneath concurrent appenders. Both are correct only if a record carries
 //! its own place in the sequence. The cost is that a clock stepped backwards
 //! could let an older record win; on a single machine's ledger that is a far
-//! smaller exposure than the two reorderings it buys.
+//! smaller exposure than the two reorderings it buys — and it is **reported**
+//! rather than absorbed: [`mark_harvested`] folds the file back and says so
+//! when the line it just wrote lost, so a review discarded by a backwards clock
+//! is visible at the moment it happens instead of the next time somebody
+//! wonders why the session is still being offered.
 //!
 //! # Two axes, not one
 //!
@@ -221,6 +225,21 @@ struct LedgerLine {
     stage: Option<HarvestStage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     decision: Option<HarvestDecision>,
+    /// When the decision this line carries was actually taken, when that is
+    /// not `at`.
+    ///
+    /// Only [`maybe_compact`] writes it, and it is the whole reason compaction
+    /// is fold-preserving. A snapshot line has to sort at the entry's
+    /// high-water mark (see [`Folded::last_at`]) yet still carry the decision,
+    /// and the fold stamps `harvested_at` from `at` — so without this the
+    /// rewrite silently moved every entry's "Recorded" time forward to its
+    /// most recent *mechanical* event, changing `ledger list`'s ordering and
+    /// the instant the 365-day window is measured from.
+    ///
+    /// Absent on every line written before this existed, which reads exactly
+    /// as it did then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    decided_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     memory_ids: Option<Vec<String>>,
     /// Only written by the migration, which carries over counts from ledgers
@@ -252,6 +271,7 @@ impl LedgerLine {
             at: Utc::now(),
             stage: None,
             decision: None,
+            decided_at: None,
             memory_ids: None,
             memories_created: None,
             note: None,
@@ -378,6 +398,11 @@ fn fold(lines: Vec<LedgerLine>) -> HashMap<String, Folded> {
             folded.entry.decision = Some(decision);
             folded.entry.harvested_at = line.at;
         }
+        // After the decision, so a compaction snapshot restores the instant the
+        // decision was really taken instead of the instant it was rewritten.
+        if let Some(decided_at) = line.decided_at {
+            folded.entry.harvested_at = decided_at;
+        }
         if let Some(ids) = line.memory_ids {
             folded.entry.memories_created = ids.len();
             folded.entry.memory_ids = ids;
@@ -476,19 +501,22 @@ pub fn compaction_is_pending(lines: usize, live: usize) -> bool {
     lines > live.max(1) * COMPACT_FACTOR
 }
 
-/// Is this session settled — i.e. should `list` stop offering it?
-///
-/// An entry that only records a collected transcript (written by the SessionEnd
-/// hook for a session nobody has reviewed yet) is `Unreviewed` and deliberately
-/// does **not** count: archiving a transcript must never make it invisible to
-/// the very command that exists to review it.
-pub fn is_harvested(project_dir: &Path, session_id: &str) -> bool {
-    if session_id.is_empty() {
-        return false;
-    }
-    read_folded(project_dir)
-        .get(session_id)
-        .is_some_and(|f| f.entry.is_settled())
+/// What a [`mark_harvested`] call left behind.
+#[derive(Debug, Clone)]
+pub struct MarkOutcome {
+    /// The session's state as the log now folds — which is not necessarily
+    /// what this call asked for; see [`Self::superseded`].
+    pub entry: HarvestEntry,
+    /// The appended line lost the fold to a decision line already in the log,
+    /// so the review was recorded and immediately discarded.
+    ///
+    /// Only reachable through a clock that stepped backwards (lines are folded
+    /// in timestamp order, not file order — see the module docs), which is the
+    /// price paid for making adoption and compaction reorderable. The price is
+    /// small; paying it *silently* is not, because the visible symptom is a
+    /// session that keeps being offered with no indication that anything was
+    /// rejected. [`Self::entry`] is the truth, this flag is the warning.
+    pub superseded: bool,
 }
 
 /// Record a review decision for `session_id`.
@@ -500,14 +528,14 @@ pub fn is_harvested(project_dir: &Path, session_id: &str) -> bool {
 ///
 /// Returns the session's state *after* the append, folded from the file rather
 /// than synthesized from the patch, so the caller sees the archive it did not
-/// write.
+/// write — and, from the same fold, whether the append actually won.
 pub fn mark_harvested(
     project_dir: &Path,
     session_id: &str,
     memory_ids: &[String],
     decision: HarvestDecision,
     note: Option<String>,
-) -> Result<HarvestEntry> {
+) -> Result<MarkOutcome> {
     // Reject anything that is not a plain identifier, not just the empty
     // string. A ledger key is later joined into an archive path by
     // `harvest ledger rm` / `export`, so a key like `../../x` planted here
@@ -526,7 +554,7 @@ pub fn mark_harvested(
     let at = line.at;
     append(project_dir, &[line])?;
 
-    Ok(read_folded(project_dir)
+    let entry = read_folded(project_dir)
         .remove(session_id)
         .map(|f| f.entry)
         .unwrap_or(HarvestEntry {
@@ -537,7 +565,21 @@ pub fn mark_harvested(
             stage: HarvestStage::Collected,
             note,
             archive: None,
-        }))
+        });
+    // The fold stamps `harvested_at` from the winning decision line's own
+    // timestamp, so "the entry does not carry ours" is exactly "a later
+    // decision line outranked ours".
+    let superseded = entry.harvested_at != at || entry.decision != Some(decision);
+    if superseded {
+        tracing::warn!(
+            "harvest ledger: the decision just recorded for session {session_id} was discarded \
+             by the fold — a line already in the log is timestamped later ({}) than this write \
+             ({at}), which means the clock stepped backwards. The session still reads as {:?}.",
+            entry.harvested_at,
+            entry.decision()
+        );
+    }
+    Ok(MarkOutcome { entry, superseded })
 }
 
 /// Attach an archive to a session, creating an unreviewed entry when nobody has
@@ -882,6 +924,9 @@ fn migrate_legacy_map(project_dir: &Path) {
             at: entry.harvested_at,
             stage: Some(HarvestStage::Collected),
             decision: Some(decision),
+            // `at` already *is* the recorded decision time here, so nothing to
+            // restate.
+            decided_at: None,
             memory_ids: Some(entry.memory_ids),
             memories_created: Some(entry.memories_created),
             note: Some(entry.note),
@@ -936,9 +981,12 @@ fn append(project_dir: &Path, lines: &[LedgerLine]) -> Result<()> {
 
 /// Rewrite the log as one line per live entry once it has outgrown them.
 ///
-/// Purely a space reclaim — the fold is identical either way — so it is
-/// best-effort throughout and gives up rather than risk a record. Two hazards,
-/// both handled by reading the tail rather than by taking a lock:
+/// Purely a space reclaim — the fold is identical either way, which costs the
+/// snapshot line a second timestamp (see [`LedgerLine::decided_at`]: `at`
+/// places it in the sequence, `decided_at` preserves what the fold reports as
+/// `harvested_at`) — so it is best-effort throughout and gives up rather than
+/// risk a record. Two hazards, both handled by reading the tail rather than by
+/// taking a lock:
 ///
 /// 1. Appends landing *while* the snapshot is being built are carried over
 ///    verbatim, re-read until the file stops growing.
@@ -982,6 +1030,12 @@ fn maybe_compact(project_dir: &Path) {
             at: f.last_at,
             stage: Some(entry.stage),
             decision: Some(entry.decision()),
+            // The two timestamps have to be carried separately, because they
+            // answer different questions and the snapshot needs both: `at`
+            // places the line in the sequence, `decided_at` is what the fold
+            // reports as `harvested_at`. Stamping only `at` moved every
+            // entry's "Recorded" time to its newest mechanical event.
+            decided_at: Some(entry.harvested_at),
             memory_ids: Some(entry.memory_ids.clone()),
             memories_created: Some(entry.memories_created),
             note: Some(entry.note.clone()),
@@ -1050,6 +1104,23 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Is this session settled — i.e. would `list` stop offering it?
+    ///
+    /// A test helper rather than library API: nothing in the binary ever asked
+    /// this question (callers all want the whole entry), but it states the
+    /// property most of these tests are actually about. An entry that only
+    /// records a collected transcript is `Unreviewed` and deliberately does
+    /// **not** count — archiving a transcript must never make it invisible to
+    /// the very command that exists to review it.
+    fn is_harvested(project_dir: &Path, session_id: &str) -> bool {
+        if session_id.is_empty() {
+            return false;
+        }
+        read_folded(project_dir)
+            .get(session_id)
+            .is_some_and(|f| f.entry.is_settled())
+    }
+
     fn lines_in(dir: &Path) -> Vec<String> {
         std::fs::read_to_string(ledger_path(dir))
             .unwrap_or_default()
@@ -1082,7 +1153,8 @@ mod tests {
             HarvestDecision::Harvested,
             None,
         )
-        .unwrap();
+        .unwrap()
+        .entry;
         assert_eq!(entry.memories_created, 2);
         assert!(is_harvested(dir, "s1"));
         assert_eq!(read_harvested(dir)["s1"].memory_ids, vec!["m1", "m2"]);
@@ -1305,6 +1377,83 @@ mod tests {
     }
 
     #[test]
+    fn compaction_preserves_the_instant_a_decision_was_recorded() {
+        // The snapshot line has to sort at the entry's high-water mark, but it
+        // also carries the decision — and the fold stamps `harvested_at` from
+        // the line's own timestamp. Without a separate `decided_at` the
+        // rewrite silently moved every entry's "Recorded" time forward to its
+        // newest *mechanical* event: `ledger list`'s column and sort order
+        // change under the user, and the 365-day window is measured from the
+        // wrong instant.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let filler = "x".repeat(2048);
+
+        mark_harvested(
+            dir,
+            "s1",
+            &["m1".into()],
+            HarvestDecision::Harvested,
+            Some(filler.clone()),
+        )
+        .unwrap();
+        let decided = read_harvested(dir)["s1"].harvested_at;
+        // A later mechanical event on the same session: the SessionEnd hook's
+        // archive line, which deliberately says nothing about the decision.
+        set_archive(dir, "s1", sample_archive()).unwrap();
+        assert_eq!(
+            read_harvested(dir)["s1"].harvested_at,
+            decided,
+            "archiving already must not make the review look fresh"
+        );
+
+        // Push the file past the compaction gate on a *different* session, so
+        // nothing new is written about `s1` at all.
+        append_until_compacted(dir, "filler", &filler);
+
+        let after = read_harvested(dir);
+        assert_eq!(
+            after["s1"].harvested_at, decided,
+            "compaction moved the recorded decision time to the archive's"
+        );
+        assert_eq!(after["s1"].decision(), HarvestDecision::Harvested);
+        assert_eq!(after["s1"].memory_ids, vec!["m1"]);
+        assert!(after["s1"].archive.is_some(), "the archive survived too");
+    }
+
+    #[test]
+    fn a_mark_the_fold_discards_reports_itself() {
+        // The cost of ordering by timestamp rather than file position: a clock
+        // stepped backwards puts this write *before* a decision already in the
+        // log, and the fold keeps the old one. The visible symptom is a
+        // session that keeps being offered, with nothing saying a review was
+        // rejected — so the rejection is reported at the moment it happens.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let mut planted = LedgerLine::touching("s1");
+        planted.decision = Some(HarvestDecision::Deferred);
+        planted.at = Utc::now() + Duration::days(1);
+        append(dir, &[planted]).unwrap();
+
+        let outcome = mark_harvested(dir, "s1", &[], HarvestDecision::Skipped, None).unwrap();
+        assert!(
+            outcome.superseded,
+            "a review the fold threw away was reported as recorded"
+        );
+        assert_eq!(
+            outcome.entry.decision(),
+            HarvestDecision::Deferred,
+            "the returned entry must be the fold's truth, not the request"
+        );
+
+        // The ordinary write is not flagged — otherwise the flag says nothing.
+        let ordinary = mark_harvested(dir, "s2", &[], HarvestDecision::Skipped, None).unwrap();
+        assert!(!ordinary.superseded);
+        assert_eq!(ordinary.entry.decision(), HarvestDecision::Skipped);
+    }
+
+    #[test]
     fn a_torn_final_line_does_not_destroy_the_log() {
         // A crash mid-append leaves a partial record. Under the whole-map
         // format that was the entire file's worth of review decisions; here it
@@ -1481,8 +1630,9 @@ mod tests {
         // The reason this module exists: a session that yielded nothing must
         // not be offered again on the next run.
         let tmp = TempDir::new().unwrap();
-        let entry =
-            mark_harvested(tmp.path(), "empty", &[], HarvestDecision::Skipped, None).unwrap();
+        let entry = mark_harvested(tmp.path(), "empty", &[], HarvestDecision::Skipped, None)
+            .unwrap()
+            .entry;
         assert_eq!(entry.memories_created, 0);
         assert!(is_harvested(tmp.path(), "empty"));
     }

@@ -253,7 +253,7 @@ engramdb reindex [--embeddings-only|--index-only|--archive-only] [--global]
 | (no flag) | Re-embed everything + rebuild the LanceDB index. |
 | `--embeddings-only` | Re-embed only. |
 | `--index-only` | Rebuild the index without re-embedding. |
-| `--archive-only` | Rebuild the **conversation** search rows from the stored transcript copies. Touches no memory; see [`harvest search`](#harvest--mine-past-claude-code-sessions). Curated summaries are preserved — they are the one thing a rebuild cannot recreate. |
+| `--archive-only` | Rebuild the **conversation** search rows from the stored transcript copies — the copies, not the live transcripts, even where Claude Code still has one. Touches no memory; see [`harvest search`](#harvest--mine-past-claude-code-sessions). Curated summaries are preserved — they are the one thing a rebuild cannot recreate. This is also the remediation when `[embeddings].dimensions` changed under an existing conversation index: the table's vector width is fixed at creation, so it is recreated at the new width (carrying the summaries across) before the rows are rebuilt. |
 
 ## `migrate` / `rollback` — memory format migrations
 
@@ -423,6 +423,11 @@ Search returns session ids and metadata, not conversation text — pass an id to
 `harvest show` to read one. A hit marked `partial` is a session whose tail was
 never embedded (the indexed text is budgeted to what the embedding model can
 actually read), so a *miss* against it is not evidence the topic was absent.
+`--since` narrows the candidates *before* the nearest-neighbour cut rather than
+trimming its output, so a window still returns its best `-n` matches however
+many older conversations rank above them. A session with no recorded end time
+is excluded by `--since`, the same rule `harvest list` applies: it cannot be
+shown to fall inside the window.
 
 `harvest index` is idempotent: each row records the checksum of the exact text
 behind its vector, so re-running costs one hash and no embedding call.
@@ -524,6 +529,18 @@ restored backup, or an eviction on another machine took away loses the
 reference, and with it the exemption, on the next harvest command.
 `harvest ledger rm` deletes one — it confirms first, since once Claude Code has pruned its own transcript the archive is the only remaining copy; `--force` skips the prompt and is **required** under `--format json`, which never prompts. `harvest ledger export` restores one, verifying it against the SHA-256
 recorded when it was written.
+
+A conversation lives in **three** places, and `harvest ledger rm <id>` (without
+`--archive-only`) removes all three: the ledger entry, the archived transcript,
+and the conversation **search row** — which stores the session's first prompt
+and its curated summary verbatim, so leaving it would keep the conversation
+findable by `harvest search` after you were told the only copy was gone, with
+nothing left for `harvest show` to open. `--archive-only` deliberately keeps the
+search row, because it retracts nothing: it reclaims bytes while the review
+record stands, and dropping the row would destroy a curated summary that no
+rebuild can recreate. A session that is searchable but no longer readable is an
+ordinary state either way — it is what any indexed session becomes once Claude
+Code prunes its transcript and no copy was taken.
 
 **Provenance and pinning.** `harvest mark <session> --memory <id>` records the
 session on each named memory as the conversation it was extracted from, so a

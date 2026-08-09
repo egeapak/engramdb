@@ -714,6 +714,16 @@ struct HarvestLedgerInput {
     decision: Option<String>,
 
     #[schemars(
+        description = "Filter by stage — where the session's bytes are: collected, indexed, or compressed. Independent of decision: a session can be indexed while skipped."
+    )]
+    stage: Option<String>,
+
+    #[schemars(
+        description = "Only sessions that still hold an archived transcript, i.e. the ones harvest_show can still read after Claude Code pruned its own copy."
+    )]
+    with_archive: Option<bool>,
+
+    #[schemars(
         description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here. Naming a project other than your own is refused unless [security] allow_all_projects_harvest = true in your own config."
     )]
     project: Option<String>,
@@ -3355,9 +3365,10 @@ impl EngramDbServer {
                 .map_err(|_| live_err)?,
         };
 
-        let entry =
+        let marked =
             harvest_state::mark_harvested(ledger_dir, &resolved, &memory_ids, decision, input.note)
                 .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
+        let entry = &marked.entry;
 
         // The provenance link, from the one call that names both halves. Same
         // ordering and the same reasoning as the summary below: reported, never
@@ -3413,6 +3424,13 @@ impl EngramDbServer {
             "memories_created": entry.memories_created,
             "summary_recorded": input.summary.is_some() && summary_error.is_none(),
             "summary_error": summary_error,
+            // The ledger folds by timestamp, not by file position, so a clock
+            // that stepped backwards puts this write behind a decision already
+            // in the log and it is dropped. Silently, the only symptom is a
+            // session `harvest_list` keeps offering after the model was told
+            // it was settled — so `decision` above is the truth and this says
+            // it is not what was asked for.
+            "superseded": marked.superseded,
             // How many memories now cite this session — and so how many
             // transcript copies this call pinned against eviction.
             "provenance_recorded": pinned,
@@ -3495,6 +3513,7 @@ impl EngramDbServer {
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
+        let mut skipped_projects: Vec<serde_json::Value> = Vec::new();
         if all_projects {
             let registry_data = self
                 .registry
@@ -3515,15 +3534,35 @@ impl EngramDbServer {
                     continue;
                 }
                 seen.push(root.clone());
-                let other =
-                    engramdb::storage::ConversationIndex::open(&root, config.embeddings.dimensions)
-                        .await
-                        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
-                hits.extend(
-                    ops::harvest_index::search(&other, &engine, &input.query, limit, since)
-                        .await
-                        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?,
-                );
+                // One unusable project must not fail the whole machine-wide
+                // search — a table left at a stale vector width is exactly
+                // that case, and it is repairable per project. Reported in the
+                // result rather than swallowed: a project silently missing
+                // from the hits is indistinguishable from one that never
+                // discussed the topic.
+                let other = match engramdb::storage::ConversationIndex::open(
+                    &root,
+                    config.embeddings.dimensions,
+                )
+                .await
+                {
+                    Ok(index) => index,
+                    Err(e) => {
+                        skipped_projects.push(serde_json::json!({
+                            "project_id": root,
+                            "reason": format!("{e:#}"),
+                        }));
+                        continue;
+                    }
+                };
+                match ops::harvest_index::search(&other, &engine, &input.query, limit, since).await
+                {
+                    Ok(found) => hits.extend(found),
+                    Err(e) => skipped_projects.push(serde_json::json!({
+                        "project_id": root,
+                        "reason": format!("{e:#}"),
+                    })),
+                }
             }
             hits.sort_by(|a, b| {
                 b.score
@@ -3567,6 +3606,9 @@ impl EngramDbServer {
             .collect();
         let r = serde_json::to_string(&serde_json::json!({
             "conversations": json,
+            // Present only when something was actually lost, so the ordinary
+            // answer is unchanged and a non-empty list is a real signal.
+            "skipped_projects": (!skipped_projects.is_empty()).then_some(skipped_projects),
             "hint": "Pass a session_id to harvest_show to read one.",
         }))
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
@@ -3600,6 +3642,33 @@ impl EngramDbServer {
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         let ledger = harvest_state::read_harvested(&scope.root_dir);
 
+        // Validated rather than silently non-matching: a typo'd stage would
+        // otherwise return an empty ledger, which reads as "nothing is
+        // indexed" — an answer about the store, not about the argument.
+        if let Some(stage) = input.stage.as_deref() {
+            if !["collected", "indexed", "compressed"].contains(&stage.to_lowercase().as_str()) {
+                return Err(error_response(
+                    ErrorCode::ValidationError,
+                    &format!(
+                        "unknown stage '{stage}' (expected collected, indexed, or compressed)"
+                    ),
+                ));
+            }
+        }
+        if let Some(decision) = input.decision.as_deref() {
+            if !["harvested", "skipped", "deferred", "unreviewed"]
+                .contains(&decision.to_lowercase().as_str())
+            {
+                return Err(error_response(
+                    ErrorCode::ValidationError,
+                    &format!(
+                        "unknown decision '{decision}' (expected harvested, skipped, deferred, \
+                         or unreviewed)"
+                    ),
+                ));
+            }
+        }
+
         let mut rows: Vec<serde_json::Value> = ledger
             .iter()
             .filter(|(_, e)| {
@@ -3607,6 +3676,15 @@ impl EngramDbServer {
                     format!("{:?}", e.decision()).to_lowercase() == want.to_lowercase()
                 })
             })
+            // The two axes the tool's own description advertises. Only
+            // `decision` was ever applied, so an agent asking for the indexed
+            // sessions got every session instead — and could not tell.
+            .filter(|(_, e)| {
+                input.stage.as_deref().is_none_or(|want| {
+                    format!("{:?}", e.stage).to_lowercase() == want.to_lowercase()
+                })
+            })
+            .filter(|(_, e)| !input.with_archive.unwrap_or(false) || e.archive.is_some())
             .map(|(id, e)| {
                 serde_json::json!({
                     "session_id": id,

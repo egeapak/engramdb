@@ -98,31 +98,59 @@ struct Source {
     summary: Option<SessionSummary>,
 }
 
-/// Locate a session's bytes: the live transcript if Claude Code still has it,
-/// otherwise the copy taken at session end.
+/// Which of a session's two possible sources to read first.
 ///
-/// The fallback is not an optimization — once Claude Code prunes a transcript
-/// the copy is the only remaining route, and indexing runs on a timeout
-/// precisely so it happens for sessions nobody opened, i.e. exactly the ones
-/// most likely to have been pruned.
-fn locate(scope: &SessionScope, session_id: &str) -> Result<Option<Source>> {
-    if let Some(summary) = transcripts::list_sessions_for(&scope.paths)?
-        .into_iter()
-        .find(|s| s.session_id == session_id)
-    {
-        return Ok(Some(Source {
-            path: summary.transcript_path.clone(),
-            _restored: None,
-            summary: Some(summary),
-        }));
+/// They are not interchangeable. The live transcript is cheaper (no
+/// decompression) and carries a parsed [`SessionSummary`], but it is also the
+/// file Claude Code owns and prunes; the stored copy is the one this program
+/// took and never rewrites. So an *ordinary* index reads live-first, and
+/// `reindex --archive-only` — whose entire promise is "rebuilt from the stored
+/// transcript copies", and which exists to prove those copies are sufficient —
+/// reads copy-first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Prefer {
+    Live,
+    Copy,
+}
+
+/// Locate a session's bytes, taking whichever source `prefer` names first and
+/// falling back to the other.
+///
+/// The fallback is not an optimization in either direction — once Claude Code
+/// prunes a transcript the copy is the only remaining route (and indexing runs
+/// on a timeout precisely so it happens for sessions nobody opened, i.e.
+/// exactly the ones most likely to have been pruned), while a session that was
+/// never archived has only the live file.
+fn locate(scope: &SessionScope, session_id: &str, prefer: Prefer) -> Result<Option<Source>> {
+    let live = || -> Result<Option<Source>> {
+        Ok(transcripts::list_sessions_for(&scope.paths)?
+            .into_iter()
+            .find(|s| s.session_id == session_id)
+            .map(|summary| Source {
+                path: summary.transcript_path.clone(),
+                _restored: None,
+                summary: Some(summary),
+            }))
+    };
+    let copy = || -> Result<Option<Source>> {
+        Ok(
+            harvest::restore_archived_session(scope, session_id)?.map(|(guard, path)| Source {
+                path,
+                _restored: Some(guard),
+                summary: None,
+            }),
+        )
+    };
+    match prefer {
+        Prefer::Live => match live()? {
+            Some(source) => Ok(Some(source)),
+            None => copy(),
+        },
+        Prefer::Copy => match copy()? {
+            Some(source) => Ok(Some(source)),
+            None => live(),
+        },
     }
-    Ok(
-        harvest::restore_archived_session(scope, session_id)?.map(|(guard, path)| Source {
-            path,
-            _restored: Some(guard),
-            summary: None,
-        }),
-    )
 }
 
 /// Index one session, replacing any row it already has.
@@ -137,7 +165,18 @@ pub async fn index_session(
     session_id: &str,
     force: bool,
 ) -> Result<IndexAction> {
-    let Some(source) = locate(scope, session_id)? else {
+    index_session_with(scope, index, engine, session_id, force, Prefer::Live).await
+}
+
+async fn index_session_with(
+    scope: &SessionScope,
+    index: &ConversationIndex,
+    engine: &RetrievalEngine,
+    session_id: &str,
+    force: bool,
+    prefer: Prefer,
+) -> Result<IndexAction> {
+    let Some(source) = locate(scope, session_id, prefer)? else {
         anyhow::bail!(
             "No transcript for session {session_id}: Claude Code no longer has the live one and \
 no copy was collected for it. `engramdb harvest ledger list --with-archive` shows which \
@@ -179,6 +218,16 @@ and no failed tool calls. There is nothing a search could match."
 
     let existing = index.fetch(session_id).await?;
     if !force && existing.as_ref().is_some_and(|r| r.digest_sha256 == sha) {
+        // The row is current, but the ledger may not say so — and if it does
+        // not, nothing else will ever fix it. The two halves come apart with
+        // no failed write at all: `harvest reset`, `harvest_mark clear=true`
+        // and `ledger rm` all drop an entry whose row survives, and so does
+        // the ledger's own 365-day window. From then on `doctor` reports the
+        // session as "due for indexing and not yet searchable" forever, and
+        // every maintenance pass re-locates, re-parses and re-hashes a
+        // transcript to arrive back here. Writing the stage on this path is
+        // what heals it, and it costs one appended line once.
+        record_indexed_stage(scope, session_id);
         return Ok(IndexAction::Unchanged);
     }
 
@@ -215,14 +264,20 @@ and no failed tool calls. There is nothing a search could match."
         digest_vec: vector,
     };
     index.upsert(&row).await?;
+    record_indexed_stage(scope, session_id);
+    Ok(IndexAction::Indexed)
+}
 
-    // Advisory, like every other ledger write in this flow: a session that is
-    // indexed but whose stage line did not land is re-indexed next pass and
-    // costs one embed, while a failure here must not undo the row.
+/// Record that a session's row exists, without letting a ledger failure undo
+/// the row.
+///
+/// Advisory, like every other ledger write in this flow. A stage line that
+/// does not land costs one re-derivation on the next pass over this session —
+/// no longer *forever*, now that the unchanged path writes it too.
+fn record_indexed_stage(scope: &SessionScope, session_id: &str) {
     if let Err(e) = harvest_state::set_stage(&scope.root_dir, session_id, HarvestStage::Indexed) {
         tracing::warn!("could not record session {session_id} as indexed in the ledger: {e}");
     }
-    Ok(IndexAction::Indexed)
 }
 
 /// Which sessions an automatic pass should index, and why they are due.
@@ -306,14 +361,82 @@ pub async fn index_sessions(
     session_ids: &[String],
     force: bool,
 ) -> Result<IndexReport> {
+    index_sessions_with(scope, index, engine, session_ids, force, Prefer::Live).await
+}
+
+async fn index_sessions_with(
+    scope: &SessionScope,
+    index: &ConversationIndex,
+    engine: &RetrievalEngine,
+    session_ids: &[String],
+    force: bool,
+    prefer: Prefer,
+) -> Result<IndexReport> {
     let mut report = IndexReport::default();
     for session_id in session_ids {
-        match index_session(scope, index, engine, session_id, force).await {
+        match index_session_with(scope, index, engine, session_id, force, prefer).await {
             Ok(action) => report.record(session_id, action),
             Err(e) => report.skip(session_id, e.to_string()),
         }
     }
     Ok(report)
+}
+
+/// Drop a session's conversation row, wherever this project keeps one.
+///
+/// The other half of deleting a conversation. `harvest ledger rm` removes the
+/// review record and the stored transcript copy, but the row holds the
+/// session's first prompt and its curated summary *verbatim* — so without this
+/// the command that advertises deleting "the only remaining copy" left the
+/// conversation searchable, while `harvest show` had nothing left to show. An
+/// indexed-but-unreachable row is also permanent: nothing else ever revisits a
+/// session with no bytes behind it.
+///
+/// Width-agnostic on purpose: whether the stored vectors still match the
+/// configured width has no bearing on whether a user may delete their own
+/// conversation.
+pub async fn forget_session(scope: &SessionScope, session_id: &str) -> Result<bool> {
+    let Some(index) = ConversationIndex::open_existing(&scope.root_project_id)
+        .await
+        .with_context(|| {
+            format!(
+                "could not open the conversation index for project {}",
+                scope.root_project_id
+            )
+        })?
+    else {
+        return Ok(false);
+    };
+    index.delete(session_id).await
+}
+
+/// Open the conversation index for a full rebuild, recreating the table when
+/// its stored vector width no longer matches the configured one.
+///
+/// Returns the curated summaries carried across such a recreate, for the
+/// caller to re-attach once the rows are back — they are the one thing a
+/// rebuild cannot recreate, and dropping the table would otherwise take them
+/// with it.
+///
+/// Lance cannot widen a `FixedSizeList` in place, so a store whose
+/// `[embeddings].dimensions` changed has a table every write and every search
+/// fails against, and no repair short of deleting `conversations.lance` by
+/// hand — `reindex --archive-only` itself went through the same failing
+/// `upsert`. This mirrors what `ops::reindex` already does for the chunks
+/// table.
+pub async fn open_index_for_rebuild(
+    scope: &SessionScope,
+    dimensions: usize,
+) -> Result<(ConversationIndex, Vec<(String, String)>)> {
+    let carried = match ConversationIndex::open_existing(&scope.root_project_id).await? {
+        Some(existing) if existing.dimensions() != dimensions => {
+            let carried = existing.curated_summaries().await?;
+            existing.drop_table().await?;
+            carried
+        }
+        _ => Vec::new(),
+    };
+    Ok((open_index(scope, dimensions).await?, carried))
 }
 
 /// Every session in scope that has bytes behind it — a live transcript or a
@@ -338,6 +461,13 @@ pub fn all_indexable(scope: &SessionScope) -> Result<Vec<String>> {
 /// heuristic is a re-derivation away, and only because nothing was dropped at
 /// collect time. Curated summaries survive untouched — they are the one thing
 /// no rebuild can recreate.
+///
+/// Reads the **copy**, not the live transcript, even when Claude Code still
+/// has one. Preferring the live file made the command's documented behaviour
+/// false, and quietly so: this is the operation that demonstrates the stored
+/// copies are sufficient, and a rebuild that silently sourced its bytes
+/// elsewhere would keep succeeding right up to the day the live transcripts
+/// were gone.
 pub async fn reindex_from_copies(
     scope: &SessionScope,
     index: &ConversationIndex,
@@ -350,7 +480,7 @@ pub async fn reindex_from_copies(
         .map(|(id, _)| id)
         .collect();
     ids.sort();
-    index_sessions(scope, index, engine, &ids, true).await
+    index_sessions_with(scope, index, engine, &ids, true, Prefer::Copy).await
 }
 
 /// Replace a session's curated summary and re-embed **only** `summary_vec`.
@@ -498,12 +628,24 @@ mod tests {
     /// A transcript with one human turn, one assistant turn, a successful tool
     /// call and a failed one.
     fn write_transcript(dir: &Path, session: &str, prompt: &str, reply: &str) -> PathBuf {
+        write_transcript_for(dir, Path::new("/repo"), session, prompt, reply)
+    }
+
+    /// [`write_transcript`] with a chosen recorded `cwd`, which is what
+    /// `list_sessions_for` attributes a session by.
+    fn write_transcript_for(
+        dir: &Path,
+        cwd: &Path,
+        session: &str,
+        prompt: &str,
+        reply: &str,
+    ) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
         let path = dir.join(format!("{session}.jsonl"));
         let mut f = std::fs::File::create(&path).unwrap();
         let lines = [
             serde_json::json!({
-                "type": "user", "cwd": "/repo", "gitBranch": "main",
+                "type": "user", "cwd": cwd.to_string_lossy(), "gitBranch": "main",
                 "timestamp": "2026-08-01T10:00:00Z",
                 "message": {"role": "user", "content": prompt},
             }),
@@ -749,6 +891,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_indexed_session_whose_ledger_stage_was_lost_heals_itself() {
+        // The row and the ledger entry come apart with no failed write at
+        // all: `harvest reset`, `harvest_mark clear=true`, `ledger rm` and the
+        // ledger's own 365-day window each drop an archive-less entry while
+        // its row lives on. Returning `Unchanged` without re-writing the stage
+        // made that permanent — `doctor` reports the session as "due for
+        // indexing and not yet searchable" forever, about a session that is
+        // indexed, and every maintenance pass re-parses the transcript to
+        // rediscover it.
+        let tmp = TempDir::new().unwrap();
+        let scope = scope_at(tmp.path());
+        let engine = engine_with_embeddings(tmp.path()).await;
+        let index = index_at(tmp.path()).await;
+        let path = write_transcript(tmp.path(), "s1", "protoc question", "answer");
+
+        index_one(&scope, &index, &engine, "s1", &path, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            harvest_state::clear_harvested(tmp.path(), "s1").unwrap(),
+            harvest_state::ClearOutcome::Removed
+        );
+        assert!(
+            !harvest_state::read_harvested(tmp.path()).contains_key("s1"),
+            "the ledger entry is gone while the row is not"
+        );
+
+        assert_eq!(
+            index_one(&scope, &index, &engine, "s1", &path, false)
+                .await
+                .unwrap(),
+            IndexAction::Unchanged,
+            "the row is current, so no embed is owed"
+        );
+        assert_eq!(
+            harvest_state::read_harvested(tmp.path())["s1"].stage,
+            HarvestStage::Indexed,
+            "a session that IS indexed must stop reporting as due"
+        );
+    }
+
+    #[tokio::test]
     async fn a_batch_records_the_sessions_it_could_not_index() {
         // A conversation missing from search is indistinguishable from one
         // that never mentioned the topic, so the loss has to be declared.
@@ -978,6 +1162,233 @@ mod tests {
             now,
         );
         assert!(due.is_empty(), "{due:?}");
+    }
+
+    // ---- deleting a conversation ----
+
+    #[tokio::test]
+    async fn forgetting_a_session_drops_its_searchable_row() {
+        // `harvest ledger rm` says it deletes the conversation, "the only
+        // remaining copy". The row holds the first prompt and the curated
+        // summary verbatim, so leaving it behind is an incomplete deletion of
+        // conversation content — and a permanently unreachable row, since
+        // nothing ever revisits a session with no bytes left.
+        let tmp = TempDir::new().unwrap();
+        let mut scope = scope_at(tmp.path());
+        scope.root_project_id = "forget-one-proj".into();
+        let engine = engine_with_embeddings(tmp.path()).await;
+        let index = ConversationIndex::open(&scope.root_project_id, DIM)
+            .await
+            .unwrap();
+        let path = write_transcript(tmp.path(), "s1", "notes about protoc", "ok");
+        index_one(&scope, &index, &engine, "s1", &path, false)
+            .await
+            .unwrap();
+        set_summary(&index, &engine, "s1", "what this settled")
+            .await
+            .unwrap();
+        assert_eq!(
+            search(&index, &engine, "protoc", 5, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        assert!(forget_session(&scope, "s1").await.unwrap());
+        assert!(
+            search(&index, &engine, "protoc", 5, None)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the deleted conversation is still searchable"
+        );
+        assert!(
+            !forget_session(&scope, "s1").await.unwrap(),
+            "the second call must report that there was nothing left"
+        );
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_session_in_a_project_with_no_index_is_not_an_error() {
+        // `ledger rm` runs in projects that never indexed anything, and it
+        // must neither fail there nor create a table on the way past.
+        let tmp = TempDir::new().unwrap();
+        let mut scope = scope_at(tmp.path());
+        scope.root_project_id = "forget-none-proj".into();
+        assert!(!forget_session(&scope, "s1").await.unwrap());
+        assert!(!ConversationIndex::exists(&scope.root_project_id));
+    }
+
+    // ---- the width-change repair ----
+
+    #[tokio::test]
+    async fn a_stale_vector_width_is_repaired_by_the_rebuild_path() {
+        // Lance opens a table AS-IS, so after a `[embeddings].dimensions`
+        // change every upsert and every search fails against it — including
+        // the ones inside `reindex --archive-only`, the documented rebuild.
+        // There was no repair short of deleting `conversations.lance` by hand.
+        let tmp = TempDir::new().unwrap();
+        let mut scope = scope_at(tmp.path());
+        scope.root_project_id = "rebuild-width-proj".into();
+        let engine = engine_with_embeddings(tmp.path()).await;
+
+        let narrow = ConversationIndex::open(&scope.root_project_id, DIM / 2)
+            .await
+            .unwrap();
+        narrow
+            .upsert(&ConversationRow {
+                session_id: "s1".into(),
+                project_id: scope.root_project_id.clone(),
+                cwd: None,
+                git_branch: None,
+                started_at: None,
+                ended_at: Some(Utc::now()),
+                indexed_at: Utc::now(),
+                user_turns: 1,
+                assistant_turns: 1,
+                first_prompt: None,
+                indexed_chars: 10,
+                indexed_complete: true,
+                digest_sha256: "stale".into(),
+                summary: Some("the daemon socket comes from resolve_socket".into()),
+                summary_updated_at: Some(Utc::now()),
+                digest_vec: vec![0.0; DIM / 2],
+                summary_vec: Some(vec![0.0; DIM / 2]),
+            })
+            .await
+            .unwrap();
+        drop(narrow);
+
+        // The ordinary open refuses, and says what to run. `{:#}` because the
+        // remediation is in the source error, not the outer context — which is
+        // also how `main` renders it.
+        let err = format!(
+            "{:#}",
+            open_index(&scope, DIM)
+                .await
+                .err()
+                .expect("a stale width must not open")
+        );
+        assert!(err.contains("reindex --archive-only"), "{err}");
+
+        let (index, carried) = open_index_for_rebuild(&scope, DIM).await.unwrap();
+        assert_eq!(index.dimensions(), DIM);
+        assert_eq!(
+            carried,
+            vec![(
+                "s1".to_string(),
+                "the daemon socket comes from resolve_socket".to_string()
+            )],
+            "a curated summary is the one thing a rebuild cannot recreate, so it is carried"
+        );
+        assert_eq!(index.count().await.unwrap(), 0, "the stale rows are gone");
+
+        // ...and the table now takes writes at the configured width, which it
+        // could not before.
+        let path = write_transcript(tmp.path(), "s1", "protoc question", "answer");
+        index_one(&scope, &index, &engine, "s1", &path, false)
+            .await
+            .unwrap();
+        set_summary(&index, &engine, "s1", &carried[0].1)
+            .await
+            .unwrap();
+        let row = index.fetch("s1").await.unwrap().unwrap();
+        assert_eq!(row.digest_vec.len(), DIM);
+        assert_eq!(
+            row.summary.as_deref(),
+            Some("the daemon socket comes from resolve_socket")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_rebuild_path_is_a_plain_open_when_the_width_still_matches() {
+        // The control: a matching width must not cost the rows.
+        let tmp = TempDir::new().unwrap();
+        let mut scope = scope_at(tmp.path());
+        scope.root_project_id = "rebuild-same-proj".into();
+        let engine = engine_with_embeddings(tmp.path()).await;
+        let index = ConversationIndex::open(&scope.root_project_id, DIM)
+            .await
+            .unwrap();
+        let path = write_transcript(tmp.path(), "s1", "protoc question", "answer");
+        index_one(&scope, &index, &engine, "s1", &path, false)
+            .await
+            .unwrap();
+        drop(index);
+
+        let (reopened, carried) = open_index_for_rebuild(&scope, DIM).await.unwrap();
+        assert!(carried.is_empty());
+        assert_eq!(
+            reopened.count().await.unwrap(),
+            1,
+            "the rows were destroyed"
+        );
+    }
+
+    // ---- rebuilding from the stored copies ----
+
+    #[tokio::test]
+    async fn a_rebuild_reads_the_stored_copy_not_the_live_transcript() {
+        // `reindex --archive-only` is documented to rebuild "from the stored
+        // transcript copies", and that is the claim the whole verbatim-copy
+        // policy rests on. Preferring the live file made it false quietly: the
+        // rebuild kept succeeding off bytes this program does not own, right
+        // up to the day Claude Code pruned them.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let claude = root.join("claude");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &claude);
+
+        let scope = SessionScope {
+            root_project_id: "copy-first-proj".into(),
+            root_dir: root.clone(),
+            paths: vec![root.clone()],
+        };
+        let engine = engine_with_embeddings(&root).await;
+        let index = ConversationIndex::open(&scope.root_project_id, DIM)
+            .await
+            .unwrap();
+
+        // The live transcript Claude Code still holds says one thing...
+        let live_dir = claude
+            .join("projects")
+            .join(transcripts::encode_project_dir(&root));
+        let live = write_transcript_for(&live_dir, &root, "s1", "a question about clippy", "ok");
+        assert_eq!(
+            transcripts::list_sessions_for(&scope.paths).unwrap().len(),
+            1,
+            "the fixture must actually be discoverable as a live transcript"
+        );
+
+        // ...and the copy this program took says another.
+        let stored = write_transcript_for(&root, &root, "stored", "a question about lancedb", "ok");
+        let archive = crate::storage::transcript_archive::archive_transcript(
+            &scope.root_project_id,
+            "s1",
+            &stored,
+        )
+        .unwrap();
+        harvest_state::set_archive(&root, "s1", archive).unwrap();
+
+        let report = reindex_from_copies(&scope, &index, &engine).await.unwrap();
+        assert_eq!(report.indexed, vec!["s1".to_string()], "{report:?}");
+
+        // The row records the SHA of the exact text behind its vector, so
+        // which file it was derived from is decidable rather than inferred.
+        let sha_of = |path: &Path| {
+            harvest::index_text_digest(&harvest::index_text(&harvest::index_digest(path).unwrap()))
+        };
+        assert_ne!(
+            sha_of(&stored),
+            sha_of(&live),
+            "the fixture must make the two sources distinguishable"
+        );
+        assert_eq!(
+            index.fetch("s1").await.unwrap().unwrap().digest_sha256,
+            sha_of(&stored),
+            "the rebuild read the live transcript instead of the stored copy"
+        );
     }
 
     #[test]

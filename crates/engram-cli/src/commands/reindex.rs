@@ -124,13 +124,42 @@ async fn run_archive_reindex(
              and retry."
         );
     }
-    let index =
-        engramdb::ops::harvest_index::open_index(&scope, config.embeddings.dimensions).await?;
+    // Not a plain `open_index`: this is the documented remediation for a
+    // conversations table whose stored vector width no longer matches the
+    // configured one, and until it recreated that table it went through the
+    // very `upsert` the mismatch breaks — so the advertised repair was the one
+    // thing that could not repair it. Curated summaries are carried across and
+    // re-attached below; they are the one thing a rebuild cannot recreate.
+    let (index, carried_summaries) =
+        engramdb::ops::harvest_index::open_index_for_rebuild(&scope, config.embeddings.dimensions)
+            .await?;
+    if !carried_summaries.is_empty() || index.dimensions() != config.embeddings.dimensions {
+        formatter.print_warning(&format!(
+            "The conversation table stored a different vector width, so it was recreated at {}; \
+             {} curated summar{} carried across.",
+            config.embeddings.dimensions,
+            carried_summaries.len(),
+            if carried_summaries.len() == 1 {
+                "y is"
+            } else {
+                "ies are"
+            }
+        ));
+    }
 
     if !formatter.is_json() {
         println!("Rebuilding conversation rows from stored transcript copies...");
     }
     let report = engramdb::ops::harvest_index::reindex_from_copies(&scope, &index, &engine).await?;
+    // After the rows exist, because a summary has nowhere to go without one.
+    let mut summary_errors: Vec<String> = Vec::new();
+    for (session_id, summary) in &carried_summaries {
+        if let Err(e) =
+            engramdb::ops::set_conversation_summary(&index, &engine, session_id, summary).await
+        {
+            summary_errors.push(format!("{session_id}: {e:#}"));
+        }
+    }
 
     if formatter.is_json() {
         println!(
@@ -141,9 +170,16 @@ async fn run_archive_reindex(
                     "session_id": s.session_id,
                     "reason": s.reason,
                 })).collect::<Vec<_>>(),
+                "summaries_carried": carried_summaries.len(),
+                "summary_errors": summary_errors,
             }))?
         );
         return Ok(());
+    }
+    // Named, because a curated summary that failed to land is the one loss a
+    // re-run cannot make good.
+    for error in &summary_errors {
+        formatter.print_warning(&format!("Could not re-attach a carried summary — {error}"));
     }
     if report.is_empty() {
         formatter.print_message(

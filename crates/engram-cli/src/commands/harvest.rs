@@ -153,8 +153,24 @@ pub async fn run_harvest(
             } else {
                 HarvestDecision::Harvested
             };
-            let entry =
+            let marked =
                 harvest_state::mark_harvested(ledger_dir, &resolved, &memory_ids, decision, note)?;
+            let entry = &marked.entry;
+            if marked.superseded {
+                // The fold orders by timestamp, not by file position, so a
+                // clock that stepped backwards puts this write behind a
+                // decision already in the log and it is silently dropped. The
+                // symptom is a session that keeps being offered with nothing
+                // saying why, so it is named here instead.
+                formatter.print_warning(&format!(
+                    "The decision just written for session {resolved} was discarded: a line \
+                     already in the ledger is timestamped later than this write, which means \
+                     the system clock stepped backwards. The session still reads as {:?}. \
+                     Re-run once the clock is past {}.",
+                    entry.decision(),
+                    entry.harvested_at.format("%Y-%m-%d %H:%M:%S UTC")
+                ));
+            }
             // The provenance link, written from the one call that already names
             // both halves — the agent does nothing extra. After the ledger, for
             // the same reason the summary is: the decision is what must not be
@@ -166,29 +182,48 @@ pub async fn run_harvest(
             // needs a model that may not load. A session with a decision and
             // no summary is a normal state; one with a summary and no
             // decision would keep being re-offered.
-            if let Some(summary) = summary {
-                write_summary(
-                    dir,
-                    full_config,
-                    &scope,
-                    &engine_ctx,
-                    &resolved,
-                    &summary,
-                    formatter,
-                )
-                .await?;
+            //
+            // ...which is why the failure is *captured* rather than
+            // propagated, matching `harvest_mark` on MCP. Propagating it exited
+            // non-zero over a decision (and a provenance pin) already on disk,
+            // and under `--format json` printed nothing at all — losing
+            // `pinned` and `unresolved_memories` with it. The command's own
+            // documentation promises a failed summary "costs the summary and
+            // not the review"; this is what makes that true.
+            let summary_error = match &summary {
+                Some(text) => {
+                    attach_summary(dir, full_config, &scope, &engine_ctx, &resolved, text)
+                        .await
+                        .err()
+                        .map(|e| format!("{e:#}"))
+                }
+                None => None,
+            };
+            if let Some(error) = &summary_error {
+                formatter.print_warning(&format!(
+                    "Recorded the decision for session {resolved}, but the summary could not be \
+                     written ({error}). `engramdb harvest summary {resolved} \"...\"` retries it \
+                     without touching the decision."
+                ));
             }
             if formatter.is_json() {
-                let mut json = entry_json(&resolved, &entry);
+                let mut json = entry_json(&resolved, entry);
                 json["pinned"] = serde_json::json!(links.pinned());
                 json["unresolved_memories"] = serde_json::json!(links
                     .unresolved
                     .iter()
                     .map(|(id, _)| id.clone())
                     .collect::<Vec<_>>());
+                json["summary_recorded"] =
+                    serde_json::json!(summary.is_some() && summary_error.is_none());
+                json["summary_error"] = serde_json::json!(summary_error);
+                json["superseded"] = serde_json::json!(marked.superseded);
                 println!("{}", serde_json::to_string_pretty(&json)?);
+            } else if summary_error.is_none() && summary.is_some() {
+                formatter.print_success(&format!("Summary recorded for session {resolved}."));
+                formatter.print_success(&describe_mark(&resolved, entry));
             } else {
-                formatter.print_success(&describe_mark(&resolved, &entry));
+                formatter.print_success(&describe_mark(&resolved, entry));
             }
         }
 
@@ -230,6 +265,7 @@ pub async fn run_harvest(
                     limit,
                     since,
                     hits,
+                    formatter,
                 )
                 .await?;
             }
@@ -384,6 +420,30 @@ fn compose_in_editor() -> Result<String> {
 }
 
 /// Attach (or clear) a curated summary, re-embedding only `summary_vec`.
+///
+/// Silent: `mark` reports its own outcome as one document and must not have a
+/// success line (which `--format json` renders as a *second* JSON object)
+/// spliced into it.
+async fn attach_summary(
+    dir: &Path,
+    config: &EngramConfig,
+    scope: &harvest::SessionScope,
+    ctx: &HarvestEngineContext<'_>,
+    session_id: &str,
+    body: &str,
+) -> Result<()> {
+    let (index, engine) = open_engine(dir, config, scope, ctx).await?;
+    // A summary for a session with no row has nowhere to go, and silently
+    // indexing here would make `harvest summary` an embedding of the whole
+    // conversation rather than of two sentences. Index first, explicitly.
+    if index.fetch(session_id).await?.is_none() {
+        harvest_index::index_session(scope, &index, &engine, session_id, false).await?;
+    }
+    harvest_index::set_summary(&index, &engine, session_id, body).await
+}
+
+/// [`attach_summary`] plus the line `harvest summary` prints, which is the
+/// whole result of that command.
 async fn write_summary(
     dir: &Path,
     config: &EngramConfig,
@@ -393,14 +453,7 @@ async fn write_summary(
     body: &str,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let (index, engine) = open_engine(dir, config, scope, ctx).await?;
-    // A summary for a session with no row has nowhere to go, and silently
-    // indexing here would make `harvest summary` an embedding of the whole
-    // conversation rather than of two sentences. Index first, explicitly.
-    if index.fetch(session_id).await?.is_none() {
-        harvest_index::index_session(scope, &index, &engine, session_id, false).await?;
-    }
-    harvest_index::set_summary(&index, &engine, session_id, body).await?;
+    attach_summary(dir, config, scope, ctx, session_id, body).await?;
     if body.trim().is_empty() {
         formatter.print_success(&format!("Cleared the summary for session {session_id}."));
     } else {
@@ -424,6 +477,7 @@ async fn search_all_projects(
     limit: usize,
     since: Option<chrono::DateTime<chrono::Utc>>,
     mut hits: Vec<ConversationHit>,
+    formatter: &OutputFormatter,
 ) -> Result<Vec<ConversationHit>> {
     let data = registry.load().await?;
     let mut seen: Vec<String> = vec![own.root_project_id.clone()];
@@ -436,8 +490,26 @@ async fn search_all_projects(
             continue;
         }
         seen.push(root.clone());
-        let index = ConversationIndex::open(&root, config.embeddings.dimensions).await?;
-        hits.extend(harvest_index::search(&index, engine, query, limit, since).await?);
+        // One unusable project must not take the whole machine-wide search
+        // down with it — a table left at a stale vector width is exactly that
+        // case, and it is repairable per-project. Named rather than counted,
+        // because a project silently missing from the results is
+        // indistinguishable from one that never discussed the topic.
+        let index = match ConversationIndex::open(&root, config.embeddings.dimensions).await {
+            Ok(index) => index,
+            Err(e) => {
+                formatter.print_warning(&format!(
+                    "Skipped project {root}: its conversation index could not be opened ({e:#})."
+                ));
+                continue;
+            }
+        };
+        match harvest_index::search(&index, engine, query, limit, since).await {
+            Ok(found) => hits.extend(found),
+            Err(e) => formatter.print_warning(&format!(
+                "Skipped project {root}: its conversations could not be searched ({e:#})."
+            )),
+        }
     }
     hits.sort_by(|a, b| {
         b.score
@@ -918,20 +990,23 @@ in JSON mode"
                 formatter.print_warning(&match (archive_only, &archive) {
                     (true, Some(a)) => format!(
                         "This deletes the archived transcript for session {key} ({}) — the \
-only remaining copy, since Claude Code prunes its own.",
+only remaining copy, since Claude Code prunes its own. Its search row is kept, so the \
+conversation stays findable by `harvest search` (with nothing left to `harvest show`).",
                         human_bytes(a.original_bytes)
                     ),
                     (true, None) => {
                         format!("Session {key} has no archived transcript; nothing to delete.")
                     }
                     (false, Some(a)) => format!(
-                        "This deletes the harvest record for session {key} AND its archived \
-transcript ({}), the only remaining copy. The session will be offered again.",
+                        "This deletes the harvest record for session {key}, its archived \
+transcript ({}) — the only remaining copy — AND its conversation search row, including any \
+curated summary. The session will be offered again.",
                         human_bytes(a.original_bytes)
                     ),
                     (false, None) => format!(
-                        "This deletes the harvest record for session {key}. The session will \
-be offered again by `harvest list`."
+                        "This deletes the harvest record for session {key} and its conversation \
+search row, including any curated summary. The session will be offered again by \
+`harvest list`."
                     ),
                 });
                 if !citing.is_empty() {
@@ -954,6 +1029,15 @@ citation but it will no longer resolve.",
             if archive_only {
                 // Keep the review record, drop the now-dangling file pointer.
                 harvest_state::clear_archive_refs(dir, std::slice::from_ref(&key))?;
+                // The search row stays too, deliberately. `--archive-only`
+                // reclaims bytes without retracting the review, and the row is
+                // part of that record — dropping it would destroy a curated
+                // summary (which nothing can recreate once the transcript is
+                // gone) to save nothing. A session that is searchable but no
+                // longer readable is an ordinary state anyway: it is what any
+                // indexed session becomes once Claude Code prunes its
+                // transcript and no copy was taken.
+                //
                 // Honor the bool: without this, a second run reports success
                 // over a file that was already gone.
                 if removed_archive {
@@ -968,12 +1052,21 @@ citation but it will no longer resolve.",
                 // deleted — nothing to strand, so the entry must go too.
                 harvest_state::clear_archive_refs(dir, std::slice::from_ref(&key))?;
                 harvest_state::clear_harvested(dir, &key)?;
+                // ...and the search row, which is the third place this
+                // conversation lives. It holds the first prompt and the
+                // curated summary verbatim, so leaving it made "this deletes
+                // the only remaining copy" false — the conversation stayed
+                // searchable while `harvest show` had nothing to show, and
+                // nothing would ever revisit a session with no bytes behind it
+                // to clean the row up.
+                let removed_row = engramdb::ops::forget_session(scope, &key).await?;
                 formatter.print_success(&format!(
                     "Removed {} for session {key}.",
-                    if removed_archive {
-                        "ledger entry and archive"
-                    } else {
-                        "ledger entry"
+                    match (removed_archive, removed_row) {
+                        (true, true) => "ledger entry, archive and search row",
+                        (true, false) => "ledger entry and archive",
+                        (false, true) => "ledger entry and search row",
+                        (false, false) => "ledger entry",
                     }
                 ));
             }

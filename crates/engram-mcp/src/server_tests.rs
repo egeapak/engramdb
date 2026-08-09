@@ -5266,6 +5266,8 @@ async fn harvest_tools_reject_memory_store_targets() {
             .harvest_ledger(Parameters(HarvestLedgerInput {
                 decision: None,
                 project: p,
+                stage: None,
+                with_archive: None,
             }))
             .await
             .is_err());
@@ -5323,6 +5325,8 @@ async fn harvest_ledger_filters_by_decision() {
                 .harvest_ledger(Parameters(HarvestLedgerInput {
                     decision: Some(want.to_string()),
                     project: None,
+                    stage: None,
+                    with_archive: None,
                 }))
                 .await,
         );
@@ -5336,11 +5340,105 @@ async fn harvest_ledger_filters_by_decision() {
             .harvest_ledger(Parameters(HarvestLedgerInput {
                 decision: None,
                 project: None,
+                stage: None,
+                with_archive: None,
             }))
             .await,
     );
     // A set, not an order: three marks can land in the same millisecond.
     assert_eq!(ids_for(&all), vec!["s-defer", "s-harv", "s-skip"]);
+}
+
+#[tokio::test]
+async fn harvest_ledger_filters_by_stage_and_archive() {
+    // The tool's description advertises the stage axis and whether an archived
+    // transcript is held, and the CLI has `--stage` / `--with-archive` — but
+    // only `decision` was ever applied here, so an agent asking for the
+    // indexed sessions got every session back and could not tell.
+    use engramdb::storage::harvest_state::{self, HarvestStage};
+    use engramdb::storage::transcript_archive::ArchiveRef;
+
+    let home = ScopedClaudeHome::new();
+    let (dir, server) = setup().await;
+    for id in ["s-plain", "s-indexed", "s-archived"] {
+        home.plant_session(dir.path(), id);
+        let mut input = mark_input(id, None);
+        input.decision = Some("skipped".to_string());
+        server.harvest_mark(Parameters(input)).await.unwrap();
+    }
+    harvest_state::set_stage(dir.path(), "s-indexed", HarvestStage::Indexed).unwrap();
+    // A *real* copy on disk, not just a reference: every harvest entry point
+    // runs `reconcile_archive_refs`, which drops a reference whose file is
+    // missing — so a planted `ArchiveRef` alone would be cleared before the
+    // filter ever saw it.
+    let transcript = dir.path().join("s-archived-source.jsonl");
+    std::fs::write(&transcript, "{}\n").unwrap();
+    let project_id = engramdb::storage::project_id::compute_project_id(dir.path());
+    let archive: ArchiveRef = engramdb::storage::transcript_archive::archive_transcript(
+        &project_id,
+        "s-archived",
+        &transcript,
+    )
+    .unwrap();
+    harvest_state::set_archive(dir.path(), "s-archived", archive).unwrap();
+
+    let ids_for = |rows: &serde_json::Value| {
+        let mut v: Vec<String> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["session_id"].as_str().unwrap().to_string())
+            .collect();
+        v.sort();
+        v
+    };
+    let query = |stage: Option<&'static str>, with_archive: Option<bool>| HarvestLedgerInput {
+        decision: None,
+        project: None,
+        stage: stage.map(|s| s.to_string()),
+        with_archive,
+    };
+
+    let indexed = parse_ok(
+        &server
+            .harvest_ledger(Parameters(query(Some("indexed"), None)))
+            .await,
+    );
+    assert_eq!(ids_for(&indexed), vec!["s-indexed"]);
+
+    let collected = parse_ok(
+        &server
+            .harvest_ledger(Parameters(query(Some("collected"), None)))
+            .await,
+    );
+    assert_eq!(ids_for(&collected), vec!["s-archived", "s-plain"]);
+
+    let archived = parse_ok(
+        &server
+            .harvest_ledger(Parameters(query(None, Some(true))))
+            .await,
+    );
+    assert_eq!(ids_for(&archived), vec!["s-archived"]);
+
+    // The control: no filter still returns everything, so the assertions above
+    // are about the filter and not about an empty ledger.
+    let all = parse_ok(&server.harvest_ledger(Parameters(query(None, None))).await);
+    assert_eq!(ids_for(&all), vec!["s-archived", "s-indexed", "s-plain"]);
+
+    // A typo must not read as "nothing is indexed" — that is an answer about
+    // the store, given to a question about the argument.
+    let err = parse_err(
+        &server
+            .harvest_ledger(Parameters(query(Some("indexd"), None)))
+            .await,
+    );
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown stage"),
+        "{err}"
+    );
 }
 
 #[tokio::test]
@@ -5489,6 +5587,8 @@ async fn every_mcp_ledger_call_routes_through_the_root_project() {
             .harvest_ledger(Parameters(HarvestLedgerInput {
                 decision: None,
                 project: None,
+                stage: None,
+                with_archive: None,
             }))
             .await,
     );
@@ -5517,6 +5617,8 @@ async fn a_ledger_adopted_from_the_child_is_visible_to_every_mcp_tool() {
             .harvest_ledger(Parameters(HarvestLedgerInput {
                 decision: None,
                 project: None,
+                stage: None,
+                with_archive: None,
             }))
             .await,
     );
@@ -5809,6 +5911,8 @@ async fn the_ledger_is_not_a_way_around_the_read_gate() {
             .harvest_ledger(Parameters(HarvestLedgerInput {
                 decision: None,
                 project: target,
+                stage: None,
+                with_archive: None,
             }))
             .await,
     );

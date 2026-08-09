@@ -750,6 +750,77 @@ fn ledger_rm_in_json_mode_requires_force() {
     assert!(find_archive("aaaa1111-rich").is_some());
 }
 
+/// A summary that cannot be embedded must cost the summary and not the review.
+///
+/// That is what `commands/harvest.md` tells every agent, and what `harvest_mark`
+/// on MCP has always done — while the CLI propagated the failure instead,
+/// exiting non-zero over a decision (and a provenance pin) already on disk and,
+/// under `--format json`, printing nothing at all.
+///
+/// The no-provider state is built the way the contributor docs describe it: an
+/// empty model cache plus `ENGRAMDB_OFFLINE`, pinned to the ONNX backend so
+/// there is no Ollama fallback to reach for, and in-process so a daemon that
+/// happens to be running cannot serve the embedding anyway. That is exactly
+/// the state a user with no ONNX runtime is in.
+#[test]
+fn mark_with_an_unembeddable_summary_still_records_the_decision() {
+    let c = build_corpus();
+    init_with_worktree(&c);
+    let empty_cache = TempDir::new().unwrap();
+
+    let out = cmd()
+        .env("CLAUDE_CONFIG_DIR", &c.claude)
+        .env("ENGRAMDB_MODEL_CACHE_DIR", empty_cache.path())
+        .env("ENGRAMDB_OFFLINE", "1")
+        .env("ENGRAMDB_IN_PROCESS", "1")
+        .arg("--dir")
+        .arg(&c.main)
+        .args(["--embedding-backend", "onnx"])
+        .args([
+            "--format",
+            "json",
+            "harvest",
+            "mark",
+            "bbbb",
+            "--memory",
+            "no-such-memory",
+            "--summary",
+            "what this conversation settled",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "a failed summary took the whole command down: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+    assert_eq!(json["decision"], "harvested", "{json}");
+    assert_eq!(json["summary_recorded"], false, "{json}");
+    assert!(
+        json["summary_error"]
+            .as_str()
+            .unwrap()
+            .contains("embedding"),
+        "the failure must be named, not swallowed: {json}"
+    );
+    // The fields the aborted JSON document used to lose entirely.
+    assert_eq!(json["pinned"], 0, "{json}");
+    assert_eq!(
+        json["unresolved_memories"],
+        serde_json::json!(["no-such-memory"]),
+        "{json}"
+    );
+
+    // ...and the decision really is on disk, which is the whole point.
+    let list = c.stdout(&c.main, &["harvest", "list"]);
+    assert!(
+        !list.contains("bbbb2222"),
+        "the review was lost with the summary: {list}"
+    );
+}
+
 /// The privacy switch. Every failure inside `archive_ending_session` is
 /// swallowed by `tracing::debug!`, so a regression here is silent — nothing
 /// is the expected output either way. The positive control is what makes the

@@ -149,17 +149,106 @@ impl ConversationIndex {
         if dimensions == 0 {
             anyhow::bail!("conversation index needs a non-zero embedding width");
         }
+        let index = Self::connect_at(db_dir, dimensions).await?;
+        index.ensure_table().await?;
+        Ok(index)
+    }
+
+    /// Open an **existing** table at whatever width it was created with, or
+    /// `None` when the project has no table at all. Never creates one.
+    ///
+    /// The width-agnostic handle. Deleting a row, or reading the curated
+    /// summaries off one, is meaningful whatever the stored width is, and
+    /// [`Self::open_at`] refuses to hand out a handle whose configured width
+    /// disagrees with the table's — so the two operations that have to work
+    /// *during* such a disagreement (dropping a session, and carrying its
+    /// summaries across a rebuild) come through here.
+    pub async fn open_existing_at(db_dir: &std::path::Path) -> Result<Option<Self>> {
+        // Checked on the filesystem before connecting: `connect` creates the
+        // database directory, and a caller merely asking whether a table is
+        // there must not leave one behind.
+        if !db_dir.join(format!("{TABLE}.lance")).exists() {
+            return Ok(None);
+        }
+        // A width of 1 is a placeholder: the stored width replaces it below,
+        // and the table is never created on this path.
+        let probe = Self::connect_at(db_dir, 1).await?;
+        let Ok(table) = probe.connection.open_table(TABLE).execute().await else {
+            return Ok(None);
+        };
+        let dimensions = table_dimensions(&table).await?.context(
+            "the conversations table has no fixed-width digest_vec column; it was not written \
+             by this program",
+        )?;
+        Ok(Some(Self {
+            connection: probe.connection,
+            dimensions,
+        }))
+    }
+
+    /// [`Self::open_existing_at`] for a **root** project id.
+    pub async fn open_existing(root_project_id: &str) -> Result<Option<Self>> {
+        if !Self::exists(root_project_id) {
+            return Ok(None);
+        }
+        let dir = paths::lancedb_dir(root_project_id)?;
+        Self::open_existing_at(&dir).await
+    }
+
+    /// Connect to the LanceDB directory without touching the table.
+    async fn connect_at(db_dir: &std::path::Path, dimensions: usize) -> Result<Self> {
         let path = db_dir.to_str().context("LanceDB path is not valid UTF-8")?;
         let connection = connect(path)
             .execute()
             .await
             .context("Failed to connect to LanceDB")?;
-        let index = Self {
+        Ok(Self {
             connection: Arc::new(connection),
             dimensions,
-        };
-        index.ensure_table().await?;
-        Ok(index)
+        })
+    }
+
+    /// Drop the whole table, rows and all.
+    ///
+    /// The only remediation for a stored vector width that no longer matches
+    /// the configured one — Lance cannot widen a `FixedSizeList` in place, and
+    /// the rows are re-derivable from the stored transcript copies. Curated
+    /// summaries are *not* re-derivable, so a caller that drops the table must
+    /// read them off with [`Self::curated_summaries`] first and re-attach them
+    /// after the rebuild.
+    pub async fn drop_table(&self) -> Result<()> {
+        self.connection
+            .drop_table(TABLE, &[])
+            .await
+            .context("Failed to drop the LanceDB conversations table")
+    }
+
+    /// Every curated summary in the table, as `(session_id, summary)`.
+    ///
+    /// Read before a [`Self::drop_table`], because an agent-authored summary is
+    /// the one thing in a row that no rebuild can recreate.
+    pub async fn curated_summaries(&self) -> Result<Vec<(String, String)>> {
+        let table = self.table().await?;
+        let mut stream = table
+            .query()
+            .select(Select::Columns(vec!["session_id".into(), "summary".into()]))
+            .execute()
+            .await
+            .context("Failed to scan the conversations table")?;
+        let mut out = Vec::new();
+        while let Some(batch) = stream.next().await {
+            let batch = batch.context("Failed to read a conversations batch")?;
+            for i in 0..batch.num_rows() {
+                let (Some(id), Some(summary)) = (
+                    column_text(&batch, "session_id", i),
+                    column_text(&batch, "summary", i),
+                ) else {
+                    continue;
+                };
+                out.push((id, summary));
+            }
+        }
+        Ok(out)
     }
 
     fn schema(&self) -> Arc<Schema> {
@@ -196,8 +285,30 @@ impl ConversationIndex {
         ]))
     }
 
+    /// Create the table, or check that the one already there has this handle's
+    /// vector width.
+    ///
+    /// The check is the point. Lance opens an existing table AS-IS, so after a
+    /// `[embeddings].dimensions` change (or a provider swap) the stored width
+    /// can differ from the configured one — and then *every* `upsert` and
+    /// `search` fails, one confusing Arrow error at a time, with the actual
+    /// cause never named. Failing at open says what is wrong and what fixes
+    /// it. The same reasoning as `LanceIndex::chunks_table_dimensions`, which
+    /// guards the memories store's vectors.
     async fn ensure_table(&self) -> Result<()> {
-        if self.connection.open_table(TABLE).execute().await.is_ok() {
+        if let Ok(table) = self.connection.open_table(TABLE).execute().await {
+            if let Some(stored) = table_dimensions(&table).await? {
+                if stored != self.dimensions {
+                    anyhow::bail!(
+                        "the conversations table stores {stored}-dimension vectors but this \
+                         project is configured for {} — every conversation-index write and \
+                         search would fail against it. Run `engramdb reindex --archive-only` \
+                         to rebuild the rows at the new width from the stored transcript \
+                         copies.",
+                        self.dimensions
+                    );
+                }
+            }
             return Ok(());
         }
         self.connection
@@ -312,30 +423,6 @@ impl ConversationIndex {
             .context("Failed to build a conversation RecordBatch")
     }
 
-    /// Every indexed session id, for reconciliation against the ledger.
-    pub async fn session_ids(&self) -> Result<Vec<String>> {
-        let table = self.table().await?;
-        let mut stream = table
-            .query()
-            .select(Select::Columns(vec!["session_id".into()]))
-            .execute()
-            .await
-            .context("Failed to scan the conversations table")?;
-        let mut out = Vec::new();
-        while let Some(batch) = stream.next().await {
-            let batch = batch.context("Failed to read a conversations batch")?;
-            if let Some(ids) = batch
-                .column_by_name("session_id")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-            {
-                for i in 0..ids.len() {
-                    out.push(ids.value(i).to_string());
-                }
-            }
-        }
-        Ok(out)
-    }
-
     /// The digest checksum recorded for one session, if it is indexed.
     ///
     /// What `harvest index` consults to stay idempotent: identical text means
@@ -394,10 +481,20 @@ impl ConversationIndex {
     /// Each column is queried separately and the results are folded per
     /// session: the better score wins, and an exact tie resolves to the
     /// summary because a human wrote it, so a match there is higher precision.
-    /// `since` filters on `ended_at`, applied in Rust rather than pushed down
-    /// because the column is an RFC 3339 *string* (the convention the memories
-    /// table already uses for timestamps) and lexical comparison would be
-    /// wrong across offsets.
+    ///
+    /// `since` is a **prefilter**, not a post-filter. Applied after the k-NN
+    /// `limit` it silently produced empty results: the nearest `limit`
+    /// conversations can all be older than the window while a match inside it
+    /// sits at rank `limit + 1`, and the caller then reports "no indexed
+    /// conversation matched" — an assertion of absence it cannot support.
+    /// `harvest list --since` has always filtered before its limit; this is
+    /// conversations catching up.
+    ///
+    /// The predicate is resolved to a session-id set first because `ended_at`
+    /// is an RFC 3339 *string* (the convention the memories table already uses
+    /// for timestamps), so comparing it lexically inside the query engine
+    /// would be wrong across offsets. One row per session makes that scan
+    /// cheap, and the *comparison* still happens in Rust on parsed timestamps.
     pub async fn search(
         &self,
         query: &[f32],
@@ -408,23 +505,26 @@ impl ConversationIndex {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let window = match since {
+            Some(cutoff) => self.since_window(cutoff).await?,
+            None => Window::All,
+        };
+        let filter = match &window {
+            // No session ended inside the window, so no query can match one.
+            Window::None => return Ok(Vec::new()),
+            Window::All => None,
+            Window::Only(expr) => Some(expr.as_str()),
+        };
         let mut best: std::collections::HashMap<String, ConversationHit> =
             std::collections::HashMap::new();
         for (column, matched_on) in [
             ("digest_vec", MatchedOn::Digest),
             ("summary_vec", MatchedOn::Summary),
         ] {
-            for hit in self.search_column(column, matched_on, query, limit).await? {
-                if let Some(cutoff) = since {
-                    match hit.ended_at {
-                        Some(end) if end >= cutoff => {}
-                        // A session with no end timestamp cannot be shown to
-                        // fall inside the window, so it is excluded rather
-                        // than assumed recent — the same rule `harvest list`
-                        // applies to `--since`.
-                        _ => continue,
-                    }
-                }
+            for hit in self
+                .search_column(column, matched_on, query, limit, filter)
+                .await?
+            {
                 match best.entry(hit.session_id.clone()) {
                     std::collections::hash_map::Entry::Vacant(v) => {
                         v.insert(hit);
@@ -452,21 +552,75 @@ impl ConversationIndex {
         Ok(out)
     }
 
+    /// Which sessions ended inside the `since` window, as a query predicate.
+    ///
+    /// Emits whichever of `IN` / `NOT IN` names the smaller set, so the common
+    /// shapes — a short recent window over a long history, or a window wide
+    /// enough to keep almost everything — both cost a short predicate.
+    async fn since_window(&self, cutoff: DateTime<Utc>) -> Result<Window> {
+        let table = self.table().await?;
+        let mut stream = table
+            .query()
+            .select(Select::Columns(vec![
+                "session_id".into(),
+                "ended_at".into(),
+            ]))
+            .execute()
+            .await
+            .context("Failed to scan the conversations table")?;
+        let (mut inside, mut outside) = (Vec::new(), Vec::new());
+        while let Some(batch) = stream.next().await {
+            let batch = batch.context("Failed to read a conversations batch")?;
+            for i in 0..batch.num_rows() {
+                let Some(id) = column_text(&batch, "session_id", i) else {
+                    continue;
+                };
+                let ended = column_text(&batch, "ended_at", i)
+                    .as_deref()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|t| t.with_timezone(&Utc));
+                // A session with no end timestamp cannot be shown to fall
+                // inside the window, so it is excluded rather than assumed
+                // recent — the same rule `harvest list` applies to `--since`.
+                if ended.is_some_and(|end| end >= cutoff) {
+                    inside.push(id);
+                } else {
+                    outside.push(id);
+                }
+            }
+        }
+        Ok(match (inside.is_empty(), outside.is_empty()) {
+            (true, _) => Window::None,
+            (_, true) => Window::All,
+            _ if inside.len() <= outside.len() => {
+                Window::Only(format!("session_id IN ({})", quoted_list(&inside)))
+            }
+            _ => Window::Only(format!("session_id NOT IN ({})", quoted_list(&outside))),
+        })
+    }
+
     async fn search_column(
         &self,
         column: &str,
         matched_on: MatchedOn,
         query: &[f32],
         limit: usize,
+        filter: Option<&str>,
     ) -> Result<Vec<ConversationHit>> {
         let table = self.table().await?;
-        let mut stream = table
+        let mut search = table
             .vector_search(query.to_vec())
             .context("Failed to build the conversation search")?
             .column(column)
             .limit(limit)
             .nprobes(NPROBES)
-            .refine_factor(REFINE_FACTOR)
+            .refine_factor(REFINE_FACTOR);
+        if let Some(filter) = filter {
+            // Prefilter (LanceDB's default for `only_if`), so `limit` is spent
+            // on rows that already satisfy the predicate.
+            search = search.only_if(filter);
+        }
+        let mut stream = search
             .execute()
             .await
             .context("Failed to execute the conversation search")?;
@@ -506,6 +660,52 @@ impl ConversationIndex {
         }
         Ok(hits)
     }
+}
+
+/// What a `since` cutoff reduces to once the sessions are known.
+enum Window {
+    /// Nothing ended inside the window.
+    None,
+    /// Everything did, so no predicate is needed.
+    All,
+    /// This SQL predicate names the surviving sessions.
+    Only(String),
+}
+
+/// SQL string literals for a set of session ids.
+///
+/// The writers validate session ids, but a row can also arrive from a restored
+/// backup or a hand-edited store, so the quote is doubled rather than assumed
+/// absent.
+fn quoted_list(ids: &[String]) -> String {
+    ids.iter()
+        .map(|id| format!("'{}'", id.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One non-null string cell, or `None` when the column is absent or null.
+fn column_text(batch: &RecordBatch, name: &str, i: usize) -> Option<String> {
+    batch
+        .column_by_name(name)
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+        .filter(|a| !a.is_null(i))
+        .map(|a| a.value(i).to_string())
+}
+
+/// The vector width the table's `digest_vec` column was created with.
+async fn table_dimensions(table: &Table) -> Result<Option<usize>> {
+    let schema = table
+        .schema()
+        .await
+        .context("Failed to read the LanceDB conversations table schema")?;
+    Ok(schema
+        .field_with_name("digest_vec")
+        .ok()
+        .and_then(|field| match field.data_type() {
+            DataType::FixedSizeList(_, width) => Some(*width as usize),
+            _ => None,
+        }))
 }
 
 /// Decode one row of a `conversations` batch.
@@ -695,6 +895,132 @@ mod tests {
             .unwrap();
         let ids: Vec<&str> = hits.iter().map(|h| h.session_id.as_str()).collect();
         assert_eq!(ids, vec!["recent"]);
+    }
+
+    #[tokio::test]
+    async fn since_survives_a_candidate_set_full_of_nearer_old_sessions() {
+        // The window must narrow the k-NN, not trim its output. With more
+        // old-but-nearer conversations than `limit`, a post-filter returns
+        // nothing at all — and the caller then reports "no indexed
+        // conversation matched", an assertion of absence it cannot support.
+        let tmp = TempDir::new().unwrap();
+        let idx = index(&tmp).await;
+        let long_ago = Utc::now() - chrono::Duration::days(40);
+        for n in 0..12 {
+            // Exactly the query vector: every one of these outranks the hit.
+            let mut old = row(&format!("old-{n:02}"), [1.0, 0.0, 0.0, 0.0]);
+            old.ended_at = Some(long_ago);
+            idx.upsert(&old).await.unwrap();
+        }
+        let mut recent = row("recent", [0.9, 0.1, 0.0, 0.0]);
+        recent.ended_at = Some(Utc::now());
+        idx.upsert(&recent).await.unwrap();
+
+        let cutoff = Utc::now() - chrono::Duration::days(7);
+        let hits = idx
+            .search(&[1.0, 0.0, 0.0, 0.0], 10, Some(cutoff))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h.session_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["recent"],
+            "the window was applied after the limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_window_that_keeps_almost_everything_still_excludes_the_rest() {
+        // The `NOT IN` half of the predicate: with the eligible set larger
+        // than the excluded one, the filter names the exclusions instead.
+        let tmp = TempDir::new().unwrap();
+        let idx = index(&tmp).await;
+        for n in 0..5 {
+            idx.upsert(&row(&format!("in-{n}"), [1.0, 0.0, 0.0, 0.0]))
+                .await
+                .unwrap();
+        }
+        let mut old = row("out", [1.0, 0.0, 0.0, 0.0]);
+        old.ended_at = Some(Utc::now() - chrono::Duration::days(40));
+        idx.upsert(&old).await.unwrap();
+
+        let cutoff = Utc::now() - chrono::Duration::days(7);
+        let hits = idx
+            .search(&[1.0, 0.0, 0.0, 0.0], 10, Some(cutoff))
+            .await
+            .unwrap();
+        let mut ids: Vec<&str> = hits.iter().map(|h| h.session_id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["in-0", "in-1", "in-2", "in-3", "in-4"]);
+    }
+
+    #[tokio::test]
+    async fn opening_at_a_different_width_names_the_remediation() {
+        // Lance opens an existing table AS-IS, so without this check the
+        // disagreement only surfaces as an Arrow error on every upsert and
+        // every search, with the actual cause never named.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("lancedb");
+        let idx = ConversationIndex::open_at(&dir, DIM).await.unwrap();
+        idx.upsert(&row("a", [1.0, 0.0, 0.0, 0.0])).await.unwrap();
+        drop(idx);
+
+        let err = ConversationIndex::open_at(&dir, DIM * 2)
+            .await
+            .err()
+            .expect("a width disagreement must not open")
+            .to_string();
+        assert!(err.contains("4-dimension"), "{err}");
+        assert!(err.contains("configured for 8"), "{err}");
+        assert!(err.contains("reindex --archive-only"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_existing_table_opens_at_its_stored_width() {
+        // The width-agnostic handle: deleting a row and reading the curated
+        // summaries off one both have to work *during* a width disagreement,
+        // because they are what the repair path is made of.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("lancedb");
+        let idx = ConversationIndex::open_at(&dir, DIM).await.unwrap();
+        let mut r = row("a", [1.0, 0.0, 0.0, 0.0]);
+        r.summary = Some("what this settled".into());
+        r.summary_vec = Some(vec![1.0, 0.0, 0.0, 0.0]);
+        idx.upsert(&r).await.unwrap();
+        idx.upsert(&row("b", [0.0, 1.0, 0.0, 0.0])).await.unwrap();
+        drop(idx);
+
+        let reopened = ConversationIndex::open_existing_at(&dir)
+            .await
+            .unwrap()
+            .expect("a table is there");
+        assert_eq!(reopened.dimensions(), DIM);
+        assert_eq!(
+            reopened.curated_summaries().await.unwrap(),
+            vec![("a".to_string(), "what this settled".to_string())],
+            "only the rows a human wrote a summary for"
+        );
+        assert!(reopened.delete("b").await.unwrap());
+
+        reopened.drop_table().await.unwrap();
+        // A fresh handle at the new width now succeeds where it could not
+        // before, which is the whole point of dropping it.
+        let wider = ConversationIndex::open_at(&dir, DIM * 2).await.unwrap();
+        assert_eq!(wider.count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn open_existing_reports_no_table_rather_than_creating_one() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("lancedb");
+        assert!(ConversationIndex::open_existing_at(&dir)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(
+            !dir.join(format!("{TABLE}.lance")).exists(),
+            "probing for a table must not leave one behind"
+        );
     }
 
     #[tokio::test]

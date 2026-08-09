@@ -55,9 +55,9 @@ pub use harvest::{
     DEFAULT_DIGEST_BUDGET,
 };
 pub use harvest_index::{
-    index_pending, index_session, index_sessions, reindex_from_copies,
-    search as search_conversations, set_summary as set_conversation_summary, IndexAction,
-    IndexReport,
+    forget_session, index_pending, index_session, index_sessions, open_index_for_rebuild,
+    reindex_from_copies, search as search_conversations, set_summary as set_conversation_summary,
+    IndexAction, IndexReport,
 };
 pub use harvest_pin::{
     evidence_links, expired_evidence, link_memories, sessions_with_bytes, EvidenceLinks,
