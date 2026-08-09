@@ -23,6 +23,8 @@ pub mod engine;
 pub mod output;
 pub mod project_tree;
 pub mod prompter;
+#[cfg(test)]
+pub(crate) mod testutil;
 pub mod validation;
 
 /// Determine the `DaemonPolicy` for a CLI invocation based on the flag ladder.

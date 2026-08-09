@@ -1,0 +1,10 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- prompts ---
+? Memory type: [decision, convention, hazard, context, intent, relationship, debug, preference] → blueprint
+--- stdout ---
+--- stderr ---
+--- error ---
+Invalid memory type: blueprint. Valid types: decision, convention, hazard, context, intent, relationship, debug, preference

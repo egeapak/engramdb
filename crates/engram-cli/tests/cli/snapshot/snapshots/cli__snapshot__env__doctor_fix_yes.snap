@@ -1,0 +1,228 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/env.rs
+expression: "f.run(&[\"doctor\", \"--fix\", \"--yes\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] doctor --fix --yes
+exit: 0
+--- stdout ---
+{
+  "sections": [
+    {
+      "name": "Project",
+      "checks": [
+        {
+          "name": "Store initialized",
+          "passed": true,
+          "message": ".engramdb/ exists",
+          "details": [
+            "path: [PROJECT]/.engramdb"
+          ]
+        },
+        {
+          "name": "Store health",
+          "passed": true,
+          "message": "healthy",
+          "details": [
+            "indexed: 0",
+            "on disk: 0"
+          ]
+        },
+        {
+          "name": "Manifest stats",
+          "passed": true,
+          "message": "memory_count 0 matches index"
+        },
+        {
+          "name": "Chunk index integrity",
+          "passed": true,
+          "message": "0 chunk memory_ids, no orphans"
+        },
+        {
+          "name": "Config file",
+          "passed": true,
+          "message": ".engramdb/config.toml valid"
+        },
+        {
+          "name": "MCP server configuration",
+          "passed": true,
+          "message": ".mcp.json not found",
+          "suggestion": "Add engramdb to .mcp.json, or install the Claude Code plugin",
+          "status": "warn"
+        },
+        {
+          "name": "Write lock",
+          "passed": true,
+          "message": "no active writer"
+        },
+        {
+          "name": "Project .gitignore",
+          "passed": true,
+          "message": "no .gitignore file",
+          "status": "info"
+        },
+        {
+          "name": "Project disk usage",
+          "passed": true,
+          "message": "[SIZE]",
+          "details": [
+            "shared: [SIZE] (0 memories)",
+            "personal: [SIZE] (0 memories)",
+            "index: [SIZE]"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Projects",
+      "checks": [
+        {
+          "name": "Registered projects",
+          "passed": true,
+          "message": "1 registered",
+          "details": [
+            "registered: 1",
+            "reachable: 1"
+          ]
+        },
+        {
+          "name": "Project hierarchy",
+          "passed": true,
+          "message": "healthy"
+        }
+      ]
+    },
+    {
+      "name": "Global settings & models",
+      "checks": [
+        {
+          "name": "Binary on PATH",
+          "passed": true,
+          "message": "not found",
+          "suggestion": "Install with `brew install engramdb`",
+          "status": "warn"
+        },
+        {
+          "name": "Global gitignore",
+          "passed": true,
+          "message": ".engramdb not in global excludes",
+          "suggestion": "Add .engramdb to [HOME]/config/git/ignore to ignore it in all repositories",
+          "status": "info"
+        },
+        {
+          "name": "Claude Code plugin",
+          "passed": true,
+          "message": "not found",
+          "suggestion": "Install with `claude plugin add https://github.com/egeapak/engramdb`",
+          "status": "warn"
+        },
+        {
+          "name": "Hook configuration",
+          "passed": true,
+          "message": "not configured",
+          "suggestion": "Install the Claude Code plugin to configure hooks automatically",
+          "status": "warn"
+        },
+        {
+          "name": "Auto-maintenance",
+          "passed": true,
+          "message": "disabled",
+          "status": "info"
+        },
+        {
+          "name": "Embedding daemon",
+          "passed": true,
+          "message": "disabled in config (models load in-process per MCP)",
+          "details": [
+            "socket: [RUNTIME]/d.sock",
+            "config: enabled=false, idle_timeout_secs=900"
+          ],
+          "status": "info"
+        }
+      ],
+      "subsections": [
+        {
+          "name": "Embeddings",
+          "checks": [
+            {
+              "name": "ONNX Runtime",
+              "passed": true,
+              "message": "ONNX Runtime 1.24.2 (loaded at run time from /tmp/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so)"
+            },
+            {
+              "name": "Embedding backend",
+              "passed": true,
+              "message": "auto (model: onnx)"
+            },
+            {
+              "name": "Embedding model identity",
+              "passed": true,
+              "message": "untracked (legacy store); current model onnx/all-MiniLM-L12-v2-u8",
+              "suggestion": "run `engramdb reindex --embeddings-only` to re-embed and stamp the store",
+              "status": "warn"
+            },
+            {
+              "name": "Embedding model cache",
+              "passed": true,
+              "message": "not cached",
+              "suggestion": "Run `engramdb init` to download the embedding model",
+              "status": "warn"
+            },
+            {
+              "name": "Ollama connectivity",
+              "passed": true,
+              "message": "unreachable (not configured as backend)"
+            }
+          ]
+        },
+        {
+          "name": "Models",
+          "checks": [
+            {
+              "name": "Embedding model",
+              "passed": true,
+              "message": "onnx/all-MiniLM-L12-v2-u8 (384d)",
+              "details": [
+                "Local ONNX bi-encoder; embeds memories and queries into vectors so search can rank by semantic similarity."
+              ],
+              "status": "info"
+            },
+            {
+              "name": "Title generation",
+              "passed": true,
+              "message": "keyword (RAKE)",
+              "details": [
+                "In-process RAKE keyword extraction; no model is loaded."
+              ],
+              "status": "info"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Stats",
+      "checks": [
+        {
+          "name": "Global disk usage",
+          "passed": true,
+          "message": "[SIZE]",
+          "details": [
+            "projects: [SIZE] (1 registered)",
+            "models: no cached models"
+          ]
+        }
+      ]
+    }
+  ],
+  "all_passed": true,
+  "store_check": {
+    "indexed": 0,
+    "on_disk": 0,
+    "stale_entries": [],
+    "orphaned_files": [],
+    "healthy": true
+  }
+}
+{"message":"Nothing to reindex."}
+{"message":"Embedding model is ready.","success":true}
+--- stderr ---

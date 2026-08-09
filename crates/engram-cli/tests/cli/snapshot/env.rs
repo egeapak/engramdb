@@ -57,6 +57,40 @@ fn doctor_global() {
     insta::assert_snapshot!("doctor_global", f.run(&["doctor", "--global"]));
 }
 
+/// `--fix` without a terminal lists what it *would* do and stops.
+///
+/// `run_environment_check` gates the prompt on
+/// `std::io::stdout().is_terminal()` read directly — not on the formatter, not
+/// on the prompter — so under a pipe this is the branch that runs, and it is
+/// the one a CI job or a scripted invocation actually sees. The prompted
+/// variant is unreachable from any test for the same reason: nothing injectable
+/// stands between the code and the real stdout.
+#[test]
+fn doctor_fix_without_tty_lists_actions() {
+    let f = Fixture::new();
+    f.write_config_only();
+    insta::assert_snapshot!("doctor_fix_no_tty", f.run(&["doctor", "--fix"]));
+}
+
+/// `--fix --yes` skips the terminal check entirely and applies every action.
+///
+/// On an initialised store the applied actions are the reindex and the
+/// embedding-model check, both of which are no-ops here — so this pins that
+/// auto-repair on a healthy store is quiet and exits 0.
+///
+/// The equivalent on an *unregistered* store (`write_config_only`) is
+/// deliberately absent: it prunes its own data directory as an orphan and then
+/// exits 1 with a bare `IO error: No such file or directory`. That looks like a
+/// real defect rather than a contract, and a snapshot would enshrine it. It
+/// does not reproduce outside the fixture's empty-model-cache + offline
+/// environment, so it needs isolating before anything pins it.
+#[test]
+fn doctor_fix_yes_on_healthy_store() {
+    let f = Fixture::new();
+    f.init();
+    insta::assert_snapshot!("doctor_fix_yes", f.run(&["doctor", "--fix", "--yes"]));
+}
+
 // =====================================================================
 // daemon — renderer-thin; only the no-daemon branch is reachable
 // =====================================================================

@@ -1,0 +1,16 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- prompts ---
+? Memory type: [decision, convention, hazard, context, intent, relationship, debug, preference] → hazard
+? Summary (required): → Blocking inside the daemon socket loop deadlocks every session
+? Content (required): → Never call block_on from serve_connection; spawn the work onto the runtime instead.
+? Physical scope (optional, e.g., src/**/*.rs): → src/daemon/**/*.rs
+? Logical scopes (optional, comma-separated): → daemon.concurrency, runtime
+? Tags (optional, comma-separated): → daemon, tokio
+? Criticality (0.0-1.0): [default: 0.95] → 0.95
+? Visibility: [shared, personal] → shared
+--- stdout ---
+Created memory [ID]
+--- stderr ---
