@@ -103,11 +103,18 @@ impl MockPrompter {
     ///
     /// `answer` is the *resolved* value, not the raw queue entry, so an empty
     /// scripted response shows the default it fell back to rather than a blank.
+    ///
+    /// An answer that resolves to nothing renders as `(empty)` rather than
+    /// leaving the line to end in a space: a trailing space in a `.snap` is
+    /// invisible in review and gets stripped by editors and pre-commit hooks,
+    /// which would fail the snapshot for a reason nobody can see. It also says
+    /// what actually happened — the prompt was accepted with no value.
     fn record(&self, question: String, answer: &str) {
+        let shown = if answer.is_empty() { "(empty)" } else { answer };
         self.asked
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(format!("? {question} → {answer}"));
+            .push(format!("? {question} → {shown}"));
     }
 
     /// The dialogue so far, one line per prompt, newline-terminated.

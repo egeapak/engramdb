@@ -1211,11 +1211,18 @@ Line 3"#;
         );
     }
 
-    /// Criticality outside `[0.0, 1.0]`. `MockPrompter::float_validated`
-    /// records the rejected answer before bailing (`InquirePrompter` would
-    /// instead re-ask), so the transcript ends on the offending value.
+    /// A prompter that errors mid-flow must abort without half-creating.
+    ///
+    /// **This does not document what a real user sees for a bad criticality.**
+    /// `InquirePrompter` installs a validator, so `1.5` makes the terminal
+    /// re-ask; only `MockPrompter::float_validated` turns it into an `Err`.
+    /// What the case really pins is the propagation path — any prompter
+    /// failure (a validator giving up, EOF, an interrupt) aborts
+    /// `run_interactive_mode` after the answers already given, and the store
+    /// is left untouched. The out-of-range value is just the cheapest way to
+    /// make a prompter fail partway through.
     #[tokio::test]
-    async fn snap_add_interactive_criticality_out_of_range() {
+    async fn snap_add_interactive_prompter_error_aborts() {
         let p = TempProject::new();
         let (store, engine) = test_store_and_engine(p.path(), &p.registry).await;
 
@@ -1235,9 +1242,13 @@ Line 3"#;
             .unwrap_err();
 
         snap_command(
-            "add_interactive_criticality_out_of_range",
+            "add_interactive_prompter_error_aborts",
             p.path(),
             format!("{}--- error ---\n{err}\n", interaction(&prompter, &cap)),
+        );
+        assert!(
+            store.list_ids().await.unwrap().is_empty(),
+            "an aborted interactive add must not leave a partial memory behind"
         );
     }
 }

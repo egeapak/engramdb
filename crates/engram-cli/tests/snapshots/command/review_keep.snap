@@ -1,0 +1,21 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- prompts ---
+? Action: [Keep (reset to Active), Update, Invalidate (close validity window, keep history), Delete, Skip, Quit] → Keep (reset to Active)
+--- stdout ---
+1 memories need review:
+
+ID: [ID8]
+Type: Decision
+Summary: Embedding vectors are stored in the same LanceDB table as metadata
+Status: Challenged
+Criticality: 0.80
+Challenges:
+  - A reviewer thought a second table had been added for chunks (2025-03-14)
+    Source: crates/engram-storage/src/lance_index.rs
+
+Kept memory [ID8] as Active.
+
+--- stderr ---

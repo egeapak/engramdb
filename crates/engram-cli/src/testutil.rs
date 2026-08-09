@@ -147,11 +147,21 @@ static FILTERS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
             "${1}[PID13]${2}",
         ),
         // `review` prints `id.chars().take(8)`. Eight hex characters is short
-        // enough to occur in prose — `deadbeef` is a legal summary — so this
-        // one is anchored to the line `review` actually emits instead of
-        // matching a bare run. `print_memory`'s `ID: <full uuid>` is already
-        // gone by here, consumed by the first rule.
+        // enough to occur in prose — `deadbeef` is a legal summary — so both
+        // 8-char rules are anchored to a context instead of matching a bare
+        // run: the card's own `ID:` line, and the outcome sentences
+        // ("Kept memory 019fe625 as Active."). A uuid-v7 prefix is
+        // time-derived, so an unredacted one changes about every 65 seconds.
+        //
+        // Both run after the full-uuid rule, which matters: memories created
+        // in the same second share a v7 prefix, so an unanchored replacement
+        // would bite a *different* memory's full uuid in half and leak its
+        // tail.
         (Regex::new(r"(?m)^ID: [0-9a-f]{8}$").unwrap(), "ID: [ID8]"),
+        (
+            Regex::new(r"memory [0-9a-f]{8}([^0-9a-f-]|$)").unwrap(),
+            "memory [ID8]${1}",
+        ),
     ]
 });
 
@@ -260,12 +270,42 @@ mod tests {
     }
 
     /// Ordinary prose must survive untouched. Eight hex characters is short
-    /// enough to be a real word — this is why the 8-char rule is anchored to
-    /// `review`'s `ID:` line rather than matching a bare run.
+    /// enough to be a real word — this is why both 8-char rules are anchored
+    /// to a context rather than matching a bare run.
     #[test]
     fn normalize_leaves_prose_alone() {
         let dir = std::path::Path::new("/tmp/x");
         let prose = "Created decision: added a deadbeef cafe to the facade\n";
         assert_eq!(normalize(prose, dir), prose);
+    }
+
+    /// `review`'s outcome sentences carry the same 8-char prefix inline, where
+    /// the `ID:` anchor cannot reach it.
+    #[test]
+    fn normalize_redacts_the_id_in_outcome_sentences() {
+        let dir = std::path::Path::new("/tmp/x");
+        assert_eq!(
+            normalize("Kept memory 019fe625 as Active.\n", dir),
+            "Kept memory [ID8] as Active.\n"
+        );
+        assert_eq!(
+            normalize("Deleted memory 019fe625.\n", dir),
+            "Deleted memory [ID8].\n"
+        );
+    }
+
+    /// Two memories created in the same second share a uuid-v7 prefix. An
+    /// unanchored 8-char rule would match inside the *other* memory's full
+    /// uuid and leak its tail — so the full-uuid rule must win, and the
+    /// 8-char rule must not fire mid-id.
+    #[test]
+    fn normalize_does_not_bite_a_full_uuid_in_half() {
+        let dir = std::path::Path::new("/tmp/x");
+        let out = normalize(
+            "Superseded memory 019fe625 by 019fe625-d832-7a92-9208-0cb4d7c231a7.\n",
+            dir,
+        );
+        assert_eq!(out, "Superseded memory [ID8] by [ID].\n");
+        assert!(!out.contains("-d832-"), "full uuid tail leaked: {out}");
     }
 }

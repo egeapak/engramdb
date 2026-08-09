@@ -1,0 +1,21 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- prompts ---
+? Action: [Keep (reset to Active), Update, Invalidate (close validity window, keep history), Delete, Skip, Quit] → Delete
+--- stdout ---
+1 memories need review:
+
+ID: [ID8]
+Type: Debug
+Summary: Reranking is slow because the model reloads on every query
+Status: Challenged
+Criticality: 0.35
+Challenges:
+  - ProviderCache now loads the reranker once per process (2025-03-14)
+    Source: src/ops/mod.rs
+
+Deleted memory [ID8].
+
+--- stderr ---

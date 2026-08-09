@@ -199,6 +199,7 @@ pub async fn run_review(
 mod tests {
     use super::*;
     use crate::prompter::MockPrompter;
+    use crate::testutil::{capturing_plain, interaction, snap_command, TempProject};
     use engramdb::storage::{InMemoryRegistry, RegistryBackend};
     use engramdb::types::{Challenge, Memory, MemoryType, Provenance, Status};
     use tempfile::TempDir;
@@ -385,5 +386,301 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
+    }
+
+    // =================================================================
+    // Command-tier snapshots
+    //
+    // The tests above assert store *state* — that Keep clears the
+    // challenges, that Delete removes the file. These assert what the user
+    // was actually shown and asked: the per-memory card, the action list and
+    // its wording, the follow-up prompts each action opens, and the outcome
+    // line. `review`'s whole loop reaches the terminal through `inquire`
+    // (prompts) and `outln!` (card), so neither other tier can observe it.
+    // See `crate::testutil`.
+    // =================================================================
+
+    /// A fixed challenge clock.
+    ///
+    /// `run_review` renders `challenge.timestamp.format("%Y-%m-%d")` in the
+    /// card, so a `Challenge::new` timestamp (`Utc::now()`) would bake today's
+    /// date into the snapshot and break the build tomorrow.
+    fn pinned_at() -> chrono::DateTime<chrono::Utc> {
+        "2025-03-14T09:12:00Z".parse().expect("fixed timestamp")
+    }
+
+    /// Seed one challenged memory with a pinned challenge timestamp.
+    ///
+    /// Distinct criticalities are what make a multi-memory snapshot stable:
+    /// `review_memories` sorts by criticality descending, and equal scores
+    /// leave the order to the index.
+    async fn seed_challenged(
+        store: &MemoryStore,
+        type_: MemoryType,
+        summary: &str,
+        content: &str,
+        criticality: f64,
+        evidence: &str,
+        source_file: Option<&str>,
+    ) -> String {
+        let mut memory = Memory::new(type_, summary, content, Provenance::human());
+        memory.status = Status::Challenged;
+        memory.criticality = criticality;
+        let mut challenge = Challenge::new(evidence);
+        challenge.timestamp = pinned_at();
+        if let Some(sf) = source_file {
+            challenge = challenge.with_source_file(sf);
+        }
+        memory.add_challenge(challenge);
+        let id = memory.id.clone();
+        store.create(&memory).await.unwrap();
+        id
+    }
+
+    /// Keep: the card, the action list, and the "reset to Active" outcome.
+    #[tokio::test]
+    async fn snap_review_keep() {
+        let p = TempProject::new();
+        let store = p.init_store().await;
+        seed_challenged(
+            &store,
+            MemoryType::Decision,
+            "Embedding vectors are stored in the same LanceDB table as metadata",
+            "There is no separate metadata DB; one table holds both.",
+            0.80,
+            "A reviewer thought a second table had been added for chunks",
+            Some("crates/engram-storage/src/lance_index.rs"),
+        )
+        .await;
+
+        let prompter = MockPrompter::new(vec!["Keep (reset to Active)"]);
+        let (formatter, cap) = capturing_plain();
+
+        run_review(
+            p.path(),
+            false,
+            None,
+            None,
+            false,
+            false,
+            None,
+            &formatter,
+            &prompter,
+        )
+        .await
+        .unwrap();
+
+        snap_command("review_keep", p.path(), interaction(&prompter, &cap));
+    }
+
+    /// Update opens two follow-up text prompts. Their wording — and that both
+    /// are asked before anything is written — is the point.
+    #[tokio::test]
+    async fn snap_review_update() {
+        let p = TempProject::new();
+        let store = p.init_store().await;
+        seed_challenged(
+            &store,
+            MemoryType::Convention,
+            "CLI output goes through println! in command handlers",
+            "Handlers print directly with println!.",
+            0.60,
+            "The formatter-output CI job now rejects bare print macros",
+            None,
+        )
+        .await;
+
+        let prompter = MockPrompter::new(vec![
+            "Update",
+            "All CLI output goes through the outln!/errln! formatter macros",
+            "Bare print macros fail the formatter-output CI job; write through \
+             OutputFormatter so the renderer snapshots can see the bytes.",
+        ]);
+        let (formatter, cap) = capturing_plain();
+
+        run_review(
+            p.path(),
+            false,
+            None,
+            None,
+            false,
+            false,
+            None,
+            &formatter,
+            &prompter,
+        )
+        .await
+        .unwrap();
+
+        snap_command("review_update", p.path(), interaction(&prompter, &cap));
+    }
+
+    /// Delete: no confirmation of its own, so the action list is the only
+    /// thing between the user and a removed memory.
+    #[tokio::test]
+    async fn snap_review_delete() {
+        let p = TempProject::new();
+        let store = p.init_store().await;
+        seed_challenged(
+            &store,
+            MemoryType::Debug,
+            "Reranking is slow because the model reloads on every query",
+            "Each query built a fresh cross-encoder session.",
+            0.35,
+            "ProviderCache now loads the reranker once per process",
+            Some("src/ops/mod.rs"),
+        )
+        .await;
+
+        let prompter = MockPrompter::new(vec!["Delete"]);
+        let (formatter, cap) = capturing_plain();
+
+        run_review(
+            p.path(),
+            false,
+            None,
+            None,
+            false,
+            false,
+            None,
+            &formatter,
+            &prompter,
+        )
+        .await
+        .unwrap();
+
+        snap_command("review_delete", p.path(), interaction(&prompter, &cap));
+    }
+
+    /// Invalidate — the supersede path. It is the one action with a second
+    /// prompt whose answer is another memory's id, and the only outcome line
+    /// that tells the user the memory is retained on disk.
+    #[tokio::test]
+    async fn snap_review_supersede() {
+        let p = TempProject::new();
+        let store = p.init_store().await;
+        seed_challenged(
+            &store,
+            MemoryType::Decision,
+            "The ONNX Runtime is vendored into the release archives",
+            "Release artifacts ship a bundled libonnxruntime.",
+            0.70,
+            "Releases now depend on the package manager's runtime instead",
+            Some("docs/contributors/embedding-model-alternatives.md"),
+        )
+        .await;
+
+        // A real successor, so the prompt is answered with an id the store
+        // actually knows. Active, so it is not itself up for review.
+        let successor = Memory::new(
+            MemoryType::Decision,
+            "Release archives hold the binary only; the runtime is a dependency",
+            "Homebrew and Scoop declare libonnxruntime as a package dependency.",
+            Provenance::human(),
+        );
+        let successor_id = successor.id.clone();
+        store.create(&successor).await.unwrap();
+
+        let prompter = MockPrompter::new(vec![
+            "Invalidate (close validity window, keep history)",
+            &successor_id,
+        ]);
+        let (formatter, cap) = capturing_plain();
+
+        run_review(
+            p.path(),
+            false,
+            None,
+            None,
+            false,
+            false,
+            None,
+            &formatter,
+            &prompter,
+        )
+        .await
+        .unwrap();
+
+        snap_command("review_supersede", p.path(), interaction(&prompter, &cap));
+    }
+
+    /// The loop's control flow: `Skip` falls through to the next memory (and
+    /// suppresses the trailing blank line), `Quit` breaks out before the
+    /// second card is acted on. Two memories with different criticalities, so
+    /// the order the cards appear in is the sort order, not the index's.
+    #[tokio::test]
+    async fn snap_review_skip_then_quit() {
+        let p = TempProject::new();
+        let store = p.init_store().await;
+        seed_challenged(
+            &store,
+            MemoryType::Hazard,
+            "Blocking calls inside the daemon request handler stall every session",
+            "The socket server is single-threaded per connection.",
+            0.90,
+            "A blocking fs read was added to the Status handler",
+            Some("src/daemon/server.rs"),
+        )
+        .await;
+        seed_challenged(
+            &store,
+            MemoryType::Convention,
+            "Snapshot ids must be redacted without word boundaries",
+            "Ids sit inside filenames, and _ is a word character.",
+            0.40,
+            "A new filter used \\b and silently skipped embedded ids",
+            None,
+        )
+        .await;
+
+        let prompter = MockPrompter::new(vec!["Skip", "Quit"]);
+        let (formatter, cap) = capturing_plain();
+
+        run_review(
+            p.path(),
+            false,
+            None,
+            None,
+            false,
+            false,
+            None,
+            &formatter,
+            &prompter,
+        )
+        .await
+        .unwrap();
+
+        snap_command(
+            "review_skip_then_quit",
+            p.path(),
+            interaction(&prompter, &cap),
+        );
+    }
+
+    /// The early return. An empty prompts section is the assertion: nothing
+    /// to review must never reach the action list.
+    #[tokio::test]
+    async fn snap_review_empty() {
+        let p = TempProject::new();
+        p.init_store().await;
+
+        let prompter = MockPrompter::new(vec![]);
+        let (formatter, cap) = capturing_plain();
+
+        run_review(
+            p.path(),
+            false,
+            None,
+            None,
+            false,
+            false,
+            None,
+            &formatter,
+            &prompter,
+        )
+        .await
+        .unwrap();
+
+        snap_command("review_empty", p.path(), interaction(&prompter, &cap));
     }
 }

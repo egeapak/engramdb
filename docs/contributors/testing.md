@@ -127,6 +127,34 @@ no env var can force the real binary to style a pipe, and every colour site is
 in `output.rs` anyway. The negative direction is already covered — an escape
 leaking into redirected output would show up in the tier-2 snapshots.
 
+**Tier 1.5 — the command tier** (`tests` modules in
+`crates/engram-cli/src/commands/*.rs`, harness in `src/testutil.rs`, snapshots
+under `crates/engram-cli/tests/snapshots/command/`). Runs a command handler
+in-process against a real `MemoryStore` in a temp dir, with a scripted
+`MockPrompter` and a capturing formatter. This is the only tier that can reach
+an interactive flow: tier 1 has no store or prompter, and tier 2 spawns a
+binary where `inquire` wants a terminal and `MockPrompter` — `#[cfg(test)]` in
+the lib — is invisible to an integration-test crate.
+
+`MockPrompter` records what it was *asked*, which is the point. Prompt wording,
+option lists and defaults are user-visible interface that reaches the terminal
+through `inquire`, never through the formatter, so nothing asserted them
+before. A snapshot pairs the dialogue with the output:
+
+```text
+--- prompts ---
+? Action: [Keep (reset to Active), Update, …, Skip, Quit] → Skip
+--- stdout ---
+Kept memory [ID8] as Active.
+--- stderr ---
+```
+
+Use `TempProject`, `capturing_plain()`, `interaction(&prompter, &cap)` and
+`snap_command(name, p.path(), body)`. Names must be unique across the tier and
+prefixed with the command — `snap_command` turns insta's module prefix off,
+because insta derives it from the *asserting* file and every snapshot would
+otherwise be attributed to `testutil`.
+
 **Tier 2 — the binary** (`crates/engram-cli/tests/cli/snapshot/`). Spawns the
 real `engramdb` and snapshots one transcript per invocation: command line, exit
 code, stdout, stderr. Put anything about *wiring* here — which flag reaches
@@ -142,6 +170,17 @@ about it are easy to get wrong:
   (`one-memory_019fd0b6-…`), and `_` is a word character, so `\b` silently
   skips them. Dashed ids are matched unanchored; bare-hex ids capture a
   non-hex delimiter on each side.
+- **Anchor short id patterns to a context.** The command tier learned this the
+  hard way twice: eight hex characters occur in prose (`deadbeef` is a legal
+  summary), so its 8-char rules match `^ID: …` and `memory …` rather than a
+  bare run — and both must run *after* the full-uuid rule, because memories
+  created in the same second share a uuid-v7 prefix, so an unanchored rule bites
+  a different memory's full id in half and leaks the tail.
+- **Redact both spellings of a temp dir.** `RegistryBackend::update` stores
+  `dir.canonicalize()` and commands echo it back, while `TempDir::path()` is
+  uncanonicalised. They are equal on Linux; on macOS `/tmp` → `/private/tmp`
+  and the real path lands in the snapshot. Replace longest-first — the raw path
+  is a prefix of the canonical one.
 - **Pin model configuration, do not rely on absence.** Whether
   `libonnxruntime` is installed differs between a laptop and CI, and a missing
   one prints a warning. `fixture_config()` disables rerank/NLI and selects the

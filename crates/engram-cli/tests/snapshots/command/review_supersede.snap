@@ -1,0 +1,22 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- prompts ---
+? Action: [Keep (reset to Active), Update, Invalidate (close validity window, keep history), Delete, Skip, Quit] → Invalidate (close validity window, keep history)
+? Superseded by (memory id, enter for none): → [ID]
+--- stdout ---
+1 memories need review:
+
+ID: [ID8]
+Type: Decision
+Summary: The ONNX Runtime is vendored into the release archives
+Status: Challenged
+Criticality: 0.70
+Challenges:
+  - Releases now depend on the package manager's runtime instead (2025-03-14)
+    Source: docs/contributors/embedding-model-alternatives.md
+
+Invalidated memory [ID8] (retained on disk; reopen with `update --clear-invalidated`).
+
+--- stderr ---
