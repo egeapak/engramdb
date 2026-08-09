@@ -6,173 +6,173 @@ $ engramdb --no-maintenance --dir [PROJECT] doctor --fix
 exit: 0
 --- stdout ---
 {
+  "all_passed": true,
   "sections": [
     {
-      "name": "Project",
       "checks": [
         {
-          "name": "Store initialized",
-          "passed": true,
-          "message": ".engramdb/ exists",
           "details": [
             "path: [PROJECT]/.engramdb"
-          ]
+          ],
+          "message": ".engramdb/ exists",
+          "name": "Store initialized",
+          "passed": true
         },
         {
+          "message": "not registered",
           "name": "Registry",
           "passed": true,
-          "message": "not registered",
-          "suggestion": "Run `engramdb init` to register this project",
-          "status": "warn"
+          "status": "warn",
+          "suggestion": "Run `engramdb init` to register this project"
         }
-      ]
+      ],
+      "name": "Project"
     },
     {
-      "name": "Projects",
       "checks": [
         {
-          "name": "Registered projects",
-          "passed": true,
-          "message": "0 registered",
-          "suggestion": "Run `engramdb projects prune` to clean up",
           "details": [
             "registered: 0",
             "reachable: 0",
             "orphan data dirs: 1"
           ],
-          "status": "warn"
+          "message": "0 registered",
+          "name": "Registered projects",
+          "passed": true,
+          "status": "warn",
+          "suggestion": "Run `engramdb projects prune` to clean up"
         },
         {
+          "message": "healthy",
           "name": "Project hierarchy",
-          "passed": true,
-          "message": "healthy"
+          "passed": true
         }
-      ]
+      ],
+      "name": "Projects"
     },
     {
-      "name": "Global settings & models",
       "checks": [
         {
+          "message": "not found",
           "name": "Binary on PATH",
           "passed": true,
-          "message": "not found",
-          "suggestion": "Install with `brew install engramdb`",
-          "status": "warn"
+          "status": "warn",
+          "suggestion": "Install with `brew install engramdb`"
         },
         {
+          "message": ".engramdb not in global excludes",
           "name": "Global gitignore",
           "passed": true,
-          "message": ".engramdb not in global excludes",
-          "suggestion": "Add .engramdb to [HOME]/config/git/ignore to ignore it in all repositories",
-          "status": "info"
+          "status": "info",
+          "suggestion": "Add .engramdb to [HOME]/config/git/ignore to ignore it in all repositories"
         },
         {
+          "message": "not found",
           "name": "Claude Code plugin",
           "passed": true,
-          "message": "not found",
-          "suggestion": "Install with `claude plugin add https://github.com/egeapak/engramdb`",
-          "status": "warn"
+          "status": "warn",
+          "suggestion": "Install with `claude plugin add https://github.com/egeapak/engramdb`"
         },
         {
+          "message": "not configured",
           "name": "Hook configuration",
           "passed": true,
-          "message": "not configured",
-          "suggestion": "Install the Claude Code plugin to configure hooks automatically",
-          "status": "warn"
+          "status": "warn",
+          "suggestion": "Install the Claude Code plugin to configure hooks automatically"
         },
         {
+          "message": "disabled",
           "name": "Auto-maintenance",
           "passed": true,
-          "message": "disabled",
           "status": "info"
         },
         {
-          "name": "Embedding daemon",
-          "passed": true,
-          "message": "disabled in config (models load in-process per MCP)",
           "details": [
             "socket: [RUNTIME]/d.sock",
             "config: enabled=false, idle_timeout_secs=900"
           ],
+          "message": "disabled in config (models load in-process per MCP)",
+          "name": "Embedding daemon",
+          "passed": true,
           "status": "info"
         }
       ],
+      "name": "Global settings & models",
       "subsections": [
         {
-          "name": "Embeddings",
           "checks": [
             {
+              "message": "[ONNX_RUNTIME_CHECK]",
               "name": "ONNX Runtime",
-              "passed": true,
-              "message": "ONNX Runtime 1.24.2 (loaded at run time from /tmp/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so)"
+              "passed": true
             },
             {
+              "message": "auto (model: onnx)",
               "name": "Embedding backend",
-              "passed": true,
-              "message": "auto (model: onnx)"
+              "passed": true
             },
             {
+              "message": "untracked (legacy store); current model onnx/all-MiniLM-L12-v2-u8",
               "name": "Embedding model identity",
               "passed": true,
-              "message": "untracked (legacy store); current model onnx/all-MiniLM-L12-v2-u8",
-              "suggestion": "run `engramdb reindex --embeddings-only` to re-embed and stamp the store",
-              "status": "warn"
+              "status": "warn",
+              "suggestion": "run `engramdb reindex --embeddings-only` to re-embed and stamp the store"
             },
             {
+              "message": "not cached",
               "name": "Embedding model cache",
               "passed": true,
-              "message": "not cached",
-              "suggestion": "Run `engramdb init` to download the embedding model",
-              "status": "warn"
+              "status": "warn",
+              "suggestion": "Run `engramdb init` to download the embedding model"
             },
             {
+              "message": "unreachable (not configured as backend)",
               "name": "Ollama connectivity",
-              "passed": true,
-              "message": "unreachable (not configured as backend)"
+              "passed": true
             }
-          ]
+          ],
+          "name": "Embeddings"
         },
         {
-          "name": "Models",
           "checks": [
             {
-              "name": "Embedding model",
-              "passed": true,
-              "message": "onnx/all-MiniLM-L12-v2-u8 (384d)",
               "details": [
                 "Local ONNX bi-encoder; embeds memories and queries into vectors so search can rank by semantic similarity."
               ],
+              "message": "onnx/all-MiniLM-L12-v2-u8 (384d)",
+              "name": "Embedding model",
+              "passed": true,
               "status": "info"
             },
             {
-              "name": "Title generation",
-              "passed": true,
-              "message": "keyword (RAKE)",
               "details": [
                 "In-process RAKE keyword extraction; no model is loaded."
               ],
+              "message": "keyword (RAKE)",
+              "name": "Title generation",
+              "passed": true,
               "status": "info"
             }
-          ]
+          ],
+          "name": "Models"
         }
       ]
     },
     {
-      "name": "Stats",
       "checks": [
         {
-          "name": "Global disk usage",
-          "passed": true,
-          "message": "[SIZE]",
           "details": [
             "projects: [SIZE] (1 registered)",
             "models: no cached models"
-          ]
+          ],
+          "message": "[SIZE]",
+          "name": "Global disk usage",
+          "passed": true
         }
-      ]
+      ],
+      "name": "Stats"
     }
   ],
-  "all_passed": true,
   "store_check": null
 }
 {"message":"  - Prune stale/orphaned projects from the registry (engramdb projects prune)?"}

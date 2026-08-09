@@ -78,17 +78,40 @@ fn doctor_fix_without_tty_lists_actions() {
 /// embedding-model check, both of which are no-ops here — so this pins that
 /// auto-repair on a healthy store is quiet and exits 0.
 ///
-/// The equivalent on an *unregistered* store (`write_config_only`) is
-/// deliberately absent: it prunes its own data directory as an orphan and then
-/// exits 1 with a bare `IO error: No such file or directory`. That looks like a
-/// real defect rather than a contract, and a snapshot would enshrine it. It
-/// does not reproduce outside the fixture's empty-model-cache + offline
-/// environment, so it needs isolating before anything pins it.
 #[test]
 fn doctor_fix_yes_on_healthy_store() {
     let f = Fixture::new();
     f.init();
     insta::assert_snapshot!("doctor_fix_yes", f.run(&["doctor", "--fix", "--yes"]));
+}
+
+/// The same on an *unregistered* store — the case that made `--fix`
+/// destructive.
+///
+/// `doctor` warns "Registry: not registered", `--fix` answers that by running
+/// `projects prune`, and the sweep used to delete the project's own data
+/// directory because nothing in the registry pointed at it. The personal
+/// memories under `projects/<id>/personal/` are the only copy, so they went
+/// with it, and the run then exited 1 on a bare `IO error: No such file or
+/// directory` when the next fix action reached for the deleted directory.
+/// `prune_stale_projects` now spares the project it is running in, so the
+/// sweep reports `orphans_removed: 0` and the store is still readable
+/// afterwards — the whole loop, end to end through the binary.
+#[test]
+fn doctor_fix_yes_on_unregistered_store() {
+    let f = Fixture::new();
+    f.init();
+    // A *personal* memory is the stake. Shared memories live in the project
+    // tree and a reindex rebuilds them; this one exists only inside the data
+    // directory the sweep used to delete.
+    f.seed_personal("Personal note", "Only copy lives in the global data dir");
+    f.deregister();
+    insta::assert_snapshot!(
+        "doctor_fix_yes_unregistered",
+        f.run(&["doctor", "--fix", "--yes"])
+    );
+    // The point of the fix: it is still there to be read afterwards.
+    insta::assert_snapshot!("doctor_fix_yes_unregistered_after", f.run(&["list"]));
 }
 
 // =====================================================================

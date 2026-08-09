@@ -20,15 +20,15 @@ exit: 0
         },
         {
           "details": [
-            "indexed: 0",
-            "on disk: 0"
+            "indexed: 1",
+            "on disk: 1"
           ],
           "message": "healthy",
           "name": "Store health",
           "passed": true
         },
         {
-          "message": "memory_count 0 matches index",
+          "message": "memory_count 1 matches index",
           "name": "Manifest stats",
           "passed": true
         },
@@ -38,37 +38,11 @@ exit: 0
           "passed": true
         },
         {
-          "message": ".engramdb/config.toml valid",
-          "name": "Config file",
-          "passed": true
-        },
-        {
-          "message": ".mcp.json not found",
-          "name": "MCP server configuration",
+          "message": "not registered",
+          "name": "Registry",
           "passed": true,
           "status": "warn",
-          "suggestion": "Add engramdb to .mcp.json, or install the Claude Code plugin"
-        },
-        {
-          "message": "no active writer",
-          "name": "Write lock",
-          "passed": true
-        },
-        {
-          "message": "no .gitignore file",
-          "name": "Project .gitignore",
-          "passed": true,
-          "status": "info"
-        },
-        {
-          "details": [
-            "shared: [SIZE] (0 memories)",
-            "personal: [SIZE] (0 memories)",
-            "index: [SIZE]"
-          ],
-          "message": "[SIZE]",
-          "name": "Project disk usage",
-          "passed": true
+          "suggestion": "Run `engramdb init` to register this project"
         }
       ],
       "name": "Project"
@@ -77,12 +51,15 @@ exit: 0
       "checks": [
         {
           "details": [
-            "registered: 1",
-            "reachable: 1"
+            "registered: 0",
+            "reachable: 0",
+            "orphan data dirs: 1"
           ],
-          "message": "1 registered",
+          "message": "0 registered",
           "name": "Registered projects",
-          "passed": true
+          "passed": true,
+          "status": "warn",
+          "suggestion": "Run `engramdb projects prune` to clean up"
         },
         {
           "message": "healthy",
@@ -217,12 +194,14 @@ exit: 0
   ],
   "store_check": {
     "healthy": true,
-    "indexed": 0,
-    "on_disk": 0,
+    "indexed": 1,
+    "on_disk": 1,
     "orphaned_files": [],
     "stale_entries": []
   }
 }
-{"message":"Nothing to reindex."}
+{"hierarchy_cleared":[],"orphans_removed":0,"stale_removed":0}
 {"message":"Embedding model is ready.","success":true}
 --- stderr ---
+{"error":"1 errors during reindex:"}
+  [UUID]: embedding failed

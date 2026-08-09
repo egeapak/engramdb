@@ -202,6 +202,18 @@ about it are easy to get wrong:
   `EngramConfig::default()` and serialized whole — a hand-written *partial*
   table fails to deserialize (several fields have no serde default) and
   `load_config_or_default` quietly substitutes defaults.
+- **Structural redaction has to survive JSON-lines.** What config cannot pin,
+  `render_stdout` redacts by parsing — `doctor`'s ONNX Runtime row reports
+  *where* `libonnxruntime` was loaded from, and the passing and failing forms
+  differ in shape (`status`/`suggestion` exist only on the failure), so no
+  line-level rule can square them. The trap is that several commands print more
+  than one JSON document: `doctor --fix` emits the report and then a
+  `{"message":…}` line per action, so a single `from_str` over the whole of
+  stdout fails and the redaction is skipped entirely. That shipped once — the
+  snapshot held the accepting machine's `/tmp/onnxruntime-…` path and CI failed
+  on `/usr/local/lib/…`. `redact_json_lines` handles the multi-document case,
+  leaving each document's bytes alone unless redaction changed it. When you
+  snapshot a command that prints JSON, check whether it prints *one*.
 
 `smoke_is_deterministic_across_fixtures` asserts two independent fixtures
 produce identical transcripts. If you add a new source of variance, that is

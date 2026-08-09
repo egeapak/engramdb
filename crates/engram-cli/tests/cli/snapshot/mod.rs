@@ -316,6 +316,20 @@ impl Fixture {
     /// For the commands that auto-create on first use: they still take the
     /// uninitialized-store path, but with model configuration pinned so the
     /// snapshot does not depend on whether this machine has an ONNX runtime.
+    /// Delete the registry, leaving an initialized store nothing points at.
+    ///
+    /// This is what a lost or hand-cleared `registry.json` looks like, and the
+    /// state that made `doctor --fix` destructive — see
+    /// `doctor_fix_yes_on_unregistered_store`. Distinct from
+    /// [`write_config_only`](Self::write_config_only), which is a store that
+    /// was never built in the first place.
+    pub fn deregister(&self) {
+        let path = self.registry.path().join("registry.json");
+        if path.exists() {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+
     pub fn write_config_only(&self) {
         let dir = self.root.join(".engramdb");
         std::fs::create_dir_all(&dir).unwrap();
@@ -342,6 +356,42 @@ impl Fixture {
         assert!(
             out.status.success(),
             "fixture init failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Add one **personal** memory.
+    ///
+    /// Personal memories live only under `<data>/projects/<id>/personal/`,
+    /// outside the project tree, so they are the ones a mistaken sweep of the
+    /// global data directory destroys for good.
+    ///
+    /// Asserts the add succeeded, like [`seed`](Self::seed): `run` returns a
+    /// transcript rather than checking the status, so a setup command that
+    /// failed — a mistyped flag exits 2 before clap ever reaches the handler —
+    /// would otherwise leave an empty store and a vacuously passing test.
+    pub fn seed_personal(&self, summary: &str, content: &str) {
+        let out = self
+            .base()
+            .args([
+                "--no-maintenance",
+                "--dir",
+                self.path().to_str().unwrap(),
+                "add",
+                "-t",
+                "context",
+                "-s",
+                summary,
+                "-c",
+                content,
+                "--visibility",
+                "personal",
+            ])
+            .output()
+            .expect("failed to seed personal memory");
+        assert!(
+            out.status.success(),
+            "personal seed add failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
     }
@@ -488,9 +538,14 @@ fn redact_onnx_in_json(value: &mut serde_json::Value) -> bool {
                 map.remove("suggestion");
                 return true;
             }
-            map.values_mut().any(redact_onnx_in_json)
+            // `fold`, not `any`: `any` short-circuits, so a document with two
+            // ONNX rows would keep the second one's machine-specific path.
+            map.values_mut()
+                .fold(false, |hit, v| redact_onnx_in_json(v) | hit)
         }
-        serde_json::Value::Array(items) => items.iter_mut().any(redact_onnx_in_json),
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .fold(false, |hit, v| redact_onnx_in_json(v) | hit),
         _ => false,
     }
 }
@@ -524,7 +579,57 @@ fn render_stdout(stdout: &str) -> String {
             return format!("{rendered}\n");
         }
     }
-    stdout.to_string()
+    redact_json_lines(trimmed).unwrap_or_else(|| stdout.to_string())
+}
+
+/// The same redaction for stdout that is *several* JSON documents.
+///
+/// `doctor --fix` prints the report object and then one `{"message":…}` line
+/// per proposed action, so the whole of stdout is not one parseable document
+/// and the single-value branch above skips it — which let the ONNX Runtime
+/// check through with the absolute path of whatever `libonnxruntime` the
+/// machine loaded. That passes on the box the snapshot was accepted on and
+/// fails everywhere else; CI caught it as `/tmp/onnxruntime-…` versus
+/// `/usr/local/lib/…`.
+///
+/// Each document keeps the exact bytes it arrived with unless redaction
+/// actually changed it, and a changed one is re-rendered in the shape it had
+/// (multi-line stays multi-line). Reformatting wholesale would churn every
+/// JSON-lines snapshot in the suite for no gain. Returns `None` if the input
+/// is not a clean sequence of JSON values, leaving the caller's raw text.
+fn redact_json_lines(trimmed: &str) -> Option<String> {
+    let mut stream = serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
+    let mut docs: Vec<(usize, usize, serde_json::Value)> = Vec::new();
+    let mut start = 0;
+    // `while let`, not `for`: `byte_offset` needs the stream back between
+    // items, and a `for` loop holds the mutable borrow for its whole body.
+    while let Some(value) = stream.next() {
+        let value = value.ok()?;
+        let end = stream.byte_offset();
+        docs.push((start, end, value));
+        start = end;
+    }
+    // A trailing fragment means this was never JSON-lines; don't touch it.
+    if docs.len() < 2 || trimmed[start..].trim() != "" {
+        return None;
+    }
+
+    let mut out = String::new();
+    for (from, to, mut value) in docs {
+        let original = trimmed[from..to].trim();
+        let rendered = if redact_onnx_in_json(&mut value) {
+            if original.contains('\n') {
+                serde_json::to_string_pretty(&value).ok()?
+            } else {
+                serde_json::to_string(&value).ok()?
+            }
+        } else {
+            original.to_string()
+        };
+        out.push_str(&rendered);
+        out.push('\n');
+    }
+    Some(out)
 }
 
 /// Compiled once per test process rather than per assertion.
