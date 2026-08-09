@@ -46,7 +46,11 @@ pub async fn run_reindex(
 
     // Print progress before starting (human-only; raw println! would corrupt
     // the JSON document the formatter emits below — finding #7).
-    if !formatter.is_json() {
+    //
+    // `wants_human_stdout`, not `!is_json()`: `doctor --fix` calls this with a
+    // delegate formatter that deliberately is NOT JSON, so the narrower guard
+    // selected these lines and printed them onto doctor's JSON stdout.
+    if formatter.wants_human_stdout() {
         if !embeddings_only {
             println!("Reindexing...");
         }

@@ -220,7 +220,7 @@ Without a subcommand: full environment diagnostics (paths, embedding backend, da
 |-------------------|-------------|
 | `store` | Fast project-scoped check (index vs disk only). Use it as a CI/script smoke test. |
 | `validate` | Load each downloaded model and run a test inference to confirm it works. |
-| `--fix` | Offer to fix detected issues (reindex, download model, prune registry, init). Prompts on a terminal; in non-interactive contexts pair with `--yes`. |
+| `--fix` | Offer to fix detected issues (reindex, download the embedding model, prune the registry, re-key a project whose ID drifted, init). Prompts on a terminal; in non-interactive contexts pair with `--yes`, which is also what lets the epistemic checks flag memories for review. Exits on the post-fix state; declining every fix, or finding none, still exits on the checks. Without `--yes` off a terminal it only lists the fixes and exits 0. |
 | `--yes` | Apply fixes without prompting (use with `--fix`; required to fix in non-TTY contexts). |
 | `--global` | Check the global cross-project store instead of the current project. |
 
@@ -337,18 +337,26 @@ parent (marked `↳`). `--group` sets the grouping for one run, overriding the
 Worktree nesting and path sorting apply in every mode. `--json` output is
 unaffected by `--group`: it stays a flat array carrying `parent_project_id`.
 
-`projects delete` removes a *registration* and reclaims the rebuildable index
-behind it. It keeps personal memories unless `--purge` is passed, and reports
-what it kept as `retained_with_personal` — a project ID derived from a git
-remote is shared by every clone of that remote on the machine, and the registry
-records only one of them, so deleting one checkout's registration can otherwise
-destroy another checkout's only copy. `--purge` is the explicit "I mean it";
-without `-f` the prompt spells out which of the two you are about to do.
+`projects delete` removes a *registration* and reclaims the data directory
+behind it. It keeps that directory whole whenever it still holds personal
+memories, unless `--purge` is passed — a project ID derived from a git remote is
+shared by every clone of that remote on the machine, and the registry records
+only one of them, so deleting one checkout's registration can otherwise destroy
+another checkout's only copy. `--purge` is the explicit "I mean it"; without
+`-f` the prompt spells out which of the two you are about to do.
+
+`--force` is required in JSON mode (the command never prompts there), and it
+emits one object: `{deleted, project_id, project_path, purge,
+global_data_removed, retained_with_personal[], cascaded_ids[]}`. Refusing to act
+— a project with sub-projects and no `--cascade` — exits non-zero rather than
+reporting a delete that did not happen.
 
 `projects prune` drops registry entries whose project directory is gone and
 reclaims data directories no registration answers to. It never deletes personal
-memories: a data directory holding `personal/memories/*.md` keeps them, and only
-the rebuildable `lancedb/` index inside it is reclaimed. Those directories are
+memories: a data directory holding `personal/memories/*.md` is left whole, index
+included — it is being kept precisely because something unregistered may still
+be using it, and wiping that copy's index would leave a healthy project silently
+unsearchable. Those directories are
 listed as `retained_with_personal` (in JSON and in the human summary) so a clean
 run is not mistaken for "everything was reclaimed". The same rule applies to the
 unattended maintenance pass, which runs prune for you.

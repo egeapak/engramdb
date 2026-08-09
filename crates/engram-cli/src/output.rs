@@ -163,6 +163,26 @@ impl OutputFormatter {
         }
     }
 
+    /// Whether this formatter belongs to a delegate whose caller owns stdout.
+    ///
+    /// Raw `println!` sites — the ones no formatter flag can gag — must check
+    /// **this as well as** [`Self::is_json`]. A delegate formatter is not JSON
+    /// (see [`Self::silent`]), so guarding on `is_json()` alone does not
+    /// suppress human chatter here; it *selects* it, and that text lands on the
+    /// caller's JSON stdout.
+    pub fn is_silent(&self) -> bool {
+        self.silent
+    }
+
+    /// Whether to emit free-form human text on stdout at all.
+    ///
+    /// The correct guard for a raw `println!`: false in JSON mode (it would
+    /// corrupt the document) and false for a delegate (the text would land on
+    /// the caller's document).
+    pub fn wants_human_stdout(&self) -> bool {
+        !self.is_json() && !self.silent
+    }
+
     /// Whether output is JSON (machine-consumed; never prompt interactively).
     ///
     /// Command handlers use this to suppress or redirect human-oriented

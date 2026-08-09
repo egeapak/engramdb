@@ -97,10 +97,10 @@ engramdb projects list                                 # full registry as a tree
 engramdb projects list --group none                    # flat, one full path per line
 engramdb projects info                                 # current project
 engramdb projects stats                                # aggregate stats
-engramdb projects delete <id> [-f] [--cascade] [--purge] # remove from registry + delete data
+engramdb projects delete <id> [-f] [--cascade] [--purge] # deregister; --purge also deletes personal memories
 engramdb projects link <child_id> --parent <parent_id> # link as sub-project
 engramdb projects unlink <child_id>                    # promote back to root
-engramdb projects prune [-f]                           # remove stale registry entries + orphan data
+engramdb projects prune [-f]                           # remove stale registry entries + orphan data dirs
 engramdb projects discover [PATH] [-y] [--dry-run]     # adopt projects on disk that aren't registered
 engramdb projects repair [-f]                          # re-key a project whose ID drifted
 ```
@@ -166,7 +166,18 @@ entry carries `parent_project_id`, regardless of the grouping mode.
 
 `prune` cleans two things:
 - **Stale** entries: registered projects whose path no longer exists on disk.
-- **Orphan** data: data directories under `<global_data_dir>/projects/` that no registry entry points to.
+- **Orphan** data: data directories under `<global_data_dir>/projects/` that
+  nothing answers to. "Nothing answers to" is wider than "no registry row names
+  it": a registered path's *live* ID is protected even when the row records an
+  older one (see [drift](#project-identity-drift)), and so are engramdb's own
+  global and group stores.
+
+Neither ever deletes personal memories. A data directory still holding
+`personal/memories/*.md` is kept whole, index included, and the kept directories
+are reported as `retained_with_personal`. The reason is structural: a project ID derived from a
+git remote is shared by every clone of that remote on this machine, and the
+registry records only one of them, so no check can prove a directory is yours
+alone. `projects delete --purge` is the one way to say you mean it anyway.
 
 ## Git worktrees
 
@@ -209,4 +220,4 @@ engramdb query --dir ~/code/other-project --mode rank --path src/bar.rs
 ## Notes
 
 - **`--global` vs `--include-global`.** `--global` operates against the global store **instead of** the current project. `--include-global` operates against the current project **plus** the global store.
-- **Project IDs are path-stable.** Moving the project directory produces a new ID — run `engramdb projects prune` after to clean up the orphan.
+- **Project IDs are path-stable** when there is no git remote (with one, the remote decides). Moving such a project produces a new ID — run `engramdb projects prune` after to reclaim the old data directory. If it held personal memories, prune keeps it; move them across or `projects delete --purge` the old ID.

@@ -184,10 +184,24 @@ async fn run_environment_check(
                         ),
                         Err(e) => formatter.print_warning(&format!("epistemic fixes skipped: {e}")),
                     }
-                } else {
+                } else if !fix {
                     note(
                         formatter,
                         "Run `engramdb doctor --fix` to flag these for review, or `engramdb verify <id>` after re-confirming one.",
+                    );
+                } else if interactive {
+                    // They ran `--fix` and declined at the prompt.
+                    note(
+                        formatter,
+                        "Left unflagged. `engramdb verify <id>` clears one you re-confirm.",
+                    );
+                } else {
+                    // They ran `--fix`, but this is not a terminal — the same
+                    // rule the fix list follows. Telling them to run `--fix`
+                    // would send them round the loop they are already in.
+                    note(
+                        formatter,
+                        "Re-run with `--fix --yes` to flag these for review (flagging memories needs confirmation, and this isn't a terminal).",
                     );
                 }
                 print_enrichment_gaps(&epistemic.gaps, formatter);
@@ -262,9 +276,6 @@ async fn run_environment_check(
     Ok(())
 }
 
-/// Report-only enrichment nudge: memories whose (often type-derived, i.e.
-/// legacy pre-epistemic) class carries no actionable metadata yet. Not a
-/// defect — enrichment happens gradually as memories are touched.
 /// Human commentary that must not land on stdout in JSON mode.
 ///
 /// `doctor` emits exactly one JSON document; every incidental `print_message`
@@ -278,6 +289,9 @@ fn note(formatter: &OutputFormatter, message: &str) {
     }
 }
 
+/// Report-only enrichment nudge: memories whose (often type-derived, i.e.
+/// legacy pre-epistemic) class carries no actionable metadata yet. Not a
+/// defect — enrichment happens gradually as memories are touched.
 fn print_enrichment_gaps(gaps: &engramdb::ops::EnrichmentGaps, formatter: &OutputFormatter) {
     if !gaps.any() {
         return;

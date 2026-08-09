@@ -323,17 +323,29 @@ pub async fn doctor_environment(
         // dropped those checks and suggested `init`, which pushes a SECOND
         // registry row for the same path.
         if let Some(stale_id) = &registry_info.drifted_registration {
+            // Two different defects wear the same `drifted_registration`. State
+            // A: the stale row is the ONLY row, so the live ID is unregistered
+            // and the memories really are missing from queries. State B: a
+            // correct row exists too (what `init` on an already-drifted project
+            // produces) and the leftover is a duplicate — memories are
+            // reachable, and saying otherwise sends the user hunting for a
+            // problem they don't have. `repair` is the fix either way.
+            let (message, suggestion) = if registry_info.in_registry {
+                (
+                    format!("a leftover registry entry ({stale_id}) still names this path alongside the live one ({project_id})"),
+                    "Two rows for one path: group subscriptions resolve to whichever comes first, so some may silently stop fanning in. Run `engramdb projects repair` to fold them into one.",
+                )
+            } else {
+                (
+                    format!("registered as {stale_id} but now hashes to {project_id}"),
+                    "A git remote added after `engramdb init` re-keys the project: its memories disappear from queries and its group subscriptions detach. Run `engramdb projects repair` (NOT `init`, which would add a second registry entry).",
+                )
+            };
             project_checks.push(EnvironmentCheck {
                 name: "Project identity".to_string(),
                 passed: true,
-                message: format!(
-                    "registered as {} but now hashes to {}",
-                    stale_id, project_id
-                ),
-                suggestion: Some(
-                    "A git remote added after `engramdb init` re-keys the project: its memories disappear from queries and its group subscriptions detach. Run `engramdb projects repair` (NOT `init`, which would add a second registry entry)."
-                        .to_string(),
-                ),
+                message,
+                suggestion: Some(suggestion.to_string()),
                 details: vec![],
                 status: Some(CheckStatus::Warn),
             });
@@ -597,23 +609,29 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
             // Count orphan data directories (on disk but not in registry).
             // Shares `prune`'s widened predicate rather than re-deriving one:
             // counting a re-keyed project's live data dir as an orphan here
-            // would invite the user to run the prune that deletes it.
+            // would invite the user to run the prune that deletes it. It must
+            // also share prune's RETENTION rule — a directory still holding
+            // personal memories is kept, so counting it would warn about an
+            // orphan that no prune will ever clear.
             let registered_ids = crate::storage::protected_project_ids(&reg);
-            let orphan_dirs = crate::storage::paths::global_data_dir()
-                .ok()
-                .map(|d| d.join("projects"))
-                .filter(|d| d.exists())
-                .and_then(|d| std::fs::read_dir(d).ok())
-                .map(|entries| {
-                    entries
-                        .filter_map(|e| e.ok())
-                        .filter(|e| e.path().is_dir())
-                        .filter(|e| {
-                            !registered_ids.contains(e.file_name().to_string_lossy().as_ref())
-                        })
-                        .count()
-                })
-                .unwrap_or(0);
+            let mut orphan_dirs = 0usize;
+            if let Ok(projects_dir) =
+                crate::storage::paths::global_data_dir().map(|d| d.join("projects"))
+            {
+                if let Ok(mut entries) = tokio::fs::read_dir(&projects_dir).await {
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let path = entry.path();
+                        if !path.is_dir()
+                            || registered_ids.contains(entry.file_name().to_string_lossy().as_ref())
+                        {
+                            continue;
+                        }
+                        if !crate::storage::paths::holds_personal_memories(&path).await {
+                            orphan_dirs += 1;
+                        }
+                    }
+                }
+            }
 
             let issues = crate::ops::projects::scan_hierarchy_issues(&reg);
 

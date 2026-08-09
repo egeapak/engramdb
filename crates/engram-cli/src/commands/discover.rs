@@ -65,6 +65,16 @@ pub async fn run_discover(
 ) -> Result<()> {
     let json_mode = formatter.is_json();
 
+    // JSON is machine-consumed: never prompt (mirrors `projects prune`).
+    // Checked before the scan, not just before the prompt: the contract is a
+    // property of the flags alone, and walking a home directory for seconds
+    // only to reject the arguments is work nobody asked for.
+    if !params.yes && !params.dry_run && json_mode {
+        bail!(
+            "projects discover requires confirmation; re-run with --yes or --dry-run in JSON mode"
+        );
+    }
+
     let opts = DiscoverOptions {
         max_depth: params.max_depth,
         include_hidden: params.hidden,
@@ -93,16 +103,6 @@ pub async fn run_discover(
     .await;
     scan_pb.finish_and_clear();
     let report = report?;
-
-    // JSON is machine-consumed: never prompt (mirrors `projects prune`).
-    // Checked before any early return so the contract is a property of the
-    // flags alone — a script must not succeed or fail depending on whether the
-    // tree happened to contain a candidate.
-    if !params.yes && !params.dry_run && json_mode {
-        bail!(
-            "projects discover requires confirmation; re-run with --yes or --dry-run in JSON mode"
-        );
-    }
 
     let candidates: Vec<DiscoveredProject> = report.unregistered().cloned().collect();
 
@@ -416,6 +416,11 @@ fn scan_json(
         "root": root.display().to_string(),
         "scanned_dirs": report.scanned_dirs,
         "depth_limited": report.depth_limited,
+        // Present in BOTH documents: `--dry-run --format json` is the
+        // sanctioned pre-flight (JSON mode refuses to prompt), and without this
+        // a consumer cannot tell "no candidates" from "half the tree was
+        // unreadable" — the distinction the report exists to preserve.
+        "unreadable_dirs": report.unreadable_dirs,
         "dry_run": true,
         "candidates": candidates.iter().map(|c| serde_json::json!({
             "path": c.path.display().to_string(),

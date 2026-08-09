@@ -215,22 +215,39 @@ pub async fn discover_projects_in(
     // and by project ID (is this ID owned by another checkout?).
     let mut by_path: HashSet<PathBuf> = HashSet::new();
     let mut by_id: HashMap<String, &RegistryEntry> = HashMap::new();
+    // `try_exists`, and an error counts as present: `exists()` collapses EACCES,
+    // ESTALE and a hung network mount into "gone", and the failure mode here is
+    // adopting (and reindexing) a live project's store.
+    let alive = |p: &Path| p.try_exists().unwrap_or(true);
     for entry in &reg.projects {
         let entry_path = canonical(Path::new(&entry.project_path));
         by_path.insert(entry_path.clone());
-        by_id.entry(entry.project_id.clone()).or_insert(entry);
+        let live = alive(&entry_path);
+        // A LIVING owner always wins the slot. `or_insert` gave it to whichever
+        // row came first in the file, so a not-yet-pruned row for a deleted
+        // checkout could occupy the ID of a project that is right there on disk
+        // using it — `classify` then found the owner missing, called the clone
+        // `Unregistered`, and adoption reindexed the live project's store to
+        // empty. Reproduced; it flipped on registry row order alone.
+        let mut claim = |id: String| match by_id.entry(id) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(entry);
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                let incumbent = canonical(Path::new(&slot.get().project_path));
+                if live && !alive(&incumbent) {
+                    slot.insert(entry);
+                }
+            }
+        };
+        claim(entry.project_id.clone());
         // Also index the ID the registered path hashes to TODAY. A drifted
         // project owns its live ID even though no row records it, and without
         // this a clone of that project matches nothing — so it is offered for
         // adoption, and its reindex clears the memories table the drifted
         // project is still using.
-        // `try_exists`, and an error counts as present: `exists()` collapses
-        // EACCES, ESTALE and a hung network mount into "gone", and the failure
-        // mode here is adopting (and reindexing) a live project's store.
-        if entry_path.try_exists().unwrap_or(true) {
-            by_id
-                .entry(project_id::compute_project_id(&entry_path))
-                .or_insert(entry);
+        if live {
+            claim(project_id::compute_project_id(&entry_path));
         }
     }
 
@@ -285,15 +302,29 @@ pub async fn discover_projects_in(
             report.unreadable_dirs += 1;
             continue;
         };
+        // Consecutive `next_entry` failures, reset by any success. A single bad
+        // entry must not truncate the listing — but `next_entry` is not
+        // guaranteed to advance past a failed `getdents` (a dead NFS mount
+        // fails every call), and retrying forever would hang the scan with no
+        // output at all. Bounded retry keeps the siblings and ends the spin.
+        const MAX_CONSECUTIVE_ENTRY_ERRORS: u32 = 16;
+        let mut entry_errors = 0u32;
         loop {
             let entry = match entries.next_entry().await {
-                Ok(Some(entry)) => entry,
+                Ok(Some(entry)) => {
+                    entry_errors = 0;
+                    entry
+                }
                 Ok(None) => break,
                 // A per-entry error must not silently truncate the rest of the
                 // listing (`while let Ok(Some(_))` would drop every remaining
                 // sibling); skip this one and keep reading.
                 Err(_) => {
                     report.unreadable_dirs += 1;
+                    entry_errors += 1;
+                    if entry_errors >= MAX_CONSECUTIVE_ENTRY_ERRORS {
+                        break;
+                    }
                     continue;
                 }
             };
@@ -353,8 +384,20 @@ pub async fn discover_projects_in(
 ///
 /// Runs after the sort, so "first" is the lowest path and the outcome is
 /// deterministic rather than dependent on directory-iteration order.
+///
+/// Two passes, and the split matters: **every** project in the scan claims its
+/// ID, but only `Unregistered` ones can be demoted. Claiming from unregistered
+/// candidates alone let a project we had just reported as drifted (or as
+/// registered) fail to defend the ID it is visibly using, so a clone sharing
+/// that ID stayed adoptable — and adoption reindexes, which empties the
+/// original's memories table.
 fn demote_intra_scan_id_collisions(projects: &mut [DiscoveredProject]) {
     let mut claimed: HashMap<String, PathBuf> = HashMap::new();
+    for project in projects.iter() {
+        if project.status != DiscoveryStatus::Unregistered {
+            claimed.insert(project.project_id.clone(), project.path.clone());
+        }
+    }
     for project in projects.iter_mut() {
         if project.status != DiscoveryStatus::Unregistered {
             continue;
@@ -757,6 +800,86 @@ mod tests {
             &skipped[0].status,
             DiscoveryStatus::StaleRegistration { registered_id } if registered_id == "stale00000000000"
         ));
+    }
+
+    /// A dead registry row must not be able to hold an ID that a project
+    /// *visible in this very scan* is using.
+    ///
+    /// The `by_id` index gave the slot to whichever row came first in the file.
+    /// With a not-yet-pruned row for a deleted checkout ahead of the live
+    /// project's own (drifted) row, the clone matched a missing owner, came out
+    /// `Unregistered`, and adoption reindexed the live project's store to empty.
+    /// Reproduced end-to-end; it flipped on registry row order alone, so the
+    /// test pins the losing order.
+    #[tokio::test]
+    async fn a_dead_row_cannot_shield_an_id_a_live_project_is_using() {
+        let tmp = TempDir::new().unwrap();
+        let live = fake_project(tmp.path(), "live", 2);
+        let clone = fake_project(tmp.path(), "clone", 0);
+        // Both hash to the same ID only if they share a remote; without git
+        // they hash by path, so force the collision the way the registry sees
+        // it: the live project is registered under a STALE id (drifted), and a
+        // dead row holds the id the clone hashes to.
+        let clone_id = project_id::compute_project_id(&clone);
+        let mut reg = Registry::default();
+        reg.projects.push(RegistryEntry {
+            project_id: clone_id.clone(),
+            project_path: tmp.path().join("deleted-checkout").to_string_lossy().into(),
+            parent_project_id: None,
+            subscriptions: vec![],
+        });
+        reg.projects.push(RegistryEntry {
+            project_id: clone_id.clone(),
+            project_path: live.to_string_lossy().to_string(),
+            parent_project_id: None,
+            subscriptions: vec![],
+        });
+
+        let report = scan(tmp.path(), &reg).await;
+        let offered: Vec<_> = report.unregistered().map(|p| p.path.clone()).collect();
+        assert!(
+            !offered.contains(&clone.canonicalize().unwrap()),
+            "adopting this reindexes the live project's store to empty: {offered:?}"
+        );
+    }
+
+    /// The intra-scan pass must let EVERY project defend its ID, not just the
+    /// unregistered ones — a project reported as drifted is visibly using its
+    /// live ID, and a clone sharing it must not stay adoptable.
+    #[tokio::test]
+    async fn a_drifted_project_in_the_scan_defends_its_live_id() {
+        let tmp = TempDir::new().unwrap();
+        let drifted = fake_project(tmp.path(), "a-drifted", 2);
+        let clone = fake_project(tmp.path(), "b-clone", 0);
+        let mut reg = Registry::default();
+        reg.projects.push(RegistryEntry {
+            project_id: "stale00000000000".to_string(),
+            project_path: drifted.to_string_lossy().to_string(),
+            parent_project_id: None,
+            subscriptions: vec![],
+        });
+
+        let mut report = scan(tmp.path(), &reg).await;
+        // Force the collision: give the clone the drifted project's live ID,
+        // then re-run the intra-scan pass over the result.
+        let live_id = project_id::compute_project_id(&drifted);
+        for p in report.projects.iter_mut() {
+            if p.path == clone.canonicalize().unwrap() {
+                p.project_id = live_id.clone();
+            }
+        }
+        super::demote_intra_scan_id_collisions(&mut report.projects);
+
+        let clone_status = report
+            .projects
+            .iter()
+            .find(|p| p.path == clone.canonicalize().unwrap())
+            .map(|p| p.status.clone())
+            .unwrap();
+        assert!(
+            matches!(clone_status, DiscoveryStatus::SharedId { .. }),
+            "the drifted project owns this ID; got {clone_status:?}"
+        );
     }
 
     /// State B: the two-row state that running `init` on an already-drifted

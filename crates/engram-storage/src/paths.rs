@@ -353,6 +353,53 @@ pub async fn find_memory_in_dir(dir: &Path, id: &str) -> Option<PathBuf> {
     None
 }
 
+/// Whether `<data>/projects/<id>/` still holds personal memories.
+///
+/// `dir` is the project data directory, not the memories dir. An unreadable
+/// directory counts as holding something: the alternative is deleting blind.
+///
+/// This is the single predicate behind every "may I remove this data
+/// directory?" decision — `ops::projects::prune_stale_projects`, its orphan
+/// sweep, `ops::projects::delete_project`, `doctor`'s orphan count, and
+/// `worktree::consolidate_worktree_into_main`. They must agree: a directory one
+/// of them retains and another deletes is a data-loss bug, and a directory
+/// prune retains but doctor still counts as reclaimable is a warning the user
+/// can never clear.
+pub async fn holds_personal_memories(dir: &Path) -> bool {
+    let personal = dir.join("personal").join("memories");
+    match tokio::fs::read_dir(&personal).await {
+        Ok(mut entries) => {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if entry.path().extension().and_then(|s| s.to_str()) == Some("md") {
+                    return true;
+                }
+            }
+            false
+        }
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
+/// Remove a project data directory unless it still holds personal memories.
+///
+/// Returns whether it was removed. Personal memories exist *only* here — there
+/// is no copy in any project tree — and no caller can prove the directory is
+/// theirs alone: a project ID derived from a git remote is shared by every
+/// clone of that remote, and the registry keeps one row per ID, so a sibling
+/// clone is structurally invisible.
+///
+/// A retained directory is kept **whole**, index included. Reclaiming just the
+/// index looks free — it rebuilds from the `.md` files — but the directory is
+/// being retained precisely because something may still be using it, and an
+/// unregistered sibling's index would then be wiped on every sweep, leaving a
+/// healthy project silently unsearchable until someone re-embedded it by hand.
+pub async fn reclaim_project_data_dir(dir: &Path) -> bool {
+    if holds_personal_memories(dir).await {
+        return false;
+    }
+    tokio::fs::remove_dir_all(dir).await.is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

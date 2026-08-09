@@ -207,7 +207,6 @@ pub async fn consolidate_worktree_into_main(worktree_dir: &Path, main_dir: &Path
     // they are the ONLY copy — so the directory holding them is not ours to
     // remove, however tidy that would be.
     let mut stranded_shared = 0;
-    let mut stranded_personal = 0;
 
     // Only migrate when the worktree actually has a stray store AND the main
     // store exists (the caller guarantees the latter before routing to it;
@@ -223,9 +222,8 @@ pub async fn consolidate_worktree_into_main(worktree_dir: &Path, main_dir: &Path
         moved += n;
         stranded_shared += skipped;
         if let Ok(wt_personal) = paths::personal_memories_dir(&wt_id) {
-            let (n, skipped) = migrate_dir(&wt_personal, &wt_store, &main_store).await?;
+            let (n, _) = migrate_dir(&wt_personal, &wt_store, &main_store).await?;
             moved += n;
-            stranded_personal += skipped;
         }
 
         // Remove the stray worktree store so future ops route to main — but
@@ -238,17 +236,20 @@ pub async fn consolidate_worktree_into_main(worktree_dir: &Path, main_dir: &Path
     }
 
     // Drop the worktree's stale global data dir (its now-migrated personal
-    // memories and obsolete LanceDB index). Best-effort: data already moved.
+    // memories and obsolete LanceDB index) — unless personal memories are still
+    // in it, which means `migrate_dir` could not read them and they exist
+    // nowhere else.
+    //
+    // The decision reads the directory itself rather than a count from the
+    // block above, and that is load-bearing: this runs on EVERY command in a
+    // linked worktree, and the block above is skipped once the stray
+    // `.engramdb` is gone. A counter would be zero on the second invocation for
+    // want of having looked, and would delete exactly what the first
+    // invocation preserved.
     if let Ok(global_data) = paths::global_data_dir() {
         let wt_global = global_data.join("projects").join(&wt_id);
         if wt_global.exists() {
-            if stranded_personal == 0 {
-                let _ = async_fs::remove_dir_all(&wt_global).await;
-            } else {
-                // Same rule as `ops::projects::prune`: the index is derived and
-                // always reclaimable, personal memories are the only copy.
-                let _ = async_fs::remove_dir_all(wt_global.join("lancedb")).await;
-            }
+            paths::reclaim_project_data_dir(&wt_global).await;
         }
     }
 
@@ -609,6 +610,47 @@ mod tests {
         }
 
         assert!(!wt.join(".engramdb").exists(), "stray store is removed");
+    }
+
+    /// The first run strands an unparseable personal file and keeps its
+    /// directory. The SECOND run must keep it too — `consolidate` runs on every
+    /// command in a worktree, and by then the stray `.engramdb` is gone, so a
+    /// count carried from the migration block is zero for want of having
+    /// looked and deletes exactly what the first run preserved.
+    #[tokio::test]
+    async fn a_stranded_personal_file_survives_the_next_consolidation() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree(tmp.path());
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(&main, &registry).await.unwrap();
+        let wt_store = MemoryStore::init(&wt, &registry).await.unwrap();
+
+        // A shared memory that migrates cleanly, so the stray `.engramdb` is
+        // removed on run 1 and the block is skipped on run 2.
+        let good = Memory::new(MemoryType::Decision, "Clean", "c", Provenance::human());
+        wt_store.create(&good).await.unwrap();
+
+        let wt_id = project_id::compute_project_id(&wt);
+        let personal = paths::personal_memories_dir(&wt_id).unwrap();
+        async_fs::create_dir_all(&personal).await.unwrap();
+        let stranded = personal.join("unparseable.md");
+        async_fs::write(&stranded, "written by a newer schema")
+            .await
+            .unwrap();
+
+        consolidate_worktree_into_main(&wt, &main).await.unwrap();
+        assert!(
+            !wt.join(".engramdb").exists(),
+            "run 1 clears the stray store"
+        );
+        assert!(stranded.exists(), "run 1 must keep the only copy");
+
+        consolidate_worktree_into_main(&wt, &main).await.unwrap();
+        assert!(
+            stranded.exists(),
+            "run 2 deleted what run 1 preserved — the decision must read the \
+             directory, not a count from a block that no longer runs"
+        );
     }
 
     #[tokio::test]

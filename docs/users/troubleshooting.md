@@ -131,7 +131,7 @@ It should. Worktrees auto-route to the main project. If they're not, run:
 If a worktree was init'd before this routing was added, you may have a stray `.engramdb/` in the worktree. EngramDB will auto-consolidate it on the next memory op; otherwise run any memory command in the worktree to trigger consolidation.
 
 **`projects prune` lists projects I want to keep.**
-Those projects' on-disk paths no longer exist. Either restore the path, or accept the prune. The data isn't lost — `prune` deletes only the registry entry; the global data dir is preserved unless you confirm.
+Those projects' on-disk paths no longer exist. Either restore the path, or accept the prune. Memories aren't lost: prune keeps any data directory still holding personal memories, whole — those it lists as `retained_with_personal` — and reclaims only the ones that hold nothing but a rebuildable index. Shared memories live in the project tree and are never touched.
 
 **All my memories vanished after I added a git remote.**
 The project's ID is derived from the git remote when it has one, so adding a

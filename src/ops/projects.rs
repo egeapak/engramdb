@@ -419,7 +419,14 @@ pub async fn repair_hierarchy(registry: &dyn RegistryBackend) -> Result<Hierarch
     Ok(issues)
 }
 
-/// Count orphan data directories (on disk under `projects/` but not in registry).
+/// Count orphan data directories prune would actually reclaim.
+///
+/// "Not in the registry" is necessary but not sufficient: a directory still
+/// holding personal memories is retained (see [`reclaim_data_dir`]), so
+/// counting it here would make `doctor` warn "N orphan directories — run
+/// `engramdb projects prune`" forever against a prune that removes nothing.
+/// That is the same divergence `protected_project_ids` was introduced to end,
+/// one rule further down.
 pub async fn count_orphan_dirs(registry: &dyn RegistryBackend) -> Result<usize> {
     let reg = registry.load().await?;
     // Recorded IDs are not enough: a project re-keyed by a git remote added
@@ -439,7 +446,9 @@ pub async fn count_orphan_dirs(registry: &dyn RegistryBackend) -> Result<usize> 
                 continue;
             }
             let dir_name = entry.file_name().to_string_lossy().to_string();
-            if !registered_ids.contains(&dir_name) {
+            if !registered_ids.contains(&dir_name)
+                && !crate::storage::paths::holds_personal_memories(&entry.path()).await
+            {
                 count += 1;
             }
         }
@@ -460,33 +469,15 @@ pub async fn count_orphan_dirs(registry: &dyn RegistryBackend) -> Result<usize> 
 /// and destroying the sibling's personal memories unattended via
 /// `auto_maintain`.
 ///
-/// So the rule is structural rather than provenance-based: reclaim the derived
-/// data always, keep the directory whenever it still holds personal memories.
-/// A retained directory costs disk; a deleted one costs the memories.
-async fn reclaim_data_dir(dir: &Path) -> bool {
-    let personal = dir.join("personal").join("memories");
-    let has_personal = match async_fs::read_dir(&personal).await {
-        Ok(mut entries) => {
-            let mut found = false;
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                if entry.path().extension().and_then(|s| s.to_str()) == Some("md") {
-                    found = true;
-                    break;
-                }
-            }
-            found
-        }
-        // Unreadable: assume it holds something rather than delete blind.
-        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
-    };
-
-    if has_personal {
-        // Derived only. The index rebuilds from the `.md` files on next open.
-        let _ = async_fs::remove_dir_all(dir.join("lancedb")).await;
-        return false;
-    }
-    async_fs::remove_dir_all(dir).await.is_ok()
-}
+/// So the rule is structural rather than provenance-based: keep the directory
+/// whenever it still holds personal memories. A retained directory costs disk;
+/// a deleted one costs the memories.
+///
+/// The predicate lives in `storage::paths` because four call sites must agree
+/// on it — this one, the orphan sweep, `delete_project`, and worktree
+/// consolidation — and a fifth (`count_orphan_dirs`) must agree on what is
+/// *reclaimable* or `doctor` recommends a prune that then declines to act.
+use crate::storage::paths::reclaim_project_data_dir as reclaim_data_dir;
 
 /// Phase indicator for prune progress callbacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -501,8 +492,17 @@ pub enum PrunePhase {
 /// Stale: in registry but project path no longer exists on disk.
 /// Orphan: data directory exists under `projects/` but not in registry.
 ///
-/// Deletion is parallelized with rayon. Calls `on_progress(phase)` after
-/// each item is removed (must be thread-safe).
+/// Neither ever removes personal memories — see [`reclaim_data_dir`]. Retained
+/// directories come back in [`PruneResult::retained_with_personal`], and
+/// [`count_orphan_dirs`] excludes them so `doctor` cannot recommend a prune
+/// that then declines to act.
+///
+/// Deletion is sequential: it was `rayon`-parallel, but the retention check is
+/// a directory read per candidate and interleaving those with `remove_dir_all`
+/// across a rayon pool inside `async fn` bought less than it cost in blocking
+/// the executor. `on_progress(phase)` still fires once per item removed, and
+/// fires only for items actually reclaimed — size a progress bar from the
+/// candidate count, not from `stale_removed`.
 pub async fn prune_stale_projects(
     registry: &dyn RegistryBackend,
     on_progress: impl Fn(PrunePhase) + Send + Sync,
@@ -852,7 +852,13 @@ mod tests {
             only_copy.exists(),
             "a sibling clone's only copy must survive a registration delete"
         );
-        assert!(!lancedb.exists(), "the derived index is still reclaimed");
+        // The directory is kept WHOLE, index included: it is retained because
+        // an unregistered sibling may still be using it, and wiping that
+        // sibling's index leaves a healthy project silently unsearchable.
+        assert!(
+            lancedb.exists(),
+            "a retained directory must keep its index too"
+        );
         assert!(!result.global_data_removed);
         assert_eq!(result.retained_with_personal, vec![pid.clone()]);
 

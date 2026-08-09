@@ -151,7 +151,7 @@ pub enum ProjectsCommand {
         /// Follow directory symlinks while scanning
         #[arg(long)]
         follow_symlinks: bool,
-        /// Register every discovered project without prompting (required in JSON mode)
+        /// Register every discovered project without prompting (in JSON mode, required unless --dry-run)
         #[arg(long, short = 'y')]
         yes: bool,
         /// Report what would be registered and exit without changing anything
@@ -177,7 +177,12 @@ pub enum ProjectsCommand {
         #[arg(long)]
         no_index: bool,
     },
-    /// Remove a project from the registry and delete its global data.
+    /// Remove a project from the registry and reclaim its index.
+    ///
+    /// Personal memories are KEPT unless `--purge` is passed: a project ID
+    /// derived from a git remote is shared by every clone of that remote on
+    /// this machine, and the registry records only one of them, so deleting
+    /// one registration can destroy another checkout's only copy.
     ///
     /// Refuses by default when the project has sub-projects (children).
     /// Re-run with `--cascade` to also delete descendants, or unlink the
@@ -185,7 +190,7 @@ pub enum ProjectsCommand {
     Delete {
         /// Project ID to delete
         project_id: String,
-        /// Skip confirmation prompt
+        /// Skip confirmation prompt (required in JSON mode)
         #[arg(long, short = 'f')]
         force: bool,
         /// Also delete all descendants (children and their children).
