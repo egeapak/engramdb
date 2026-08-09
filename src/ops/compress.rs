@@ -170,10 +170,37 @@ pub async fn compress_apply(
     // the whole group. No-op (None) on a project-local store, so the common path
     // pays no extra reads.
     let audience = if store.is_group() || store.is_global() {
-        let mut mems = Vec::with_capacity(source_ids.len());
-        for id in &source_ids {
-            mems.push(store.get(id).await?);
+        // One batched read: the file already uses `batch_exists` on this exact
+        // list a few lines up, so a per-id `get` loop here was gratuitous.
+        //
+        // The completeness check is NOT optional. `consolidated_audience`
+        // unions the sources' restricted audiences, so a source silently
+        // dropped from the batch (unreadable file — `get_batch` warns and
+        // skips) would contribute nothing and the summary would end up LESS
+        // restricted than its evidence. That is precisely the widening
+        // `consolidated_audience` is documented never to do, so a short batch
+        // has to fail the way the per-id `get(...)?` it replaced did.
+        let refs: Vec<&str> = source_ids.iter().map(String::as_str).collect();
+        let loaded = store.get_batch(&refs).await?;
+        if loaded.len() != source_ids.len() {
+            let missing: Vec<&str> = {
+                let got: std::collections::HashSet<&str> =
+                    loaded.iter().map(|(id, _)| id.as_str()).collect();
+                source_ids
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|id| !got.contains(id))
+                    .collect()
+            };
+            bail!(
+                "Cannot compute the consolidated audience: source memor{} {} could not be read. \
+                 Refusing to proceed — a partial read would produce a summary visible more \
+                 widely than its sources.",
+                if missing.len() == 1 { "y" } else { "ies" },
+                missing.join(", ")
+            );
         }
+        let mems: Vec<crate::types::Memory> = loaded.into_iter().map(|(_, m)| m).collect();
         consolidated_audience(store, &mems)
     } else {
         None
@@ -227,16 +254,33 @@ pub async fn compress_apply(
     //   so the user can re-run. The summary memory remains valid either way.
     let mut skipped_sources = Vec::new();
     let mut failed_sources: Vec<String> = Vec::new();
+    // One batched read rather than a `get` (full directory scan) per source.
+    //
+    // `get_batch` drops unreadable files with a warning, so "absent from the
+    // map" alone cannot distinguish a source that was concurrently deleted
+    // (benign — skip) from one whose file is corrupt or unreadable (a real
+    // failure the caller must be told about so it can re-run). The per-id loop
+    // this replaced drew that line via `Err(NotFound)` vs `Err(other)`.
+    // `batch_exists` restores it in one extra directory scan: a source with no
+    // file on disk is gone, one whose file is present but did not load is a
+    // failure.
+    let verify_refs: Vec<&str> = source_ids.iter().map(String::as_str).collect();
+    let on_disk = store
+        .batch_exists(&verify_refs)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to re-check source IDs: {}", e))?;
+    let verified: std::collections::HashMap<String, crate::types::Memory> =
+        store.get_batch(&verify_refs).await?.into_iter().collect();
     for id in &source_ids {
-        match store.get(id).await {
-            Err(crate::storage::StorageError::NotFound(_)) => {
-                skipped_sources.push(id.clone());
-            }
-            Err(e) => failed_sources.push(format!("{} ({})", id, e)),
+        match verified.get(id) {
+            None if !on_disk.contains(id.as_str()) => skipped_sources.push(id.clone()),
+            // File present but did not load — corrupt, unreadable, or replaced
+            // by something that is not a memory file.
+            None => failed_sources.push(format!("{} (unreadable)", id)),
             // Invalidated — by this compress or an earlier writer; either
             // way the window is closed.
-            Ok(m) if m.is_invalidated() => {}
-            Ok(_) => failed_sources.push(format!("{} (still active)", id)),
+            Some(m) if m.is_invalidated() => {}
+            Some(_) => failed_sources.push(format!("{} (still active)", id)),
         }
     }
 
@@ -271,6 +315,246 @@ mod tests {
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
         (temp_dir, store)
+    }
+
+    /// Deterministic pseudo-random vector at the embedding dimension.
+    fn synth_vector(seed: u64, dims: usize) -> Vec<f32> {
+        let mut state = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        (0..dims)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                ((state >> 33) as f32 / (1u32 << 31) as f32) - 0.5
+            })
+            .collect()
+    }
+
+    /// The whole justification for the fast path: it has to compute the same
+    /// number the straightforward version does.
+    ///
+    /// Tolerance is 1e-5 because the fast path accumulates in `f32` across
+    /// eight lanes while the reference accumulates in `f64` — the results are
+    /// equal in exact arithmetic and differ only in rounding. Includes a
+    /// length that is not a multiple of `DOT_LANES` (385) so the scalar
+    /// remainder tail is covered, and the odd sizes around the lane boundary.
+    #[test]
+    fn dot_unit_agrees_with_cosine() {
+        for dims in [1, 7, 8, 9, 15, 16, 384, 385, 768] {
+            for seed in 0..8u64 {
+                let a = synth_vector(seed * 2, dims);
+                let b = synth_vector(seed * 2 + 1, dims);
+                let reference = cosine(&a, &b);
+                let fast = dot_unit(&l2_normalized(&a), &l2_normalized(&b));
+                assert!(
+                    (reference - fast).abs() < 1e-5,
+                    "dims={dims} seed={seed}: reference {reference} vs fast {fast}"
+                );
+            }
+        }
+    }
+
+    /// Every backend must agree, not just whichever one this host dispatches
+    /// to.
+    ///
+    /// `dot_unit` picks AVX2 on any modern x86-64 machine, so without this the
+    /// SSE2 and scalar paths would be compiled, shipped, and never executed by
+    /// the suite — and the SSE2 path is what every pre-Haswell CPU and every
+    /// VM that masks AVX2 actually runs. Lengths deliberately straddle the
+    /// 4/8/16-element strides so each backend's scalar tail is exercised.
+    #[test]
+    fn dot_unit_backends_agree() {
+        for dims in [1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 384, 385, 768] {
+            for seed in 0..4u64 {
+                let a = l2_normalized(&synth_vector(seed * 2, dims));
+                let b = l2_normalized(&synth_vector(seed * 2 + 1, dims));
+                let reference = dot_unit_scalar(&a, &b);
+                let dispatched = dot_unit(&a, &b);
+                assert!(
+                    (reference - dispatched).abs() < 1e-5,
+                    "dims={dims} seed={seed}: scalar {reference} vs dispatched {dispatched}"
+                );
+                #[cfg(target_arch = "x86_64")]
+                {
+                    let sse2 = dot_unit_sse2(&a, &b);
+                    assert!(
+                        (reference - sse2).abs() < 1e-5,
+                        "dims={dims} seed={seed}: scalar {reference} vs sse2 {sse2}"
+                    );
+                    if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
+                    {
+                        // SAFETY: guarded by the detection on this line.
+                        let avx2 = unsafe { dot_unit_avx2(&a, &b) };
+                        assert!(
+                            (reference - avx2).abs() < 1e-5,
+                            "dims={dims} seed={seed}: scalar {reference} vs avx2 {avx2}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A source that exists but cannot be READ must fail the compress, not be
+    /// silently skipped.
+    ///
+    /// Regression guard for the `get` -> `get_batch` conversion. The per-id
+    /// loops propagated a read error; `get_batch` warns and omits the row, so
+    /// a naive conversion turns "this source is corrupt" into "this source is
+    /// fine". Two places cared: the post-invalidation verification (which
+    /// would report success while leaving a source active) and the audience
+    /// union (which would publish the summary wider than its evidence).
+    #[tokio::test]
+    async fn unreadable_source_fails_compress_rather_than_being_skipped() {
+        let (temp, store) = setup_store().await;
+        let broken = add_memory(&store, MemoryType::Debug, "broken", 0.1, vec![]).await;
+        let ok = add_memory(&store, MemoryType::Debug, "fine", 0.1, vec![]).await;
+
+        // A directory where the memory file should be: the id still "exists"
+        // on disk (batch_exists sees the stem) but no read can succeed.
+        let memories_dir = temp.path().join(".engramdb").join("memories");
+        for entry in std::fs::read_dir(&memories_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n.contains(&broken))
+            {
+                std::fs::remove_file(&path).unwrap();
+                std::fs::create_dir(&path).unwrap();
+            }
+        }
+
+        let err = compress_apply(
+            &store,
+            CompressApplyParams {
+                source_ids: vec![broken.clone(), ok.clone()],
+                summary: "Summary".to_string(),
+                content: "Content".to_string(),
+                scope: None,
+                tags: None,
+                embed_async: false,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&broken),
+            "the unreadable source must be named in the error, got: {msg}"
+        );
+        assert!(
+            !msg.contains(&ok),
+            "the readable source must not be reported as failed, got: {msg}"
+        );
+    }
+
+    /// Max-over-chunk-pairs: two memories are similar if ANY chunk of one is
+    /// similar to ANY chunk of the other.
+    ///
+    /// This is the aggregation choice, so it gets a test that would fail under
+    /// mean (which would average the strong match away) and under
+    /// first-chunk-only (which would miss it entirely).
+    #[test]
+    fn similar_pairs_aggregates_chunks_by_max() {
+        let dims = 384;
+        let shared = synth_vector(7, dims);
+        let noise_a = synth_vector(100, dims);
+        let noise_b = synth_vector(200, dims);
+        let noise_c = synth_vector(300, dims);
+
+        // Memory 0 and memory 1 share one near-identical chunk each, buried
+        // behind unrelated ones. Memory 2 shares nothing.
+        let vectors = vec![
+            vec![noise_a.clone(), shared.clone()],
+            vec![shared.clone(), noise_b.clone()],
+            vec![noise_c.clone()],
+        ];
+
+        // 0.99: only the shared pair clears it, so the assertion is about the
+        // aggregation and not about the corpus happening to be similar.
+        let pairs = similar_pairs(&vectors, 0.99);
+        assert_eq!(
+            pairs,
+            vec![(0, 1)],
+            "max over chunk pairs must find the shared chunk; mean or \
+             first-chunk-only would miss it"
+        );
+
+        // The same corpus with the shared chunks removed must find nothing —
+        // otherwise the test above proves nothing.
+        let unrelated = vec![
+            vec![noise_a.clone()],
+            vec![noise_b.clone()],
+            vec![noise_c.clone()],
+        ];
+        assert!(similar_pairs(&unrelated, 0.99).is_empty());
+    }
+
+    /// A memory with no stored vectors participates in no pair rather than
+    /// panicking or matching everything.
+    #[test]
+    fn similar_pairs_skips_memories_without_vectors() {
+        let dims = 384;
+        let v = synth_vector(1, dims);
+        let vectors = vec![vec![v.clone()], Vec::new(), vec![v.clone()]];
+        // 0 and 2 are identical; 1 has nothing.
+        assert_eq!(similar_pairs(&vectors, 0.99), vec![(0, 2)]);
+    }
+
+    /// Degenerate inputs must behave like the reference, not panic or produce
+    /// a NaN that would then poison the `>= similarity` comparison.
+    #[test]
+    fn dot_unit_handles_degenerate_vectors() {
+        let zero = vec![0.0f32; 384];
+        let v = synth_vector(1, 384);
+        assert_eq!(dot_unit(&l2_normalized(&zero), &l2_normalized(&v)), 0.0);
+        assert_eq!(dot_unit(&l2_normalized(&zero), &l2_normalized(&zero)), 0.0);
+        // Length mismatch and empty input are guards, matching `cosine`.
+        assert_eq!(dot_unit(&v, &synth_vector(2, 128)), 0.0);
+        assert_eq!(dot_unit(&[], &[]), 0.0);
+        // A unit vector against itself is 1.0.
+        let unit = l2_normalized(&v);
+        assert!((dot_unit(&unit, &unit) - 1.0).abs() < 1e-5);
+    }
+
+    /// `similar_pairs` must return exactly what the sequential nested loop
+    /// returned, in the same order — including the `None` (failed-to-embed)
+    /// holes, which take part in no pair.
+    #[test]
+    fn similar_pairs_matches_sequential_reference() {
+        let dims = 384;
+        // One vector per memory here, so max-over-chunk-pairs degenerates to
+        // the plain pairwise cosine the sequential reference computes. The
+        // multi-chunk aggregation is covered by
+        // `similar_pairs_aggregates_chunks_by_max`.
+        let mut vectors: Vec<Vec<Vec<f32>>> = (0..40u64)
+            .map(|i| vec![synth_vector(i % 12, dims)])
+            .collect();
+        // Memories with no stored vectors take part in no pair.
+        vectors[3] = Vec::new();
+        vectors[17] = Vec::new();
+
+        // Threshold low enough that plenty of pairs qualify, so this is not
+        // vacuously "both returned nothing".
+        let similarity = 0.5;
+        let mut expected: Vec<(usize, usize)> = Vec::new();
+        for i in 0..vectors.len() {
+            for j in (i + 1)..vectors.len() {
+                if let (Some(a), Some(b)) = (vectors[i].first(), vectors[j].first()) {
+                    if cosine(a, b) >= similarity {
+                        expected.push((i, j));
+                    }
+                }
+            }
+        }
+        assert!(
+            !expected.is_empty(),
+            "test corpus produced no pairs; the comparison would be vacuous"
+        );
+        assert_eq!(similar_pairs(&vectors, similarity), expected);
     }
 
     async fn add_memory(
@@ -836,6 +1120,13 @@ pub fn cluster_pairs(n: usize, pairs: &[(usize, usize)], min_size: usize) -> Vec
     clusters
 }
 
+/// The straightforward cosine: one `f64` accumulator chain, norms recomputed
+/// per call.
+///
+/// Superseded on the hot path by [`l2_normalized`] + [`dot_unit`], and kept as
+/// the reference the equivalence test scores against — the fast path is only
+/// worth having if it agrees with this to floating-point tolerance.
+#[cfg(test)]
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
@@ -851,6 +1142,283 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
     } else {
         dot / (na.sqrt() * nb.sqrt())
     }
+}
+
+/// A memory's embedding scaled to unit length, so that the cosine of two of
+/// them is just their dot product.
+///
+/// `consolidation_pass` compares every observation against every other one,
+/// and [`cosine`] recomputes `‖a‖` and `‖b‖` inside each of those n(n-1)/2
+/// comparisons even though a vector has exactly one norm. Hoisting the norms
+/// into an O(n) prepass removes two thirds of the arithmetic, and leaves the
+/// O(n²) body a bare dot product.
+///
+/// `‖v‖²` is itself a dot product, so it reuses [`dot_unit`] and gets the same
+/// vector instructions rather than a second scalar reduction. The scaling pass
+/// is left scalar deliberately: this whole function is O(n) against the O(n²)
+/// body it feeds — at the 500-observation cap it is ~0.4% of the pass — so a
+/// third set of per-architecture intrinsics would be maintenance for a
+/// rounding error.
+///
+/// Returns the vector unchanged when it has no length — matching [`cosine`],
+/// which reports `0.0` similarity for a zero vector, since `dot_unit` against
+/// an unscaled zero vector is likewise `0.0`.
+pub fn l2_normalized(v: &[f32]) -> Vec<f32> {
+    let norm = (dot_unit(v, v) as f32).sqrt();
+    if norm == 0.0 || !norm.is_finite() {
+        return v.to_vec();
+    }
+    v.iter().map(|x| x / norm).collect()
+}
+
+/// Cosine similarity of two [`l2_normalized`] vectors: their dot product.
+///
+/// `pub` so `benches/parallel_simd.rs` measures *this* function rather than a
+/// copy. A benchmark that reimplements the code it claims to measure silently
+/// stops being true the moment production changes — which had already happened
+/// here once.
+///
+/// Written with explicit SIMD intrinsics rather than a shape the
+/// auto-vectorizer might pick up, because **the release profile ships
+/// `opt-level = "z"`, which runs neither the loop vectorizer nor the
+/// unroller.** Any "vectorizer-friendly" formulation is therefore scalar in
+/// the binary users actually run. Intrinsics are semantic — they lower to the
+/// instruction regardless of the optimization level — so this is the only way
+/// to get vector arithmetic into a size-optimized build.
+///
+/// Measured at `opt-level = "z"` with the real release profile (`lto = true`,
+/// `codegen-units = 1`), 384-dim pairs (`examples/` probe reproduced in
+/// `benches/parallel_simd.rs`):
+///
+/// | form | ns/pair |
+/// |---|---|
+/// | plain scalar loop | 461 |
+/// | eight unrolled accumulators (no intrinsics) | 720 |
+/// | [`wide`]-style portable SIMD wrapper | 384 |
+/// | SSE2 intrinsics (this, baseline path) | **65** |
+/// | AVX2 + FMA intrinsics (this, detected path) | **55** |
+///
+/// Note the second row: hand-unrolling into independent accumulators is
+/// *slower than the naive loop* at `-Oz`, because the optimizer that would
+/// have cleaned it up is switched off. That shape only wins at
+/// `opt-level >= 2`, i.e. in `profile.bench` and not in production.
+///
+/// Raising `opt-level` instead was measured and rejected: `2` doubles the
+/// binary (55.0 → 105.2 MiB) for less than a fifth of the gain this gets for
+/// free. See `docs/contributors/parallelization-simd.md`.
+///
+/// Why not `fastembed::similarity::cosine_similarity`, which is already in the
+/// tree? It cannot be reached from here — `fastembed` is an optional
+/// dependency of `engram-models` gated behind `onnxruntime`, and this crate
+/// must keep working under `--no-default-features --features ollama` — and it
+/// is also the shape this replaced: three `dot` calls per comparison
+/// (recomputing both norms every time) over a single non-vectorizing
+/// accumulator chain. Measured at `-Oz`, 384-dim, identical results: 1358 ns
+/// against 51 ns here.
+///
+/// Mismatched lengths score `0.0`, as in [`cosine`] — the callers pair vectors
+/// from one provider, so this is a guard, not a code path.
+pub fn dot_unit(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    dot_unit_dispatch(a, b)
+}
+
+/// Per-architecture backend selection, split out so each arch gets a plain
+/// function body rather than a stack of `#[cfg]` blocks with early returns.
+///
+/// AVX2+FMA is not in the x86-64 baseline, so it is detected at run time.
+/// `is_x86_feature_detected!` caches its answer in an atomic after the first
+/// call, so this is a predictable load, not a `cpuid` per comparison.
+#[cfg(target_arch = "x86_64")]
+fn dot_unit_dispatch(a: &[f32], b: &[f32]) -> f64 {
+    if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+        // SAFETY: guarded by the detection immediately above.
+        unsafe { dot_unit_avx2(a, b) }
+    } else {
+        dot_unit_sse2(a, b)
+    }
+}
+
+/// NEON is mandatory in the aarch64 baseline, so there is nothing to detect.
+#[cfg(target_arch = "aarch64")]
+fn dot_unit_dispatch(a: &[f32], b: &[f32]) -> f64 {
+    // SAFETY: `target_arch = "aarch64"` guarantees these instructions exist.
+    unsafe { dot_unit_neon(a, b) }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn dot_unit_dispatch(a: &[f32], b: &[f32]) -> f64 {
+    dot_unit_scalar(a, b)
+}
+
+/// Portable fallback. A single accumulator on purpose: at `-Oz` the unrolled
+/// form measured 1.6x *slower* (see [`dot_unit`]), and the architectures that
+/// reach this path are the ones we have not measured on.
+#[cfg_attr(any(target_arch = "x86_64", target_arch = "aarch64"), allow(dead_code))]
+fn dot_unit_scalar(a: &[f32], b: &[f32]) -> f64 {
+    let mut dot = 0.0f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+    }
+    dot as f64
+}
+
+/// SSE2 is part of the x86-64 baseline, so this needs no `target_feature`
+/// attribute and no detection — it is always legal on the target.
+///
+/// Two accumulators so the two multiply-add chains are independent; a single
+/// one leaves half the FP issue width idle.
+#[cfg(target_arch = "x86_64")]
+fn dot_unit_sse2(a: &[f32], b: &[f32]) -> f64 {
+    use std::arch::x86_64::*;
+    // SAFETY: every intrinsic below is SSE2, which is unconditionally present
+    // on `x86_64`. The loads are unaligned (`loadu`) and bounded by `n`, which
+    // is `len` rounded down to a multiple of 8, so all 8 lanes of each pair of
+    // loads are in bounds; the tail is handled scalar-wise.
+    unsafe {
+        let (mut acc0, mut acc1) = (_mm_setzero_ps(), _mm_setzero_ps());
+        let n = a.len() / 8 * 8;
+        let mut i = 0;
+        while i < n {
+            let a0 = _mm_loadu_ps(a.as_ptr().add(i));
+            let b0 = _mm_loadu_ps(b.as_ptr().add(i));
+            let a1 = _mm_loadu_ps(a.as_ptr().add(i + 4));
+            let b1 = _mm_loadu_ps(b.as_ptr().add(i + 4));
+            acc0 = _mm_add_ps(acc0, _mm_mul_ps(a0, b0));
+            acc1 = _mm_add_ps(acc1, _mm_mul_ps(a1, b1));
+            i += 8;
+        }
+        let mut lanes = [0.0f32; 4];
+        _mm_storeu_ps(lanes.as_mut_ptr(), _mm_add_ps(acc0, acc1));
+        let mut dot: f32 = lanes.iter().sum();
+        while i < a.len() {
+            dot += a[i] * b[i];
+            i += 1;
+        }
+        dot as f64
+    }
+}
+
+/// AVX2 + FMA: 16 elements per iteration, one instruction per multiply-add.
+///
+/// # Safety
+/// The caller must have verified `avx2` and `fma` are available.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_unit_avx2(a: &[f32], b: &[f32]) -> f64 {
+    use std::arch::x86_64::*;
+    let (mut acc0, mut acc1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+    let n = a.len() / 16 * 16;
+    let mut i = 0;
+    while i < n {
+        let a0 = _mm256_loadu_ps(a.as_ptr().add(i));
+        let b0 = _mm256_loadu_ps(b.as_ptr().add(i));
+        let a1 = _mm256_loadu_ps(a.as_ptr().add(i + 8));
+        let b1 = _mm256_loadu_ps(b.as_ptr().add(i + 8));
+        acc0 = _mm256_fmadd_ps(a0, b0, acc0);
+        acc1 = _mm256_fmadd_ps(a1, b1, acc1);
+        i += 16;
+    }
+    let mut lanes = [0.0f32; 8];
+    _mm256_storeu_ps(lanes.as_mut_ptr(), _mm256_add_ps(acc0, acc1));
+    let mut dot: f32 = lanes.iter().sum();
+    while i < a.len() {
+        dot += a[i] * b[i];
+        i += 1;
+    }
+    dot as f64
+}
+
+/// NEON, 8 elements per iteration. Mandatory on aarch64, so no detection.
+///
+/// # Safety
+/// `target_arch = "aarch64"` guarantees these instructions exist.
+#[cfg(target_arch = "aarch64")]
+unsafe fn dot_unit_neon(a: &[f32], b: &[f32]) -> f64 {
+    use std::arch::aarch64::*;
+    let (mut acc0, mut acc1) = (vdupq_n_f32(0.0), vdupq_n_f32(0.0));
+    let n = a.len() / 8 * 8;
+    let mut i = 0;
+    while i < n {
+        acc0 = vfmaq_f32(
+            acc0,
+            vld1q_f32(a.as_ptr().add(i)),
+            vld1q_f32(b.as_ptr().add(i)),
+        );
+        acc1 = vfmaq_f32(
+            acc1,
+            vld1q_f32(a.as_ptr().add(i + 4)),
+            vld1q_f32(b.as_ptr().add(i + 4)),
+        );
+        i += 8;
+    }
+    let mut dot = vaddvq_f32(vaddq_f32(acc0, acc1));
+    while i < a.len() {
+        dot += a[i] * b[i];
+        i += 1;
+    }
+    dot as f64
+}
+
+/// Every pair of observations whose embeddings are at least `similarity`
+/// alike, as `(i, j)` index pairs with `i < j`.
+///
+/// This is the O(n²) heart of [`consolidation_pass`]. Three things make it
+/// cheap enough to keep running inline in the maintenance pass:
+///
+/// 1. norms hoisted out of the inner loop ([`l2_normalized`]),
+/// 2. an inner product split into independent accumulator chains
+///    ([`dot_unit`]),
+/// 3. the outer index spread across the rayon pool.
+///
+/// Row `i` does `n - i` comparisons, so the per-index work is triangular;
+/// rayon's work stealing absorbs that without manual chunking. Results are
+/// collected per outer index and concatenated in order, so the pair list is
+/// identical to the sequential one — `cluster_pairs` is order-insensitive
+/// anyway, but a stable order keeps the reports reproducible.
+///
+/// A memory with no vectors takes part in no pair, exactly as before.
+///
+/// **Aggregation is max over chunk pairs.** A memory is represented by several
+/// vectors (a metadata row plus one per content chunk), so "how similar are
+/// these two memories" needs a reduction. Max matches what the query path
+/// already does when it aggregates chunk hits by `memory_id`
+/// (`lance_index::vector_search`), so consolidation and search agree on what
+/// "similar" means. Mean would dilute a strong match on one chunk against
+/// unrelated chunks in a long memory — precisely the case consolidation is
+/// looking for.
+pub fn similar_pairs(vectors: &[Vec<Vec<f32>>], similarity: f64) -> Vec<(usize, usize)> {
+    use rayon::prelude::*;
+
+    // Normalize every chunk once. With `k` chunks per memory the inner loop is
+    // k_i * k_j dot products instead of one, so hoisting the norms matters
+    // more here than it did in the single-vector version, not less.
+    let unit: Vec<Vec<Vec<f32>>> = vectors
+        .iter()
+        .map(|chunks| chunks.iter().map(|v| l2_normalized(v)).collect())
+        .collect();
+
+    (0..unit.len())
+        .into_par_iter()
+        .map(|i| {
+            if unit[i].is_empty() {
+                return Vec::new();
+            }
+            ((i + 1)..unit.len())
+                .filter(|&j| {
+                    unit[j]
+                        .iter()
+                        .any(|b| unit[i].iter().any(|a| dot_unit(a, b) >= similarity))
+                })
+                .map(|j| (i, j))
+                .collect::<Vec<_>>()
+        })
+        .reduce(Vec::new, |mut acc, mut v| {
+            acc.append(&mut v);
+            acc
+        })
 }
 
 /// §11.4 consolidation pass: find clusters of ≥
@@ -923,24 +1491,58 @@ pub async fn consolidation_pass(
         return Ok(report);
     }
 
-    // Embed each observation (summary + content). Failures drop the entry.
-    let mut vectors: Vec<Option<Vec<f32>>> = Vec::with_capacity(observations.len());
-    for (_, m) in &observations {
-        let text = format!("{} {}", m.summary, m.content);
-        vectors.push(engine.embed_text(&text).await);
-    }
+    // Vectors come from the chunk table — the ones the write path already
+    // produced — rather than being re-derived here.
+    //
+    // This is a correctness fix as much as a speed one. The pass used to embed
+    // `format!("{summary} {content}")` as ONE string, which the tokenizer
+    // truncates at the model's `max_length`: long observations were compared
+    // on their first ~256 tokens and nothing else, and `title`/`tags` never
+    // entered the comparison at all. The write path meanwhile chunks
+    // (`embedding_texts` -> `chunk_text`) and emits a metadata row carrying
+    // exactly those fields. Two compositions for the same store, and only one
+    // of them was the documented one. Reading the stored vectors makes this
+    // pass see what search sees.
+    //
+    // Reading is also now ~8x faster than re-embedding (`export_chunks_batch`,
+    // one scan instead of one per memory).
+    let obs_ids: Vec<&str> = observations.iter().map(|(id, _)| id.as_str()).collect();
+    let mut stored = store
+        .export_chunks_batch(&obs_ids)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("consolidation: batched chunk read failed ({e}); embedding on demand");
+            std::collections::HashMap::new()
+        });
 
-    // Pairwise similarity → union-find clusters.
-    let mut pairs: Vec<(usize, usize)> = Vec::new();
-    for i in 0..observations.len() {
-        for j in (i + 1)..observations.len() {
-            if let (Some(a), Some(b)) = (&vectors[i], &vectors[j]) {
-                if cosine(a, b) >= similarity {
-                    pairs.push((i, j));
-                }
-            }
+    // Fallback for memories with no stored vectors — created before embedding
+    // was available, or written while the provider was down. Embedding them
+    // here keeps them eligible instead of silently dropping them from
+    // consolidation, and uses `embedding_texts` so the composition matches
+    // what the write path would have stored.
+    let missing: Vec<&crate::types::Memory> = observations
+        .iter()
+        .map(|(_, m)| m)
+        .filter(|m| !stored.contains_key(&m.id))
+        .collect();
+    if !missing.is_empty() {
+        tracing::debug!(
+            count = missing.len(),
+            "consolidation: embedding memories with no stored vectors"
+        );
+        let owned: Vec<crate::types::Memory> = missing.into_iter().cloned().collect();
+        for (id, chunks) in engine.embed_memory_texts(&owned).await {
+            stored.insert(id, chunks);
         }
     }
+
+    let vectors: Vec<Vec<Vec<f32>>> = observations
+        .iter()
+        .map(|(id, _)| stored.remove(id).unwrap_or_default())
+        .collect();
+
+    // Pairwise similarity → union-find clusters.
+    let pairs = similar_pairs(&vectors, similarity);
     let clusters = cluster_pairs(observations.len(), &pairs, min_sources);
 
     // Pairwise-NLI bound per cluster: k sources cost k(k-1)/2 cross-encoder
@@ -1020,9 +1622,18 @@ pub async fn consolidate_cluster_apply(
     if source_ids.len() < 2 {
         bail!("a consolidation cluster needs at least 2 sources");
     }
+    // One batched read for the cluster's sources.
+    let src_refs: Vec<&str> = source_ids.iter().map(String::as_str).collect();
+    let by_id: std::collections::HashMap<String, crate::types::Memory> =
+        store.get_batch(&src_refs).await?.into_iter().collect();
     let mut sources = Vec::with_capacity(source_ids.len());
     for id in source_ids {
-        sources.push(store.get(id).await?);
+        sources.push(
+            by_id
+                .get(id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("source memory not found: {id}"))?,
+        );
     }
 
     let all_same_type = sources.windows(2).all(|w| w[0].type_ == w[1].type_);
@@ -1098,18 +1709,15 @@ pub async fn consolidate_cluster_apply(
 
     // Demote sources: 30d exponential, floor 0.1 — evidence fades, never
     // vanishes.
-    for id in source_ids {
-        let demoted = store
-            .update_with(id, |m| {
-                m.decay = Some(
-                    crate::types::Decay::exponential(chrono::Duration::days(30)).with_floor(0.1),
-                );
-                Ok(())
-            })
-            .await;
-        if let Err(e) = demoted {
-            tracing::warn!(memory_id = %id, "consolidation source demotion failed: {e}");
-        }
+    let (_, demote_failures) = store
+        .update_batch_with(source_ids, |m| {
+            m.decay =
+                Some(crate::types::Decay::exponential(chrono::Duration::days(30)).with_floor(0.1));
+            Ok(())
+        })
+        .await?;
+    for (id, e) in demote_failures {
+        tracing::warn!(memory_id = %id, "consolidation source demotion failed: {e}");
     }
     Ok(new_id)
 }

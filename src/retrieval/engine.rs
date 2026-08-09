@@ -41,6 +41,27 @@ const VECTOR_SEARCH_WINDOW_CAP: usize = 1000;
 /// to the whole-store search.
 const VECTOR_RESTRICT_MAX_IDS: usize = 500;
 
+/// Candidate count at or above which the per-memory scoring and keyword-stem
+/// passes go through the rayon pool.
+///
+/// Both are pure per-row maps over shared read-only state, so they parallelize
+/// exactly; the only question is whether the work is worth entering the pool
+/// for. At ~0.5µs of scoring per row the crossover is a few dozen rows, and
+/// most queries in a small store are below it — where the sequential branch
+/// keeps the previous behaviour byte for byte and costs nothing. Measured
+/// gains start around 100 rows (~1.5x) and reach ~3.5x at 5,000
+/// (`benches/parallel_simd.rs`).
+const PARALLEL_SCORE_MIN: usize = 64;
+
+/// Texts per `embed_batch` call in [`RetrievalEngine::embed_texts`].
+///
+/// The gain from batching is flat well before this (2.5x at 64, and the ONNX
+/// backend pads every row in a batch to the longest one, so very wide batches
+/// start wasting compute on padding). The bound matters more for the other two
+/// backends: the daemon puts a whole batch in one socket message and Ollama in
+/// one HTTP body, and the consolidation pass can hand over 500 texts.
+const EMBED_BATCH_CHUNK: usize = 64;
+
 /// Detail level for retrieved memories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DetailLevel {
@@ -412,6 +433,125 @@ impl RetrievalEngine {
         Ok(())
     }
 
+    /// [`Self::embed_memory`] for many memories: one batched inference and
+    /// one batched chunk write for the whole set.
+    ///
+    /// Per-memory `embed_memory` costs a small `embed_batch` (one memory's
+    /// chunks — far below the width where batching pays), a write lock, a full
+    /// directory scan and two LanceDB commits, *each*. Over a whole store that
+    /// is quadratic. This flattens every memory's chunk texts into one
+    /// inference stream and one `upsert_chunks_batch`.
+    ///
+    /// Composition is [`embedding_texts`] — byte-identical to the single
+    /// version, so vectors written here and by `create` are interchangeable.
+    ///
+    /// Returns `(embedded_count, per_memory_errors)`. A memory that produced
+    /// no text (entirely empty) has its chunks deleted, matching
+    /// `embed_memory`. `Ok((0, vec![]))` when no provider is configured.
+    pub async fn embed_memories(&self, memories: &[Memory]) -> (usize, Vec<(String, String)>) {
+        let Some(provider) = &self.embedding_provider else {
+            return (0, Vec::new());
+        };
+        if memories.is_empty() {
+            return (0, Vec::new());
+        }
+        let chunk_tokens =
+            effective_chunk_tokens(self.config.embeddings.max_tokens, provider.max_tokens());
+        let metadata_vector = self.config.embeddings.metadata_vector;
+
+        // Flatten every memory's chunk texts into one stream, remembering how
+        // many belong to each so the vectors can be handed back out.
+        let mut texts: Vec<String> = Vec::new();
+        let mut spans: Vec<(usize, usize)> = Vec::with_capacity(memories.len());
+        for memory in memories {
+            let start = texts.len();
+            texts.extend(embedding_texts(memory, chunk_tokens, metadata_vector));
+            spans.push((start, texts.len()));
+        }
+
+        let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let vectors = self.embed_texts(&text_refs).await;
+
+        let mut entries: Vec<(String, chrono::DateTime<chrono::Utc>, Vec<Vec<f32>>)> =
+            Vec::with_capacity(memories.len());
+        let mut errors: Vec<(String, String)> = Vec::new();
+        for (memory, (start, end)) in memories.iter().zip(spans) {
+            // A single failed text fails that memory only — its vectors would
+            // otherwise be a partial, silently-wrong representation.
+            let mut chunks = Vec::with_capacity(end - start);
+            let mut failed = false;
+            for slot in &vectors[start..end] {
+                match slot {
+                    Some(v) => chunks.push(v.clone()),
+                    None => {
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            if failed {
+                errors.push((memory.id.clone(), "embedding failed".to_string()));
+                continue;
+            }
+            entries.push((memory.id.clone(), memory.updated_at, chunks));
+        }
+
+        match self.store.upsert_chunks_batch(entries).await {
+            Ok(written) => (written.len(), errors),
+            Err(e) => {
+                errors.push(("*".to_string(), format!("batched chunk write failed: {e}")));
+                (0, errors)
+            }
+        }
+    }
+
+    /// Embed memories with the **write path's** composition and return the
+    /// vectors, without writing them.
+    ///
+    /// For callers that need a memory's vectors but found none in the chunk
+    /// table — currently `ops::compress::consolidation_pass`'s fallback. Using
+    /// [`embedding_texts`] rather than an ad-hoc string is the point: the
+    /// vectors it returns are directly comparable with the stored ones, which
+    /// a hand-rolled `"{summary} {content}"` would not be (that form is one
+    /// tokenizer-truncated vector, with no metadata row).
+    ///
+    /// Memories that fail to embed are simply absent from the result.
+    pub async fn embed_memory_texts(
+        &self,
+        memories: &[Memory],
+    ) -> std::collections::HashMap<String, Vec<Vec<f32>>> {
+        let mut out = std::collections::HashMap::new();
+        let Some(provider) = &self.embedding_provider else {
+            return out;
+        };
+        if memories.is_empty() {
+            return out;
+        }
+        let chunk_tokens =
+            effective_chunk_tokens(self.config.embeddings.max_tokens, provider.max_tokens());
+        let metadata_vector = self.config.embeddings.metadata_vector;
+
+        let mut texts: Vec<String> = Vec::new();
+        let mut spans: Vec<(usize, usize)> = Vec::with_capacity(memories.len());
+        for memory in memories {
+            let start = texts.len();
+            texts.extend(embedding_texts(memory, chunk_tokens, metadata_vector));
+            spans.push((start, texts.len()));
+        }
+        let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let vectors = self.embed_texts(&text_refs).await;
+
+        for (memory, (start, end)) in memories.iter().zip(spans) {
+            let chunks: Option<Vec<Vec<f32>>> = vectors[start..end].iter().cloned().collect();
+            if let Some(chunks) = chunks {
+                if !chunks.is_empty() {
+                    out.insert(memory.id.clone(), chunks);
+                }
+            }
+        }
+        out
+    }
+
     /// Spawn embedding + contradiction detection for a freshly-created memory
     /// in the background and return immediately.
     ///
@@ -523,6 +663,59 @@ impl RetrievalEngine {
                 None
             }
         }
+    }
+
+    /// [`Self::embed_text`] for many texts at once, one embedding slot per
+    /// input in input order (`None` where that text could not be embedded).
+    ///
+    /// Embedding N texts through N `embed_text` awaits pays the per-invocation
+    /// overhead N times — the provider mutex, the `spawn_blocking` hop, the
+    /// tokenizer setup and the ONNX session entry for the local backend; a
+    /// whole HTTP round trip for Ollama; a whole socket round trip for the
+    /// daemon — and gives ONNX Runtime N separate single-row matmuls instead
+    /// of one padded batch. Measured on the default quantized all-MiniLM:
+    /// 511ms for 64 texts one at a time vs 208ms batched (2.5x); at 8 texts
+    /// it is 1.6x (`benches/parallel_simd.rs`, `embed_batching/*`).
+    ///
+    /// Chunked at [`EMBED_BATCH_CHUNK`] rather than handed over whole: the
+    /// daemon backend puts the entire batch in one socket message and Ollama
+    /// in one HTTP body, so an unbounded batch is an unbounded message.
+    ///
+    /// A failed chunk falls back to embedding its texts individually, so one
+    /// unembeddable text costs only itself — the same granularity the
+    /// `embed_text`-per-item loop had. Failures are logged, never fatal.
+    pub async fn embed_texts(&self, texts: &[&str]) -> Vec<Option<Vec<f32>>> {
+        let Some(provider) = self.embedding_provider.as_ref() else {
+            return vec![None; texts.len()];
+        };
+        let mut out: Vec<Option<Vec<f32>>> = Vec::with_capacity(texts.len());
+        for chunk in texts.chunks(EMBED_BATCH_CHUNK) {
+            match provider.embed_batch(chunk).await {
+                // A provider that returns the wrong count is broken in a way
+                // that would silently misalign vectors with memories, which is
+                // far worse than a slow path — fall through to per-text.
+                Ok(vectors) if vectors.len() == chunk.len() => {
+                    out.extend(vectors.into_iter().map(Some));
+                }
+                Ok(vectors) => {
+                    tracing::debug!(
+                        "embed_batch returned {} vectors for {} texts; falling back to per-text",
+                        vectors.len(),
+                        chunk.len()
+                    );
+                    for text in chunk {
+                        out.push(self.embed_text(text).await);
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("embed_batch failed (non-fatal): {e}; retrying per-text");
+                    for text in chunk {
+                        out.push(self.embed_text(text).await);
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Contradiction probabilities for text pairs via the NLI provider.
@@ -1047,19 +1240,39 @@ impl RetrievalEngine {
             // loaded memory only for rows written before the column existed, so
             // a partially-migrated store degrades in speed and never in
             // correctness.
-            let scored: Vec<(&str, KeywordStems)> = filtered_entries
-                .iter()
-                .filter_map(|e| {
-                    let stems = match &e.keyword_stems {
-                        Some(s) => s.clone(),
-                        None => {
-                            let m = memory_map.get(&e.id)?;
-                            KeywordStems::compute(&m.summary, &m.tags, &m.content)
-                        }
-                    };
-                    Some((e.id.as_str(), stems))
-                })
-                .collect();
+            fn stems_for<'a>(
+                e: &'a crate::storage::IndexForFiltering,
+                memory_map: &HashMap<String, Memory>,
+            ) -> Option<(&'a str, KeywordStems)> {
+                let stems = match &e.keyword_stems {
+                    Some(s) => s.clone(),
+                    None => {
+                        let m = memory_map.get(&e.id)?;
+                        KeywordStems::compute(&m.summary, &m.tags, &m.content)
+                    }
+                };
+                Some((e.id.as_str(), stems))
+            }
+            // The `None` arm is the pre-v0.5.0 fallback: deriving stems is
+            // ~16µs per memory (tokenize → stoplist → Snowball stem → dedup
+            // across three fields), so on a store that has not been reindexed
+            // since the column landed this dominates the query. Parallel above
+            // the same threshold as scoring; order-preserving either way,
+            // which matters here because `kw_results` indexes back into this
+            // vector.
+            let scored: Vec<(&str, KeywordStems)> = if filtered_entries.len() >= PARALLEL_SCORE_MIN
+            {
+                use rayon::prelude::*;
+                filtered_entries
+                    .par_iter()
+                    .filter_map(|e| stems_for(e, &memory_map))
+                    .collect()
+            } else {
+                filtered_entries
+                    .iter()
+                    .filter_map(|e| stems_for(e, &memory_map))
+                    .collect()
+            };
             let stems: Vec<KeywordStems> = scored.iter().map(|(_, s)| s.clone()).collect();
             let kw_results = keyword_search_stems(q, &stems);
             let num_tokens = query_token_count(q);
@@ -1092,16 +1305,12 @@ impl RetrievalEngine {
         // memory. Only the survivors of threshold + sort + rerank + truncate
         // are materialized (cloned) into `ScoredMemory` at the end. On a large
         // no-filter Rank query this turns N memory clones into `max_results`.
-        let mut candidates: Vec<ScoredCandidate> = Vec::new();
         let query_path = query_path.as_deref();
         let now = Utc::now();
 
         let t_score = std::time::Instant::now();
-        for entry in filtered_entries.iter() {
-            let memory = match memory_map.get(&entry.id) {
-                Some(m) => m,
-                None => continue,
-            };
+        let score_one = |entry: &crate::storage::IndexForFiltering| {
+            let memory = memory_map.get(&entry.id)?;
 
             // Gather query evidence for this memory. Semantic comes from the
             // vector top-k when present; an embedded memory that missed the
@@ -1188,16 +1397,28 @@ impl RetrievalEngine {
                 // sufficiency signal — it filtered nothing.
                 let user_scope_supplied = query_path.is_some() || !query.logical.is_empty();
                 if !(has_kw || has_tag || user_scope_supplied) {
-                    continue;
+                    return None;
                 }
             }
 
-            candidates.push(ScoredCandidate {
+            Some(ScoredCandidate {
                 id: memory.id.clone(),
                 score: breakdown.final_score,
                 breakdown,
-            });
-        }
+            })
+        };
+
+        // Same independence argument as `rank_scope_only_from_index`: every
+        // iteration reads `memory_map` / `keyword_map` / `semantic_scores_map`
+        // and writes nothing shared. `filter_map` over an indexed parallel
+        // iterator keeps input order, so the candidate list is identical to
+        // the sequential one, not merely equivalent.
+        let mut candidates: Vec<ScoredCandidate> = if filtered_entries.len() >= PARALLEL_SCORE_MIN {
+            use rayon::prelude::*;
+            filtered_entries.par_iter().filter_map(score_one).collect()
+        } else {
+            filtered_entries.iter().filter_map(score_one).collect()
+        };
 
         self.record_stage("score", t_score.elapsed().as_secs_f64() * 1000.0);
 
@@ -1315,36 +1536,48 @@ impl RetrievalEngine {
         let now = Utc::now();
 
         let t_score = std::time::Instant::now();
-        let mut candidates: Vec<ScoredCandidate> = filtered_entries
-            .iter()
-            .map(|e| {
-                let target = ScoreTarget {
-                    created_at: e.created_at,
-                    decay: &e.decay,
-                    criticality: e.criticality,
-                    physical: &e.physical,
-                    logical: &e.logical,
-                    provenance_source: e.provenance_source,
-                    status: e.status,
-                    epistemic: e.epistemic,
-                    verified_at: e.verified_at,
-                };
-                let context = ScoringContext::scope_only(ctx_path, &query.logical)
-                    .with_situation(query.situation);
-                // Mirror the main loop: expired entries (present only under
-                // include_expired) score ignoring decay.
-                let breakdown = if e.expires_at.is_some_and(|exp| now > exp) {
-                    composite_score_target_ignore_decay(target, &context, &self.config, now)
-                } else {
-                    composite_score_target(target, &context, &self.config, now)
-                };
-                ScoredCandidate {
-                    id: e.id.clone(),
-                    score: breakdown.final_score,
-                    breakdown,
-                }
-            })
-            .collect();
+        let score_entry = |e: &crate::storage::IndexForFiltering| {
+            let target = ScoreTarget {
+                created_at: e.created_at,
+                decay: &e.decay,
+                criticality: e.criticality,
+                physical: &e.physical,
+                logical: &e.logical,
+                provenance_source: e.provenance_source,
+                status: e.status,
+                epistemic: e.epistemic,
+                verified_at: e.verified_at,
+            };
+            let context = ScoringContext::scope_only(ctx_path, &query.logical)
+                .with_situation(query.situation);
+            // Mirror the main loop: expired entries (present only under
+            // include_expired) score ignoring decay.
+            let breakdown = if e.expires_at.is_some_and(|exp| now > exp) {
+                composite_score_target_ignore_decay(target, &context, &self.config, now)
+            } else {
+                composite_score_target(target, &context, &self.config, now)
+            };
+            ScoredCandidate {
+                id: e.id.clone(),
+                score: breakdown.final_score,
+                breakdown,
+            }
+        };
+        // This path scores *every* index row — it is the no-query Rank shape
+        // the SessionStart/PreToolUse hooks take, where nothing narrows the
+        // candidate set first, so scoring is the whole cost rather than a tail
+        // behind file loading. Measured at ~3.0ms per 5,000 rows serially and
+        // ~0.87ms across four cores (`benches/parallel_simd.rs`, `score/*`).
+        //
+        // Scoring is a pure function of the row plus shared read-only config,
+        // so the rows are independent; `collect` keeps input order, which the
+        // sort below then makes irrelevant anyway.
+        let mut candidates: Vec<ScoredCandidate> = if filtered_entries.len() >= PARALLEL_SCORE_MIN {
+            use rayon::prelude::*;
+            filtered_entries.par_iter().map(score_entry).collect()
+        } else {
+            filtered_entries.iter().map(score_entry).collect()
+        };
         self.record_stage("score", t_score.elapsed().as_secs_f64() * 1000.0);
 
         let threshold = self.config.retrieval.relevance_threshold;
@@ -4436,6 +4669,88 @@ mod tests {
     ///   "queryvec" → v[0]=1.0, "closevec" → v[0]=0.4 (near),
     ///   "fillvec" → v[0]=0.1 (mid), anything else → v[1]=1.0 (orthogonal).
     struct MarkerEmbeddingProvider;
+
+    /// `embed_memories` (reindex) and `embed_memory_texts` (the consolidation
+    /// fallback) must compose text exactly like the single-memory write path.
+    ///
+    /// This is the guard for the whole "one store, two compositions" class of
+    /// bug: the consolidation pass used to build its own
+    /// `format!("{summary} {content}")`, which is one tokenizer-truncated
+    /// vector carrying neither title nor tags, while `create` stored a
+    /// metadata row plus chunked content. Anything that embeds a Memory must
+    /// go through `embedding_texts`, and this test fails if a new path
+    /// re-invents the string.
+    #[test]
+    fn every_embedding_path_uses_the_same_composition() {
+        let mut memory = Memory::new(
+            MemoryType::Decision,
+            "Use LanceDB for the unified index",
+            "The chunks table stores vectors; the memories table stores metadata.",
+            crate::types::Provenance::human(),
+        );
+        memory.title = Some("LanceDB choice".to_string());
+        memory.tags = vec!["storage".to_string(), "index".to_string()];
+
+        let texts = embedding_texts(&memory, 256, true);
+
+        // The metadata row must carry title AND tags — the fields the old
+        // hand-rolled composition silently dropped.
+        assert!(
+            texts[0].contains("LanceDB choice"),
+            "metadata row must carry the title, got {:?}",
+            texts[0]
+        );
+        assert!(
+            texts[0].contains("storage") && texts[0].contains("index"),
+            "metadata row must carry the tags, got {:?}",
+            texts[0]
+        );
+        assert!(
+            texts.len() >= 2,
+            "content must be embedded separately from metadata, got {texts:?}"
+        );
+        assert!(
+            texts[1..].iter().any(|t| t.contains("chunks table")),
+            "content must appear in a chunk, got {texts:?}"
+        );
+
+        // The legacy composition (metadata_vector = false) is the ONLY place
+        // "{summary} {content}" is correct, and even there it is chunked
+        // rather than truncated.
+        let legacy = embedding_texts(&memory, 256, false);
+        assert!(legacy[0].starts_with("Use LanceDB for the unified index"));
+        assert!(legacy[0].contains("chunks table"));
+    }
+
+    /// Long content must be CHUNKED, not truncated — a memory longer than the
+    /// model's window has to be fully represented across several vectors.
+    #[test]
+    fn long_content_is_chunked_not_truncated() {
+        let long = (0..600)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut memory = Memory::new(
+            MemoryType::Context,
+            "A long memory",
+            &long,
+            crate::types::Provenance::human(),
+        );
+        memory.title = Some("Long".to_string());
+
+        let texts = embedding_texts(&memory, 256, true);
+        assert!(
+            texts.len() > 2,
+            "600 words at 256 tokens must produce several content chunks, got {}",
+            texts.len()
+        );
+        // The tail must survive — the failure mode being guarded against is
+        // silently dropping everything past the tokenizer's window.
+        assert!(
+            texts.iter().any(|t| t.contains("word599")),
+            "the end of a long memory must be embedded, not truncated away"
+        );
+    }
 
     fn marker_vector(text: &str) -> Vec<f32> {
         let mut v = vec![0.0f32; 384];

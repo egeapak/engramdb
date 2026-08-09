@@ -105,12 +105,26 @@ pub(crate) async fn close_superseded_windows(
     new_id: &str,
 ) {
     let now = chrono::Utc::now();
+    // One batched read for the whole supersedes list. `supersedes` is
+    // caller-supplied and unbounded (an agent can pass an arbitrarily long
+    // list via `compress apply`), and each `get` is a full directory scan.
+    let targets: Vec<&str> = supersedes
+        .iter()
+        .map(String::as_str)
+        .filter(|id| *id != new_id)
+        .collect();
+    let loaded: std::collections::HashMap<String, crate::types::Memory> = store
+        .get_batch(&targets)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
     for old_id in supersedes {
         if old_id.as_str() == new_id {
             tracing::debug!(id = %new_id, "memory lists itself in supersedes; skipping");
             continue;
         }
-        match store.get(old_id).await {
+        match loaded.get(old_id).ok_or(()) {
             Ok(old) if old.is_invalidated_at(now) => {
                 tracing::debug!(
                     superseded = %old_id,
@@ -130,11 +144,11 @@ pub(crate) async fn close_superseded_windows(
                     );
                 }
             }
-            Err(e) => {
+            Err(()) => {
                 tracing::debug!(
                     superseded = %old_id,
                     by = %new_id,
-                    "supersedes target not found; skipping window close: {e}"
+                    "supersedes target not found; skipping window close"
                 );
             }
         }

@@ -176,35 +176,45 @@ pub async fn execute_gc_plan(
     let retention_cutoff =
         (retention_days > 0).then(|| now - chrono::Duration::days(retention_days as i64));
 
-    for candidate in &plan.candidates {
-        let context = ScoringContext::scope_only(None, &[]);
-        let deleted = store
-            .delete_if(&candidate.id, |memory| {
-                if memory.updated_at != candidate.updated_at {
-                    return false; // modified since planning — stale decision
+    // One lock, one batched re-read, one index delete, one chunk delete and
+    // one manifest refresh for the whole sweep. `delete_if` per candidate was
+    // a lock + id-resolution scan + directory scan + two commits + a full
+    // manifest-stats scan EACH — the heaviest per-item primitive in the store.
+    //
+    // The safety contract is unchanged: every candidate is re-read inside the
+    // same lock that deletes it and judged by the identical predicate, so a
+    // memory modified since planning is still skipped, never deleted on a
+    // stale score.
+    let candidate_ids: Vec<String> = plan.candidates.iter().map(|c| c.id.clone()).collect();
+    let by_id: std::collections::HashMap<&str, &GcCandidate> =
+        plan.candidates.iter().map(|c| (c.id.as_str(), c)).collect();
+    let context = ScoringContext::scope_only(None, &[]);
+    let (deleted, not_deleted) = store
+        .delete_batch_if(&candidate_ids, |memory| {
+            let Some(candidate) = by_id.get(memory.id.as_str()) else {
+                return false;
+            };
+            if memory.updated_at != candidate.updated_at {
+                return false; // modified since planning — stale decision
+            }
+            match candidate.reason {
+                GcReason::LowScore => {
+                    // Mirror planning: a memory invalidated since planning
+                    // is protected by retention, not score.
+                    !memory.is_invalidated_at(now)
+                        && composite_score(memory, &context, config, now).final_score
+                            < plan.threshold
                 }
-                match candidate.reason {
-                    GcReason::LowScore => {
-                        // Mirror planning: a memory invalidated since planning
-                        // is protected by retention, not score.
-                        !memory.is_invalidated_at(now)
-                            && composite_score(memory, &context, config, now).final_score
-                                < plan.threshold
-                    }
-                    // Still invalidated and still past retention (a §2.4
-                    // reopening would have bumped updated_at, but re-check
-                    // anyway — deletion is irreversible).
-                    GcReason::InvalidatedRetention => retention_cutoff
-                        .is_some_and(|cutoff| memory.invalidated_at.is_some_and(|t| t < cutoff)),
-                }
-            })
-            .await?;
-        if deleted {
-            removed.push(candidate.id.clone());
-        } else {
-            skipped.push(candidate.id.clone());
-        }
-    }
+                // Still invalidated and still past retention (a §2.4
+                // reopening would have bumped updated_at, but re-check
+                // anyway — deletion is irreversible).
+                GcReason::InvalidatedRetention => retention_cutoff
+                    .is_some_and(|cutoff| memory.invalidated_at.is_some_and(|t| t < cutoff)),
+            }
+        })
+        .await?;
+    removed.extend(deleted);
+    skipped.extend(not_deleted);
 
     let count = removed.len();
     Ok(GcResult {

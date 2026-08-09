@@ -25,10 +25,69 @@ use super::registry::RegistryBackend;
 use super::{manifest, memory_file, paths, project_id, write_lock};
 use crate::config::{load_config, load_config_or_default};
 use chrono::{DateTime, Utc};
-use engram_types::{Memory, MemoryUpdate, Visibility};
+use engram_types::{Memory, MemoryType, MemoryUpdate, Visibility};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::fs as async_fs;
+
+/// How many memory-file reads may be in flight at once.
+///
+/// Read latency is what serializing these costs, so overlapping them is worth
+/// it; the bound is what keeps a 5,000-memory reindex from opening 5,000 file
+/// descriptors at once.
+const PARALLEL_READ_WIDTH: usize = 16;
+
+/// Batch size at or above which [`parse_batch`] goes through rayon.
+///
+/// Parsing is ~20µs per memory, and entering the rayon pool costs a few µs of
+/// its own, so the crossover is low — but the retrieval path calls `get_batch`
+/// with a handful of survivor IDs on every query, and paying pool latency
+/// there to save nothing would be a regression on the most common shape. 32 is
+/// comfortably past the crossover in both directions (`parse/*` in
+/// `benches/parallel_simd.rs` still shows ~2.6x at 100).
+const PARALLEL_PARSE_MIN: usize = 32;
+
+/// Parse a batch of already-read memory files, in parallel above
+/// [`PARALLEL_PARSE_MIN`].
+///
+/// Frontmatter deserialization plus the V2 section split is pure CPU and
+/// perfectly per-file — the shape rayon is for. Measured at ~20ms per 1,000
+/// memories serially and ~6ms across four cores (`benches/parallel_simd.rs`,
+/// `parse/*`).
+///
+/// Unparseable files are dropped with a warning rather than failing the batch,
+/// matching what every caller did inline before.
+///
+/// Order follows the input, so a caller that ordered `ids` still gets its
+/// order back — rayon's `collect` into a `Vec` is order-preserving.
+fn parse_batch(read: Vec<(String, PathBuf, String)>) -> Vec<(String, Memory)> {
+    use rayon::prelude::*;
+
+    fn parse_one(id: String, path: &Path, content: &str) -> Option<(String, Memory)> {
+        match memory_file::parse_memory_file(content) {
+            Ok(memory) => Some((id, memory)),
+            Err(e) => {
+                tracing::warn!(
+                    "skipping {} ({}): failed to parse: {}",
+                    id,
+                    path.display(),
+                    e
+                );
+                None
+            }
+        }
+    }
+
+    if read.len() < PARALLEL_PARSE_MIN {
+        return read
+            .into_iter()
+            .filter_map(|(id, path, content)| parse_one(id, &path, &content))
+            .collect();
+    }
+    read.into_par_iter()
+        .filter_map(|(id, path, content)| parse_one(id, &path, &content))
+        .collect()
+}
 
 /// Main storage interface for EngramDB operations.
 ///
@@ -486,6 +545,115 @@ impl MemoryStore {
         Ok(memory.id.clone())
     }
 
+    /// [`Self::create`] for many memories at once.
+    ///
+    /// Takes the per-project write lock **once**, writes every file, then
+    /// performs a single ID probe, a single chunk-presence probe, a single
+    /// index upsert and a single manifest refresh for the whole set.
+    ///
+    /// The per-memory version costs *four* separate O(store size) operations
+    /// each — the `find_ids_by_prefix` LIKE scan, the `has_chunks` query, the
+    /// `merge_insert` commit, and the full-column scan behind
+    /// `update_manifest_stats` — so creating W memories into a store of M is
+    /// quadratic. Measured: one `create` costs 24 ms into an empty store and
+    /// 582 ms into a 1000-memory one.
+    ///
+    /// Semantics are identical to calling [`Self::create`] in a loop, with two
+    /// deliberate differences that both follow from batching:
+    ///
+    /// - The manifest is refreshed once at the end rather than after each
+    ///   memory. Intermediate states were never observable anyway: the whole
+    ///   loop ran under one lock in the caller's eyes, and the refresh is a
+    ///   derived cache that `update_manifest_stats` recomputes from scratch.
+    /// - The ID pre-existence probe reads the *filesystem* (one scan of both
+    ///   visibility dirs) rather than the index. `create` gates its sweep on
+    ///   an index probe reasoning that every store-managed file has an index
+    ///   row; asking the filesystem answers the same question more directly,
+    ///   and is what the sweep actually acts on. It is taken **before** any
+    ///   file is written, so a memory in this batch cannot see its own new
+    ///   file and mistake it for a pre-existing one.
+    ///
+    /// Ordering within the batch is preserved in the returned ids. Duplicate
+    /// IDs within one call are not deduplicated — the later write wins, the
+    /// same as consecutive `create` calls.
+    pub async fn create_batch(&self, memories: &[Memory]) -> Result<Vec<String>> {
+        if memories.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
+        // Probe BEFORE writing anything: after the writes every ID in the
+        // batch would trivially "exist".
+        let ids: Vec<&str> = memories.iter().map(|m| m.id.as_str()).collect();
+        let preexisting = self.batch_exists(&ids).await?;
+
+        for memory in memories {
+            let memories_dir = self.get_memories_dir(&memory.visibility)?;
+            async_fs::create_dir_all(&memories_dir).await?;
+
+            let filename = memory_file::memory_filename(memory);
+            let file_path = memories_dir.join(&filename);
+            let content = memory_file::write_memory_file(memory)?;
+            atomic_write(&file_path, &content).await?;
+
+            // Same cross-visibility sweep as `create`, on the same condition:
+            // an ID that already had a file may have it under the *other*
+            // visibility, or under a different title slug. New-file-first
+            // ordering (the `atomic_write` above) means a concurrent reader
+            // never sees a spurious NotFound. See `create` for the full
+            // rationale; skipping this for fresh IDs is what keeps bulk
+            // creates off the O(n^2) dirent path.
+            if preexisting.contains(&memory.id) {
+                for dir in [
+                    self.get_memories_dir(&Visibility::Shared)?,
+                    self.get_memories_dir(&Visibility::Personal)?,
+                ] {
+                    for old in find_memory_files(&dir, &memory.id).await? {
+                        if old != file_path {
+                            match async_fs::remove_file(&old).await {
+                                Ok(()) => {}
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                                Err(e) => return Err(e.into()),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // One chunk-presence probe for the whole batch. As in `create`, a
+        // re-create must not reset `has_embedding`: the chunks table is
+        // untouched here, so carry the current presence forward or an
+        // already-embedded memory silently drops out of semantic ranking
+        // (R3). Fresh IDs are absent from this set, giving `false`.
+        let with_chunks = self
+            .lance_index
+            .memory_ids_with_chunks(&ids)
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB memory_ids_with_chunks failed: {}", e))
+            })?;
+
+        let entries: Vec<IndexEntry> = memories
+            .iter()
+            .map(|m| {
+                let mut entry = IndexEntry::from(m);
+                entry.has_embedding = with_chunks.contains(&m.id);
+                entry
+            })
+            .collect();
+
+        self.lance_index
+            .upsert_batch(&entries)
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB upsert_batch failed: {}", e)))?;
+
+        self.update_manifest_stats().await?;
+
+        Ok(memories.iter().map(|m| m.id.clone()).collect())
+    }
+
     /// Get a memory by ID (supports prefix matching).
     pub async fn get(&self, id: &str) -> Result<Memory> {
         // Try shared memories first
@@ -539,25 +707,14 @@ impl MemoryStore {
                 Some((id_str.to_owned(), path.clone()))
             })
             .collect();
-        let results: Vec<Option<(String, Memory)>> = stream::iter(to_read)
+        let read: Vec<(String, PathBuf, String)> = stream::iter(to_read)
             .map(|(id_str, path)| async move {
                 // An indexed memory whose file is unreadable/unparseable is a
                 // data-integrity problem. Drop it (as before, so one bad file
                 // doesn't fail a whole batch) but `warn!` rather than swallow it
                 // silently, matching `reindex_dir`'s handling (finding #15).
                 match async_fs::read_to_string(&path).await {
-                    Ok(content) => match memory_file::parse_memory_file(&content) {
-                        Ok(memory) => Some((id_str, memory)),
-                        Err(e) => {
-                            tracing::warn!(
-                                "get_batch: skipping {} ({}): failed to parse: {}",
-                                id_str,
-                                path.display(),
-                                e
-                            );
-                            None
-                        }
-                    },
+                    Ok(content) => Some((id_str, path, content)),
                     Err(e) => {
                         tracing::warn!(
                             "get_batch: skipping {} ({}): failed to read: {}",
@@ -569,10 +726,14 @@ impl MemoryStore {
                     }
                 }
             })
-            .buffered(16)
-            .collect()
-            .await;
-        Ok(results.into_iter().flatten().collect())
+            .buffered(PARALLEL_READ_WIDTH)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+
+        Ok(parse_batch(read))
     }
 
     /// Check which of the given IDs have `.md` files on disk.
@@ -681,6 +842,85 @@ impl MemoryStore {
         Ok(memory)
     }
 
+    /// [`Self::update_with`] for many memories under **one** lock, one batched
+    /// read, one index upsert and one manifest-stats refresh.
+    ///
+    /// The per-memory version costs a lock, a directory scan, a `has_chunks`
+    /// scan, an index commit and a full manifest-stats scan *each* — measured
+    /// at 28 ms/memory at n=16 rising to 60 ms/memory at n=128, i.e.
+    /// quadratic. Callers that mutate a set of memories (task completion,
+    /// closing superseded validity windows) should use this.
+    ///
+    /// Semantics match `update_with` per entry: each memory is re-read inside
+    /// the lock so `f` sees the latest persisted state, `updated_at` is bumped,
+    /// and a failing closure fails only its own memory. Ids that do not resolve
+    /// are reported rather than aborting the batch.
+    ///
+    /// Returns `(updated_ids, per_id_errors)`.
+    pub async fn update_batch_with<F>(
+        &self,
+        ids: &[String],
+        mut f: F,
+    ) -> Result<(Vec<String>, Vec<(String, String)>)>
+    where
+        F: FnMut(&mut Memory) -> anyhow::Result<()>,
+    {
+        if ids.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let mut current: HashMap<String, Memory> =
+            self.get_batch(&id_refs).await?.into_iter().collect();
+
+        let mut updated: Vec<String> = Vec::new();
+        let mut errors: Vec<(String, String)> = Vec::new();
+        let mut entries: Vec<IndexEntry> = Vec::new();
+
+        for id in ids {
+            let Some(mut memory) = current.remove(id) else {
+                errors.push((id.clone(), "memory not found".to_string()));
+                continue;
+            };
+            let old_visibility = memory.visibility;
+            if let Err(e) = f(&mut memory) {
+                errors.push((id.clone(), format!("{:#}", e)));
+                continue;
+            }
+            memory.mark_updated();
+
+            // File writes stay per-memory: each is an atomic rename to its own
+            // path, and the rename-on-title-change cleanup is inherently
+            // per-file. It is the LanceDB commits and the manifest scan that
+            // were quadratic, not this.
+            if let Err(e) = self
+                .write_updated_file_locked(id, &memory, old_visibility)
+                .await
+            {
+                errors.push((id.clone(), format!("{:#}", e)));
+                continue;
+            }
+
+            let mut entry = IndexEntry::from(&memory);
+            entry.has_embedding = self.lance_index.has_chunks(&memory.id).await.map_err(|e| {
+                StorageError::Validation(format!("LanceDB has_chunks failed: {}", e))
+            })?;
+            entries.push(entry);
+            updated.push(id.clone());
+        }
+
+        if !entries.is_empty() {
+            self.lance_index.upsert_batch(&entries).await.map_err(|e| {
+                StorageError::Validation(format!("LanceDB upsert_batch failed: {}", e))
+            })?;
+            // One refresh for the whole batch instead of one per memory.
+            self.update_manifest_stats().await?;
+        }
+
+        Ok((updated, errors))
+    }
+
     /// Close a memory's validity window (§2.4): set `invalidated_at = now`
     /// and, when the closure was caused by supersession, the ADR-style
     /// reverse link `superseded_by`. The memory is retained on disk and
@@ -712,6 +952,23 @@ impl MemoryStore {
     /// one acquisition must span the entire read-modify-write critical
     /// section.
     async fn write_updated_locked(
+        &self,
+        id: &str,
+        memory: &Memory,
+        old_visibility: Visibility,
+    ) -> Result<()> {
+        self.write_updated_file_locked(id, memory, old_visibility)
+            .await?;
+        self.sync_index_row_locked(memory).await
+    }
+
+    /// The file half of [`Self::write_updated_locked`]: locate the old
+    /// file(s), atomically write the new one, remove any stale path.
+    ///
+    /// Split out so [`Self::update_batch_with`] reuses this exact code rather
+    /// than reimplementing the durability ordering below — the ordering is
+    /// subtle enough that a second copy would be a latent data-loss bug.
+    async fn write_updated_file_locked(
         &self,
         id: &str,
         memory: &Memory,
@@ -751,6 +1008,11 @@ impl MemoryStore {
             }
         }
 
+        Ok(())
+    }
+
+    /// The index half of [`Self::write_updated_locked`].
+    async fn sync_index_row_locked(&self, memory: &Memory) -> Result<()> {
         // Upsert metadata to LanceDB (chunks are managed separately). An update
         // must not reset `has_embedding`: the memory may already have chunks
         // that this update isn't touching. Carry the current chunk-presence
@@ -825,6 +1087,84 @@ impl MemoryStore {
 
         self.delete_locked(&full_id).await?;
         Ok(true)
+    }
+
+    /// [`Self::delete_if`] for many ids under **one** lock, one index delete,
+    /// one chunk delete and one manifest-stats refresh.
+    ///
+    /// The per-id version costs a lock, an id resolution scan, a directory
+    /// scan, two LanceDB commits and a full manifest-stats scan *each* — the
+    /// heaviest per-item primitive in the store, and GC calls it once per
+    /// candidate. On a sweep that is quadratic.
+    ///
+    /// The predicate contract is unchanged: every memory is re-read inside
+    /// the same lock that performs the deletion and judged individually, so a
+    /// concurrently-modified memory is skipped exactly as before. Returns
+    /// `(deleted_ids, skipped_ids)`, both in input order.
+    pub async fn delete_batch_if<F>(
+        &self,
+        ids: &[String],
+        mut predicate: F,
+    ) -> Result<(Vec<String>, Vec<String>)>
+    where
+        F: FnMut(&Memory) -> bool,
+    {
+        if ids.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let current: HashMap<String, Memory> =
+            self.get_batch(&id_refs).await?.into_iter().collect();
+
+        let mut to_delete: Vec<String> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
+        for id in ids {
+            match current.get(id) {
+                // A memory whose file vanished (stale index entry) is a skip,
+                // matching `delete_if`'s NotFound handling.
+                None => skipped.push(id.clone()),
+                Some(memory) if predicate(memory) => to_delete.push(id.clone()),
+                Some(_) => skipped.push(id.clone()),
+            }
+        }
+        if to_delete.is_empty() {
+            return Ok((Vec::new(), skipped));
+        }
+
+        // Files first: the index row is the recovery hint if we crash midway
+        // (a reindex rebuilds the row from the file, so an orphaned row is
+        // repairable while an orphaned file would resurrect on reindex).
+        for id in &to_delete {
+            match self
+                .delete_file_from_dir(id, &paths::memories_dir(&self.project_dir))
+                .await
+            {
+                Ok(()) => {}
+                Err(StorageError::NotFound(_)) => {
+                    self.delete_file_from_dir(id, &paths::personal_memories_dir(&self.project_id)?)
+                        .await?;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        self.lance_index
+            .delete_batch(&to_delete)
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB delete_batch failed: {}", e)))?;
+        self.lance_index
+            .delete_chunks_batch(&to_delete)
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB delete_chunks_batch failed: {}", e))
+            })?;
+
+        // One refresh for the whole sweep instead of one per deletion.
+        self.update_manifest_stats().await?;
+
+        Ok((to_delete, skipped))
     }
 
     /// Shared deletion path for `delete` / `delete_if`. Callers MUST hold the
@@ -971,6 +1311,18 @@ impl MemoryStore {
     }
 
     /// Return the count of memories without loading data.
+    /// Count memories grouped by type in one single-column index scan.
+    ///
+    /// See [`LanceIndex::count_by_type`]. Cheaper than deriving the histogram
+    /// from [`Self::list_summary`], which decodes six columns this does not
+    /// need.
+    pub async fn count_by_type(&self) -> Result<HashMap<MemoryType, usize>> {
+        self.lance_index
+            .count_by_type()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB count_by_type failed: {}", e)))
+    }
+
     pub async fn count(&self) -> Result<usize> {
         self.lance_index
             .count()
@@ -1268,6 +1620,54 @@ impl MemoryStore {
         Ok(true)
     }
 
+    /// [`Self::upsert_chunks_if_current`] for many memories at once.
+    ///
+    /// Takes the per-project write lock **once**, re-reads every memory in a
+    /// single batched directory scan, drops the entries whose `updated_at` no
+    /// longer matches the snapshot (or that vanished), and writes what is left
+    /// in one merge_insert.
+    ///
+    /// The per-memory version costs a lock, a full directory scan and two
+    /// LanceDB commits *each*, so re-embedding a whole store through it is
+    /// quadratic. The freshness guarantee is unchanged: every surviving entry
+    /// was verified inside the same lock that performs the write.
+    ///
+    /// Returns the ids actually written.
+    pub async fn upsert_chunks_batch(
+        &self,
+        entries: Vec<(String, chrono::DateTime<chrono::Utc>, Vec<Vec<f32>>)>,
+    ) -> Result<Vec<String>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
+        let ids: Vec<&str> = entries.iter().map(|(id, _, _)| id.as_str()).collect();
+        let current: HashMap<String, Memory> = self.get_batch(&ids).await?.into_iter().collect();
+
+        let mut fresh: Vec<(String, Vec<Vec<f32>>)> = Vec::with_capacity(entries.len());
+        for (id, snapshot_updated_at, chunks) in entries {
+            match current.get(&id) {
+                Some(mem) if mem.updated_at == snapshot_updated_at => fresh.push((id, chunks)),
+                Some(_) => tracing::debug!(
+                    "skipping stale chunk upsert for {id}: memory changed since snapshot"
+                ),
+                None => tracing::debug!("skipping chunk upsert for deleted memory {id}"),
+            }
+        }
+        if fresh.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.lance_index
+            .upsert_chunks_batch(&fresh)
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB upsert_chunks_batch failed: {}", e))
+            })?;
+        Ok(fresh.into_iter().map(|(id, _)| id).collect())
+    }
+
     /// Delete all embedding chunks for a memory.
     pub async fn delete_chunks(&self, memory_id: &str) -> Result<()> {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
@@ -1294,6 +1694,24 @@ impl MemoryStore {
             .await
             .map_err(|e| {
                 StorageError::Validation(format!("LanceDB chunks_for_memory failed: {}", e))
+            })
+    }
+
+    /// [`Self::export_chunks`] for many memories in one scan, keyed by id.
+    ///
+    /// Mirrors [`Self::get_batch`], and for the same reason: the per-item form
+    /// re-opens the dataset and re-plans the query on every call, so a loop
+    /// over it is O(n²). Ids with no stored vectors are absent from the map.
+    pub async fn export_chunks_batch<S: AsRef<str>>(
+        &self,
+        ids: &[S],
+    ) -> Result<HashMap<String, Vec<Vec<f32>>>> {
+        let refs: Vec<&str> = ids.iter().map(AsRef::as_ref).collect();
+        self.lance_index
+            .chunks_for_memories(&refs)
+            .await
+            .map_err(|e| {
+                StorageError::Validation(format!("LanceDB chunks_for_memories failed: {}", e))
             })
     }
 
@@ -1383,72 +1801,125 @@ impl MemoryStore {
         chunk_ids: &std::collections::HashSet<String>,
         indexed_ids: &mut Vec<String>,
     ) -> Result<()> {
+        use rayon::prelude::*;
+
         let mut by_id: HashMap<String, (PathBuf, std::time::SystemTime, Memory)> = HashMap::new();
 
+        // Phase 1 — enumerate. Cheap, and it has to be sequential anyway.
+        let mut md_paths: Vec<PathBuf> = Vec::new();
         let mut entries = async_fs::read_dir(dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("md") {
-                let content = match async_fs::read_to_string(&path).await {
-                    Ok(c) => c,
+                md_paths.push(path);
+            }
+        }
+
+        // Phase 2 — read + stat, overlapped. Bounded at the same width as
+        // `get_batch` so a large store cannot exhaust the fd table.
+        use futures_util::{stream, StreamExt};
+        let read: Vec<(PathBuf, std::time::SystemTime, String)> = stream::iter(md_paths)
+            .map(|path| async move {
+                match async_fs::read_to_string(&path).await {
+                    Ok(content) => {
+                        let mtime = file_mtime(&path).await;
+                        Some((path, mtime, content))
+                    }
                     Err(e) => {
                         tracing::warn!("Skipping {}: failed to read: {}", path.display(), e);
-                        continue;
-                    }
-                };
-                let memory = match memory_file::parse_memory_file(&content) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        tracing::warn!("Skipping {}: failed to parse: {}", path.display(), e);
-                        continue;
-                    }
-                };
-                let mtime = file_mtime(&path).await;
-                let stale = match by_id.entry(memory.id.clone()) {
-                    std::collections::hash_map::Entry::Vacant(slot) => {
-                        slot.insert((path, mtime, memory));
                         None
                     }
-                    std::collections::hash_map::Entry::Occupied(mut slot) => {
-                        let (ref slot_path, slot_mtime, _) = *slot.get();
-                        if prefers_newer((mtime, &path), (slot_mtime, slot_path)) {
-                            let (old_path, _, _) = slot.insert((path, mtime, memory));
-                            Some(old_path)
-                        } else {
-                            Some(path)
-                        }
+                }
+            })
+            .buffered(PARALLEL_READ_WIDTH)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+
+        // Phase 3 — parse, in parallel. Frontmatter deserialization plus the
+        // V2 section split is pure CPU and pure per-file: measured at ~20ms
+        // per 1,000 memories serially, ~6ms across four cores
+        // (`benches/parallel_simd.rs`, `parse/*`). This is the single largest
+        // component of `reindex`.
+        //
+        // `reindex` already runs under the per-project write lock and is not
+        // latency-critical, so occupying the rayon pool here is free; the
+        // calling tokio worker is blocked for a *shorter* time than before,
+        // since the work used to run inline on it.
+        let parsed: Vec<(PathBuf, std::time::SystemTime, Memory)> = read
+            .into_par_iter()
+            .filter_map(
+                |(path, mtime, content)| match memory_file::parse_memory_file(&content) {
+                    Ok(memory) => Some((path, mtime, memory)),
+                    Err(e) => {
+                        tracing::warn!("Skipping {}: failed to parse: {}", path.display(), e);
+                        None
                     }
-                };
-                if let Some(stale_path) = stale {
+                },
+            )
+            .collect();
+
+        // Phase 4 — resolve duplicate IDs. Sequential by nature (it is a
+        // fold over a shared map) and cheap: no I/O, no parsing.
+        for (path, mtime, memory) in parsed {
+            let stale = match by_id.entry(memory.id.clone()) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert((path, mtime, memory));
+                    None
+                }
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    let (ref slot_path, slot_mtime, _) = *slot.get();
+                    if prefers_newer((mtime, &path), (slot_mtime, slot_path)) {
+                        let (old_path, _, _) = slot.insert((path, mtime, memory));
+                        Some(old_path)
+                    } else {
+                        Some(path)
+                    }
+                }
+            };
+            if let Some(stale_path) = stale {
+                tracing::warn!(
+                    "Removing stale duplicate file {} (same memory ID, older mtime)",
+                    stale_path.display()
+                );
+                if let Err(e) = async_fs::remove_file(&stale_path).await {
                     tracing::warn!(
-                        "Removing stale duplicate file {} (same memory ID, older mtime)",
-                        stale_path.display()
+                        "Failed to remove stale duplicate {}: {}",
+                        stale_path.display(),
+                        e
                     );
-                    if let Err(e) = async_fs::remove_file(&stale_path).await {
-                        tracing::warn!(
-                            "Failed to remove stale duplicate {}: {}",
-                            stale_path.display(),
-                            e
-                        );
-                    }
                 }
             }
         }
 
+        // Phase 5 — build the index rows, in parallel. `IndexEntry::from`
+        // derives the memory's keyword stems (tokenize → stoplist → Snowball
+        // stem → dedup for three fields), the second-largest CPU cost here at
+        // ~16ms per 1,000 memories serially, ~5.7ms across four cores
+        // (`benches/parallel_simd.rs`, `stems/*`).
+        //
         // One batched merge_insert instead of one commit (and one LanceDB
         // dataset version) per memory — reindexing a 1,000-memory store used
         // to perform 1,000 sequential commits that optimize() then compacted.
-        let mut entries_batch = Vec::with_capacity(by_id.len());
-        for (id, (_path, _mtime, memory)) in by_id {
-            let mut index_entry = IndexEntry::from(&memory);
-            index_entry.visibility = visibility;
-            // R3: stamp the embedding flag from the chunk-table snapshot so a
-            // reindex (including the on-open schema migration) leaves
-            // `has_embedding` authoritative.
-            index_entry.has_embedding = chunk_ids.contains(&id);
-            entries_batch.push(index_entry);
-            indexed_ids.push(id);
-        }
+        let owned: Vec<(String, Memory)> = by_id
+            .into_iter()
+            .map(|(id, (_path, _mtime, memory))| (id, memory))
+            .collect();
+        let entries_batch: Vec<IndexEntry> = owned
+            .par_iter()
+            .map(|(id, memory)| {
+                let mut index_entry = IndexEntry::from(memory);
+                index_entry.visibility = visibility;
+                // R3: stamp the embedding flag from the chunk-table snapshot so a
+                // reindex (including the on-open schema migration) leaves
+                // `has_embedding` authoritative.
+                index_entry.has_embedding = chunk_ids.contains(id);
+                index_entry
+            })
+            .collect();
+        indexed_ids.extend(owned.into_iter().map(|(id, _)| id));
         self.lance_index
             .upsert_batch(&entries_batch)
             .await
@@ -1879,6 +2350,180 @@ mod tests {
         memory.id = id.to_string();
         memory.visibility = visibility;
         memory
+    }
+
+    /// The batched chunk write must be observably identical to N single
+    /// writes — same vectors readable back, same `has_embedding` flag.
+    #[tokio::test]
+    async fn upsert_chunks_batch_matches_per_memory_writes() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+
+        let mut mems = Vec::new();
+        for i in 0..5 {
+            let m = create_test_memory(&format!("batch-{i}"), Visibility::Shared);
+            store.create(&m).await.unwrap();
+            mems.push(m);
+        }
+
+        let entries: Vec<_> = mems
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                (
+                    m.id.clone(),
+                    m.updated_at,
+                    vec![vec![i as f32; 384], vec![(i + 100) as f32; 384]],
+                )
+            })
+            .collect();
+        let written = store.upsert_chunks_batch(entries).await.unwrap();
+        assert_eq!(written.len(), 5);
+
+        for (i, m) in mems.iter().enumerate() {
+            let chunks = store.export_chunks(&m.id).await.unwrap();
+            assert_eq!(chunks.len(), 2, "memory {i} should have both chunks");
+            assert_eq!(chunks[0], vec![i as f32; 384], "chunk order must be stable");
+            assert_eq!(chunks[1], vec![(i + 100) as f32; 384]);
+            assert!(
+                has_embedding_flag(&store, &m.id).await,
+                "has_embedding must be set by the batch"
+            );
+        }
+    }
+
+    /// The freshness guard is per-entry: a memory modified since its snapshot
+    /// is skipped while its neighbours in the same batch are still written.
+    #[tokio::test]
+    async fn upsert_chunks_batch_skips_only_the_stale_entry() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+
+        let fresh = create_test_memory("batch-fresh", Visibility::Shared);
+        let stale = create_test_memory("batch-stale", Visibility::Shared);
+        store.create(&fresh).await.unwrap();
+        store.create(&stale).await.unwrap();
+
+        let entries = vec![
+            (fresh.id.clone(), fresh.updated_at, vec![vec![1.0f32; 384]]),
+            // A snapshot timestamp that no longer matches the stored memory.
+            (
+                stale.id.clone(),
+                stale.updated_at - chrono::Duration::seconds(60),
+                vec![vec![2.0f32; 384]],
+            ),
+        ];
+        let written = store.upsert_chunks_batch(entries).await.unwrap();
+
+        assert_eq!(written, vec![fresh.id.clone()]);
+        assert_eq!(store.export_chunks(&fresh.id).await.unwrap().len(), 1);
+        assert!(
+            store.export_chunks(&stale.id).await.unwrap().is_empty(),
+            "the stale entry must not have been written"
+        );
+    }
+
+    /// A batch write must not touch chunks belonging to memories outside it —
+    /// the `when_not_matched_by_source_delete_expr` has to be scoped.
+    #[tokio::test]
+    async fn upsert_chunks_batch_leaves_other_memories_alone() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+
+        let kept = create_test_memory("batch-kept", Visibility::Shared);
+        let rewritten = create_test_memory("batch-rewritten", Visibility::Shared);
+        store.create(&kept).await.unwrap();
+        store.create(&rewritten).await.unwrap();
+        store
+            .upsert_chunks(&kept.id, vec![vec![9.0f32; 384]])
+            .await
+            .unwrap();
+
+        store
+            .upsert_chunks_batch(vec![(
+                rewritten.id.clone(),
+                rewritten.updated_at,
+                vec![vec![3.0f32; 384]],
+            )])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.export_chunks(&kept.id).await.unwrap(),
+            vec![vec![9.0f32; 384]],
+            "a memory outside the batch must keep its chunks"
+        );
+    }
+
+    /// Shrinking a memory's chunk count must delete the surplus rows, matching
+    /// `upsert_chunks`'s stale-row cleanup.
+    #[tokio::test]
+    async fn upsert_chunks_batch_drops_surplus_chunks() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+
+        let m = create_test_memory("batch-shrink", Visibility::Shared);
+        store.create(&m).await.unwrap();
+        store
+            .upsert_chunks_batch(vec![(
+                m.id.clone(),
+                m.updated_at,
+                vec![vec![1.0f32; 384], vec![2.0f32; 384], vec![3.0f32; 384]],
+            )])
+            .await
+            .unwrap();
+        assert_eq!(store.export_chunks(&m.id).await.unwrap().len(), 3);
+
+        store
+            .upsert_chunks_batch(vec![(m.id.clone(), m.updated_at, vec![vec![4.0f32; 384]])])
+            .await
+            .unwrap();
+        assert_eq!(
+            store.export_chunks(&m.id).await.unwrap(),
+            vec![vec![4.0f32; 384]],
+            "surplus chunks from the previous write must be gone"
+        );
+    }
+
+    /// `export_chunks_batch` must agree with N `export_chunks` calls, including
+    /// chunk order and absent ids.
+    #[tokio::test]
+    async fn export_chunks_batch_matches_per_memory_reads() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+
+        let mut ids = Vec::new();
+        for i in 0..6 {
+            let m = create_test_memory(&format!("read-{i}"), Visibility::Shared);
+            store.create(&m).await.unwrap();
+            // Leave memory 4 without vectors.
+            if i != 4 {
+                store
+                    .upsert_chunks(&m.id, vec![vec![i as f32; 384], vec![(i + 50) as f32; 384]])
+                    .await
+                    .unwrap();
+            }
+            ids.push(m.id.clone());
+        }
+
+        let batched = store.export_chunks_batch(&ids).await.unwrap();
+        for id in &ids {
+            let single = store.export_chunks(id).await.unwrap();
+            if single.is_empty() {
+                assert!(
+                    !batched.contains_key(id),
+                    "a memory with no chunks must be absent from the map, not empty"
+                );
+            } else {
+                assert_eq!(batched.get(id), Some(&single), "batched read must match");
+            }
+        }
+        assert_eq!(batched.len(), 5);
     }
 
     async fn has_embedding_flag(store: &MemoryStore, id: &str) -> bool {
@@ -2404,6 +3049,152 @@ mod tests {
         assert!(
             has_embedding_flag(&store, "recreate-1").await,
             "re-create must preserve has_embedding while chunks still exist"
+        );
+    }
+
+    // ===================================================================
+    // `create_batch` must be indistinguishable from `create` in a loop.
+    // Each test below pins one guarantee the batched path could plausibly
+    // drop, since it reimplements the probe/sweep/upsert sequence rather
+    // than calling `create` internally.
+    // ===================================================================
+
+    #[tokio::test]
+    async fn create_batch_writes_every_memory_and_indexes_them() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let batch: Vec<Memory> = (0..25)
+            .map(|i| {
+                create_test_memory(
+                    &format!("0190aaaa-bbbb-7ccc-8ddd-{:012}", i),
+                    Visibility::Shared,
+                )
+            })
+            .collect();
+        let ids = store.create_batch(&batch).await.unwrap();
+
+        assert_eq!(ids.len(), 25, "one id returned per input, in order");
+        assert_eq!(ids, batch.iter().map(|m| m.id.clone()).collect::<Vec<_>>());
+        assert_eq!(store.count().await.unwrap(), 25, "every row indexed");
+        for m in &batch {
+            assert_eq!(store.get(&m.id).await.unwrap().id, m.id);
+        }
+    }
+
+    #[tokio::test]
+    async fn create_batch_empty_is_a_noop() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        assert!(store.create_batch(&[]).await.unwrap().is_empty());
+        assert_eq!(store.count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn create_batch_preserves_has_embedding_for_recreated_memories() {
+        // The batched `has_embedding` carry-forward is a single probe over the
+        // whole set, so a mistake here would silently drop already-embedded
+        // memories out of semantic ranking (R3) — and only for re-creates,
+        // which is exactly the worktree consolidation re-run case.
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let embedded =
+            create_test_memory("0190aaaa-bbbb-7ccc-8ddd-00000000000a", Visibility::Shared);
+        let bare = create_test_memory("0190aaaa-bbbb-7ccc-8ddd-00000000000b", Visibility::Shared);
+        store.create(&embedded).await.unwrap();
+        store
+            .upsert_chunks(&embedded.id, vec![vec![0.4f32; 384]])
+            .await
+            .unwrap();
+        assert!(has_embedding_flag(&store, &embedded.id).await);
+
+        // Re-create BOTH in one batch, without touching chunks.
+        store
+            .create_batch(&[embedded.clone(), bare.clone()])
+            .await
+            .unwrap();
+
+        assert!(
+            has_embedding_flag(&store, &embedded.id).await,
+            "re-create in a batch must preserve has_embedding while chunks exist"
+        );
+        assert!(
+            !has_embedding_flag(&store, &bare.id).await,
+            "a memory with no chunks must not be marked embedded"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_batch_sweeps_old_visibility_file() {
+        // Mirrors `create_same_id_different_visibility_does_not_orphan`. The
+        // batched path takes its pre-existence probe once, before any write,
+        // so this also pins that the probe is not accidentally reading the
+        // batch's own freshly-written files.
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "0190aaaa-bbbb-7ccc-8ddd-00000000000c";
+
+        store
+            .create(&create_test_memory(id, Visibility::Shared))
+            .await
+            .unwrap();
+
+        // Re-create the same id as Personal, in a batch alongside a fresh one.
+        let fresh = create_test_memory("0190aaaa-bbbb-7ccc-8ddd-00000000000d", Visibility::Shared);
+        store
+            .create_batch(&[create_test_memory(id, Visibility::Personal), fresh.clone()])
+            .await
+            .unwrap();
+
+        let shared = paths::memories_dir(&store.project_dir);
+        let personal = paths::personal_memories_dir(&store.project_id).unwrap();
+
+        assert_eq!(
+            count_files(&shared).await,
+            1,
+            "only the fresh Shared memory remains; the old Shared file is swept"
+        );
+        assert_eq!(count_files(&personal).await, 1);
+        assert_eq!(store.count().await.unwrap(), 2);
+        assert_eq!(
+            store.get(id).await.unwrap().visibility,
+            Visibility::Personal
+        );
+    }
+
+    #[tokio::test]
+    async fn create_batch_refreshes_manifest_stats() {
+        // The manifest refresh moved from once-per-memory to once-per-batch;
+        // the end state must still be correct.
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        let batch: Vec<Memory> = (0..7)
+            .map(|i| {
+                create_test_memory(
+                    &format!("0190aaaa-bbbb-7ccc-8ddd-{:012}", 100 + i),
+                    Visibility::Shared,
+                )
+            })
+            .collect();
+        store.create_batch(&batch).await.unwrap();
+
+        let manifest_path = paths::project_dir(&store.project_dir).join("manifest.toml");
+        let manifest = manifest::load_manifest(&manifest_path).await.unwrap();
+        assert_eq!(
+            manifest.stats.memory_count, 7,
+            "manifest stats must reflect the whole batch"
         );
     }
 
