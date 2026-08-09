@@ -143,14 +143,21 @@ impl OutputFormatter {
         }
     }
 
-    /// A formatter that prints nothing.
+    /// A formatter that suppresses stdout, for a command invoked *by* another
+    /// command that owns the output — not a user-facing mode.
     ///
-    /// For a command invoked *by* another command that owns the output — not a
-    /// user-facing mode. Errors are swallowed too, so the caller must surface
-    /// the delegate's `Result` itself.
+    /// The format is deliberately **not** `Json`: delegates branch on
+    /// `is_json()` and emit their own documents with a raw `println!`, which no
+    /// formatter flag can gag. Presenting as a human format routes them through
+    /// the (suppressed) `print_*` methods instead.
+    ///
+    /// Errors and warnings are still printed — they go to stderr, so they never
+    /// threatened the caller's one-document rule, and several delegates report
+    /// failure *only* by printing (`run_init` reports an unavailable model and
+    /// then returns `Ok`).
     pub fn silent() -> Self {
         Self {
-            format: OutputFormat::Json,
+            format: OutputFormat::Plain,
             use_color: false,
             silent: true,
         }
@@ -212,9 +219,6 @@ impl OutputFormatter {
 
     /// Print an error message (with red color in pretty mode).
     pub fn print_error(&self, message: &str) {
-        if self.silent {
-            return;
-        }
         match self.format {
             OutputFormat::Json => {
                 eprintln!("{}", serde_json::json!({ "error": message }));
@@ -448,9 +452,6 @@ impl OutputFormatter {
 
     /// Print a warning message (with yellow color in pretty mode).
     pub fn print_warning(&self, message: &str) {
-        if self.silent {
-            return;
-        }
         match self.format {
             OutputFormat::Json => {
                 eprintln!("{}", serde_json::json!({ "warning": message }));

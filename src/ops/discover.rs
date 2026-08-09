@@ -224,7 +224,10 @@ pub async fn discover_projects_in(
         // this a clone of that project matches nothing — so it is offered for
         // adoption, and its reindex clears the memories table the drifted
         // project is still using.
-        if entry_path.exists() {
+        // `try_exists`, and an error counts as present: `exists()` collapses
+        // EACCES, ESTALE and a hung network mount into "gone", and the failure
+        // mode here is adopting (and reindexing) a live project's store.
+        if entry_path.try_exists().unwrap_or(true) {
             by_id
                 .entry(project_id::compute_project_id(&entry_path))
                 .or_insert(entry);
@@ -383,7 +386,17 @@ fn classify(
     // and detach it from main. A linked worktree's `.git` is a file, so
     // `compute_project_id` finds no `.git/config` and falls back to the path
     // hash, which is why it looks unregistered in the first place.
-    if let Some(main) = project_id::detect_worktree_main(canon) {
+    //
+    // Except when a row already points here: that is a worktree `resolve_
+    // project_root` has linked as a sub-project — the healthy steady state, and
+    // one that cannot be stale (its ID *is* the path hash, so it only moves if
+    // the path does, and then the row would not point here). Reporting it as a
+    // skipped worktree would flag every linked worktree on every scan.
+    let worktree_main = project_id::detect_worktree_main(canon);
+    if let Some(main) = worktree_main {
+        if by_path.contains(canon) {
+            return DiscoveryStatus::Registered;
+        }
         return DiscoveryStatus::Worktree {
             main: canonical(&main),
         };
@@ -406,7 +419,9 @@ fn classify(
     // vanished one is the moved-project case, which re-registration heals.
     if let Some(entry) = by_id.get(project_id) {
         let owner = canonical(Path::new(&entry.project_path));
-        if owner != canon && owner.exists() {
+        // Fail-closed for the same reason as the index above: an owner we
+        // cannot stat is treated as present, so we skip rather than adopt.
+        if owner != canon && owner.try_exists().unwrap_or(true) {
             return DiscoveryStatus::SharedId { owner };
         }
     }
@@ -695,6 +710,26 @@ mod tests {
             &skipped[0].status,
             DiscoveryStatus::Worktree { main: m } if m == &main.canonicalize().unwrap()
         ));
+
+        // Once `resolve_project_root` has linked it as a sub-project there is a
+        // row at this exact path, and the healthy steady state must read as
+        // `Registered` — otherwise every linked worktree on the machine shows
+        // up under "skipped" on every scan, which is noise, not a finding.
+        let mut reg = Registry::default();
+        reg.projects.push(RegistryEntry {
+            project_id: project_id::compute_project_id(&wt),
+            project_path: wt.canonicalize().unwrap().to_string_lossy().to_string(),
+            parent_project_id: Some(project_id::compute_project_id(&main)),
+            subscriptions: vec![],
+        });
+        let report = scan(tmp.path(), &reg).await;
+        assert_eq!(report.skipped().count(), 0);
+        assert_eq!(report.unregistered().count(), 0);
+        assert!(report
+            .projects
+            .iter()
+            .any(|p| p.path == wt.canonicalize().unwrap()
+                && matches!(p.status, DiscoveryStatus::Registered)));
     }
 
     /// State A: one entry, recorded under an ID the path no longer hashes to.

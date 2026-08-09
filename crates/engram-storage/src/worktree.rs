@@ -25,7 +25,11 @@ use tokio::fs as async_fs;
 
 /// Migrate every memory file in `src_dir` into `main_store`, carrying its
 /// embedding vectors over from `wt_store` so search keeps working without
-/// re-embedding. Returns the number of memories migrated.
+/// re-embedding. Returns `(migrated, left_behind)`.
+///
+/// `left_behind` counts files this pass could not read or parse; the caller
+/// must not delete `src_dir` while it is non-zero — skipping a file only
+/// protects it if something else does not then remove the directory it sits in.
 ///
 /// Files that can't be read or parsed are skipped (a single corrupt file
 /// must not abort consolidation). Re-runs are made safe two ways:
@@ -42,12 +46,13 @@ async fn migrate_dir(
     src_dir: &Path,
     wt_store: &MemoryStore,
     main_store: &MemoryStore,
-) -> Result<usize> {
+) -> Result<(usize, usize)> {
     if !src_dir.exists() {
-        return Ok(0);
+        return Ok((0, 0));
     }
 
     let mut migrated = 0;
+    let mut left_behind = 0;
     let mut entries = async_fs::read_dir(src_dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
@@ -55,9 +60,11 @@ async fn migrate_dir(
             continue;
         }
         let Ok(content) = async_fs::read_to_string(&path).await else {
+            left_behind += 1;
             continue;
         };
         let Ok(memory) = memory_file::parse_memory_file(&content) else {
+            left_behind += 1;
             continue;
         };
 
@@ -90,7 +97,7 @@ async fn migrate_dir(
         let _ = async_fs::remove_file(&path).await;
         migrated += 1;
     }
-    Ok(migrated)
+    Ok((migrated, left_behind))
 }
 
 /// Consolidate a linked worktree's stray memory store into the main project.
@@ -114,6 +121,11 @@ pub async fn consolidate_worktree_into_main(worktree_dir: &Path, main_dir: &Path
 
     let wt_engramdb = paths::project_dir(worktree_dir);
     let mut moved = 0;
+    // Files `migrate_dir` could not read or parse. They are still data, and
+    // they are the ONLY copy — so the directory holding them is not ours to
+    // remove, however tidy that would be.
+    let mut stranded_shared = 0;
+    let mut stranded_personal = 0;
 
     // Only migrate when the worktree actually has a stray store AND the main
     // store exists (the caller guarantees the latter before routing to it;
@@ -124,13 +136,23 @@ pub async fn consolidate_worktree_into_main(worktree_dir: &Path, main_dir: &Path
 
         // Shared memories live in the worktree's own .engramdb/; personal
         // ones are keyed by the worktree's project ID in the global data dir.
-        moved += migrate_dir(&paths::memories_dir(worktree_dir), &wt_store, &main_store).await?;
+        let (n, skipped) =
+            migrate_dir(&paths::memories_dir(worktree_dir), &wt_store, &main_store).await?;
+        moved += n;
+        stranded_shared += skipped;
         if let Ok(wt_personal) = paths::personal_memories_dir(&wt_id) {
-            moved += migrate_dir(&wt_personal, &wt_store, &main_store).await?;
+            let (n, skipped) = migrate_dir(&wt_personal, &wt_store, &main_store).await?;
+            moved += n;
+            stranded_personal += skipped;
         }
 
-        // Remove the stray worktree store so future ops route to main.
-        async_fs::remove_dir_all(&wt_engramdb).await?;
+        // Remove the stray worktree store so future ops route to main — but
+        // only once nothing is left in it. Routing does not depend on this
+        // (`detect_worktree_main` decides that), so keeping the directory
+        // costs a re-scan per invocation and nothing else.
+        if stranded_shared == 0 {
+            async_fs::remove_dir_all(&wt_engramdb).await?;
+        }
     }
 
     // Drop the worktree's stale global data dir (its now-migrated personal
@@ -138,7 +160,13 @@ pub async fn consolidate_worktree_into_main(worktree_dir: &Path, main_dir: &Path
     if let Ok(global_data) = paths::global_data_dir() {
         let wt_global = global_data.join("projects").join(&wt_id);
         if wt_global.exists() {
-            let _ = async_fs::remove_dir_all(&wt_global).await;
+            if stranded_personal == 0 {
+                let _ = async_fs::remove_dir_all(&wt_global).await;
+            } else {
+                // Same rule as `ops::projects::prune`: the index is derived and
+                // always reclaimable, personal memories are the only copy.
+                let _ = async_fs::remove_dir_all(wt_global.join("lancedb")).await;
+            }
         }
     }
 
@@ -377,6 +405,44 @@ mod tests {
         assert!(
             (chunks[0][0] - 0.9).abs() < f32::EPSILON,
             "main's newer vectors must not be overwritten by the stale copy"
+        );
+    }
+
+    /// A file `migrate_dir` cannot parse is skipped so it is not destroyed —
+    /// but the stray store was then removed wholesale, which destroyed it
+    /// anyway. Skipping only protects a file if the directory survives too.
+    #[tokio::test]
+    async fn a_corrupt_stray_file_is_not_deleted_with_the_store() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree(tmp.path());
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(&main, &registry).await.unwrap();
+
+        let wt_store = MemoryStore::init(&wt, &registry).await.unwrap();
+        let good = Memory::new(
+            MemoryType::Decision,
+            "Migrates fine",
+            "content",
+            Provenance::human(),
+        );
+        let good_id = wt_store.create(&good).await.unwrap();
+        let corrupt = paths::memories_dir(&wt).join("corrupt.md");
+        async_fs::write(&corrupt, "not frontmatter at all")
+            .await
+            .unwrap();
+
+        let moved = consolidate_worktree_into_main(&wt, &main).await.unwrap();
+        assert_eq!(moved, 1, "the readable memory still migrates");
+        let main_store = MemoryStore::open(&main).await.unwrap();
+        assert!(main_store.get(&good_id).await.is_ok());
+
+        assert!(
+            corrupt.exists(),
+            "an unparseable file is the only copy of its data — it must survive"
+        );
+        assert_eq!(
+            async_fs::read_to_string(&corrupt).await.unwrap(),
+            "not frontmatter at all"
         );
     }
 

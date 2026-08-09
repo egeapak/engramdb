@@ -136,6 +136,16 @@ pub async fn run_projects(
             });
         }
         ProjectsCommand::Prune { force } => {
+            let json_mode = formatter.is_json();
+
+            // JSON is machine-consumed: never prompt. Checked before anything
+            // is inspected so the contract is a property of the flags alone —
+            // a script must not succeed or fail depending on whether this
+            // machine happened to have something to prune.
+            if !force && json_mode {
+                anyhow::bail!("prune requires confirmation; re-run with --force in JSON mode");
+            }
+
             // Preview what would be pruned
             let entries = projects::list_projects(registry).await?;
             let stale: Vec<_> = entries.iter().filter(|e| !e.exists).collect();
@@ -144,17 +154,20 @@ pub async fn run_projects(
             let hierarchy_issues = projects::scan_hierarchy_issues(&reg_snapshot);
             drop(reg_snapshot);
 
-            let json_mode = formatter.is_json();
-
             if stale.is_empty() && orphan_count == 0 && hierarchy_issues.total() == 0 {
                 if json_mode {
-                    // Same object shape as a real prune so scripts parse one form.
+                    // Same object shape as a real prune so scripts parse one
+                    // form — every key the success path emits, at its zero
+                    // value.
                     println!(
                         "{}",
                         serde_json::json!({
                             "stale_removed": 0,
+                            "stale_ids": [],
                             "orphans_removed": 0,
+                            "orphan_ids": [],
                             "hierarchy_cleared": [],
+                            "retained_with_personal": [],
                         })
                     );
                 } else {
@@ -209,11 +222,7 @@ pub async fn run_projects(
             }
 
             if !force {
-                // JSON is machine-consumed: never prompt (mirrors the
-                // doctor --fix interactivity rule).
-                if json_mode {
-                    anyhow::bail!("prune requires confirmation; re-run with --force in JSON mode");
-                }
+                // JSON mode already bailed at the top of this branch.
                 let confirm = prompter.confirm("Remove all?", false).unwrap_or(false);
                 if !confirm {
                     formatter.print_message("Aborted.");
@@ -261,6 +270,7 @@ pub async fn run_projects(
                         "orphans_removed": result.orphans_removed,
                         "orphan_ids": result.orphan_ids,
                         "hierarchy_cleared": result.hierarchy_cleared,
+                        "retained_with_personal": result.retained_with_personal,
                     })
                 );
                 return Ok(());
@@ -282,6 +292,17 @@ pub async fn run_projects(
                 formatter.print_success(&format!(
                     "Cleared broken parent link on {} sub-project(s).",
                     result.hierarchy_cleared.len()
+                ));
+            }
+            if !result.retained_with_personal.is_empty() {
+                // Silence here would read as "everything was reclaimed", and
+                // these directories hold the only copy of their personal
+                // memories — the user needs to know they are still on disk.
+                formatter.print_message(&format!(
+                    "Kept {} data director(ies) holding personal memories (index reclaimed, \
+                     memories left): {}",
+                    result.retained_with_personal.len(),
+                    result.retained_with_personal.join(", ")
                 ));
             }
         }
@@ -404,8 +425,32 @@ mod tests {
         assert_eq!(loaded.projects.len(), 2, "nothing should have been deleted");
     }
 
+    /// The "requires --force in JSON mode" contract is a property of the flags
+    /// alone. It used to be checked only on the path that had something to
+    /// prune, so the same invocation succeeded or failed depending on the state
+    /// of the machine it ran on — the one thing a scripted caller cannot test
+    /// for in advance.
     #[tokio::test]
-    async fn test_projects_prune_json_nothing_to_prune_is_ok() {
+    async fn test_projects_prune_json_without_force_errors_even_with_nothing_to_prune() {
+        let registry = InMemoryRegistry::new();
+        let formatter = OutputFormatter::new(None, true, true);
+        let prompter = MockPrompter::new(vec![]);
+
+        let err = run_projects(
+            Path::new("."),
+            &registry,
+            Some(ProjectsCommand::Prune { force: false }),
+            &formatter,
+            &prompter,
+            ProjectListGrouping::default(),
+        )
+        .await
+        .expect_err("JSON mode must refuse to prompt regardless of state");
+        assert!(format!("{err}").contains("--force"));
+    }
+
+    #[tokio::test]
+    async fn test_projects_prune_json_with_force_and_nothing_to_prune_is_ok() {
         let registry = InMemoryRegistry::new();
         let formatter = OutputFormatter::new(None, true, true);
         let prompter = MockPrompter::new(vec![]);
@@ -413,7 +458,7 @@ mod tests {
         let result = run_projects(
             Path::new("."),
             &registry,
-            Some(ProjectsCommand::Prune { force: false }),
+            Some(ProjectsCommand::Prune { force: true }),
             &formatter,
             &prompter,
             ProjectListGrouping::default(),

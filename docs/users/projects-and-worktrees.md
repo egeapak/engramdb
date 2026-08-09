@@ -84,8 +84,9 @@ engramdb projects repair
 
 Do **not** run `engramdb init` to "re-register" — that adds a *second* registry
 entry for the same path, with no subscriptions and no parent link. `repair`
-migrates the existing entry instead, so both survive, and carries the personal
-memories across before removing the old data directory.
+migrates the existing entry instead, so both survive, and *copies* the personal
+memories across. The old data directory is left in place — a sibling clone of
+the same remote may share it, and the registry cannot see one.
 
 ## Registry, prune, link, unlink
 

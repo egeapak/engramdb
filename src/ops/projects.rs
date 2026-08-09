@@ -98,11 +98,18 @@ pub async fn get_project_info(dir: &Path) -> Result<ProjectInfo> {
 /// entry — and so `doctor` can never report stale entries that `prune` then
 /// declines to remove.
 pub(crate) fn registry_entry_alive(e: &RegistryEntry) -> bool {
-    if e.parent_project_id.is_some() {
-        Path::new(&e.project_path).exists()
+    // `try_exists`, with an error counting as ALIVE. `exists()` collapses
+    // EACCES, ESTALE and a hung network mount into "gone", which would drop the
+    // row and hand its data directory to the sweep while the checkout is merely
+    // unreachable. This runs before `protected_project_ids`, so a fail-open
+    // answer here makes that guard moot.
+    let path = Path::new(&e.project_path);
+    let target = if e.parent_project_id.is_some() {
+        path.to_path_buf()
     } else {
-        Path::new(&e.project_path).join(".engramdb").exists()
-    }
+        path.join(".engramdb")
+    };
+    target.try_exists().unwrap_or(true)
 }
 
 /// List all registered projects.
@@ -265,6 +272,10 @@ pub struct PruneResult {
     /// Project IDs whose broken `parent_project_id` link was cleared
     /// (dangling, stale-parent, or cycle-participating sub-projects).
     pub hierarchy_cleared: Vec<String>,
+    /// Data directories kept because they still hold personal memories — the
+    /// only copy of those. Their derived index was reclaimed. Reported so the
+    /// retained disk usage is visible rather than mysterious.
+    pub retained_with_personal: Vec<String>,
 }
 
 /// Classification of a sub-project's parent chain.
@@ -408,6 +419,46 @@ pub async fn count_orphan_dirs(registry: &dyn RegistryBackend) -> Result<usize> 
     Ok(count)
 }
 
+/// Reclaim a project data directory without ever destroying an only copy.
+///
+/// `<data>/projects/<id>/` holds derived data (`lancedb/`, `write.lock`) and
+/// **authoritative** data (`personal/memories/*.md`, which exists nowhere
+/// else). Deciding whether a directory is expendable from the registry alone
+/// is not possible: two clones of one git remote share an ID, and
+/// `RegistryBackend::update` keeps a single row per ID, so the *other* clone is
+/// structurally invisible. Removing a checkout from disk therefore looked like
+/// "this ID is dead" while a healthy sibling was still using it — reproduced,
+/// and destroying the sibling's personal memories unattended via
+/// `auto_maintain`.
+///
+/// So the rule is structural rather than provenance-based: reclaim the derived
+/// data always, keep the directory whenever it still holds personal memories.
+/// A retained directory costs disk; a deleted one costs the memories.
+async fn reclaim_data_dir(dir: &Path) -> bool {
+    let personal = dir.join("personal").join("memories");
+    let has_personal = match async_fs::read_dir(&personal).await {
+        Ok(mut entries) => {
+            let mut found = false;
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if entry.path().extension().and_then(|s| s.to_str()) == Some("md") {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        }
+        // Unreadable: assume it holds something rather than delete blind.
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    };
+
+    if has_personal {
+        // Derived only. The index rebuilds from the `.md` files on next open.
+        let _ = async_fs::remove_dir_all(dir.join("lancedb")).await;
+        return false;
+    }
+    async_fs::remove_dir_all(dir).await.is_ok()
+}
+
 /// Phase indicator for prune progress callbacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrunePhase {
@@ -427,9 +478,6 @@ pub async fn prune_stale_projects(
     registry: &dyn RegistryBackend,
     on_progress: impl Fn(PrunePhase) + Send + Sync,
 ) -> Result<PruneResult> {
-    use rayon::prelude::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     // --- Stale registry entries ---
     //
     // The whole load → partition → save cycle runs under the backend's
@@ -456,17 +504,17 @@ pub async fn prune_stale_projects(
     // index, vectors and personal memories with it — no drift required. The
     // set is computed from the post-removal registry for exactly that reason.
     let survivors = crate::storage::protected_project_ids(&reg);
-    let stale_dirs: Vec<_> = stale
-        .iter()
-        .filter(|e| !survivors.contains(&e.project_id))
-        .map(|e| projects_dir.join(&e.project_id))
-        .filter(|p| p.exists())
-        .collect();
-
-    stale_dirs.par_iter().for_each(|dir| {
-        let _ = std::fs::remove_dir_all(dir);
+    let mut retained_with_personal: Vec<String> = Vec::new();
+    for entry in stale.iter().filter(|e| !survivors.contains(&e.project_id)) {
+        let dir = projects_dir.join(&entry.project_id);
+        if !dir.exists() {
+            continue;
+        }
+        if !reclaim_data_dir(&dir).await {
+            retained_with_personal.push(entry.project_id.clone());
+        }
         on_progress(PrunePhase::Stale);
-    });
+    }
 
     // --- Orphan data directories ---
     //
@@ -495,15 +543,20 @@ pub async fn prune_stale_projects(
         }
     }
 
-    let orphan_errors = AtomicUsize::new(0);
-    orphan_paths.par_iter().for_each(|path| {
-        if std::fs::remove_dir_all(path).is_err() {
-            orphan_errors.fetch_add(1, Ordering::Relaxed);
+    let mut orphans_removed = 0;
+    let mut kept_orphan_ids: Vec<String> = Vec::new();
+    for (id, path) in orphan_ids.iter().zip(orphan_paths.iter()) {
+        if reclaim_data_dir(path).await {
+            orphans_removed += 1;
+        } else {
+            // Held back: still the only copy of its personal memories.
+            retained_with_personal.push(id.clone());
+            kept_orphan_ids.push(id.clone());
         }
         on_progress(PrunePhase::Orphan);
-    });
-
-    let orphans_removed = orphan_ids.len() - orphan_errors.load(Ordering::Relaxed);
+    }
+    // A directory that was kept is not an orphan that was removed.
+    orphan_ids.retain(|id| !kept_orphan_ids.contains(id));
 
     // --- Hierarchy repair ---
     //
@@ -539,6 +592,7 @@ pub async fn prune_stale_projects(
         orphans_removed,
         orphan_ids,
         hierarchy_cleared,
+        retained_with_personal,
     })
 }
 
@@ -903,45 +957,79 @@ mod tests {
         );
     }
 
-    /// Removing a checkout from disk must not delete the data directory a
-    /// *surviving* clone of the same remote is still using. Two clones share
-    /// one ID by design, and the stale branch deletes by recorded ID — the one
-    /// deletion site the first pass of this guard did not cover.
+    /// Two clones of one git remote share a project ID, and the registry keeps
+    /// exactly ONE row per ID (`update_inner_impl` declines to add a second),
+    /// so the sibling is structurally invisible. Removing the registered
+    /// checkout from disk therefore looks like "this ID is dead" while a
+    /// healthy clone is still using it.
+    ///
+    /// Reproduced against the real binary before this guard: `rm -rf` one
+    /// clone, run any command in an unrelated project, and the surviving
+    /// clone's only copy of its personal memories was gone. No registry-derived
+    /// predicate can see the sibling — hence the structural rule that personal
+    /// memories are never deleted by prune.
     #[tokio::test]
-    async fn prune_keeps_a_shared_data_dir_when_one_clone_goes_away() {
+    async fn prune_never_deletes_personal_memories_of_an_invisible_sibling() {
         let registry = InMemoryRegistry::new();
-        let live = TempDir::new().unwrap();
+        let gone = TempDir::new().unwrap();
         let shared_id = "shared0000000000";
 
-        // Two rows, one ID: the live checkout and one whose path is gone.
+        // Exactly one row, as the registry actually stores it, and its path is
+        // about to vanish.
         let mut reg = registry.load().await.unwrap();
-        for path in [
-            live.path().to_string_lossy().to_string(),
-            "/nonexistent/removed-clone".to_string(),
-        ] {
-            reg.projects.push(RegistryEntry {
-                project_id: shared_id.to_string(),
-                project_path: path,
-                parent_project_id: None,
-                subscriptions: vec![],
-            });
-        }
+        reg.projects.push(RegistryEntry {
+            project_id: shared_id.to_string(),
+            project_path: gone
+                .path()
+                .join("removed-clone")
+                .to_string_lossy()
+                .to_string(),
+            parent_project_id: None,
+            subscriptions: vec![],
+        });
         registry.save(&reg).await.unwrap();
-        async_fs::create_dir_all(live.path().join(".engramdb"))
-            .await
-            .unwrap();
 
+        // The sibling clone's personal memory — its only copy.
         let personal = paths::personal_memories_dir(shared_id).unwrap();
         async_fs::create_dir_all(&personal).await.unwrap();
-        let file = personal.join("shared-only-copy.md");
+        let file = personal.join("sibling-only-copy.md");
         async_fs::write(&file, "---\n---\n").await.unwrap();
+        // Derived data that SHOULD be reclaimed.
+        let lance = paths::lancedb_dir(shared_id).unwrap();
+        async_fs::create_dir_all(&lance).await.unwrap();
 
-        prune_stale_projects(&registry, |_| {}).await.unwrap();
+        let result = prune_stale_projects(&registry, |_| {}).await.unwrap();
 
         assert!(
             file.exists(),
-            "removing one clone destroyed the surviving clone's personal memories"
+            "prune destroyed the only copy of an invisible sibling's personal memories"
         );
+        assert!(!lance.exists(), "derived index should still be reclaimed");
+        assert!(
+            result
+                .retained_with_personal
+                .contains(&shared_id.to_string()),
+            "a directory kept for its personal memories must be reported: {result:?}"
+        );
+    }
+
+    /// The other half of the invariant: a data directory with nothing
+    /// authoritative left in it IS reclaimed, so the guard can't degenerate
+    /// into "prune never deletes anything".
+    #[tokio::test]
+    async fn prune_still_reclaims_a_directory_with_no_personal_memories() {
+        let registry = InMemoryRegistry::new();
+        let projects_dir = paths::global_data_dir().unwrap().join("projects");
+        let dead = projects_dir.join("deadbeef00000000");
+        async_fs::create_dir_all(dead.join("lancedb"))
+            .await
+            .unwrap();
+
+        let result = prune_stale_projects(&registry, |_| {}).await.unwrap();
+
+        assert!(!dead.exists(), "a directory with no only-copy data must go");
+        assert!(result.orphan_ids.contains(&"deadbeef00000000".to_string()));
+        assert_eq!(result.orphans_removed, 1);
     }
 
     /// The live ID must be derived with `compute_project_id` — which prefers

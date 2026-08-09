@@ -108,6 +108,7 @@ pub async fn run_repair(
                 "repaired": true,
                 "path": report.path.display().to_string(),
                 "old_id": report.old_id,
+                "old_ids": report.old_ids,
                 "new_id": report.new_id,
                 "personal_migrated": report.personal_migrated,
                 "personal_superseded": report.personal_superseded,
@@ -115,6 +116,10 @@ pub async fn run_repair(
                 "removed_duplicate_entry": report.removed_duplicate_entry,
                 "reparented_children": report.reparented_children,
                 "old_data_dir": report.old_data_dir.display().to_string(),
+                "old_data_dirs": report.old_data_dirs
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>(),
                 "no_index": no_index,
                 "indexed": indexed,
                 "embedded": embedded,
@@ -128,7 +133,7 @@ pub async fn run_repair(
     formatter.print_success(&format!(
         "Re-keyed {} from {} to {}.",
         report.path.display(),
-        report.old_id,
+        report.old_ids.join(", "),
         report.new_id
     ));
     if report.personal_migrated > 0 {
@@ -139,7 +144,8 @@ pub async fn run_repair(
     }
     if report.personal_superseded > 0 {
         formatter.print_message(&format!(
-            "  {} personal memory(ies) were already present in a newer form and were dropped.",
+            "  {} personal memory(ies) were skipped — the live directory already held a newer \
+             copy. Nothing was deleted; the older copies stay where they are.",
             report.personal_superseded
         ));
     }
@@ -165,17 +171,17 @@ pub async fn run_repair(
     }
     if report.personal_skipped > 0 {
         formatter.print_warning(&format!(
-            "{} personal file(s) could not be read or parsed and were left in the old data \
-             directory — inspect {} before removing it.",
+            "{} personal file(s) could not be read or parsed on one side or the other and were \
+             left alone — inspect {} before removing anything.",
             report.personal_skipped,
-            report.old_data_dir.display()
+            join_dirs(&report.old_data_dirs)
         ));
     }
     formatter.print_message(&format!(
         "  The old data directory is left in place ({}). It may be shared with another clone of \
-         the same remote, so `engramdb projects prune` reclaims it only once nothing answers to \
-         that ID.",
-        report.old_data_dir.display()
+         the same remote, so nothing here deletes it; `engramdb projects prune` reclaims only the \
+         rebuildable index inside it and always keeps personal memories.",
+        join_dirs(&report.old_data_dirs)
     ));
     if let Some(err) = &index_error {
         formatter.print_error(&format!(
@@ -209,12 +215,25 @@ fn fail_if_index_failed(index_error: Option<String>) -> Result<()> {
     }
 }
 
+/// Comma-separated data directories — a project that drifted twice has more
+/// than one, and naming only the first sends the user to the wrong place.
+fn join_dirs(dirs: &[std::path::PathBuf]) -> String {
+    dirs.iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The blast radius, before anything is touched.
+///
+/// The counts are a preview taken before the locks are held, so they can differ
+/// from the outcome if the files change underneath — the outcome is reported
+/// separately once the repair has run.
 fn print_plan(formatter: &OutputFormatter, plan: &RepairReport) {
     formatter.print_warning(&format!(
         "{} is registered under project ID {} but now hashes to {}.",
         plan.path.display(),
-        plan.old_id,
+        plan.old_ids.join(", "),
         plan.new_id
     ));
     formatter.print_message("This will:");
@@ -223,9 +242,14 @@ fn print_plan(formatter: &OutputFormatter, plan: &RepairReport) {
     );
     if plan.personal_superseded > 0 {
         formatter.print_message(&format!(
-            "  - skip {} personal memory(ies) already superseded in the live directory{}",
-            plan.personal_superseded,
-            String::new()
+            "  - skip {} personal memory(ies) already superseded in the live directory",
+            plan.personal_superseded
+        ));
+    }
+    if plan.personal_skipped > 0 {
+        formatter.print_message(&format!(
+            "  - leave {} unreadable or unparseable personal file(s) alone",
+            plan.personal_skipped
         ));
     }
     if plan.removed_duplicate_entry {
@@ -238,9 +262,14 @@ fn print_plan(formatter: &OutputFormatter, plan: &RepairReport) {
         ));
     }
     formatter.print_message(&format!(
-        "  - copy {} personal memory file(s) and LEAVE the old data directory ({}) in place",
+        "  - copy {} personal memory file(s) and LEAVE the old data director{} ({}) in place",
         plan.personal_migrated,
-        plan.old_data_dir.display()
+        if plan.old_data_dirs.len() == 1 {
+            "y"
+        } else {
+            "ies"
+        },
+        join_dirs(&plan.old_data_dirs)
     ));
 }
 

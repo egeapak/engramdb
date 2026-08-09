@@ -135,7 +135,11 @@ the current directory isn't an EngramDB project, the report collapses to just th
 the embedding model, prune stale projects, re-key a project whose ID drifted,
 or initialize the project) — it
 prompts on a terminal and applies non-interactively with `--fix --yes`. A run
-that applies fixes re-checks afterwards and exits on the post-fix state.
+that applies fixes re-checks afterwards and exits on the post-fix state; a run
+where nothing was fixable still exits on the checks themselves, so `--fix` can
+never turn a failing check into a zero exit status. Flagging memories for
+review (the epistemic checks) is asked for separately, since it is the one part
+of `--fix` that edits memories.
 `engramdb doctor validate` loads each downloaded model and runs a test inference
 to confirm it actually works.
 

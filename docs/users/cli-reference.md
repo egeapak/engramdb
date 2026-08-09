@@ -337,6 +337,20 @@ parent (marked `↳`). `--group` sets the grouping for one run, overriding the
 Worktree nesting and path sorting apply in every mode. `--json` output is
 unaffected by `--group`: it stays a flat array carrying `parent_project_id`.
 
+`projects prune` drops registry entries whose project directory is gone and
+reclaims data directories no registration answers to. It never deletes personal
+memories: a data directory holding `personal/memories/*.md` keeps them, and only
+the rebuildable `lancedb/` index inside it is reclaimed. Those directories are
+listed as `retained_with_personal` (in JSON and in the human summary) so a clean
+run is not mistaken for "everything was reclaimed". The same rule applies to the
+unattended maintenance pass, which runs prune for you.
+
+`--force` is required in JSON mode whether or not there is anything to prune —
+JSON is machine-consumed and never prompts, so the contract depends on the flags
+alone. The one emitted object carries `stale_removed`, `stale_ids[]`,
+`orphans_removed`, `orphan_ids[]`, `hierarchy_cleared[]`, and
+`retained_with_personal[]`, at their zero values when nothing was pruned.
+
 ### `projects discover`
 
 Walks a directory tree for `.engramdb/` projects the registry doesn't know
@@ -363,7 +377,7 @@ bar over the batch.
 
 Directories that can't hold a project root are never descended into
 (`node_modules`, `target`, `.git`, `vendor`, `dist`, `build`, virtualenvs, …),
-and engramdb's own global/group stores are never offered. Two kinds of project
+and engramdb's own global/group stores are never offered. Three kinds of project
 are reported but never registered — as a warning in human output, and in the
 `skipped[]` array in JSON:
 
@@ -372,7 +386,8 @@ are reported but never registered — as a warning in human output, and in the
   clones of one git remote hash to the same ID and would share a single index.
 - **Linked git worktree** — worktrees are sub-projects, not roots: engramdb
   routes their memory operations to the main checkout automatically. Adopting
-  one would create a second owner of the same memory files.
+  one would create a second owner of the same memory files. A worktree already
+  linked as a sub-project (the steady state) reports as registered, not here.
 - **Stale project ID** — the path *is* registered, but under an ID it no
   longer hashes to. Adopting would leave two registry entries for one path; the
   fix is `projects repair` (below).
@@ -423,26 +438,36 @@ engramdb projects repair --no-index # re-key only; run `engramdb reindex` later
 It migrates the registry entry in place — preserving group subscriptions and
 worktree parent links, which a re-registration would silently drop — carries
 the personal memories over to the live data directory, re-points any
-sub-projects at the new ID, removes the old data directory once its contents
-have moved, and rebuilds the index. Running it on a consistent project is a
-no-op, so it is safe to re-run.
+sub-projects at the new ID, and rebuilds the index. Running it on a consistent
+project is a no-op, so it is safe to re-run.
+
+A project that drifted more than once (`init` → add a remote → change the
+remote) has several stale IDs. Every one of them is collapsed into a single
+entry, and every one's personal memories are carried across — the directory you
+were writing into just before the last drift is not the first stale ID.
 
 It **never deletes anything**: personal memories are *copied* to the live data
 directory and the old one is left in place. An unregistered sibling clone of the
 same remote shares that directory and is structurally invisible to the registry,
-so no check can prove it is yours alone — reclaiming it is `projects prune`'s
-job, which has the guard repair does not. Files that can't be read or parsed are
-left alone and counted in `personal_skipped`.
+so no check can prove it is yours alone. `projects prune` later reclaims the
+rebuildable index inside it, but never the personal memories. Files that can't
+be read or parsed — on either side — are left alone and counted in
+`personal_skipped`; that includes a live file carrying the same memory ID that
+this binary can't parse, which is never replaced by an older copy.
 
-It refuses outright when another **registered** checkout answers to either the
-old or the new ID, and when run inside a linked git worktree (worktrees route to
-the main checkout and are never re-keyed).
+It refuses outright when a registry row at **another path** already holds the
+live ID (two rows sharing one ID resolve to whichever comes first, so the repair
+would report success while the symptom persisted), and when run inside a linked
+git worktree (worktrees route to the main checkout and are never re-keyed). A
+sibling clone still answering to the *old* ID is fine: that is the normal state
+for two clones of one remote, and nothing here writes to or deletes the shared
+directory.
 
 JSON mode emits one object: `{"repaired": false, "reason": "nothing_to_repair"}`
-when the registration is consistent, otherwise `{repaired, path, old_id, new_id,
-personal_migrated, personal_superseded, personal_skipped,
-removed_duplicate_entry, reparented_children[], old_data_dir, no_index, indexed,
-embedded, warnings[], index_error}`. `--force` is required in JSON mode
+when the registration is consistent, otherwise `{repaired, path, old_id,
+old_ids[], new_id, personal_migrated, personal_superseded, personal_skipped,
+removed_duplicate_entry, reparented_children[], old_data_dir, old_data_dirs[],
+no_index, indexed, embedded, warnings[], index_error}`. `--force` is required in JSON mode
 regardless of whether this project is drifted. If the re-key succeeds but the
 index rebuild fails, the document is still emitted (with `index_error` set) and
 the command then exits non-zero — retrying `repair` would report nothing to do,

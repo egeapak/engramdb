@@ -30,8 +30,16 @@ use tokio::fs as async_fs;
 pub struct RepairReport {
     /// The project directory that was re-keyed.
     pub path: PathBuf,
-    /// The ID the registry recorded.
+    /// The ID the registry recorded. When a project drifted more than once
+    /// (`init` → add a remote → change the remote) there is more than one; this
+    /// is the first, kept for display. [`RepairReport::old_ids`] is the full set
+    /// and is what the migration actually walks.
     pub old_id: String,
+    /// Every stale ID recorded for this path, in registry order. All of them
+    /// are collapsed, and every one's personal memories are carried across —
+    /// migrating only the first strands the directory the user was actually
+    /// writing into before the last drift.
+    pub old_ids: Vec<String>,
     /// The ID the directory hashes to today.
     pub new_id: String,
     /// Personal memory files copied from the old data dir to the live one.
@@ -39,8 +47,10 @@ pub struct RepairReport {
     /// Personal files not copied because the live dir already held a newer
     /// copy of the same memory.
     pub personal_superseded: usize,
-    /// Files under the old personal dir that could not be read or parsed and
-    /// were therefore left untouched. Non-zero means the old directory still
+    /// Personal files left untouched because something on *either* side could
+    /// not be read or parsed: an unreadable source, or a live file carrying the
+    /// same memory ID that this binary cannot parse (replacing that one would
+    /// destroy data of unknown vintage). Non-zero means an old directory still
     /// holds data nothing else has.
     pub personal_skipped: usize,
     /// A duplicate registry row for this path was dropped (the state produced
@@ -54,8 +64,11 @@ pub struct RepairReport {
     /// and is structurally invisible to the registry (`update_inner_impl`
     /// keeps one row per ID and declines to add a second), so no check here
     /// can prove the directory is ours alone. Reclaiming it is `prune`'s job,
-    /// which has the `protected_project_ids` guard this does not.
+    /// and prune only ever removes the *derived* half (`lancedb/`) — a
+    /// directory holding personal memories is retained whole.
     pub old_data_dir: PathBuf,
+    /// One entry per [`RepairReport::old_ids`] element, same order.
+    pub old_data_dirs: Vec<PathBuf>,
 }
 
 /// Inspect `dir` and describe the repair it needs, without changing anything.
@@ -69,12 +82,19 @@ pub async fn plan_repair(
     dir: &Path,
 ) -> Result<Option<RepairReport>> {
     let reg = registry.load().await?;
-    plan_from(&reg, dir).await
+    Ok(plan_from(&reg, dir).await?.map(|(report, _)| report))
 }
 
 /// [`plan_repair`] against an already-loaded snapshot, so the execute path can
 /// re-derive the plan inside its critical section from the same rules.
-async fn plan_from(reg: &crate::storage::Registry, dir: &Path) -> Result<Option<RepairReport>> {
+///
+/// Returns the stale rows alongside the report: the caller rewrites exactly
+/// those, and re-deriving them from a second filter pass would leave the two
+/// able to disagree (and an empty-vector index to panic on).
+async fn plan_from(
+    reg: &crate::storage::Registry,
+    dir: &Path,
+) -> Result<Option<(RepairReport, Vec<RegistryEntry>)>> {
     // A linked worktree is not an independent project: its operations route to
     // the main checkout and it is registered as a sub-project. Re-keying one
     // would point its row at the worktree's own path hash and detach it.
@@ -87,30 +107,43 @@ async fn plan_from(reg: &crate::storage::Registry, dir: &Path) -> Result<Option<
         );
     }
 
+    let canon = canon_of(dir);
     let new_id = project_id::compute_project_id(dir);
-    let stale = stale_registrations_for(reg, dir, &new_id);
+    let stale: Vec<RegistryEntry> = stale_registrations_for(reg, dir, &new_id)
+        .into_iter()
+        .cloned()
+        .collect();
     if stale.is_empty() {
         return Ok(None);
     }
-    let old_id = stale[0].project_id.clone();
+    let old_ids: Vec<String> = stale.iter().map(|e| e.project_id.clone()).collect();
+    let old_id = old_ids[0].clone();
 
-    // Another registered checkout answering to either ID means the data dirs
-    // are shared and this repair would move or graft data it does not own.
-    // Checked against BOTH ids: the new-ID case is the one where a sibling's
-    // row would absorb our subscriptions and our own row would be dropped.
-    for id in [&old_id, &new_id] {
-        if let Some(other) = other_checkout_sharing_id(reg, id, dir) {
-            bail!(
-                "project ID {} is also registered to the checkout at {}, which shares that data \
-                 directory — refusing to re-key. Remove or re-register that checkout first.",
-                id,
-                other.display()
-            );
-        }
+    // A row at ANOTHER path already holding the live ID is the one state that
+    // makes the re-key destructive: the `live_row_here` branch would fold our
+    // membership into *their* row, and the else branch would leave two rows
+    // sharing one ID — `subscriptions_of` returns the first, so the drifted
+    // project's groups still would not fan in and repair would report success.
+    //
+    // Deliberately NOT liveness-filtered. A dead sibling row that prune has not
+    // collected yet produces the duplicate-ID registry just as surely as a live
+    // one, and `exists()` also answers "gone" for an unreadable or unmounted
+    // path. The old ID is *not* checked: two clones of one remote legitimately
+    // share it, nothing here writes to or deletes the old directory, and
+    // refusing there would permanently block a repair that needs nothing from
+    // the sibling.
+    if let Some(other) = other_checkout_with_id(reg, &new_id, &canon) {
+        bail!(
+            "the live project ID {} is already registered to the checkout at {} — refusing to \
+             re-key, because two registry rows sharing one ID resolve to whichever comes first. \
+             Re-register or `engramdb projects prune` that checkout first.",
+            new_id,
+            other.display()
+        );
     }
 
-    let (migrate, supersede, skipped) = survey_personal(&old_id, &new_id).await;
-    Ok(Some(RepairReport {
+    let (migrate, supersede, skipped) = survey_personal(&old_ids, &new_id).await;
+    let report = RepairReport {
         path: dir.to_path_buf(),
         personal_migrated: migrate,
         personal_superseded: supersede,
@@ -118,12 +151,17 @@ async fn plan_from(reg: &crate::storage::Registry, dir: &Path) -> Result<Option<
         removed_duplicate_entry: reg
             .projects
             .iter()
-            .any(|e| e.project_id == new_id && same_path(e, dir)),
-        reparented_children: children_of(reg, &old_id),
+            .any(|e| e.project_id == new_id && same_path(e, &canon)),
+        // Children of EVERY stale ID: the execute path re-points all of them,
+        // and this is the one display whose stated purpose is the blast radius.
+        reparented_children: children_of(reg, &old_ids),
         old_data_dir: data_dir_for(&old_id),
+        old_data_dirs: old_ids.iter().map(|id| data_dir_for(id)).collect(),
         old_id,
+        old_ids,
         new_id,
-    }))
+    };
+    Ok(Some((report, stale)))
 }
 
 /// Re-key `dir`'s registration to the ID it hashes to today, carrying its
@@ -139,39 +177,55 @@ pub async fn repair_project_id(
     registry: &dyn RegistryBackend,
     dir: &Path,
 ) -> Result<Option<RepairReport>> {
-    let Some(plan) = plan_repair(registry, dir).await? else {
+    let Some(pre) = plan_repair(registry, dir).await? else {
         return Ok(None);
     };
 
-    // Locks are per-ID and this touches two. `flock` here is an unbounded
-    // block with no deadlock detection, so acquire in a deterministic order:
-    // two processes repairing in opposite directions would otherwise deadlock.
-    // Both guards are dropped before the caller reindexes —
-    // `MemoryStore::reindex` re-acquires, and a second acquire in one process
-    // blocks forever.
-    let (first, second) = if plan.old_id <= plan.new_id {
-        (&plan.old_id, &plan.new_id)
-    } else {
-        (&plan.new_id, &plan.old_id)
-    };
-    let _lock_a = crate::storage::write_lock::acquire_write_lock(first).await?;
-    let _lock_b = crate::storage::write_lock::acquire_write_lock(second).await?;
+    // Locks are per-ID and this touches one per stale row plus the live one.
+    // `flock` here is an unbounded block with no deadlock detection, so acquire
+    // in a deterministic (sorted, deduped) order: two processes repairing in
+    // opposite directions would otherwise deadlock. Every guard is dropped
+    // before the caller reindexes — `MemoryStore::reindex` re-acquires, and a
+    // second acquire in one process blocks forever.
+    let mut lock_ids: Vec<String> = pre.old_ids.clone();
+    lock_ids.push(pre.new_id.clone());
+    lock_ids.sort();
+    lock_ids.dedup();
+    let mut _locks = Vec::with_capacity(lock_ids.len());
+    for id in &lock_ids {
+        _locks.push(crate::storage::write_lock::acquire_write_lock(id).await?);
+    }
 
-    // Copy before the registry rewrite: if this fails, the registry is
-    // untouched and the whole operation is a no-op the user can retry.
-    let (migrated, superseded, skipped) = copy_personal(&plan.old_id, &plan.new_id).await?;
-
-    // ONE critical section for read, decide and write. Splitting the decision
-    // across separate `load()`s let a concurrent prune or repair land in
-    // between, producing a report that described work nobody did.
+    // ONE critical section for read, decide, copy and write. Splitting the
+    // decision across separate `load()`s let a concurrent prune or repair land
+    // in between, producing a report that described work nobody did. The copy
+    // is inside it too, so a plan that has since become `None` or unsafe cannot
+    // leave files grafted into a directory the refusal exists to protect, nor
+    // copied-but-never-indexed because the caller was told there was nothing
+    // to do.
     let _reg_lock = registry.lock_exclusive().await?;
     let mut reg = registry.load().await?;
 
     // Re-derive under the lock rather than trusting the pre-lock plan.
-    let Some(mut report) = plan_from(&reg, dir).await? else {
+    let Some((mut report, stale_here)) = plan_from(&reg, dir).await? else {
         // Someone else repaired it while we waited for the lock.
         return Ok(None);
     };
+
+    // The per-ID locks above were taken against the pre-lock plan. If the
+    // identity moved in that window (`git remote set-url`, a concurrent prune
+    // dropping a stale row) they cover the wrong files, so stop rather than
+    // migrate unlocked — a re-run picks up the new plan and is a no-op if
+    // someone else got there first.
+    if report.new_id != pre.new_id || report.old_ids != pre.old_ids {
+        bail!(
+            "{}'s registration changed while this repair was starting — nothing was modified. \
+             Re-run `engramdb projects repair`.",
+            dir.display()
+        );
+    }
+
+    let (migrated, superseded, skipped) = copy_personal(&report.old_ids, &report.new_id).await?;
     report.personal_migrated = migrated;
     report.personal_superseded = superseded;
     report.personal_skipped = skipped;
@@ -179,19 +233,11 @@ pub async fn repair_project_id(
     // Every lookup is scoped to THIS path. Matching by ID alone let a
     // different checkout's row absorb our subscriptions while our own row was
     // deleted — two clones of one remote is enough to trigger it.
+    let canon = canon_of(dir);
     let live_row_here = reg
         .projects
         .iter()
-        .any(|e| e.project_id == report.new_id && same_path(e, dir));
-
-    // Every stale row for this path, not just the first: drifting twice leaves
-    // two, and repairing one would keep the other flagged forever.
-    let stale_here: Vec<RegistryEntry> = reg
-        .projects
-        .iter()
-        .filter(|e| e.project_id != report.new_id && same_path(e, dir))
-        .cloned()
-        .collect();
+        .any(|e| e.project_id == report.new_id && same_path(e, &canon));
 
     if live_row_here {
         // Fold every stale row's membership into the live one, then drop them.
@@ -199,7 +245,7 @@ pub async fn repair_project_id(
         if let Some(live) = reg
             .projects
             .iter_mut()
-            .find(|e| e.project_id == report.new_id && same_path(e, dir))
+            .find(|e| e.project_id == report.new_id && same_path(e, &canon))
         {
             for group in subs {
                 if !live.subscriptions.contains(&group) {
@@ -212,7 +258,7 @@ pub async fn repair_project_id(
         }
         let stale_ids: Vec<&str> = stale_here.iter().map(|e| e.project_id.as_str()).collect();
         reg.projects
-            .retain(|e| !(stale_ids.contains(&e.project_id.as_str()) && same_path(e, dir)));
+            .retain(|e| !(stale_ids.contains(&e.project_id.as_str()) && same_path(e, &canon)));
         report.removed_duplicate_entry = true;
     } else {
         // Re-key the first stale row in place — this is what preserves
@@ -220,12 +266,17 @@ pub async fn repair_project_id(
         // silently drop both, and losing subscriptions does not error, queries
         // just stop fanning in group memories. Any further stale rows for this
         // path fold into it and are dropped.
+        //
+        // `stale_here` is non-empty by construction: `plan_from` returned
+        // `Some`, and it hands back the very rows it planned against rather
+        // than leaving the caller to re-filter (which could disagree, and did
+        // index `[0]` of a vector a second `canonicalize` could empty).
         let (subs, parent) = merge_membership(&stale_here);
         let keep_id = stale_here[0].project_id.clone();
         if let Some(entry) = reg
             .projects
             .iter_mut()
-            .find(|e| e.project_id == keep_id && same_path(e, dir))
+            .find(|e| e.project_id == keep_id && same_path(e, &canon))
         {
             entry.project_id = report.new_id.clone();
             for group in subs {
@@ -244,7 +295,7 @@ pub async fn repair_project_id(
             .collect();
         if !extra.is_empty() {
             reg.projects
-                .retain(|e| !(extra.contains(&e.project_id.as_str()) && same_path(e, dir)));
+                .retain(|e| !(extra.contains(&e.project_id.as_str()) && same_path(e, &canon)));
             report.removed_duplicate_entry = true;
         }
     }
@@ -269,9 +320,18 @@ pub async fn repair_project_id(
     Ok(Some(report))
 }
 
-/// Whether a registry row points at `dir` (canonicalized both sides).
-fn same_path(entry: &RegistryEntry, dir: &Path) -> bool {
-    let canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+/// `dir` canonicalized, falling back to the literal path.
+///
+/// Hoisted out of [`same_path`] deliberately: that predicate runs once per
+/// registry row across five passes, and re-canonicalizing `dir` each time is
+/// both a blocking syscall inside `async fn` (on a path that may be a dead
+/// network mount) and a TOCTOU seam — the answer could change mid-rewrite.
+fn canon_of(dir: &Path) -> PathBuf {
+    dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
+}
+
+/// Whether a registry row points at `canon` (a path from [`canon_of`]).
+fn same_path(entry: &RegistryEntry, canon: &Path) -> bool {
     let p = PathBuf::from(&entry.project_path);
     p.canonicalize().unwrap_or(p) == canon
 }
@@ -301,17 +361,16 @@ fn data_dir_for(id: &str) -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("projects").join(id))
 }
 
-/// A still-existing checkout other than `dir` registered under `project_id`.
+/// A checkout other than `canon` registered under `project_id`.
 ///
-/// Such a checkout shares `projects/<project_id>/` — its LanceDB index, write
-/// lock, and personal memories — so that directory is not ours to migrate or
-/// delete.
-fn other_checkout_sharing_id(
+/// Liveness is deliberately not consulted — see the call site: the hazard this
+/// guards is a duplicate ID in the registry, which a row whose directory is
+/// gone (or merely unreadable) creates just as surely as a live one.
+fn other_checkout_with_id(
     reg: &crate::storage::Registry,
     project_id: &str,
-    dir: &Path,
+    canon: &Path,
 ) -> Option<PathBuf> {
-    let canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     reg.projects
         .iter()
         .filter(|e| e.project_id == project_id)
@@ -319,32 +378,42 @@ fn other_checkout_sharing_id(
             let p = PathBuf::from(&e.project_path);
             p.canonicalize().unwrap_or(p)
         })
-        .find(|p| p != &canon && p.exists())
+        .find(|p| p != canon)
 }
 
-/// Registry IDs whose `parent_project_id` is `parent`.
-fn children_of(reg: &crate::storage::Registry, parent: &str) -> Vec<String> {
+/// Registry IDs whose `parent_project_id` is any of `parents`.
+fn children_of(reg: &crate::storage::Registry, parents: &[String]) -> Vec<String> {
     reg.projects
         .iter()
-        .filter(|e| e.parent_project_id.as_deref() == Some(parent))
+        .filter(|e| {
+            e.parent_project_id
+                .as_deref()
+                .is_some_and(|p| parents.iter().any(|s| s == p))
+        })
         .map(|e| e.project_id.clone())
         .collect()
 }
 
 /// Count what [`copy_personal`] would do, without doing it.
-async fn survey_personal(old_id: &str, new_id: &str) -> (usize, usize, usize) {
-    let (Ok(from), Ok(to)) = (
-        paths::personal_memories_dir(old_id),
-        paths::personal_memories_dir(new_id),
-    ) else {
+///
+/// Walks the same directories in the same order, but cannot model the target
+/// dir filling up as earlier files land, so the counts are a preview rather
+/// than a promise.
+async fn survey_personal(old_ids: &[String], new_id: &str) -> (usize, usize, usize) {
+    let Ok(to) = paths::personal_memories_dir(new_id) else {
         return (0, 0, 0);
     };
     let (mut copy, mut supersede, mut skip) = (0, 0, 0);
-    for (_, path) in memory_files(&from).await {
-        match plan_file(&path, &to).await {
-            Some(FileAction::Copy { .. }) => copy += 1,
-            Some(FileAction::Superseded) => supersede += 1,
-            None => skip += 1,
+    for old_id in old_ids {
+        let Ok(from) = paths::personal_memories_dir(old_id) else {
+            continue;
+        };
+        for (_, path) in memory_files(&from).await {
+            match plan_file(&path, &to).await {
+                Some(FileAction::Copy { .. }) => copy += 1,
+                Some(FileAction::Superseded) => supersede += 1,
+                None => skip += 1,
+            }
         }
     }
     (copy, supersede, skip)
@@ -372,28 +441,35 @@ enum FileAction {
 /// merging one memories dir into another: keyed on the memory ID (filenames
 /// derive from the title slug, so one memory can be stored under two names),
 /// strictly-newer target wins, ties re-copy.
-async fn copy_personal(old_id: &str, new_id: &str) -> Result<(usize, usize, usize)> {
-    let from = paths::personal_memories_dir(old_id)?;
+///
+/// Every stale ID is walked, oldest registry row first, so a project that
+/// drifted twice does not strand the directory it was actually writing into
+/// before the last drift. Ordering is harmless: the collision rule is
+/// timestamp-based, not arrival-based.
+async fn copy_personal(old_ids: &[String], new_id: &str) -> Result<(usize, usize, usize)> {
     let to = paths::personal_memories_dir(new_id)?;
-    if !from.exists() {
-        return Ok((0, 0, 0));
-    }
-    async_fs::create_dir_all(&to).await?;
-
     let (mut copied, mut superseded, mut skipped) = (0, 0, 0);
-    for (file_name, path) in memory_files(&from).await {
-        match plan_file(&path, &to).await {
-            Some(FileAction::Copy { replaces }) => {
-                // Remove the older copy first, or the same memory ends up in
-                // two files and which one wins is `read_dir` order.
-                if let Some(old) = replaces {
-                    async_fs::remove_file(&old).await?;
+
+    for old_id in old_ids {
+        let from = paths::personal_memories_dir(old_id)?;
+        if !from.exists() {
+            continue;
+        }
+        async_fs::create_dir_all(&to).await?;
+        for (file_name, path) in memory_files(&from).await {
+            match plan_file(&path, &to).await {
+                Some(FileAction::Copy { replaces }) => {
+                    // Remove the older copy first, or the same memory ends up
+                    // in two files and which one wins is `read_dir` order.
+                    if let Some(old) = replaces {
+                        async_fs::remove_file(&old).await?;
+                    }
+                    async_fs::copy(&path, to.join(&file_name)).await?;
+                    copied += 1;
                 }
-                async_fs::copy(&path, to.join(&file_name)).await?;
-                copied += 1;
+                Some(FileAction::Superseded) => superseded += 1,
+                None => skipped += 1,
             }
-            Some(FileAction::Superseded) => superseded += 1,
-            None => skipped += 1,
         }
     }
     Ok((copied, superseded, skipped))
@@ -417,9 +493,9 @@ async fn memory_files(dir: &Path) -> Vec<(String, PathBuf)> {
 
 /// Decide what to do with `source`, or `None` to leave it alone.
 ///
-/// `None` covers unreadable and unparseable files. Because nothing is deleted,
-/// "leave it alone" is genuinely safe here — it is reported via
-/// `personal_skipped` so the user knows the old directory still holds data.
+/// `None` covers an unreadable or unparseable file on *either* side. Because
+/// nothing is deleted, "leave it alone" is genuinely safe here — it is reported
+/// via `personal_skipped` so the user knows an old directory still holds data.
 async fn plan_file(source: &Path, target_dir: &Path) -> Option<FileAction> {
     let content = async_fs::read_to_string(source).await.ok()?;
     let memory = memory_file::parse_memory_file(&content).ok()?;
@@ -438,9 +514,15 @@ async fn plan_file(source: &Path, target_dir: &Path) -> Option<FileAction> {
             // precedent (a crash between writing a file and relocating its
             // vectors leaves a copy that still needs carrying).
             Some(e) if e.updated_at > memory.updated_at => Some(FileAction::Superseded),
-            _ => Some(FileAction::Copy {
+            Some(_) => Some(FileAction::Copy {
                 replaces: Some(path),
             }),
+            // The live file carries this memory ID but cannot be read or
+            // parsed, so there is no timestamp to compare and replacing it
+            // means unlinking data of unknown vintage. Protecting a corrupt
+            // source while destroying a corrupt target would be exactly
+            // backwards: skip, and report it.
+            None => None,
         };
     }
     Some(FileAction::Copy { replaces: None })
@@ -782,12 +864,18 @@ mod tests {
         );
     }
 
+    /// Two clones of one remote legitimately share the remote-derived ID. When
+    /// only one of them changes its remote, the other is a healthy project that
+    /// has nothing to do with this repair — refusing there would make the drift
+    /// permanently unfixable without deregistering a working checkout. Nothing
+    /// writes to or deletes the shared directory, so the repair is safe.
     #[tokio::test]
-    async fn refuses_when_another_registered_checkout_holds_the_old_id() {
+    async fn repairs_even_when_a_sibling_clone_still_answers_to_the_old_id() {
         let tmp = TempDir::new().unwrap();
         let other = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();
-        let (_, stale) = drifted(&registry, tmp.path()).await;
+        let (live, stale) = drifted(&registry, tmp.path()).await;
+        let (_, sibling_file) = write_personal(&stale, "Sibling's own note").await;
         let mut reg = registry.load().await.unwrap();
         reg.projects.push(RegistryEntry {
             project_id: stale.clone(),
@@ -797,14 +885,29 @@ mod tests {
         });
         registry.save(&reg).await.unwrap();
 
-        let err = repair_project_id(&registry, tmp.path())
+        let report = repair_project_id(&registry, tmp.path())
             .await
-            .expect_err("must refuse to touch a shared data directory");
-        assert!(format!("{err}").contains("shares that data"));
+            .unwrap()
+            .expect("a sibling on the old ID must not block the repair");
+        assert_eq!(report.new_id, live);
+
+        let reg = registry.load().await.unwrap();
+        assert_eq!(
+            row(&reg, &stale).map(|e| e.project_path),
+            Some(other.path().to_string_lossy().to_string()),
+            "the sibling's registration must be left exactly as it was"
+        );
+        assert!(
+            sibling_file.exists(),
+            "and its data must be copied, never moved"
+        );
     }
 
-    /// The destructive half: a sibling row holding the LIVE id would otherwise
-    /// absorb our subscriptions while our own row was deleted.
+    /// The destructive half: a row at another path holding the LIVE id. In the
+    /// `live_row_here` branch it would absorb our subscriptions while our own
+    /// row was deleted; in the other, the re-key would leave two rows sharing
+    /// one ID and `subscriptions_of` resolves the first — so repair would
+    /// report success while the symptom persisted.
     #[tokio::test]
     async fn refuses_when_another_registered_checkout_holds_the_new_id() {
         let tmp = TempDir::new().unwrap();
@@ -823,12 +926,120 @@ mod tests {
         let err = repair_project_id(&registry, tmp.path())
             .await
             .expect_err("must refuse when a sibling already holds the live ID");
-        assert!(format!("{err}").contains("shares that data"));
+        assert!(format!("{err}").contains("already registered"));
 
         // And nothing was touched.
         let reg = registry.load().await.unwrap();
         assert_eq!(reg.projects.len(), 2);
         assert!(row(&reg, &live).is_some());
+    }
+
+    /// The same refusal must fire for a row whose directory is *gone*. Filtering
+    /// on liveness let a not-yet-pruned sibling through, and the re-key then
+    /// produced two rows carrying one ID — the exact state repair exists to
+    /// remove.
+    #[tokio::test]
+    async fn refuses_when_a_dead_row_elsewhere_already_holds_the_new_id() {
+        let tmp = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let (live, _) = drifted(&registry, tmp.path()).await;
+        let mut reg = registry.load().await.unwrap();
+        reg.projects.push(RegistryEntry {
+            project_id: live.clone(),
+            project_path: tmp.path().join("removed-checkout").to_string_lossy().into(),
+            parent_project_id: None,
+            subscriptions: vec![],
+        });
+        registry.save(&reg).await.unwrap();
+
+        let err = repair_project_id(&registry, tmp.path())
+            .await
+            .expect_err("a dead duplicate row is still a duplicate ID");
+        assert!(format!("{err}").contains("already registered"));
+    }
+
+    /// Drifting twice means the user was writing personal memories under the
+    /// SECOND stale ID by the time the last drift happened. Migrating only
+    /// `stale[0]` leaves those invisible, unmentioned, and un-migratable — the
+    /// second run reports nothing to repair.
+    #[tokio::test]
+    async fn carries_personal_memories_from_every_stale_id() {
+        let tmp = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let (live, first_stale) = drifted(&registry, tmp.path()).await;
+        let second_stale = format!("secnd{}", &live[..11]);
+        let mut reg = registry.load().await.unwrap();
+        reg.projects.push(RegistryEntry {
+            project_id: second_stale.clone(),
+            project_path: tmp.path().to_string_lossy().to_string(),
+            parent_project_id: None,
+            subscriptions: vec![],
+        });
+        registry.save(&reg).await.unwrap();
+
+        let (first_id, _) = write_personal(&first_stale, "From the first drift").await;
+        let (second_id, _) = write_personal(&second_stale, "From the second drift").await;
+
+        let report = repair_project_id(&registry, tmp.path())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.personal_migrated, 2);
+        assert_eq!(report.old_ids.len(), 2);
+
+        let live_dir = paths::personal_memories_dir(&live).unwrap();
+        let mut found = Vec::new();
+        for (_, path) in super::memory_files(&live_dir).await {
+            found.push(async_fs::read_to_string(&path).await.unwrap());
+        }
+        assert!(found.iter().any(|c| c.contains(&first_id)));
+        assert!(
+            found.iter().any(|c| c.contains(&second_id)),
+            "the memory written under the second stale ID must come across too"
+        );
+    }
+
+    /// The mirror of `an_unparseable_personal_file_is_skipped_and_reported`: a
+    /// live file that cannot be parsed must not be unlinked and replaced by a
+    /// stale copy of unknown vintage.
+    #[tokio::test]
+    async fn an_unparseable_file_in_the_live_dir_is_never_replaced() {
+        let tmp = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let (live, stale) = drifted(&registry, tmp.path()).await;
+
+        let dir_old = paths::personal_memories_dir(&stale).unwrap();
+        let dir_new = paths::personal_memories_dir(&live).unwrap();
+        async_fs::create_dir_all(&dir_old).await.unwrap();
+        async_fs::create_dir_all(&dir_new).await.unwrap();
+
+        let mut memory = Memory::new(MemoryType::Decision, "Stale", "old", Provenance::human());
+        memory.visibility = Visibility::Personal;
+        async_fs::write(
+            dir_old.join(memory_file::memory_filename(&memory)),
+            memory_file::write_memory_file(&memory).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // Same memory ID in the live dir (stored under a different title slug,
+        // so the filenames differ), unparseable by this binary.
+        let corrupt = dir_new.join(format!("live-copy_{}.md", &memory.id));
+        async_fs::write(&corrupt, "written by a newer schema")
+            .await
+            .unwrap();
+
+        let report = repair_project_id(&registry, tmp.path())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.personal_migrated, 0);
+        assert_eq!(report.personal_skipped, 1);
+        assert_eq!(
+            async_fs::read_to_string(&corrupt).await.unwrap(),
+            "written by a newer schema",
+            "an unparseable live file must survive untouched"
+        );
     }
 
     /// Worktrees route to the main checkout; re-keying one would point its row
