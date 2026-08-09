@@ -44,8 +44,8 @@ pub struct DeleteResult {
     /// Project IDs of descendants that were also removed (cascade delete).
     /// Empty when cascade was not requested or the project had no descendants.
     pub cascaded_ids: Vec<String>,
-    /// Data directories kept because they still hold personal memories and
-    /// `purge` was not requested. Their index was reclaimed either way.
+    /// Data directories kept whole because they still hold personal memories
+    /// and `purge` was not requested.
     pub retained_with_personal: Vec<String>,
 }
 
@@ -149,9 +149,9 @@ pub async fn list_projects(registry: &dyn RegistryBackend) -> Result<Vec<Project
 ///
 /// `purge` decides what happens to personal memories, which live *only* in the
 /// data directory and have no copy in the project tree. With `purge = false`
-/// (the default everywhere) the directory is kept whenever it still holds them,
-/// exactly as `prune_stale_projects` does, and only the rebuildable index is
-/// reclaimed — because a project ID derived from a git remote is shared by every
+/// (the default everywhere) the directory is kept whole whenever it still holds
+/// them, index included, exactly as `prune_stale_projects` does — because a
+/// project ID derived from a git remote is shared by every
 /// clone of that remote on the machine, and the registry keeps one row per ID,
 /// so a sibling clone is structurally invisible here. Deleting project A's data
 /// directory can therefore destroy project B's only copy, and no check inside
@@ -1087,7 +1087,7 @@ mod tests {
         async_fs::create_dir_all(&personal).await.unwrap();
         let file = personal.join("sibling-only-copy.md");
         async_fs::write(&file, "---\n---\n").await.unwrap();
-        // Derived data that SHOULD be reclaimed.
+        // The index the invisible sibling is still querying through.
         let lance = paths::lancedb_dir(shared_id).unwrap();
         async_fs::create_dir_all(&lance).await.unwrap();
 
@@ -1097,7 +1097,14 @@ mod tests {
             file.exists(),
             "prune destroyed the only copy of an invisible sibling's personal memories"
         );
-        assert!(!lance.exists(), "derived index should still be reclaimed");
+        // Kept too. The index is rebuildable in principle, but only by the
+        // checkout that owns it — and that checkout is invisible here, so
+        // reclaiming it on every sweep leaves a healthy project silently
+        // unsearchable until someone re-embeds it by hand.
+        assert!(
+            lance.exists(),
+            "a directory kept for its personal memories must be kept whole"
+        );
         assert!(
             result
                 .retained_with_personal

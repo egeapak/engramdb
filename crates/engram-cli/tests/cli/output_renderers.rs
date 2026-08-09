@@ -787,10 +787,11 @@ fn projects_prune_when_nothing_stale_prints_nothing_to_prune() {
 }
 
 #[test]
-fn projects_delete_with_descendants_no_cascade_warns_and_aborts() {
+fn projects_delete_with_descendants_no_cascade_refuses_non_zero() {
     // Set up a parent + child, then attempt to delete parent without
-    // --cascade. Drives the "has sub-projects" early-return branch
-    // (src/cli/commands/projects.rs:61-69).
+    // --cascade. Drives the "has sub-projects" refusal branch, which must
+    // exit NON-ZERO: nothing was deleted, and reporting success for declined
+    // work let a `set -e` script treat the project as gone.
     let env = IsolatedEnv::new();
     let parent_dir = TempDir::new().unwrap();
     let child_dir = TempDir::new().unwrap();
@@ -809,8 +810,8 @@ fn projects_delete_with_descendants_no_cascade_warns_and_aborts() {
         .output()
         .unwrap();
     assert!(
-        output.status.success(),
-        "expected graceful abort, not error: {}",
+        !output.status.success(),
+        "a refusal that deleted nothing must not exit 0: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let combined = format!(
@@ -820,7 +821,18 @@ fn projects_delete_with_descendants_no_cascade_warns_and_aborts() {
     );
     assert!(
         combined.contains("sub-project") || combined.contains("cascade"),
-        "warning about sub-projects expected: {combined}"
+        "the refusal must say why and how to proceed: {combined}"
+    );
+
+    // And it really did decline: both projects are still registered.
+    let listed = isolated_cmd(&env)
+        .args(["--format", "json", "projects", "list"])
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listed.contains(&parent_id) && listed.contains(&child_id),
+        "nothing should have been deleted: {listed}"
     );
 }
 
