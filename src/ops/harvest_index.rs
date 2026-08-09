@@ -492,7 +492,7 @@ fn due_sessions(
     }
     // Newest first: a pass that is capped should spend its budget on the
     // conversations a search is most likely to be about.
-    due.sort_by(|a, b| b.0.cmp(&a.0));
+    due.sort_by_key(|(ended_at, _)| std::cmp::Reverse(*ended_at));
     due.into_iter().map(|(_, id)| id).collect()
 }
 
