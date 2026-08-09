@@ -119,7 +119,9 @@ async fn run_environment_check(
         .map(|s| s.project_dir.clone())
         .unwrap_or_else(|| dir.to_path_buf());
     let daemon_check = engramdb::daemon::check_daemon(&check_dir).await;
-    let result = doctor_environment(&check_dir, store.as_ref(), daemon_check).await;
+    let supported_hooks = crate::supported_hook_subcommands();
+    let result =
+        doctor_environment(&check_dir, store.as_ref(), daemon_check, &supported_hooks).await;
     formatter.print_environment_doctor(&result);
 
     // §10 epistemic checks (invalidated-path / stale-observation /

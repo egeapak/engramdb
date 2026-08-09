@@ -25,6 +25,23 @@ pub enum HookCommand {
     SessionEnd,
     /// Handle PreCompact hook events (store-your-memories reminder before compaction)
     PreCompact,
+    /// Catch-all for a hook event this binary does not know.
+    ///
+    /// The hook wiring in `.claude-plugin/plugin.json` and `settings.json` is
+    /// installed independently of the binary (plugin marketplace update vs.
+    /// `cargo install`), so a Claude Code config can name a `hook` subcommand
+    /// that an older `engramdb` never shipped. Without this variant clap
+    /// rejects the unknown name and exits 2 — which Claude Code treats as a
+    /// *blocking* hook error, so a stale binary breaks every prompt in the
+    /// session. Capturing it here routes the failure through the same
+    /// fail-open contract the handlers already honor (see the backstop in
+    /// `lib.rs` and `hook_all_subcommands_malformed_stdin_exit_zero`).
+    ///
+    /// Note that clap stops binding global args once it hands off to an
+    /// external subcommand, so the trailing `--dir .` lands in this `Vec`
+    /// rather than in `Cli::dir`. The handler only prints, so that is moot.
+    #[command(external_subcommand)]
+    Unknown(Vec<String>),
 }
 
 /// Subcommands for `engramdb task`.
@@ -1167,8 +1184,11 @@ pub enum Command {
 
     /// Claude Code plugin hook handler
     Hook {
+        /// `None` when invoked as a bare `engramdb hook`. Optional rather than
+        /// required so that case exits 0 through the same fail-open path as
+        /// [`HookCommand::Unknown`], instead of clap's exit-2 usage error.
         #[command(subcommand)]
-        command: HookCommand,
+        command: Option<HookCommand>,
     },
 
     /// Set up Claude Code integration (hooks, MCP, ENGRAM.md, CLAUDE.md)

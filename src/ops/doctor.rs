@@ -186,10 +186,16 @@ impl EnvironmentDoctorResult {
 /// Projects (all registered projects), Global settings & models
 /// (binaries, integration, embeddings, the active models, and the daemon),
 /// and Stats (global disk usage).
+///
+/// `daemon_check` and `supported_hooks` are injected by the caller to keep the
+/// module graph a DAG: the daemon probe lives in `daemon` and the `hook`
+/// subcommand list is derived from `engram-cli`'s clap enum, and `ops` must
+/// never depend upward on either.
 pub async fn doctor_environment(
     dir: &Path,
     store: Option<&MemoryStore>,
     daemon_check: EnvironmentCheck,
+    supported_hooks: &[String],
 ) -> EnvironmentDoctorResult {
     let mut sections = Vec::new();
 
@@ -377,7 +383,7 @@ pub async fn doctor_environment(
         check_binary_on_path().await,
         check_global_gitignore(),
         check_claude_plugin(),
-        check_hook_config(),
+        check_hook_config(dir, supported_hooks),
         check_maintenance(dir).await,
         daemon_check,
     ];
@@ -933,29 +939,242 @@ fn check_onnx_runtime() -> EnvironmentCheck {
     }
 }
 
-/// Check `~/.claude/settings.json` for engramdb hook configuration.
-fn check_hook_config() -> EnvironmentCheck {
-    let found = dirs::home_dir()
-        .map(|h| h.join(".claude").join("settings.json"))
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .map(|contents| contents.contains("engramdb"))
-        .unwrap_or(false);
+/// One `engramdb hook <subcommand>` wiring found in a Claude Code config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfiguredHook {
+    /// The Claude Code event it is wired to, e.g. `UserPromptSubmit`.
+    event: String,
+    /// The `hook` subcommand it invokes, e.g. `user-prompt-submit`.
+    subcommand: String,
+    /// Where the wiring lives, for the details lines.
+    source: String,
+}
+
+/// Extract the `hook` subcommand from a configured command line.
+///
+/// Recognizes `engramdb`, an absolute path to it, and `engramdb.exe`, then
+/// takes the first bare token after `hook`. Anything that is not a plausible
+/// subcommand name (lowercase kebab-case) yields `None` rather than a guess —
+/// that way a shape this parser does not model, such as a global flag's value
+/// in `engramdb hook --dir . pre-tool-use`, is skipped instead of being
+/// reported as an unsupported hook.
+fn hook_subcommand_of(command: &str) -> Option<&str> {
+    let mut tokens = command.split_whitespace();
+    let program = tokens.next()?;
+    let stem = Path::new(program).file_stem()?.to_str()?;
+    if stem != "engramdb" {
+        return None;
+    }
+    // Skip anything before `hook` (global flags may precede the subcommand).
+    tokens.by_ref().find(|t| *t == "hook")?;
+    let candidate = tokens.find(|t| !t.starts_with('-'))?;
+    let plausible = !candidate.is_empty()
+        && candidate.starts_with(|c: char| c.is_ascii_lowercase())
+        && candidate
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    plausible.then_some(candidate)
+}
+
+/// Collect the engramdb hook wirings out of a Claude Code `hooks` object,
+/// which has the shape `{"<Event>": [{"hooks": [{"command": "..."}]}]}`.
+fn collect_hooks_from(hooks: &serde_json::Value, source: &str, out: &mut Vec<ConfiguredHook>) {
+    let Some(events) = hooks.as_object() else {
+        return;
+    };
+    for (event, matchers) in events {
+        let Some(matchers) = matchers.as_array() else {
+            continue;
+        };
+        for matcher in matchers {
+            let Some(entries) = matcher.get("hooks").and_then(|h| h.as_array()) else {
+                continue;
+            };
+            for entry in entries {
+                let Some(command) = entry.get("command").and_then(|c| c.as_str()) else {
+                    continue;
+                };
+                if let Some(subcommand) = hook_subcommand_of(command) {
+                    out.push(ConfiguredHook {
+                        event: event.clone(),
+                        subcommand: subcommand.to_string(),
+                        source: source.to_string(),
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Read a JSON file and harvest its top-level `hooks` object, if any.
+fn collect_hooks_from_file(path: &Path, source: &str, out: &mut Vec<ConfiguredHook>) {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return;
+    };
+    if let Some(hooks) = value.get("hooks") {
+        collect_hooks_from(hooks, source, out);
+    }
+}
+
+/// Find the installed engram plugin's `plugin.json` under `~/.claude/plugins/`.
+///
+/// The marketplace decides the on-disk layout, so rather than hardcode a path
+/// this walks a bounded depth looking for `.claude-plugin/plugin.json`.
+///
+/// Plugin sources are git checkouts, so the walk prunes the directories that
+/// would otherwise dominate it (`node_modules`, `.git`, `target`) — doctor runs
+/// interactively and must not spend its time in someone's dependency tree.
+fn find_installed_plugin_manifests(plugins_dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth == 0 {
+        return;
+    }
+    let manifest = plugins_dir.join(".claude-plugin").join("plugin.json");
+    if manifest.is_file() {
+        out.push(manifest);
+    }
+    let Ok(entries) = std::fs::read_dir(plugins_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name();
+        // `.claude-plugin` is handled above; don't descend into it again.
+        if matches!(
+            name.to_str(),
+            Some(".claude-plugin") | Some("node_modules") | Some(".git") | Some("target")
+        ) {
+            continue;
+        }
+        find_installed_plugin_manifests(&entry.path(), depth - 1, out);
+    }
+}
+
+/// Gather every engramdb hook wiring Claude Code could act on for this project.
+///
+/// Covers user scope (`~/.claude/`), project scope (`<dir>/.claude/`, written
+/// by a plain `engramdb setup`), the `.local.json` overlays, and the installed
+/// plugin's manifest. The plugin is the source that most often runs ahead of
+/// the binary: `/plugin update` re-reads the repo while the binary only moves
+/// on an explicit reinstall.
+fn collect_configured_hooks(dir: &Path) -> Vec<ConfiguredHook> {
+    let mut found = Vec::new();
+    let home = dirs::home_dir();
+
+    if let Some(home) = home.as_ref() {
+        let claude = home.join(".claude");
+        collect_hooks_from_file(
+            &claude.join("settings.json"),
+            "~/.claude/settings.json",
+            &mut found,
+        );
+        collect_hooks_from_file(
+            &claude.join("settings.local.json"),
+            "~/.claude/settings.local.json",
+            &mut found,
+        );
+
+        let mut manifests = Vec::new();
+        find_installed_plugin_manifests(&claude.join("plugins"), 5, &mut manifests);
+        for manifest in manifests {
+            collect_hooks_from_file(&manifest, "installed plugin", &mut found);
+        }
+    }
+
+    let project_claude = dir.join(".claude");
+    collect_hooks_from_file(
+        &project_claude.join("settings.json"),
+        ".claude/settings.json",
+        &mut found,
+    );
+    collect_hooks_from_file(
+        &project_claude.join("settings.local.json"),
+        ".claude/settings.local.json",
+        &mut found,
+    );
+
+    found
+}
+
+/// Check the Claude Code hook configuration against what this binary can serve.
+///
+/// The hook wiring and the binary are installed by independent mechanisms — a
+/// plugin marketplace update versus `cargo install` — so a config can name a
+/// `hook` subcommand this build never shipped. Claude Code treats a non-zero
+/// hook exit as *blocking*, so that skew used to reject every prompt with
+/// `unrecognized subcommand`. The binary now fails open on an unknown event
+/// (see `warn_unknown_hook` in `engram-cli`); this check is what makes the
+/// skew visible instead of silently dropping the hook.
+///
+/// `supported` is injected by the caller because the subcommand list is
+/// derived from `engram-cli`'s clap enum, and `ops` must not depend upward on
+/// the CLI — the same reason `daemon_check` is passed in.
+///
+/// Reported as a `Warn`, never a failure: a stale hook degrades context but
+/// breaks nothing, and flipping doctor's exit code for it would be wrong.
+fn check_hook_config(dir: &Path, supported: &[String]) -> EnvironmentCheck {
+    let configured = collect_configured_hooks(dir);
+    let name = "Hook configuration".to_string();
+
+    if configured.is_empty() {
+        return EnvironmentCheck {
+            name,
+            passed: true,
+            message: "not configured".to_string(),
+            suggestion: Some(
+                "Install the Claude Code plugin to configure hooks automatically".to_string(),
+            ),
+            details: vec![],
+            status: Some(CheckStatus::Warn),
+        };
+    }
+
+    let unsupported: Vec<&ConfiguredHook> = configured
+        .iter()
+        .filter(|h| !supported.iter().any(|s| s == &h.subcommand))
+        .collect();
+
+    if unsupported.is_empty() {
+        return EnvironmentCheck {
+            name,
+            passed: true,
+            message: format!("configured ({} hooks)", configured.len()),
+            suggestion: None,
+            details: vec![],
+            status: None,
+        };
+    }
+
+    let details = unsupported
+        .iter()
+        .map(|h| {
+            format!(
+                "{}: `engramdb hook {}` not supported by this binary (from {})",
+                h.event, h.subcommand, h.source
+            )
+        })
+        .collect();
 
     EnvironmentCheck {
-        name: "Hook configuration".to_string(),
+        name,
         passed: true,
-        message: if found {
-            "configured".to_string()
-        } else {
-            "not configured".to_string()
-        },
-        suggestion: if found {
-            None
-        } else {
-            Some("Install the Claude Code plugin to configure hooks automatically".to_string())
-        },
-        details: vec![],
-        status: if found { None } else { Some(CheckStatus::Warn) },
+        message: format!(
+            "{} of {} configured hooks unsupported by engramdb {}",
+            unsupported.len(),
+            configured.len(),
+            env!("CARGO_PKG_VERSION"),
+        ),
+        suggestion: Some(
+            "Your Claude Code hook configuration is newer than this binary. Reinstall with \
+             `cargo install --git https://github.com/egeapak/engramdb --force`"
+                .to_string(),
+        ),
+        details,
+        status: Some(CheckStatus::Warn),
     }
 }
 
@@ -2481,6 +2700,23 @@ mod tests {
         }
     }
 
+    /// Hook subcommand list injected into `doctor_environment` in tests, for
+    /// the same reason as [`test_daemon_check`]: the real list is derived from
+    /// `engram-cli`'s clap enum, which `ops` must not depend on.
+    fn test_supported_hooks() -> Vec<String> {
+        [
+            "pre-tool-use",
+            "session-start",
+            "user-prompt-submit",
+            "post-tool-use",
+            "session-end",
+            "pre-compact",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
     #[tokio::test]
     async fn test_doctor_healthy_store() {
         let temp_dir = TempDir::new().unwrap();
@@ -2762,7 +2998,13 @@ mod tests {
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let result = doctor_environment(temp_dir.path(), Some(&store), test_daemon_check()).await;
+        let result = doctor_environment(
+            temp_dir.path(),
+            Some(&store),
+            test_daemon_check(),
+            &test_supported_hooks(),
+        )
+        .await;
         let names: Vec<&str> = result
             .all_checks()
             .iter()
@@ -2791,7 +3033,13 @@ mod tests {
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let result = doctor_environment(temp_dir.path(), Some(&store), test_daemon_check()).await;
+        let result = doctor_environment(
+            temp_dir.path(),
+            Some(&store),
+            test_daemon_check(),
+            &test_supported_hooks(),
+        )
+        .await;
         let section_names: Vec<&str> = result.sections.iter().map(|s| s.name.as_str()).collect();
 
         assert_eq!(
@@ -2830,7 +3078,13 @@ mod tests {
         MemoryStore::init(&a, &registry).await.unwrap();
         let store_b = MemoryStore::init(&b, &registry).await.unwrap();
 
-        let result = doctor_environment(&b, Some(&store_b), test_daemon_check()).await;
+        let result = doctor_environment(
+            &b,
+            Some(&store_b),
+            test_daemon_check(),
+            &test_supported_hooks(),
+        )
+        .await;
         let check = result
             .all_checks()
             .into_iter()
@@ -2856,7 +3110,13 @@ mod tests {
         let registry = crate::storage::FileRegistry::global().unwrap();
         let store = MemoryStore::init(&a, &registry).await.unwrap();
 
-        let result = doctor_environment(&a, Some(&store), test_daemon_check()).await;
+        let result = doctor_environment(
+            &a,
+            Some(&store),
+            test_daemon_check(),
+            &test_supported_hooks(),
+        )
+        .await;
         assert!(
             !result
                 .all_checks()
@@ -2870,7 +3130,13 @@ mod tests {
     async fn test_environment_store_not_initialized() {
         let temp_dir = TempDir::new().unwrap();
 
-        let result = doctor_environment(temp_dir.path(), None, test_daemon_check()).await;
+        let result = doctor_environment(
+            temp_dir.path(),
+            None,
+            test_daemon_check(),
+            &test_supported_hooks(),
+        )
+        .await;
         let store_check = result
             .all_checks()
             .into_iter()
@@ -3035,7 +3301,13 @@ mod tests {
         let registry = InMemoryRegistry::new();
         MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let result = doctor_environment(temp_dir.path(), None, test_daemon_check()).await;
+        let result = doctor_environment(
+            temp_dir.path(),
+            None,
+            test_daemon_check(),
+            &test_supported_hooks(),
+        )
+        .await;
         let store_check = result
             .all_checks()
             .into_iter()
@@ -3055,7 +3327,13 @@ mod tests {
         let mem = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
         store.create(&mem).await.unwrap();
 
-        let result = doctor_environment(temp_dir.path(), Some(&store), test_daemon_check()).await;
+        let result = doctor_environment(
+            temp_dir.path(),
+            Some(&store),
+            test_daemon_check(),
+            &test_supported_hooks(),
+        )
+        .await;
         let health_check = result
             .all_checks()
             .into_iter()
@@ -3089,7 +3367,13 @@ mod tests {
         .await
         .unwrap();
 
-        let result = doctor_environment(temp_dir.path(), Some(&store), test_daemon_check()).await;
+        let result = doctor_environment(
+            temp_dir.path(),
+            Some(&store),
+            test_daemon_check(),
+            &test_supported_hooks(),
+        )
+        .await;
         let health_check = result
             .all_checks()
             .into_iter()
@@ -3107,7 +3391,13 @@ mod tests {
     async fn test_environment_no_store_skips_health() {
         let temp_dir = TempDir::new().unwrap();
 
-        let result = doctor_environment(temp_dir.path(), None, test_daemon_check()).await;
+        let result = doctor_environment(
+            temp_dir.path(),
+            None,
+            test_daemon_check(),
+            &test_supported_hooks(),
+        )
+        .await;
         let health_check = result
             .all_checks()
             .into_iter()
@@ -3125,7 +3415,13 @@ mod tests {
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let result = doctor_environment(temp_dir.path(), Some(&store), test_daemon_check()).await;
+        let result = doctor_environment(
+            temp_dir.path(),
+            Some(&store),
+            test_daemon_check(),
+            &test_supported_hooks(),
+        )
+        .await;
         let expected = result.all_checks().iter().all(|c| c.passed);
         assert_eq!(result.all_passed, expected);
     }
@@ -3135,7 +3431,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         // No init — "Store initialized" will fail
 
-        let result = doctor_environment(temp_dir.path(), None, test_daemon_check()).await;
+        let result = doctor_environment(
+            temp_dir.path(),
+            None,
+            test_daemon_check(),
+            &test_supported_hooks(),
+        )
+        .await;
         assert!(!result.all_passed);
     }
 
@@ -3145,7 +3447,13 @@ mod tests {
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let result = doctor_environment(temp_dir.path(), Some(&store), test_daemon_check()).await;
+        let result = doctor_environment(
+            temp_dir.path(),
+            Some(&store),
+            test_daemon_check(),
+            &test_supported_hooks(),
+        )
+        .await;
         let json = serde_json::to_string(&result).unwrap();
 
         assert!(json.contains("\"sections\""));
@@ -3418,16 +3726,118 @@ mod tests {
 
     #[test]
     fn test_check_hook_config_returns_result() {
-        let result = check_hook_config();
+        let temp_dir = TempDir::new().unwrap();
+        let result = check_hook_config(temp_dir.path(), &test_supported_hooks());
         assert_eq!(result.name, "Hook configuration");
-        // Can't guarantee state in CI, but it should not panic
+        // Can't guarantee the developer's ~/.claude state in CI, but it should
+        // not panic and must always report something.
         assert!(!result.message.is_empty());
-        // When not configured, status should be Warn; when configured, None
         if result.message == "not configured" {
             assert_eq!(result.status, Some(CheckStatus::Warn));
-        } else {
-            assert_eq!(result.status, None);
         }
+    }
+
+    /// The parser must accept the shapes the plugin and `setup` actually
+    /// write, and refuse to guess at anything else.
+    #[test]
+    fn test_hook_subcommand_of_parses_configured_shapes() {
+        assert_eq!(
+            hook_subcommand_of("engramdb hook user-prompt-submit --dir ."),
+            Some("user-prompt-submit")
+        );
+        assert_eq!(
+            hook_subcommand_of("/usr/local/bin/engramdb hook pre-tool-use --dir ."),
+            Some("pre-tool-use")
+        );
+        assert_eq!(
+            hook_subcommand_of("engramdb.exe hook session-start"),
+            Some("session-start")
+        );
+        // Not our binary.
+        assert_eq!(hook_subcommand_of("other-tool hook pre-tool-use"), None);
+        // Not a `hook` invocation.
+        assert_eq!(hook_subcommand_of("engramdb serve --dir ."), None);
+        // A global flag's value must not be mistaken for a subcommand: better
+        // to skip the entry than to report a bogus unsupported hook.
+        assert_eq!(
+            hook_subcommand_of("engramdb hook --dir . pre-tool-use"),
+            None
+        );
+        assert_eq!(hook_subcommand_of("engramdb hook"), None);
+    }
+
+    /// A hook wired to a subcommand this binary doesn't have — exactly the
+    /// plugin-ahead-of-binary skew — must surface as a Warn that names the
+    /// event, not as a silent pass.
+    #[test]
+    fn test_check_hook_config_flags_unsupported_subcommand() {
+        let temp_dir = TempDir::new().unwrap();
+        let claude = temp_dir.path().join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::write(
+            claude.join("settings.json"),
+            serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "hooks": [{"type": "command", "command": "engramdb hook pre-tool-use --dir ."}]
+                    }],
+                    "UserPromptSubmit": [{
+                        "hooks": [{"type": "command", "command": "engramdb hook user-prompt-submit --dir ."}]
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // A binary that predates `user-prompt-submit`.
+        let old = vec!["pre-tool-use".to_string(), "session-start".to_string()];
+        let result = check_hook_config(temp_dir.path(), &old);
+
+        assert_eq!(result.status, Some(CheckStatus::Warn));
+        // Advisory only — a stale hook degrades context but breaks nothing, so
+        // it must not flip doctor's exit code.
+        assert!(result.passed);
+        assert!(
+            result
+                .details
+                .iter()
+                .any(|d| d.contains("UserPromptSubmit") && d.contains("user-prompt-submit")),
+            "details should name the broken event: {:?}",
+            result.details
+        );
+        assert!(
+            !result.details.iter().any(|d| d.contains("PreToolUse")),
+            "the supported hook must not be reported: {:?}",
+            result.details
+        );
+        assert!(result.suggestion.is_some());
+    }
+
+    /// Project-scope `engramdb setup` writes `<project>/.claude/settings.json`;
+    /// the old check only read `~/.claude/settings.json` and reported those
+    /// installs as "not configured".
+    #[test]
+    fn test_check_hook_config_reads_project_scope() {
+        let temp_dir = TempDir::new().unwrap();
+        let claude = temp_dir.path().join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::write(
+            claude.join("settings.json"),
+            serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "hooks": [{"type": "command", "command": "engramdb hook pre-tool-use --dir ."}]
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let result = check_hook_config(temp_dir.path(), &test_supported_hooks());
+        assert_ne!(result.message, "not configured");
+        assert!(result.message.contains("configured"));
     }
 
     #[test]
@@ -3633,7 +4043,13 @@ mod tests {
     async fn test_project_section_skipped_when_not_initialized() {
         let temp_dir = TempDir::new().unwrap();
 
-        let result = doctor_environment(temp_dir.path(), None, test_daemon_check()).await;
+        let result = doctor_environment(
+            temp_dir.path(),
+            None,
+            test_daemon_check(),
+            &test_supported_hooks(),
+        )
+        .await;
         let project_section = result
             .sections
             .iter()
@@ -3995,7 +4411,13 @@ mod tests {
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let result = doctor_environment(temp_dir.path(), Some(&store), test_daemon_check()).await;
+        let result = doctor_environment(
+            temp_dir.path(),
+            Some(&store),
+            test_daemon_check(),
+            &test_supported_hooks(),
+        )
+        .await;
         let names: Vec<&str> = result
             .all_checks()
             .iter()
@@ -4023,7 +4445,13 @@ mod tests {
         // With no .engramdb setup, the report collapses to a single Project
         // section carrying only the "not set up" notice — the global sections
         // (Projects / Global settings & models / Stats) are suppressed.
-        let result = doctor_environment(temp_dir.path(), None, test_daemon_check()).await;
+        let result = doctor_environment(
+            temp_dir.path(),
+            None,
+            test_daemon_check(),
+            &test_supported_hooks(),
+        )
+        .await;
         let section_names: Vec<&str> = result.sections.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(section_names, vec!["Project"]);
 
@@ -4097,7 +4525,13 @@ mod tests {
         // The global sections only render for an initialized project.
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
-        let result = doctor_environment(temp_dir.path(), Some(&store), test_daemon_check()).await;
+        let result = doctor_environment(
+            temp_dir.path(),
+            Some(&store),
+            test_daemon_check(),
+            &test_supported_hooks(),
+        )
+        .await;
         let global = result
             .sections
             .iter()
