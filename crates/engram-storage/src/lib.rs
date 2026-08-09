@@ -31,9 +31,9 @@ pub use lance_index::{
 pub use manifest::{embedding_status, EmbeddingFingerprint, EmbeddingModelStatus, Manifest};
 pub use project_id::detect_worktree_main;
 pub use registry::{
-    collect_descendants, conflicting_checkout_path, list_children, resolve_root_project_id,
-    subscriptions_of, FileRegistry, GroupEntry, InMemoryRegistry, Registry, RegistryBackend,
-    RegistryEntry,
+    collect_descendants, conflicting_checkout_path, list_children, protected_project_ids,
+    resolve_root_project_id, stale_registrations_for, subscriptions_of, FileRegistry, GroupEntry,
+    InMemoryRegistry, Registry, RegistryBackend, RegistryEntry,
 };
 pub use store::MemoryStore;
 pub use worktree::{consolidate_worktree_into_main, resolve_project_root};

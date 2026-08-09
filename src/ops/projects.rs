@@ -382,8 +382,10 @@ pub async fn repair_hierarchy(registry: &dyn RegistryBackend) -> Result<Hierarch
 /// Count orphan data directories (on disk under `projects/` but not in registry).
 pub async fn count_orphan_dirs(registry: &dyn RegistryBackend) -> Result<usize> {
     let reg = registry.load().await?;
-    let registered_ids: std::collections::HashSet<String> =
-        reg.projects.iter().map(|e| e.project_id.clone()).collect();
+    // Recorded IDs are not enough: a project re-keyed by a git remote added
+    // after `init` still owns the data dir named by its *live* ID. See
+    // `protected_project_ids`.
+    let registered_ids = crate::storage::protected_project_ids(&reg);
 
     let projects_dir = paths::global_data_dir()?.join("projects");
     if !projects_dir.exists() {
@@ -465,13 +467,9 @@ pub async fn prune_stale_projects(
     // registered while the stale-dir deletion above ran would be missing
     // from the old snapshot and its fresh data dir would be swept as an
     // orphan. A fresh snapshot narrows that window to the sweep itself.
-    let registered_ids: std::collections::HashSet<String> = registry
-        .load()
-        .await?
-        .projects
-        .iter()
-        .map(|e| e.project_id.clone())
-        .collect();
+    // Same widened set as `count_orphan_dirs` — this is the destructive side,
+    // so an ID missing here is a directory deleted outright.
+    let registered_ids = crate::storage::protected_project_ids(&registry.load().await?);
 
     let mut orphan_paths = Vec::new();
     let mut orphan_ids = Vec::new();
@@ -813,6 +811,86 @@ mod tests {
         assert_eq!(
             wt.parent_project_id.as_deref(),
             Some(parent.project_id.as_str())
+        );
+    }
+
+    /// A project re-keyed by a git remote added after `init` keeps operating
+    /// under its NEW ID while the registry still records the OLD one. The new
+    /// data dir is therefore absent from the recorded-ID set — and prune
+    /// deletes orphans outright, taking the personal memories that exist
+    /// nowhere else. `auto_maintain` runs this prune unattended, so nothing
+    /// about the deletion is opt-in.
+    #[tokio::test]
+    async fn prune_keeps_the_live_data_dir_of_a_rekeyed_project() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(dir, &registry).await.unwrap();
+        let live_id = store.project_id.clone();
+
+        // Re-key the registry entry to a stale ID, exactly as adding a git
+        // remote after `init` does (the path is unchanged, so the entry is not
+        // "stale" by the liveness predicate — only its ID is wrong).
+        let stale_id = "0000000000000000".to_string();
+        let mut reg = registry.load().await.unwrap();
+        reg.projects
+            .iter_mut()
+            .find(|e| e.project_id == live_id)
+            .unwrap()
+            .project_id = stale_id.clone();
+        registry.save(&reg).await.unwrap();
+
+        // A personal memory lives ONLY in the live data dir — there is no copy
+        // in the project tree, so deleting that dir is unrecoverable.
+        let personal = paths::personal_memories_dir(&live_id).unwrap();
+        async_fs::create_dir_all(&personal).await.unwrap();
+        let personal_file = personal.join("only-copy.md");
+        async_fs::write(&personal_file, "---\n---\n").await.unwrap();
+
+        let result = prune_stale_projects(&registry, |_| {}).await.unwrap();
+
+        assert!(
+            personal_file.exists(),
+            "prune deleted the live data dir of a re-keyed project, destroying \
+             the only copy of its personal memories"
+        );
+        assert!(
+            !result.orphan_ids.contains(&live_id),
+            "the live ID of a registered path must never be swept as an orphan"
+        );
+    }
+
+    #[test]
+    fn protected_ids_cover_both_the_recorded_and_the_live_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path();
+        let live_id = crate::storage::project_id::compute_project_id(dir);
+
+        let mut reg = Registry::default();
+        reg.projects.push(RegistryEntry {
+            project_id: "stale00000000000".to_string(),
+            project_path: dir.to_string_lossy().to_string(),
+            parent_project_id: None,
+            subscriptions: vec![],
+        });
+
+        let protected = crate::storage::protected_project_ids(&reg);
+        assert!(protected.contains("stale00000000000"), "recorded ID");
+        assert!(protected.contains(&live_id), "ID the path hashes to today");
+
+        // A vanished path contributes only its recorded ID: there is nothing on
+        // disk to re-hash, and the entry is the stale-entry case instead.
+        let mut gone = Registry::default();
+        gone.projects.push(RegistryEntry {
+            project_id: "ghost00000000000".to_string(),
+            project_path: "/nonexistent/protected-ids-test".to_string(),
+            parent_project_id: None,
+            subscriptions: vec![],
+        });
+        assert_eq!(
+            crate::storage::protected_project_ids(&gone).len(),
+            1,
+            "a vanished path must not contribute a bogus live ID"
         );
     }
 

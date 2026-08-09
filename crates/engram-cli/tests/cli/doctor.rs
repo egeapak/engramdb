@@ -249,3 +249,56 @@ fn doctor_store_unhealthy_exits_nonzero() {
         .failure()
         .stdout(predicate::str::contains("orphan-001"));
 }
+
+/// A project whose ID drifted (a git remote added after `init`) must be
+/// reported as such AND keep its per-project checks.
+///
+/// `in_registry` is computed by ID, so before the three-arm restructure a
+/// drifted project fell into the "not registered" branch: it was told to run
+/// `init` (which adds a SECOND registry row for the same path) and silently
+/// lost five checks — config file, `.mcp.json`, write lock, gitignore, and
+/// disk usage.
+#[test]
+fn doctor_reports_project_identity_drift_and_keeps_project_checks() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+
+    // `compute_project_id` prefers the git remote in `.git/config`, so writing
+    // one after registration re-keys the project exactly as `git remote add`
+    // does.
+    std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+    std::fs::write(
+        dir.path().join(".git").join("config"),
+        "[remote \"origin\"]\n\turl = git@github.com:acme/drifted.git\n",
+    )
+    .unwrap();
+
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "plain",
+            "doctor",
+        ])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        combined.contains("Project identity"),
+        "drift must be reported: {combined}"
+    );
+    assert!(
+        combined.contains("projects repair"),
+        "the suggestion must point at repair, not init: {combined}"
+    );
+    assert!(
+        combined.contains("Config file"),
+        "per-project checks must survive a drifted registration: {combined}"
+    );
+}

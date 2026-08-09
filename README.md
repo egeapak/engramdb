@@ -132,7 +132,8 @@ the current directory isn't an EngramDB project, the report collapses to just th
 "not set up" notice.
 
 `engramdb doctor --fix` offers to repair the issues it finds (reindex, download
-the embedding model, prune stale projects, or initialize the project) — it
+the embedding model, prune stale projects, re-key a project whose ID drifted,
+or initialize the project) — it
 prompts on a terminal and applies non-interactively with `--fix --yes`.
 `engramdb doctor validate` loads each downloaded model and runs a test inference
 to confirm it actually works.

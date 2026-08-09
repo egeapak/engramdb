@@ -4,15 +4,15 @@
 //! (see [`engramdb::ops::discover`]), asks whether to adopt each one, and — on
 //! accept — registers it and rebuilds its index with an indicatif progress bar.
 
+use crate::engine::engine_for_project;
 use crate::output::OutputFormatter;
 use crate::prompter::Prompter;
 use anyhow::{bail, Result};
-use engramdb::daemon::{DaemonCell, DaemonPolicy, InProcessFallback};
+use engramdb::daemon::{DaemonCell, DaemonPolicy};
 use engramdb::ops::discover::{
     DiscoverOptions, DiscoveredProject, DiscoveryReport, DiscoveryStatus,
 };
 use engramdb::ops::{self};
-use engramdb::retrieval::engine::RetrievalEngine;
 use engramdb::storage::{MemoryStore, RegistryBackend};
 use engramdb::types::EmbeddingBackend;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -331,37 +331,6 @@ async fn adopt(
     })
 }
 
-/// Like [`crate::engine::engine_for`], but serving in-process providers from a
-/// shared cache so a multi-project run loads each model at most once.
-async fn engine_for_project(
-    store: MemoryStore,
-    backend: Option<EmbeddingBackend>,
-    cell: &Arc<DaemonCell>,
-    policy: DaemonPolicy,
-    cache: &ops::ProviderCache,
-) -> RetrievalEngine {
-    let config_path = store.project_dir.join(".engramdb").join("config.toml");
-    let mut config = engramdb::storage::config::load_config_or_default(&config_path).await;
-    // `ProviderCache` is the MCP server's seam and auto-sizes the embedding
-    // pool to `cores/2` for many concurrent callers. Here it is used purely as
-    // a cache across projects — both this loop and `ops::reindex`'s embed loop
-    // are strictly sequential — so the extra sessions could never be used and
-    // would cost a full model load each. Pin to one; the size is part of
-    // `provider_cache_key`, so this stays a coherent cache key.
-    config.embeddings.pool_size = Some(1);
-    let project_dir = store.project_dir.clone();
-    let providers = engramdb::daemon::resolve_providers_with(
-        cell,
-        &config,
-        backend,
-        &project_dir,
-        policy,
-        InProcessFallback::Pool(cache),
-    )
-    .await;
-    ops::assemble_engine(store, config, providers)
-}
-
 /// Human-readable scan summary (pretty/plain only).
 fn print_scan_summary(
     formatter: &OutputFormatter,
@@ -392,6 +361,12 @@ fn print_scan_summary(
                 "{} is a linked git worktree of {} — skipping (worktrees route to the main checkout automatically; run any engramdb command inside it, or discover the main checkout).",
                 skipped.path.display(),
                 main.display()
+            )),
+            DiscoveryStatus::StaleRegistration { registered_id } => formatter.print_warning(&format!(
+                "{} is registered under project ID {} but now hashes to {} (a git remote added after `engramdb init` re-keys a project). Its memories are missing from queries and its group subscriptions are detached. Run `engramdb projects repair` in that directory — adopting it here would leave two registry entries for one path.",
+                skipped.path.display(),
+                registered_id,
+                skipped.project_id
             )),
             _ => {}
         }
@@ -464,17 +439,24 @@ fn skipped_json(report: &DiscoveryReport) -> Vec<serde_json::Value> {
     report
         .skipped()
         .map(|p| {
-            let (reason, owner) = match &p.status {
-                DiscoveryStatus::SharedId { owner } => ("shared_project_id", owner),
-                DiscoveryStatus::Worktree { main } => ("git_worktree", main),
-                // Not reachable: `skipped()` yields only the two above.
-                _ => ("unknown", &p.path),
+            // `owner` is the other party in the conflict; for a re-keyed
+            // registration there is none, so it carries the stale ID instead
+            // under `registered_id`.
+            let (reason, owner, registered_id) = match &p.status {
+                DiscoveryStatus::SharedId { owner } => ("shared_project_id", Some(owner), None),
+                DiscoveryStatus::Worktree { main } => ("git_worktree", Some(main), None),
+                DiscoveryStatus::StaleRegistration { registered_id } => {
+                    ("stale_project_id", None, Some(registered_id))
+                }
+                // Not reachable: `skipped()` yields only the three above.
+                _ => ("unknown", None, None),
             };
             serde_json::json!({
                 "path": p.path.display().to_string(),
                 "project_id": p.project_id,
                 "reason": reason,
-                "owner": owner.display().to_string(),
+                "owner": owner.map(|o| o.display().to_string()),
+                "registered_id": registered_id,
             })
         })
         .collect()

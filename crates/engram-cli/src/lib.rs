@@ -788,6 +788,22 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
+        Command::Projects {
+            command: Some(ProjectsCommand::Repair { force, no_index }),
+        } => {
+            commands::run_repair(
+                &dir,
+                &registry,
+                force,
+                no_index,
+                &formatter,
+                &prompter,
+                backend,
+                &daemon_cell,
+                daemon_policy,
+            )
+            .await
+        }
         Command::Projects { command } => {
             commands::run_projects(
                 &dir,

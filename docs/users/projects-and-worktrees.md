@@ -60,6 +60,33 @@ engramdb query --mode rank --path src/foo.rs --include-global
 
 The global data directory is `<global_data_dir>/projects/<global_id>/` (no `.engramdb/` in any project tree — global memories live entirely in user-space).
 
+## Project identity drift
+
+A project's ID is derived from its git remote when it has one, and from its
+absolute path when it doesn't. So running `engramdb init` **before**
+`git remote add origin …` — the ordinary order when you create a repo locally
+and push it later — permanently re-keys the project. The registry keeps the old
+ID; every live operation uses the new one, and the symptoms are all silent:
+
+- memories vanish from `list`/`query`, because the live ID's index is empty —
+  the `.md` files in `.engramdb/memories/` are untouched;
+- **personal** memories become invisible: they live only under the old ID's
+  data directory;
+- group subscriptions detach — they are recorded against the old ID;
+- worktree sub-projects still point at the old ID as their parent.
+
+`engramdb doctor` reports it as a `Project identity` warning, and
+`projects discover` reports it as `stale_project_id`. Fix it with:
+
+```bash
+engramdb projects repair
+```
+
+Do **not** run `engramdb init` to "re-register" — that adds a *second* registry
+entry for the same path, with no subscriptions and no parent link. `repair`
+migrates the existing entry instead, so both survive, and carries the personal
+memories across before removing the old data directory.
+
 ## Registry, prune, link, unlink
 
 The global registry tracks every project you've init'd. It supports parent-child relationships and cleanup.
@@ -74,6 +101,7 @@ engramdb projects link <child_id> --parent <parent_id> # link as sub-project
 engramdb projects unlink <child_id>                    # promote back to root
 engramdb projects prune [-f]                           # remove stale registry entries + orphan data
 engramdb projects discover [PATH] [-y] [--dry-run]     # adopt projects on disk that aren't registered
+engramdb projects repair [-f]                          # re-key a project whose ID drifted
 ```
 
 `projects discover` is prune's mirror image. Prune removes registry entries with
@@ -97,14 +125,17 @@ rebuilds its index from the on-disk `.md` files, with a progress bar over the
 batch. `--yes` takes them all, `--no-index` registers without rebuilding (run
 `engramdb reindex` later), and `--dry-run` only reports.
 
-Three things are deliberately never auto-registered. engramdb's own global and
+Four things are deliberately never auto-registered. engramdb's own global and
 group stores (they live under the global data dir in the same `.engramdb/`
-layout) are not reported at all. The other two are reported and skipped — as a
-warning in human output, and in `skipped[]` in JSON:
+layout) are not reported at all. The other three are reported and skipped — as
+a warning in human output, and in `skipped[]` in JSON:
 
 - A directory whose project ID is already claimed by a different checkout that
   still exists (in the registry, or earlier in the same scan). Two clones of
   one git remote hash to the same ID and would share a single index.
+- A path registered under an ID it no longer hashes to (see [Project identity
+  drift](#project-identity-drift) above) — adopting would leave two entries for
+  one path.
 - A **linked git worktree** carrying its own `.engramdb/`. Worktrees are
   sub-projects: memory operations inside one already route to the main
   checkout, and any stray local store is consolidated into it on the next

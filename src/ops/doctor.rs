@@ -317,7 +317,28 @@ pub async fn doctor_environment(
             project_checks.push(check_chunk_orphans(s).await);
         }
 
-        if registry_info.in_registry {
+        // Three cases, not two. A re-keyed project is registered — just under
+        // the wrong ID — so it must keep the per-project checks below AND get
+        // told what actually happened. Treating it as "not registered" both
+        // dropped those checks and suggested `init`, which pushes a SECOND
+        // registry row for the same path.
+        if let Some(stale_id) = &registry_info.drifted_registration {
+            project_checks.push(EnvironmentCheck {
+                name: "Project identity".to_string(),
+                passed: true,
+                message: format!(
+                    "registered as {} but now hashes to {}",
+                    stale_id, project_id
+                ),
+                suggestion: Some(
+                    "A git remote added after `engramdb init` re-keys the project: its memories disappear from queries and its group subscriptions detach. Run `engramdb projects repair` (NOT `init`, which would add a second registry entry)."
+                        .to_string(),
+                ),
+                details: vec![],
+                status: Some(CheckStatus::Warn),
+            });
+        }
+        if registry_info.in_registry || registry_info.drifted_registration.is_some() {
             project_checks.push(check_config_file(dir).await);
             project_checks.push(check_mcp_config_deep(dir));
             project_checks.push(check_write_lock(&project_id).await);
@@ -529,6 +550,11 @@ struct RegistryInfo {
     /// checkouts share one LanceDB index, write lock, and personal-memories
     /// dir while keeping separate `.engramdb/memories/` trees.
     conflicting_checkout: Option<PathBuf>,
+    /// This path IS registered, but under a project ID it no longer hashes to
+    /// (a git remote added after `init` re-keys a project). Carries the stale
+    /// ID. Distinct from `in_registry`, which is computed by ID and is
+    /// therefore `false` in exactly this case.
+    drifted_registration: Option<String>,
 }
 
 /// Load registry info once for reuse across sections.
@@ -548,6 +574,7 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
                 hierarchy_stale_parent: 0,
                 hierarchy_cycle: 0,
                 conflicting_checkout: None,
+                drifted_registration: None,
             };
         }
     };
@@ -567,9 +594,11 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
                 .filter(|e| crate::ops::projects::registry_entry_alive(e))
                 .count();
 
-            // Count orphan data directories (on disk but not in registry)
-            let registered_ids: std::collections::HashSet<&str> =
-                reg.projects.iter().map(|e| e.project_id.as_str()).collect();
+            // Count orphan data directories (on disk but not in registry).
+            // Shares `prune`'s widened predicate rather than re-deriving one:
+            // counting a re-keyed project's live data dir as an orphan here
+            // would invite the user to run the prune that deletes it.
+            let registered_ids = crate::storage::protected_project_ids(&reg);
             let orphan_dirs = crate::storage::paths::global_data_dir()
                 .ok()
                 .map(|d| d.join("projects"))
@@ -591,6 +620,13 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
             let conflicting_checkout =
                 crate::storage::conflicting_checkout_path(&reg, &project_id, dir);
 
+            // Same shared predicate `discover` and `projects repair` use, so
+            // the three can't disagree about what counts as a re-keyed project.
+            let drifted_registration =
+                crate::storage::stale_registrations_for(&reg, dir, &project_id)
+                    .first()
+                    .map(|e| e.project_id.clone());
+
             RegistryInfo {
                 in_registry,
                 total_projects,
@@ -601,6 +637,7 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
                 hierarchy_stale_parent: issues.stale_parent.len(),
                 hierarchy_cycle: issues.cycle_members.len(),
                 conflicting_checkout,
+                drifted_registration,
             }
         }
         Err(_) => RegistryInfo {
@@ -613,6 +650,7 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
             conflicting_checkout: None,
+            drifted_registration: None,
         },
     }
 }
@@ -3700,6 +3738,7 @@ mod tests {
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
             conflicting_checkout: None,
+            drifted_registration: None,
         };
         let checks = build_registry_checks(&info);
         assert!(checks[0].message.contains("5 registered"));
@@ -3721,6 +3760,7 @@ mod tests {
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
             conflicting_checkout: None,
+            drifted_registration: None,
         };
         let checks = build_registry_checks(&info);
         let details_str = checks[0].details.join(" ");
@@ -3741,6 +3781,7 @@ mod tests {
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
             conflicting_checkout: None,
+            drifted_registration: None,
         };
         let checks = build_registry_checks(&info);
         assert_eq!(checks[0].status, Some(CheckStatus::Warn));
@@ -3761,6 +3802,7 @@ mod tests {
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
             conflicting_checkout: None,
+            drifted_registration: None,
         };
         let checks = build_registry_checks(&info);
         let hierarchy = checks
@@ -3784,6 +3826,7 @@ mod tests {
             hierarchy_stale_parent: 1,
             hierarchy_cycle: 2,
             conflicting_checkout: None,
+            drifted_registration: None,
         };
         let checks = build_registry_checks(&info);
         let hierarchy = checks

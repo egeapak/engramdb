@@ -316,6 +316,7 @@ Invoked by Claude Code, not manually. See [claude-code.md](./claude-code.md#how-
 engramdb projects info                          # current project info (default)
 engramdb projects list [--group auto|always|none]  # all registered projects as a tree
 engramdb projects discover [PATH] [--yes] [--dry-run]  # adopt unregistered projects
+engramdb projects repair [-f] [--no-index]      # re-key a project whose ID drifted
 engramdb projects stats                         # cross-project aggregate stats
 engramdb projects delete <project_id> [-f] [--cascade]
 engramdb projects link <child_id> --parent <parent_id>
@@ -372,6 +373,9 @@ are reported but never registered — as a warning in human output, and in the
 - **Linked git worktree** — worktrees are sub-projects, not roots: engramdb
   routes their memory operations to the main checkout automatically. Adopting
   one would create a second owner of the same memory files.
+- **Stale project ID** — the path *is* registered, but under an ID it no
+  longer hashes to. Adopting would leave two registry entries for one path; the
+  fix is `projects repair` (below).
 
 Exit status is non-zero if any project failed to register; the report is still
 emitted first, so you can see which ones. Directories that can't be read
@@ -382,7 +386,7 @@ emitted first, so you can see which ones. Directories that can't be read
 JSON mode emits exactly one of two objects, both carrying `root`,
 `scanned_dirs`, `depth_limited`, `unreadable_dirs`, `dry_run`, and `skipped[]`
 (each `{path, project_id, reason, owner}` where `reason` is
-`shared_project_id` or `git_worktree`).
+`shared_project_id`, `git_worktree`, or `stale_project_id`).
 
 - `--dry-run` adds `candidates[]` (each `{path, project_id, memory_count}`) and
   `already_registered[]`.
@@ -394,6 +398,39 @@ Arrays are empty rather than absent when nothing was found or everything was
 declined, so the shape never varies with the outcome. Under `--no-index`,
 `indexed` and `embedded` are `null` — "not rebuilt", as distinct from `0`,
 which means the rebuild ran and found nothing.
+
+### `projects repair`
+
+Re-keys a project whose ID drifted out from under its registry entry.
+
+`compute_project_id` hashes the git remote when there is one and falls back to
+the path when there isn't, so running `engramdb init` **before**
+`git remote add origin …` permanently changes the project's ID. The registry
+keeps the old one; every live operation uses the new one. The symptoms are all
+silent — memories vanish from `list`/`query` (the live ID's index is empty even
+though the `.md` files are untouched), group subscriptions detach, and personal
+memories become invisible.
+
+```bash
+engramdb projects repair            # show the blast radius, then confirm
+engramdb projects repair -f         # skip the prompt (required in JSON mode)
+engramdb projects repair --no-index # re-key only; run `engramdb reindex` later
+```
+
+It migrates the registry entry in place — preserving group subscriptions and
+worktree parent links, which a re-registration would silently drop — carries
+the personal memories over to the live data directory, re-points any
+sub-projects at the new ID, removes the old data directory once its contents
+have moved, and rebuilds the index. Running it on a consistent project is a
+no-op, so it is safe to re-run.
+
+It refuses when another still-existing checkout is registered under the old ID:
+that data directory is shared, and migrating it would destroy the other
+checkout's data. The old directory's usage history (stats events) is not
+carried over; memories and vectors are unaffected.
+
+`engramdb doctor` reports the same condition as a `Project identity` warning,
+and `doctor --fix` offers this repair.
 
 See [projects-and-worktrees.md](./projects-and-worktrees.md).
 

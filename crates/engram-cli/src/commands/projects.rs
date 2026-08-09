@@ -12,9 +12,10 @@ use std::path::Path;
 
 /// Run the `projects` command with the given subcommand (defaults to `Info`).
 ///
-/// `ProjectsCommand::Discover` is NOT handled here: it needs model providers to
-/// rebuild an index, so `lib.rs` dispatches it directly alongside the other
-/// daemon-aware commands. Reaching it here means that dispatch was removed.
+/// `ProjectsCommand::{Discover, Repair}` are NOT handled here: both rebuild an
+/// index and so need model providers, and `lib.rs` dispatches them directly
+/// alongside the other daemon-aware commands. Reaching them here means that
+/// dispatch was removed.
 pub async fn run_projects(
     dir: &Path,
     registry: &dyn RegistryBackend,
@@ -52,8 +53,8 @@ pub async fn run_projects(
             // The per-invocation `--group` flag overrides the config default.
             formatter.print_project_list(&output, group.unwrap_or(grouping));
         }
-        ProjectsCommand::Discover { .. } => {
-            unreachable!("`projects discover` is dispatched in lib.rs (needs model providers)")
+        ProjectsCommand::Discover { .. } | ProjectsCommand::Repair { .. } => {
+            unreachable!("dispatched in lib.rs (both need model providers)")
         }
         ProjectsCommand::Delete {
             project_id,

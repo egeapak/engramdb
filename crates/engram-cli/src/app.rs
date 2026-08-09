@@ -161,6 +161,22 @@ pub enum ProjectsCommand {
         #[arg(long)]
         no_index: bool,
     },
+    /// Re-key this project's registration to the ID it hashes to today.
+    ///
+    /// Adding a git remote after `engramdb init` changes the project's ID, so
+    /// the registry keeps pointing at the old one: memories vanish from
+    /// queries, group subscriptions detach, and personal memories become
+    /// invisible. This migrates the registry entry (preserving subscriptions
+    /// and worktree links), carries the personal memories across, and rebuilds
+    /// the index.
+    Repair {
+        /// Skip confirmation prompt
+        #[arg(long, short = 'f')]
+        force: bool,
+        /// Re-key only — skip the index rebuild and re-embedding
+        #[arg(long)]
+        no_index: bool,
+    },
     /// Remove a project from the registry and delete its global data.
     ///
     /// Refuses by default when the project has sub-projects (children).
@@ -830,7 +846,8 @@ pub enum Command {
         #[arg(long)]
         global: bool,
 
-        /// Offer to fix detected issues (reindex, download model, prune registry, init).
+        /// Offer to fix detected issues (reindex, download model, prune registry, repair a
+        /// drifted project ID, init).
         /// Prompts on a terminal; in non-interactive contexts pair with --yes.
         #[arg(long)]
         fix: bool,

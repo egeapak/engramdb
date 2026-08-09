@@ -94,6 +94,19 @@ pub enum DiscoveryStatus {
         /// The checkout that owns (or will own) the project ID.
         owner: PathBuf,
     },
+    /// The path IS registered, but under a project ID it no longer hashes to.
+    ///
+    /// `compute_project_id` prefers the git remote and falls back to the path,
+    /// so adding a remote after `engramdb init` silently re-keys the project.
+    /// Its memories then disappear from queries (the live ID's index is empty)
+    /// and its group subscriptions detach (they are recorded against the old
+    /// ID). Adopting is the wrong repair — registering the live ID leaves two
+    /// entries for one path — so this is reported and pointed at
+    /// `engramdb projects repair`.
+    StaleRegistration {
+        /// The project ID the registry still records for this path.
+        registered_id: String,
+    },
     /// A linked git worktree carrying its own `.engramdb/`.
     ///
     /// Worktrees are not independent projects: `worktree::resolve_project_root`
@@ -157,13 +170,16 @@ impl DiscoveryReport {
     }
 
     /// Projects found but deliberately not offered: an ID owned by another
-    /// checkout, or a linked git worktree. Front-ends must account for these —
-    /// silently dropping them makes "found N, registered fewer" unreconcilable.
+    /// checkout, a linked git worktree, or a re-keyed registration. Front-ends
+    /// must account for these — silently dropping them makes "found N,
+    /// registered fewer" unreconcilable.
     pub fn skipped(&self) -> impl Iterator<Item = &DiscoveredProject> {
         self.projects.iter().filter(|p| {
             matches!(
                 p.status,
-                DiscoveryStatus::SharedId { .. } | DiscoveryStatus::Worktree { .. }
+                DiscoveryStatus::SharedId { .. }
+                    | DiscoveryStatus::Worktree { .. }
+                    | DiscoveryStatus::StaleRegistration { .. }
             )
         })
     }
@@ -237,7 +253,7 @@ pub async fn discover_projects_in(
 
         if is_dir(&canon.join(".engramdb")).await {
             let project_id = project_id::compute_project_id(&canon);
-            let status = classify(&canon, &project_id, &by_path, &by_id);
+            let status = classify(&canon, &project_id, reg, &by_path, &by_id);
             report.projects.push(DiscoveredProject {
                 path: canon.clone(),
                 memory_count: count_memories(&canon, &project_id).await,
@@ -346,9 +362,19 @@ fn demote_intra_scan_id_collisions(projects: &mut [DiscoveredProject]) {
 fn classify(
     canon: &Path,
     project_id: &str,
+    reg: &Registry,
     by_path: &HashSet<PathBuf>,
     by_id: &HashMap<&str, &RegistryEntry>,
 ) -> DiscoveryStatus {
+    // Checked before `Registered`, and via the same shared predicate the repair
+    // and doctor paths use, so the three can't drift apart. Catches both real
+    // shapes: one entry holding the stale ID, and the two-entry state that
+    // running `init` on a re-keyed project produces.
+    if let Some(stale) = crate::storage::stale_registrations_for(reg, canon, project_id).first() {
+        return DiscoveryStatus::StaleRegistration {
+            registered_id: stale.project_id.clone(),
+        };
+    }
     // A registry entry pointing here wins over everything else — a worktree
     // already linked as a sub-project is correctly tracked, not a finding.
     if by_path.contains(canon) {
@@ -657,6 +683,56 @@ mod tests {
             &skipped[0].status,
             DiscoveryStatus::Worktree { main: m } if m == &main.canonicalize().unwrap()
         ));
+    }
+
+    /// State A: one entry, recorded under an ID the path no longer hashes to.
+    /// It must not read as `Registered` (the tool for finding registry
+    /// problems would declare the broken registration fine) nor as
+    /// `Unregistered` (adopting adds a second row for one path).
+    #[tokio::test]
+    async fn a_rekeyed_registration_is_reported_not_adopted() {
+        let tmp = TempDir::new().unwrap();
+        let dir = fake_project(tmp.path(), "proj", 1);
+        let mut reg = Registry::default();
+        reg.projects.push(RegistryEntry {
+            project_id: "stale00000000000".to_string(),
+            project_path: dir.to_string_lossy().to_string(),
+            parent_project_id: None,
+            subscriptions: vec![],
+        });
+
+        let report = scan(tmp.path(), &reg).await;
+        assert_eq!(report.unregistered().count(), 0);
+        assert_eq!(report.registered().count(), 0);
+        let skipped: Vec<_> = report.skipped().collect();
+        assert_eq!(skipped.len(), 1);
+        assert!(matches!(
+            &skipped[0].status,
+            DiscoveryStatus::StaleRegistration { registered_id } if registered_id == "stale00000000000"
+        ));
+    }
+
+    /// State B: the two-row state that running `init` on an already-drifted
+    /// project produces. The live ID IS registered, so a naive `by_path`
+    /// lookup would call this healthy and leave the duplicate in place.
+    #[tokio::test]
+    async fn a_duplicate_registration_is_reported_too() {
+        let tmp = TempDir::new().unwrap();
+        let dir = fake_project(tmp.path(), "proj", 1);
+        let live_id = project_id::compute_project_id(&dir);
+        let mut reg = Registry::default();
+        for id in ["stale00000000000", live_id.as_str()] {
+            reg.projects.push(RegistryEntry {
+                project_id: id.to_string(),
+                project_path: dir.to_string_lossy().to_string(),
+                parent_project_id: None,
+                subscriptions: vec![],
+            });
+        }
+
+        let report = scan(tmp.path(), &reg).await;
+        assert_eq!(report.registered().count(), 0, "not healthy: two rows");
+        assert_eq!(report.skipped().count(), 1);
     }
 
     #[tokio::test]

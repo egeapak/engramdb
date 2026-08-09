@@ -133,6 +133,15 @@ If a worktree was init'd before this routing was added, you may have a stray `.e
 **`projects prune` lists projects I want to keep.**
 Those projects' on-disk paths no longer exist. Either restore the path, or accept the prune. The data isn't lost — `prune` deletes only the registry entry; the global data dir is preserved unless you confirm.
 
+**All my memories vanished after I added a git remote.**
+The project's ID is derived from the git remote when it has one, so adding a
+remote after `engramdb init` re-keys the project: the registry still points at
+the old ID, and the new one's index is empty. Nothing is lost — the `.md` files
+are untouched. Run `engramdb projects repair` (not `engramdb init`, which adds
+a second registry entry for the same path). `engramdb doctor` flags the same
+condition as a `Project identity` warning. See
+[projects-and-worktrees.md](./projects-and-worktrees.md#project-identity-drift).
+
 **`projects list` is missing a project I know has memories.**
 The registry is machine-local: it only records projects `init`'d or opened on
 this machine. A repo cloned with its `.engramdb/memories/` already committed, a

@@ -19,6 +19,7 @@ pub mod parsing;
 pub mod projects;
 pub mod query;
 pub mod reindex;
+pub mod repair;
 pub mod resolve;
 pub mod review;
 pub mod stats;

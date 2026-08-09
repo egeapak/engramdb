@@ -246,6 +246,8 @@ enum FixAction {
     DownloadEmbedding,
     /// Prune stale/orphaned projects from the registry.
     PruneProjects,
+    /// Re-key a project whose ID drifted out from under its registry entry.
+    RepairProjectId,
 }
 
 impl FixAction {
@@ -262,6 +264,9 @@ impl FixAction {
             FixAction::DownloadEmbedding => "Download the embedding model now?",
             FixAction::PruneProjects => {
                 "Prune stale/orphaned projects from the registry (engramdb projects prune)?"
+            }
+            FixAction::RepairProjectId => {
+                "Re-key this project's registration to its current ID (engramdb projects repair)?"
             }
         }
     }
@@ -314,6 +319,23 @@ impl FixAction {
                     anyhow::bail!("could not load the embedding model after download attempt")
                 }
             }
+            FixAction::RepairProjectId => {
+                let registry = engramdb::storage::FileRegistry::global()?;
+                // `force: true` — the doctor already reported the drift and the
+                // user just confirmed this fix, so don't double-prompt.
+                crate::commands::run_repair(
+                    dir,
+                    &registry,
+                    true,
+                    false,
+                    formatter,
+                    &crate::prompter::InquirePrompter,
+                    backend,
+                    &std::sync::Arc::new(engramdb::daemon::DaemonCell::new()),
+                    engramdb::daemon::DaemonPolicy::InProcess,
+                )
+                .await
+            }
             FixAction::PruneProjects => {
                 let registry = engramdb::storage::FileRegistry::global()?;
                 // `force: true` — the doctor already reported the findings and
@@ -356,6 +378,7 @@ fn collect_fix_actions(result: &EnvironmentDoctorResult) -> Vec<FixAction> {
             }),
             "Embedding model cache" if warn => push(FixAction::DownloadEmbedding),
             "Registered projects" if warn => push(FixAction::PruneProjects),
+            "Project identity" if warn => push(FixAction::RepairProjectId),
             _ => {}
         }
     }
@@ -781,6 +804,22 @@ mod tests {
             vec![FixAction::Reindex {
                 embeddings_only: true
             }]
+        );
+    }
+
+    /// The check name is a load-bearing, compiler-unchecked contract between
+    /// `src/ops/doctor.rs` and this mapping — renaming it there silently drops
+    /// the fix.
+    #[test]
+    fn collect_fix_actions_maps_project_identity_drift() {
+        let result = result_with(vec![check(
+            "Project identity",
+            true,
+            Some(CheckStatus::Warn),
+        )]);
+        assert_eq!(
+            collect_fix_actions(&result),
+            vec![FixAction::RepairProjectId]
         );
     }
 
