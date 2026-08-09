@@ -380,11 +380,32 @@ pub async fn repair_hierarchy(registry: &dyn RegistryBackend) -> Result<Hierarch
     Ok(issues)
 }
 
+/// The project ID that an orphan sweep must never touch.
+///
+/// `current_project` is the resolved main-worktree root of the project the
+/// command is running in, if any. Its ID is derived exactly the way
+/// [`MemoryStore::init`]/`open` derive theirs — from the directory, not from
+/// the registry — because the registry is precisely what may be missing.
+///
+/// See [`prune_stale_projects`] for why this exists.
+fn protected_project_id(current_project: Option<&Path>) -> Option<String> {
+    current_project.map(crate::storage::project_id::compute_project_id)
+}
+
 /// Count orphan data directories (on disk under `projects/` but not in registry).
-pub async fn count_orphan_dirs(registry: &dyn RegistryBackend) -> Result<usize> {
+///
+/// `current_project` is protected from the count exactly as it is from the
+/// sweep (see [`prune_stale_projects`]) — otherwise `doctor` would report an
+/// orphan that `prune` then refuses to remove, and the warning would never
+/// clear.
+pub async fn count_orphan_dirs(
+    registry: &dyn RegistryBackend,
+    current_project: Option<&Path>,
+) -> Result<usize> {
     let reg = registry.load().await?;
     let registered_ids: std::collections::HashSet<String> =
         reg.projects.iter().map(|e| e.project_id.clone()).collect();
+    let protected = protected_project_id(current_project);
 
     let projects_dir = paths::global_data_dir()?.join("projects");
     if !projects_dir.exists() {
@@ -398,6 +419,9 @@ pub async fn count_orphan_dirs(registry: &dyn RegistryBackend) -> Result<usize> 
                 continue;
             }
             let dir_name = entry.file_name().to_string_lossy().to_string();
+            if protected.as_deref() == Some(dir_name.as_str()) {
+                continue;
+            }
             if !registered_ids.contains(&dir_name) {
                 count += 1;
             }
@@ -420,10 +444,33 @@ pub enum PrunePhase {
 /// Stale: in registry but project path no longer exists on disk.
 /// Orphan: data directory exists under `projects/` but not in registry.
 ///
+/// `current_project` is the resolved main-worktree root of the project this
+/// command is running in (`None` only where there is genuinely no such
+/// project). **Its data directory is never swept**, even when the registry has
+/// no entry for it.
+///
+/// That guard is load-bearing, not defensive: `projects/<id>/personal/` is the
+/// *only* copy of a project's personal memories (shared memories live in the
+/// project tree and survive a reindex), and "absent from the registry" is not
+/// evidence a project is gone — `registry.json` is a single user-writable file
+/// that can be lost, corrupted, or predate a moved checkout. The current
+/// project is the one directory a sweep can positively confirm is live, so it
+/// is excluded. Without this, an unregistered project destroyed its own
+/// personal memories: `doctor` warns "not registered" → `--fix` runs `projects
+/// prune` → the sweep sees an unregistered data dir → deletes it. The very
+/// condition being fixed is what made the project look like an orphan.
+/// [`crate::ops::maintenance::auto_maintain`] widened that to any ordinary
+/// command, since it prunes on the command path before the store is opened.
+///
+/// This bounds the damage rather than eliminating it: `projects/<id>/` records
+/// no back-reference to its project path, so with the registry gone, *other*
+/// projects' directories remain indistinguishable from real orphans.
+///
 /// Deletion is parallelized with rayon. Calls `on_progress(phase)` after
 /// each item is removed (must be thread-safe).
 pub async fn prune_stale_projects(
     registry: &dyn RegistryBackend,
+    current_project: Option<&Path>,
     on_progress: impl Fn(PrunePhase) + Send + Sync,
 ) -> Result<PruneResult> {
     use rayon::prelude::*;
@@ -438,6 +485,8 @@ pub async fn prune_stale_projects(
     // the next prune pass. Directory deletion happens *after* the save,
     // outside the lock: once the entries are gone the dirs are plain
     // orphans, so a crash mid-delete just leaves work for the next pass.
+    let protected = protected_project_id(current_project);
+
     let lock = registry.lock_exclusive().await?;
     let mut reg = registry.load().await?;
     let (keep, stale): (Vec<_>, Vec<_>) = reg.projects.into_iter().partition(registry_entry_alive);
@@ -449,8 +498,14 @@ pub async fn prune_stale_projects(
     let projects_dir = paths::global_data_dir()?.join("projects");
 
     let stale_ids: Vec<String> = stale.iter().map(|e| e.project_id.clone()).collect();
+    // Dropping the registry entry is right — its path is gone — but the data
+    // dir is keyed by project ID, and two checkouts of the same git remote
+    // share one ID (see `registry::conflicting_checkout_path`). If the
+    // registered checkout was deleted while we run from a second one, the
+    // "stale" dir is our own live storage. Same protection as the orphan sweep.
     let stale_dirs: Vec<_> = stale
         .iter()
+        .filter(|e| protected.as_deref() != Some(e.project_id.as_str()))
         .map(|e| projects_dir.join(&e.project_id))
         .filter(|p| p.exists())
         .collect();
@@ -483,6 +538,9 @@ pub async fn prune_stale_projects(
                     continue;
                 }
                 let dir_name = entry.file_name().to_string_lossy().to_string();
+                if protected.as_deref() == Some(dir_name.as_str()) {
+                    continue;
+                }
                 if !registered_ids.contains(&dir_name) {
                     orphan_ids.push(dir_name);
                     orphan_paths.push(entry.path());
@@ -782,7 +840,7 @@ mod tests {
 
         assert_eq!(registry.load().await.unwrap().projects.len(), 2);
 
-        let result = prune_stale_projects(&registry, |_| {}).await.unwrap();
+        let result = prune_stale_projects(&registry, None, |_| {}).await.unwrap();
         assert_eq!(result.stale_removed, 1);
         assert_eq!(result.stale_ids, vec!["stale-proj-001"]);
 
@@ -815,7 +873,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = prune_stale_projects(&registry, |_| {}).await.unwrap();
+        let result = prune_stale_projects(&registry, None, |_| {}).await.unwrap();
         assert!(
             !result.stale_ids.iter().any(|id| id == "wt-subproject-001"),
             "a live worktree sub-project must not be pruned as stale"
@@ -840,7 +898,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let _store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let result = prune_stale_projects(&registry, |_| {}).await.unwrap();
+        let result = prune_stale_projects(&registry, None, |_| {}).await.unwrap();
         assert_eq!(result.stale_removed, 0);
         assert!(result.stale_ids.is_empty());
 
@@ -851,7 +909,7 @@ mod tests {
     #[tokio::test]
     async fn test_prune_stale_projects_empty_registry() {
         let registry = InMemoryRegistry::new();
-        let result = prune_stale_projects(&registry, |_| {}).await.unwrap();
+        let result = prune_stale_projects(&registry, None, |_| {}).await.unwrap();
         assert_eq!(result.stale_removed, 0);
         assert!(result.stale_ids.is_empty());
     }
@@ -1197,6 +1255,154 @@ mod tests {
         assert_eq!(repaired.total(), 0);
     }
 
+    /// Store one personal memory in `dir`'s project and return its ID.
+    ///
+    /// Personal memories are the stake in the tests below: they live *only*
+    /// under `<global>/projects/<id>/personal/`, so unlike shared memories
+    /// (which sit in the project tree and survive a reindex) a swept data dir
+    /// destroys the only copy.
+    async fn store_personal_memory(store: &MemoryStore) -> String {
+        let mut mem = Memory::new(
+            MemoryType::Decision,
+            "Personal note",
+            "Only copy lives under projects/<id>/personal/",
+            Provenance::human(),
+        );
+        mem.visibility = crate::types::Visibility::Personal;
+        store.create(&mem).await.unwrap();
+        mem.id.to_string()
+    }
+
+    /// Drop `project_id`'s entry, leaving its data dir on disk unreferenced —
+    /// what a lost or hand-edited `registry.json` looks like to a sweep.
+    async fn deregister(registry: &InMemoryRegistry, project_id: &str) {
+        let mut reg = registry.load().await.unwrap();
+        reg.projects.retain(|e| e.project_id != project_id);
+        registry.save(&reg).await.unwrap();
+    }
+
+    /// The sweep must not delete the data dir of the project it is running in.
+    ///
+    /// Regression: `doctor` warns "not registered" → `--fix` runs `projects
+    /// prune` → the sweep saw an unregistered data dir and deleted it. The
+    /// condition being fixed was the same one that made the project look like
+    /// an orphan, so the repair destroyed the personal memories it was meant
+    /// to be caring for. `auto_maintain` widened it to any ordinary command.
+    #[tokio::test]
+    async fn prune_spares_the_current_projects_data_dir() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(dir, &registry).await.unwrap();
+        let memory_id = store_personal_memory(&store).await;
+        deregister(&registry, &store.project_id).await;
+
+        let data_dir = paths::global_data_dir()
+            .unwrap()
+            .join("projects")
+            .join(&store.project_id);
+        assert!(data_dir.exists(), "precondition: data dir was created");
+
+        let result = prune_stale_projects(&registry, Some(dir), |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(result.orphans_removed, 0);
+        assert!(
+            !result.orphan_ids.contains(&store.project_id),
+            "current project must not even be reported as an orphan"
+        );
+        assert!(data_dir.exists(), "current project's data dir was deleted");
+        assert!(
+            MemoryStore::open(dir)
+                .await
+                .unwrap()
+                .get(&memory_id)
+                .await
+                .is_ok(),
+            "personal memory was destroyed — this is the only copy"
+        );
+    }
+
+    /// The other half of the pin: with no current project to protect, an
+    /// unregistered data dir is still swept. Without this the test above would
+    /// keep passing if the orphan phase stopped working altogether.
+    #[tokio::test]
+    async fn prune_still_sweeps_an_unprotected_data_dir() {
+        let temp = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp.path(), &registry).await.unwrap();
+        store_personal_memory(&store).await;
+        deregister(&registry, &store.project_id).await;
+
+        let data_dir = paths::global_data_dir()
+            .unwrap()
+            .join("projects")
+            .join(&store.project_id);
+
+        let result = prune_stale_projects(&registry, None, |_| {}).await.unwrap();
+
+        assert_eq!(result.orphans_removed, 1);
+        assert_eq!(result.orphan_ids, vec![store.project_id.clone()]);
+        assert!(!data_dir.exists());
+    }
+
+    /// Two checkouts of one git remote share a project ID, so a *stale* entry
+    /// — registered path gone — can name the data dir the surviving checkout
+    /// is actively using. Dropping the entry is right; deleting the dir is not.
+    #[tokio::test]
+    async fn prune_spares_the_current_data_dir_when_a_sibling_checkout_went_stale() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(dir, &registry).await.unwrap();
+        let memory_id = store_personal_memory(&store).await;
+
+        // Repoint the entry at a checkout that no longer exists, keeping the
+        // ID — exactly the shape `registry::conflicting_checkout_path` guards.
+        let mut reg = registry.load().await.unwrap();
+        let entry = reg
+            .projects
+            .iter_mut()
+            .find(|e| e.project_id == store.project_id)
+            .unwrap();
+        entry.project_path = temp.path().join("deleted-sibling").to_string_lossy().into();
+        registry.save(&reg).await.unwrap();
+
+        let result = prune_stale_projects(&registry, Some(dir), |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.stale_ids,
+            vec![store.project_id.clone()],
+            "the dead checkout's registry entry should still be dropped"
+        );
+        assert!(
+            MemoryStore::open(dir)
+                .await
+                .unwrap()
+                .get(&memory_id)
+                .await
+                .is_ok(),
+            "surviving checkout's personal memory was destroyed"
+        );
+    }
+
+    /// `doctor` and `prune` must agree: counting an orphan the sweep then
+    /// refuses to remove leaves a warning that can never be cleared.
+    #[tokio::test]
+    async fn count_orphan_dirs_excludes_the_current_project() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(dir, &registry).await.unwrap();
+        deregister(&registry, &store.project_id).await;
+
+        assert_eq!(count_orphan_dirs(&registry, Some(dir)).await.unwrap(), 0);
+        assert_eq!(count_orphan_dirs(&registry, None).await.unwrap(), 1);
+    }
+
     #[tokio::test]
     async fn test_prune_repairs_orphaned_children_after_stale_parent_removal() {
         // Parent's .engramdb/ is gone → stale → prune removes the parent.
@@ -1220,7 +1426,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = prune_stale_projects(&registry, |_| {}).await.unwrap();
+        let result = prune_stale_projects(&registry, None, |_| {}).await.unwrap();
         assert!(result.stale_ids.contains(&parent.project_id));
         assert_eq!(result.hierarchy_cleared, vec![child.project_id.clone()]);
 

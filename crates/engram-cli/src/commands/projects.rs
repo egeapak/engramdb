@@ -133,7 +133,7 @@ pub async fn run_projects(
             // Preview what would be pruned
             let entries = projects::list_projects(registry).await?;
             let stale: Vec<_> = entries.iter().filter(|e| !e.exists).collect();
-            let orphan_count = projects::count_orphan_dirs(registry).await?;
+            let orphan_count = projects::count_orphan_dirs(registry, Some(dir)).await?;
             let reg_snapshot = registry.load().await?;
             let hierarchy_issues = projects::scan_hierarchy_issues(&reg_snapshot);
             drop(reg_snapshot);
@@ -226,7 +226,10 @@ pub async fn run_projects(
             let hierarchy_pb =
                 progress::make_bar(hierarchy_issues.total() as u64, "links", target());
 
-            let result = projects::prune_stale_projects(registry, |phase| match phase {
+            // `dir` is protected from the sweep: see `prune_stale_projects`.
+            // This is also what keeps `doctor --fix` from destroying the very
+            // project whose "not registered" warning triggered it.
+            let result = projects::prune_stale_projects(registry, Some(dir), |phase| match phase {
                 projects::PrunePhase::Stale => stale_pb.inc(1),
                 projects::PrunePhase::Orphan => orphan_pb.inc(1),
                 projects::PrunePhase::Hierarchy => hierarchy_pb.inc(1),
@@ -280,6 +283,54 @@ mod tests {
     use super::*;
     use crate::prompter::MockPrompter;
     use engramdb::storage::registry::{InMemoryRegistry, Registry, RegistryEntry};
+
+    /// Pins the CLI half of the prune-orphan fix: `run_projects` must hand its
+    /// `dir` to both the preview count and the sweep. The invariant itself is
+    /// pinned in `ops::projects`; what can only break here is the wiring — and
+    /// this is the exact path `doctor --fix` takes when it "repairs" a
+    /// not-registered warning by pruning.
+    #[tokio::test]
+    async fn prune_spares_the_project_it_is_invoked_from() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = engramdb::storage::MemoryStore::init(temp_dir.path(), &registry)
+            .await
+            .unwrap();
+        let mut mem = engramdb::types::Memory::new(
+            engramdb::types::MemoryType::Decision,
+            "Personal note",
+            "Only copy lives under projects/<id>/personal/",
+            engramdb::types::Provenance::human(),
+        );
+        mem.visibility = engramdb::types::Visibility::Personal;
+        store.create(&mem).await.unwrap();
+
+        // The project is on disk but absent from the registry — a lost
+        // registry.json, which is also what `doctor` warns about before
+        // offering this very command as the fix.
+        registry.save(&Registry::default()).await.unwrap();
+
+        run_projects(
+            temp_dir.path(),
+            &registry,
+            Some(ProjectsCommand::Prune { force: true }),
+            &OutputFormatter::new(None, false, true),
+            &MockPrompter::new(vec![]),
+            ProjectListGrouping::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            engramdb::storage::MemoryStore::open(temp_dir.path())
+                .await
+                .unwrap()
+                .get(&mem.id.to_string())
+                .await
+                .is_ok(),
+            "prune destroyed the personal memories of the project it ran in"
+        );
+    }
 
     #[tokio::test]
     async fn test_projects_delete_confirmed() {
