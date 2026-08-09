@@ -122,7 +122,13 @@ async fn run_environment_check(
     let supported_hooks = crate::supported_hook_subcommands();
     let result =
         doctor_environment(&check_dir, store.as_ref(), daemon_check, &supported_hooks).await;
-    formatter.print_environment_doctor(&result);
+    // Under `--fix` in JSON mode the POST-fix report is the one document this
+    // command emits, so the pre-fix one is held back rather than printed and
+    // then contradicted.
+    let json_fix = fix && formatter.is_json();
+    if !json_fix {
+        formatter.print_environment_doctor(&result);
+    }
 
     // §10 epistemic checks (invalidated-path / stale-observation /
     // derived-from). Report-only unless --fix, which flips affected memories
@@ -168,12 +174,41 @@ async fn run_environment_check(
     }
 
     // `--fix` takes over from here: it offers to repair the fixable issues
-    // instead of just exiting non-zero, so we don't `bail!` in that mode.
+    // instead of just exiting non-zero.
     if fix {
-        return apply_fixes(
+        let applied = apply_fixes(
             &check_dir, global, &result, yes, backend, prompter, formatter,
         )
-        .await;
+        .await?;
+        if applied == 0 {
+            // Nothing was applied — nothing fixable, the user declined, or the
+            // non-interactive listing path. That last one is documented to
+            // exit 0 (`doctor_fix_non_tty_without_yes_lists_fixes_and_exits_zero`),
+            // so leave this case exactly as it was.
+            if json_fix {
+                formatter.print_environment_doctor(&result);
+            }
+            return Ok(());
+        }
+        // Re-run and report the POST-fix state. Without this, `doctor --fix
+        // --yes` in CI exited 0 on a store the fixes did not actually repair,
+        // and never told the user whether they worked.
+        let store = if global {
+            MemoryStore::open_global().await.ok()
+        } else {
+            MemoryStore::open(&check_dir).await.ok()
+        };
+        let daemon_check = engramdb::daemon::check_daemon(&check_dir).await;
+        let after =
+            doctor_environment(&check_dir, store.as_ref(), daemon_check, &supported_hooks).await;
+        if !json_fix {
+            formatter.print_message("\nRe-checked after applying fixes:");
+        }
+        formatter.print_environment_doctor(&after);
+        if !after.all_passed {
+            anyhow::bail!("environment check still failing after applying fixes");
+        }
+        return Ok(());
     }
 
     // `all_passed` only reflects hard failures (`passed == false`): checks
@@ -411,11 +446,11 @@ async fn apply_fixes(
     backend: Option<engramdb::types::EmbeddingBackend>,
     prompter: &dyn Prompter,
     formatter: &OutputFormatter,
-) -> Result<()> {
+) -> Result<usize> {
     let actions = collect_fix_actions(result);
     if actions.is_empty() {
         formatter.print_success("Nothing to fix.");
-        return Ok(());
+        return Ok(0);
     }
 
     let interactive = !yes && std::io::stdout().is_terminal() && !formatter.is_json();
@@ -427,9 +462,24 @@ async fn apply_fixes(
         for action in &actions {
             formatter.print_message(&format!("  - {}", action.prompt()));
         }
-        return Ok(());
+        return Ok(0);
     }
 
+    // In JSON mode this command owns stdout: each delegate would otherwise
+    // print its own document, breaking the one-document rule. Their `Result`
+    // still propagates, so nothing is swallowed silently.
+    let delegate_formatter = if formatter.is_json() {
+        OutputFormatter::silent()
+    } else {
+        OutputFormatter::new(None, false, false)
+    };
+    let delegate = if formatter.is_json() {
+        &delegate_formatter
+    } else {
+        formatter
+    };
+
+    let mut applied = 0;
     for action in actions {
         let apply = if yes {
             true
@@ -437,10 +487,11 @@ async fn apply_fixes(
             prompter.confirm(action.prompt(), true)?
         };
         if apply {
-            action.apply(dir, global, backend, formatter).await?;
+            action.apply(dir, global, backend, delegate).await?;
+            applied += 1;
         }
     }
-    Ok(())
+    Ok(applied)
 }
 
 #[cfg(test)]

@@ -301,4 +301,86 @@ fn doctor_reports_project_identity_drift_and_keeps_project_checks() {
         combined.contains("Config file"),
         "per-project checks must survive a drifted registration: {combined}"
     );
+    // The check must render as a WARNING, not plain output: `collect_fix_actions`
+    // matches on `status == Warn`, so a producer emitting `status: None` would
+    // still print this text while silently offering no fix.
+    assert!(
+        combined.contains('⚠') || combined.contains("Warn"),
+        "the drift check must carry Warn status or --fix stops offering the repair: {combined}"
+    );
+}
+
+/// `doctor --fix --yes` must re-check and exit on the POST-fix state.
+///
+/// Before this, it exited 0 after applying fixes even when the report showed
+/// failures and never told the user whether the fix worked — so a CI gate on
+/// `doctor --fix --yes` passed on a still-broken store.
+#[test]
+fn doctor_fix_yes_rechecks_and_reports_the_post_fix_state() {
+    let dir = TempDir::new().unwrap();
+
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "plain",
+            "doctor",
+            "--fix",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("Re-checked after applying fixes"),
+        "a fix run must verify its own work: {combined}"
+    );
+    // The init fix resolves the only failing check, so the post-fix state is
+    // clean and the command exits 0 — on the re-check, not on assumption.
+    assert!(
+        output.status.success(),
+        "post-fix state is healthy, so exit 0: {combined}"
+    );
+    assert!(dir.path().join(".engramdb").join("manifest.toml").exists());
+}
+
+/// `doctor --fix --yes --format json` must leave exactly one JSON document on
+/// stdout. Each fix delegate prints its own report otherwise.
+#[test]
+fn doctor_fix_yes_json_emits_one_document() {
+    let dir = TempDir::new().unwrap();
+
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "json",
+            "doctor",
+            "--fix",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut stream = serde_json::Deserializer::from_str(&stdout).into_iter::<serde_json::Value>();
+    let first = stream
+        .next()
+        .expect("expected a JSON document")
+        .unwrap_or_else(|e| panic!("stdout is not valid JSON: {e} — {stdout}"));
+    assert!(
+        first.get("sections").is_some(),
+        "the one document must be the doctor report: {stdout}"
+    );
+    assert!(
+        stream.next().is_none(),
+        "exactly one JSON document must reach stdout; got more: {stdout}"
+    );
 }

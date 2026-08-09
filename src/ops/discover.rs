@@ -214,10 +214,21 @@ pub async fn discover_projects_in(
     // Index the registry once: by canonical path (is *this* directory tracked?)
     // and by project ID (is this ID owned by another checkout?).
     let mut by_path: HashSet<PathBuf> = HashSet::new();
-    let mut by_id: HashMap<&str, &RegistryEntry> = HashMap::new();
+    let mut by_id: HashMap<String, &RegistryEntry> = HashMap::new();
     for entry in &reg.projects {
-        by_path.insert(canonical(Path::new(&entry.project_path)));
-        by_id.entry(entry.project_id.as_str()).or_insert(entry);
+        let entry_path = canonical(Path::new(&entry.project_path));
+        by_path.insert(entry_path.clone());
+        by_id.entry(entry.project_id.clone()).or_insert(entry);
+        // Also index the ID the registered path hashes to TODAY. A drifted
+        // project owns its live ID even though no row records it, and without
+        // this a clone of that project matches nothing — so it is offered for
+        // adoption, and its reindex clears the memories table the drifted
+        // project is still using.
+        if entry_path.exists() {
+            by_id
+                .entry(project_id::compute_project_id(&entry_path))
+                .or_insert(entry);
+        }
     }
 
     // The global/group stores live under the global data dir in the same
@@ -364,10 +375,21 @@ fn classify(
     project_id: &str,
     reg: &Registry,
     by_path: &HashSet<PathBuf>,
-    by_id: &HashMap<&str, &RegistryEntry>,
+    by_id: &HashMap<String, &RegistryEntry>,
 ) -> DiscoveryStatus {
-    // Checked before `Registered`, and via the same shared predicate the repair
-    // and doctor paths use, so the three can't drift apart. Catches both real
+    // Worktree first: "never an independent project" is the strongest rule
+    // here, and it must beat `StaleRegistration` — telling a worktree to run
+    // `projects repair` would re-key its row to the worktree's own path hash
+    // and detach it from main. A linked worktree's `.git` is a file, so
+    // `compute_project_id` finds no `.git/config` and falls back to the path
+    // hash, which is why it looks unregistered in the first place.
+    if let Some(main) = project_id::detect_worktree_main(canon) {
+        return DiscoveryStatus::Worktree {
+            main: canonical(&main),
+        };
+    }
+    // Then drift, before `Registered`, via the same shared predicate the repair
+    // and doctor paths use so the three can't disagree. Catches both real
     // shapes: one entry holding the stale ID, and the two-entry state that
     // running `init` on a re-keyed project produces.
     if let Some(stale) = crate::storage::stale_registrations_for(reg, canon, project_id).first() {
@@ -375,19 +397,9 @@ fn classify(
             registered_id: stale.project_id.clone(),
         };
     }
-    // A registry entry pointing here wins over everything else — a worktree
-    // already linked as a sub-project is correctly tracked, not a finding.
+    // A registry entry pointing here means it is correctly tracked.
     if by_path.contains(canon) {
         return DiscoveryStatus::Registered;
-    }
-    // A linked worktree's `.git` is a file, so `compute_project_id` finds no
-    // `.git/config` and falls back to the path hash — giving it an ID distinct
-    // from its main checkout's. It therefore looks unregistered, and without
-    // this check would be adopted as an independent root project.
-    if let Some(main) = project_id::detect_worktree_main(canon) {
-        return DiscoveryStatus::Worktree {
-            main: canonical(&main),
-        };
     }
     // The path isn't tracked, but the ID might be — two clones of the same git
     // remote share an ID. Only an owner that still exists is a conflict; a

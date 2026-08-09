@@ -30,6 +30,14 @@ pub async fn run_repair(
 ) -> Result<()> {
     let json_mode = formatter.is_json();
 
+    // JSON is machine-consumed: never prompt (mirrors `projects prune`).
+    // Checked before anything else so the contract is a property of the flags
+    // alone — a script must not succeed or fail depending on whether this
+    // project happened to be drifted.
+    if !force && json_mode {
+        bail!("projects repair requires confirmation; re-run with --force in JSON mode");
+    }
+
     let Some(plan) = ops::repair::plan_repair(registry, dir).await? else {
         if json_mode {
             println!(
@@ -46,15 +54,9 @@ pub async fn run_repair(
         print_plan(formatter, &plan);
     }
 
-    if !force {
-        // JSON is machine-consumed: never prompt (mirrors `projects prune`).
-        if json_mode {
-            bail!("projects repair requires confirmation; re-run with --force in JSON mode");
-        }
-        if !prompter.confirm("Repair this registration?", true)? {
-            formatter.print_message("Aborted.");
-            return Ok(());
-        }
+    if !force && !prompter.confirm("Repair this registration?", true)? {
+        formatter.print_message("Aborted.");
+        return Ok(());
     }
 
     let Some(report) = ops::repair::repair_project_id(registry, dir).await? else {
@@ -74,23 +76,28 @@ pub async fn run_repair(
     // The live ID's index is empty by construction — that is the symptom the
     // user came here for — so rebuilding it is part of the repair, not an
     // optional extra.
+    // The re-key is already committed, so an index failure must be REPORTED,
+    // not propagated before the document is emitted: a retry is a no-op
+    // (`plan_repair` now returns `None`), so a caller that saw only an error
+    // would be left re-keyed, un-indexed, and told there is nothing to repair.
     let mut indexed = None;
     let mut embedded = None;
     let mut warnings: Vec<String> = Vec::new();
+    let mut index_error: Option<String> = None;
     if !no_index {
-        let store = MemoryStore::open(dir).await?;
-        let cache = ops::ProviderCache::new();
-        let engine =
-            engine_for_project(store.clone(), embedding_backend, cell, policy, &cache).await;
-        let result = ops::reindex(&store, Some(&engine), false).await?;
-        indexed = Some(result.indexed);
-        embedded = Some(result.embedded);
-        warnings.extend(result.warnings);
-        if !result.errors.is_empty() {
-            warnings.push(format!(
-                "{} memory(ies) failed to embed and will be missed by semantic search",
-                result.errors.len()
-            ));
+        match reindex_after_repair(dir, embedding_backend, cell, policy).await {
+            Ok(result) => {
+                indexed = Some(result.indexed);
+                embedded = Some(result.embedded);
+                warnings.extend(result.warnings);
+                if !result.errors.is_empty() {
+                    warnings.push(format!(
+                        "{} memory(ies) failed to embed and will be missed by semantic search",
+                        result.errors.len()
+                    ));
+                }
+            }
+            Err(e) => index_error = Some(e.to_string()),
         }
     }
 
@@ -104,16 +111,18 @@ pub async fn run_repair(
                 "new_id": report.new_id,
                 "personal_migrated": report.personal_migrated,
                 "personal_superseded": report.personal_superseded,
+                "personal_skipped": report.personal_skipped,
                 "removed_duplicate_entry": report.removed_duplicate_entry,
                 "reparented_children": report.reparented_children,
-                "old_data_dir_removed": report.old_data_dir_removed,
+                "old_data_dir": report.old_data_dir.display().to_string(),
                 "no_index": no_index,
                 "indexed": indexed,
                 "embedded": embedded,
                 "warnings": warnings,
+                "index_error": index_error,
             })
         );
-        return Ok(());
+        return fail_if_index_failed(index_error);
     }
 
     formatter.print_success(&format!(
@@ -124,7 +133,7 @@ pub async fn run_repair(
     ));
     if report.personal_migrated > 0 {
         formatter.print_success(&format!(
-            "Migrated {} personal memory(ies) to the live data directory.",
+            "Copied {} personal memory(ies) to the live data directory.",
             report.personal_migrated
         ));
     }
@@ -154,14 +163,50 @@ pub async fn run_repair(
     for warning in &warnings {
         formatter.print_warning(warning);
     }
-    if report.old_data_dir_removed {
-        formatter.print_message(
-            "  Removed the old data directory. Its usage history (stats events) is not carried \
-             over and is gone; memories and vectors are not affected.",
-        );
+    if report.personal_skipped > 0 {
+        formatter.print_warning(&format!(
+            "{} personal file(s) could not be read or parsed and were left in the old data \
+             directory — inspect {} before removing it.",
+            report.personal_skipped,
+            report.old_data_dir.display()
+        ));
+    }
+    formatter.print_message(&format!(
+        "  The old data directory is left in place ({}). It may be shared with another clone of \
+         the same remote, so `engramdb projects prune` reclaims it only once nothing answers to \
+         that ID.",
+        report.old_data_dir.display()
+    ));
+    if let Some(err) = &index_error {
+        formatter.print_error(&format!(
+            "The re-key succeeded but rebuilding the index failed: {err}. \
+             Run `engramdb reindex` — re-running repair will report nothing to do."
+        ));
     }
 
-    Ok(())
+    fail_if_index_failed(index_error)
+}
+
+/// Open the store and rebuild its index after a successful re-key.
+async fn reindex_after_repair(
+    dir: &Path,
+    embedding_backend: Option<EmbeddingBackend>,
+    cell: &Arc<DaemonCell>,
+    policy: DaemonPolicy,
+) -> Result<ops::ReindexResult> {
+    let store = MemoryStore::open(dir).await?;
+    let cache = ops::ProviderCache::new();
+    let engine = engine_for_project(store.clone(), embedding_backend, cell, policy, &cache).await;
+    ops::reindex(&store, Some(&engine), false).await
+}
+
+/// Exit non-zero when the index rebuild failed — after its document/message
+/// has already been emitted.
+fn fail_if_index_failed(index_error: Option<String>) -> Result<()> {
+    match index_error {
+        Some(e) => bail!("index rebuild failed after re-keying: {e}"),
+        None => Ok(()),
+    }
 }
 
 /// The blast radius, before anything is touched.
@@ -176,18 +221,11 @@ fn print_plan(formatter: &OutputFormatter, plan: &RepairReport) {
     formatter.print_message(
         "  - re-key the registry entry (subscriptions and worktree links preserved)",
     );
-    if plan.personal_migrated > 0 || plan.personal_superseded > 0 {
+    if plan.personal_superseded > 0 {
         formatter.print_message(&format!(
-            "  - migrate {} personal memory(ies) to the live data directory{}",
-            plan.personal_migrated,
-            if plan.personal_superseded > 0 {
-                format!(
-                    " ({} already superseded by a newer copy)",
-                    plan.personal_superseded
-                )
-            } else {
-                String::new()
-            }
+            "  - skip {} personal memory(ies) already superseded in the live directory{}",
+            plan.personal_superseded,
+            String::new()
         ));
     }
     if plan.removed_duplicate_entry {
@@ -200,8 +238,9 @@ fn print_plan(formatter: &OutputFormatter, plan: &RepairReport) {
         ));
     }
     formatter.print_message(&format!(
-        "  - delete the old data directory ({}) once its memories have been moved",
-        plan.old_id
+        "  - copy {} personal memory file(s) and LEAVE the old data directory ({}) in place",
+        plan.personal_migrated,
+        plan.old_data_dir.display()
     ));
 }
 

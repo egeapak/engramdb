@@ -448,36 +448,62 @@ pub fn conflicting_checkout_path(
     Some(registered_canon)
 }
 
-/// Every project ID whose data directory belongs to a registered project.
+/// The set of project IDs whose data directory under `<data>/projects/` must
+/// never be deleted as unrecognized.
 ///
-/// This is the *recorded* ID of each entry plus the ID its path hashes to
-/// **today** — which are not always the same. `project_id::compute_project_id`
-/// prefers the git remote and falls back to the path, so adding a remote after
-/// `engramdb init` silently re-keys a project: the registry keeps the old ID
-/// while every live operation uses the new one.
+/// Deleting one of these destroys personal memories, which exist nowhere else.
+/// `prune` does that unattended from `auto_maintain`, so this predicate is the
+/// only thing standing between a naming mismatch and permanent data loss.
+/// Three sources, each of which has been an actual loss:
 ///
-/// Orphan classification must use this rather than the recorded IDs alone.
-/// With only the recorded set, a re-keyed project's *live* data directory is an
-/// orphan by construction — and `prune` deletes orphans outright, taking the
-/// personal memories that exist nowhere else with it. That prune runs
-/// unattended from `auto_maintain`, so nothing about it is opt-in.
+/// 1. **Recorded IDs** — the obvious ones.
+/// 2. **Live IDs.** `compute_project_id` prefers the git remote and falls back
+///    to the path, so adding a remote after `engramdb init` silently re-keys a
+///    project. The registry keeps the old ID while every operation uses the
+///    new one, making the *live* directory unrecognized.
+/// 3. **Internal stores.** The global store and every group store own a
+///    `<data>/projects/<id>/` directory but are never project rows (groups
+///    live in `Registry::groups`, the global store nowhere at all). Without
+///    this, one ordinary command was enough to delete every personal memory in
+///    the global store.
 ///
-/// One shared predicate on purpose: the same duplication in
-/// [`crate::registry`]-adjacent liveness checks is what once made `doctor`
-/// report stale entries `prune` then declined to remove (see
+/// Use [`ProtectedIds::contains`] rather than matching IDs by hand: group IDs
+/// are minted per name and cannot be enumerated from the registry alone.
+pub struct ProtectedIds {
+    ids: std::collections::HashSet<String>,
+}
+
+impl ProtectedIds {
+    /// Whether a `<data>/projects/<id>` directory name is spoken for.
+    pub fn contains(&self, id: &str) -> bool {
+        // Internal stores first: these are structural, not registry-derived.
+        if id == paths::GLOBAL_PROJECT_ID || paths::is_group_id(id) {
+            return true;
+        }
+        self.ids.contains(id)
+    }
+}
+
+/// Build the [`ProtectedIds`] set for `registry`.
+///
+/// One shared predicate on purpose: duplicating a liveness rule is what once
+/// made `doctor` report stale entries `prune` then declined to remove (see
 /// `ops::projects::registry_entry_alive`).
-pub fn protected_project_ids(registry: &Registry) -> std::collections::HashSet<String> {
+pub fn protected_project_ids(registry: &Registry) -> ProtectedIds {
     let mut ids = std::collections::HashSet::with_capacity(registry.projects.len() * 2);
     for entry in &registry.projects {
         ids.insert(entry.project_id.clone());
-        // Only meaningful while the checkout still exists; a vanished path is
-        // the stale-entry case, which `registry_entry_alive` handles.
+        // The live ID is only meaningful while the checkout is there to hash.
+        // `try_exists` rather than `exists`, and an error counts as present:
+        // `exists()` collapses EACCES, an unmounted volume and a hung network
+        // mount into "gone", which would drop protection at exactly the moment
+        // the checkout is unreachable — failing open on the destructive side.
         let path = Path::new(&entry.project_path);
-        if path.exists() {
+        if path.try_exists().unwrap_or(true) {
             ids.insert(crate::project_id::compute_project_id(path));
         }
     }
-    ids
+    ProtectedIds { ids }
 }
 
 /// The registry entries recorded against `dir` under a project ID that no

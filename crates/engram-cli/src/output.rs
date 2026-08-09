@@ -106,6 +106,10 @@ fn print_validity_lines(memory: &Memory) {
 pub struct OutputFormatter {
     format: OutputFormat,
     use_color: bool,
+    /// Suppress everything. Used when one command delegates to another and
+    /// must own the whole of stdout — `doctor --fix` in JSON mode, where the
+    /// delegates' own documents would break the one-document rule.
+    silent: bool,
 }
 
 impl OutputFormatter {
@@ -132,7 +136,24 @@ impl OutputFormatter {
 
         let use_color = is_tty && !no_color && !matches!(format, OutputFormat::Json);
 
-        Self { format, use_color }
+        Self {
+            format,
+            use_color,
+            silent: false,
+        }
+    }
+
+    /// A formatter that prints nothing.
+    ///
+    /// For a command invoked *by* another command that owns the output — not a
+    /// user-facing mode. Errors are swallowed too, so the caller must surface
+    /// the delegate's `Result` itself.
+    pub fn silent() -> Self {
+        Self {
+            format: OutputFormat::Json,
+            use_color: false,
+            silent: true,
+        }
     }
 
     /// Whether output is JSON (machine-consumed; never prompt interactively).
@@ -147,6 +168,9 @@ impl OutputFormatter {
 
     /// Print a generic message.
     pub fn print_message(&self, message: &str) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 println!("{}", serde_json::json!({ "message": message }));
@@ -159,6 +183,9 @@ impl OutputFormatter {
 
     /// Print a success message (with green color in pretty mode).
     pub fn print_success(&self, message: &str) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 println!(
@@ -185,6 +212,9 @@ impl OutputFormatter {
 
     /// Print an error message (with red color in pretty mode).
     pub fn print_error(&self, message: &str) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 eprintln!("{}", serde_json::json!({ "error": message }));
@@ -208,6 +238,9 @@ impl OutputFormatter {
 
     /// Print a hint/suggestion message (with blue color in pretty mode).
     pub fn print_hint(&self, message: &str) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Pretty => {
                 if self.use_color {
@@ -229,6 +262,9 @@ impl OutputFormatter {
 
     /// Print full environment doctor results organized by section.
     pub fn print_environment_doctor(&self, result: &engramdb::ops::EnvironmentDoctorResult) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 println!("{}", serde_json::to_string_pretty(result).unwrap());
@@ -412,6 +448,9 @@ impl OutputFormatter {
 
     /// Print a warning message (with yellow color in pretty mode).
     pub fn print_warning(&self, message: &str) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 eprintln!("{}", serde_json::json!({ "warning": message }));
@@ -435,6 +474,9 @@ impl OutputFormatter {
 
     /// Print a single memory in the configured format.
     pub fn print_memory(&self, memory: &Memory) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 println!("{}", serde_json::to_string_pretty(memory).unwrap());
@@ -450,6 +492,9 @@ impl OutputFormatter {
 
     /// Print a memory with full details without truncation.
     pub fn print_memory_full(&self, memory: &Memory) {
+        if self.silent {
+            return;
+        }
         // For now, this is identical to print_memory
         // In the future, print_memory might add truncation logic
         self.print_memory(memory);
@@ -552,6 +597,9 @@ impl OutputFormatter {
 
     /// Print search results in the configured format.
     pub fn print_search_results(&self, results: &[ScoredMemory]) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 let json_output = results
@@ -625,6 +673,9 @@ impl OutputFormatter {
 
     /// Print retrieval results in the configured format.
     pub fn print_retrieval_result(&self, result: &RetrievalResult, show_scores: bool) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 let json_output = serde_json::json!({
@@ -746,6 +797,9 @@ impl OutputFormatter {
 
     /// Print a list of memory index entries in the configured format.
     pub fn print_memory_list(&self, entries: &[IndexFilterable], verbose: bool) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 println!("{}", serde_json::to_string_pretty(entries).unwrap());
@@ -843,6 +897,9 @@ impl OutputFormatter {
 
     /// Print statistics in the configured format.
     pub fn print_stats(&self, stats: &Stats) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 println!("{}", serde_json::to_string_pretty(stats).unwrap());
@@ -901,6 +958,9 @@ impl OutputFormatter {
 
     /// Print project info in the configured format.
     pub fn print_project_info(&self, info: &ProjectInfoOutput) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 println!("{}", serde_json::to_string_pretty(info).unwrap());
@@ -956,6 +1016,9 @@ impl OutputFormatter {
     /// `grouping`. JSON stays a flat array (with `parent_project_id`) so
     /// scripts and the MCP surface keep a stable shape regardless of grouping.
     pub fn print_project_list(&self, entries: &[ProjectListOutput], grouping: ProjectListGrouping) {
+        if self.silent {
+            return;
+        }
         if let OutputFormat::Json = self.format {
             println!("{}", serde_json::to_string_pretty(entries).unwrap());
             return;
@@ -1020,6 +1083,9 @@ impl OutputFormatter {
 
     /// Print aggregate statistics across all projects.
     pub fn print_aggregate_stats(&self, stats: &AggregateStatsOutput) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 println!("{}", serde_json::to_string_pretty(stats).unwrap());

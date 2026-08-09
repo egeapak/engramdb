@@ -384,13 +384,16 @@ emitted first, so you can see which ones. Directories that can't be read
 "there are none".
 
 JSON mode emits exactly one of two objects, both carrying `root`,
-`scanned_dirs`, `depth_limited`, `unreadable_dirs`, `dry_run`, and `skipped[]`
+`scanned_dirs`, `depth_limited`, `dry_run`, and `skipped[]`
 (each `{path, project_id, reason, owner}` where `reason` is
-`shared_project_id`, `git_worktree`, or `stale_project_id`).
+`shared_project_id`, `git_worktree`, or `stale_project_id`; `owner` is the
+conflicting checkout for the first two and `null` for the third, which carries
+`registered_id` — the stale ID — instead).
 
 - `--dry-run` adds `candidates[]` (each `{path, project_id, memory_count}`) and
   `already_registered[]`.
-- A real run adds `no_index`, `found_unregistered`, `registered[]` (each
+- A real run adds `unreadable_dirs`, `no_index`, `found_unregistered`,
+  `registered[]` (each
   `{path, project_id, indexed, embedded, warnings[]}`), `declined[]`, and
   `errors[]` (each `{path, error}`).
 
@@ -424,10 +427,26 @@ sub-projects at the new ID, removes the old data directory once its contents
 have moved, and rebuilds the index. Running it on a consistent project is a
 no-op, so it is safe to re-run.
 
-It refuses when another still-existing checkout is registered under the old ID:
-that data directory is shared, and migrating it would destroy the other
-checkout's data. The old directory's usage history (stats events) is not
-carried over; memories and vectors are unaffected.
+It **never deletes anything**: personal memories are *copied* to the live data
+directory and the old one is left in place. An unregistered sibling clone of the
+same remote shares that directory and is structurally invisible to the registry,
+so no check can prove it is yours alone — reclaiming it is `projects prune`'s
+job, which has the guard repair does not. Files that can't be read or parsed are
+left alone and counted in `personal_skipped`.
+
+It refuses outright when another **registered** checkout answers to either the
+old or the new ID, and when run inside a linked git worktree (worktrees route to
+the main checkout and are never re-keyed).
+
+JSON mode emits one object: `{"repaired": false, "reason": "nothing_to_repair"}`
+when the registration is consistent, otherwise `{repaired, path, old_id, new_id,
+personal_migrated, personal_superseded, personal_skipped,
+removed_duplicate_entry, reparented_children[], old_data_dir, no_index, indexed,
+embedded, warnings[], index_error}`. `--force` is required in JSON mode
+regardless of whether this project is drifted. If the re-key succeeds but the
+index rebuild fails, the document is still emitted (with `index_error` set) and
+the command then exits non-zero — retrying `repair` would report nothing to do,
+so run `engramdb reindex`.
 
 `engramdb doctor` reports the same condition as a `Project identity` warning,
 and `doctor --fix` offers this repair.

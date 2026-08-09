@@ -450,8 +450,15 @@ pub async fn prune_stale_projects(
     let projects_dir = paths::global_data_dir()?.join("projects");
 
     let stale_ids: Vec<String> = stale.iter().map(|e| e.project_id.clone()).collect();
+    // A stale entry's data dir is only expendable if nothing that SURVIVED
+    // still answers to that ID. Two clones of one git remote share an ID, so
+    // deleting the dir of a removed checkout would take the surviving one's
+    // index, vectors and personal memories with it — no drift required. The
+    // set is computed from the post-removal registry for exactly that reason.
+    let survivors = crate::storage::protected_project_ids(&reg);
     let stale_dirs: Vec<_> = stale
         .iter()
+        .filter(|e| !survivors.contains(&e.project_id))
         .map(|e| projects_dir.join(&e.project_id))
         .filter(|p| p.exists())
         .collect();
@@ -860,6 +867,121 @@ mod tests {
         );
     }
 
+    /// The global store owns `projects/__global_store__/` but is never a
+    /// registry row, so the orphan sweep deleted it — and its personal
+    /// memories, which exist nowhere else. One ordinary command was enough:
+    /// `auto_maintain` runs this prune unattended.
+    #[tokio::test]
+    async fn prune_keeps_the_global_and_group_stores() {
+        let registry = InMemoryRegistry::new();
+
+        let global_personal = paths::personal_memories_dir(paths::GLOBAL_PROJECT_ID).unwrap();
+        async_fs::create_dir_all(&global_personal).await.unwrap();
+        let global_file = global_personal.join("global-only-copy.md");
+        async_fs::write(&global_file, "---\n---\n").await.unwrap();
+
+        let group_id = paths::compute_group_id("team");
+        let group_personal = paths::personal_memories_dir(&group_id).unwrap();
+        async_fs::create_dir_all(&group_personal).await.unwrap();
+        let group_file = group_personal.join("group-only-copy.md");
+        async_fs::write(&group_file, "---\n---\n").await.unwrap();
+
+        let result = prune_stale_projects(&registry, |_| {}).await.unwrap();
+
+        assert!(
+            global_file.exists(),
+            "prune deleted the global store's personal memories"
+        );
+        assert!(
+            group_file.exists(),
+            "prune deleted a group store's personal memories"
+        );
+        assert!(
+            result.orphan_ids.is_empty(),
+            "internal stores must not be reported as orphans: {:?}",
+            result.orphan_ids
+        );
+    }
+
+    /// Removing a checkout from disk must not delete the data directory a
+    /// *surviving* clone of the same remote is still using. Two clones share
+    /// one ID by design, and the stale branch deletes by recorded ID — the one
+    /// deletion site the first pass of this guard did not cover.
+    #[tokio::test]
+    async fn prune_keeps_a_shared_data_dir_when_one_clone_goes_away() {
+        let registry = InMemoryRegistry::new();
+        let live = TempDir::new().unwrap();
+        let shared_id = "shared0000000000";
+
+        // Two rows, one ID: the live checkout and one whose path is gone.
+        let mut reg = registry.load().await.unwrap();
+        for path in [
+            live.path().to_string_lossy().to_string(),
+            "/nonexistent/removed-clone".to_string(),
+        ] {
+            reg.projects.push(RegistryEntry {
+                project_id: shared_id.to_string(),
+                project_path: path,
+                parent_project_id: None,
+                subscriptions: vec![],
+            });
+        }
+        registry.save(&reg).await.unwrap();
+        async_fs::create_dir_all(live.path().join(".engramdb"))
+            .await
+            .unwrap();
+
+        let personal = paths::personal_memories_dir(shared_id).unwrap();
+        async_fs::create_dir_all(&personal).await.unwrap();
+        let file = personal.join("shared-only-copy.md");
+        async_fs::write(&file, "---\n---\n").await.unwrap();
+
+        prune_stale_projects(&registry, |_| {}).await.unwrap();
+
+        assert!(
+            file.exists(),
+            "removing one clone destroyed the surviving clone's personal memories"
+        );
+    }
+
+    /// The live ID must be derived with `compute_project_id` — which prefers
+    /// the git remote — not with a path hash. Every other test here builds a
+    /// project in a bare `TempDir` where the two coincide, so a "stop reading
+    /// .git/config on every prune" optimization would restore the original bug
+    /// with the whole suite still green.
+    #[tokio::test]
+    async fn prune_keeps_the_live_dir_of_a_project_re_keyed_by_a_real_git_remote() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path();
+        let registry = InMemoryRegistry::new();
+        // Registered before the remote exists: the recorded ID is the path hash.
+        let store = MemoryStore::init(dir, &registry).await.unwrap();
+        let recorded_id = store.project_id.clone();
+
+        async_fs::create_dir_all(dir.join(".git")).await.unwrap();
+        async_fs::write(
+            dir.join(".git").join("config"),
+            "[remote \"origin\"]\n\turl = git@github.com:acme/rekeyed.git\n",
+        )
+        .await
+        .unwrap();
+
+        let live_id = crate::storage::project_id::compute_project_id(dir);
+        assert_ne!(live_id, recorded_id, "the remote must change the ID");
+
+        let personal = paths::personal_memories_dir(&live_id).unwrap();
+        async_fs::create_dir_all(&personal).await.unwrap();
+        let file = personal.join("remote-only-copy.md");
+        async_fs::write(&file, "---\n---\n").await.unwrap();
+
+        prune_stale_projects(&registry, |_| {}).await.unwrap();
+
+        assert!(
+            file.exists(),
+            "the remote-derived live data dir was swept as an orphan"
+        );
+    }
+
     #[test]
     fn protected_ids_cover_both_the_recorded_and_the_live_id() {
         let temp_dir = TempDir::new().unwrap();
@@ -887,11 +1009,22 @@ mod tests {
             parent_project_id: None,
             subscriptions: vec![],
         });
-        assert_eq!(
-            crate::storage::protected_project_ids(&gone).len(),
-            1,
+        let gone_protected = crate::storage::protected_project_ids(&gone);
+        assert!(gone_protected.contains("ghost00000000000"), "recorded ID");
+        assert!(
+            !gone_protected.contains(&crate::storage::project_id::compute_project_id(Path::new(
+                "/nonexistent/protected-ids-test"
+            ))),
             "a vanished path must not contribute a bogus live ID"
         );
+
+        // Internal stores own a `projects/<id>/` dir but are never project
+        // rows — the global store nowhere, groups in `Registry::groups`.
+        // Missing them let one ordinary command delete every personal memory
+        // in the global store.
+        let protected = crate::storage::protected_project_ids(&Registry::default());
+        assert!(protected.contains(crate::storage::paths::GLOBAL_PROJECT_ID));
+        assert!(protected.contains(&crate::storage::paths::compute_group_id("team")));
     }
 
     #[tokio::test]
