@@ -69,9 +69,20 @@ fn lock_mapping(project_dir: &Path) -> Option<std::fs::File> {
 /// empty (the mapping is advisory state, never a hard failure).
 pub fn read_session_tasks(project_dir: &Path) -> HashMap<String, TaskEntry> {
     let path = mapping_path(project_dir);
-    match std::fs::read_to_string(&path) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-        Err(_) => HashMap::new(),
+    // Through the shared reader, which refuses to follow a symlink planted at
+    // this path or to block on a FIFO — the same delivery `state_file`'s docs
+    // describe for the write side, and this file is read by the unattended
+    // hooks.
+    match crate::state_file::read_state_file(&path) {
+        Ok(Some(s)) => serde_json::from_str(&s).unwrap_or_default(),
+        Ok(None) => HashMap::new(),
+        Err(e) => {
+            tracing::warn!(
+                "session tasks: refusing to read {} ({e}); it reads as empty",
+                path.display()
+            );
+            HashMap::new()
+        }
     }
 }
 

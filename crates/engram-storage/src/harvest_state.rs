@@ -334,10 +334,41 @@ pub fn read_harvested(project_dir: &Path) -> HashMap<String, HarvestEntry> {
 /// The fold, with the per-entry high-water timestamp compaction needs.
 fn read_folded(project_dir: &Path) -> HashMap<String, Folded> {
     migrate_legacy_map(project_dir);
-    let raw = std::fs::read_to_string(ledger_path(project_dir)).unwrap_or_default();
+    let raw = read_ledger_text(&ledger_path(project_dir));
     let mut folded = fold(parse_lines(&raw));
     drain_and_prune(&mut folded);
     folded
+}
+
+/// Read a ledger file, refusing anything that is not a plain regular file.
+///
+/// **The read side needs `O_NOFOLLOW` at least as badly as the write side**,
+/// which is why every read here goes through [`crate::state_file`] rather than
+/// `std::fs::read_to_string`. Delivery is the one that module's own docs
+/// describe: `.engramdb/` is meant to be committed, `git` checks a symlink out
+/// verbatim, and the SessionEnd hook runs unattended in a fresh clone. A
+/// followed symlink here is not a corrupted ledger, it is an arbitrary-file
+/// *read* — and [`adopt_ledger`] then copies the bytes into the root project's
+/// log, from where the harvest tools hand them to a model. A FIFO planted at
+/// the path was worse still: the read blocked forever, wedging the hook.
+///
+/// A refusal reads as an **empty** ledger and says so loudly, which is safe in
+/// the one direction that matters: every *write* to the same path already
+/// fails the same way, so nothing is recorded against a ledger that folded as
+/// empty. The cost is that reviewed sessions are offered again until the
+/// planted path is removed — visible, recoverable, and preferable to reading it.
+fn read_ledger_text(path: &Path) -> String {
+    match crate::state_file::read_state_file(path) {
+        Ok(raw) => raw.unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(
+                "harvest ledger: refusing to read {} ({e}); it folds as empty, so every session \
+                 in it will be offered again until the path is a plain file",
+                path.display()
+            );
+            String::new()
+        }
+    }
 }
 
 /// Parse every line, in timestamp order, skipping the ones that cannot be read.
@@ -485,9 +516,7 @@ fn drain_and_prune(folded: &mut HashMap<String, Folded>) {
 /// harvested in months never appends, so the file sits at whatever size it
 /// reached.
 pub fn compaction_pressure(project_dir: &Path) -> (usize, usize) {
-    let Ok(raw) = std::fs::read_to_string(ledger_path(project_dir)) else {
-        return (0, 0);
-    };
+    let raw = read_ledger_text(&ledger_path(project_dir));
     let lines = raw.lines().filter(|l| !l.trim().is_empty()).count();
     let mut folded = fold(parse_lines(&raw));
     drain_and_prune(&mut folded);
@@ -824,7 +853,14 @@ pub fn adopt_ledger(sub_dir: &Path, root_dir: &Path) -> Result<()> {
     let adopted = legacy.with_extension("jsonl.adopted");
     std::fs::rename(&legacy, &adopted)?;
 
-    let raw = std::fs::read_to_string(&adopted).unwrap_or_default();
+    // The read, not the rename, is where a planted path bites: `rename(2)`
+    // moves a symlink rather than its target, so the `.adopted` file is still
+    // the symlink and reading *it* would follow. That is the arbitrary-file
+    // read, and this function's own contract — "adoption is a concatenation" —
+    // would then copy whatever it pointed at, verbatim, into the root
+    // project's ledger. Refused rather than absorbed: adoption is
+    // all-or-nothing and the caller already treats a failure as advisory.
+    let raw = crate::state_file::read_state_file(&adopted)?.unwrap_or_default();
     if raw.trim().is_empty() {
         return Ok(());
     }
@@ -865,8 +901,12 @@ fn migrate_legacy_map(project_dir: &Path) {
         );
         return;
     }
-    let raw = match std::fs::read_to_string(&retired) {
-        Ok(raw) => raw,
+    // Same reasoning as [`adopt_ledger`]: the rename above moved a symlink
+    // rather than its target, so this read is the one that would follow it —
+    // and the entries it parses are appended straight into the log.
+    let raw = match crate::state_file::read_state_file(&retired) {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return,
         Err(e) => {
             tracing::warn!(
                 "harvest ledger: the old map at {} could not be read ({e}); \
@@ -1005,7 +1045,7 @@ fn maybe_compact(project_dir: &Path) {
     if meta.len() < COMPACT_MIN_BYTES {
         return;
     }
-    let Ok(raw) = std::fs::read_to_string(&path) else {
+    let Ok(Some(raw)) = crate::state_file::read_state_file(&path) else {
         return;
     };
     let lines = raw.lines().filter(|l| !l.trim().is_empty()).count();
@@ -1052,7 +1092,7 @@ fn maybe_compact(project_dir: &Path) {
     // Carry over anything appended while the snapshot was being built, and keep
     // going until the file stops moving. Still growing after a few passes means
     // a busy writer, and leaving the file long is the harmless outcome.
-    let Ok(mut handle) = std::fs::File::open(&path) else {
+    let Ok(Some(mut handle)) = crate::state_file::open_state_file_for_read(&path) else {
         return;
     };
     let mut consumed = raw.len() as u64;
@@ -2123,5 +2163,129 @@ mod tests {
             "the ledger write landed on the symlink's target"
         );
         assert!(result.is_err(), "a redirected write reported success");
+    }
+
+    /// The read side of the same planted symlink, which is the worse half: a
+    /// redirected write damages a file the user can see, a redirected read
+    /// copies a private file into a store the harvest tools hand to a model.
+    #[test]
+    #[cfg(unix)]
+    fn a_planted_symlink_cannot_redirect_a_ledger_read() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let secret = dir.join("id_ed25519");
+        std::fs::write(&secret, "-----BEGIN OPENSSH PRIVATE KEY-----\n").unwrap();
+
+        let path = ledger_path(dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&secret, &path).unwrap();
+
+        assert!(
+            read_harvested(dir).is_empty(),
+            "the ledger read followed the symlink to {}",
+            secret.display()
+        );
+        // The same path every other reader takes.
+        assert_eq!(compaction_pressure(dir), (0, 0));
+        assert!(
+            std::fs::read_to_string(&secret)
+                .unwrap()
+                .starts_with("-----BEGIN"),
+            "a refused read must not delete what it refused"
+        );
+    }
+
+    /// `adopt_ledger` is the arbitrary-read *amplifier*: it concatenates the
+    /// file it reads, verbatim, into the root project's ledger. `rename(2)`
+    /// moves the symlink rather than its target, so the `.adopted` file is
+    /// still a symlink and the read after it is what follows.
+    #[test]
+    #[cfg(unix)]
+    fn adoption_does_not_copy_a_symlinked_ledgers_target_into_the_root() {
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("child");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(ledger_path(&sub).parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+
+        let secret = tmp.path().join("id_ed25519");
+        std::fs::write(&secret, "-----BEGIN OPENSSH PRIVATE KEY-----\n").unwrap();
+        std::os::unix::fs::symlink(&secret, ledger_path(&sub)).unwrap();
+
+        // Advisory to the caller either way; what must never happen is the
+        // copy.
+        let _ = adopt_ledger(&sub, &root);
+        let adopted_into_root = crate::state_file::read_state_file(&ledger_path(&root))
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        assert!(
+            !adopted_into_root.contains("BEGIN OPENSSH PRIVATE KEY"),
+            "the symlink's target was adopted into the root project's ledger"
+        );
+        assert!(
+            std::fs::read_to_string(&secret)
+                .unwrap()
+                .starts_with("-----BEGIN"),
+            "a refused adoption must not delete what it refused"
+        );
+    }
+
+    /// A symlink at the pre-log map is the same delivery one format older, and
+    /// the migration reads it after its own rename for the same reason.
+    #[test]
+    #[cfg(unix)]
+    fn the_legacy_map_migration_does_not_follow_a_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let secret = dir.join("secrets.json");
+        std::fs::write(&secret, r#"{"leak-me": {"memories_created": 1}}"#).unwrap();
+
+        let legacy = legacy_path(dir);
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&secret, &legacy).unwrap();
+
+        assert!(
+            !read_harvested(dir).contains_key("leak-me"),
+            "the migration read through a symlink into the ledger"
+        );
+    }
+
+    /// `O_NOFOLLOW` refuses a symlink, not a FIFO planted directly at the
+    /// path — and a `read` on a FIFO with no writer never returns, which in
+    /// the unattended SessionEnd hook is a wedge rather than an error. The
+    /// timing here is the assertion: without the guard this test hangs instead
+    /// of failing.
+    #[test]
+    #[cfg(unix)]
+    fn a_fifo_at_the_ledger_path_does_not_wedge_a_read() {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let path = ledger_path(dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(
+            unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) },
+            0,
+            "could not plant the FIFO: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = done.clone();
+        let probe = dir.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = read_harvested(&probe);
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        for _ in 0..100 {
+            if done.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("reading a ledger path occupied by a FIFO never returned");
     }
 }

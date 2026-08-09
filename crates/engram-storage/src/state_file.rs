@@ -1,5 +1,10 @@
-//! Writers shared by the small state files under a project's
+//! Readers and writers shared by the small state files under a project's
 //! `.engramdb/state/` ([`crate::harvest_state`], [`crate::task_state`]).
+//!
+//! Nothing under `state/` may be touched with bare `std::fs`: every open in
+//! this module carries protections a plain `read_to_string` or `write` does
+//! not, and a caller that goes around it re-opens whichever hole this file
+//! exists to close.
 //!
 //! Both wrote through a *predictable* temp path (`<name>.json.tmp`) with a
 //! plain `std::fs::write`, and that is reachable by an attacker who never
@@ -17,9 +22,23 @@
 //! [`append_state_file`] needs the same flag for a stronger reason: it opens
 //! the *live* path rather than a temp, so a symlink planted there is followed
 //! on every append, not just on the first write after a crash.
+//!
+//! **Reads need it too, and for a worse outcome.** A redirected write
+//! overwrites a file the user can see; a redirected *read* copies whatever the
+//! symlink points at into a store the harvest flow then hands to a model —
+//! [`crate::harvest_state::adopt_ledger`] appends the bytes it reads verbatim
+//! into the root project's ledger. Same delivery, same unattended hook, so
+//! [`read_state_file`] carries the same `O_NOFOLLOW`.
+//!
+//! `O_NOFOLLOW` alone is not enough on the read side: it refuses a *symlink*
+//! at the path, not a FIFO planted directly there, and a `read` on a FIFO with
+//! no writer blocks forever — which is a hang in the SessionEnd hook, not an
+//! error it can report. So every open here is `O_NONBLOCK` (a no-op on a
+//! regular file, the difference between "returns" and "blocks" on a FIFO) and
+//! every opened handle is checked to be a regular file before it is used.
 
 use crate::error::{Result, StorageError};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Write `contents` to a `.json` file under a state dir, atomically.
@@ -82,6 +101,74 @@ pub(crate) fn append_state_file(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+/// Read a state file, refusing to follow a symlink or open a FIFO.
+///
+/// A missing file is `Ok(None)` — the same "reads as empty" every caller here
+/// already relies on. Anything that exists but is not a plain regular file is
+/// an error naming the cause, never a silent empty read: a planted path is a
+/// deliberate act and the operator has to be told, and never a deletion
+/// either, for the same reason [`write_state_json`] refuses a planted temp
+/// rather than clearing it.
+pub(crate) fn read_state_file(path: &Path) -> Result<Option<String>> {
+    let Some(mut file) = open_state_file_for_read(path)? else {
+        return Ok(None);
+    };
+    let mut out = String::new();
+    file.read_to_string(&mut out)?;
+    Ok(Some(out))
+}
+
+/// The handle behind [`read_state_file`], for the one caller that reads a
+/// state file incrementally (compaction re-reads the tail through a handle it
+/// held across the rewrite).
+pub(crate) fn open_state_file_for_read(path: &Path) -> Result<Option<std::fs::File>> {
+    match open_read(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(StorageError::Validation(format!(
+            "could not read {} ({e}); if that path is a symlink, remove it — \
+             state reads deliberately refuse to follow one",
+            path.display()
+        ))),
+    }
+}
+
+/// Open for reading without following a symlink, and without blocking on a
+/// FIFO.
+///
+/// The type check is on the *handle*, not on the path: a `symlink_metadata`
+/// probe followed by an open is a TOCTOU race, while `fstat` on an already-open
+/// descriptor describes the exact object the read will draw from.
+#[cfg(unix)]
+fn open_read(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    ensure_regular(file)
+}
+
+#[cfg(not(unix))]
+fn open_read(path: &Path) -> std::io::Result<std::fs::File> {
+    ensure_regular(std::fs::File::open(path)?)
+}
+
+/// Reject a handle that is not a plain regular file.
+///
+/// A directory, a device or a FIFO at a state path is never something this
+/// program wrote, and a FIFO in particular turns an ordinary read or append
+/// into an unbounded wait inside an unattended hook.
+fn ensure_regular(file: std::fs::File) -> std::io::Result<std::fs::File> {
+    if file.metadata()?.file_type().is_file() {
+        return Ok(file);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "not a regular file",
+    ))
+}
+
 /// Is there a trailing fragment with no newline after it?
 ///
 /// Reads through the same handle the append goes to; `O_APPEND` fixes the
@@ -126,13 +213,14 @@ fn write_via_temp(path: &Path, tmp: PathBuf, contents: &str) -> Result<()> {
 #[cfg(unix)]
 fn open_temp(tmp: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(tmp)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(tmp)?;
+    ensure_regular(file)
 }
 
 /// No `O_NOFOLLOW` equivalent off unix, and no committed-symlink delivery
@@ -140,33 +228,36 @@ fn open_temp(tmp: &Path) -> std::io::Result<std::fs::File> {
 /// mode). Same fallback shape as `transcript_archive::restrict_to_owner`.
 #[cfg(not(unix))]
 fn open_temp(tmp: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(tmp)
+        .open(tmp)?;
+    ensure_regular(file)
 }
 
 /// Same protections as [`open_temp`], on the live path.
 #[cfg(unix)]
 fn open_append(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .append(true)
         .create(true)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    ensure_regular(file)
 }
 
 #[cfg(not(unix))]
 fn open_append(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .append(true)
         .create(true)
-        .open(path)
+        .open(path)?;
+    ensure_regular(file)
 }
 
 #[cfg(all(test, unix))]
@@ -243,6 +334,58 @@ mod tests {
         assert!(
             err.to_string().contains("symlink"),
             "the refusal should name the cause: {err}"
+        );
+    }
+
+    /// The read counterpart of the two write tests above. A followed read is
+    /// the worse half of the same planted symlink: it hands the target's bytes
+    /// to whatever consumes the state file.
+    #[test]
+    fn a_symlinked_target_cannot_redirect_a_read() {
+        let tmp = TempDir::new().unwrap();
+        let secret = tmp.path().join("secret.txt");
+        std::fs::write(&secret, "top secret").unwrap();
+
+        let target = tmp.path().join("state").join("log.jsonl");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&secret, &target).unwrap();
+
+        let err = read_state_file(&target).unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "the refusal should name the cause: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&secret).unwrap(),
+            "top secret",
+            "a refused read must not delete what it refused"
+        );
+    }
+
+    /// `O_NOFOLLOW` says nothing about a FIFO planted directly at the path,
+    /// and `read` on one with no writer blocks forever. The `open` is where
+    /// that has to be caught, because after it there is nothing to time out.
+    #[test]
+    fn a_fifo_is_refused_rather_than_read() {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("log.jsonl");
+        let c_path = std::ffi::CString::new(target.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        assert!(read_state_file(&target).is_err(), "a FIFO was read");
+        assert!(
+            append_state_file(&target, "line\n").is_err(),
+            "a FIFO was appended to"
+        );
+    }
+
+    #[test]
+    fn a_missing_file_reads_as_nothing_rather_than_an_error() {
+        let tmp = TempDir::new().unwrap();
+        assert_eq!(
+            read_state_file(&tmp.path().join("nope.jsonl")).unwrap(),
+            None
         );
     }
 

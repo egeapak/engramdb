@@ -466,7 +466,12 @@ a line records only the fields that change — so the SessionEnd hook writing
 where a transcript ended up cannot disturb a decision you recorded, and vice
 versa, without either side reading the file first. Reading folds the lines
 together in timestamp order, last write wins. A partial line left by a crash
-costs that line and nothing else. The file is rewritten from scratch once it
+costs that line and nothing else. The file is also only ever read and written
+as a **plain file**: if `harvest_ledger.jsonl` is a symlink, a named pipe or
+anything else — which a repository you cloned can arrange, since `.engramdb/`
+is meant to be committed — every read folds as empty and every write is
+refused, each with a warning naming the path. Nothing is deleted for you;
+remove the planted path and the ledger works again. The file is rewritten from scratch once it
 holds more than **four** lines per live entry, which is what drops entries that
 have been removed or aged out.
 

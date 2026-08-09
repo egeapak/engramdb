@@ -39,9 +39,16 @@ Small, verified against the code at `60217a5`:
 9. `session_scope` walks *down from the root*, so running from a worktree also
    covers the parent and siblings. Three places describe scope as "this project
    plus its sub-projects", which understates it.
-10. CLI `harvest list --format json` emits `cwd` / `first_prompt` /
-    `git_branch` unsanitized — serde escapes C0, but bidi controls pass
-    through. The MCP path sanitizes these.
+10. ~~CLI `harvest list --format json` emits `cwd` / `first_prompt` /
+    `git_branch` unsanitized.~~ Fixed. Both front-ends now put every
+    transcript- or ledger-derived string through
+    `ops::harvest::defang_metadata` / `defang_prose` — sanitize, bound, defang
+    harness tags — rather than `sanitize_one_line`, which never touched a tag.
+    The listings (`harvest_list`, `harvest_search`, `harvest_ledger`) also
+    carry `ops::harvest::LISTING_TRUST_HEADER` as a leading `trust` field, the
+    way `harvest_show` already carried `DIGEST_TRUST_HEADER`;
+    `harvest_ledger`'s rows moved from a bare array into `entries` to make
+    room for it.
 
 ## Process note
 

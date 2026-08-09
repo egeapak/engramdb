@@ -754,6 +754,14 @@ fn is_synthetic_prompt(text: &str) -> bool {
     // while still reporting the digest complete. Tags embedded mid-prompt are
     // handled where they actually matter, by `ops::harvest`'s defang, which
     // neutralizes them without discarding the human's words.
+    //
+    // That claim is load-bearing and was for a while only half true: the
+    // digest render defanged, and the `harvest_list` / `harvest_search` /
+    // `harvest_ledger` listings — which quote `first_prompt`, `git_branch` and
+    // `cwd` out of the very same records — applied `sanitize_one_line` alone,
+    // which has never touched a tag. Every consumer of this stream now goes
+    // through `ops::harvest::defang_metadata` or the digest's `defang`; a new
+    // one that does not re-opens this hole rather than creating a new one.
     // Strip invisibles first: this runs on *raw* record text, so without it
     // `<system\u{200d}-reminder>` reads as an ordinary human turn.
     let cleaned: String = text.chars().filter(|c| !is_invisible_format(*c)).collect();

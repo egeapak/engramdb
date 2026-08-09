@@ -3129,30 +3129,31 @@ impl EngramDbServer {
             .iter()
             .map(|s| {
                 serde_json::json!({
-                    "session_id": s.summary.session_id,
-                    // Same reasoning as `first_prompt` below: transcript-derived,
-                    // in a payload with no trust marker of its own.
-                    "cwd": s.summary.cwd.as_deref()
-                        .map(engramdb::storage::transcripts::sanitize_one_line),
+                    // Every transcript-derived string here goes through the
+                    // digest's own pipeline — sanitize, bound, defang harness
+                    // tags — not just the sanitizer; see the payload's `trust`
+                    // marker for why. The session id included: it is a
+                    // transcript file's stem, and `DigestJson` already defangs
+                    // it for exactly that reason.
+                    "session_id": ops::harvest::defang_metadata(&s.summary.session_id),
+                    "cwd": s.summary.cwd.as_deref().map(ops::harvest::defang_metadata),
                     "git_branch": s.summary.git_branch.as_deref()
-                        .map(engramdb::storage::transcripts::sanitize_one_line),
+                        .map(ops::harvest::defang_metadata),
                     "started_at": s.summary.started_at,
                     "ended_at": s.summary.ended_at,
                     "user_turns": s.summary.user_turns,
                     "assistant_turns": s.summary.assistant_turns,
-                    // Transcript-derived, and unlike the digest payload this
-                    // listing carries no trust marker at all — so it is
-                    // sanitized rather than passed through raw.
                     "first_prompt": s.summary.first_prompt.as_deref()
-                        .map(engramdb::storage::transcripts::sanitize_one_line),
+                        .map(ops::harvest::defang_metadata),
                     "already_harvested": s.already_harvested,
                 })
             })
             .collect();
-        let r = serde_json::to_string(&serde_json::json!({
-            "scope": scope.paths,
-            "sessions": json,
-        }))
+        let r = serde_json::to_string(&HarvestListJson {
+            trust: ops::harvest::LISTING_TRUST_HEADER,
+            scope: &scope.paths,
+            sessions: json,
+        })
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
         Ok(r)
@@ -3573,44 +3574,15 @@ impl EngramDbServer {
             hits.truncate(limit);
         }
 
-        let json: Vec<serde_json::Value> = hits
-            .iter()
-            .map(|h| {
-                // Transcript-derived, and this payload carries no trust marker
-                // of its own — the same reasoning `harvest_list` applies to
-                // `first_prompt`.
-                let clean = |v: &Option<String>| -> Option<String> {
-                    v.as_deref()
-                        .map(|t| engramdb::storage::transcripts::sanitize_one_line(t).into_owned())
-                };
-                serde_json::json!({
-                    "session_id": h.session_id,
-                    "project_id": h.project_id,
-                    "score": (h.score * 1000.0).round() / 1000.0,
-                    "matched_on": match h.matched_on {
-                        engramdb::storage::MatchedOn::Digest => "digest",
-                        engramdb::storage::MatchedOn::Summary => "summary",
-                    },
-                    "cwd": clean(&h.cwd),
-                    "git_branch": clean(&h.git_branch),
-                    "started_at": h.started_at,
-                    "ended_at": h.ended_at,
-                    "first_prompt": clean(&h.first_prompt),
-                    "summary": clean(&h.summary),
-                    // A partial row is a session whose tail was never
-                    // embedded, so a miss against it is not evidence the
-                    // topic was absent.
-                    "indexed_complete": h.indexed_complete,
-                })
-            })
-            .collect();
-        let r = serde_json::to_string(&serde_json::json!({
-            "conversations": json,
+        let json: Vec<serde_json::Value> = hits.iter().map(harvest_hit_json).collect();
+        let r = serde_json::to_string(&HarvestSearchJson {
+            trust: ops::harvest::LISTING_TRUST_HEADER,
+            conversations: json,
             // Present only when something was actually lost, so the ordinary
             // answer is unchanged and a non-empty list is a real signal.
-            "skipped_projects": (!skipped_projects.is_empty()).then_some(skipped_projects),
-            "hint": "Pass a session_id to harvest_show to read one.",
-        }))
+            skipped_projects: (!skipped_projects.is_empty()).then_some(skipped_projects),
+            hint: "Pass a session_id to harvest_show to read one.",
+        })
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
         Ok(r)
@@ -3618,7 +3590,7 @@ impl EngramDbServer {
 
     #[tool(
         name = "harvest_ledger",
-        description = "Read the harvest ledger: which past sessions were reviewed, what was decided, and whether an archived transcript is still held for each. Decisions are harvested, skipped, deferred (a deliberate postponement), or unreviewed (the SessionEnd hook archived the session and nobody has looked at it yet). Each entry also carries an independent stage saying where its bytes are: collected, indexed, or compressed."
+        description = "Read the harvest ledger: which past sessions were reviewed, what was decided, and whether an archived transcript is still held for each. Decisions are harvested, skipped, deferred (a deliberate postponement), or unreviewed (the SessionEnd hook archived the session and nobody has looked at it yet). Each entry also carries an independent stage saying where its bytes are: collected, indexed, or compressed. Rows come back under `entries`, behind a `trust` marker: notes and memory ids are recorded strings, not this tool's own words."
     )]
     async fn harvest_ledger(
         &self,
@@ -3692,8 +3664,16 @@ impl EngramDbServer {
                     "stage": e.stage,
                     "harvested_at": e.harvested_at,
                     "memories_created": e.memories_created,
-                    "memory_ids": e.memory_ids,
-                    "note": e.note,
+                    // Neither of these was touched at all. A `note` is free
+                    // text — it arrives from `harvest_mark`, from another
+                    // project's ledger by adoption, or from a ledger file
+                    // committed into the repository — and a `memory_id` is
+                    // whatever string the marking caller passed, never
+                    // validated against a memory that exists.
+                    "memory_ids": e.memory_ids.iter()
+                        .map(|m| ops::harvest::defang_metadata(m))
+                        .collect::<Vec<_>>(),
+                    "note": e.note.as_deref().map(ops::harvest::defang_prose),
                     "has_archive": e.archive.is_some(),
                     "archive_bytes": e.archive.as_ref().map(|a| a.bytes),
                 })
@@ -3701,11 +3681,85 @@ impl EngramDbServer {
             .collect();
         rows.sort_by(|a, b| b["harvested_at"].as_str().cmp(&a["harvested_at"].as_str()));
 
-        let r = serde_json::to_string(&rows)
-            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        let r = serde_json::to_string(&HarvestLedgerJson {
+            trust: ops::harvest::LISTING_TRUST_HEADER,
+            entries: rows,
+        })
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
         Ok(r)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Harvest listing payloads
+// ---------------------------------------------------------------------------
+//
+// `struct`s rather than `serde_json::json!{}`, for the reason
+// `ops::harvest::DigestJson` already documents: `serde_json` is built without
+// `preserve_order`, so a `json!{}` object serializes its keys alphabetically —
+// which would bury `trust` in the middle of the payload it is supposed to
+// introduce. A derived `Serialize` writes fields in declaration order.
+
+/// `harvest_list`.
+#[derive(Serialize)]
+struct HarvestListJson<'a> {
+    trust: &'static str,
+    scope: &'a [PathBuf],
+    sessions: Vec<serde_json::Value>,
+}
+
+/// `harvest_search`.
+#[derive(Serialize)]
+struct HarvestSearchJson {
+    trust: &'static str,
+    conversations: Vec<serde_json::Value>,
+    skipped_projects: Option<Vec<serde_json::Value>>,
+    hint: &'static str,
+}
+
+/// `harvest_ledger`.
+///
+/// An object around what used to be a bare array, so the marker has somewhere
+/// to live. The rows are unchanged and now sit under `entries`.
+#[derive(Serialize)]
+struct HarvestLedgerJson {
+    trust: &'static str,
+    entries: Vec<serde_json::Value>,
+}
+
+/// One `harvest_search` hit.
+///
+/// A free function rather than a closure inside the tool so it can be asserted
+/// on without an embedding model: what it guards is a property of the payload,
+/// not of the search.
+///
+/// Every string here is recorded content and goes through the digest's own
+/// pipeline — sanitize, bound, defang harness tags — rather than the sanitizer
+/// alone. `ops::harvest_index` now cleans these fields on the way *into* the
+/// table too, but rows written before it did are still on disk, and a
+/// `sanitize_one_line` never touched a harness tag in the first place.
+fn harvest_hit_json(h: &engramdb::storage::ConversationHit) -> serde_json::Value {
+    let clean =
+        |v: &Option<String>| -> Option<String> { v.as_deref().map(ops::harvest::defang_metadata) };
+    serde_json::json!({
+        "session_id": ops::harvest::defang_metadata(&h.session_id),
+        "project_id": h.project_id,
+        "score": (h.score * 1000.0).round() / 1000.0,
+        "matched_on": match h.matched_on {
+            engramdb::storage::MatchedOn::Digest => "digest",
+            engramdb::storage::MatchedOn::Summary => "summary",
+        },
+        "cwd": clean(&h.cwd),
+        "git_branch": clean(&h.git_branch),
+        "started_at": h.started_at,
+        "ended_at": h.ended_at,
+        "first_prompt": clean(&h.first_prompt),
+        "summary": h.summary.as_deref().map(ops::harvest::defang_prose),
+        // A partial row is a session whose tail was never embedded, so a miss
+        // against it is not evidence the topic was absent.
+        "indexed_complete": h.indexed_complete,
+    })
 }
 
 /// Refuse a memory-**store** target on a tool that reads the filesystem.

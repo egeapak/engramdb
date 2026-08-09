@@ -74,12 +74,24 @@ impl EvidenceLinks {
 
 /// Gather the evidence links held by every memory store in `scope`.
 ///
-/// A path with no store of its own (the usual shape of a registered git
-/// worktree, whose storage lives at its parent) contributes nothing and is not
-/// an error. Any *other* failure propagates: a store that cannot be read is a
-/// store whose pins are unknown, and the caller must be able to tell that apart
-/// from a store with no pins — the difference is whether an eviction pass is
-/// allowed to run at all.
+/// A path that is **present** and simply has no store of its own (the usual
+/// shape of a registered git worktree, whose storage lives at its parent)
+/// contributes nothing and is not an error. Any *other* failure propagates: a
+/// store that cannot be read is a store whose pins are unknown, and the caller
+/// must be able to tell that apart from a store with no pins — the difference is
+/// whether an eviction pass is allowed to run at all.
+///
+/// The two are not the same condition, and reading `NotInitialized` as the
+/// first was the defect. `MemoryStore::open` reports it for any `dir` whose
+/// `.engramdb/` does not *stat*, which covers a linked sub-project that was
+/// moved, deleted, or sits on an unmounted volume — and
+/// [`crate::ops::harvest::session_scope`] deliberately keeps registered paths
+/// that no longer exist, so those are ordinary, not exotic. Every such path
+/// silently contributed zero pins, and the SessionEnd sweep then ran with an
+/// incomplete set: exactly the "unknown pin is indistinguishable from an absent
+/// one" case, resolved the wrong way, against the only surviving copy of a
+/// harvested conversation. So the *directory* is what separates them — present
+/// but storeless is a real answer, absent is not an answer at all.
 pub async fn evidence_links(scope: &SessionScope) -> Result<EvidenceLinks> {
     let mut links: BTreeMap<String, Vec<String>> = BTreeMap::new();
     // Deduped by project id, never by path spelling: `.`, a relative `--dir`
@@ -94,7 +106,15 @@ pub async fn evidence_links(scope: &SessionScope) -> Result<EvidenceLinks> {
         // skipped and the whole scope would look uncited.
         let store = match MemoryStore::open(path).await {
             Ok(store) => store,
-            Err(crate::storage::StorageError::NotInitialized) => continue,
+            Err(crate::storage::StorageError::NotInitialized) if is_readable_dir(path) => continue,
+            Err(crate::storage::StorageError::NotInitialized) => {
+                anyhow::bail!(
+                    "{} is registered in this project's scope but is not a readable directory, \
+                     so whether any memory there cites a conversation is unknown. Re-link or \
+                     unregister it with `engramdb projects`, or restore the path.",
+                    path.display()
+                )
+            }
             Err(e) => {
                 return Err(e).with_context(|| {
                     format!(
@@ -122,6 +142,15 @@ pub async fn evidence_links(scope: &SessionScope) -> Result<EvidenceLinks> {
         ids.dedup();
     }
     Ok(EvidenceLinks { by_session: links })
+}
+
+/// Can this path be read at all, i.e. is "no store here" a fact rather than a
+/// guess?
+///
+/// `std::fs::metadata`, not `Path::is_dir`: the latter folds every error into
+/// `false`, which is the same collapse this function exists to undo.
+fn is_readable_dir(path: &std::path::Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.is_dir())
 }
 
 /// Every session in scope that still has bytes behind it — a live transcript
@@ -356,6 +385,48 @@ mod tests {
         let links = evidence_links(&scope).await.unwrap();
         assert_eq!(links.pinned_sessions().len(), 1);
         assert_eq!(links.by_session["sess-a"], vec![id]);
+    }
+
+    /// A sub-project that moved (or was deleted, or lives on a volume that is
+    /// not mounted) is still in the registry, and `session_scope` deliberately
+    /// keeps registered paths that no longer exist. Reading that as "this
+    /// project has no pins" hands the eviction sweep a licence it has not
+    /// earned: the copies it then deletes may be the only evidence behind a
+    /// memory in the store it could not open.
+    #[tokio::test]
+    async fn a_scope_path_that_cannot_be_read_is_not_a_project_with_no_pins() {
+        let tmp = TempDir::new().unwrap();
+        let main = tmp.path().join("main");
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let store = store_with(&main).await;
+        let id = store.create(&memory("m")).await.unwrap();
+        link_memories(&store, "sess-a", std::slice::from_ref(&id))
+            .await
+            .unwrap();
+
+        let scope = |paths: Vec<std::path::PathBuf>| SessionScope {
+            root_project_id: project_id::compute_project_id(&main),
+            root_dir: main.clone(),
+            paths,
+        };
+
+        // Control: while the sub-project is a real (if storeless) directory,
+        // the scan succeeds and reports the main store's pin. Without this the
+        // assertion below would pass for a scan that always failed.
+        let links = evidence_links(&scope(vec![main.clone(), sub.clone()]))
+            .await
+            .expect("a present but storeless path is an ordinary member of a scope");
+        assert_eq!(links.pinned_sessions().len(), 1);
+
+        std::fs::rename(&sub, tmp.path().join("sub-moved")).unwrap();
+        let err = evidence_links(&scope(vec![main.clone(), sub.clone()]))
+            .await
+            .expect_err("a path that cannot be read was counted as holding no pins");
+        assert!(
+            err.to_string().contains("not a readable directory"),
+            "the refusal must name the path it could not read: {err:#}"
+        );
     }
 
     #[test]
