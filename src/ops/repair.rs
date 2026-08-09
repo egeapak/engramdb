@@ -1024,7 +1024,7 @@ mod tests {
 
         // Same memory ID in the live dir (stored under a different title slug,
         // so the filenames differ), unparseable by this binary.
-        let corrupt = dir_new.join(format!("live-copy_{}.md", &memory.id));
+        let corrupt = dir_new.join(format!("live-copy_{}.md", memory.id));
         async_fs::write(&corrupt, "written by a newer schema")
             .await
             .unwrap();
