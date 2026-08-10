@@ -465,7 +465,15 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok());
+        // A decline is a REFUSAL, not a completed delete: exiting 0 here let a
+        // `set -e` script read "Aborted." as success and carry on as though the
+        // project were gone.
+        let err = result.expect_err("a declined delete must not report success");
+        assert!(
+            err.to_string().contains("declined"),
+            "the error must say the delete was declined, not look like a failure \
+             to delete: {err}"
+        );
         // Verify project is still in registry (not deleted)
         let loaded = registry.load().await.unwrap();
         assert_eq!(loaded.projects.len(), 1);
