@@ -2079,14 +2079,17 @@ version = "0.10.0"
 dependencies = [
  "anyhow",
  "arrow-array",
+ "arrow-buffer",
  "arrow-schema",
  "async-trait",
  "chrono",
  "dirs",
  "engram-types",
  "futures-util",
- "jwalk",
+ "jwalk 0.8.1",
  "lancedb",
+ "libc",
+ "rayon",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -2131,7 +2134,7 @@ dependencies = [
  "engram-types",
  "futures-util",
  "globset",
- "jwalk",
+ "jwalk 0.9.0",
  "lancedb",
  "rayon",
  "reqwest 0.13.4",
@@ -3234,6 +3237,16 @@ name = "jwalk"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2735847566356cd2179a2a38264839308f7079fa96e6bd5a42d740460e003c56"
+dependencies = [
+ "crossbeam",
+ "rayon",
+]
+
+[[package]]
+name = "jwalk"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e610b2b1eaea9e0e062c47e319d20a2e0f929e7aabf24d58514354de967bfbd"
 dependencies = [
  "crossbeam",
  "rayon",
