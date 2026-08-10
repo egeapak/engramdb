@@ -290,8 +290,14 @@ pub async fn discover_projects_in(
     };
     // Cycle/duplicate guard: a directory reachable twice (via symlinks, or a
     // root passed under two spellings) is walked once. Membership is decided
-    // when a child is queued rather than when it is popped, so a directory
-    // reachable from two parents in the SAME wave is scanned once, not twice.
+    // when a child is queued rather than when it is popped; the serial walk
+    // guarded at pop time and so also scanned it once — queueing it once just
+    // saves the duplicate entry and the wasted pop. What DID change is which
+    // depth a multiply-reachable directory gets: waves are depth-uniform, so
+    // it is now always the shortest path from the root, where the old LIFO
+    // pop order made it whichever spelling happened to win. That is only
+    // observable under `follow_symlinks`, and it replaces a nondeterministic
+    // answer with a deterministic one.
     let mut visited: HashSet<PathBuf> = HashSet::new();
     visited.insert(root_canon.clone());
     let mut frontier: Vec<(PathBuf, usize)> = if is_internal(&root_canon) {
@@ -304,7 +310,7 @@ pub async fn discover_projects_in(
         let wave = std::mem::take(&mut frontier);
         let scanned: Vec<DirScan> = futures_util::stream::iter(
             wave.into_iter()
-                .map(|(canon, depth)| scan_one_dir(canon, depth, opts)),
+                .map(|(canon, depth)| scan_one_dir(canon, depth, opts, &on_dir)),
         )
         .buffer_unordered(DIR_CONCURRENCY)
         .collect()
@@ -312,7 +318,6 @@ pub async fn discover_projects_in(
 
         for scan in scanned {
             report.scanned_dirs += 1;
-            on_dir(&scan.canon);
             report.unreadable_dirs += scan.unreadable_dirs;
             report.depth_limited |= scan.depth_limited;
 
@@ -361,8 +366,9 @@ pub async fn discover_projects_in(
 /// the first registration) while reporting success for both, and the second's
 /// memories would be reindexed into the first's shared index.
 ///
-/// Runs after the sort, so "first" is the lowest path and the outcome is
-/// deterministic rather than dependent on directory-iteration order.
+/// Runs after the sort, so the outcome is deterministic rather than dependent
+/// on directory-iteration order. Among colliding candidates the largest store
+/// wins (see the tie-break note in the body); path order only settles a tie.
 ///
 /// Two passes, and the split matters: **every** project in the scan claims its
 /// ID, but only `Unregistered` ones can be demoted. Claiming from unregistered
@@ -371,25 +377,64 @@ pub async fn discover_projects_in(
 /// that ID stayed adoptable — and adoption reindexes, which empties the
 /// original's memories table.
 fn demote_intra_scan_id_collisions(projects: &mut [DiscoveredProject]) {
+    // Pass 1: every project that is NOT a candidate defends its ID.
     let mut claimed: HashMap<String, PathBuf> = HashMap::new();
     for project in projects.iter() {
         if project.status != DiscoveryStatus::Unregistered {
             claimed.insert(project.project_id.clone(), project.path.clone());
         }
     }
+
+    // Pass 2: among colliding candidates, the one with the MOST memories wins
+    // the ID; path order only breaks an exact tie.
+    //
+    // Alphabetical order was not a safety property. Adoption reindexes, and a
+    // reindex rebuilds the shared memories table from the adopted checkout's
+    // files alone — so when a throwaway clone sorted before the real one, the
+    // scratch copy took the ID and the real checkout's memories vanished from
+    // every query until someone re-ran `reindex` there by hand. Whichever
+    // clone is adopted, the other's memories are absent from the shared
+    // index; picking the largest is the choice that loses least, and
+    // `memory_count` is already computed for the prompt.
+    //
+    // Deterministic: `projects` is sorted by path before this runs, and the
+    // comparison is (memory_count desc, path asc).
+    let mut winners: HashMap<String, (usize, PathBuf)> = HashMap::new();
+    for project in projects.iter() {
+        if project.status != DiscoveryStatus::Unregistered
+            || claimed.contains_key(&project.project_id)
+        {
+            continue;
+        }
+        match winners.get(&project.project_id) {
+            Some((best, _)) if *best >= project.memory_count => {}
+            _ => {
+                winners.insert(
+                    project.project_id.clone(),
+                    (project.memory_count, project.path.clone()),
+                );
+            }
+        }
+    }
+
     for project in projects.iter_mut() {
         if project.status != DiscoveryStatus::Unregistered {
             continue;
         }
-        match claimed.get(&project.project_id) {
-            Some(owner) => {
+        // A non-candidate owner always beats a candidate.
+        if let Some(owner) = claimed.get(&project.project_id) {
+            project.status = DiscoveryStatus::SharedId {
+                owner: owner.clone(),
+            };
+            continue;
+        }
+        match winners.get(&project.project_id) {
+            Some((_, winner)) if winner != &project.path => {
                 project.status = DiscoveryStatus::SharedId {
-                    owner: owner.clone(),
-                }
+                    owner: winner.clone(),
+                };
             }
-            None => {
-                claimed.insert(project.project_id.clone(), project.path.clone());
-            }
+            _ => {}
         }
     }
 }
@@ -513,7 +558,20 @@ struct DirScan {
 ///
 /// Everything here is independent per directory, which is what makes the walk
 /// safe to run several-at-a-time.
-async fn scan_one_dir(canon: PathBuf, depth: usize, opts: &DiscoverOptions) -> DirScan {
+///
+/// `on_dir` fires here, before the reads, rather than in the driver after the
+/// wave lands. The driver sees a whole level at once, so reporting from there
+/// made the spinner freeze for the duration of the widest level — the bulk of
+/// the wall clock — and then repaint tens of thousands of already-finished
+/// paths in a few milliseconds. "Scanning X" has to be said while X is being
+/// scanned.
+async fn scan_one_dir(
+    canon: PathBuf,
+    depth: usize,
+    opts: &DiscoverOptions,
+    on_dir: &(impl Fn(&Path) + Send + Sync),
+) -> DirScan {
+    on_dir(&canon);
     let mut out = DirScan {
         canon,
         depth,
@@ -640,6 +698,207 @@ mod tests {
         discover_projects_in(root, reg, &DiscoverOptions::default(), |_| {})
             .await
             .unwrap()
+    }
+
+    async fn scan_with(root: &Path, reg: &Registry, opts: &DiscoverOptions) -> DiscoveryReport {
+        discover_projects_in(root, reg, opts, |_| {}).await.unwrap()
+    }
+
+    /// A subtree the scan could not list must be COUNTED, because
+    /// `unreadable_dirs` is the only thing that stops "no unregistered
+    /// projects found" from being a claim of absence the scan cannot support.
+    ///
+    /// The count survived a serial->concurrent rewrite that moved it from one
+    /// mutable counter to a per-directory field summed in the driver, and
+    /// nothing pinned it either side of that move.
+    ///
+    /// Root ignores mode bits, so on a root runner there is no unreadable
+    /// directory to observe and the assertion is skipped — CI runs
+    /// `ubuntu-latest` as a normal user, where it does assert.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unlistable_directory_is_counted_and_does_not_truncate_the_scan() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let visible = fake_project(tmp.path(), "visible", 1);
+        let locked = tmp.path().join("locked");
+        std::fs::create_dir_all(locked.join("child")).unwrap();
+
+        let set_mode = |mode: u32| {
+            let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+            perms.set_mode(mode);
+            std::fs::set_permissions(&locked, perms).unwrap();
+        };
+        set_mode(0o000);
+        let denied = std::fs::read_dir(&locked).is_err();
+        let report = scan(tmp.path(), &Registry::default()).await;
+        set_mode(0o755);
+
+        if denied {
+            assert_eq!(
+                report.unreadable_dirs, 1,
+                "an unlistable directory must be reported: {report:?}"
+            );
+            // And the failure must not have cost us the rest of the tree.
+            assert!(
+                report.projects.iter().any(|p| p.path.ends_with("visible")),
+                "an unreadable sibling truncated the scan: {report:?}"
+            );
+        }
+        drop(visible);
+    }
+
+    /// One directory reachable by two names is scanned once, and a symlink
+    /// cycle terminates.
+    ///
+    /// `follow_symlinks` had no test at all, which is also what makes the
+    /// canonicalize-at-push-time invariant (the thing keeping the cycle guard
+    /// exact) unpinned.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn following_symlinks_visits_a_shared_target_once_and_survives_a_cycle() {
+        let tmp = TempDir::new().unwrap();
+        let shared = fake_project(tmp.path(), "shared", 3);
+        std::fs::create_dir_all(tmp.path().join("p1")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("p2")).unwrap();
+        // Two routes to one project...
+        std::os::unix::fs::symlink(&shared, tmp.path().join("p1").join("link")).unwrap();
+        std::os::unix::fs::symlink(&shared, tmp.path().join("p2").join("link")).unwrap();
+        // ...and a self-cycle, which a walk without a canonical visited set
+        // would follow until it hit max_depth (or forever).
+        std::os::unix::fs::symlink(tmp.path().join("p1"), tmp.path().join("p1").join("loop"))
+            .unwrap();
+
+        let opts = DiscoverOptions {
+            follow_symlinks: true,
+            ..Default::default()
+        };
+        let report = scan_with(tmp.path(), &Registry::default(), &opts).await;
+
+        let found: Vec<_> = report
+            .projects
+            .iter()
+            .filter(|p| p.path.ends_with("shared"))
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "a project reachable by two symlinks was reported twice: {report:?}"
+        );
+        // Reported once means it is still adoptable — being demoted to
+        // `SharedId` against itself would be the subtler failure.
+        assert_eq!(found[0].status, DiscoveryStatus::Unregistered);
+    }
+
+    /// The internal-store guard must hold for a CHILD, not just for the root.
+    ///
+    /// Scanning the global data dir *itself* hits the root short-circuit and
+    /// empties the frontier before the per-child guard can run — so that test
+    /// alone would still pass with the child guard deleted. The real case is
+    /// scanning a home directory, where the global store is reached as a
+    /// descendant and would otherwise be offered for adoption: engramdb
+    /// proposing to register its own global store as a user project.
+    #[tokio::test]
+    async fn the_internal_store_is_skipped_when_reached_as_a_child() {
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("ENGRAMDB_DATA_DIR", tmp.path().join("data"));
+        let internal = paths::global_data_dir().unwrap();
+        std::fs::create_dir_all(internal.join("projects").join("global").join(".engramdb"))
+            .unwrap();
+        // A real project alongside it, so an empty result cannot pass by
+        // accident.
+        fake_project(tmp.path(), "real", 1);
+
+        let opts = DiscoverOptions {
+            include_hidden: true,
+            ..Default::default()
+        };
+        let report = scan_with(tmp.path(), &Registry::default(), &opts).await;
+
+        assert!(
+            report
+                .projects
+                .iter()
+                .all(|p| !p.path.starts_with(&internal)),
+            "engramdb's own global store was offered as a user project: {report:?}"
+        );
+        assert_eq!(report.projects.len(), 1);
+    }
+
+    /// Among colliding candidates the LARGEST store wins the ID, whichever way
+    /// they sort.
+    ///
+    /// The tie-break used to be alphabetical, which is not a safety property:
+    /// adoption reindexes, and a reindex rebuilds the shared memories table
+    /// from the adopted checkout alone — so a throwaway clone sorting first
+    /// took the ID and the real checkout's memories vanished from every query.
+    /// The scratch copy sorts FIRST here, which is the losing order for the
+    /// old rule.
+    #[tokio::test]
+    async fn the_largest_colliding_candidate_wins_the_id() {
+        let mut projects = vec![
+            DiscoveredProject {
+                path: PathBuf::from("/a-scratch"),
+                project_id: "shared0000000000".to_string(),
+                memory_count: 0,
+                status: DiscoveryStatus::Unregistered,
+            },
+            DiscoveredProject {
+                path: PathBuf::from("/z-real"),
+                project_id: "shared0000000000".to_string(),
+                memory_count: 400,
+                status: DiscoveryStatus::Unregistered,
+            },
+        ];
+        demote_intra_scan_id_collisions(&mut projects);
+
+        assert_eq!(
+            projects[1].status,
+            DiscoveryStatus::Unregistered,
+            "the checkout with 400 memories must keep the id"
+        );
+        assert_eq!(
+            projects[0].status,
+            DiscoveryStatus::SharedId {
+                owner: PathBuf::from("/z-real")
+            },
+            "the empty scratch clone must be demoted"
+        );
+    }
+
+    /// A project that is not a candidate defends its ID even when it sorts
+    /// LAST — the two-pass split is what makes that true, and a single-pass
+    /// "claim as you go" implementation passes every other test in this file.
+    #[tokio::test]
+    async fn a_defender_that_sorts_last_still_holds_its_id() {
+        let mut projects = vec![
+            DiscoveredProject {
+                path: PathBuf::from("/a-clone"),
+                project_id: "shared0000000000".to_string(),
+                memory_count: 99,
+                status: DiscoveryStatus::Unregistered,
+            },
+            DiscoveredProject {
+                path: PathBuf::from("/z-drifted"),
+                project_id: "shared0000000000".to_string(),
+                memory_count: 1,
+                status: DiscoveryStatus::StaleRegistration {
+                    registered_id: "old00000000000".to_string(),
+                },
+            },
+        ];
+        demote_intra_scan_id_collisions(&mut projects);
+
+        // Even with 99 memories against 1, a candidate never takes an ID a
+        // non-candidate is visibly using.
+        assert_eq!(
+            projects[0].status,
+            DiscoveryStatus::SharedId {
+                owner: PathBuf::from("/z-drifted")
+            },
+            "a clone took an id the drifted project is still using"
+        );
     }
 
     #[tokio::test]

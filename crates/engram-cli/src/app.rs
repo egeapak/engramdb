@@ -422,9 +422,11 @@ pub enum ProjectsCommand {
         #[arg(long)]
         no_index: bool,
     },
-    /// Remove a project from the registry and reclaim its index.
+    /// Remove a project from the registry and reclaim its data directory.
     ///
-    /// Personal memories are KEPT unless `--purge` is passed: a project ID
+    /// The data directory is kept WHOLE — index included — whenever it still
+    /// holds personal memories, archived transcripts or conversation
+    /// summaries, unless `--purge` is passed: a project ID
     /// derived from a git remote is shared by every clone of that remote on
     /// this machine, and the registry records only one of them, so deleting
     /// one registration can destroy another checkout's only copy.
@@ -441,9 +443,10 @@ pub enum ProjectsCommand {
         /// Also delete all descendants (children and their children).
         #[arg(long)]
         cascade: bool,
-        /// Also delete personal memories. Without this they are kept: a
-        /// remote-derived project ID is shared by every clone of that remote,
-        /// and the registry cannot see the others.
+        /// Also delete personal memories, archived transcripts and curated
+        /// conversation summaries — none of which have another copy. Without
+        /// this they are kept: a remote-derived project ID is shared by every
+        /// clone of that remote, and the registry cannot see the others.
         #[arg(long)]
         purge: bool,
     },

@@ -3,7 +3,7 @@
 use crate::app::ProjectsCommand;
 use crate::output::{AggregateStatsOutput, OutputFormatter, ProjectInfoOutput, ProjectListOutput};
 use crate::prompter::Prompter;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use engramdb::ops::projects;
 use engramdb::storage::RegistryBackend;
 use engramdb::types::ProjectListGrouping;
@@ -119,10 +119,17 @@ pub async fn run_projects(
                          memories.",
                     );
                 }
-                let confirm = prompter.confirm("Continue?", false).unwrap_or(false);
-                if !confirm {
+                // Propagated, not swallowed. `unwrap_or(false)` turned a
+                // prompt *failure* (no TTY, EOF on stdin) into a decline, and
+                // a decline exits 0 — so `engramdb --format plain projects
+                // delete <id>` from a script printed "Aborted." and reported
+                // success for a project that is still registered. A refusal
+                // the user never made must not read as a completed delete.
+                if !prompter.confirm("Continue?", false)? {
+                    // Nothing was deleted. Exiting 0 here would let `set -e`
+                    // treat a declined delete as a done one.
                     formatter.print_message("Aborted.");
-                    return Ok(());
+                    bail!("delete declined; nothing was removed");
                 }
             }
 
@@ -161,8 +168,9 @@ pub async fn run_projects(
             }
             if !result.retained_irreplaceable.is_empty() {
                 formatter.print_message(&format!(
-                    "Kept {} data director(ies) holding personal memories or \
-                     archived transcripts: {}. Re-run with --purge to delete them too.",
+                    "Kept {} data director(ies) holding personal memories, archived \
+                     transcripts or conversation summaries: {}. Re-run with --purge \
+                     to delete them too.",
                     result.retained_irreplaceable.len(),
                     result.retained_irreplaceable.join(", ")
                 ));
@@ -286,7 +294,9 @@ pub async fn run_projects(
 
             if !force {
                 // JSON mode already bailed at the top of this branch.
-                let confirm = prompter.confirm("Remove all?", false).unwrap_or(false);
+                // See the note on `delete` above: a failed prompt is not a
+                // decline, and a decline is not a successful prune.
+                let confirm = prompter.confirm("Remove all?", false)?;
                 if !confirm {
                     formatter.print_message("Aborted.");
                     return Ok(());
@@ -359,10 +369,12 @@ pub async fn run_projects(
             }
             if !result.retained_irreplaceable.is_empty() {
                 // Silence here would read as "everything was reclaimed", and
-                // these directories hold the only copy of their personal
-                // memories — the user needs to know they are still on disk.
+                // these directories hold the only copy of something — the user
+                // needs to know they are still on disk.
                 formatter.print_message(&format!(
-                    "Kept {} data director(ies) holding personal memories: {}",
+                    "Kept {} data director(ies) holding personal memories, archived \
+                     transcripts or conversation summaries: {}. Prune never deletes \
+                     these; use `engramdb projects delete <id> --purge` if you mean to.",
                     result.retained_irreplaceable.len(),
                     result.retained_irreplaceable.join(", ")
                 ));

@@ -64,8 +64,9 @@ pub struct RepairReport {
     /// and is structurally invisible to the registry (`update_inner_impl`
     /// keeps one row per ID and declines to add a second), so no check here
     /// can prove the directory is ours alone. Reclaiming it is `prune`'s job,
-    /// and prune only ever removes the *derived* half (`lancedb/`) — a
-    /// directory holding personal memories is retained whole.
+    /// and prune leaves it alone entirely for as long as it holds anything
+    /// with no other copy — personal memories, archived transcripts, or a
+    /// `lancedb/conversations.lance` table of curated summaries.
     pub old_data_dir: PathBuf,
     /// One entry per [`RepairReport::old_ids`] element, same order.
     pub old_data_dirs: Vec<PathBuf>,
@@ -98,6 +99,13 @@ async fn plan_from(
     // A linked worktree is not an independent project: its operations route to
     // the main checkout and it is registered as a sub-project. Re-keying one
     // would point its row at the worktree's own path hash and detach it.
+    //
+    // Reachable from the CLI only for a worktree that resolution did NOT
+    // rewrite (an unlinked one) — `cli::run` resolves `dir` to the main root
+    // before dispatch, so the ordinary linked case arrives here already
+    // pointing at the main checkout and repairs that, which is what every
+    // other project command does too. Kept as the guard for direct `ops`
+    // callers, which get no such resolution.
     if let Some(main) = project_id::detect_worktree_main(dir) {
         bail!(
             "{} is a linked git worktree of {} — worktrees route to the main checkout and are \

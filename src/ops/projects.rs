@@ -304,8 +304,10 @@ pub struct PruneResult {
     /// Project IDs whose broken `parent_project_id` link was cleared
     /// (dangling, stale-parent, or cycle-participating sub-projects).
     pub hierarchy_cleared: Vec<String>,
-    /// Data directories kept because they still hold personal memories — the
-    /// only copy of those. Their derived index was reclaimed. Reported so the
+    /// Data directories kept **whole** because they still hold data that
+    /// exists nowhere else: personal memories, or archived transcripts whose
+    /// originals Claude Code has already pruned. Deduplicated — a directory
+    /// retained by the stale pass is seen again by the orphan sweep. Reported so the
     /// retained disk usage is visible rather than mysterious.
     pub retained_irreplaceable: Vec<String>,
 }
@@ -589,6 +591,17 @@ pub async fn prune_stale_projects(
     }
     // A directory that was kept is not an orphan that was removed.
     orphan_ids.retain(|id| !kept_orphan_ids.contains(id));
+
+    // A directory retained by the stale pass reaches the orphan sweep too —
+    // its registry row was just removed, so it is no longer in
+    // `registered_ids` — and is retained a second time. That is correct
+    // behaviour for both passes and the wrong thing to report: the ID landed
+    // in this list twice, so the CLI said "Kept 2 data director(ies): x, x"
+    // and the JSON shipped the duplicate. Dedupe here rather than skipping
+    // the second pass, which would need the sweep to know why a directory was
+    // held back.
+    let mut seen = HashSet::new();
+    retained_irreplaceable.retain(|id| seen.insert(id.clone()));
 
     // --- Hierarchy repair ---
     //
@@ -1108,12 +1121,153 @@ mod tests {
             lance.exists(),
             "a directory kept for its personal memories must be kept whole"
         );
-        assert!(
-            result
-                .retained_irreplaceable
-                .contains(&shared_id.to_string()),
-            "a directory kept for its personal memories must be reported: {result:?}"
+        // `assert_eq!` on the whole vector, not `contains`: a retained stale
+        // directory is seen AGAIN by the orphan sweep (its registry row is
+        // gone by then), so it was reported twice — "Kept 2 data director(ies):
+        // x, x" — and `contains` could not tell.
+        assert_eq!(
+            result.retained_irreplaceable,
+            vec![shared_id.to_string()],
+            "a retained directory must be reported exactly once: {result:?}"
         );
+    }
+
+    // The retention rule is enforced at each CALLER, so pinning the predicate
+    // alone is not enough: re-inline a `personal/memories`-only check in
+    // `prune_stale_projects` and every test above still passes while prune —
+    // which runs unattended from `auto_maintain` — deletes every transcript
+    // archive on the machine. Claude Code has already pruned the originals.
+    #[tokio::test]
+    async fn prune_keeps_a_directory_holding_only_transcripts() {
+        let registry = InMemoryRegistry::new();
+
+        // An orphan data dir: no registry row at all, no personal memories,
+        // nothing but an archived transcript.
+        let orphan_id = "transcriptonly00";
+        let transcripts = paths::transcript_archive_dir(orphan_id).unwrap();
+        async_fs::create_dir_all(&transcripts).await.unwrap();
+        let archive = transcripts.join("session-a.jsonl.zst");
+        async_fs::write(&archive, b"zstd").await.unwrap();
+
+        let result = prune_stale_projects(&registry, |_| {}).await.unwrap();
+
+        assert!(
+            archive.exists(),
+            "prune destroyed the last copy of an archived transcript"
+        );
+        assert_eq!(result.orphans_removed, 0);
+        assert_eq!(result.retained_irreplaceable, vec![orphan_id.to_string()]);
+    }
+
+    // Same rule, the third payload: `lancedb/conversations.lance` holds the
+    // curated per-session summaries, which nothing regenerates. A project with
+    // `[harvest] archive = false`, or one old enough for archive eviction to
+    // have run, has summaries and no transcripts to imply them.
+    #[tokio::test]
+    async fn prune_keeps_a_directory_holding_only_conversation_summaries() {
+        let registry = InMemoryRegistry::new();
+
+        let orphan_id = "summariesonly000";
+        let lance = paths::lancedb_dir(orphan_id).unwrap();
+        async_fs::create_dir_all(lance.join("conversations.lance"))
+            .await
+            .unwrap();
+
+        let result = prune_stale_projects(&registry, |_| {}).await.unwrap();
+
+        assert!(
+            lance.join("conversations.lance").exists(),
+            "prune destroyed curated conversation summaries"
+        );
+        assert_eq!(result.orphans_removed, 0);
+        assert_eq!(result.retained_irreplaceable, vec![orphan_id.to_string()]);
+    }
+
+    // `doctor` counts what prune will reclaim. If the two ever disagree the
+    // user gets a warning they can never clear — the exact failure this
+    // branch set out to remove — so assert the NUMBERS agree, not just that
+    // each is individually plausible.
+    #[tokio::test]
+    async fn doctor_orphan_count_agrees_with_what_prune_reclaims() {
+        let registry = InMemoryRegistry::new();
+
+        // One genuinely reclaimable orphan: derived data only.
+        let dead = "deadindexonly000";
+        async_fs::create_dir_all(paths::lancedb_dir(dead).unwrap())
+            .await
+            .unwrap();
+        // One that must be retained.
+        let held = "heldpersonal0000";
+        let personal = paths::personal_memories_dir(held).unwrap();
+        async_fs::create_dir_all(&personal).await.unwrap();
+        async_fs::write(
+            personal.join("only-copy.md"),
+            "---
+---
+",
+        )
+        .await
+        .unwrap();
+
+        let counted = count_orphan_dirs(&registry).await.unwrap();
+        let result = prune_stale_projects(&registry, |_| {}).await.unwrap();
+
+        assert_eq!(
+            counted, result.orphans_removed,
+            "doctor promised {counted} reclaimable orphan(s), prune reclaimed {}",
+            result.orphans_removed
+        );
+        assert_eq!(counted, 1);
+        assert!(personal.join("only-copy.md").exists());
+    }
+
+    // Cascade is the highest-blast-radius delete there is, and every cascade
+    // test used `purge = true`, so the descendant branch of the retention rule
+    // never ran.
+    #[tokio::test]
+    async fn cascade_delete_without_purge_keeps_a_child_s_personal_memories() {
+        let registry = InMemoryRegistry::new();
+        let tmp = TempDir::new().unwrap();
+
+        let parent_id = "parentproject000";
+        let child_id = "childproject0000";
+        let mut reg = registry.load().await.unwrap();
+        reg.projects.push(RegistryEntry {
+            project_id: parent_id.to_string(),
+            project_path: tmp.path().join("parent").to_string_lossy().to_string(),
+            parent_project_id: None,
+            subscriptions: vec![],
+        });
+        reg.projects.push(RegistryEntry {
+            project_id: child_id.to_string(),
+            project_path: tmp.path().join("child").to_string_lossy().to_string(),
+            parent_project_id: Some(parent_id.to_string()),
+            subscriptions: vec![],
+        });
+        registry.save(&reg).await.unwrap();
+
+        let child_personal = paths::personal_memories_dir(child_id).unwrap();
+        async_fs::create_dir_all(&child_personal).await.unwrap();
+        let file = child_personal.join("child-only-copy.md");
+        async_fs::write(
+            &file, "---
+---
+",
+        )
+        .await
+        .unwrap();
+
+        let result = delete_project(&registry, parent_id, true, false)
+            .await
+            .unwrap();
+
+        assert!(
+            file.exists(),
+            "cascade delete destroyed a descendant's only copy of its personal memories"
+        );
+        assert!(result
+            .retained_irreplaceable
+            .contains(&child_id.to_string()));
     }
 
     /// The other half of the invariant: a data directory with nothing

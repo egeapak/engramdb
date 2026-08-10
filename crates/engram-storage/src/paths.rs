@@ -385,6 +385,17 @@ pub async fn find_memory_in_dir(dir: &Path, id: &str) -> Option<PathBuf> {
 ///   is the entire reason [`crate::transcript_archive`] takes a copy at
 ///   `SessionEnd`; by the time a sweep runs, the archive is routinely the last
 ///   surviving copy of the conversation behind a memory's provenance.
+/// - `lancedb/conversations.lance`. Everything else under `lancedb/` rebuilds
+///   from the `.md` files, but this table's `summary_vec` holds curated
+///   per-session summaries that a human or an agent wrote. Nothing else
+///   stores them — the ledger deliberately carries no summary — which is why
+///   `reindex --archive-only` reads them off the table and puts them back
+///   rather than regenerating them. Two ordinary configurations reach a state
+///   with summaries and no transcripts to imply them: `[harvest] archive =
+///   false`, and any project old enough for archive eviction to have run.
+///   Presence of the table is enough to retain; counting rows would mean
+///   opening LanceDB on a path a sweep is about to delete, and over-retaining
+///   is the safe direction here.
 ///
 /// This is the single predicate behind every "may I remove this data
 /// directory?" decision — `ops::projects::prune_stale_projects`, its orphan
@@ -399,6 +410,9 @@ pub async fn holds_irreplaceable_data(dir: &Path) -> bool {
     holds_files_with_extension(&dir.join("personal").join("memories"), "md").await
         || holds_files_with_extension(&dir.join("transcripts"), transcript_archive::ARCHIVE_EXT)
             .await
+        || crate::conversation_index::ConversationIndex::table_path_in(&dir.join("lancedb"))
+            .try_exists()
+            .unwrap_or(true)
 }
 
 /// Whether a directory holds at least one file with the given extension.

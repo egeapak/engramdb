@@ -97,7 +97,7 @@ engramdb projects list                                 # full registry as a tree
 engramdb projects list --group none                    # flat, one full path per line
 engramdb projects info                                 # current project
 engramdb projects stats                                # aggregate stats
-engramdb projects delete <id> [-f] [--cascade] [--purge] # deregister; --purge also deletes personal memories
+engramdb projects delete <id> [-f] [--cascade] [--purge] # deregister; --purge also deletes personal memories + transcripts
 engramdb projects link <child_id> --parent <parent_id> # link as sub-project
 engramdb projects unlink <child_id>                    # promote back to root
 engramdb projects prune [-f]                           # remove stale registry entries + orphan data dirs
@@ -172,9 +172,10 @@ entry carries `parent_project_id`, regardless of the grouping mode.
   older one (see [drift](#project-identity-drift)), and so are engramdb's own
   global and group stores.
 
-Neither ever deletes personal memories. A data directory still holding
-`personal/memories/*.md` is kept whole, index included, and the kept directories
-are reported as `retained_with_personal`. The reason is structural: a project ID derived from a
+Neither ever deletes data that exists nowhere else. A data directory still
+holding `personal/memories/*.md`, `transcripts/*.jsonl.zst` or a
+`lancedb/conversations.lance` table is kept whole, index included, and the kept directories
+are reported as `retained_irreplaceable`. The reason is structural: a project ID derived from a
 git remote is shared by every clone of that remote on this machine, and the
 registry records only one of them, so no check can prove a directory is yours
 alone. `projects delete --purge` is the one way to say you mean it anyway.
@@ -228,4 +229,4 @@ engramdb query --dir ~/code/other-project --mode rank --path src/bar.rs
 ## Notes
 
 - **`--global` vs `--include-global`.** `--global` operates against the global store **instead of** the current project. `--include-global` operates against the current project **plus** the global store.
-- **Project IDs are path-stable** when there is no git remote (with one, the remote decides). Moving such a project produces a new ID — run `engramdb projects prune` after to reclaim the old data directory. If it held personal memories, prune keeps it; move them across or `projects delete --purge` the old ID.
+- **Project IDs are path-stable** when there is no git remote (with one, the remote decides). Moving such a project produces a new ID — run `engramdb projects prune` after to reclaim the old data directory. Prune keeps it if it holds personal memories, archived transcripts or conversation summaries (which is the common case for any project that has ended a Claude Code session); move what you need across, then `projects delete --purge` the old ID.

@@ -339,8 +339,9 @@ Worktree nesting and path sorting apply in every mode. `--json` output is
 unaffected by `--group`: it stays a flat array carrying `parent_project_id`.
 
 `projects delete` removes a *registration* and reclaims the data directory
-behind it. It keeps that directory whole whenever it still holds personal
-memories, unless `--purge` is passed — a project ID derived from a git remote is
+behind it. It keeps that directory whole whenever it still holds anything with no other
+copy — personal memories, archived transcripts, or curated conversation
+summaries — unless `--purge` is passed — a project ID derived from a git remote is
 shared by every clone of that remote on the machine, and the registry records
 only one of them, so deleting one checkout's registration can otherwise destroy
 another checkout's only copy. `--purge` is the explicit "I mean it"; without
@@ -348,17 +349,18 @@ another checkout's only copy. `--purge` is the explicit "I mean it"; without
 
 `--force` is required in JSON mode (the command never prompts there), and it
 emits one object: `{deleted, project_id, project_path, purge,
-global_data_removed, retained_with_personal[], cascaded_ids[]}`. Refusing to act
+global_data_removed, retained_irreplaceable[], cascaded_ids[]}`. Refusing to act
 — a project with sub-projects and no `--cascade` — exits non-zero rather than
 reporting a delete that did not happen.
 
 `projects prune` drops registry entries whose project directory is gone and
-reclaims data directories no registration answers to. It never deletes personal
-memories: a data directory holding `personal/memories/*.md` is left whole, index
-included — it is being kept precisely because something unregistered may still
+reclaims data directories no registration answers to. It never deletes what has no
+other copy: a data directory holding `personal/memories/*.md`,
+`transcripts/*.jsonl.zst`, or a `lancedb/conversations.lance` table is left
+whole, index included — it is being kept precisely because something unregistered may still
 be using it, and wiping that copy's index would leave a healthy project silently
 unsearchable. Those directories are
-listed as `retained_with_personal` (in JSON and in the human summary) so a clean
+listed as `retained_irreplaceable` (in JSON and in the human summary) so a clean
 run is not mistaken for "everything was reclaimed". The same rule applies to the
 unattended maintenance pass, which runs prune for you.
 
@@ -366,7 +368,7 @@ unattended maintenance pass, which runs prune for you.
 JSON is machine-consumed and never prompts, so the contract depends on the flags
 alone. The one emitted object carries `stale_removed`, `stale_ids[]`,
 `orphans_removed`, `orphan_ids[]`, `hierarchy_cleared[]`, and
-`retained_with_personal[]`, at their zero values when nothing was pruned.
+`retained_irreplaceable[]`, at their zero values when nothing was pruned.
 
 ### `projects discover`
 
@@ -466,16 +468,20 @@ were writing into just before the last drift is not the first stale ID.
 It **never deletes anything**: personal memories are *copied* to the live data
 directory and the old one is left in place. An unregistered sibling clone of the
 same remote shares that directory and is structurally invisible to the registry,
-so no check can prove it is yours alone. `projects prune` later reclaims the
-rebuildable index inside it, but never the personal memories. Files that can't
+so no check can prove it is yours alone. `projects prune` leaves that directory alone
+entirely for as long as it holds personal memories, archived transcripts or
+conversation summaries — it is kept whole, index included. Files that can't
 be read or parsed — on either side — are left alone and counted in
 `personal_skipped`; that includes a live file carrying the same memory ID that
 this binary can't parse, which is never replaced by an older copy.
 
 It refuses outright when a registry row at **another path** already holds the
 live ID (two rows sharing one ID resolve to whichever comes first, so the repair
-would report success while the symptom persisted), and when run inside a linked
-git worktree (worktrees route to the main checkout and are never re-keyed). A
+would report success while the symptom persisted). Run inside a *linked* git
+worktree it repairs the main checkout, not the worktree — every project command
+resolves to the main root first, and a worktree is registered as a sub-project
+rather than re-keyed. The op-level worktree refusal only fires for a worktree
+that has not been linked, where no resolution happened. A
 sibling clone still answering to the *old* ID is fine: that is the normal state
 for two clones of one remote, and nothing here writes to or deletes the shared
 directory.

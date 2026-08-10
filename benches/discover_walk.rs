@@ -17,34 +17,46 @@
 //! only as the record of what was replaced. The copy performs the same reads in
 //! the same order the old code did but skips `classify` — classification is
 //! pure CPU, runs identically in both shapes, and is not what this group is
-//! measuring. Both arms therefore do the same I/O; only its scheduling differs.
+//! measuring. Both arms therefore do the same I/O; only its scheduling differs
+//! — and `assert_same_work` checks that claim against each fixture before the
+//! timed runs, so it cannot rot silently when the filters change.
 //!
 //! Sweeps are over directory *count* at fixed breadth (how the walk scales) and
 //! over project *density* (how much the per-project `count_memories` reads add).
 //!
-//! Caveat worth reading before quoting a number: a bench machine's page cache
-//! makes every one of these reads a memory hit, which is the case least
-//! favourable to overlapping them. The gap this measures is the floor, not the
-//! ceiling — the win grows with per-operation latency, and the target
-//! environment (a real home directory, possibly on a network mount) has far
-//! more of it than a warm tmpfs.
+//! Two caveats, and they pull in opposite directions — quote the numbers with
+//! both or not at all.
 //!
-//! Measured (warm cache, 16-way, mean of 100+ samples):
+//! *Understates:* a bench machine's page cache makes every read a memory hit,
+//! the case least favourable to overlapping them. A real home directory, cold
+//! or on a network mount, has far more latency to hide.
 //!
-//! | case | previous | shipped | |
-//! |------|---------:|--------:|-|
-//! | 85 dirs (4x3) | 10.5 ms | 2.2 ms | 4.8x |
-//! | 1555 dirs (6x4) | 240.6 ms | 37.1 ms | 6.5x |
-//! | 4681 dirs (8x4) | 746.2 ms | 115.0 ms | 6.5x |
-//! | 1555 dirs, 1-in-64 projects | 160.9 ms | 30.4 ms | 5.3x |
-//! | 1555 dirs, 1-in-8 projects | 251.4 ms | 36.8 ms | 6.8x |
-//! | 1555 dirs, every dir a project | 449.5 ms | 88.7 ms | 5.1x |
+//! *Overstates:* `build_tree` produces a perfectly balanced tree, so 75-88% of
+//! its directories sit in a single wave. The speedup below tracks that share
+//! almost exactly, which is the tell — this measures wave width as much as it
+//! measures the change. Two real-world effects are invisible here and both cut
+//! against the shipped arm: a level narrower than `DIR_CONCURRENCY` gets no
+//! overlap at all (and `DEFAULT_SKIP_DIRS` prunes `node_modules`/`target`/
+//! `.git`, i.e. exactly the wide subtrees), and the per-level barrier waits for
+//! the slowest directory in the level — free on a uniform tmpfs, not free when
+//! one directory is on a slow mount. The old depth-first walk had no barrier.
+//!
+//! Measured (warm cache, 16-way, mean of 100+ samples, balanced tree):
+//!
+//! | case | widest level | previous | shipped | |
+//! |------|-------------:|---------:|--------:|-|
+//! | 85 dirs (4x3) | 75% | 10.5 ms | 2.2 ms | 4.8x |
+//! | 1555 dirs (6x4) | 83% | 240.6 ms | 37.1 ms | 6.5x |
+//! | 4681 dirs (8x4) | 88% | 746.2 ms | 115.0 ms | 6.5x |
+//! | 1555 dirs, 1-in-64 projects | 83% | 160.9 ms | 30.4 ms | 5.3x |
+//! | 1555 dirs, 1-in-8 projects | 83% | 251.4 ms | 36.8 ms | 6.8x |
+//! | 1555 dirs, every dir a project | 83% | 449.5 ms | 88.7 ms | 5.1x |
 //!
 //! Larger than a cached-read model predicts, because tokio dispatches every
 //! `fs` call to its blocking pool: the per-await cost is a thread hand-off, not
-//! just a syscall, and that is exactly what overlapping recovers. The figures
-//! are also conservative in the shipped arm's disfavour — it additionally
-//! classifies, accumulates and sorts a report that the copy does not build.
+//! just a syscall, and that is what overlapping recovers. The shipped arm also
+//! classifies, accumulates and sorts a report the copy never builds, so that
+//! part is in its disfavour.
 //!
 //! `DIR_CONCURRENCY` was set from the blocking-pool argument rather than swept;
 //! if it is ever retuned, this is the group to retune it against.
@@ -164,6 +176,28 @@ async fn count_md(dir: &Path) -> usize {
     n
 }
 
+/// Check the two arms actually walk the same tree, before timing them.
+///
+/// The A/B is only meaningful if the copy and production visit the same
+/// directories and find the same projects. Asserted per fixture, outside every
+/// timed closure.
+fn assert_same_work(rt: &tokio::runtime::Runtime, root: &Path, opts: &DiscoverOptions) {
+    let reg = Registry::default();
+    let (serial_dirs, serial_projects) = rt.block_on(walk_serial_previous(root, opts));
+    let report = rt
+        .block_on(discover_projects_in(root, &reg, opts, |_| {}))
+        .unwrap();
+    assert_eq!(
+        serial_dirs, report.scanned_dirs,
+        "arms disagree on directories walked — the A/B is not comparing like with like"
+    );
+    assert_eq!(
+        serial_projects,
+        report.projects.len(),
+        "arms disagree on projects found — the A/B is not comparing like with like"
+    );
+}
+
 /// Scaling in directory count, at a fixed breadth and a fixed project density.
 fn bench_walk_by_size(c: &mut Criterion) {
     let rt = runtime();
@@ -177,6 +211,7 @@ fn bench_walk_by_size(c: &mut Criterion) {
         let opts = DiscoverOptions::default();
         let reg = Registry::default();
         let label = format!("{breadth}x{depth}");
+        assert_same_work(&rt, &root, &opts);
 
         group.bench_with_input(
             BenchmarkId::new("serial_PREVIOUS", &label),
@@ -215,6 +250,7 @@ fn bench_walk_by_density(c: &mut Criterion) {
         let opts = DiscoverOptions::default();
         let reg = Registry::default();
         let label = format!("1_in_{every}");
+        assert_same_work(&rt, &root, &opts);
 
         group.bench_with_input(
             BenchmarkId::new("serial_PREVIOUS", &label),

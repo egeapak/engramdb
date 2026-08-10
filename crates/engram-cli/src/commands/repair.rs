@@ -179,8 +179,9 @@ pub async fn run_repair(
     }
     formatter.print_message(&format!(
         "  The old data directory is left in place ({}). It may be shared with another clone of \
-         the same remote, so nothing here deletes it; `engramdb projects prune` reclaims only the \
-         rebuildable index inside it and always keeps personal memories.",
+         the same remote, so nothing here deletes it — and `engramdb projects prune` will leave \
+         it alone too for as long as it holds personal memories, archived transcripts or \
+         conversation summaries.",
         join_dirs(&report.old_data_dirs)
     ));
     if let Some(err) = &index_error {

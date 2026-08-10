@@ -139,8 +139,19 @@ impl ConversationIndex {
     /// at.
     pub fn exists(root_project_id: &str) -> bool {
         paths::lancedb_dir(root_project_id)
-            .map(|d| d.join(format!("{TABLE}.lance")).exists())
+            .map(|d| Self::table_path_in(&d).exists())
             .unwrap_or(false)
+    }
+
+    /// Where the table sits inside a project's `lancedb/` directory.
+    ///
+    /// Exposed because `paths::holds_irreplaceable_data` has to recognise this
+    /// table without opening it: the curated summaries in `summary_vec` are
+    /// authored, not derived, so a data directory holding this table must
+    /// survive a sweep even though everything else under `lancedb/` rebuilds
+    /// from the `.md` files.
+    pub fn table_path_in(lancedb_dir: &std::path::Path) -> std::path::PathBuf {
+        lancedb_dir.join(format!("{TABLE}.lance"))
     }
 
     /// [`Self::open`] against an explicit LanceDB directory, so tests need no
