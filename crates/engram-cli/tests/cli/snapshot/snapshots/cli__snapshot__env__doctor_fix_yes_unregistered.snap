@@ -52,14 +52,11 @@ exit: 0
         {
           "details": [
             "registered: 0",
-            "reachable: 0",
-            "orphan data dirs: 1"
+            "reachable: 0"
           ],
           "message": "0 registered",
           "name": "Registered projects",
-          "passed": true,
-          "status": "warn",
-          "suggestion": "Run `engramdb projects prune` to clean up"
+          "passed": true
         },
         {
           "message": "healthy",
@@ -200,8 +197,6 @@ exit: 0
     "stale_entries": []
   }
 }
-{"hierarchy_cleared":[],"orphans_removed":0,"stale_removed":0}
-{"message":"Embedding model is ready.","success":true}
 --- stderr ---
-{"error":"1 errors during reindex:"}
+Error: 1 errors during reindex:
   [UUID]: embedding failed

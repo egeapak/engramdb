@@ -132,8 +132,16 @@ the current directory isn't an EngramDB project, the report collapses to just th
 "not set up" notice.
 
 `engramdb doctor --fix` offers to repair the issues it finds (reindex, download
-the embedding model, prune stale projects, or initialize the project) — it
-prompts on a terminal and applies non-interactively with `--fix --yes`.
+the embedding model, prune stale projects, re-key a project whose ID drifted,
+or initialize the project) — it
+prompts on a terminal and applies non-interactively with `--fix --yes`. A run
+that applies fixes re-checks afterwards and exits on the post-fix state, and a
+run where nothing was fixable — or where you declined every fix — still exits on
+the checks themselves. The one deliberate exception is the non-interactive
+listing path (`--fix` without `--yes` off a terminal), which only reports the
+available fixes and exits 0. Flagging memories for review (the epistemic checks)
+is asked for separately, since it is the one part of `--fix` that edits
+memories.
 `engramdb doctor validate` loads each downloaded model and runs a test inference
 to confirm it actually works.
 

@@ -1,0 +1,16 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/projects_groups.rs
+expression: "f.run(&[\"--format\", \"plain\", \"projects\", \"repair\", \"--force\", \"--no-index\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format plain projects repair --force --no-index
+exit: 0
+--- stdout ---
+This will:
+  - re-key the registry entry (subscriptions and worktree links preserved)
+  - copy 1 personal memory file(s) and LEAVE the old data directory ([DATA]/projects/[PROJECT_ID]) in place
+Re-keyed [PROJECT] from [PROJECT_ID] to [PROJECT_ID].
+Copied 1 personal memory(ies) to the live data directory.
+  Hint: Memories stay missing from queries until you run `engramdb reindex`.
+  The old data directory is left in place ([DATA]/projects/[PROJECT_ID]). It may be shared with another clone of the same remote, so nothing here deletes it — and `engramdb projects prune` will leave it alone too for as long as it holds personal memories, archived transcripts or conversation summaries.
+--- stderr ---
+Warning: [PROJECT] is registered under project ID [PROJECT_ID] but now hashes to [PROJECT_ID].

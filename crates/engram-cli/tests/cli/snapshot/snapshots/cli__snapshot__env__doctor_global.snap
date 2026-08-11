@@ -52,14 +52,11 @@ exit: 0
         {
           "details": [
             "registered: 1",
-            "reachable: 1",
-            "orphan data dirs: 1"
+            "reachable: 1"
           ],
           "message": "1 registered",
           "name": "Registered projects",
-          "passed": true,
-          "status": "warn",
-          "suggestion": "Run `engramdb projects prune` to clean up"
+          "passed": true
         },
         {
           "message": "healthy",

@@ -1,0 +1,10 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/projects_groups.rs
+expression: "f.run(&[\"--format\", \"plain\", \"projects\", \"delete\", &id, \"--force\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format plain projects delete [PROJECT_ID] --force
+exit: 0
+--- stdout ---
+Removed project from registry (path: [PROJECT])
+Kept 1 data director(ies) holding personal memories, archived transcripts or conversation summaries: [PROJECT_ID]. Re-run with --purge to delete them too.
+--- stderr ---

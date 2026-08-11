@@ -6,6 +6,6 @@ expression: body
 ? Continue? [y/N] → yes
 --- stdout ---
 Removed project from registry (path: [PROJECT])
-Deleted global data (LanceDB + personal memories).
+Deleted global data (LanceDB index).
 --- stderr ---
-Warning: This will remove project '[PID]' from the registry and delete its global data.
+Warning: This will remove project '[PID]' from the registry and delete its index (personal memories are kept unless you pass --purge).

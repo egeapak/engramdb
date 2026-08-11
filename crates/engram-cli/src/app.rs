@@ -377,7 +377,59 @@ pub enum ProjectsCommand {
         #[arg(long, value_name = "MODE")]
         group: Option<engramdb::types::ProjectListGrouping>,
     },
-    /// Remove a project from the registry and delete its global data.
+    /// Walk a directory tree for `.engramdb/` projects the registry doesn't
+    /// know about, then offer to register and index each one.
+    ///
+    /// Useful after cloning a repo that carries its memories, restoring from a
+    /// backup, or losing `registry.json`: those projects exist on disk but are
+    /// invisible to `projects list` and every cross-project surface until they
+    /// are registered.
+    Discover {
+        /// Directory to scan (defaults to the current project directory)
+        path: Option<std::path::PathBuf>,
+        /// Maximum directory depth to descend below the scan root
+        #[arg(long, default_value_t = engramdb::ops::discover::DEFAULT_MAX_DEPTH)]
+        max_depth: usize,
+        /// Also descend into hidden (dot-prefixed) directories
+        #[arg(long)]
+        hidden: bool,
+        /// Follow directory symlinks while scanning
+        #[arg(long)]
+        follow_symlinks: bool,
+        /// Register every discovered project without prompting (in JSON mode, required unless --dry-run)
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Report what would be registered and exit without changing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Register only — skip the index rebuild and re-embedding
+        #[arg(long)]
+        no_index: bool,
+    },
+    /// Re-key this project's registration to the ID it hashes to today.
+    ///
+    /// Adding a git remote after `engramdb init` changes the project's ID, so
+    /// the registry keeps pointing at the old one: memories vanish from
+    /// queries, group subscriptions detach, and personal memories become
+    /// invisible. This migrates the registry entry (preserving subscriptions
+    /// and worktree links), carries the personal memories across, and rebuilds
+    /// the index.
+    Repair {
+        /// Skip confirmation prompt
+        #[arg(long, short = 'f')]
+        force: bool,
+        /// Re-key only — skip the index rebuild and re-embedding
+        #[arg(long)]
+        no_index: bool,
+    },
+    /// Remove a project from the registry and reclaim its data directory.
+    ///
+    /// The data directory is kept WHOLE — index included — whenever it still
+    /// holds personal memories, archived transcripts or conversation
+    /// summaries, unless `--purge` is passed: a project ID
+    /// derived from a git remote is shared by every clone of that remote on
+    /// this machine, and the registry records only one of them, so deleting
+    /// one registration can destroy another checkout's only copy.
     ///
     /// Refuses by default when the project has sub-projects (children).
     /// Re-run with `--cascade` to also delete descendants, or unlink the
@@ -385,12 +437,18 @@ pub enum ProjectsCommand {
     Delete {
         /// Project ID to delete
         project_id: String,
-        /// Skip confirmation prompt
+        /// Skip confirmation prompt (required in JSON mode)
         #[arg(long, short = 'f')]
         force: bool,
         /// Also delete all descendants (children and their children).
         #[arg(long)]
         cascade: bool,
+        /// Also delete personal memories, archived transcripts and curated
+        /// conversation summaries — none of which have another copy. Without
+        /// this they are kept: a remote-derived project ID is shared by every
+        /// clone of that remote, and the registry cannot see the others.
+        #[arg(long)]
+        purge: bool,
     },
     /// Show aggregate statistics across all projects
     Stats,
@@ -1046,7 +1104,8 @@ pub enum Command {
         #[arg(long)]
         global: bool,
 
-        /// Offer to fix detected issues (reindex, download model, prune registry, init).
+        /// Offer to fix detected issues (reindex, download model, prune registry, repair a
+        /// drifted project ID, init).
         /// Prompts on a terminal; in non-interactive contexts pair with --yes.
         #[arg(long)]
         fix: bool,
@@ -2412,11 +2471,13 @@ mod tests {
                         project_id,
                         force,
                         cascade,
+                        purge,
                     }),
             } => {
                 assert_eq!(project_id, "some-id");
                 assert!(force);
                 assert!(!cascade);
+                assert!(!purge, "personal memories are kept unless asked for");
             }
             _ => panic!("Expected Projects Delete command"),
         }

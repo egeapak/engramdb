@@ -74,9 +74,11 @@ help_cases! {
     help_daemon_stop => ["daemon", "stop", "--help"],
     help_daemon_restart => ["daemon", "restart", "--help"],
 
-    // ---- projects (7) ---------------------------------------------------
+    // ---- projects (9) ---------------------------------------------------
     help_projects_info => ["projects", "info", "--help"],
     help_projects_list => ["projects", "list", "--help"],
+    help_projects_discover => ["projects", "discover", "--help"],
+    help_projects_repair => ["projects", "repair", "--help"],
     help_projects_delete => ["projects", "delete", "--help"],
     help_projects_stats => ["projects", "stats", "--help"],
     help_projects_prune => ["projects", "prune", "--help"],

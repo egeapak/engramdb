@@ -3,10 +3,10 @@ source: crates/engram-cli/tests/cli/snapshot/env.rs
 expression: "f.run(&[\"doctor\", \"--fix\", \"--yes\"])"
 ---
 $ engramdb --no-maintenance --dir [PROJECT] doctor --fix --yes
-exit: 0
+exit: 1
 --- stdout ---
 {
-  "all_passed": true,
+  "all_passed": false,
   "sections": [
     {
       "checks": [
@@ -154,10 +154,9 @@ exit: 0
               "passed": true
             },
             {
-              "message": "untracked (legacy store); current model onnx/all-MiniLM-L12-v2-u8",
+              "message": "MISMATCH: stored ollama/all-minilm, current onnx/all-MiniLM-L12-v2-u8 — search uses stale/mixed vectors",
               "name": "Embedding model identity",
-              "passed": true,
-              "status": "warn",
+              "passed": false,
               "suggestion": "run `engramdb reindex --embeddings-only` to re-embed and stamp the store"
             },
             {
@@ -223,6 +222,5 @@ exit: 0
     "stale_entries": []
   }
 }
-{"message":"Nothing to reindex."}
-{"message":"Embedding model is ready.","success":true}
 --- stderr ---
+Error: environment check still failing after applying fixes

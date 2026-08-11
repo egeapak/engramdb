@@ -212,11 +212,14 @@ pub async fn auto_maintain_with_engine(
     };
 
     // 1) Clean up orphan/stale projects and repair broken hierarchy links.
-    // `dir` is the resolved main-worktree root, so it is exactly the project
-    // that must survive the sweep — this pass runs on the command path before
-    // the store is even opened, so an unregistered project would otherwise
-    // delete its own personal memories on the next ordinary command.
-    match prune_stale_projects(registry, Some(dir), |_| {}).await {
+    //
+    // This runs on the command path of every ordinary invocation, before the
+    // store is even opened, so it is the widest reach the sweep has: an
+    // unregistered project is one `engramdb query` away from being swept. What
+    // makes that safe is `reclaim_data_dir`, which retains any directory still
+    // holding personal memories, transcript copies or a conversations table —
+    // not anything this caller passes.
+    match prune_stale_projects(registry, |_| {}).await {
         Ok(result) => {
             if result.stale_removed > 0
                 || result.orphans_removed > 0
@@ -451,15 +454,19 @@ mod tests {
         assert!(doctor.healthy, "freshly-created store must be healthy");
     }
 
-    /// The widest reach of the prune-orphan bug: this pass runs on the command
-    /// path of every ordinary CLI/MCP invocation on the main worktree, before
-    /// the store is opened. A project missing from the registry — a lost or
-    /// corrupted `registry.json`, a moved checkout — looked like an orphan to
-    /// the sweep, so the next `engramdb query` deleted its own personal
-    /// memories. `auto_maintain` must hand its `dir` to the sweep as the
-    /// project to spare.
+    /// The widest reach the prune sweep has, and the reason its retention rule
+    /// has to hold without any help from the caller.
+    ///
+    /// This pass runs on the command path of every ordinary CLI/MCP invocation
+    /// on the main worktree, *before* the store is opened, so a project missing
+    /// from the registry — a lost or corrupted `registry.json`, a moved
+    /// checkout — is one `engramdb query` away from being swept. It once was:
+    /// the sweep deleted the data directory, taking the only copy of its
+    /// personal memories. `reclaim_data_dir` now retains any directory still
+    /// holding irreplaceable data, and this pins that the automatic pass gets
+    /// that protection too — nothing here passes the sweep a project to spare.
     #[tokio::test]
-    async fn auto_maintain_does_not_prune_the_project_it_is_maintaining() {
+    async fn auto_maintain_keeps_the_personal_memories_of_an_unregistered_project() {
         let dir = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(dir.path(), &registry).await.unwrap();

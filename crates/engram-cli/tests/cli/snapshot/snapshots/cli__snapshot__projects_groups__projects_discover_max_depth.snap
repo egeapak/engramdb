@@ -1,0 +1,13 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/projects_groups.rs
+expression: "f.run(&[\"--format\", \"plain\", \"projects\", \"discover\", \"--dry-run\",\n\"--max-depth\", \"0\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format plain projects discover --dry-run --max-depth 0
+exit: 0
+--- stdout ---
+Scanned 1 directory(ies) under [PROJECT].
+Found 1 unregistered project(s):
+  [PROJECT]  (3 memories, id [PROJECT_ID])
+  Hint: Some subtrees were cut off by --max-depth; raise it to scan deeper.
+Dry run: nothing was registered.
+--- stderr ---

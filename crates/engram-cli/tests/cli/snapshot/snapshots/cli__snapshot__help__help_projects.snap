@@ -10,14 +10,16 @@ Manage registered EngramDB projects
 Usage: engramdb projects [OPTIONS] [COMMAND]
 
 Commands:
-  info    Show info about the current project (default)
-  list    List all registered projects
-  delete  Remove a project from the registry and delete its global data
-  stats   Show aggregate statistics across all projects
-  prune   Remove stale registry entries and orphan data directories
-  link    Link a project as a sub-project of another project
-  unlink  Remove the parent link on a project, promoting it back to a root project
-  help    Print this message or the help of the given subcommand(s)
+  info      Show info about the current project (default)
+  list      List all registered projects
+  discover  Walk a directory tree for `.engramdb/` projects the registry doesn't know about, then offer to register and index each one
+  repair    Re-key this project's registration to the ID it hashes to today
+  delete    Remove a project from the registry and reclaim its data directory
+  stats     Show aggregate statistics across all projects
+  prune     Remove stale registry entries and orphan data directories
+  link      Link a project as a sub-project of another project
+  unlink    Remove the parent link on a project, promoting it back to a root project
+  help      Print this message or the help of the given subcommand(s)
 
 Options:
       --format <FORMAT>

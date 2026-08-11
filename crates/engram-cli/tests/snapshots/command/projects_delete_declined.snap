@@ -7,4 +7,6 @@ expression: body
 --- stdout ---
 Aborted.
 --- stderr ---
-Warning: This will remove project '[PID]' from the registry and delete its global data.
+Warning: This will remove project '[PID]' from the registry and delete its index (personal memories are kept unless you pass --purge).
+--- error ---
+delete declined; nothing was removed

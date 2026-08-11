@@ -450,7 +450,7 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
             [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
             [CompletionResult]::new('--global', '--global', [CompletionResultType]::ParameterName, 'Check the global (cross-project) memory store instead of the current project')
-            [CompletionResult]::new('--fix', '--fix', [CompletionResultType]::ParameterName, 'Offer to fix detected issues (reindex, download model, prune registry, init). Prompts on a terminal; in non-interactive contexts pair with --yes')
+            [CompletionResult]::new('--fix', '--fix', [CompletionResultType]::ParameterName, 'Offer to fix detected issues (reindex, download model, prune registry, repair a drifted project ID, init). Prompts on a terminal; in non-interactive contexts pair with --yes')
             [CompletionResult]::new('--yes', '--yes', [CompletionResultType]::ParameterName, 'Apply fixes without prompting (use with --fix; required to fix in non-TTY contexts)')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
             [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
@@ -534,7 +534,9 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
             [CompletionResult]::new('info', 'info', [CompletionResultType]::ParameterValue, 'Show info about the current project (default)')
             [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'List all registered projects')
-            [CompletionResult]::new('delete', 'delete', [CompletionResultType]::ParameterValue, 'Remove a project from the registry and delete its global data')
+            [CompletionResult]::new('discover', 'discover', [CompletionResultType]::ParameterValue, 'Walk a directory tree for `.engramdb/` projects the registry doesn''t know about, then offer to register and index each one')
+            [CompletionResult]::new('repair', 'repair', [CompletionResultType]::ParameterValue, 'Re-key this project''s registration to the ID it hashes to today')
+            [CompletionResult]::new('delete', 'delete', [CompletionResultType]::ParameterValue, 'Remove a project from the registry and reclaim its data directory')
             [CompletionResult]::new('stats', 'stats', [CompletionResultType]::ParameterValue, 'Show aggregate statistics across all projects')
             [CompletionResult]::new('prune', 'prune', [CompletionResultType]::ParameterValue, 'Remove stale registry entries and orphan data directories')
             [CompletionResult]::new('link', 'link', [CompletionResultType]::ParameterValue, 'Link a project as a sub-project of another project')
@@ -577,13 +579,58 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
             break
         }
-        'engramdb;projects;delete' {
+        'engramdb;projects;discover' {
+            [CompletionResult]::new('--max-depth', '--max-depth', [CompletionResultType]::ParameterName, 'Maximum directory depth to descend below the scan root')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
+            [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
+            [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
+            [CompletionResult]::new('--hidden', '--hidden', [CompletionResultType]::ParameterName, 'Also descend into hidden (dot-prefixed) directories')
+            [CompletionResult]::new('--follow-symlinks', '--follow-symlinks', [CompletionResultType]::ParameterName, 'Follow directory symlinks while scanning')
+            [CompletionResult]::new('-y', '-y', [CompletionResultType]::ParameterName, 'Register every discovered project without prompting (in JSON mode, required unless --dry-run)')
+            [CompletionResult]::new('--yes', '--yes', [CompletionResultType]::ParameterName, 'Register every discovered project without prompting (in JSON mode, required unless --dry-run)')
+            [CompletionResult]::new('--dry-run', '--dry-run', [CompletionResultType]::ParameterName, 'Report what would be registered and exit without changing anything')
+            [CompletionResult]::new('--no-index', '--no-index', [CompletionResultType]::ParameterName, 'Register only — skip the index rebuild and re-embedding')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
+            [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'No colored output')
+            [CompletionResult]::new('--in-process', '--in-process', [CompletionResultType]::ParameterName, 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1')
+            [CompletionResult]::new('--spawn-daemon', '--spawn-daemon', [CompletionResultType]::ParameterName, 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)')
+            [CompletionResult]::new('--no-maintenance', '--no-maintenance', [CompletionResultType]::ParameterName, 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
+        'engramdb;projects;repair' {
             [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
             [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
             [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
             [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Skip confirmation prompt')
             [CompletionResult]::new('--force', '--force', [CompletionResultType]::ParameterName, 'Skip confirmation prompt')
+            [CompletionResult]::new('--no-index', '--no-index', [CompletionResultType]::ParameterName, 'Re-key only — skip the index rebuild and re-embedding')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
+            [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'No colored output')
+            [CompletionResult]::new('--in-process', '--in-process', [CompletionResultType]::ParameterName, 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1')
+            [CompletionResult]::new('--spawn-daemon', '--spawn-daemon', [CompletionResultType]::ParameterName, 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)')
+            [CompletionResult]::new('--no-maintenance', '--no-maintenance', [CompletionResultType]::ParameterName, 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
+        'engramdb;projects;delete' {
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
+            [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
+            [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
+            [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Skip confirmation prompt (required in JSON mode)')
+            [CompletionResult]::new('--force', '--force', [CompletionResultType]::ParameterName, 'Skip confirmation prompt (required in JSON mode)')
             [CompletionResult]::new('--cascade', '--cascade', [CompletionResultType]::ParameterName, 'Also delete all descendants (children and their children)')
+            [CompletionResult]::new('--purge', '--purge', [CompletionResultType]::ParameterName, 'Also delete personal memories, archived transcripts and curated conversation summaries — none of which have another copy. Without this they are kept: a remote-derived project ID is shared by every clone of that remote, and the registry cannot see the others')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
             [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
             [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
@@ -671,7 +718,9 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
         'engramdb;projects;help' {
             [CompletionResult]::new('info', 'info', [CompletionResultType]::ParameterValue, 'Show info about the current project (default)')
             [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'List all registered projects')
-            [CompletionResult]::new('delete', 'delete', [CompletionResultType]::ParameterValue, 'Remove a project from the registry and delete its global data')
+            [CompletionResult]::new('discover', 'discover', [CompletionResultType]::ParameterValue, 'Walk a directory tree for `.engramdb/` projects the registry doesn''t know about, then offer to register and index each one')
+            [CompletionResult]::new('repair', 'repair', [CompletionResultType]::ParameterValue, 'Re-key this project''s registration to the ID it hashes to today')
+            [CompletionResult]::new('delete', 'delete', [CompletionResultType]::ParameterValue, 'Remove a project from the registry and reclaim its data directory')
             [CompletionResult]::new('stats', 'stats', [CompletionResultType]::ParameterValue, 'Show aggregate statistics across all projects')
             [CompletionResult]::new('prune', 'prune', [CompletionResultType]::ParameterValue, 'Remove stale registry entries and orphan data directories')
             [CompletionResult]::new('link', 'link', [CompletionResultType]::ParameterValue, 'Link a project as a sub-project of another project')
@@ -683,6 +732,12 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             break
         }
         'engramdb;projects;help;list' {
+            break
+        }
+        'engramdb;projects;help;discover' {
+            break
+        }
+        'engramdb;projects;help;repair' {
             break
         }
         'engramdb;projects;help;delete' {
@@ -1783,7 +1838,9 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
         'engramdb;help;projects' {
             [CompletionResult]::new('info', 'info', [CompletionResultType]::ParameterValue, 'Show info about the current project (default)')
             [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'List all registered projects')
-            [CompletionResult]::new('delete', 'delete', [CompletionResultType]::ParameterValue, 'Remove a project from the registry and delete its global data')
+            [CompletionResult]::new('discover', 'discover', [CompletionResultType]::ParameterValue, 'Walk a directory tree for `.engramdb/` projects the registry doesn''t know about, then offer to register and index each one')
+            [CompletionResult]::new('repair', 'repair', [CompletionResultType]::ParameterValue, 'Re-key this project''s registration to the ID it hashes to today')
+            [CompletionResult]::new('delete', 'delete', [CompletionResultType]::ParameterValue, 'Remove a project from the registry and reclaim its data directory')
             [CompletionResult]::new('stats', 'stats', [CompletionResultType]::ParameterValue, 'Show aggregate statistics across all projects')
             [CompletionResult]::new('prune', 'prune', [CompletionResultType]::ParameterValue, 'Remove stale registry entries and orphan data directories')
             [CompletionResult]::new('link', 'link', [CompletionResultType]::ParameterValue, 'Link a project as a sub-project of another project')
@@ -1794,6 +1851,12 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             break
         }
         'engramdb;help;projects;list' {
+            break
+        }
+        'engramdb;help;projects;discover' {
+            break
+        }
+        'engramdb;help;projects;repair' {
             break
         }
         'engramdb;help;projects;delete' {

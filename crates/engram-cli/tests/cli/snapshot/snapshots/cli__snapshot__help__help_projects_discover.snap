@@ -1,31 +1,40 @@
 ---
 source: crates/engram-cli/tests/cli/snapshot/help.rs
-expression: "f.run_bare(& [\"projects\", \"delete\", \"--help\"])"
+expression: "f.run_bare(& [\"projects\", \"discover\", \"--help\"])"
 ---
-$ engramdb projects delete --help
+$ engramdb projects discover --help
 exit: 0
 --- stdout ---
-Remove a project from the registry and reclaim its data directory.
+Walk a directory tree for `.engramdb/` projects the registry doesn't know about, then offer to register and index each one.
 
-The data directory is kept WHOLE — index included — whenever it still holds personal memories, archived transcripts or conversation summaries, unless `--purge` is passed: a project ID derived from a git remote is shared by every clone of that remote on this machine, and the registry records only one of them, so deleting one registration can destroy another checkout's only copy.
+Useful after cloning a repo that carries its memories, restoring from a backup, or losing `registry.json`: those projects exist on disk but are invisible to `projects list` and every cross-project surface until they are registered.
 
-Refuses by default when the project has sub-projects (children). Re-run with `--cascade` to also delete descendants, or unlink the children first with `engramdb projects unlink <id>`.
-
-Usage: engramdb projects delete [OPTIONS] <PROJECT_ID>
+Usage: engramdb projects discover [OPTIONS] [PATH]
 
 Arguments:
-  <PROJECT_ID>
-          Project ID to delete
+  [PATH]
+          Directory to scan (defaults to the current project directory)
 
 Options:
-  -f, --force
-          Skip confirmation prompt (required in JSON mode)
+      --max-depth <MAX_DEPTH>
+          Maximum directory depth to descend below the scan root
+          
+          [default: 6]
 
-      --cascade
-          Also delete all descendants (children and their children)
+      --hidden
+          Also descend into hidden (dot-prefixed) directories
 
-      --purge
-          Also delete personal memories, archived transcripts and curated conversation summaries — none of which have another copy. Without this they are kept: a remote-derived project ID is shared by every clone of that remote, and the registry cannot see the others
+      --follow-symlinks
+          Follow directory symlinks while scanning
+
+  -y, --yes
+          Register every discovered project without prompting (in JSON mode, required unless --dry-run)
+
+      --dry-run
+          Report what would be registered and exit without changing anything
+
+      --no-index
+          Register only — skip the index rebuild and re-embedding
 
       --format <FORMAT>
           Output format

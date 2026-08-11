@@ -102,7 +102,7 @@ const LANCE_QUIET: &[&str] = &[
     "lancedb=warn",
 ];
 
-use app::{Cli, Command, HookCommand, TaskCommand};
+use app::{Cli, Command, HookCommand, ProjectsCommand, TaskCommand};
 use commands::{AddParams, ChallengeParams, QueryParams, UpdateParams};
 use output::OutputFormatter;
 
@@ -731,6 +731,59 @@ pub async fn run(cli: Cli) -> Result<()> {
                 tracing::warn!("engramdb hook failed (continuing without context): {e}");
             }
             Ok(())
+        }
+        // `discover` is the one `projects` subcommand that rebuilds an index
+        // and therefore needs model providers, so it is dispatched here
+        // alongside every other daemon-aware command rather than threading a
+        // backend/cell/policy through `run_projects` for its sake alone.
+        Command::Projects {
+            command:
+                Some(ProjectsCommand::Discover {
+                    path,
+                    max_depth,
+                    hidden,
+                    follow_symlinks,
+                    yes,
+                    dry_run,
+                    no_index,
+                }),
+        } => {
+            commands::run_discover(
+                commands::DiscoverParams {
+                    // No explicit path: scan from the project directory this
+                    // invocation resolved to (cwd, or `--dir`).
+                    root: path.unwrap_or(dir),
+                    max_depth,
+                    hidden,
+                    follow_symlinks,
+                    yes,
+                    dry_run,
+                    no_index,
+                },
+                &registry,
+                &formatter,
+                &prompter,
+                backend,
+                &daemon_cell,
+                daemon_policy,
+            )
+            .await
+        }
+        Command::Projects {
+            command: Some(ProjectsCommand::Repair { force, no_index }),
+        } => {
+            commands::run_repair(
+                &dir,
+                &registry,
+                force,
+                no_index,
+                &formatter,
+                &prompter,
+                backend,
+                &daemon_cell,
+                daemon_policy,
+            )
+            .await
         }
         Command::Projects { command } => {
             commands::run_projects(

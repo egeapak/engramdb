@@ -433,6 +433,66 @@ impl Fixture {
         );
     }
 
+    /// The project's ID, for the commands that take one as an argument.
+    ///
+    /// Computed the way the store computes it rather than scraped out of a
+    /// command's output, so a test that needs an id does not depend on the
+    /// formatting of some other command.
+    pub fn project_id(&self) -> String {
+        engramdb::storage::project_id::compute_project_id(&self.root)
+    }
+
+    /// Initialize a second store at `rel`, below the project root.
+    ///
+    /// For `projects discover`, which is about stores that exist on disk but
+    /// are not in the registry — so it needs a tree with more than one to walk.
+    /// Returns the absolute path.
+    pub fn init_nested(&self, rel: &str) -> PathBuf {
+        let dir = self.root.join(rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        let template = self.root.join("fixture-config.toml");
+        std::fs::write(&template, fixture_config()).unwrap();
+        let out = self
+            .base()
+            .args([
+                "--no-maintenance",
+                "--dir",
+                dir.to_str().unwrap(),
+                "init",
+                "--no-embeddings",
+                "--template",
+                template.to_str().unwrap(),
+            ])
+            .output()
+            .expect("failed to init nested store");
+        assert!(
+            out.status.success(),
+            "nested init failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        dir
+    }
+
+    /// Give the project a git origin, changing the ID it hashes to.
+    ///
+    /// `compute_project_id` prefers the origin URL over the directory path and
+    /// reads `.git/config` as plain text, so this needs no git binary — and
+    /// because the ID then derives from the URL rather than a temp path, it is
+    /// the same on every machine.
+    ///
+    /// Adding a remote *after* `init` is precisely the drift `projects repair`
+    /// exists for: the registry still points at the path-derived ID while the
+    /// project now hashes to a different one.
+    pub fn write_git_remote(&self, url: &str) {
+        let git = self.root.join(".git");
+        std::fs::create_dir_all(&git).unwrap();
+        std::fs::write(
+            git.join("config"),
+            format!("[remote \"origin\"]\n\turl = {url}\n"),
+        )
+        .unwrap();
+    }
+
     /// Add one **personal** memory.
     ///
     /// Personal memories live only under `<data>/projects/<id>/personal/`,

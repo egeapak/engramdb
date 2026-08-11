@@ -60,6 +60,34 @@ engramdb query --mode rank --path src/foo.rs --include-global
 
 The global data directory is `<global_data_dir>/projects/<global_id>/` (no `.engramdb/` in any project tree — global memories live entirely in user-space).
 
+## Project identity drift
+
+A project's ID is derived from its git remote when it has one, and from its
+absolute path when it doesn't. So running `engramdb init` **before**
+`git remote add origin …` — the ordinary order when you create a repo locally
+and push it later — permanently re-keys the project. The registry keeps the old
+ID; every live operation uses the new one, and the symptoms are all silent:
+
+- memories vanish from `list`/`query`, because the live ID's index is empty —
+  the `.md` files in `.engramdb/memories/` are untouched;
+- **personal** memories become invisible: they live only under the old ID's
+  data directory;
+- group subscriptions detach — they are recorded against the old ID;
+- worktree sub-projects still point at the old ID as their parent.
+
+`engramdb doctor` reports it as a `Project identity` warning, and
+`projects discover` reports it as `stale_project_id`. Fix it with:
+
+```bash
+engramdb projects repair
+```
+
+Do **not** run `engramdb init` to "re-register" — that adds a *second* registry
+entry for the same path, with no subscriptions and no parent link. `repair`
+migrates the existing entry instead, so both survive, and *copies* the personal
+memories across. The old data directory is left in place — a sibling clone of
+the same remote may share it, and the registry cannot see one.
+
 ## Registry, prune, link, unlink
 
 The global registry tracks every project you've init'd. It supports parent-child relationships and cleanup.
@@ -69,11 +97,52 @@ engramdb projects list                                 # full registry as a tree
 engramdb projects list --group none                    # flat, one full path per line
 engramdb projects info                                 # current project
 engramdb projects stats                                # aggregate stats
-engramdb projects delete <id> [-f] [--cascade]         # remove from registry + delete data
+engramdb projects delete <id> [-f] [--cascade] [--purge] # deregister; --purge also deletes personal memories + transcripts
 engramdb projects link <child_id> --parent <parent_id> # link as sub-project
 engramdb projects unlink <child_id>                    # promote back to root
-engramdb projects prune [-f]                           # remove stale registry entries + orphan data
+engramdb projects prune [-f]                           # remove stale registry entries + orphan data dirs
+engramdb projects discover [PATH] [-y] [--dry-run]     # adopt projects on disk that aren't registered
+engramdb projects repair [-f]                          # re-key a project whose ID drifted
 ```
+
+`projects discover` is prune's mirror image. Prune removes registry entries with
+no project behind them; discover finds projects with no registry entry in front
+of them. The registry is machine-local and only written when a project is
+`init`'d or opened *here*, so a repo cloned with its `.engramdb/memories/`
+already committed, a restored backup, or a lost `registry.json` all leave real
+projects invisible to `projects list` and every cross-project surface.
+
+```bash
+engramdb projects discover ~/src --dry-run   # what's out there?
+engramdb projects discover ~/src             # ask per project, then register + index
+```
+
+It walks from `PATH` (default: the project directory the invocation resolved
+to — inside a linked worktree that is the main checkout) up to
+`--max-depth` levels (6), skipping dependency and build trees (`node_modules`,
+`target`, `.git`, `vendor`, …) and dot-directories unless `--hidden` is passed.
+Each unregistered project is offered individually — accepting registers it and
+rebuilds its index from the on-disk `.md` files, with a progress bar over the
+batch. `--yes` takes them all, `--no-index` registers without rebuilding (run
+`engramdb reindex` later), and `--dry-run` only reports.
+
+Four things are deliberately never auto-registered. engramdb's own global and
+group stores (they live under the global data dir in the same `.engramdb/`
+layout) are not reported at all. The other three are reported and skipped — as
+a warning in human output, and in `skipped[]` in JSON:
+
+- A directory whose project ID is already claimed by a different checkout that
+  still exists (in the registry, or earlier in the same scan). Two clones of
+  one git remote hash to the same ID and would share a single index.
+- A path registered under an ID it no longer hashes to (see [Project identity
+  drift](#project-identity-drift) above) — adopting would leave two entries for
+  one path.
+- A **linked git worktree** carrying its own `.engramdb/`. Worktrees are
+  sub-projects: memory operations inside one already route to the main
+  checkout, and any stray local store is consolidated into it on the next
+  command. Adopting one as a root project would give the same memory files two
+  owners, double-counting them in `projects list` and `projects stats`. Run
+  `discover` against the main checkout instead.
 
 `projects list` prints a directory tree. Projects are grouped under their
 containing folder and sorted by path; a worktree (or any linked sub-project)
@@ -97,7 +166,19 @@ entry carries `parent_project_id`, regardless of the grouping mode.
 
 `prune` cleans two things:
 - **Stale** entries: registered projects whose path no longer exists on disk.
-- **Orphan** data: data directories under `<global_data_dir>/projects/` that no registry entry points to.
+- **Orphan** data: data directories under `<global_data_dir>/projects/` that
+  nothing answers to. "Nothing answers to" is wider than "no registry row names
+  it": a registered path's *live* ID is protected even when the row records an
+  older one (see [drift](#project-identity-drift)), and so are engramdb's own
+  global and group stores.
+
+Neither ever deletes data that exists nowhere else. A data directory still
+holding `personal/memories/*.md`, `transcripts/*.jsonl.zst` or a
+`lancedb/conversations.lance` table is kept whole, index included, and the kept directories
+are reported as `retained_irreplaceable`. The reason is structural: a project ID derived from a
+git remote is shared by every clone of that remote on this machine, and the
+registry records only one of them, so no check can prove a directory is yours
+alone. `projects delete --purge` is the one way to say you mean it anyway.
 
 ## Git worktrees
 
@@ -148,4 +229,4 @@ engramdb query --dir ~/code/other-project --mode rank --path src/bar.rs
 ## Notes
 
 - **`--global` vs `--include-global`.** `--global` operates against the global store **instead of** the current project. `--include-global` operates against the current project **plus** the global store.
-- **Project IDs are path-stable.** Moving the project directory produces a new ID — run `engramdb projects prune` after to clean up the orphan.
+- **Project IDs are path-stable** when there is no git remote (with one, the remote decides). Moving such a project produces a new ID — run `engramdb projects prune` after to reclaim the old data directory. Prune keeps it if it holds personal memories, archived transcripts or conversation summaries (which is the common case for any project that has ended a Claude Code session); move what you need across, then `projects delete --purge` the old ID.

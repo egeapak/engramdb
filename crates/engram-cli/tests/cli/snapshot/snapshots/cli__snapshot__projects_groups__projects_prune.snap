@@ -6,8 +6,12 @@ $ engramdb --no-maintenance --dir [PROJECT] projects prune --force
 exit: 0
 --- stdout ---
 {
+  "failed_to_reclaim": [],
   "hierarchy_cleared": [],
+  "orphan_ids": [],
   "orphans_removed": 0,
+  "retained_irreplaceable": [],
+  "stale_ids": [],
   "stale_removed": 0
 }
 --- stderr ---

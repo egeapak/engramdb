@@ -1,7 +1,7 @@
 //! Doctor (health check) command.
 
 use crate::app::{DoctorCommand, ProjectsCommand};
-use crate::output::{outln, short_id, OutputFormatter};
+use crate::output::{errln, outln, short_id, OutputFormatter};
 use crate::prompter::Prompter;
 use anyhow::Result;
 use engramdb::ops::{
@@ -123,17 +123,31 @@ async fn run_environment_check(
     let supported_hooks = crate::supported_hook_subcommands();
     let result =
         doctor_environment(&check_dir, store.as_ref(), daemon_check, &supported_hooks).await;
-    formatter.print_environment_doctor(&result);
+    // Under `--fix` in JSON mode the POST-fix report is the one document this
+    // command emits, so the pre-fix one is held back rather than printed and
+    // then contradicted.
+    let json_fix = fix && formatter.is_json();
+    if !json_fix {
+        formatter.print_environment_doctor(&result);
+    }
+
+    // Prompting is allowed only on a terminal, and never in JSON mode (which is
+    // machine-consumed). `--yes` means "apply without asking".
+    let interactive = !yes && std::io::stdout().is_terminal() && !formatter.is_json();
 
     // §10 epistemic checks (invalidated-path / stale-observation /
     // derived-from). Report-only unless --fix, which flips affected memories
     // to NeedsReview with a doctor-tagged challenge that `verify` clears.
+    //
+    // The first pass is ALWAYS report-only: this is the one part of `--fix`
+    // that mutates memories, and it used to do so before the user was shown a
+    // single finding, let alone asked. Consent gates the second pass.
     if let Some(store) = store.as_ref() {
         let config = engramdb::storage::config::load_config_or_default(
             &store.project_dir.join(".engramdb").join("config.toml"),
         )
         .await;
-        match engramdb::ops::doctor_epistemic(store, &config, fix).await {
+        match engramdb::ops::doctor_epistemic(store, &config, false).await {
             Ok(epistemic) if !epistemic.findings.is_empty() => {
                 formatter.print_warning(&format!(
                     "{} epistemic finding(s) across {} checked memories:",
@@ -141,25 +155,54 @@ async fn run_environment_check(
                     epistemic.checked
                 ));
                 for f in &epistemic.findings {
-                    let action = if f.fixed {
-                        " -> flagged needs_review"
-                    } else if fix {
-                        " (already flagged)"
+                    // Report pass: everything listed here is still unflagged
+                    // (`doctor_epistemic` omits already-flagged memories).
+                    let line = format!("  {} {} — {}", short_id(&f.id), f.summary, f.detail);
+                    if formatter.is_json() {
+                        errln!(formatter, "{line}");
                     } else {
-                        ""
-                    };
-                    outln!(
-                        formatter,
-                        "  {} {} — {}{}",
-                        short_id(&f.id),
-                        f.summary,
-                        f.detail,
-                        action
-                    );
+                        outln!(formatter, "{line}");
+                    }
                 }
-                if !fix {
-                    formatter.print_message(
+                let flag = fix
+                    && (yes
+                        || (interactive
+                            && prompter.confirm(
+                                &format!(
+                                    "Flag {} memory(ies) as needs_review?",
+                                    epistemic.findings.len()
+                                ),
+                                true,
+                            )?));
+                if flag {
+                    match engramdb::ops::doctor_epistemic(store, &config, true).await {
+                        Ok(fixed) => note(
+                            formatter,
+                            &format!(
+                                "Flagged {} memory(ies) for review.",
+                                fixed.findings.iter().filter(|f| f.fixed).count()
+                            ),
+                        ),
+                        Err(e) => formatter.print_warning(&format!("epistemic fixes skipped: {e}")),
+                    }
+                } else if !fix {
+                    note(
+                        formatter,
                         "Run `engramdb doctor --fix` to flag these for review, or `engramdb verify <id>` after re-confirming one.",
+                    );
+                } else if interactive {
+                    // They ran `--fix` and declined at the prompt.
+                    note(
+                        formatter,
+                        "Left unflagged. `engramdb verify <id>` clears one you re-confirm.",
+                    );
+                } else {
+                    // They ran `--fix`, but this is not a terminal — the same
+                    // rule the fix list follows. Telling them to run `--fix`
+                    // would send them round the loop they are already in.
+                    note(
+                        formatter,
+                        "Re-run with `--fix --yes` to flag these for review (flagging memories needs confirmation, and this isn't a terminal).",
                     );
                 }
                 print_enrichment_gaps(&epistemic.gaps, formatter);
@@ -170,12 +213,59 @@ async fn run_environment_check(
     }
 
     // `--fix` takes over from here: it offers to repair the fixable issues
-    // instead of just exiting non-zero, so we don't `bail!` in that mode.
+    // instead of just exiting non-zero.
     if fix {
-        return apply_fixes(
+        let outcome = apply_fixes(
             &check_dir, global, &result, yes, backend, prompter, formatter,
         )
-        .await;
+        .await?;
+        if outcome.applied == 0 {
+            // Nothing was applied. Emit the report that was held back, then
+            // pick the exit code from *why* nothing happened.
+            if json_fix {
+                formatter.print_environment_doctor(&result);
+            }
+            if let Some(e) = outcome.error {
+                return Err(e);
+            }
+            // The non-interactive listing path is documented to exit 0
+            // (`doctor_fix_non_tty_without_yes_lists_fixes_and_exits_zero`).
+            if outcome.listed_only {
+                return Ok(());
+            }
+            // Otherwise nothing was fixable, or the user declined every fix —
+            // neither of which repairs anything, so the ordinary exit rule
+            // applies. Returning `Ok` here made `doctor --fix` a way to turn a
+            // failing check into a zero exit status.
+            if !result.all_passed {
+                anyhow::bail!("environment check found failing checks");
+            }
+            return Ok(());
+        }
+        // Re-run and report the POST-fix state. Without this, `doctor --fix
+        // --yes` in CI exited 0 on a store the fixes did not actually repair,
+        // and never told the user whether they worked.
+        let store = if global {
+            MemoryStore::open_global().await.ok()
+        } else {
+            MemoryStore::open(&check_dir).await.ok()
+        };
+        let daemon_check = engramdb::daemon::check_daemon(&check_dir).await;
+        let after =
+            doctor_environment(&check_dir, store.as_ref(), daemon_check, &supported_hooks).await;
+        if !json_fix {
+            formatter.print_message("\nRe-checked after applying fixes:");
+        }
+        formatter.print_environment_doctor(&after);
+        // The failing fix is reported only after its document is out, so a
+        // scripted caller never gets a non-zero exit with nothing on stdout.
+        if let Some(e) = outcome.error {
+            return Err(e);
+        }
+        if !after.all_passed {
+            anyhow::bail!("environment check still failing after applying fixes");
+        }
+        return Ok(());
     }
 
     // `all_passed` only reflects hard failures (`passed == false`): checks
@@ -187,6 +277,19 @@ async fn run_environment_check(
     Ok(())
 }
 
+/// Human commentary that must not land on stdout in JSON mode.
+///
+/// `doctor` emits exactly one JSON document; every incidental `print_message`
+/// here would be a second one. Warnings already go to stderr, so this reuses
+/// that channel rather than inventing another.
+fn note(formatter: &OutputFormatter, message: &str) {
+    if formatter.is_json() {
+        errln!(formatter, "{message}");
+    } else {
+        formatter.print_message(message);
+    }
+}
+
 /// Report-only enrichment nudge: memories whose (often type-derived, i.e.
 /// legacy pre-epistemic) class carries no actionable metadata yet. Not a
 /// defect — enrichment happens gradually as memories are touched.
@@ -194,12 +297,15 @@ fn print_enrichment_gaps(gaps: &engramdb::ops::EnrichmentGaps, formatter: &Outpu
     if !gaps.any() {
         return;
     }
-    formatter.print_message(&format!(
+    note(
+        formatter,
+        &format!(
         "Epistemic metadata gaps ({} live memories): {} decision(s) without a premise, \
          {} observation(s) without invalidation watch paths. Legacy memories start this way — \
          enrich as you touch them (`update --premise` / `--invalidated-by`, `verify` what you re-confirm).",
-        gaps.total_live, gaps.decisions_without_premise, gaps.observations_without_watch
-    ));
+            gaps.total_live, gaps.decisions_without_premise, gaps.observations_without_watch
+        ),
+    );
 }
 
 /// Load each downloaded/enabled model and run a tiny inference to confirm it
@@ -248,6 +354,8 @@ enum FixAction {
     DownloadEmbedding,
     /// Prune stale/orphaned projects from the registry.
     PruneProjects,
+    /// Re-key a project whose ID drifted out from under its registry entry.
+    RepairProjectId,
 }
 
 impl FixAction {
@@ -264,6 +372,9 @@ impl FixAction {
             FixAction::DownloadEmbedding => "Download the embedding model now?",
             FixAction::PruneProjects => {
                 "Prune stale/orphaned projects from the registry (engramdb projects prune)?"
+            }
+            FixAction::RepairProjectId => {
+                "Re-key this project's registration to its current ID (engramdb projects repair)?"
             }
         }
     }
@@ -319,6 +430,23 @@ impl FixAction {
                     anyhow::bail!("could not load the embedding model after download attempt")
                 }
             }
+            FixAction::RepairProjectId => {
+                let registry = engramdb::storage::FileRegistry::global()?;
+                // `force: true` — the doctor already reported the drift and the
+                // user just confirmed this fix, so don't double-prompt.
+                crate::commands::run_repair(
+                    dir,
+                    &registry,
+                    true,
+                    false,
+                    formatter,
+                    &crate::prompter::InquirePrompter,
+                    backend,
+                    &std::sync::Arc::new(engramdb::daemon::DaemonCell::new()),
+                    engramdb::daemon::DaemonPolicy::InProcess,
+                )
+                .await
+            }
             FixAction::PruneProjects => {
                 let registry = engramdb::storage::FileRegistry::global()?;
                 // `force: true` — the doctor already reported the findings and
@@ -361,6 +489,7 @@ fn collect_fix_actions(result: &EnvironmentDoctorResult) -> Vec<FixAction> {
             }),
             "Embedding model cache" if warn => push(FixAction::DownloadEmbedding),
             "Registered projects" if warn => push(FixAction::PruneProjects),
+            "Project identity" if warn => push(FixAction::RepairProjectId),
             _ => {}
         }
     }
@@ -378,6 +507,21 @@ fn collect_fix_actions(result: &EnvironmentDoctorResult) -> Vec<FixAction> {
     actions
 }
 
+/// What [`apply_fixes`] did, in enough detail for the caller to pick an exit
+/// code and decide whether its held-back report still needs printing.
+struct FixOutcome {
+    /// Fixes actually applied.
+    applied: usize,
+    /// The non-interactive path that lists the available fixes and changes
+    /// nothing. Distinct from "nothing was fixable": it is documented to exit
+    /// zero, and conflating the two let a failing check pass silently.
+    listed_only: bool,
+    /// The first fix that failed. Applying stops there, but the error is
+    /// carried back rather than propagated so the caller can emit its document
+    /// first.
+    error: Option<anyhow::Error>,
+}
+
 /// Offer (and apply) fixes for the issues found in `result`.
 ///
 /// Interactivity follows the same rule as `add`: prompt only when stdout is a
@@ -393,11 +537,15 @@ async fn apply_fixes(
     backend: Option<engramdb::types::EmbeddingBackend>,
     prompter: &dyn Prompter,
     formatter: &OutputFormatter,
-) -> Result<()> {
+) -> Result<FixOutcome> {
     let actions = collect_fix_actions(result);
     if actions.is_empty() {
-        formatter.print_success("Nothing to fix.");
-        return Ok(());
+        note(formatter, "Nothing to fix.");
+        return Ok(FixOutcome {
+            applied: 0,
+            listed_only: false,
+            error: None,
+        });
     }
 
     let interactive = !yes && std::io::stdout().is_terminal() && !formatter.is_json();
@@ -407,11 +555,28 @@ async fn apply_fixes(
             actions.len()
         ));
         for action in &actions {
-            formatter.print_message(&format!("  - {}", action.prompt()));
+            note(formatter, &format!("  - {}", action.prompt()));
         }
-        return Ok(());
+        return Ok(FixOutcome {
+            applied: 0,
+            listed_only: true,
+            error: None,
+        });
     }
 
+    // In JSON mode this command owns stdout: each delegate would otherwise
+    // print its own document, breaking the one-document rule. Their `Result`
+    // still comes back, so nothing is swallowed silently.
+    let silent;
+    let delegate = if formatter.is_json() {
+        silent = OutputFormatter::silent();
+        &silent
+    } else {
+        formatter
+    };
+
+    let mut applied = 0;
+    let mut error = None;
     for action in actions {
         let apply = if yes {
             true
@@ -419,10 +584,21 @@ async fn apply_fixes(
             prompter.confirm(action.prompt(), true)?
         };
         if apply {
-            action.apply(dir, global, backend, formatter).await?;
+            // Stop at the first failure, but keep the error rather than
+            // returning it: propagating here skipped the post-fix report, so a
+            // JSON caller got a non-zero exit and an empty stdout.
+            if let Err(e) = action.apply(dir, global, backend, delegate).await {
+                error = Some(e);
+                break;
+            }
+            applied += 1;
         }
     }
-    Ok(())
+    Ok(FixOutcome {
+        applied,
+        listed_only: false,
+        error,
+    })
 }
 
 #[cfg(test)]
@@ -786,6 +962,22 @@ mod tests {
             vec![FixAction::Reindex {
                 embeddings_only: true
             }]
+        );
+    }
+
+    /// The check name is a load-bearing, compiler-unchecked contract between
+    /// `src/ops/doctor.rs` and this mapping — renaming it there silently drops
+    /// the fix.
+    #[test]
+    fn collect_fix_actions_maps_project_identity_drift() {
+        let result = result_with(vec![check(
+            "Project identity",
+            true,
+            Some(CheckStatus::Warn),
+        )]);
+        assert_eq!(
+            collect_fix_actions(&result),
+            vec![FixAction::RepairProjectId]
         );
     }
 

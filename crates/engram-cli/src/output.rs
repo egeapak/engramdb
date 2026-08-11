@@ -202,6 +202,10 @@ pub struct OutputFormatter {
     use_color: bool,
     out: Sink,
     err: Sink,
+    /// Suppress everything. Used when one command delegates to another and
+    /// must own the whole of stdout — `doctor --fix` in JSON mode, where the
+    /// delegates' own documents would break the one-document rule.
+    silent: bool,
 }
 
 impl OutputFormatter {
@@ -233,7 +237,42 @@ impl OutputFormatter {
             use_color,
             out: Sink::Stdout,
             err: Sink::Stderr,
+            silent: false,
         }
+    }
+
+    /// A formatter that suppresses stdout, for a command invoked *by* another
+    /// command that owns the output — not a user-facing mode.
+    ///
+    /// The format is deliberately **not** `Json`: delegates branch on
+    /// `is_json()` to emit their own documents, and presenting as a human
+    /// format routes them through the (suppressed) `print_*` methods instead.
+    ///
+    /// Errors and warnings are still printed — they go to stderr, so they
+    /// never threatened the caller's one-document rule, and several delegates
+    /// report failure *only* by printing (`run_init` reports an unavailable
+    /// model and then returns `Ok`).
+    pub fn silent() -> Self {
+        Self {
+            format: OutputFormat::Plain,
+            use_color: false,
+            out: Sink::Stdout,
+            err: Sink::Stderr,
+            silent: true,
+        }
+    }
+
+    /// Whether this formatter belongs to a delegate whose caller owns stdout.
+    pub fn is_silent(&self) -> bool {
+        self.silent
+    }
+
+    /// Whether to emit free-form human text on stdout at all.
+    ///
+    /// False in JSON mode (it would corrupt the document) and false for a
+    /// delegate (the text would land on the caller's document).
+    pub fn wants_human_stdout(&self) -> bool {
+        !self.is_json() && !self.silent
     }
 
     /// A formatter that buffers instead of printing, plus the handle to read
@@ -269,6 +308,7 @@ impl OutputFormatter {
             use_color,
             out: Sink::Capture(Arc::clone(&out)),
             err: Sink::Capture(Arc::clone(&err)),
+            silent: false,
         };
         (formatter, Capture { out, err })
     }
@@ -287,12 +327,27 @@ impl OutputFormatter {
     ///
     /// Exists so the macros can expand outside this module without `out` and
     /// `err` becoming crate-visible fields.
+    /// A [`silent`](Self::silent) formatter drops the write. Enforcing it here
+    /// rather than only at each `print_*` entry point is what makes the
+    /// guarantee total: every byte of stdout in this crate goes through this
+    /// method (the `formatter-output` CI job exists to keep that true), so a
+    /// renderer added later is covered without remembering to guard it. The
+    /// per-method early returns upstream remain valid and simply short-circuit
+    /// sooner.
     pub(crate) fn write_line(&self, args: std::fmt::Arguments<'_>) {
+        if self.silent {
+            return;
+        }
         self.out.line(args);
     }
 
     /// Write to the stdout sink with no trailing newline. See [`outraw!`].
+    ///
+    /// Suppressed for a silent formatter, as [`Self::write_line`] is.
     pub(crate) fn write_raw(&self, args: std::fmt::Arguments<'_>) {
+        if self.silent {
+            return;
+        }
         self.out.raw(args);
     }
 
@@ -318,6 +373,9 @@ impl OutputFormatter {
 
     /// Print a generic message.
     pub fn print_message(&self, message: &str) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 outln!(self, "{}", serde_json::json!({ "message": message }));
@@ -330,6 +388,9 @@ impl OutputFormatter {
 
     /// Print a success message (with green color in pretty mode).
     pub fn print_success(&self, message: &str) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 outln!(
@@ -382,6 +443,9 @@ impl OutputFormatter {
 
     /// Print a hint/suggestion message (with blue color in pretty mode).
     pub fn print_hint(&self, message: &str) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Pretty => {
                 if self.styled() {
@@ -404,6 +468,9 @@ impl OutputFormatter {
 
     /// Print full environment doctor results organized by section.
     pub fn print_environment_doctor(&self, result: &engramdb::ops::EnvironmentDoctorResult) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 outln!(self, "{}", serde_json::to_string_pretty(result).unwrap());
@@ -629,6 +696,9 @@ impl OutputFormatter {
 
     /// Print a single memory in the configured format.
     pub fn print_memory(&self, memory: &Memory) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 outln!(self, "{}", serde_json::to_string_pretty(memory).unwrap());
@@ -644,6 +714,9 @@ impl OutputFormatter {
 
     /// Print a memory with full details without truncation.
     pub fn print_memory_full(&self, memory: &Memory) {
+        if self.silent {
+            return;
+        }
         // For now, this is identical to print_memory
         // In the future, print_memory might add truncation logic
         self.print_memory(memory);
@@ -756,6 +829,9 @@ impl OutputFormatter {
 
     /// Print search results in the configured format.
     pub fn print_search_results(&self, results: &[ScoredMemory]) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 let json_output = results
@@ -842,6 +918,9 @@ impl OutputFormatter {
 
     /// Print retrieval results in the configured format.
     pub fn print_retrieval_result(&self, result: &RetrievalResult, show_scores: bool) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 let json_output = serde_json::json!({
@@ -995,6 +1074,9 @@ impl OutputFormatter {
 
     /// Print a list of memory index entries in the configured format.
     pub fn print_memory_list(&self, entries: &[IndexFilterable], verbose: bool) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 outln!(self, "{}", serde_json::to_string_pretty(entries).unwrap());
@@ -1100,6 +1182,9 @@ impl OutputFormatter {
 
     /// Print statistics in the configured format.
     pub fn print_stats(&self, stats: &Stats) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 outln!(self, "{}", serde_json::to_string_pretty(stats).unwrap());
@@ -1158,6 +1243,9 @@ impl OutputFormatter {
 
     /// Print project info in the configured format.
     pub fn print_project_info(&self, info: &ProjectInfoOutput) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 outln!(self, "{}", serde_json::to_string_pretty(info).unwrap());
@@ -1225,6 +1313,9 @@ impl OutputFormatter {
     /// of both — so the only difference is styling, which
     /// [`OutputFormatter::styled`] withholds from Plain.
     pub fn print_project_list(&self, entries: &[ProjectListOutput], grouping: ProjectListGrouping) {
+        if self.silent {
+            return;
+        }
         if let OutputFormat::Json = self.format {
             outln!(self, "{}", serde_json::to_string_pretty(entries).unwrap());
             return;
@@ -1377,6 +1468,9 @@ impl OutputFormatter {
 
     /// Print aggregate statistics across all projects.
     pub fn print_aggregate_stats(&self, stats: &AggregateStatsOutput) {
+        if self.silent {
+            return;
+        }
         match self.format {
             OutputFormat::Json => {
                 outln!(self, "{}", serde_json::to_string_pretty(stats).unwrap());

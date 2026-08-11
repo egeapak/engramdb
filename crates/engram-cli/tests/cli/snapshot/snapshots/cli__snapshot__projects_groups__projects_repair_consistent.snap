@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/projects_groups.rs
+expression: "f.run(&[\"--format\", \"plain\", \"projects\", \"repair\", \"--force\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format plain projects repair --force
+exit: 0
+--- stdout ---
+Registration is consistent — nothing to repair.
+--- stderr ---

@@ -131,7 +131,29 @@ It should. Worktrees auto-route to the main project. If they're not, run:
 If a worktree was init'd before this routing was added, you may have a stray `.engramdb/` in the worktree. EngramDB will auto-consolidate it on the next memory op; otherwise run any memory command in the worktree to trigger consolidation.
 
 **`projects prune` lists projects I want to keep.**
-Those projects' on-disk paths no longer exist. Either restore the path, or accept the prune. The data isn't lost — `prune` deletes only the registry entry; the global data dir is preserved unless you confirm.
+Those projects' on-disk paths no longer exist. Either restore the path, or accept the prune. Memories aren't lost: prune keeps any data directory still holding personal memories, archived transcripts or conversation summaries, whole — those it lists as `retained_irreplaceable` — and reclaims only the ones that hold nothing but rebuildable data. Shared memories live in the project tree and are never touched.
+
+If `doctor` keeps reporting the same reclaimable orphan after a prune, check
+prune's `failed_to_reclaim` — a directory it could not unlink (owned by another
+user after a `sudo` run, a busy or read-only mount, an immutable file) stays on
+disk and stays counted. The listed error is the thing to fix; prune exits 0
+either way, since the rest of the sweep succeeded.
+
+**All my memories vanished after I added a git remote.**
+The project's ID is derived from the git remote when it has one, so adding a
+remote after `engramdb init` re-keys the project: the registry still points at
+the old ID, and the new one's index is empty. Nothing is lost — the `.md` files
+are untouched. Run `engramdb projects repair` (not `engramdb init`, which adds
+a second registry entry for the same path). `engramdb doctor` flags the same
+condition as a `Project identity` warning. See
+[projects-and-worktrees.md](./projects-and-worktrees.md#project-identity-drift).
+
+**`projects list` is missing a project I know has memories.**
+The registry is machine-local: it only records projects `init`'d or opened on
+this machine. A repo cloned with its `.engramdb/memories/` already committed, a
+restored backup, or a lost `registry.json` leaves the project on disk but
+unregistered. Run `engramdb projects discover <dir> --dry-run` to find them, then
+without `--dry-run` to register and reindex the ones you want.
 
 **Want this worktree to be its own project, not a sub-project of main.**
 After init: `engramdb projects unlink <worktree_id>`. It becomes a root project.

@@ -3,7 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 EngramDB is a project-scoped persistent memory store for coding agents.
-Tech stack: Rust (edition 2021), LanceDB (vector index), ONNX Runtime via `fastembed` / raw `ort` (all-MiniLM-L6-v2 embeddings, BGE reranker, NLI), MCP protocol via `rmcp`, Tokio.
+Tech stack: Rust (edition 2021), LanceDB (vector index), ONNX Runtime via `fastembed` / raw `ort` (all-MiniLM embeddings, cross-encoder reranker, NLI), MCP protocol via `rmcp`, Tokio.
 
 The repo ships **one binary** (`engramdb`, `crates/engram-cli/src/main.rs`) that does everything — CLI, `serve` for the MCP server, `daemon` for the shared embedding host, and `hook` for Claude Code hook handlers. The same binary is what the Claude Code plugin in `.claude-plugin/` wires up.
 
@@ -76,7 +76,7 @@ Feature flags from `Cargo.toml`:
 
   **Build-time linking is deliberately not offered.** A `pkg-config` strategy (`ort/pkg-config`) would record `libonnxruntime` as a load-time dependency, and the dynamic loader resolves those before `main()` runs — so a missing runtime would stop the binary from starting at all, with no `doctor` output and no chance for the pre-flight probe to run. A CI step asserts the default binary has no ONNX entry in `ldd` and starts with no runtime installed; don't reintroduce one.
 
-  Two consequences worth internalizing. **(1)** `--all-features` necessarily turns `bundled-onnxruntime` back on, so `cargo clippy/nextest --all-features` still links a static ORT and does *not* exercise the default path — the `test-load-dynamic` CI job is what covers that. **(2)** Under `load-dynamic`, `ort`'s own loader **panics** when the dylib is missing, and the release profile is `panic = "abort"`, so it cannot be caught. `engram_onnx::runtime` therefore probes and validates the library with `libloading` *before* any `ort` call, and every model loader in `engram-models` calls `crate::ensure_onnx_runtime()` first. **Any new ONNX-backed loader must do the same**, or a user without the runtime gets a hard abort instead of the documented fallback to keyword search.
+  Two consequences worth internalizing. **(1)** `--all-features` necessarily turns `bundled-onnxruntime` back on, so `cargo clippy/nextest --all-features` links a static ORT — but `load-dynamic` is *also* on (it is in `default`) and takes precedence at run time, so those runs still `dlopen` a **shared** library and still need `ORT_DYLIB_PATH`. Linking static does not exempt you; see the sandbox section. The `test-load-dynamic` CI job is what covers the no-`bundled` build. **(2)** Under `load-dynamic`, `ort`'s own loader **panics** when the dylib is missing, and the release profile is `panic = "abort"`, so it cannot be caught. `engram_onnx::runtime` therefore probes and validates the library with `libloading` *before* any `ort` call, and every model loader in `engram-models` calls `crate::ensure_onnx_runtime()` first. **Any new ONNX-backed loader must do the same**, or a user without the runtime gets a hard abort instead of the documented fallback to keyword search.
 
 - `ollama` (default) — Ollama embedding backend via `reqwest`. Disable for pure offline ONNX.
 - `coreml` (macOS only) — Apple Neural Engine EP for `ort` (implies `onnxruntime`).
@@ -191,6 +191,8 @@ The web sandbox's egress gateway uses a custom CA that rustls/webpki-based downl
      tar -xzf onnxruntime-linux-x64-1.24.2.tgz
      export ORT_DYLIB_PATH=/tmp/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so
      ```
+
+     A full green sandbox run therefore needs BOTH: `ORT_STRATEGY=system ORT_LIB_LOCATION=/tmp/ort-lib` (build) and `ORT_DYLIB_PATH=…/libonnxruntime.so` (run).
 
    Fetch + decode the prebuilt static lib via curl, then build with `ORT_STRATEGY=system ORT_LIB_LOCATION=/tmp/ort-lib`. The version must match what the locked `ort` crate expects (`2.0.0-rc.12` → ONNX Runtime 1.24.x / API 24); a mismatch surfaces at *runtime* as "The requested API version [N] is not available". If you swap the lib after a build, also `rm -rf target/debug/build/ort-sys-* target/debug/.fingerprint/ort-sys-* target/debug/deps/*ort_sys*` — the objects are bundled into the ort-sys rlib at its build time, so relinking alone keeps the old runtime:
    ```

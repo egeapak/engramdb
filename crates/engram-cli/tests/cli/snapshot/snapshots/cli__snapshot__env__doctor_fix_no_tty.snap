@@ -175,8 +175,8 @@ exit: 0
   ],
   "store_check": null
 }
-{"message":"  - Prune stale/orphaned projects from the registry (engramdb projects prune)?"}
-{"message":"  - Re-embed memories with the current model (engramdb reindex --embeddings-only)?"}
-{"message":"  - Download the embedding model now?"}
 --- stderr ---
 {"warning":"3 fixable issue(s) found. Re-run with `--fix --yes` to apply them:"}
+  - Prune stale/orphaned projects from the registry (engramdb projects prune)?
+  - Re-embed memories with the current model (engramdb reindex --embeddings-only)?
+  - Download the embedding model now?

@@ -25,26 +25,30 @@ use tokio::fs as async_fs;
 
 /// Migrate every memory file in `src_dir` into `main_store`, carrying its
 /// embedding vectors over from `wt_store` so search keeps working without
-/// re-embedding. Returns the number of memories migrated.
+/// re-embedding. Returns `(migrated, left_behind)`.
 ///
-/// Files that can't be read or parsed are skipped (a single corrupt file
-/// must not abort consolidation). Re-runs are made safe two ways:
+/// Files that can't be read or parsed are skipped (a single corrupt file must
+/// not abort consolidation) and counted in `left_behind`. The caller must not
+/// delete `src_dir` while that count is non-zero: skipping a file only protects
+/// it if something else does not then remove the directory it sits in.
+///
+/// Re-runs are made safe two ways:
 /// - **newest wins**: when main already holds the same ID with an
 ///   `updated_at` at least as new, the stray copy is dropped instead of
 ///   migrated — `create` is a full overwrite, so migrating unconditionally
 ///   would resurrect a stale snapshot (file, index row, AND vectors) over
 ///   changes made in the main store after a partial run (a crash or a failed
 ///   `remove_dir_all` leaves the stray store behind while main keeps moving);
-/// - **per-file deletion**: each source file is removed right after its
-///   successful migration, so a crash mid-loop leaves only not-yet-migrated
-///   files for the next run instead of the whole set.
+/// - **delete-after-durable**: source files are removed only once the batched
+///   `create` has committed, so a crash before that point leaves every source
+///   file in place for the next run instead of losing the ones already handled.
 async fn migrate_dir(
     src_dir: &Path,
     wt_store: &MemoryStore,
     main_store: &MemoryStore,
-) -> Result<usize> {
+) -> Result<(usize, usize)> {
     if !src_dir.exists() {
-        return Ok(0);
+        return Ok((0, 0));
     }
 
     // Phase 1 — read and parse every stray file up front.
@@ -55,8 +59,11 @@ async fn migrate_dir(
     // — the previous shape interleaved them one memory at a time, so the
     // `get` against main was a full directory scan per stray file, i.e.
     // O(stray * main_size). Unreadable or unparseable files are skipped here
-    // exactly as before: a single corrupt file must not abort consolidation.
+    // exactly as before: a single corrupt file must not abort consolidation —
+    // and counted, so the caller knows not to remove the directory holding
+    // them.
     let mut pending: Vec<(PathBuf, engram_types::Memory)> = Vec::new();
+    let mut left_behind = 0;
     let mut entries = async_fs::read_dir(src_dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
@@ -64,15 +71,17 @@ async fn migrate_dir(
             continue;
         }
         let Ok(content) = async_fs::read_to_string(&path).await else {
+            left_behind += 1;
             continue;
         };
         let Ok(memory) = memory_file::parse_memory_file(&content) else {
+            left_behind += 1;
             continue;
         };
         pending.push((path, memory));
     }
     if pending.is_empty() {
-        return Ok(0);
+        return Ok((0, left_behind));
     }
 
     // Phase 2 — one batched read of main's existing copies, replacing the
@@ -110,7 +119,7 @@ async fn migrate_dir(
         }
     }
     if to_migrate.is_empty() {
-        return Ok(0);
+        return Ok((0, left_behind));
     }
 
     // Phase 3 — pull all the vectors out of the worktree store in one scan
@@ -170,7 +179,7 @@ async fn migrate_dir(
         main_store.upsert_chunks_batch(relocate).await?;
     }
 
-    Ok(migrated)
+    Ok((migrated, left_behind))
 }
 
 /// Consolidate a linked worktree's stray memory store into the main project.
@@ -194,6 +203,10 @@ pub async fn consolidate_worktree_into_main(worktree_dir: &Path, main_dir: &Path
 
     let wt_engramdb = paths::project_dir(worktree_dir);
     let mut moved = 0;
+    // Files `migrate_dir` could not read or parse. They are still data, and
+    // they are the ONLY copy — so the directory holding them is not ours to
+    // remove, however tidy that would be.
+    let mut stranded_shared = 0;
 
     // Only migrate when the worktree actually has a stray store AND the main
     // store exists (the caller guarantees the latter before routing to it;
@@ -204,21 +217,75 @@ pub async fn consolidate_worktree_into_main(worktree_dir: &Path, main_dir: &Path
 
         // Shared memories live in the worktree's own .engramdb/; personal
         // ones are keyed by the worktree's project ID in the global data dir.
-        moved += migrate_dir(&paths::memories_dir(worktree_dir), &wt_store, &main_store).await?;
+        let (n, skipped) =
+            migrate_dir(&paths::memories_dir(worktree_dir), &wt_store, &main_store).await?;
+        moved += n;
+        stranded_shared += skipped;
         if let Ok(wt_personal) = paths::personal_memories_dir(&wt_id) {
-            moved += migrate_dir(&wt_personal, &wt_store, &main_store).await?;
+            let (n, _) = migrate_dir(&wt_personal, &wt_store, &main_store).await?;
+            moved += n;
         }
 
-        // Remove the stray worktree store so future ops route to main.
-        async_fs::remove_dir_all(&wt_engramdb).await?;
+        // Fold the worktree's harvest ledger into the main project's before
+        // the directory goes.
+        //
+        // `.engramdb/state/harvest_ledger.jsonl` is the append-only review
+        // record — decision, note and memory ids per session. It is
+        // gitignored and machine-local, so unlike the memory files it has no
+        // copy anywhere, and `migrate_dir` does not look at it: it only walks
+        // `memories/`. A directory used standalone before it became a linked
+        // worktree therefore carried a full review history straight into the
+        // `remove_dir_all` below.
+        //
+        // `adopt_ledger` is the same operation the harvest flow already runs
+        // for linked sub-projects, and concatenation IS the merge here: the
+        // ledger is a patch log folded in timestamp order, so appending one
+        // log to another needs no precedence rule. It also migrates a legacy
+        // `harvested_sessions.json` and refuses a planted symlink on the way.
+        let ledger_adopted = match crate::harvest_state::adopt_ledger(worktree_dir, main_dir) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(
+                    "could not fold the harvest ledger at {} into {} ({e}); \
+                         keeping the worktree store so the review record is not lost",
+                    worktree_dir.display(),
+                    main_dir.display()
+                );
+                false
+            }
+        };
+
+        // Remove the stray worktree store so future ops route to main — but
+        // only once nothing is left in it that exists nowhere else. Routing
+        // does not depend on this (`detect_worktree_main` decides that), so
+        // keeping the directory costs a re-scan per invocation and nothing
+        // else — which is the whole reason a failed adoption can block the
+        // delete rather than being swallowed. The next invocation retries.
+        //
+        // `state/session_tasks.json` does go with the directory. That one is
+        // deliberately not preserved: it maps a live session to its task and
+        // the SessionEnd hook clears it anyway, so it is per-session scratch
+        // rather than a record of anything.
+        if stranded_shared == 0 && ledger_adopted {
+            async_fs::remove_dir_all(&wt_engramdb).await?;
+        }
     }
 
     // Drop the worktree's stale global data dir (its now-migrated personal
-    // memories and obsolete LanceDB index). Best-effort: data already moved.
+    // memories and obsolete LanceDB index) — unless personal memories are still
+    // in it, which means `migrate_dir` could not read them and they exist
+    // nowhere else.
+    //
+    // The decision reads the directory itself rather than a count from the
+    // block above, and that is load-bearing: this runs on EVERY command in a
+    // linked worktree, and the block above is skipped once the stray
+    // `.engramdb` is gone. A counter would be zero on the second invocation for
+    // want of having looked, and would delete exactly what the first
+    // invocation preserved.
     if let Ok(global_data) = paths::global_data_dir() {
         let wt_global = global_data.join("projects").join(&wt_id);
         if wt_global.exists() {
-            let _ = async_fs::remove_dir_all(&wt_global).await;
+            paths::reclaim_project_data_dir(&wt_global).await;
         }
     }
 
@@ -460,6 +527,44 @@ mod tests {
         );
     }
 
+    /// A file `migrate_dir` cannot parse is skipped so it is not destroyed —
+    /// but the stray store was then removed wholesale, which destroyed it
+    /// anyway. Skipping only protects a file if the directory survives too.
+    #[tokio::test]
+    async fn a_corrupt_stray_file_is_not_deleted_with_the_store() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree(tmp.path());
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(&main, &registry).await.unwrap();
+
+        let wt_store = MemoryStore::init(&wt, &registry).await.unwrap();
+        let good = Memory::new(
+            MemoryType::Decision,
+            "Migrates fine",
+            "content",
+            Provenance::human(),
+        );
+        let good_id = wt_store.create(&good).await.unwrap();
+        let corrupt = paths::memories_dir(&wt).join("corrupt.md");
+        async_fs::write(&corrupt, "not frontmatter at all")
+            .await
+            .unwrap();
+
+        let moved = consolidate_worktree_into_main(&wt, &main).await.unwrap();
+        assert_eq!(moved, 1, "the readable memory still migrates");
+        let main_store = MemoryStore::open(&main).await.unwrap();
+        assert!(main_store.get(&good_id).await.is_ok());
+
+        assert!(
+            corrupt.exists(),
+            "an unparseable file is the only copy of its data — it must survive"
+        );
+        assert_eq!(
+            async_fs::read_to_string(&corrupt).await.unwrap(),
+            "not frontmatter at all"
+        );
+    }
+
     /// A mixed batch: some stray files are stale (main is newer, drop them),
     /// some are fresh (migrate them), in one consolidation.
     ///
@@ -541,6 +646,177 @@ mod tests {
         }
 
         assert!(!wt.join(".engramdb").exists(), "stray store is removed");
+    }
+
+    /// The first run strands an unparseable personal file and keeps its
+    /// directory. The SECOND run must keep it too — `consolidate` runs on every
+    /// command in a worktree, and by then the stray `.engramdb` is gone, so a
+    /// count carried from the migration block is zero for want of having
+    /// looked and deletes exactly what the first run preserved.
+    /// The worktree's harvest ledger is folded into the main project's before
+    /// the stray store is deleted.
+    ///
+    /// `.engramdb/state/harvest_ledger.jsonl` is gitignored and machine-local,
+    /// so it has no copy in the project tree the way memory files do, and
+    /// `migrate_dir` never sees it — it walks `memories/` only. A directory
+    /// used standalone before it became a linked worktree carried a full
+    /// review history (decisions, notes, memory ids) straight into the
+    /// `remove_dir_all`.
+    #[tokio::test]
+    async fn the_worktrees_harvest_ledger_is_merged_into_main_before_deletion() {
+        use crate::harvest_state::{self, HarvestDecision};
+
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree(tmp.path());
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(&main, &registry).await.unwrap();
+        let wt_store = MemoryStore::init(&wt, &registry).await.unwrap();
+
+        // A shared memory that migrates cleanly, so the stray store is
+        // eligible for removal — the exact case that used to lose the ledger.
+        let good = Memory::new(MemoryType::Decision, "Clean", "c", Provenance::human());
+        wt_store.create(&good).await.unwrap();
+
+        // Review records on BOTH sides: the fold has to be a merge, not a
+        // move that clobbers what main already knew.
+        harvest_state::mark_harvested(
+            &main,
+            "session-main",
+            &["mem-main".to_string()],
+            HarvestDecision::Harvested,
+            None,
+        )
+        .unwrap();
+        harvest_state::mark_harvested(
+            &wt,
+            "session-worktree",
+            &["mem-wt".to_string()],
+            HarvestDecision::Skipped,
+            Some("not worth keeping".to_string()),
+        )
+        .unwrap();
+
+        consolidate_worktree_into_main(&wt, &main).await.unwrap();
+
+        assert!(
+            !wt.join(".engramdb").exists(),
+            "the stray store should be gone once everything in it was carried across"
+        );
+        let folded = harvest_state::read_harvested(&main);
+        assert_eq!(
+            folded.len(),
+            2,
+            "both sides' review records must survive the fold: {folded:?}"
+        );
+        let adopted = folded
+            .get("session-worktree")
+            .expect("the worktree's review record was lost with its directory");
+        assert_eq!(adopted.decision, Some(HarvestDecision::Skipped));
+        assert_eq!(adopted.note.as_deref(), Some("not worth keeping"));
+        assert!(folded.contains_key("session-main"));
+    }
+
+    /// A ledger that cannot be folded blocks the delete rather than being
+    /// destroyed by it.
+    ///
+    /// Keeping the directory costs a re-scan per invocation and nothing else —
+    /// which is precisely why a failed adoption is allowed to stop the
+    /// removal instead of being swallowed. The next invocation retries.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_ledger_that_cannot_be_folded_keeps_the_worktree_store() {
+        use crate::harvest_state::{self, HarvestDecision};
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree(tmp.path());
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(&main, &registry).await.unwrap();
+        let wt_store = MemoryStore::init(&wt, &registry).await.unwrap();
+        let good = Memory::new(MemoryType::Decision, "Clean", "c", Provenance::human());
+        wt_store.create(&good).await.unwrap();
+
+        harvest_state::mark_harvested(
+            &wt,
+            "session-worktree",
+            &["mem-wt".to_string()],
+            HarvestDecision::Harvested,
+            None,
+        )
+        .unwrap();
+
+        // Make the worktree's own state dir unwritable so `adopt_ledger`
+        // cannot rename the log aside — the step that commits the adoption.
+        let wt_state = wt.join(".engramdb").join("state");
+        let set_mode = |mode: u32| {
+            let mut perms = fs::metadata(&wt_state).unwrap().permissions();
+            perms.set_mode(mode);
+            fs::set_permissions(&wt_state, perms).unwrap();
+        };
+        set_mode(0o500);
+        // Probe without touching the ledger: renaming it aside to test the
+        // rename would be exactly the destructive step under test.
+        let probe = wt_state.join(".write-probe");
+        let blocked = fs::write(&probe, b"x").is_err();
+        let _ = fs::remove_file(&probe);
+
+        let result = consolidate_worktree_into_main(&wt, &main).await;
+        // Restore only if the directory is still there — under root the
+        // adoption succeeds and the whole store is removed, which is the
+        // outcome the skip below accounts for.
+        if wt_state.exists() {
+            set_mode(0o755);
+        }
+        result.unwrap();
+
+        // Root ignores the mode bits, so on a root runner there is nothing to
+        // block and the assertion is skipped. CI runs as a normal user.
+        if blocked {
+            assert!(
+                wt.join(".engramdb").exists(),
+                "an unfoldable ledger must keep its directory, not be deleted with it"
+            );
+            assert!(
+                wt_state.join("harvest_ledger.jsonl").exists(),
+                "the review record must still be on disk for the next attempt"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stranded_personal_file_survives_the_next_consolidation() {
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree(tmp.path());
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(&main, &registry).await.unwrap();
+        let wt_store = MemoryStore::init(&wt, &registry).await.unwrap();
+
+        // A shared memory that migrates cleanly, so the stray `.engramdb` is
+        // removed on run 1 and the block is skipped on run 2.
+        let good = Memory::new(MemoryType::Decision, "Clean", "c", Provenance::human());
+        wt_store.create(&good).await.unwrap();
+
+        let wt_id = project_id::compute_project_id(&wt);
+        let personal = paths::personal_memories_dir(&wt_id).unwrap();
+        async_fs::create_dir_all(&personal).await.unwrap();
+        let stranded = personal.join("unparseable.md");
+        async_fs::write(&stranded, "written by a newer schema")
+            .await
+            .unwrap();
+
+        consolidate_worktree_into_main(&wt, &main).await.unwrap();
+        assert!(
+            !wt.join(".engramdb").exists(),
+            "run 1 clears the stray store"
+        );
+        assert!(stranded.exists(), "run 1 must keep the only copy");
+
+        consolidate_worktree_into_main(&wt, &main).await.unwrap();
+        assert!(
+            stranded.exists(),
+            "run 2 deleted what run 1 preserved — the decision must read the \
+             directory, not a count from a block that no longer runs"
+        );
     }
 
     #[tokio::test]
