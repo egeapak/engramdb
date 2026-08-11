@@ -16,6 +16,41 @@ use std::path::Path;
 /// index and so need model providers, and `lib.rs` dispatches them directly
 /// alongside the other daemon-aware commands. Reaching them here means that
 /// dispatch was removed.
+/// Render `(project_id, error)` pairs as objects.
+///
+/// A bare id would tell the user a directory could not be removed without
+/// telling them anything they could act on; the errno text is the difference
+/// between "it failed" and "it is owned by root".
+fn failed_json(failed: &[(String, String)]) -> serde_json::Value {
+    serde_json::Value::Array(
+        failed
+            .iter()
+            .map(|(id, err)| serde_json::json!({ "project_id": id, "error": err }))
+            .collect(),
+    )
+}
+
+/// Report directories the sweep could not remove.
+///
+/// Deliberately a warning and deliberately not fatal: prune is a best-effort
+/// sweep and the rest of its work stands, so the exit code says "the sweep
+/// ran" while this says which directories it could not finish. Silence here
+/// is what made `doctor`'s orphan warning look un-clearable — doctor counts
+/// these as reclaimable, because in principle they are.
+fn report_failed_reclaims(formatter: &OutputFormatter, failed: &[(String, String)]) {
+    if failed.is_empty() {
+        return;
+    }
+    formatter.print_warning(&format!(
+        "Could not remove {} data director(ies); they are still on disk and \
+         `doctor` will keep listing them until the cause is cleared:",
+        failed.len()
+    ));
+    for (id, err) in failed {
+        formatter.print_message(&format!("  {id}: {err}"));
+    }
+}
+
 pub async fn run_projects(
     dir: &Path,
     registry: &dyn RegistryBackend,
@@ -147,6 +182,7 @@ pub async fn run_projects(
                         "purge": purge,
                         "global_data_removed": result.global_data_removed,
                         "retained_irreplaceable": result.retained_irreplaceable,
+                        "failed_to_reclaim": failed_json(&result.failed_to_reclaim),
                         "cascaded_ids": result.cascaded_ids,
                     })
                 );
@@ -175,6 +211,7 @@ pub async fn run_projects(
                     result.retained_irreplaceable.join(", ")
                 ));
             }
+            report_failed_reclaims(formatter, &result.failed_to_reclaim);
             if !result.cascaded_ids.is_empty() {
                 formatter.print_success(&format!(
                     "Cascade-deleted {} descendant project(s): {}",
@@ -239,6 +276,7 @@ pub async fn run_projects(
                             "orphan_ids": [],
                             "hierarchy_cleared": [],
                             "retained_irreplaceable": [],
+                            "failed_to_reclaim": [],
                         })
                     );
                 } else {
@@ -344,6 +382,7 @@ pub async fn run_projects(
                         "orphan_ids": result.orphan_ids,
                         "hierarchy_cleared": result.hierarchy_cleared,
                         "retained_irreplaceable": result.retained_irreplaceable,
+                        "failed_to_reclaim": failed_json(&result.failed_to_reclaim),
                     })
                 );
                 return Ok(());
@@ -379,6 +418,7 @@ pub async fn run_projects(
                     result.retained_irreplaceable.join(", ")
                 ));
             }
+            report_failed_reclaims(formatter, &result.failed_to_reclaim);
         }
     }
 

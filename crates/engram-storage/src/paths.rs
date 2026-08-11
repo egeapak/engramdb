@@ -454,11 +454,42 @@ async fn holds_files_with_extension(dir: &Path, ext: &str) -> bool {
 /// being retained precisely because something may still be using it, and an
 /// unregistered sibling's index would then be wiped on every sweep, leaving a
 /// healthy project silently unsearchable until someone re-embedded it by hand.
-pub async fn reclaim_project_data_dir(dir: &Path) -> bool {
+pub async fn reclaim_project_data_dir(dir: &Path) -> Reclaim {
     if holds_irreplaceable_data(dir).await {
-        return false;
+        return Reclaim::Retained;
     }
-    tokio::fs::remove_dir_all(dir).await.is_ok()
+    match tokio::fs::remove_dir_all(dir).await {
+        Ok(()) => Reclaim::Removed,
+        Err(e) => Reclaim::Failed(e.to_string()),
+    }
+}
+
+/// What [`reclaim_project_data_dir`] did.
+///
+/// Three outcomes, not two. A `bool` collapsed `Retained` and `Failed` into
+/// one `false`, and every caller read that as `Retained` — so an orphan
+/// directory that `remove_dir_all` could not unlink (owned by another uid
+/// after a `sudo` run, an NFS silly-rename, an immutable file) was reported
+/// to the user as "kept because it holds personal memories" it did not have,
+/// while `doctor` went on counting it as reclaimable. Telling someone the
+/// wrong reason for an outcome is worse than telling them nothing: it sends
+/// them looking for memories that were never there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reclaim {
+    /// The directory was removed.
+    Removed,
+    /// Kept deliberately: it still holds data with no other copy.
+    Retained,
+    /// Removal was attempted and failed. Carries the error, because "it
+    /// failed" with no reason is not something a user can act on.
+    Failed(String),
+}
+
+impl Reclaim {
+    /// Whether the directory is gone.
+    pub fn removed(&self) -> bool {
+        matches!(self, Reclaim::Removed)
+    }
 }
 
 #[cfg(test)]
@@ -483,7 +514,7 @@ mod tests {
         .unwrap();
 
         assert!(holds_irreplaceable_data(&dir).await);
-        assert!(!reclaim_project_data_dir(&dir).await);
+        assert_eq!(reclaim_project_data_dir(&dir).await, Reclaim::Retained);
         assert!(
             dir.exists(),
             "prune destroyed the only copy of a transcript"
@@ -506,8 +537,47 @@ mod tests {
             .unwrap();
 
         assert!(!holds_irreplaceable_data(&dir).await);
-        assert!(reclaim_project_data_dir(&dir).await);
+        assert_eq!(reclaim_project_data_dir(&dir).await, Reclaim::Removed);
         assert!(!dir.exists());
+    }
+
+    // A removal that FAILS is not retention. The two shared one `false`, and
+    // every caller read it as retention — so an orphan nobody could unlink was
+    // reported as "kept because it holds personal memories" it did not have.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_removal_is_not_reported_as_retention() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("parent");
+        let dir = parent.join("proj");
+        // Derived data only: nothing here is a reason to retain.
+        tokio::fs::create_dir_all(dir.join("lancedb"))
+            .await
+            .unwrap();
+
+        // A read-only PARENT is what blocks the unlink; the directory itself
+        // stays readable so `holds_irreplaceable_data` still answers "no".
+        let set_mode = |mode: u32| {
+            let mut perms = std::fs::metadata(&parent).unwrap().permissions();
+            perms.set_mode(mode);
+            std::fs::set_permissions(&parent, perms).unwrap();
+        };
+        set_mode(0o500);
+        let blocked = std::fs::create_dir(parent.join("probe")).is_err();
+
+        let outcome = reclaim_project_data_dir(&dir).await;
+        set_mode(0o755);
+
+        // Root ignores the mode bits; CI runs as a normal user.
+        if blocked {
+            assert!(
+                matches!(outcome, Reclaim::Failed(_)),
+                "an unlink failure must be distinguishable from a deliberate keep: {outcome:?}"
+            );
+            assert!(dir.exists());
+        }
     }
 
     // `ARCHIVE_EXT` is a compound suffix (`jsonl.zst`). `Path::extension`

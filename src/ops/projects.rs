@@ -48,6 +48,11 @@ pub struct DeleteResult {
     /// nowhere else — personal memories or archived transcripts — and `purge`
     /// was not requested.
     pub retained_irreplaceable: Vec<String>,
+    /// Data directories the sweep TRIED to remove and could not, as
+    /// `(project_id, error)`. Distinct from retention: nothing here was kept
+    /// on purpose, so reporting these as retention told the user the wrong
+    /// reason for the same outcome.
+    pub failed_to_reclaim: Vec<(String, String)>,
 }
 
 /// Aggregate statistics across all projects.
@@ -204,15 +209,23 @@ pub async fn delete_project(
     let projects_dir = paths::global_data_dir()?.join("projects");
     let global_project_dir = projects_dir.join(project_id);
     let mut retained_irreplaceable = Vec::new();
+    let mut failed_to_reclaim: Vec<(String, String)> = Vec::new();
     let global_data_removed = if global_project_dir.exists() {
         if purge {
             async_fs::remove_dir_all(&global_project_dir).await?;
             true
-        } else if reclaim_data_dir(&global_project_dir).await {
-            true
         } else {
-            retained_irreplaceable.push(project_id.to_string());
-            false
+            match reclaim_data_dir(&global_project_dir).await {
+                Reclaim::Removed => true,
+                Reclaim::Retained => {
+                    retained_irreplaceable.push(project_id.to_string());
+                    false
+                }
+                Reclaim::Failed(e) => {
+                    failed_to_reclaim.push((project_id.to_string(), e));
+                    false
+                }
+            }
         }
     } else {
         false
@@ -227,8 +240,12 @@ pub async fn delete_project(
                 // data dir can't be removed.
                 if purge {
                     let _ = async_fs::remove_dir_all(&dir).await;
-                } else if !reclaim_data_dir(&dir).await {
-                    retained_irreplaceable.push(desc_id.clone());
+                } else {
+                    match reclaim_data_dir(&dir).await {
+                        Reclaim::Removed => {}
+                        Reclaim::Retained => retained_irreplaceable.push(desc_id.clone()),
+                        Reclaim::Failed(e) => failed_to_reclaim.push((desc_id.clone(), e)),
+                    }
                 }
             }
         }
@@ -239,6 +256,7 @@ pub async fn delete_project(
         global_data_removed,
         cascaded_ids: descendants,
         retained_irreplaceable,
+        failed_to_reclaim,
     })
 }
 
@@ -310,6 +328,12 @@ pub struct PruneResult {
     /// retained by the stale pass is seen again by the orphan sweep. Reported so the
     /// retained disk usage is visible rather than mysterious.
     pub retained_irreplaceable: Vec<String>,
+    /// Data directories the sweep TRIED to remove and could not, as
+    /// `(project_id, error)`. These are not retention: `doctor` will keep
+    /// counting them as reclaimable, because in principle they are, so the
+    /// reason has to reach the user here or that warning looks un-clearable.
+    /// Deduplicated on the same grounds as the list above.
+    pub failed_to_reclaim: Vec<(String, String)>,
 }
 
 /// Classification of a sub-project's parent chain.
@@ -482,7 +506,7 @@ pub async fn count_orphan_dirs(registry: &dyn RegistryBackend) -> Result<usize> 
 /// on it — this one, the orphan sweep, `delete_project`, and worktree
 /// consolidation — and a fifth (`count_orphan_dirs`) must agree on what is
 /// *reclaimable* or `doctor` recommends a prune that then declines to act.
-use crate::storage::paths::reclaim_project_data_dir as reclaim_data_dir;
+use crate::storage::paths::{reclaim_project_data_dir as reclaim_data_dir, Reclaim};
 
 /// Phase indicator for prune progress callbacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -539,13 +563,16 @@ pub async fn prune_stale_projects(
     // set is computed from the post-removal registry for exactly that reason.
     let survivors = crate::storage::protected_project_ids(&reg);
     let mut retained_irreplaceable: Vec<String> = Vec::new();
+    let mut failed_to_reclaim: Vec<(String, String)> = Vec::new();
     for entry in stale.iter().filter(|e| !survivors.contains(&e.project_id)) {
         let dir = projects_dir.join(&entry.project_id);
         if !dir.exists() {
             continue;
         }
-        if !reclaim_data_dir(&dir).await {
-            retained_irreplaceable.push(entry.project_id.clone());
+        match reclaim_data_dir(&dir).await {
+            Reclaim::Removed => {}
+            Reclaim::Retained => retained_irreplaceable.push(entry.project_id.clone()),
+            Reclaim::Failed(e) => failed_to_reclaim.push((entry.project_id.clone(), e)),
         }
         on_progress(PrunePhase::Stale);
     }
@@ -580,12 +607,20 @@ pub async fn prune_stale_projects(
     let mut orphans_removed = 0;
     let mut kept_orphan_ids: Vec<String> = Vec::new();
     for (id, path) in orphan_ids.iter().zip(orphan_paths.iter()) {
-        if reclaim_data_dir(path).await {
-            orphans_removed += 1;
-        } else {
-            // Held back: still the only copy of its personal memories.
-            retained_irreplaceable.push(id.clone());
-            kept_orphan_ids.push(id.clone());
+        match reclaim_data_dir(path).await {
+            Reclaim::Removed => orphans_removed += 1,
+            Reclaim::Retained => {
+                // Held back: still the only copy of something.
+                retained_irreplaceable.push(id.clone());
+                kept_orphan_ids.push(id.clone());
+            }
+            Reclaim::Failed(e) => {
+                // NOT retention. Reporting an unlink failure as "kept because
+                // it holds personal memories" sent the user looking for
+                // memories that were never there.
+                failed_to_reclaim.push((id.clone(), e));
+                kept_orphan_ids.push(id.clone());
+            }
         }
         on_progress(PrunePhase::Orphan);
     }
@@ -602,6 +637,10 @@ pub async fn prune_stale_projects(
     // held back.
     let mut seen = HashSet::new();
     retained_irreplaceable.retain(|id| seen.insert(id.clone()));
+    // Same reason, same shape: a directory whose removal failed in the stale
+    // pass is offered to the orphan sweep and fails again.
+    let mut seen_failed = HashSet::new();
+    failed_to_reclaim.retain(|(id, _)| seen_failed.insert(id.clone()));
 
     // --- Hierarchy repair ---
     //
@@ -638,6 +677,7 @@ pub async fn prune_stale_projects(
         orphan_ids,
         hierarchy_cleared,
         retained_irreplaceable,
+        failed_to_reclaim,
     })
 }
 
@@ -1181,6 +1221,53 @@ mod tests {
         );
         assert_eq!(result.orphans_removed, 0);
         assert_eq!(result.retained_irreplaceable, vec![orphan_id.to_string()]);
+    }
+
+    // An unlink failure must reach the user as a failure, not as retention.
+    // Both were `false`, and prune read `false` as "kept because it holds
+    // personal memories" — so a directory that held none, and that nobody
+    // chose to keep, was described to the user in exactly the wrong terms.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prune_reports_an_unremovable_orphan_as_failed_not_retained() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let registry = InMemoryRegistry::new();
+        let orphan_id = "stuckorphan00000";
+        // Derived data only: nothing here is a reason to retain it.
+        async_fs::create_dir_all(paths::lancedb_dir(orphan_id).unwrap())
+            .await
+            .unwrap();
+
+        // The parent of the data dirs is what has to be read-only for the
+        // unlink to fail while the directory itself stays readable.
+        let projects_dir = paths::global_data_dir().unwrap().join("projects");
+        let set_mode = |mode: u32| {
+            let mut perms = std::fs::metadata(&projects_dir).unwrap().permissions();
+            perms.set_mode(mode);
+            std::fs::set_permissions(&projects_dir, perms).unwrap();
+        };
+        set_mode(0o500);
+        let blocked = std::fs::create_dir(projects_dir.join("probe")).is_err();
+
+        let result = prune_stale_projects(&registry, |_| {}).await.unwrap();
+        set_mode(0o755);
+
+        // Root ignores the mode bits; CI runs as a normal user.
+        if blocked {
+            assert_eq!(
+                result.orphans_removed, 0,
+                "nothing was removed, so nothing may be counted as removed"
+            );
+            assert!(
+                result.retained_irreplaceable.is_empty(),
+                "an unlink failure is not a deliberate keep: {result:?}"
+            );
+            let failed: Vec<&String> = result.failed_to_reclaim.iter().map(|(id, _)| id).collect();
+            assert_eq!(failed, vec![&orphan_id.to_string()]);
+            // The error text is what makes it actionable.
+            assert!(!result.failed_to_reclaim[0].1.is_empty());
+        }
     }
 
     // `doctor` counts what prune will reclaim. If the two ever disagree the

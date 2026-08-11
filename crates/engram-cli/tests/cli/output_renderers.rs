@@ -511,6 +511,162 @@ fn project_id_of(env: &IsolatedEnv, dir: &Path) -> String {
     v["project_id"].as_str().unwrap().to_string()
 }
 
+/// Give `dir` a git remote so `compute_project_id` re-keys it, reproducing the
+/// drift `projects repair` exists to fix: `engramdb init` first, remote after.
+fn drift_via_git_remote(dir: &Path, url: &str) {
+    for args in [vec!["init", "-q"], vec!["remote", "add", "origin", url]] {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(&args)
+            .status()
+            .expect("git must be available to exercise project-id drift")
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+}
+
+/// The whole of stdout must parse as ONE object — which is what proves the
+/// command emitted a single document rather than several.
+fn parse_one_document(stdout: &[u8]) -> serde_json::Value {
+    let text = String::from_utf8_lossy(stdout);
+    serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("stdout is not exactly one JSON document ({e}): {text}"))
+}
+
+#[test]
+fn projects_repair_json_emits_one_document_and_rekeys() {
+    let env = IsolatedEnv::new();
+    let dir = TempDir::new().unwrap();
+    init_isolated(&env, dir.path());
+    let old_id = project_id_of(&env, dir.path());
+    drift_via_git_remote(dir.path(), "https://example.com/repair-happy.git");
+    let new_id = project_id_of(&env, dir.path());
+    assert_ne!(old_id, new_id, "the fixture did not actually drift");
+
+    let output = isolated_cmd(&env)
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "json",
+            "projects",
+            "repair",
+            "--force",
+            "--no-index",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "repair should succeed on a drifted project"
+    );
+    let doc = parse_one_document(&output.stdout);
+    assert_eq!(doc["repaired"], serde_json::json!(true));
+    assert_eq!(doc["old_id"], serde_json::json!(old_id));
+    assert_eq!(doc["new_id"], serde_json::json!(new_id));
+    // The documented key set. Renaming or dropping one silently breaks any
+    // script parsing this.
+    for key in [
+        "repaired",
+        "path",
+        "old_id",
+        "old_ids",
+        "new_id",
+        "personal_migrated",
+        "personal_superseded",
+        "personal_skipped",
+        "removed_duplicate_entry",
+        "reparented_children",
+        "old_data_dir",
+        "old_data_dirs",
+        "no_index",
+        "indexed",
+        "embedded",
+        "index_error",
+        "warnings",
+    ] {
+        assert!(
+            doc.get(key).is_some(),
+            "missing documented key {key}: {doc}"
+        );
+    }
+
+    // And it really re-keyed: a second run has nothing to do.
+    let again = isolated_cmd(&env)
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "json",
+            "projects",
+            "repair",
+            "--force",
+            "--no-index",
+        ])
+        .output()
+        .unwrap();
+    assert!(again.status.success());
+    let doc = parse_one_document(&again.stdout);
+    assert_eq!(doc["repaired"], serde_json::json!(false));
+    assert_eq!(doc["reason"], serde_json::json!("nothing_to_repair"));
+}
+
+/// An index rebuild that fails must be REPORTED, not propagated before the
+/// document is emitted.
+///
+/// The re-key is already committed by then, and a retry is a no-op
+/// (`plan_repair` returns `None`), so a caller that saw only an error would be
+/// left re-keyed, un-indexed, and told there is nothing to repair. Every unit
+/// test passes `no_index: true`, so nothing else reaches this path.
+#[test]
+fn projects_repair_reports_an_index_failure_without_losing_the_document() {
+    let env = IsolatedEnv::new();
+    let dir = TempDir::new().unwrap();
+    init_isolated(&env, dir.path());
+    drift_via_git_remote(dir.path(), "https://example.com/repair-index.git");
+    let new_id = project_id_of(&env, dir.path());
+
+    // Break the live ID's index by putting a regular file where LanceDB
+    // expects its directory. It has to be replaced AFTER the id is resolved:
+    // reading the project id opens the store, which creates the directory.
+    let lancedb = env
+        .data_dir
+        .path()
+        .join("projects")
+        .join(&new_id)
+        .join("lancedb");
+    let _ = std::fs::remove_dir_all(&lancedb);
+    std::fs::write(&lancedb, b"not a directory").unwrap();
+
+    let output = isolated_cmd(&env)
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "json",
+            "projects",
+            "repair",
+            "--force",
+        ])
+        .output()
+        .unwrap();
+
+    // Non-zero, because the repair did not fully succeed...
+    assert!(
+        !output.status.success(),
+        "a failed index rebuild must not report success"
+    );
+    // ...but the document is still there, and still says the re-key landed.
+    let doc = parse_one_document(&output.stdout);
+    assert_eq!(doc["repaired"], serde_json::json!(true));
+    assert!(
+        doc["index_error"].is_string(),
+        "the index failure must be named in the document: {doc}"
+    );
+}
+
 #[test]
 fn projects_link_and_unlink_round_trip() {
     let env = IsolatedEnv::new();

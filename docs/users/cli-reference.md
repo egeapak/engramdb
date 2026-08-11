@@ -349,7 +349,10 @@ another checkout's only copy. `--purge` is the explicit "I mean it"; without
 
 `--force` is required in JSON mode (the command never prompts there), and it
 emits one object: `{deleted, project_id, project_path, purge,
-global_data_removed, retained_irreplaceable[], cascaded_ids[]}`. Refusing to act
+global_data_removed, retained_irreplaceable[], failed_to_reclaim[],
+cascaded_ids[]}`. `failed_to_reclaim` holds `{project_id, error}` objects for
+directories the command tried to remove and could not — an unlink failure is
+reported as a failure, never folded in with the directories kept on purpose. Refusing to act
 — a project with sub-projects and no `--cascade` — exits non-zero rather than
 reporting a delete that did not happen.
 
@@ -367,8 +370,16 @@ unattended maintenance pass, which runs prune for you.
 `--force` is required in JSON mode whether or not there is anything to prune —
 JSON is machine-consumed and never prompts, so the contract depends on the flags
 alone. The one emitted object carries `stale_removed`, `stale_ids[]`,
-`orphans_removed`, `orphan_ids[]`, `hierarchy_cleared[]`, and
-`retained_irreplaceable[]`, at their zero values when nothing was pruned.
+`orphans_removed`, `orphan_ids[]`, `hierarchy_cleared[]`,
+`retained_irreplaceable[]`, and `failed_to_reclaim[]`, at their zero values when
+nothing was pruned.
+
+`failed_to_reclaim[]` holds `{project_id, error}` objects for directories prune
+tried to remove and could not — a permission problem, a busy mount, an
+immutable file. These are **not** retention: nothing chose to keep them, and
+`doctor` will go on counting them as reclaimable, because in principle they
+are. Prune still exits 0, because the rest of the sweep did its job; the
+failures are named so the cause can be cleared.
 
 ### `projects discover`
 
