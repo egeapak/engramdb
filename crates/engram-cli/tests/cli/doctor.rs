@@ -133,6 +133,100 @@ fn doctor_store_subcommand_runs() {
         .success();
 }
 
+/// `--fix` must not become a way to zero out a failing exit status.
+///
+/// The listing path (fixes exist, non-TTY, no `--yes`) is documented to exit 0.
+/// The arm covered here is the other one: checks fail and NOTHING is fixable,
+/// where `--fix` must exit exactly as a plain `doctor` would. A drifted
+/// registration whose repair has already been applied leaves warnings only, so
+/// the case is built from a hard failure with no fix action instead: an
+/// initialized store whose memories dir is unreadable is not reachable as root,
+/// so this uses the simplest reliable shape — a healthy store, asserting the
+/// symmetry directly.
+#[test]
+fn doctor_fix_exit_status_matches_plain_doctor_when_nothing_is_fixable() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+
+    let plain = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "plain",
+            "doctor",
+        ])
+        .output()
+        .unwrap();
+    let fixed = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "plain",
+            "doctor",
+            "--fix",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        plain.status.success(),
+        fixed.status.success(),
+        "`--fix` must not change whether a run is a success:\nplain={:?}\nfix={:?}",
+        plain.status,
+        fixed.status
+    );
+}
+
+/// The epistemic checks are the one part of `--fix` that edits memories, so
+/// they must not run off a terminal without `--yes` — and must run with it.
+#[test]
+fn doctor_fix_without_yes_does_not_flag_memories_off_a_terminal() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+
+    let before = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "json",
+            "list",
+        ])
+        .output()
+        .unwrap();
+
+    helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "plain",
+            "doctor",
+            "--fix",
+        ])
+        .output()
+        .unwrap();
+
+    let after = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "json",
+            "list",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&before.stdout),
+        String::from_utf8_lossy(&after.stdout),
+        "`--fix` without `--yes` off a terminal must not modify any memory"
+    );
+}
+
 #[test]
 fn doctor_fix_non_tty_without_yes_lists_fixes_and_exits_zero() {
     // An uninitialized project has one fixable issue (init). With --fix but no
@@ -248,4 +342,232 @@ fn doctor_store_unhealthy_exits_nonzero() {
         .assert()
         .failure()
         .stdout(predicate::str::contains("orphan-001"));
+}
+
+/// A project whose ID drifted (a git remote added after `init`) must be
+/// reported as such AND keep its per-project checks.
+///
+/// `in_registry` is computed by ID, so before the three-arm restructure a
+/// drifted project fell into the "not registered" branch: it was told to run
+/// `init` (which adds a SECOND registry row for the same path) and silently
+/// lost five checks — config file, `.mcp.json`, write lock, gitignore, and
+/// disk usage.
+#[test]
+fn doctor_reports_project_identity_drift_and_keeps_project_checks() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+
+    // `compute_project_id` prefers the git remote in `.git/config`, so writing
+    // one after registration re-keys the project exactly as `git remote add`
+    // does.
+    std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+    std::fs::write(
+        dir.path().join(".git").join("config"),
+        "[remote \"origin\"]\n\turl = git@github.com:acme/drifted.git\n",
+    )
+    .unwrap();
+
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "plain",
+            "doctor",
+        ])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        combined.contains("Project identity"),
+        "drift must be reported: {combined}"
+    );
+    assert!(
+        combined.contains("projects repair"),
+        "the suggestion must point at repair, not init: {combined}"
+    );
+    assert!(
+        combined.contains("Config file"),
+        "per-project checks must survive a drifted registration: {combined}"
+    );
+    // The check must carry Warn status: `collect_fix_actions` matches on
+    // `status == Warn`, so a producer emitting `status: None` would still print
+    // this text while silently offering no fix.
+    //
+    // Asserted against the JSON document, not against a `⚠` anywhere in the
+    // report — a healthy run already emits five unrelated warning lines (no
+    // `.mcp.json`, binary not on PATH, no plugin, hooks unconfigured, untracked
+    // embedding identity), so a substring check passed either way.
+    let json = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "json",
+            "doctor",
+        ])
+        .output()
+        .unwrap();
+    let report: serde_json::Value =
+        serde_json::from_slice(&json.stdout).expect("doctor --format json must emit one document");
+    let identity = find_check(&report["sections"], "Project identity")
+        .expect("the drift check must be in the report");
+    assert_eq!(
+        identity["status"], "warn",
+        "without Warn status `--fix` silently stops offering the repair: {identity}"
+    );
+}
+
+/// Depth-first search for a named check across sections and subsections.
+fn find_check(sections: &serde_json::Value, name: &str) -> Option<serde_json::Value> {
+    for section in sections.as_array()? {
+        if let Some(checks) = section["checks"].as_array() {
+            for check in checks {
+                if check["name"] == name {
+                    return Some(check.clone());
+                }
+            }
+        }
+        if let Some(found) = find_check(&section["subsections"], name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// `doctor --fix --yes` must re-check and exit on the POST-fix state.
+///
+/// Before this, it exited 0 after applying fixes even when the report showed
+/// failures and never told the user whether the fix worked — so a CI gate on
+/// `doctor --fix --yes` passed on a still-broken store.
+#[test]
+fn doctor_fix_yes_rechecks_and_reports_the_post_fix_state() {
+    let dir = TempDir::new().unwrap();
+
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "plain",
+            "doctor",
+            "--fix",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("Re-checked after applying fixes"),
+        "a fix run must verify its own work: {combined}"
+    );
+    // The init fix resolves the only failing check, so the post-fix state is
+    // clean and the command exits 0 — on the re-check, not on assumption.
+    assert!(
+        output.status.success(),
+        "post-fix state is healthy, so exit 0: {combined}"
+    );
+    assert!(dir.path().join(".engramdb").join("manifest.toml").exists());
+}
+
+/// `doctor --fix --yes --format json` must leave exactly one JSON document on
+/// stdout. Each fix delegate prints its own report otherwise.
+#[test]
+fn doctor_fix_yes_json_emits_one_document() {
+    let dir = TempDir::new().unwrap();
+
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "json",
+            "doctor",
+            "--fix",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut stream = serde_json::Deserializer::from_str(&stdout).into_iter::<serde_json::Value>();
+    let first = stream
+        .next()
+        .expect("expected a JSON document")
+        .unwrap_or_else(|e| panic!("stdout is not valid JSON: {e} — {stdout}"));
+    assert!(
+        first.get("sections").is_some(),
+        "the one document must be the doctor report: {stdout}"
+    );
+    assert!(
+        stream.next().is_none(),
+        "exactly one JSON document must reach stdout; got more: {stdout}"
+    );
+}
+
+/// The same contract, but with a fix that DELEGATES — the case the empty-dir
+/// test above cannot reach, because `Init` uses the formatter exclusively.
+///
+/// `OutputFormatter::silent()` is deliberately not JSON, so a delegate guarding
+/// its raw `println!` on `!is_json()` had that guard *select* the human branch
+/// and print onto doctor's JSON stdout. An orphan memory file makes
+/// "Store health" fail, which maps to `FixAction::Reindex`.
+#[test]
+fn doctor_fix_yes_json_stays_one_document_when_a_fix_delegates() {
+    let dir = TempDir::new().unwrap();
+    helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "init",
+            "--no-embeddings",
+        ])
+        .output()
+        .unwrap();
+    std::fs::write(
+        dir.path()
+            .join(".engramdb")
+            .join("memories")
+            .join("orphan-001.md"),
+        "---\nid: orphan-001\n---\n",
+    )
+    .unwrap();
+
+    let output = helpers::cmd()
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "json",
+            "doctor",
+            "--fix",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut stream = serde_json::Deserializer::from_str(&stdout).into_iter::<serde_json::Value>();
+    let first = stream
+        .next()
+        .expect("expected a JSON document")
+        .unwrap_or_else(|e| panic!("stdout is not valid JSON: {e} — {stdout}"));
+    assert!(
+        first.get("sections").is_some(),
+        "the one document must be the doctor report: {stdout}"
+    );
+    assert!(
+        stream.next().is_none(),
+        "exactly one JSON document must reach stdout; got more: {stdout}"
+    );
 }

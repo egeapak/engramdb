@@ -3,7 +3,7 @@
 use crate::app::ProjectsCommand;
 use crate::output::{AggregateStatsOutput, OutputFormatter, ProjectInfoOutput, ProjectListOutput};
 use crate::prompter::Prompter;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use engramdb::ops::projects;
 use engramdb::storage::RegistryBackend;
 use engramdb::types::ProjectListGrouping;
@@ -11,6 +11,46 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 
 /// Run the `projects` command with the given subcommand (defaults to `Info`).
+///
+/// `ProjectsCommand::{Discover, Repair}` are NOT handled here: both rebuild an
+/// index and so need model providers, and `lib.rs` dispatches them directly
+/// alongside the other daemon-aware commands. Reaching them here means that
+/// dispatch was removed.
+/// Render `(project_id, error)` pairs as objects.
+///
+/// A bare id would tell the user a directory could not be removed without
+/// telling them anything they could act on; the errno text is the difference
+/// between "it failed" and "it is owned by root".
+fn failed_json(failed: &[(String, String)]) -> serde_json::Value {
+    serde_json::Value::Array(
+        failed
+            .iter()
+            .map(|(id, err)| serde_json::json!({ "project_id": id, "error": err }))
+            .collect(),
+    )
+}
+
+/// Report directories the sweep could not remove.
+///
+/// Deliberately a warning and deliberately not fatal: prune is a best-effort
+/// sweep and the rest of its work stands, so the exit code says "the sweep
+/// ran" while this says which directories it could not finish. Silence here
+/// is what made `doctor`'s orphan warning look un-clearable — doctor counts
+/// these as reclaimable, because in principle they are.
+fn report_failed_reclaims(formatter: &OutputFormatter, failed: &[(String, String)]) {
+    if failed.is_empty() {
+        return;
+    }
+    formatter.print_warning(&format!(
+        "Could not remove {} data director(ies); they are still on disk and \
+         `doctor` will keep listing them until the cause is cleared:",
+        failed.len()
+    ));
+    for (id, err) in failed {
+        formatter.print_message(&format!("  {id}: {err}"));
+    }
+}
+
 pub async fn run_projects(
     dir: &Path,
     registry: &dyn RegistryBackend,
@@ -48,54 +88,130 @@ pub async fn run_projects(
             // The per-invocation `--group` flag overrides the config default.
             formatter.print_project_list(&output, group.unwrap_or(grouping));
         }
+        ProjectsCommand::Discover { .. } | ProjectsCommand::Repair { .. } => {
+            unreachable!("dispatched in lib.rs (both need model providers)")
+        }
         ProjectsCommand::Delete {
             project_id,
             force,
             cascade,
+            purge,
         } => {
+            let json_mode = formatter.is_json();
+
+            // JSON is machine-consumed: never prompt. Checked before anything
+            // is inspected, so the contract is a property of the flags alone —
+            // without this, `--format json projects delete <id>` aborted on a
+            // pipe and blocked on an interactive prompt from a terminal.
+            if !force && json_mode {
+                anyhow::bail!(
+                    "projects delete requires confirmation; re-run with --force in JSON mode"
+                );
+            }
+
             // Preview descendants so the confirmation prompt is informative.
             let reg = registry.load().await?;
             let descendants = engramdb::storage::collect_descendants(&reg, &project_id);
             drop(reg);
 
             if !descendants.is_empty() && !cascade {
-                formatter.print_warning(&format!(
-                    "Project '{}' has {} sub-project(s): {}. Re-run with --cascade to delete them too, or unlink first.",
+                // Non-zero: nothing was deleted. Returning `Ok` here reported
+                // success for work that was declined, so a `set -e` script saw
+                // a clean delete and moved on.
+                anyhow::bail!(
+                    "project '{}' has {} sub-project(s): {}. Re-run with --cascade to delete them too, or unlink first.",
                     project_id,
                     descendants.len(),
                     descendants.join(", ")
-                ));
-                return Ok(());
+                );
             }
 
             if !force {
+                let data = if purge {
+                    "delete their global data, personal memories included"
+                } else {
+                    "delete their index (personal memories are kept unless you pass --purge)"
+                };
                 if cascade && !descendants.is_empty() {
                     formatter.print_warning(&format!(
-                        "This will remove project '{}' AND {} descendant(s) from the registry and delete their global data.",
+                        "This will remove project '{}' AND {} descendant(s) from the registry and {}.",
                         project_id,
-                        descendants.len()
+                        descendants.len(),
+                        data
                     ));
                 } else {
                     formatter.print_warning(&format!(
-                        "This will remove project '{}' from the registry and delete its global data.",
-                        project_id
+                        "This will remove project '{}' from the registry and {}.",
+                        project_id,
+                        data.replace("their", "its")
                     ));
                 }
-                let confirm = prompter.confirm("Continue?", false).unwrap_or(false);
-                if !confirm {
+                if purge {
+                    formatter.print_warning(
+                        "A project ID derived from a git remote is shared by every clone of that \
+                         remote on this machine, and the registry records only one of them — so \
+                         --purge can destroy another checkout's only copy of its personal \
+                         memories.",
+                    );
+                }
+                // Propagated, not swallowed. `unwrap_or(false)` turned a
+                // prompt *failure* (no TTY, EOF on stdin) into a decline, and
+                // a decline exits 0 — so `engramdb --format plain projects
+                // delete <id>` from a script printed "Aborted." and reported
+                // success for a project that is still registered. A refusal
+                // the user never made must not read as a completed delete.
+                if !prompter.confirm("Continue?", false)? {
+                    // Nothing was deleted. Exiting 0 here would let `set -e`
+                    // treat a declined delete as a done one.
                     formatter.print_message("Aborted.");
-                    return Ok(());
+                    bail!("delete declined; nothing was removed");
                 }
             }
 
-            let result = projects::delete_project(registry, &project_id, cascade).await?;
+            let result = projects::delete_project(registry, &project_id, cascade, purge).await?;
+
+            if json_mode {
+                // ONE document. Each `print_success` below is its own JSON
+                // object, so the human path emitted two to four of them.
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "deleted": true,
+                        "project_id": project_id,
+                        "project_path": result.project_path,
+                        "purge": purge,
+                        "global_data_removed": result.global_data_removed,
+                        "retained_irreplaceable": result.retained_irreplaceable,
+                        "failed_to_reclaim": failed_json(&result.failed_to_reclaim),
+                        "cascaded_ids": result.cascaded_ids,
+                    })
+                );
+                return Ok(());
+            }
+
             formatter.print_success(&format!(
                 "Removed project from registry (path: {})",
                 result.project_path
             ));
             if result.global_data_removed {
-                formatter.print_success("Deleted global data (LanceDB + personal memories).");
+                if purge {
+                    formatter.print_success(
+                        "Deleted global data (LanceDB, personal memories, transcripts).",
+                    );
+                } else {
+                    formatter.print_success("Deleted global data (LanceDB index).");
+                }
             }
+            if !result.retained_irreplaceable.is_empty() {
+                formatter.print_message(&format!(
+                    "Kept {} data director(ies) holding personal memories, archived \
+                     transcripts or conversation summaries: {}. Re-run with --purge \
+                     to delete them too.",
+                    result.retained_irreplaceable.len(),
+                    result.retained_irreplaceable.join(", ")
+                ));
+            }
+            report_failed_reclaims(formatter, &result.failed_to_reclaim);
             if !result.cascaded_ids.is_empty() {
                 formatter.print_success(&format!(
                     "Cascade-deleted {} descendant project(s): {}",
@@ -128,6 +244,16 @@ pub async fn run_projects(
             });
         }
         ProjectsCommand::Prune { force } => {
+            let json_mode = formatter.is_json();
+
+            // JSON is machine-consumed: never prompt. Checked before anything
+            // is inspected so the contract is a property of the flags alone —
+            // a script must not succeed or fail depending on whether this
+            // machine happened to have something to prune.
+            if !force && json_mode {
+                anyhow::bail!("prune requires confirmation; re-run with --force in JSON mode");
+            }
+
             // Preview what would be pruned
             let entries = projects::list_projects(registry).await?;
             let stale: Vec<_> = entries.iter().filter(|e| !e.exists).collect();
@@ -136,17 +262,21 @@ pub async fn run_projects(
             let hierarchy_issues = projects::scan_hierarchy_issues(&reg_snapshot);
             drop(reg_snapshot);
 
-            let json_mode = formatter.is_json();
-
             if stale.is_empty() && orphan_count == 0 && hierarchy_issues.total() == 0 {
                 if json_mode {
-                    // Same object shape as a real prune so scripts parse one form.
+                    // Same object shape as a real prune so scripts parse one
+                    // form — every key the success path emits, at its zero
+                    // value.
                     println!(
                         "{}",
                         serde_json::json!({
                             "stale_removed": 0,
+                            "stale_ids": [],
                             "orphans_removed": 0,
+                            "orphan_ids": [],
                             "hierarchy_cleared": [],
+                            "retained_irreplaceable": [],
+                            "failed_to_reclaim": [],
                         })
                     );
                 } else {
@@ -201,12 +331,10 @@ pub async fn run_projects(
             }
 
             if !force {
-                // JSON is machine-consumed: never prompt (mirrors the
-                // doctor --fix interactivity rule).
-                if json_mode {
-                    anyhow::bail!("prune requires confirmation; re-run with --force in JSON mode");
-                }
-                let confirm = prompter.confirm("Remove all?", false).unwrap_or(false);
+                // JSON mode already bailed at the top of this branch.
+                // See the note on `delete` above: a failed prompt is not a
+                // decline, and a decline is not a successful prune.
+                let confirm = prompter.confirm("Remove all?", false)?;
                 if !confirm {
                     formatter.print_message("Aborted.");
                     return Ok(());
@@ -253,6 +381,8 @@ pub async fn run_projects(
                         "orphans_removed": result.orphans_removed,
                         "orphan_ids": result.orphan_ids,
                         "hierarchy_cleared": result.hierarchy_cleared,
+                        "retained_irreplaceable": result.retained_irreplaceable,
+                        "failed_to_reclaim": failed_json(&result.failed_to_reclaim),
                     })
                 );
                 return Ok(());
@@ -276,6 +406,19 @@ pub async fn run_projects(
                     result.hierarchy_cleared.len()
                 ));
             }
+            if !result.retained_irreplaceable.is_empty() {
+                // Silence here would read as "everything was reclaimed", and
+                // these directories hold the only copy of something — the user
+                // needs to know they are still on disk.
+                formatter.print_message(&format!(
+                    "Kept {} data director(ies) holding personal memories, archived \
+                     transcripts or conversation summaries: {}. Prune never deletes \
+                     these; use `engramdb projects delete <id> --purge` if you mean to.",
+                    result.retained_irreplaceable.len(),
+                    result.retained_irreplaceable.join(", ")
+                ));
+            }
+            report_failed_reclaims(formatter, &result.failed_to_reclaim);
         }
     }
 
@@ -288,6 +431,16 @@ mod tests {
     use crate::prompter::MockPrompter;
     use engramdb::storage::registry::{InMemoryRegistry, Registry, RegistryEntry};
 
+    /// A formatter for the human/prompting path.
+    ///
+    /// NOT `OutputFormatter::new(None, false, ...)`: with no explicit format and
+    /// no TTY — which is every test run — that resolves to **JSON**, and the
+    /// delete/prune handlers refuse to prompt in JSON mode. These tests would
+    /// then assert against the wrong refusal.
+    fn human_formatter() -> OutputFormatter {
+        OutputFormatter::new(Some(crate::app::OutputFormat::Plain), false, true)
+    }
+
     #[tokio::test]
     async fn test_projects_delete_confirmed() {
         let temp_dir = tempfile::TempDir::new().unwrap();
@@ -299,7 +452,7 @@ mod tests {
             subscriptions: vec![],
         });
         let registry = InMemoryRegistry::with(data);
-        let formatter = OutputFormatter::new(None, false, true);
+        let formatter = human_formatter();
         let prompter = MockPrompter::new(vec!["true"]);
 
         let result = run_projects(
@@ -309,6 +462,7 @@ mod tests {
                 project_id: "test-proj".to_string(),
                 force: false,
                 cascade: false,
+                purge: false,
             }),
             &formatter,
             &prompter,
@@ -333,7 +487,7 @@ mod tests {
             subscriptions: vec![],
         });
         let registry = InMemoryRegistry::with(data);
-        let formatter = OutputFormatter::new(None, false, true);
+        let formatter = human_formatter();
         let prompter = MockPrompter::new(vec!["false"]);
 
         let result = run_projects(
@@ -343,6 +497,7 @@ mod tests {
                 project_id: "test-proj".to_string(),
                 force: false,
                 cascade: false,
+                purge: false,
             }),
             &formatter,
             &prompter,
@@ -350,7 +505,15 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok());
+        // A decline is a REFUSAL, not a completed delete: exiting 0 here let a
+        // `set -e` script read "Aborted." as success and carry on as though the
+        // project were gone.
+        let err = result.expect_err("a declined delete must not report success");
+        assert!(
+            err.to_string().contains("declined"),
+            "the error must say the delete was declined, not look like a failure \
+             to delete: {err}"
+        );
         // Verify project is still in registry (not deleted)
         let loaded = registry.load().await.unwrap();
         assert_eq!(loaded.projects.len(), 1);
@@ -374,7 +537,7 @@ mod tests {
             subscriptions: vec![],
         });
         let registry = InMemoryRegistry::with(data);
-        let formatter = OutputFormatter::new(None, false, true);
+        let formatter = human_formatter();
         let prompter = MockPrompter::new(vec![]);
 
         let result = run_projects(
@@ -384,20 +547,87 @@ mod tests {
                 project_id: "parent".to_string(),
                 force: true, // doesn't matter — the block is informational
                 cascade: false,
+                purge: false,
             }),
             &formatter,
             &prompter,
             ProjectListGrouping::default(),
         )
         .await;
-        assert!(result.is_ok(), "CLI returns Ok and prints a warning");
+        // Nothing was deleted, so this must NOT report success — returning
+        // `Ok` here let a `set -e` script treat a declined delete as done.
+        let err = result.expect_err("a refusal must exit non-zero");
+        assert!(format!("{err}").contains("--cascade"));
 
         let loaded = registry.load().await.unwrap();
         assert_eq!(loaded.projects.len(), 2, "nothing should have been deleted");
     }
 
+    /// `delete` never prompts in JSON mode either — and the refusal must come
+    /// before anything is inspected, so the contract is a property of the flags
+    /// alone rather than of what the registry happens to hold.
     #[tokio::test]
-    async fn test_projects_prune_json_nothing_to_prune_is_ok() {
+    async fn test_projects_delete_json_without_force_errors() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let mut data = Registry::default();
+        data.projects.push(RegistryEntry {
+            project_id: "test-proj".to_string(),
+            project_path: temp_dir.path().to_string_lossy().to_string(),
+            parent_project_id: None,
+            subscriptions: vec![],
+        });
+        let registry = InMemoryRegistry::with(data);
+        let formatter = OutputFormatter::new(None, true, true);
+        // No scripted responses: JSON mode must error before ever prompting.
+        let prompter = MockPrompter::new(vec![]);
+
+        let err = run_projects(
+            temp_dir.path(),
+            &registry,
+            Some(ProjectsCommand::Delete {
+                project_id: "test-proj".to_string(),
+                force: false,
+                cascade: false,
+                purge: false,
+            }),
+            &formatter,
+            &prompter,
+            ProjectListGrouping::default(),
+        )
+        .await
+        .expect_err("JSON mode must refuse to prompt");
+        assert!(format!("{err}").contains("--force"));
+
+        let loaded = registry.load().await.unwrap();
+        assert_eq!(loaded.projects.len(), 1, "nothing should have been deleted");
+    }
+
+    /// The "requires --force in JSON mode" contract is a property of the flags
+    /// alone. It used to be checked only on the path that had something to
+    /// prune, so the same invocation succeeded or failed depending on the state
+    /// of the machine it ran on — the one thing a scripted caller cannot test
+    /// for in advance.
+    #[tokio::test]
+    async fn test_projects_prune_json_without_force_errors_even_with_nothing_to_prune() {
+        let registry = InMemoryRegistry::new();
+        let formatter = OutputFormatter::new(None, true, true);
+        let prompter = MockPrompter::new(vec![]);
+
+        let err = run_projects(
+            Path::new("."),
+            &registry,
+            Some(ProjectsCommand::Prune { force: false }),
+            &formatter,
+            &prompter,
+            ProjectListGrouping::default(),
+        )
+        .await
+        .expect_err("JSON mode must refuse to prompt regardless of state");
+        assert!(format!("{err}").contains("--force"));
+    }
+
+    #[tokio::test]
+    async fn test_projects_prune_json_with_force_and_nothing_to_prune_is_ok() {
         let registry = InMemoryRegistry::new();
         let formatter = OutputFormatter::new(None, true, true);
         let prompter = MockPrompter::new(vec![]);
@@ -405,7 +635,7 @@ mod tests {
         let result = run_projects(
             Path::new("."),
             &registry,
-            Some(ProjectsCommand::Prune { force: false }),
+            Some(ProjectsCommand::Prune { force: true }),
             &formatter,
             &prompter,
             ProjectListGrouping::default(),

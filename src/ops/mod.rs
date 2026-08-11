@@ -9,6 +9,7 @@ pub mod compress;
 pub mod config;
 pub mod create;
 pub mod delete;
+pub mod discover;
 pub mod doctor;
 pub mod gc;
 pub mod get;
@@ -21,6 +22,7 @@ pub mod parsing;
 pub mod projects;
 pub mod query;
 pub mod reindex;
+pub mod repair;
 pub mod resolve;
 pub mod review;
 pub mod stats;
@@ -40,6 +42,11 @@ pub use compress::{
 pub use config::{top_tags, AgentConfigView, TagCount, DEFAULT_TOP_TAGS};
 pub use create::{create_memory, validate_summary, CreateParams, CreateResult};
 pub use delete::delete_memory;
+// `discover` is deliberately NOT flat-re-exported, matching its sibling
+// `projects` (the registry-management family it belongs to): callers use
+// `ops::discover::…`. A flat re-export would need `DEFAULT_MAX_DEPTH` aliased
+// to something unique — the only aliased re-export in this file, and a sign the
+// name is too generic for the crate-wide op surface.
 pub use doctor::{
     doctor, doctor_environment, doctor_epistemic, enrichment_gaps, validate_models, CheckStatus,
     DoctorResult, DoctorSection, EnrichmentGaps, EnvironmentCheck, EnvironmentDoctorResult,

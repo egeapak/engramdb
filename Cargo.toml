@@ -188,6 +188,12 @@ harness = false
 name = "harvest_paths"
 harness = false
 
+# A/B harness for the `projects discover` walk: the command whose advertised
+# input is a home directory, so its cost is directory reads rather than compute.
+[[bench]]
+name = "discover_walk"
+harness = false
+
 # Dev/test disk diet: full debug info across the ~400-crate dependency tree
 # (lance, datafusion, arrow, ort, …) made a single `--all-features` debug
 # build ~25 GB — enough to exhaust CI sandboxes and small dev machines.

@@ -317,7 +317,40 @@ pub async fn doctor_environment(
             project_checks.push(check_chunk_orphans(s).await);
         }
 
-        if registry_info.in_registry {
+        // Three cases, not two. A re-keyed project is registered — just under
+        // the wrong ID — so it must keep the per-project checks below AND get
+        // told what actually happened. Treating it as "not registered" both
+        // dropped those checks and suggested `init`, which pushes a SECOND
+        // registry row for the same path.
+        if let Some(stale_id) = &registry_info.drifted_registration {
+            // Two different defects wear the same `drifted_registration`. State
+            // A: the stale row is the ONLY row, so the live ID is unregistered
+            // and the memories really are missing from queries. State B: a
+            // correct row exists too (what `init` on an already-drifted project
+            // produces) and the leftover is a duplicate — memories are
+            // reachable, and saying otherwise sends the user hunting for a
+            // problem they don't have. `repair` is the fix either way.
+            let (message, suggestion) = if registry_info.in_registry {
+                (
+                    format!("a leftover registry entry ({stale_id}) still names this path alongside the live one ({project_id})"),
+                    "Two rows for one path: group subscriptions resolve to whichever comes first, so some may silently stop fanning in. Run `engramdb projects repair` to fold them into one.",
+                )
+            } else {
+                (
+                    format!("registered as {stale_id} but now hashes to {project_id}"),
+                    "A git remote added after `engramdb init` re-keys the project: its memories disappear from queries and its group subscriptions detach. Run `engramdb projects repair` (NOT `init`, which would add a second registry entry).",
+                )
+            };
+            project_checks.push(EnvironmentCheck {
+                name: "Project identity".to_string(),
+                passed: true,
+                message,
+                suggestion: Some(suggestion.to_string()),
+                details: vec![],
+                status: Some(CheckStatus::Warn),
+            });
+        }
+        if registry_info.in_registry || registry_info.drifted_registration.is_some() {
             project_checks.push(check_config_file(dir).await);
             project_checks.push(check_mcp_config_deep(dir));
             project_checks.push(check_write_lock(&project_id).await);
@@ -538,6 +571,11 @@ struct RegistryInfo {
     /// checkouts share one LanceDB index, write lock, and personal-memories
     /// dir while keeping separate `.engramdb/memories/` trees.
     conflicting_checkout: Option<PathBuf>,
+    /// This path IS registered, but under a project ID it no longer hashes to
+    /// (a git remote added after `init` re-keys a project). Carries the stale
+    /// ID. Distinct from `in_registry`, which is computed by ID and is
+    /// therefore `false` in exactly this case.
+    drifted_registration: Option<String>,
 }
 
 /// Load registry info once for reuse across sections.
@@ -557,6 +595,7 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
                 hierarchy_stale_parent: 0,
                 hierarchy_cycle: 0,
                 conflicting_checkout: None,
+                drifted_registration: None,
             };
         }
     };
@@ -576,29 +615,44 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
                 .filter(|e| crate::ops::projects::registry_entry_alive(e))
                 .count();
 
-            // Count orphan data directories (on disk but not in registry)
-            let registered_ids: std::collections::HashSet<&str> =
-                reg.projects.iter().map(|e| e.project_id.as_str()).collect();
-            let orphan_dirs = crate::storage::paths::global_data_dir()
-                .ok()
-                .map(|d| d.join("projects"))
-                .filter(|d| d.exists())
-                .and_then(|d| std::fs::read_dir(d).ok())
-                .map(|entries| {
-                    entries
-                        .filter_map(|e| e.ok())
-                        .filter(|e| e.path().is_dir())
-                        .filter(|e| {
-                            !registered_ids.contains(e.file_name().to_string_lossy().as_ref())
-                        })
-                        .count()
-                })
-                .unwrap_or(0);
+            // Count orphan data directories (on disk but not in registry).
+            // Shares `prune`'s widened predicate rather than re-deriving one:
+            // counting a re-keyed project's live data dir as an orphan here
+            // would invite the user to run the prune that deletes it. It must
+            // also share prune's RETENTION rule — a directory still holding
+            // personal memories is kept, so counting it would warn about an
+            // orphan that no prune will ever clear.
+            let registered_ids = crate::storage::protected_project_ids(&reg);
+            let mut orphan_dirs = 0usize;
+            if let Ok(projects_dir) =
+                crate::storage::paths::global_data_dir().map(|d| d.join("projects"))
+            {
+                if let Ok(mut entries) = tokio::fs::read_dir(&projects_dir).await {
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let path = entry.path();
+                        if !path.is_dir()
+                            || registered_ids.contains(entry.file_name().to_string_lossy().as_ref())
+                        {
+                            continue;
+                        }
+                        if !crate::storage::paths::holds_irreplaceable_data(&path).await {
+                            orphan_dirs += 1;
+                        }
+                    }
+                }
+            }
 
             let issues = crate::ops::projects::scan_hierarchy_issues(&reg);
 
             let conflicting_checkout =
                 crate::storage::conflicting_checkout_path(&reg, &project_id, dir);
+
+            // Same shared predicate `discover` and `projects repair` use, so
+            // the three can't disagree about what counts as a re-keyed project.
+            let drifted_registration =
+                crate::storage::stale_registrations_for(&reg, dir, &project_id)
+                    .first()
+                    .map(|e| e.project_id.clone());
 
             RegistryInfo {
                 in_registry,
@@ -610,6 +664,7 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
                 hierarchy_stale_parent: issues.stale_parent.len(),
                 hierarchy_cycle: issues.cycle_members.len(),
                 conflicting_checkout,
+                drifted_registration,
             }
         }
         Err(_) => RegistryInfo {
@@ -622,6 +677,7 @@ async fn load_registry_info(dir: &Path) -> RegistryInfo {
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
             conflicting_checkout: None,
+            drifted_registration: None,
         },
     }
 }
@@ -3940,6 +3996,7 @@ mod tests {
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
             conflicting_checkout: None,
+            drifted_registration: None,
         };
         let checks = build_registry_checks(&info);
         assert!(checks[0].message.contains("5 registered"));
@@ -3961,6 +4018,7 @@ mod tests {
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
             conflicting_checkout: None,
+            drifted_registration: None,
         };
         let checks = build_registry_checks(&info);
         let details_str = checks[0].details.join(" ");
@@ -3981,6 +4039,7 @@ mod tests {
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
             conflicting_checkout: None,
+            drifted_registration: None,
         };
         let checks = build_registry_checks(&info);
         assert_eq!(checks[0].status, Some(CheckStatus::Warn));
@@ -4001,6 +4060,7 @@ mod tests {
             hierarchy_stale_parent: 0,
             hierarchy_cycle: 0,
             conflicting_checkout: None,
+            drifted_registration: None,
         };
         let checks = build_registry_checks(&info);
         let hierarchy = checks
@@ -4024,6 +4084,7 @@ mod tests {
             hierarchy_stale_parent: 1,
             hierarchy_cycle: 2,
             conflicting_checkout: None,
+            drifted_registration: None,
         };
         let checks = build_registry_checks(&info);
         let hierarchy = checks

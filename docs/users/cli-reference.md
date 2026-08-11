@@ -220,7 +220,7 @@ Without a subcommand: full environment diagnostics (paths, embedding backend, da
 |-------------------|-------------|
 | `store` | Fast project-scoped check (index vs disk only). Use it as a CI/script smoke test. |
 | `validate` | Load each downloaded model and run a test inference to confirm it works. |
-| `--fix` | Offer to fix detected issues (reindex, download model, prune registry, init). Prompts on a terminal; in non-interactive contexts pair with `--yes`. |
+| `--fix` | Offer to fix detected issues (reindex, download the embedding model, prune the registry, re-key a project whose ID drifted, init). Prompts on a terminal; in non-interactive contexts pair with `--yes`, which is also what lets the epistemic checks flag memories for review. Exits on the post-fix state; declining every fix, or finding none, still exits on the checks. Without `--yes` off a terminal it only lists the fixes and exits 0. |
 | `--yes` | Apply fixes without prompting (use with `--fix`; required to fix in non-TTY contexts). |
 | `--global` | Check the global cross-project store instead of the current project. |
 
@@ -316,8 +316,10 @@ Invoked by Claude Code, not manually. See [claude-code.md](./claude-code.md#how-
 ```bash
 engramdb projects info                          # current project info (default)
 engramdb projects list [--group auto|always|none]  # all registered projects as a tree
+engramdb projects discover [PATH] [--yes] [--dry-run]  # adopt unregistered projects
+engramdb projects repair [-f] [--no-index]      # re-key a project whose ID drifted
 engramdb projects stats                         # cross-project aggregate stats
-engramdb projects delete <project_id> [-f] [--cascade]
+engramdb projects delete <project_id> [-f] [--cascade] [--purge]
 engramdb projects link <child_id> --parent <parent_id>
 engramdb projects unlink <project_id>
 engramdb projects prune [-f]
@@ -335,6 +337,178 @@ parent (marked `↳`). `--group` sets the grouping for one run, overriding the
 
 Worktree nesting and path sorting apply in every mode. `--json` output is
 unaffected by `--group`: it stays a flat array carrying `parent_project_id`.
+
+`projects delete` removes a *registration* and reclaims the data directory
+behind it. It keeps that directory whole whenever it still holds anything with no other
+copy — personal memories, archived transcripts, or curated conversation
+summaries — unless `--purge` is passed — a project ID derived from a git remote is
+shared by every clone of that remote on the machine, and the registry records
+only one of them, so deleting one checkout's registration can otherwise destroy
+another checkout's only copy. `--purge` is the explicit "I mean it"; without
+`-f` the prompt spells out which of the two you are about to do.
+
+`--force` is required in JSON mode (the command never prompts there), and it
+emits one object: `{deleted, project_id, project_path, purge,
+global_data_removed, retained_irreplaceable[], failed_to_reclaim[],
+cascaded_ids[]}`. `failed_to_reclaim` holds `{project_id, error}` objects for
+directories the command tried to remove and could not — an unlink failure is
+reported as a failure, never folded in with the directories kept on purpose. Refusing to act
+— a project with sub-projects and no `--cascade` — exits non-zero rather than
+reporting a delete that did not happen.
+
+`projects prune` drops registry entries whose project directory is gone and
+reclaims data directories no registration answers to. It never deletes what has no
+other copy: a data directory holding `personal/memories/*.md`,
+`transcripts/*.jsonl.zst`, or a `lancedb/conversations.lance` table is left
+whole, index included — it is being kept precisely because something unregistered may still
+be using it, and wiping that copy's index would leave a healthy project silently
+unsearchable. Those directories are
+listed as `retained_irreplaceable` (in JSON and in the human summary) so a clean
+run is not mistaken for "everything was reclaimed". The same rule applies to the
+unattended maintenance pass, which runs prune for you.
+
+`--force` is required in JSON mode whether or not there is anything to prune —
+JSON is machine-consumed and never prompts, so the contract depends on the flags
+alone. The one emitted object carries `stale_removed`, `stale_ids[]`,
+`orphans_removed`, `orphan_ids[]`, `hierarchy_cleared[]`,
+`retained_irreplaceable[]`, and `failed_to_reclaim[]`, at their zero values when
+nothing was pruned.
+
+`failed_to_reclaim[]` holds `{project_id, error}` objects for directories prune
+tried to remove and could not — a permission problem, a busy mount, an
+immutable file. These are **not** retention: nothing chose to keep them, and
+`doctor` will go on counting them as reclaimable, because in principle they
+are. Prune still exits 0, because the rest of the sweep did its job; the
+failures are named so the cause can be cleared.
+
+### `projects discover`
+
+Walks a directory tree for `.engramdb/` projects the registry doesn't know
+about and offers to register and index each one. Useful after cloning a repo
+that carries its memories, restoring from a backup, or losing `registry.json` —
+those projects exist on disk but are invisible to `projects list`, `projects
+stats`, and every cross-project surface until they are registered.
+
+| Flag | Behavior |
+| --- | --- |
+| `PATH` | Directory to scan. Defaults to the project directory this invocation resolved to — note that inside a linked git worktree that is the **main** checkout, not the cwd. |
+| `--max-depth <N>` | Maximum depth to descend below the scan root (default 6). The summary says when a subtree was cut off. |
+| `--hidden` | Also descend into dot-directories. |
+| `--follow-symlinks` | Follow directory symlinks (the walk visits each canonical path once either way). |
+| `-y`, `--yes` | Register everything found without prompting. Required in JSON mode unless `--dry-run` is passed (JSON is machine-consumed, so the command never prompts). |
+| `--dry-run` | Report what would be registered without registering anything. (The usual automatic maintenance pass still runs, as it does for every command.) |
+| `--no-index` | Register only. Memories stay unsearchable until you run `engramdb reindex`. |
+
+Without `--yes` you are asked once per project, so a scratch clone can be
+declined while a real checkout is adopted. Accepting registers the project
+(idempotent — an existing `manifest.toml` / `config.toml` is never overwritten)
+and rebuilds its index from the on-disk `.md` files, with an indicatif progress
+bar over the batch.
+
+Directories that can't hold a project root are never descended into
+(`node_modules`, `target`, `.git`, `vendor`, `dist`, `build`, virtualenvs, …),
+and engramdb's own global/group stores are never offered. Three kinds of project
+are reported but never registered — as a warning in human output, and in the
+`skipped[]` array in JSON:
+
+- **Shared project ID** — the ID is already claimed by a different checkout
+  that still exists, either in the registry or earlier in the same scan. Two
+  clones of one git remote hash to the same ID and would share a single index.
+- **Linked git worktree** — worktrees are sub-projects, not roots: engramdb
+  routes their memory operations to the main checkout automatically. Adopting
+  one would create a second owner of the same memory files. A worktree already
+  linked as a sub-project (the steady state) reports as registered, not here.
+- **Stale project ID** — the path *is* registered, but under an ID it no
+  longer hashes to. Adopting would leave two registry entries for one path; the
+  fix is `projects repair` (below).
+
+Exit status is non-zero if any project failed to register; the report is still
+emitted first, so you can see which ones. Directories that can't be read
+(permissions, dead mounts) are skipped and counted, and the summary says so —
+"no unregistered projects found" after a partial scan is not the same claim as
+"there are none".
+
+JSON mode emits exactly one of two objects, both carrying `root`,
+`scanned_dirs`, `depth_limited`, `dry_run`, and `skipped[]`
+(each `{path, project_id, reason, owner}` where `reason` is
+`shared_project_id`, `git_worktree`, or `stale_project_id`; `owner` is the
+conflicting checkout for the first two and `null` for the third, which carries
+`registered_id` — the stale ID — instead).
+
+- `--dry-run` adds `candidates[]` (each `{path, project_id, memory_count}`) and
+  `already_registered[]`.
+- A real run adds `unreadable_dirs`, `no_index`, `found_unregistered`,
+  `registered[]` (each
+  `{path, project_id, indexed, embedded, warnings[]}`), `declined[]`, and
+  `errors[]` (each `{path, error}`).
+
+Arrays are empty rather than absent when nothing was found or everything was
+declined, so the shape never varies with the outcome. Under `--no-index`,
+`indexed` and `embedded` are `null` — "not rebuilt", as distinct from `0`,
+which means the rebuild ran and found nothing.
+
+### `projects repair`
+
+Re-keys a project whose ID drifted out from under its registry entry.
+
+`compute_project_id` hashes the git remote when there is one and falls back to
+the path when there isn't, so running `engramdb init` **before**
+`git remote add origin …` permanently changes the project's ID. The registry
+keeps the old one; every live operation uses the new one. The symptoms are all
+silent — memories vanish from `list`/`query` (the live ID's index is empty even
+though the `.md` files are untouched), group subscriptions detach, and personal
+memories become invisible.
+
+```bash
+engramdb projects repair            # show the blast radius, then confirm
+engramdb projects repair -f         # skip the prompt (required in JSON mode)
+engramdb projects repair --no-index # re-key only; run `engramdb reindex` later
+```
+
+It migrates the registry entry in place — preserving group subscriptions and
+worktree parent links, which a re-registration would silently drop — carries
+the personal memories over to the live data directory, re-points any
+sub-projects at the new ID, and rebuilds the index. Running it on a consistent
+project is a no-op, so it is safe to re-run.
+
+A project that drifted more than once (`init` → add a remote → change the
+remote) has several stale IDs. Every one of them is collapsed into a single
+entry, and every one's personal memories are carried across — the directory you
+were writing into just before the last drift is not the first stale ID.
+
+It **never deletes anything**: personal memories are *copied* to the live data
+directory and the old one is left in place. An unregistered sibling clone of the
+same remote shares that directory and is structurally invisible to the registry,
+so no check can prove it is yours alone. `projects prune` leaves that directory alone
+entirely for as long as it holds personal memories, archived transcripts or
+conversation summaries — it is kept whole, index included. Files that can't
+be read or parsed — on either side — are left alone and counted in
+`personal_skipped`; that includes a live file carrying the same memory ID that
+this binary can't parse, which is never replaced by an older copy.
+
+It refuses outright when a registry row at **another path** already holds the
+live ID (two rows sharing one ID resolve to whichever comes first, so the repair
+would report success while the symptom persisted). Run inside a *linked* git
+worktree it repairs the main checkout, not the worktree — every project command
+resolves to the main root first, and a worktree is registered as a sub-project
+rather than re-keyed. The op-level worktree refusal only fires for a worktree
+that has not been linked, where no resolution happened. A
+sibling clone still answering to the *old* ID is fine: that is the normal state
+for two clones of one remote, and nothing here writes to or deletes the shared
+directory.
+
+JSON mode emits one object: `{"repaired": false, "reason": "nothing_to_repair"}`
+when the registration is consistent, otherwise `{repaired, path, old_id,
+old_ids[], new_id, personal_migrated, personal_superseded, personal_skipped,
+removed_duplicate_entry, reparented_children[], old_data_dir, old_data_dirs[],
+no_index, indexed, embedded, warnings[], index_error}`. `--force` is required in JSON mode
+regardless of whether this project is drifted. If the re-key succeeds but the
+index rebuild fails, the document is still emitted (with `index_error` set) and
+the command then exits non-zero — retrying `repair` would report nothing to do,
+so run `engramdb reindex`.
+
+`engramdb doctor` reports the same condition as a `Project identity` warning,
+and `doctor --fix` offers this repair.
 
 See [projects-and-worktrees.md](./projects-and-worktrees.md).
 
