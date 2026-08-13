@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"ledger\", \"rm\", \"session-alpha\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest ledger rm session-alpha
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: removing a ledger entry requires confirmation; re-run with --force in JSON mode

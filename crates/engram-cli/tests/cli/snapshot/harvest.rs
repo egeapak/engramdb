@@ -336,6 +336,88 @@ fn ledger_list_and_show_after_a_mark() {
     );
 }
 
+/// `summary` attaches curated prose to a session's search row, re-embedding
+/// only that row — so with no model the write cannot complete, and this is the
+/// branch a machine without a runtime hits.
+#[test]
+fn summary_without_a_model() {
+    let f = corpus();
+    insta::assert_snapshot!(
+        "harvest_summary_no_model",
+        f.run(&[
+            "harvest",
+            "summary",
+            "session-alpha",
+            "A daemon idle-timeout investigation."
+        ])
+    );
+}
+
+#[test]
+fn summary_unknown_session_fails() {
+    let f = corpus();
+    insta::assert_snapshot!(
+        "harvest_summary_unknown",
+        f.run(&["harvest", "summary", "session-omega", "Anything."])
+    );
+}
+
+/// `ledger export` writes a stored transcript copy back out. Only the
+/// SessionEnd hook makes copies, so nothing here has one — and the contract is
+/// that it says so rather than writing an empty file.
+#[test]
+fn ledger_export_without_an_archive_fails() {
+    let f = corpus();
+    f.run(&["harvest", "mark", "session-alpha"]);
+    insta::assert_snapshot!(
+        "harvest_ledger_export_no_archive",
+        f.run(&["harvest", "ledger", "export", "session-alpha"])
+    );
+}
+
+/// `ledger rm --force` drops the review record, so the session returns to the
+/// default listing exactly as `reset` would leave it.
+#[test]
+fn ledger_rm_drops_the_record() {
+    let f = corpus();
+    f.run(&[
+        "harvest",
+        "mark",
+        "session-alpha",
+        "--note",
+        "Nothing durable.",
+    ]);
+    insta::assert_snapshot!(
+        "harvest_ledger_rm",
+        f.run(&["harvest", "ledger", "rm", "session-alpha", "--force"])
+    );
+    insta::assert_snapshot!(
+        "harvest_ledger_rm_after",
+        f.run(&["harvest", "ledger", "list"])
+    );
+}
+
+/// Without `--force` the removal is confirmed, and `Fixture::run` has no
+/// terminal — so this pins the refusal a script sees, not an interactive flow.
+#[test]
+fn ledger_rm_without_force_does_not_remove() {
+    let f = corpus();
+    f.run(&["harvest", "mark", "session-alpha"]);
+    insta::assert_snapshot!(
+        "harvest_ledger_rm_needs_force",
+        f.run(&["harvest", "ledger", "rm", "session-alpha"])
+    );
+}
+
+#[test]
+fn ledger_rm_unknown_session_fails() {
+    let f = corpus();
+    insta::assert_snapshot!(
+        "harvest_ledger_rm_unknown",
+        f.run(&["harvest", "ledger", "rm", "session-omega", "--force"])
+    );
+}
+
 #[test]
 fn ledger_show_unknown_session_fails() {
     let f = corpus();

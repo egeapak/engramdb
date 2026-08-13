@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"summary\", \"session-omega\", \"Anything.\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest summary session-omega Anything.
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: No session matching 'session-omega' has any bytes behind it — neither a live transcript nor a collected copy. `engramdb harvest ledger list --with-archive` shows which sessions do.

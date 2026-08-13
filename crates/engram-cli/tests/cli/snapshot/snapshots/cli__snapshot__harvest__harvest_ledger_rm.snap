@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"ledger\", \"rm\", \"session-alpha\", \"--force\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest ledger rm session-alpha --force
+exit: 0
+--- stdout ---
+{
+  "message": "Removed ledger entry for session session-alpha.",
+  "success": true
+}
+--- stderr ---
