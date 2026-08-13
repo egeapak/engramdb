@@ -19,7 +19,7 @@ test-support = []
 [dependencies]
 engram-types = { path = "../engram-types" }
 
-lancedb = { version = "0.31", default-features = false }
+lancedb = { version = "0.37", default-features = false }
 arrow-array = "58"
 arrow-buffer = "58"
 arrow-schema = "58"
